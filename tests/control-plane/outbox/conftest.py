@@ -113,29 +113,8 @@ def migrated_db(pg_cluster):
     )
     assert up.returncode == 0, up.stdout + up.stderr
 
-    with psycopg2.connect(pg_cluster["url"]) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            ALTER TABLE message_processing_runs
-                DROP CONSTRAINT ck_message_processing_runs_status,
-                ADD COLUMN lease_expires_at timestamptz;
-            ALTER TABLE message_processing_runs
-                ADD CONSTRAINT ck_message_processing_runs_status
-                CHECK (
-                    status IN (
-                        'started',
-                        'processing',
-                        'succeeded',
-                        'failed',
-                        'skipped',
-                        'hermes_timeout',
-                        'hermes_failed',
-                        'outbox_failed'
-                    )
-                );
-            """
-        )
-
+    # message_processing_runs lease column + queue statuses now come from
+    # db/migrations/0002 (previously patched here, which hid an A-02/A-04 schema mismatch).
     yield pg_cluster["url"]
 
     down = subprocess.run(
