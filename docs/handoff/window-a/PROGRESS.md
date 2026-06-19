@@ -14,10 +14,11 @@
 | A-04 | 🔄 in_progress | — | transactional outbox + worker queue |
 | A-07 | 🔄 in_progress | — | auth / permission / audit |
 | A-10 | ✅ done | `6330830` | legacy SQLite read-only import |
-| A-03 | 🔄 in_progress | — | watcher→collector + ingress |
-| A-04 | 🔄 in_progress | — | transactional outbox + worker queue |
+| A-03 | ✅ done | `0374153` | watcher→collector + Postgres ingress |
+| A-04 | ✅ done | `a29be3e` | transactional outbox + worker queue |
 | A-07 | 🔄 in_progress | — | auth / permission / audit |
-| A-05,A-06,A-08,A-09,A-11 | ⬜ pending | — | blocked on the above per DAG |
+| A-05 | 🔄 in_progress | — | Hermes multimodal worker (real-call blocked) |
+| A-06,A-08,A-09,A-11 | ⬜ pending | — | A-06←A-05; A-08/A-09←A-07; A-11←all |
 
 ## A-00 — 建立安全基线并冻结旧自动开仓路径 — DONE
 Commit: `00b8bc0cf2a6500f7d0296875f1c13e187458e07`
@@ -68,3 +69,16 @@ Acceptance evidence (real pg@16):
 - Does **not** touch `db/migrations` or canonical execution tables; legacy data is read-only history.
 
 Residual: only the three legacy signal tables are mapped (`MAPPING.md`); legacy freqtrade orders/trades import (if needed) is a follow-up — not required for Window A acceptance.
+
+## A-03 — watcher 改为纯采集器 — DONE
+Commit: `0374153`
+- `services/ingress` writes raw_messages + queued_for_hermes outbox in one transaction; idempotent on duplicate update; edits → new source_version; reply relationship preserved; media failure rolls back raw+outbox.
+- `services/telegram-watcher` is a pure collector (collector / ingress_client / media_store); content-hash (sha256) media → media_assets; no semantic parser, no trade intent, no exchange keys.
+- Tests: `pytest tests/ingress` = **10 passed** (real pg@16) incl. `test_new_services_do_not_depend_on_semantic_or_execution_paths`, watcher-restart idempotency, media-sha.
+- Fix at acceptance: conftest runs throwaway cluster in UTC (timestamptz::text machine-TZ-independent).
+
+## A-04 — transactional outbox 与可靠队列状态机 — DONE
+Commit: `a29be3e`
+- `services/control-plane/outbox/publisher.py`: at-least-once + idempotent sink; `FOR UPDATE SKIP LOCKED`; published rows skip re-delivery.
+- `services/hermes-worker/queue/claims.py`: visibility-lease claim (SKIP LOCKED on outbox + no-active-run lock), lease-expiry takeover → `hermes_timeout`, lease-guarded completion (zombie workers can't finish), explicit failure states.
+- Tests: `pytest tests/control-plane/outbox` = **3 passed** (real pg@16): crash-between-commit-and-publish, duplicate-delivery idempotency, lease expiry + takeover. Concurrency-safe by construction.
