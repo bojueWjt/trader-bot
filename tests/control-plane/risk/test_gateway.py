@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+import json
+from uuid import uuid4
+
+import psycopg2
+import pytest
+
+import gateway
+from connection import transaction
+from policy import RiskPolicy
+
+POLICY = RiskPolicy(default_account_id="acct-1")
+
+
+def seed_decision(
+    conn,
+    *,
+    action="open_position",
+    message_type="new_signal",
+    side="long",
+    instrument="BTCUSDT",
+    entry_price=100.0,
+    stop_loss=90.0,
+    take_profits=(110.0, 120.0),
+    leverage=3.0,
+    target_position_id=None,
+    target_account_id="acct-1",
+    ambiguous=False,
+    model_provider="hermes",
+):
+    raw_id, run_id, ctx_id, dec_id = (str(uuid4()) for _ in range(4))
+    with transaction(conn), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version,"
+            " source_received_at, content_hash) VALUES (%s,'telegram','signals',%s,'v1',now(),'h')",
+            (raw_id, f"m-{raw_id}"),
+        )
+        cur.execute(
+            "INSERT INTO message_processing_runs (processing_run_id, raw_message_id, status)"
+            " VALUES (%s,%s,'succeeded')",
+            (run_id, raw_id),
+        )
+        cur.execute(
+            "INSERT INTO context_snapshots (context_snapshot_id, raw_message_id, snapshot_type,"
+            " context_version, snapshot) VALUES (%s,%s,'system_snapshot_v1','ctx-v1','{}')",
+            (ctx_id, raw_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO hermes_decisions (
+                decision_id, raw_message_id, processing_run_id, context_snapshot_id, schema_version,
+                message_type, action, ambiguous, ambiguity_reasons, account_scope, target_account_id,
+                target_position_id, instrument_symbol, side, entry_type, entry_price, stop_loss,
+                take_profits, leverage, evidence, model_provider, model_version, prompt_version,
+                context_version, temperature, created_at
+            ) VALUES (%s,%s,%s,%s,'1.0',%s,%s,%s,'[]','single',%s,%s,%s,%s,'market',%s,%s,%s,%s,'[]',
+                      %s,'m','hermes-trader-v1','ctx-v1',0,now())
+            """,
+            (dec_id, raw_id, run_id, ctx_id, message_type, action, ambiguous, target_account_id,
+             target_position_id, instrument, side, entry_price, stop_loss,
+             json.dumps(list(take_profits)), leverage, model_provider),
+        )
+    return dec_id
+
+
+def _one(conn, sql, params=()):
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchone()
+
+
+def test_no_pending_returns_none(db_conn):
+    assert gateway.process_one_decision(db_conn, policy=POLICY) is None
+
+
+def test_approved_decision_writes_risk_decision_intent_and_outbox(db_conn):
+    dec_id = seed_decision(db_conn)
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "approved"
+    assert result["intent_id"] is not None
+
+    rd = _one(db_conn, "SELECT status, account_id, instrument_id FROM risk_decisions WHERE hermes_decision_id=%s", (dec_id,))
+    assert rd == ("approved", "acct-1", "BTCUSDT")
+
+    ti = _one(db_conn, "SELECT status, action::text, account_id, idempotency_key FROM trade_intents WHERE hermes_decision_id=%s", (dec_id,))
+    assert ti[0] == "approved" and ti[1] == "open_position" and ti[2] == "acct-1"
+    assert len(ti[3]) == 64  # sha256 hex
+
+    ob = _one(db_conn, "SELECT count(*) FROM outbox_events WHERE aggregate_type='trade_intent' AND aggregate_id=%s", (result["intent_id"],))
+    assert ob[0] == 1
+
+
+def test_idempotent_second_pass_makes_no_duplicate(db_conn):
+    seed_decision(db_conn)
+    first = gateway.process_one_decision(db_conn, policy=POLICY)
+    second = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert first["status"] == "approved"
+    assert second is None  # decision already has a risk_decision
+    assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 1
+    assert _one(db_conn, "SELECT count(*) FROM risk_decisions")[0] == 1
+
+
+def test_bad_geometry_rejected_without_intent(db_conn):
+    seed_decision(db_conn, side="long", entry_price=100.0, stop_loss=105.0, take_profits=(110.0,))
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "rejected"
+    assert result["intent_id"] is None
+    assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+
+
+def test_ambiguous_needs_review_without_intent(db_conn):
+    seed_decision(db_conn, ambiguous=True)
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "needs_review"
+    assert result["intent_id"] is None
+    assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+
+
+def test_hermes_decisions_table_enforces_hermes_provenance(db_conn):
+    # Provenance is enforced at the canonical-schema layer: a non-hermes decision
+    # cannot even be persisted, so the gateway can only ever see hermes decisions.
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        seed_decision(db_conn, model_provider="openai")
