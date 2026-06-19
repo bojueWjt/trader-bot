@@ -23,19 +23,6 @@ import {
 } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  DataSourceState,
-  BotStatus,
-  DashboardOverview,
-  DailyReport,
-  EventLog,
-  Position,
-  RiskMetric,
-  RiskOverview,
-  getMockDashboardOverview,
-  getMockDailyReport,
-  getMockRiskOverview
-} from "./data/mockData";
 import { useRealtimeConnection } from "./hooks/useRealtime";
 import { LoginPage } from "./pages/LoginPage";
 import {
@@ -54,6 +41,11 @@ import {
   fetchRiskOverview,
   fetchSignalMediaBlob,
   fetchSignalReview,
+  getEmptyDashboardOverview,
+  getEmptyDailyReport,
+  getEmptyOrderCenter,
+  getEmptyRiskOverview,
+  getEmptySignalReview,
   getStoredAuthToken,
   isAuthDisabled,
   lockPair,
@@ -68,7 +60,20 @@ import {
   rejectReviewSignal,
   resumeBot
 } from "./utils/api";
-import type { SignalReviewData, SignalReviewItem, SignalReviewProposal } from "./utils/api";
+import type {
+  BotStatus,
+  CommandResult,
+  DailyReport,
+  DashboardOverview,
+  DataSourceState,
+  EventLog,
+  Position,
+  RiskMetric,
+  RiskOverview,
+  SignalReviewData,
+  SignalReviewItem,
+  SignalReviewProposal
+} from "./utils/api";
 import {
   formatCurrency,
   formatPercent,
@@ -88,7 +93,7 @@ type LoadState<T> = {
 };
 
 function useDashboardData(refreshKey: number): LoadState<DashboardOverview> {
-  const [data, setData] = useState<DashboardOverview>(getMockDashboardOverview());
+  const [data, setData] = useState<DashboardOverview>(getEmptyDashboardOverview());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -113,7 +118,7 @@ function useDashboardData(refreshKey: number): LoadState<DashboardOverview> {
 }
 
 function useRiskData(): LoadState<RiskOverview> {
-  const [data, setData] = useState<RiskOverview>(getMockRiskOverview());
+  const [data, setData] = useState<RiskOverview>(getEmptyRiskOverview());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -137,7 +142,7 @@ function useRiskData(): LoadState<RiskOverview> {
 }
 
 function useReportData(date: string): LoadState<DailyReport> {
-  const [data, setData] = useState<DailyReport>(getMockDailyReport(date));
+  const [data, setData] = useState<DailyReport>(getEmptyDailyReport(date));
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -159,30 +164,6 @@ function useReportData(date: string): LoadState<DailyReport> {
   }, [date]);
 
   return { data, loading };
-}
-
-function getEmptyOrderCenter(): OrderCenterData {
-  return {
-    positions: [],
-    orders: [],
-    history: [],
-    summary: {
-      realizedPnl: 0,
-      openPnl: 0,
-      totalPnl: 0,
-      openPositionCount: 0,
-      pendingOrderCount: 0,
-      historyCount: 0,
-      winCount: 0,
-      lossCount: 0
-    },
-    dataSource: {
-      source: "freqtrade",
-      status: "loading",
-      reason: "",
-      degraded: false
-    }
-  };
 }
 
 function useOrderCenterData(refreshKey: number): LoadState<OrderCenterData> {
@@ -208,19 +189,6 @@ function useOrderCenterData(refreshKey: number): LoadState<OrderCenterData> {
   }, [refreshKey]);
 
   return { data, loading };
-}
-
-function getEmptySignalReview(): SignalReviewData {
-  return {
-    signals: [],
-    proposals: [],
-    dataSource: {
-      source: "signals",
-      status: "loading",
-      reason: "",
-      degraded: false
-    }
-  };
 }
 
 function useSignalReviewData(refreshKey: number): LoadState<SignalReviewData> {
@@ -486,20 +454,20 @@ function DashboardPage({ refreshKey }: { refreshKey: number }): ReactElement {
     setBotActionSubmitting(true);
     setBotActionStatus(`${botAction} request pending`);
 
-    let submitted = false;
+    let result: CommandResult | false = false;
     if (botAction === "pause") {
-      submitted = await pauseBot(reason);
+      result = await pauseBot(reason);
     }
     if (botAction === "resume") {
-      submitted = await resumeBot(reason);
+      result = await resumeBot(reason);
     }
 
     setBotActionSubmitting(false);
     setBotAction(false);
     setBotActionReason("");
 
-    if (submitted) {
-      setBotActionStatus(`${botAction} submitted`);
+    if (result) {
+      setBotActionStatus(result.statusText);
       return;
     }
 
@@ -515,6 +483,7 @@ function DashboardPage({ refreshKey }: { refreshKey: number }): ReactElement {
         </div>
         <span className={sourceBadgeClass}>{sourceBadgeLabel}</span>
       </div>
+      <DataQualityPanel quality={data.dataSource} />
 
       <section className="ops-strip" aria-label="Operator state">
         <div className={`ops-mode ${statusTone(data.safety.riskState)}`}>
@@ -683,6 +652,49 @@ function StatusPill({ status }: { status: string }): ReactElement {
   return <span className={`status-pill ${statusTone(status)}`}>{status}</span>;
 }
 
+function DataQualityPanel({ quality }: { quality: DataSourceState }): ReactElement {
+  return (
+    <section className={quality.stale ? "quality-panel stale" : "quality-panel"} aria-label="Data quality">
+      {quality.stale && (
+        <div className="stale-banner" role="alert">
+          stale=true; missing_nodes={quality.missing_nodes.length > 0 ? quality.missing_nodes.join(", ") : "none"}
+        </div>
+      )}
+      <dl className="quality-grid">
+        <div>
+          <dt>data_source</dt>
+          <dd>{quality.data_source}</dd>
+        </div>
+        <div>
+          <dt>snapshot_id</dt>
+          <dd>{quality.snapshot_id || "unavailable"}</dd>
+        </div>
+        <div>
+          <dt>generated_at</dt>
+          <dd>{quality.generated_at || "unavailable"}</dd>
+        </div>
+        <div>
+          <dt>projection_lag_ms</dt>
+          <dd>{quality.projection_lag_ms}</dd>
+        </div>
+        <div>
+          <dt>stale</dt>
+          <dd>{String(quality.stale)}</dd>
+        </div>
+        <div>
+          <dt>missing_nodes</dt>
+          <dd>{quality.missing_nodes.length > 0 ? quality.missing_nodes.join(", ") : "none"}</dd>
+        </div>
+        <div>
+          <dt>reconciliation_state</dt>
+          <dd>{quality.reconciliation_state}</dd>
+        </div>
+      </dl>
+      {quality.reason && <p className="quality-reason">{quality.reason}</p>}
+    </section>
+  );
+}
+
 type BotStatusPanelProps = {
   bots: BotStatus[];
   disabled: boolean;
@@ -750,6 +762,7 @@ function EventsPanel({ events }: { events: EventLog[] }): ReactElement {
             <p>{event.message}</p>
           </div>
         ))}
+        {events.length === 0 && <p className="empty-copy">No events from control-plane.</p>}
       </div>
     </Panel>
   );
@@ -814,6 +827,7 @@ function PositionsPanel({ positions, onSelect }: PositionsPanelProps): ReactElem
                 </td>
               </tr>
             ))}
+            {positions.length === 0 && <EmptyTableRow colSpan={13} label="No positions from control-plane." />}
           </tbody>
         </table>
       </div>
@@ -872,15 +886,9 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     setCloseSubmitting(true);
     setStatus("Closing position");
     setConfirmAction(false);
-    const closed = await closePosition(position.id, actionReason, position.signalId);
+    const result = await closePosition(position.id, actionReason, position.signalId);
     setCloseSubmitting(false);
-
-    if (closed) {
-      setStatus("Close submitted");
-      return;
-    }
-
-    setStatus("Close failed");
+    setStatus(result.statusText);
   }
 
   async function submitMoveStopLoss(actionReason: string): Promise<void> {
@@ -897,15 +905,9 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     setMoveSubmitting(true);
     setStatus("Moving SL");
     setConfirmAction(false);
-    const moved = await moveStopLoss(position.id, stopLossPrice, actionReason, position.signalId);
+    const result = await moveStopLoss(position.id, stopLossPrice, actionReason, position.signalId);
     setMoveSubmitting(false);
-
-    if (moved) {
-      setStatus("SL move submitted");
-      return;
-    }
-
-    setStatus("SL move failed");
+    setStatus(result.statusText);
   }
 
   async function submitPartialClose(actionReason: string): Promise<void> {
@@ -922,15 +924,9 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     setPartialSubmitting(true);
     setStatus("Partial close pending");
     setConfirmAction(false);
-    const submitted = await partialClosePosition(position.id, partialAmount, actionReason, position.signalId);
+    const result = await partialClosePosition(position.id, partialAmount, actionReason, position.signalId);
     setPartialSubmitting(false);
-
-    if (submitted) {
-      setStatus("Partial close submitted");
-      return;
-    }
-
-    setStatus("Partial close failed");
+    setStatus(result.statusText);
   }
 
   async function submitPairLock(actionReason: string): Promise<void> {
@@ -941,15 +937,9 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     setLockSubmitting(true);
     setStatus("Pair lock pending");
     setConfirmAction(false);
-    const submitted = await lockPair(position.pair, actionReason);
+    const result = await lockPair(position.pair, actionReason);
     setLockSubmitting(false);
-
-    if (submitted) {
-      setStatus("Pair lock submitted");
-      return;
-    }
-
-    setStatus("Pair lock failed");
+    setStatus(result.statusText);
   }
 
   const confirmSubmitting = getPositionActionSubmitting(
@@ -1343,6 +1333,7 @@ function OrderCenterPage({
           </button>
         </div>
       </div>
+      <DataQualityPanel quality={data.dataSource} />
 
       <div className="kpi-grid">
         <MetricCard
@@ -1444,7 +1435,7 @@ function OrderPositionsTable({ positions }: { positions: OrderCenterPosition[] }
               <td><StatusPill status={position.status} /></td>
             </tr>
           ))}
-          {positions.length === 0 && <EmptyTableRow colSpan={11} label="No open positions from freqtrade." />}
+          {positions.length === 0 && <EmptyTableRow colSpan={11} label="No open positions from control-plane." />}
         </tbody>
       </table>
     </div>
@@ -1486,7 +1477,7 @@ function OrderOrdersTable({ orders }: { orders: OrderCenterOrder[] }): ReactElem
               <td>{order.tradeId || "--"}</td>
             </tr>
           ))}
-          {orders.length === 0 && <EmptyTableRow colSpan={11} label="No open or pending orders from freqtrade." />}
+          {orders.length === 0 && <EmptyTableRow colSpan={11} label="No open or pending orders from control-plane." />}
         </tbody>
       </table>
     </div>
@@ -1530,7 +1521,7 @@ function OrderHistoryTable({ trades }: { trades: OrderCenterTrade[] }): ReactEle
               <td>{trade.ordersCount}</td>
             </tr>
           ))}
-          {trades.length === 0 && <EmptyTableRow colSpan={12} label="No trade history from freqtrade." />}
+          {trades.length === 0 && <EmptyTableRow colSpan={12} label="No trade history from control-plane." />}
         </tbody>
       </table>
     </div>
@@ -1659,6 +1650,7 @@ function SignalReviewPage({
           </button>
         </div>
       </div>
+      <DataQualityPanel quality={data.dataSource} />
 
       <div className="kpi-grid">
         <MetricCard delta="awaiting human review" label="needs_review" tone={data.signals.length > 0 ? "warning" : "muted"} value={`${data.signals.length}`} />
@@ -2060,6 +2052,7 @@ function RiskPage(): ReactElement {
           Kill Switch
         </button>
       </div>
+      <DataQualityPanel quality={data.dataSource} />
 
       <div className="risk-grid">
         {data.metrics.map((metric) => (
@@ -2137,16 +2130,13 @@ function KillSwitchModal({ onClose }: { onClose: () => void }): ReactElement {
 
     setSubmitting(true);
     setStatus("Submitting kill switch");
-    const activated = await activateKillSwitch(reason.trim(), true, confirmText);
+    const result = await activateKillSwitch(reason.trim(), true, confirmText);
     setSubmitting(false);
+    setStatus(result.statusText);
 
-    if (activated) {
-      setStatus("Kill switch active");
+    if (result.complete) {
       onClose();
-      return;
     }
-
-    setStatus("Kill switch request failed");
   }
 
   return (
@@ -2205,18 +2195,6 @@ function KillSwitchModal({ onClose }: { onClose: () => void }): ReactElement {
 
 function ReportsPage({ onNavigate }: { onNavigate: (path: string) => void }): ReactElement {
   const today = new Date().toISOString().slice(0, 10);
-  const rows = [
-    {
-      date: today,
-      generatedAt: "latest",
-      status: "fallback ready"
-    },
-    {
-      date: "2026-05-30",
-      generatedAt: "2026-05-30T23:59:00Z",
-      status: "fixture"
-    }
-  ];
 
   return (
     <section className="page-grid">
@@ -2239,41 +2217,8 @@ function ReportsPage({ onNavigate }: { onNavigate: (path: string) => void }): Re
         </button>
       </div>
 
-      <Panel title="日报列表" icon={<FileText size={17} />}>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Generated</th>
-                <th>Status</th>
-                <th>Open</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={`${row.date}-${row.generatedAt}`}>
-                  <td>{row.date}</td>
-                  <td>{row.generatedAt}</td>
-                  <td>{row.status}</td>
-                  <td>
-                    <button
-                      aria-label={`Open daily report ${row.date}`}
-                      className="icon-button"
-                      onClick={() => {
-                        onNavigate(`/reports/daily/${row.date}`);
-                      }}
-                      title={`Open daily report ${row.date}`}
-                      type="button"
-                    >
-                      <ChevronRight size={16} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      <Panel title="日报入口" icon={<FileText size={17} />}>
+        <p className="empty-copy">Open a daily report to load the control-plane snapshot for that date.</p>
       </Panel>
     </section>
   );
@@ -2359,12 +2304,12 @@ function DailyReportPage({ date }: { date: string }): ReactElement {
             下载 Markdown
           </button>
           <button
-            aria-label="Mock Telegram brief"
+            aria-label="Telegram brief"
             className="secondary-button"
             onClick={() => {
               void showTelegramPreview();
             }}
-            title="Mock Telegram brief"
+            title="Telegram brief"
             type="button"
           >
             <Send size={16} />
@@ -2408,6 +2353,7 @@ function DailyReportPage({ date }: { date: string }): ReactElement {
           </button>
         </div>
       </div>
+      <DataQualityPanel quality={data.dataSource} />
 
       <div className="kpi-grid">
         <MetricCard delta="Total equity" label="账户权益" tone="good" value={formatCurrency(data.account.equity)} />
@@ -2507,9 +2453,9 @@ function buildMarkdown(report: DailyReport): string {
 
   return [
     "---",
-    `report_id: local-${report.date}`,
+    `report_id: ${report.dataSource.snapshot_id || report.date}`,
     `generated_at: ${new Date().toISOString()}`,
-    "renderer: client_fallback",
+    "renderer: dashboard",
     "---",
     "",
     `# Hermes Daily Report ${report.date}`,

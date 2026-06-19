@@ -380,7 +380,7 @@ test("daily report smoke renders report actions", async ({ page }) => {
 
   await expect(page.getByRole("heading", { name: "2026-05-31" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Download Markdown" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Mock Telegram brief" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Telegram brief" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Compare report versions" })).toBeVisible();
 });
 
@@ -474,7 +474,7 @@ test("daily report page renders API snapshot and preview controls", async ({ pag
   await expect(page.getByText("信号漏斗")).toBeVisible();
   await expect(page.getByText("Report ready")).toBeVisible();
 
-  await page.getByRole("button", { name: "Mock Telegram brief" }).click();
+  await page.getByRole("button", { name: "Telegram brief" }).click();
   await expect(page.getByRole("heading", { name: "Telegram 简版" })).toBeVisible();
   await expect(page.getByText("Telegram smoke preview")).toBeVisible();
 });
