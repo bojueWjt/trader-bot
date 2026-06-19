@@ -6,6 +6,8 @@ const { createWatchedEntryHandler } = require("../lib/watched-entry-routing");
 function createRecorder(env) {
   const calls = [];
   const logs = [];
+  let importerCalls = 0;
+  let approvedWrites = 0;
   const handler = createWatchedEntryHandler({
     env,
     logger: {
@@ -18,34 +20,36 @@ function createRecorder(env) {
     },
     saveTelegramMessage(entry) {
       calls.push(["save", entry.id]);
+      if (entry.approved) {
+        approvedWrites += 1;
+      }
     },
     importSignalToFreqtrade(entry) {
-      calls.push(["import", entry.id]);
+      importerCalls += 1;
     },
-    forwardToTrader(entry) {
+    traderCronForwarder(entry) {
       calls.push(["forward", entry.id]);
     },
   });
 
-  return { calls, handler, logs };
+  return { calls, handler, logs, getImporterCalls: () => importerCalls, getApprovedWrites: () => approvedWrites };
 }
 
-test("watched entry routing defaults to importer and trader forwarder", () => {
-  const { calls, handler } = createRecorder({});
+test("watched entry routing defaults to collection only", () => {
+  const { calls, handler, logs } = createRecorder({});
 
   handler({ id: 11 });
 
   assert.deepEqual(calls, [
     ["push", 11],
     ["save", 11],
-    ["import", 11],
-    ["forward", 11],
   ]);
+  assert.deepEqual(logs, ["[forward] Hermes trader cron disabled"]);
 });
 
-test("watched entry routing can run importer-only migration mode", () => {
+test("watched entry routing requires explicit Hermes cron enablement to forward", () => {
   const { calls, handler, logs } = createRecorder({
-    HERMES_TRADER_CRON_ENABLED: "0",
+    HERMES_TRADER_CRON_ENABLED: "1",
   });
 
   handler({ id: 12 });
@@ -53,45 +57,20 @@ test("watched entry routing can run importer-only migration mode", () => {
   assert.deepEqual(calls, [
     ["push", 12],
     ["save", 12],
-    ["import", 12],
+    ["forward", 12],
   ]);
-  assert.deepEqual(logs, ["[forward] Hermes trader cron disabled"]);
+  assert.deepEqual(logs, []);
 });
 
-test("watched entry routing keeps trader forwarder active after importer failure", () => {
-  const calls = [];
-  const logs = [];
-  const handler = createWatchedEntryHandler({
-    env: {},
-    logger: {
-      log(line) {
-        logs.push(String(line));
-      },
-    },
-    pushMessage(entry) {
-      calls.push(["push", entry.id]);
-    },
-    saveTelegramMessage(entry) {
-      calls.push(["save", entry.id]);
-    },
-    importSignalToFreqtrade(entry) {
-      calls.push(["import", entry.id]);
-      const err = new Error("import failed");
-      err.code = "TEST_FAILURE";
-      throw err;
-    },
-    forwardToTrader(entry) {
-      calls.push(["forward", entry.id]);
-    },
-  });
+test("default disabled importer and Hermes path add zero risk commands", () => {
+  const { calls, handler, getImporterCalls, getApprovedWrites } = createRecorder({});
 
-  handler({ id: 13 });
+  handler({ id: 13, text: "BTC long entry 65000 stop 64000 take profit 67000" });
 
   assert.deepEqual(calls, [
     ["push", 13],
     ["save", 13],
-    ["import", 13],
-    ["forward", 13],
   ]);
-  assert.deepEqual(logs, ["[signal-importer] failed: TEST_FAILURE"]);
+  assert.equal(getImporterCalls(), 0);
+  assert.equal(getApprovedWrites(), 0);
 });

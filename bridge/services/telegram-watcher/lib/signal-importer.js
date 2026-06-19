@@ -5,7 +5,7 @@ const { canonicalWatchedChatId } = require("./telegram-utils");
 
 const SIGNAL_IMPORTER_ENABLED = isSignalImporterEnabled(process.env.SIGNAL_IMPORTER_ENABLED);
 const SIGNAL_IMPORTER_PYTHON = process.env.SIGNAL_IMPORTER_PYTHON || "python3";
-const SIGNAL_IMPORTER_MODULE = process.env.SIGNAL_IMPORTER_MODULE || "freqtrade.signal_strategy.importer";
+const SIGNAL_IMPORTER_MODULE = process.env.SIGNAL_IMPORTER_MODULE || "";
 const SIGNAL_IMPORTER_CWD = process.env.SIGNAL_IMPORTER_CWD || "";
 const SIGNAL_IMPORTER_REMOTE_HOST = process.env.SIGNAL_IMPORTER_REMOTE_HOST || "";
 const SIGNAL_IMPORTER_REMOTE_CWD = process.env.SIGNAL_IMPORTER_REMOTE_CWD || SIGNAL_IMPORTER_CWD;
@@ -55,11 +55,11 @@ function buildSignalImporterPayload(entry) {
 
 function isSignalImporterEnabled(rawValue) {
   if (!rawValue) {
-    return true;
+    return false;
   }
 
   const value = String(rawValue).trim().toLowerCase();
-  return !/^(0|false|off|no)$/.test(value);
+  return /^(1|true|on|yes)$/.test(value);
 }
 
 function isOptionalFlagEnabled(rawValue) {
@@ -254,8 +254,6 @@ function buildImporterArgs() {
     "--stdin",
     "--store-url",
     SIGNAL_STORE_URL,
-    "--approve-parsed",
-    "--refresh-window",
   ];
 
   if (SIGNAL_PAIR_WHITELIST) {
@@ -333,7 +331,7 @@ function importSignalToFreqtrade(entry) {
     return;
   }
 
-  if (!SIGNAL_STORE_URL) {
+  if (!SIGNAL_STORE_URL || !SIGNAL_IMPORTER_MODULE) {
     return;
   }
 

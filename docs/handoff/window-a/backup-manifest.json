@@ -1,0 +1,30 @@
+[
+  {
+    "name": "SignalStore sqlite",
+    "path": "docker volume signal-data:/data/signal_store.db",
+    "type": "sqlite",
+    "sensitivity": "Telegram-derived signal payloads, routing metadata, and trading intent context",
+    "backup_method": "Use sqlite online backup or stop dependent containers, copy /data/signal_store.db from the signal-data volume, encrypt the artifact, and record a sha256 checksum."
+  },
+  {
+    "name": "Importer audit log",
+    "path": "docker volume signal-data:/data/importer-audit.jsonl",
+    "type": "jsonl",
+    "sensitivity": "Importer dispatch history, chat identifiers, message identifiers, and failure states",
+    "backup_method": "Copy the append-only JSONL file from the signal-data volume with timestamped rotation, encrypt the artifact, and record line count plus sha256 checksum."
+  },
+  {
+    "name": "Freqtrade databases",
+    "path": "docker volume signal-data:/data/tradesv3*.sqlite",
+    "type": "sqlite",
+    "sensitivity": "Dry-run and live trade history, orders, positions, balances, and exchange-derived metadata",
+    "backup_method": "Back up each sqlite database with sqlite online backup or a stopped-container copy, keep dry-run and live files separated, encrypt artifacts, and verify integrity with sqlite PRAGMA quick_check."
+  },
+  {
+    "name": "Freqtrade user_data state",
+    "path": "bridge/user_data/** mounted as /freqtrade/user_data",
+    "type": "directory",
+    "sensitivity": "Freqtrade configs, strategy code, pairlists, runtime state, and potential references to live execution settings",
+    "backup_method": "Create a filtered archive of user_data excluding transient caches, encrypt it, record file manifest plus sha256 checksums, and store alongside the matching database backup."
+  }
+]

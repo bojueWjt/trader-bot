@@ -50,6 +50,36 @@ test("disabled importer returns without spawning python", () => {
   }
 });
 
+test("importer defaults disabled and writes no audit when flag is omitted", () => {
+  let execCalls = 0;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signal-importer-audit-"));
+  const auditPath = path.join(tmpDir, "audit.jsonl");
+  const fakeStdin = new EventEmitter();
+  fakeStdin.write = () => {};
+  fakeStdin.end = () => {};
+
+  const { importer, cleanup } = loadSignalImporter(
+    {
+      HERMES_SIGNAL_STORE_URL: "store-for-test",
+      IMPORTER_AUDIT_LOG: auditPath,
+    },
+    () => {
+      execCalls += 1;
+      return { stdin: fakeStdin };
+    }
+  );
+
+  try {
+    importer.importSignalToFreqtrade({ chatId: "chat-a", id: 10, text: "BTC long" });
+
+    assert.equal(execCalls, 0);
+    assert.equal(importer.__test.getSignalImporterInFlight(), 0);
+    assert.equal(fs.existsSync(auditPath), false);
+  } finally {
+    cleanup();
+  }
+});
+
 test("importer failure callback releases in-flight slot and keeps caller unblocked", async () => {
   let execCalls = 0;
   const fakeStdin = new EventEmitter();
@@ -61,6 +91,7 @@ test("importer failure callback releases in-flight slot and keeps caller unblock
     {
       SIGNAL_IMPORTER_ENABLED: "1",
       HERMES_SIGNAL_STORE_URL: "store-for-test",
+      SIGNAL_IMPORTER_MODULE: "test.signal_importer",
       SIGNAL_IMPORTER_MAX_IN_FLIGHT: "1",
       IMPORTER_AUDIT_LOG: path.join(tmpDir, "audit.jsonl"),
     },
@@ -104,6 +135,7 @@ test("remote importer embeds payload in command because ssh stdin can be closed"
     {
       SIGNAL_IMPORTER_ENABLED: "1",
       HERMES_SIGNAL_STORE_URL: "sqlite:////root/freqtrade/user_data/signal_strategy.sqlite3",
+      SIGNAL_IMPORTER_MODULE: "test.signal_importer",
       SIGNAL_IMPORTER_REMOTE_HOST: "root@example.test",
       SIGNAL_IMPORTER_REMOTE_CWD: "/root/freqtrade",
       SIGNAL_IMPORTER_SSH_IPV6: "1",
@@ -130,8 +162,10 @@ test("remote importer embeds payload in command because ssh stdin can be closed"
     assert.ok(invocation.args.includes("root@example.test"));
     assert.ok(remoteCommand.startsWith("cd '/root/freqtrade' && printf %s "));
     assert.ok(remoteCommand.includes("| base64 -d | 'python3' '-m'"));
-    assert.ok(remoteCommand.includes("'freqtrade.signal_strategy.importer'"));
+    assert.ok(remoteCommand.includes("'test.signal_importer'"));
     assert.ok(remoteCommand.includes("'sqlite:////root/freqtrade/user_data/signal_strategy.sqlite3'"));
+    assert.equal(remoteCommand.includes("'--approve-parsed'"), false);
+    assert.equal(remoteCommand.includes("'--refresh-window'"), false);
     assert.ok(remoteCommand.includes("'BTC/USDT:USDT'"));
   } finally {
     cleanup();
@@ -143,6 +177,7 @@ test("local importer keeps stdin payload path", () => {
     {
       SIGNAL_IMPORTER_ENABLED: "1",
       HERMES_SIGNAL_STORE_URL: "sqlite:///local.sqlite3",
+      SIGNAL_IMPORTER_MODULE: "test.signal_importer",
       SIGNAL_IMPORTER_CWD: "/tmp/freqtrade",
     },
     () => {
@@ -162,6 +197,8 @@ test("local importer keeps stdin payload path", () => {
     assert.equal(invocation.usesStdin, true);
     assert.equal(invocation.options.cwd, "/tmp/freqtrade");
     assert.ok(invocation.args.includes("--stdin"));
+    assert.equal(invocation.args.includes("--approve-parsed"), false);
+    assert.equal(invocation.args.includes("--refresh-window"), false);
   } finally {
     cleanup();
   }
@@ -209,6 +246,7 @@ test.describe("importer dispatch audit and alert states", () => {
       {
         SIGNAL_IMPORTER_ENABLED: "1",
         HERMES_SIGNAL_STORE_URL: "store-for-test",
+        SIGNAL_IMPORTER_MODULE: "test.signal_importer",
         IMPORTER_AUDIT_LOG: auditPath,
         WATCHER_ALERT_BOT_TOKEN: "alert-token",
         WATCHER_ALERT_CHAT_ID: "chat-1",
@@ -249,6 +287,7 @@ test.describe("importer dispatch audit and alert states", () => {
       {
         SIGNAL_IMPORTER_ENABLED: "1",
         HERMES_SIGNAL_STORE_URL: "store-for-test",
+        SIGNAL_IMPORTER_MODULE: "test.signal_importer",
         IMPORTER_AUDIT_LOG: auditPath,
         WATCHER_ALERT_BOT_TOKEN: "alert-token",
         WATCHER_ALERT_CHAT_ID: "chat-1",
@@ -297,6 +336,7 @@ test.describe("importer dispatch audit and alert states", () => {
       {
         SIGNAL_IMPORTER_ENABLED: "1",
         HERMES_SIGNAL_STORE_URL: "store-for-test",
+        SIGNAL_IMPORTER_MODULE: "test.signal_importer",
         IMPORTER_AUDIT_LOG: auditPath,
         WATCHER_ALERT_BOT_TOKEN: "alert-token",
         WATCHER_ALERT_CHAT_ID: "chat-1",

@@ -5,7 +5,6 @@ const { TelegramClient, Api } = require("telegram");
 const { StringSession } = require("telegram/sessions");
 const { NewMessage } = require("telegram/events");
 const { triggerHermesCron } = require("./lib/hermes-cron");
-const { importSignalToFreqtrade } = require("./lib/signal-importer");
 const { createWatchedEntryHandler } = require("./lib/watched-entry-routing");
 const {
   chatIdFromEntity,
@@ -224,8 +223,7 @@ async function loadMessageMedia(c, message) {
 const handleWatchedEntry = createWatchedEntryHandler({
   pushMessage,
   saveTelegramMessage,
-  importSignalToFreqtrade,
-  forwardToTrader,
+  traderCronForwarder: forwardToTrader,
 });
 
 // --- Telegram ---

@@ -5,6 +5,16 @@ on:
   push:
 
 jobs:
+  no-semantic-regex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check retired semantic importer path
+        run: python3 scripts/check_no_semantic_regex.py
+
   security-tests:
     runs-on: ubuntu-latest
     steps:
