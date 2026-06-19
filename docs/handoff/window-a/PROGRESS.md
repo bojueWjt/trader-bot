@@ -9,8 +9,12 @@
 |---|---|---|---|
 | A-00 | ✅ done | `00b8bc0` | safety baseline + no-semantic-regex gate |
 | A-01 | ✅ done | `b299e60` | contracts-v1 (4 schemas + tests + B export) |
-| A-02 | 🔄 in_progress | — | Postgres canonical schema (local pg@16) |
-| A-03..A-11 | ⬜ pending | — | pipelined per DAG |
+| A-02 | ✅ done | `c979a46` | Postgres canonical schema + migration (pg@16) |
+| A-03 | 🔄 in_progress | — | watcher→collector + ingress |
+| A-04 | 🔄 in_progress | — | transactional outbox + worker queue |
+| A-07 | 🔄 in_progress | — | auth / permission / audit |
+| A-10 | 🔄 in_progress | — | legacy SQLite read-only import |
+| A-05,A-06,A-08,A-09,A-11 | ⬜ pending | — | blocked on the above per DAG |
 
 ## A-00 — 建立安全基线并冻结旧自动开仓路径 — DONE
 Commit: `00b8bc0cf2a6500f7d0296875f1c13e187458e07`
@@ -38,3 +42,16 @@ Acceptance evidence:
 
 Residual: cross-validator robustness relies on consumers using **format-aware** validation (e.g. ajv-formats in Window B); schemas use `format: date-time`/`uuid` rather than regex patterns. Noted for Window C.
 Consumption note: Window B's worktree gets these on Window C's A-merge; for parallel dev the frozen definitions in PLAN §3 are identical.
+
+## A-02 — PostgreSQL canonical schema 与 migration — DONE
+Commit: `c979a46`
+
+Acceptance evidence (real Homebrew pg@16, throwaway cluster):
+- `db/migrations/0001_canonical_schema.{up,down}.sql`: 18 canonical tables separating raw_messages → hermes_decisions → risk_decisions → trade_intents (+ execution_*, *_projection, outbox_events, audit_events, replay_*, context_snapshots, node_heartbeats, risk_state, message_processing_runs, media_assets).
+- Guardrails: `raw_messages` UNIQUE(source,channel_id,source_message_id,source_version); `source_received_at` insert-only via trigger; `trade_intents` CHECK requires hermes+risk decision FKs + approved_at when approved; execution `event_id` + intent `idempotency_key` unique; `nautilus_projection_writer` role with GRANTs restricting writes to projection tables.
+- `services/control-plane/db`: `migrate.py` runner, `connection.py`, `enums.py` (aligned to contracts-v1), `repository.py` (same-tx raw_message+outbox).
+- Tests: `pytest tests/control-plane/db` = **5 passed** (fresh-migration creates tables/constraints/indexes/projection role; tx rollback; unique-key concurrent-duplicate rejected; same-tx raw+outbox; down-migration removes objects). Independent: `migrate up` → 19 tables (+schema_migrations) + projection role; `migrate down` clean.
+
+Fix applied at acceptance: `migrate.py` opened `with psycopg2.connect() as conn:` (transaction CM) then nested `with conn:` per migration → `psycopg2 cannot re-enter recursively`. Changed `main()` to open the connection without the outer transaction CM (try/finally close); the per-migration `with conn:` blocks now own their transactions. Re-verified green.
+
+Residual: object storage for `media_assets` bytes is out of scope here (A-03 wires ingestion); legacy SQLite history import is A-10.
