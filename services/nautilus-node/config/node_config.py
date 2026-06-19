@@ -35,6 +35,28 @@ class RedisNodeConfig:
 
 
 @dataclass(frozen=True)
+class CacheNodeConfig:
+    enabled: bool
+    backend: str
+    encoding: str
+
+
+@dataclass(frozen=True)
+class MessageBusNodeConfig:
+    enabled: bool
+    backend: str
+    encoding: str
+
+
+@dataclass(frozen=True)
+class ReconciliationNodeConfig:
+    startup: bool
+    continuous: bool
+    lookback_mins: int
+    interval_mins: int
+
+
+@dataclass(frozen=True)
 class BinanceNodeConfig:
     account_type: str
     environment: str
@@ -58,6 +80,9 @@ class NodeConfig:
     trader_id: str
     instance_id: str
     redis: RedisNodeConfig
+    cache: CacheNodeConfig
+    message_bus: MessageBusNodeConfig
+    reconciliation: ReconciliationNodeConfig
     binance: BinanceNodeConfig
     control_plane: ControlPlaneNodeConfig
 
@@ -85,6 +110,9 @@ def load_node_config(path: str | Path) -> NodeConfig:
         url=_required_str(redis_raw, "url"),
         key_prefix=_required_str(redis_raw, "key_prefix"),
     )
+    cache = _load_cache_config(raw.get("cache"))
+    message_bus = _load_message_bus_config(raw.get("message_bus"))
+    reconciliation = _load_reconciliation_config(raw.get("reconciliation"))
 
     environment = _required_str(binance_raw, "environment").lower()
     if environment not in {"sandbox", "testnet"}:
@@ -135,6 +163,9 @@ def load_node_config(path: str | Path) -> NodeConfig:
         trader_id=trader_id,
         instance_id=instance_id,
         redis=redis,
+        cache=cache,
+        message_bus=message_bus,
+        reconciliation=reconciliation,
         binance=binance,
         control_plane=control_plane,
     )
@@ -189,6 +220,89 @@ def _required_positive_number(raw: Mapping[str, Any], key: str) -> float:
     if not isinstance(value, (int, float)) or value <= 0:
         raise NodeConfigError(f"{key} must be a positive number")
     return float(value)
+
+
+def _load_cache_config(raw: Any) -> CacheNodeConfig:
+    if raw is None:
+        return CacheNodeConfig(enabled=True, backend="redis", encoding="msgpack")
+    if not isinstance(raw, Mapping):
+        raise NodeConfigError("cache must be an object")
+    enabled = _optional_bool(raw, "enabled", True)
+    backend = _optional_str(raw, "backend", "redis")
+    encoding = _optional_str(raw, "encoding", "msgpack")
+    if not enabled:
+        raise NodeConfigError("cache.enabled must stay true for B-06")
+    if backend != "redis":
+        raise NodeConfigError("cache.backend must be redis for B-06")
+    if encoding not in {"msgpack", "json"}:
+        raise NodeConfigError("cache.encoding must be msgpack or json")
+    return CacheNodeConfig(enabled=enabled, backend=backend, encoding=encoding)
+
+
+def _load_message_bus_config(raw: Any) -> MessageBusNodeConfig:
+    if raw is None:
+        return MessageBusNodeConfig(enabled=True, backend="redis", encoding="msgpack")
+    if not isinstance(raw, Mapping):
+        raise NodeConfigError("message_bus must be an object")
+    enabled = _optional_bool(raw, "enabled", True)
+    backend = _optional_str(raw, "backend", "redis")
+    encoding = _optional_str(raw, "encoding", "msgpack")
+    if not enabled:
+        raise NodeConfigError("message_bus.enabled must stay true for B-06")
+    if backend != "redis":
+        raise NodeConfigError("message_bus.backend must be redis for B-06")
+    if encoding not in {"msgpack", "json"}:
+        raise NodeConfigError("message_bus.encoding must be msgpack or json")
+    return MessageBusNodeConfig(enabled=enabled, backend=backend, encoding=encoding)
+
+
+def _load_reconciliation_config(raw: Any) -> ReconciliationNodeConfig:
+    if raw is None:
+        return ReconciliationNodeConfig(
+            startup=True,
+            continuous=True,
+            lookback_mins=60,
+            interval_mins=5,
+        )
+    if not isinstance(raw, Mapping):
+        raise NodeConfigError("reconciliation must be an object")
+    startup = _optional_bool(raw, "startup", True)
+    continuous = _optional_bool(raw, "continuous", True)
+    lookback_mins = _optional_positive_int(raw, "lookback_mins", 60)
+    interval_mins = _optional_positive_int(raw, "interval_mins", 5)
+    if not startup:
+        raise NodeConfigError("reconciliation.startup must stay enabled for B-06")
+    if not continuous:
+        raise NodeConfigError("reconciliation.continuous must stay enabled for B-06")
+    if lookback_mins < 60:
+        raise NodeConfigError("reconciliation.lookback_mins must be at least 60")
+    return ReconciliationNodeConfig(
+        startup=startup,
+        continuous=continuous,
+        lookback_mins=lookback_mins,
+        interval_mins=interval_mins,
+    )
+
+
+def _optional_bool(raw: Mapping[str, Any], key: str, default: bool) -> bool:
+    value = raw.get(key, default)
+    if not isinstance(value, bool):
+        raise NodeConfigError(f"{key} must be a boolean")
+    return value
+
+
+def _optional_str(raw: Mapping[str, Any], key: str, default: str) -> str:
+    value = raw.get(key, default)
+    if not isinstance(value, str) or not value:
+        raise NodeConfigError(f"{key} must be a non-empty string")
+    return value
+
+
+def _optional_positive_int(raw: Mapping[str, Any], key: str, default: int) -> int:
+    value = raw.get(key, default)
+    if not isinstance(value, int) or value <= 0:
+        raise NodeConfigError(f"{key} must be a positive integer")
+    return value
 
 
 def _reject_overlapping_identity(
