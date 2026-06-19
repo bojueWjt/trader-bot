@@ -33,6 +33,7 @@ __all__ = [
     "ControlPlaneIntentSource",
     "ExecutionEventSink",
     "NodeCommandChannel",
+    "ControlPlaneSnapshotSource",
     "ControlPlaneClient",
 ]
 
@@ -152,7 +153,18 @@ class NodeCommandChannel(Protocol):
 
 
 @runtime_checkable
+class ControlPlaneSnapshotSource(Protocol):
+    """§4 read-model freshness used by node readiness/safety checks."""
+
+    def latest_snapshot_generated_at(self, account_id: str) -> Optional[datetime]: ...
+
+
+@runtime_checkable
 class ControlPlaneClient(
-    ControlPlaneIntentSource, ExecutionEventSink, NodeCommandChannel, Protocol
+    ControlPlaneIntentSource,
+    ExecutionEventSink,
+    NodeCommandChannel,
+    ControlPlaneSnapshotSource,
+    Protocol,
 ):
     """Aggregate node-facing control-plane client (intents + events + commands)."""
