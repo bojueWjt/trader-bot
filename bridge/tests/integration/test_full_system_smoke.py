@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -53,7 +54,7 @@ def test_gs_002_full_system_smoke_reaches_dashboard_and_report():
     client = TestClient(app)
     dashboard = client.get(
         "/api/dashboard/overview",
-        headers={"authorization": "Bearer test-viewer-token"},
+        headers={"authorization": f"Bearer {os.environ['VIEWER_TOKEN']}"},
     )
     report = client.get("/api/reports/daily/2026-02-08/markdown")
 

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from uuid import uuid4
 
 from fastapi import Header, HTTPException, Request
 
 from app.db.repositories_signal import SignalRepository
 from app.security.auth import AuthTokenError, user_from_auth_token
-from app.services.permissions import AuthError401, PermissionError403, require_user
+from app.security.roles import validate_actor
+from app.security.tokens import static_token_users
 from app.services.signal_store import SignalStore
 from app.settings import get_settings
 
@@ -43,11 +43,12 @@ def require_bearer_user(authorization: str | None) -> dict:
     if not user:
         raise HTTPException(status_code=403, detail="unknown token")
     try:
-        return require_user(user)
-    except AuthError401 as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    except PermissionError403 as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return validate_actor(user)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "login required":
+            raise HTTPException(status_code=401, detail=detail) from exc
+        raise HTTPException(status_code=403, detail=detail) from exc
 
 
 def actor_context(
@@ -77,13 +78,4 @@ def signal_store(request: Request) -> SignalStore:
 
 
 def _token_users() -> dict[str, dict[str, str]]:
-    risk_admin_token = os.environ.get("RISK_ADMIN_API_TOKEN") or "test-risk-admin-token"
-    viewer_token = os.environ.get("VIEWER_API_TOKEN") or "test-viewer-token"
-    trader_token = os.environ.get("TRADER_API_TOKEN") or "test-trader-token"
-    observer_token = os.environ.get("SYSTEM_OBSERVER_API_TOKEN") or "test-system-observer-token"
-    return {
-        risk_admin_token: {"actor_id": "risk-admin", "role": "risk_admin"},
-        viewer_token: {"actor_id": "viewer", "role": "viewer"},
-        trader_token: {"actor_id": "trader", "role": "trader"},
-        observer_token: {"actor_id": "system-observer", "role": "system_observer"},
-    }
+    return static_token_users()

@@ -1,3 +1,5 @@
+import os
+
 from app.services.release_gates import ReleaseGateEvaluator
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -6,9 +8,11 @@ from app.security.release_gates_router import reset_runtime_state, router
 
 
 def auth_headers(role="risk_admin", request_id=""):
-    token = "test-risk-admin-token"
-    if role == "viewer":
-        token = "test-viewer-token"
+    env_by_role = {
+        "risk_admin": "RISK_ADMIN_TOKEN",
+        "viewer": "VIEWER_TOKEN",
+    }
+    token = os.environ[env_by_role[role]]
     headers = {"authorization": f"Bearer {token}"}
     if request_id:
         headers["x-request-id"] = request_id

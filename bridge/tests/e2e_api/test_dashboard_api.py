@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import httpx
@@ -17,13 +19,14 @@ def build_client():
 
 
 def auth_headers(role="system_observer"):
-    token = "test-system-observer-token"
-    if role == "viewer":
-        token = "test-viewer-token"
-    if role == "trader":
-        token = "test-trader-token"
-    if role == "risk_admin":
-        token = "test-risk-admin-token"
+    env_by_role = {
+        "risk_admin": "RISK_ADMIN_TOKEN",
+        "viewer": "VIEWER_TOKEN",
+        "reviewer": "REVIEWER_TOKEN",
+        "system_observer": "SYSTEM_OBSERVER_TOKEN",
+        "nautilus_node": "NAUTILUS_NODE_TOKEN",
+    }
+    token = os.environ[env_by_role[role]]
     return {"authorization": f"Bearer {token}"}
 
 

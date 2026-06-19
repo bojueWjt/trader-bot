@@ -12,12 +12,18 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services.permissions import AuthError401, PermissionError403, require_user
+from app.security.roles import validate_actor
+from app.security.tokens import validate_security_environment
 
 
 DEFAULT_TOKEN_TTL_SECONDS = 3600
 
 router = APIRouter()
+
+
+@router.on_event("startup")
+def validate_auth_startup() -> None:
+    validate_security_environment()
 
 
 class LoginRequest(BaseModel):
@@ -197,10 +203,8 @@ def _password_matches(password: str, expected: str) -> bool:
 
 def _validated_user(user: dict[str, str]) -> dict[str, str]:
     try:
-        return require_user(user)
-    except AuthError401 as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except PermissionError403 as exc:
+        return validate_actor(user)
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -7,12 +9,15 @@ from app.services.signal_store import SignalStore
 from app.signals.router import reset_message_processing_store, router as signals_router
 
 
-def auth_headers(role="trader"):
-    token = "test-trader-token"
-    if role == "viewer":
-        token = "test-viewer-token"
-    if role == "risk_admin":
-        token = "test-risk-admin-token"
+def auth_headers(role="risk_admin"):
+    env_by_role = {
+        "risk_admin": "RISK_ADMIN_TOKEN",
+        "viewer": "VIEWER_TOKEN",
+        "reviewer": "REVIEWER_TOKEN",
+        "system_observer": "SYSTEM_OBSERVER_TOKEN",
+        "nautilus_node": "NAUTILUS_NODE_TOKEN",
+    }
+    token = os.environ[env_by_role[role]]
     return {"authorization": f"Bearer {token}"}
 
 
@@ -229,7 +234,7 @@ def test_signal_id_message_events_filters_events_by_signal():
     assert [event["to_status"] for event in events] == ["received", "db_saved"]
 
 
-def test_write_endpoints_require_trader_or_risk_admin():
+def test_write_endpoints_require_risk_admin():
     client = build_client()
 
     missing_token = client.post("/api/signals/messages", json={"message_id": "msg-auth"})

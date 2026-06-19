@@ -49,10 +49,10 @@ def test_unknown_role_is_forbidden():
         require_user({"actor_id": "unknown-1", "role": "operator"})
 
 
-def test_trader_cannot_override_risk():
+def test_reviewer_cannot_override_risk():
     with pytest.raises(PermissionError403):
         require_dangerous_operation(
-            user={"actor_id": "trader-1", "role": "trader"},
+            user={"actor_id": "reviewer-1", "role": "reviewer"},
             operation="risk_override",
             payload={"confirm": True, "reason": "manual approval"},
         )

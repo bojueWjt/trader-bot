@@ -48,7 +48,7 @@ def test_login_returns_401_for_wrong_credentials(monkeypatch):
 
 
 def test_login_returns_bearer_token_for_valid_credentials(monkeypatch):
-    configure_password_login(monkeypatch, role="trader")
+    configure_password_login(monkeypatch, role="reviewer")
     client = build_client()
 
     response = client.post("/auth/login", json={"username": "admin", "password": "correct-password"})
@@ -57,7 +57,7 @@ def test_login_returns_bearer_token_for_valid_credentials(monkeypatch):
     body = response.json()
     assert body["token_type"] == "bearer"
     assert body["expires_in"] == 3600
-    assert body["role"] == "trader"
+    assert body["role"] == "reviewer"
     assert isinstance(body["access_token"], str)
     assert body["access_token"].count(".") == 2
 

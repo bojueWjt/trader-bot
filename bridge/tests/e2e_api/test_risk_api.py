@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
@@ -18,13 +19,13 @@ def build_client():
 
 
 def auth_headers(role="risk_admin"):
-    token = "test-risk-admin-token"
-    if role == "viewer":
-        token = "test-viewer-token"
-    if role == "observer":
-        token = "test-system-observer-token"
-    if role == "trader":
-        token = "test-trader-token"
+    env_by_role = {
+        "risk_admin": "RISK_ADMIN_TOKEN",
+        "viewer": "VIEWER_TOKEN",
+        "observer": "SYSTEM_OBSERVER_TOKEN",
+        "system_observer": "SYSTEM_OBSERVER_TOKEN",
+    }
+    token = os.environ[env_by_role[role]]
     return {
         "authorization": f"Bearer {token}",
         "x-request-id": "req-1",
@@ -89,7 +90,7 @@ def test_kill_switch_requires_request_id():
     response = client.post(
         "/api/risk/kill-switch",
         json={"confirm": True, "reason": "manual emergency stop"},
-        headers={"authorization": "Bearer test-risk-admin-token"},
+        headers={"authorization": f"Bearer {os.environ['RISK_ADMIN_TOKEN']}"},
     )
 
     assert response.status_code == 422
