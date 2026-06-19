@@ -6,11 +6,10 @@ from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 
 from app.dependencies import require_bearer_user
-from app.services.dashboard_fake_adapter import DashboardFakeAdapter
+from app.services.dashboard_provider import dashboard_adapter
 
 
 router = APIRouter()
-adapter = DashboardFakeAdapter()
 
 HEARTBEAT_INTERVAL_SECONDS = 15.0
 # every Nth heartbeat is sent as dashboard_snapshot, which makes the frontend resync
@@ -46,16 +45,16 @@ async def stream() -> StreamingResponse:
 @router.get("/overview")
 def overview(authorization: str | None = Header(default=None)):
     require_bearer_user(authorization)
-    return adapter.overview()
+    return dashboard_adapter().overview()
 
 
 @router.get("/open-trades")
 def open_trades(authorization: str | None = Header(default=None)):
     require_bearer_user(authorization)
-    return adapter.open_trades()
+    return dashboard_adapter().open_trades()
 
 
 @router.get("/events")
 def events(authorization: str | None = Header(default=None)):
     require_bearer_user(authorization)
-    return adapter.events()
+    return dashboard_adapter().events()

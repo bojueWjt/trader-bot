@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,10 @@ from app.contracts.dashboard import (
 
 class DashboardFakeAdapter:
     def __init__(self, fixture_path: Path | None = None):
+        if os.environ.get("APP_ENV") != "test":
+            raise RuntimeError(
+                "DashboardFakeAdapter is test-only; production serves real PostgreSQL projections"
+            )
         self.fixture_path = fixture_path or self._default_fixture_path()
 
     def overview(self) -> DashboardOverview:

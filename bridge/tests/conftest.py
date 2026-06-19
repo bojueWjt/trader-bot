@@ -17,6 +17,7 @@ for _path in (
         sys.path.insert(0, str(_path))
 
 BRIDGE_TEST_ENV = {
+    "APP_ENV": "test",
     "AUTH_SECRET_KEY": "unit-auth-secret",
     "RISK_ADMIN_TOKEN": "unit-risk-admin-token",
     "VIEWER_TOKEN": "unit-viewer-token",

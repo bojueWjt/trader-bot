@@ -8,12 +8,12 @@ from app.contracts.dashboard import (
     SystemSnapshotResponse,
     SystemSnapshotSignal,
 )
-from app.services.dashboard_fake_adapter import DashboardFakeAdapter
+from app.services.dashboard_provider import dashboard_adapter as build_dashboard_adapter
 
 
 class SystemSnapshotAdapter:
-    def __init__(self, dashboard_adapter: DashboardFakeAdapter | None = None):
-        self.dashboard_adapter = dashboard_adapter or DashboardFakeAdapter()
+    def __init__(self, dashboard_adapter=None):
+        self.dashboard_adapter = dashboard_adapter or build_dashboard_adapter()
 
     def snapshot(self) -> SystemSnapshotResponse:
         overview = self.dashboard_adapter.overview()
