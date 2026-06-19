@@ -13,7 +13,10 @@
 | A-03 | 🔄 in_progress | — | watcher→collector + ingress |
 | A-04 | 🔄 in_progress | — | transactional outbox + worker queue |
 | A-07 | 🔄 in_progress | — | auth / permission / audit |
-| A-10 | 🔄 in_progress | — | legacy SQLite read-only import |
+| A-10 | ✅ done | `6330830` | legacy SQLite read-only import |
+| A-03 | 🔄 in_progress | — | watcher→collector + ingress |
+| A-04 | 🔄 in_progress | — | transactional outbox + worker queue |
+| A-07 | 🔄 in_progress | — | auth / permission / audit |
 | A-05,A-06,A-08,A-09,A-11 | ⬜ pending | — | blocked on the above per DAG |
 
 ## A-00 — 建立安全基线并冻结旧自动开仓路径 — DONE
@@ -55,3 +58,13 @@ Acceptance evidence (real Homebrew pg@16, throwaway cluster):
 Fix applied at acceptance: `migrate.py` opened `with psycopg2.connect() as conn:` (transaction CM) then nested `with conn:` per migration → `psycopg2 cannot re-enter recursively`. Changed `main()` to open the connection without the outer transaction CM (try/finally close); the per-migration `with conn:` blocks now own their transactions. Re-verified green.
 
 Residual: object storage for `media_assets` bytes is out of scope here (A-03 wires ingestion); legacy SQLite history import is A-10.
+
+## A-10 — 旧 SQLite 历史导入工具（只读历史）— DONE (P1)
+Commit: `6330830`
+
+Acceptance evidence (real pg@16):
+- `scripts/migrate_legacy_sqlite.py`: idempotent import of legacy `signals`/`signal_events`/`signal_operations` into separate `legacy_*` history tables (`services/control-plane/migration/legacy_ddl.sql`), with row-count + sha256 reconciliation output. Recursive sensitive-field scrubber drops `api_key`/`secret`/`token`/`password`/`credential` before insert.
+- Tests: `pytest tests/control-plane/migration` = **3 passed** — fixture import row-counts; double-run idempotency + stable checksums; secret-exclusion (payloads contain no sensitive substrings).
+- Does **not** touch `db/migrations` or canonical execution tables; legacy data is read-only history.
+
+Residual: only the three legacy signal tables are mapped (`MAPPING.md`); legacy freqtrade orders/trades import (if needed) is a follow-up — not required for Window A acceptance.
