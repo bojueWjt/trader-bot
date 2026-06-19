@@ -16,9 +16,13 @@
 | A-10 | ✅ done | `6330830` | legacy SQLite read-only import |
 | A-03 | ✅ done | `0374153` | watcher→collector + Postgres ingress |
 | A-04 | ✅ done | `a29be3e` | transactional outbox + worker queue |
-| A-07 | 🔄 in_progress | — | auth / permission / audit |
-| A-05 | 🔄 in_progress | — | Hermes multimodal worker (real-call blocked) |
-| A-06,A-08,A-09,A-11 | ⬜ pending | — | A-06←A-05; A-08/A-09←A-07; A-11←all |
+| A-07 | ✅ done | `198cb0d` | auth/permission/audit (222 bridge + 10 sec tests) |
+| A-05 | ✅ done* | `2655ca1` | Hermes worker — code + 11 tests; *real smoke BLOCKED |
+| fix | ✅ done | `134a49e` | 0002 migration: A-02/A-04 queue schema mismatch |
+| A-06 | 🔄 in_progress | — | decision gateway + risk governor (←A-05) |
+| A-08 | ⬜ ready | — | kill switch + node commands (←A-07) |
+| A-09 | ⬜ ready | — | real projection snapshot/API (←A-07) |
+| A-11 | ⬜ pending | — | ←all |
 
 ## A-00 — 建立安全基线并冻结旧自动开仓路径 — DONE
 Commit: `00b8bc0cf2a6500f7d0296875f1c13e187458e07`
@@ -82,3 +86,24 @@ Commit: `a29be3e`
 - `services/control-plane/outbox/publisher.py`: at-least-once + idempotent sink; `FOR UPDATE SKIP LOCKED`; published rows skip re-delivery.
 - `services/hermes-worker/queue/claims.py`: visibility-lease claim (SKIP LOCKED on outbox + no-active-run lock), lease-expiry takeover → `hermes_timeout`, lease-guarded completion (zombie workers can't finish), explicit failure states.
 - Tests: `pytest tests/control-plane/outbox` = **3 passed** (real pg@16): crash-between-commit-and-publish, duplicate-delivery idempotency, lease expiry + takeover. Concurrency-safe by construction.
+
+## A-07 — 统一鉴权、权限和审计 — DONE
+Commit: `198cb0d`
+- `bridge/apps/api/app/security/tokens.py`: `static_token_users()` → `validate_security_environment()` requires `AUTH_SECRET_KEY` + 5 role tokens from env and raises on missing/duplicate (**fail-closed**); all `test-*-token` defaults removed.
+- `dependencies.py` delegates to `static_token_users()` + `validate_actor` (roles viewer/reviewer/risk_admin/system_observer/nautilus_node).
+- `services/control-plane/security`: permission matrix, audit writer (`audit_events`), dangerous-ops gating (request_id + reason + confirm).
+- Tests: `pytest tests/control-plane/security` = **10 passed** (role matrix, startup fail-closed, secret scan, watcher anon-write); full bridge `pytest tests/` = **222 passed** (no regression). No plaintext exchange keys in source.
+
+## A-05 — Hermes 真实多模态 Worker — IN PROGRESS (Claude直接实现)
+Codex run `task-mqlfg9ew-xs94ub` failed at 27s with `"You've hit your usage limit. Try again later."` (Codex/GPT backend quota, not a code defect — no files written). Implemented directly by Claude.
+
+Commit: `2655ca1`
+- `services/hermes-worker/hermes_client.py`: `HermesClient` contract + OpenAI-compatible `RealHermesClient` (stdlib HTTP, temperature 0) + Unavailable/Timeout/Response errors; **no regex/OCR fallback** (fail-closed when unconfigured).
+- `prompt.py`: pinned `hermes-trader-v1` prompt (strict HermesDecisionV1 JSON; needs_review on ambiguity/missing image; updates ≠ open_position).
+- `worker.py`: claim → load raw+images+context+SystemSnapshotV1 → Hermes → **validate vs contracts-v1** → atomically persist context_snapshot + hermes_decision + audit, complete run, **consume outbox (no duplicate decision)**. Fail-closed taxonomy: media_failed / context_stale / hermes_timeout / hermes_unavailable / invalid_decision_schema / hermes_failed. Worker owns identity + pinned model block; the model supplies only classification/intent/evidence.
+- Tests: `pytest tests/hermes` = **11 passed** (real pg@16) — text/image/mixed happy paths, all fail-closed cases, no-duplicate-decision, no-semantic-regex source check.
+
+🚧 **BLOCKED (Window C / infra)**: the real multimodal call + 10 real image/text message smoke. `smoke_replay.py` reports `BLOCKED` (not faked) until `HERMES_API_URL/KEY/MODEL` + ≥10 real messages are provided. Also: the live SystemSnapshotV1 provider is wired by A-09; A-05 uses an injected provider.
+
+## Cross-task integration fix — DONE
+Commit: `134a49e` — `db/migrations/0002` adds `message_processing_runs.lease_expires_at` + queue statuses (hermes_timeout/…) that A-04's `claims.py` needs but A-02's `0001` lacked (A-04 had hidden this with a test-only `ALTER`). Caught by independent verification; A-04 now passes against the real migration chain.
