@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "intent_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "decision_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "risk_decision_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "account_id": "acct-main",
+  "instrument_id": "ETHUSDT-PERP.BINANCE",
+  "action": "move_stop_loss",
+  "order_plan": {},
+  "risk_budget": {
+    "risk_fraction": 0,
+    "max_notional": 0,
+    "max_leverage": 2
+  },
+  "target_position_id": "pos-eth-001",
+  "valid_until": "2026-06-19T13:10:00Z",
+  "idempotency_key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "approved_at": "2026-06-19T12:10:00Z"
+}
+

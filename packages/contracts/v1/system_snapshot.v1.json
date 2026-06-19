@@ -1,0 +1,134 @@
+{
+  "$id": "https://trader-bot.local/contracts/v1/system_snapshot.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SystemSnapshotV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data_source",
+    "snapshot_id",
+    "generated_at",
+    "last_execution_event_at",
+    "projection_lag_ms",
+    "stale",
+    "missing_nodes",
+    "reconciliation_state",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "data_source": {
+      "type": "string",
+      "const": "postgres_projection"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_execution_event_at": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "projection_lag_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stale": {
+      "type": "boolean"
+    },
+    "missing_nodes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reconciliation_state": {
+      "type": "string",
+      "enum": [
+        "healthy",
+        "degraded",
+        "failed"
+      ]
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "balances",
+        "orders",
+        "positions",
+        "recent_messages",
+        "hermes_decisions",
+        "risk_decisions",
+        "node_health",
+        "audit_trail"
+      ],
+      "properties": {
+        "account": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "balances": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "equity",
+            "margin"
+          ],
+          "properties": {
+            "equity": {
+              "type": "number",
+              "minimum": 0
+            },
+            "margin": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "orders": {
+          "type": "array",
+          "items": true
+        },
+        "positions": {
+          "type": "array",
+          "items": true
+        },
+        "recent_messages": {
+          "type": "array",
+          "items": true
+        },
+        "hermes_decisions": {
+          "type": "array",
+          "items": true
+        },
+        "risk_decisions": {
+          "type": "array",
+          "items": true
+        },
+        "node_health": {
+          "type": "array",
+          "items": true
+        },
+        "audit_trail": {
+          "type": "array",
+          "items": true
+        }
+      }
+    }
+  }
+}
+

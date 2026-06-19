@@ -1,0 +1,79 @@
+{
+  "$id": "https://trader-bot.local/contracts/v1/execution_event_envelope.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionEventEnvelopeV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "node_id",
+    "account_id",
+    "intent_id",
+    "client_order_id",
+    "venue_order_id",
+    "trade_id",
+    "event_type",
+    "ts_event",
+    "ts_ingest",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "event_id": {
+      "type": "string",
+      "description": "Stable unique idempotency key for this execution event"
+    },
+    "node_id": {
+      "type": "string"
+    },
+    "account_id": {
+      "type": "string"
+    },
+    "intent_id": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "uuid"
+    },
+    "client_order_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "venue_order_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "trade_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "event_type": {
+      "type": "string"
+    },
+    "ts_event": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ts_ingest": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    }
+  }
+}
+

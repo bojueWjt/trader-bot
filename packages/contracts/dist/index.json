@@ -1,0 +1,26 @@
+{
+  "contracts_version": "contracts-v1",
+  "schemas": {
+    "HermesDecisionV1": {
+      "$id": "https://trader-bot.local/contracts/v1/hermes_decision.v1.json",
+      "path": "../v1/hermes_decision.v1.json",
+      "version": "1.0"
+    },
+    "ApprovedTradeIntentV1": {
+      "$id": "https://trader-bot.local/contracts/v1/approved_trade_intent.v1.json",
+      "path": "../v1/approved_trade_intent.v1.json",
+      "version": "1.0"
+    },
+    "ExecutionEventEnvelopeV1": {
+      "$id": "https://trader-bot.local/contracts/v1/execution_event_envelope.v1.json",
+      "path": "../v1/execution_event_envelope.v1.json",
+      "version": "1.0"
+    },
+    "SystemSnapshotV1": {
+      "$id": "https://trader-bot.local/contracts/v1/system_snapshot.v1.json",
+      "path": "../v1/system_snapshot.v1.json",
+      "version": "1.0"
+    }
+  }
+}
+

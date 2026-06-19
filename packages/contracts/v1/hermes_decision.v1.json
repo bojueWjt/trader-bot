@@ -1,0 +1,242 @@
+{
+  "$id": "https://trader-bot.local/contracts/v1/hermes_decision.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HermesDecisionV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision_id",
+    "raw_message_id",
+    "processing_run_id",
+    "context_snapshot_id",
+    "classification",
+    "intent",
+    "evidence",
+    "model",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "decision_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "raw_message_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "processing_run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "context_snapshot_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message_type",
+        "action",
+        "ambiguous",
+        "ambiguity_reasons"
+      ],
+      "properties": {
+        "message_type": {
+          "type": "string",
+          "enum": [
+            "new_signal",
+            "position_update",
+            "close_update",
+            "analysis",
+            "noise",
+            "ambiguous"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "open_position",
+            "add_position",
+            "partial_close",
+            "close_position",
+            "move_stop_loss",
+            "move_stop_to_entry",
+            "replace_take_profits",
+            "hold",
+            "ignore",
+            "needs_review"
+          ]
+        },
+        "ambiguous": {
+          "type": "boolean"
+        },
+        "ambiguity_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_scope",
+        "target_account_id",
+        "target_position_id",
+        "instrument_symbol",
+        "side",
+        "entry",
+        "stop_loss",
+        "take_profits",
+        "leverage",
+        "valid_until"
+      ],
+      "properties": {
+        "account_scope": {
+          "type": "string",
+          "enum": [
+            "unassigned",
+            "single",
+            "all"
+          ]
+        },
+        "target_account_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "target_position_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "instrument_symbol": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "side": {
+          "type": [
+            "null",
+            "string"
+          ],
+          "enum": [
+            null,
+            "long",
+            "short"
+          ]
+        },
+        "entry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "price",
+            "price_min",
+            "price_max"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "market",
+                "limit",
+                "zone",
+                "none"
+              ]
+            },
+            "price": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "price_min": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "price_max": {
+              "type": [
+                "null",
+                "number"
+              ]
+            }
+          }
+        },
+        "stop_loss": {
+          "type": [
+            "null",
+            "number"
+          ]
+        },
+        "take_profits": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "leverage": {
+          "type": [
+            "null",
+            "number"
+          ]
+        },
+        "valid_until": {
+          "type": [
+            "null",
+            "string"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "evidence": {
+      "type": "array"
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "model_version",
+        "prompt_version",
+        "temperature"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "const": "hermes"
+        },
+        "model_version": {
+          "type": "string"
+        },
+        "prompt_version": {
+          "type": "string"
+        },
+        "temperature": {
+          "type": "number"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "confidence": {
+      "type": "number"
+    }
+  }
+}

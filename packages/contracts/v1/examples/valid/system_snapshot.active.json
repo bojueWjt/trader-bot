@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "data_source": "postgres_projection",
+  "snapshot_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "generated_at": "2026-06-19T12:07:00Z",
+  "last_execution_event_at": "2026-06-19T12:05:01Z",
+  "projection_lag_ms": 250,
+  "stale": false,
+  "missing_nodes": [
+    "nautilus-node-2"
+  ],
+  "reconciliation_state": "degraded",
+  "data": {
+    "account": {},
+    "balances": {
+      "equity": 12500.25,
+      "margin": 3200.5
+    },
+    "orders": [
+      {
+        "order_id": "client-order-001",
+        "status": "accepted"
+      }
+    ],
+    "positions": [
+      {
+        "position_id": "pos-btc-001",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    ],
+    "recent_messages": [
+      {
+        "raw_message_id": "22222222-2222-4222-8222-222222222222"
+      }
+    ],
+    "hermes_decisions": [
+      {
+        "decision_id": "11111111-1111-4111-8111-111111111111"
+      }
+    ],
+    "risk_decisions": [
+      {
+        "risk_decision_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      }
+    ],
+    "node_health": [
+      {
+        "node_id": "nautilus-node-1",
+        "healthy": true
+      }
+    ],
+    "audit_trail": [
+      {
+        "event_id": "nautilus-node-1:acct-main:accepted:000001"
+      }
+    ]
+  }
+}
+

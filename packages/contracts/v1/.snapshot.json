@@ -1,0 +1,737 @@
+{
+  "approved_trade_intent": {
+    "": {
+      "properties": [
+        "account_id",
+        "action",
+        "approved_at",
+        "decision_id",
+        "idempotency_key",
+        "instrument_id",
+        "intent_id",
+        "order_plan",
+        "risk_budget",
+        "risk_decision_id",
+        "schema_version",
+        "target_position_id",
+        "valid_until"
+      ],
+      "required": [
+        "account_id",
+        "action",
+        "approved_at",
+        "decision_id",
+        "idempotency_key",
+        "instrument_id",
+        "intent_id",
+        "order_plan",
+        "risk_budget",
+        "risk_decision_id",
+        "schema_version",
+        "target_position_id",
+        "valid_until"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "account_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "action": {
+      "enum": [
+        "\"add_position\"",
+        "\"close_position\"",
+        "\"move_stop_loss\"",
+        "\"move_stop_to_entry\"",
+        "\"open_position\"",
+        "\"partial_close\"",
+        "\"replace_take_profits\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "approved_at": {
+      "type": [
+        "string"
+      ]
+    },
+    "decision_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "idempotency_key": {
+      "type": [
+        "string"
+      ]
+    },
+    "instrument_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "intent_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan": {
+      "properties": [],
+      "type": [
+        "object"
+      ]
+    },
+    "risk_budget": {
+      "properties": [
+        "max_leverage",
+        "max_notional",
+        "risk_fraction"
+      ],
+      "required": [
+        "max_leverage",
+        "max_notional",
+        "risk_fraction"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "risk_budget.max_leverage": {
+      "type": [
+        "number"
+      ]
+    },
+    "risk_budget.max_notional": {
+      "type": [
+        "number"
+      ]
+    },
+    "risk_budget.risk_fraction": {
+      "type": [
+        "number"
+      ]
+    },
+    "risk_decision_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "schema_version": {
+      "const": "\"1.0\"",
+      "type": [
+        "string"
+      ]
+    },
+    "target_position_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "valid_until": {
+      "type": [
+        "string"
+      ]
+    }
+  },
+  "execution_event_envelope": {
+    "": {
+      "properties": [
+        "account_id",
+        "client_order_id",
+        "event_id",
+        "event_type",
+        "intent_id",
+        "node_id",
+        "payload",
+        "schema_version",
+        "trade_id",
+        "ts_event",
+        "ts_ingest",
+        "venue_order_id"
+      ],
+      "required": [
+        "account_id",
+        "client_order_id",
+        "event_id",
+        "event_type",
+        "intent_id",
+        "node_id",
+        "payload",
+        "schema_version",
+        "trade_id",
+        "ts_event",
+        "ts_ingest",
+        "venue_order_id"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "account_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "client_order_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "event_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "event_type": {
+      "type": [
+        "string"
+      ]
+    },
+    "intent_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "node_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "payload": {
+      "properties": [],
+      "type": [
+        "object"
+      ]
+    },
+    "schema_version": {
+      "const": "\"1.0\"",
+      "type": [
+        "string"
+      ]
+    },
+    "trade_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "ts_event": {
+      "type": [
+        "string"
+      ]
+    },
+    "ts_ingest": {
+      "type": [
+        "string"
+      ]
+    },
+    "venue_order_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    }
+  },
+  "hermes_decision": {
+    "": {
+      "properties": [
+        "classification",
+        "confidence",
+        "context_snapshot_id",
+        "created_at",
+        "decision_id",
+        "evidence",
+        "intent",
+        "model",
+        "processing_run_id",
+        "raw_message_id",
+        "schema_version"
+      ],
+      "required": [
+        "classification",
+        "context_snapshot_id",
+        "created_at",
+        "decision_id",
+        "evidence",
+        "intent",
+        "model",
+        "processing_run_id",
+        "raw_message_id",
+        "schema_version"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "classification": {
+      "properties": [
+        "action",
+        "ambiguity_reasons",
+        "ambiguous",
+        "message_type"
+      ],
+      "required": [
+        "action",
+        "ambiguity_reasons",
+        "ambiguous",
+        "message_type"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "classification.action": {
+      "enum": [
+        "\"add_position\"",
+        "\"close_position\"",
+        "\"hold\"",
+        "\"ignore\"",
+        "\"move_stop_loss\"",
+        "\"move_stop_to_entry\"",
+        "\"needs_review\"",
+        "\"open_position\"",
+        "\"partial_close\"",
+        "\"replace_take_profits\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "classification.ambiguity_reasons": {
+      "type": [
+        "array"
+      ]
+    },
+    "classification.ambiguity_reasons[]": {
+      "type": [
+        "string"
+      ]
+    },
+    "classification.ambiguous": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "classification.message_type": {
+      "enum": [
+        "\"ambiguous\"",
+        "\"analysis\"",
+        "\"close_update\"",
+        "\"new_signal\"",
+        "\"noise\"",
+        "\"position_update\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "confidence": {
+      "type": [
+        "number"
+      ]
+    },
+    "context_snapshot_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "created_at": {
+      "type": [
+        "string"
+      ]
+    },
+    "decision_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "evidence": {
+      "type": [
+        "array"
+      ]
+    },
+    "intent": {
+      "properties": [
+        "account_scope",
+        "entry",
+        "instrument_symbol",
+        "leverage",
+        "side",
+        "stop_loss",
+        "take_profits",
+        "target_account_id",
+        "target_position_id",
+        "valid_until"
+      ],
+      "required": [
+        "account_scope",
+        "entry",
+        "instrument_symbol",
+        "leverage",
+        "side",
+        "stop_loss",
+        "take_profits",
+        "target_account_id",
+        "target_position_id",
+        "valid_until"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "intent.account_scope": {
+      "enum": [
+        "\"all\"",
+        "\"single\"",
+        "\"unassigned\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "intent.entry": {
+      "properties": [
+        "price",
+        "price_max",
+        "price_min",
+        "type"
+      ],
+      "required": [
+        "price",
+        "price_max",
+        "price_min",
+        "type"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "intent.entry.price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "intent.entry.price_max": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "intent.entry.price_min": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "intent.entry.type": {
+      "enum": [
+        "\"limit\"",
+        "\"market\"",
+        "\"none\"",
+        "\"zone\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "intent.instrument_symbol": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "intent.leverage": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "intent.side": {
+      "enum": [
+        "\"long\"",
+        "\"short\"",
+        "null"
+      ],
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "intent.stop_loss": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "intent.take_profits": {
+      "type": [
+        "array"
+      ]
+    },
+    "intent.take_profits[]": {
+      "type": [
+        "number"
+      ]
+    },
+    "intent.target_account_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "intent.target_position_id": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "intent.valid_until": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "model": {
+      "properties": [
+        "model_version",
+        "prompt_version",
+        "provider",
+        "temperature"
+      ],
+      "required": [
+        "model_version",
+        "prompt_version",
+        "provider",
+        "temperature"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "model.model_version": {
+      "type": [
+        "string"
+      ]
+    },
+    "model.prompt_version": {
+      "type": [
+        "string"
+      ]
+    },
+    "model.provider": {
+      "const": "\"hermes\"",
+      "type": [
+        "string"
+      ]
+    },
+    "model.temperature": {
+      "type": [
+        "number"
+      ]
+    },
+    "processing_run_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "raw_message_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "schema_version": {
+      "const": "\"1.0\"",
+      "type": [
+        "string"
+      ]
+    }
+  },
+  "system_snapshot": {
+    "": {
+      "properties": [
+        "data",
+        "data_source",
+        "generated_at",
+        "last_execution_event_at",
+        "missing_nodes",
+        "projection_lag_ms",
+        "reconciliation_state",
+        "schema_version",
+        "snapshot_id",
+        "stale"
+      ],
+      "required": [
+        "data",
+        "data_source",
+        "generated_at",
+        "last_execution_event_at",
+        "missing_nodes",
+        "projection_lag_ms",
+        "reconciliation_state",
+        "schema_version",
+        "snapshot_id",
+        "stale"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "data": {
+      "properties": [
+        "account",
+        "audit_trail",
+        "balances",
+        "hermes_decisions",
+        "node_health",
+        "orders",
+        "positions",
+        "recent_messages",
+        "risk_decisions"
+      ],
+      "required": [
+        "account",
+        "audit_trail",
+        "balances",
+        "hermes_decisions",
+        "node_health",
+        "orders",
+        "positions",
+        "recent_messages",
+        "risk_decisions"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "data.account": {
+      "properties": [],
+      "type": [
+        "object"
+      ]
+    },
+    "data.audit_trail": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.balances": {
+      "properties": [
+        "equity",
+        "margin"
+      ],
+      "required": [
+        "equity",
+        "margin"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "data.balances.equity": {
+      "type": [
+        "number"
+      ]
+    },
+    "data.balances.margin": {
+      "type": [
+        "number"
+      ]
+    },
+    "data.hermes_decisions": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.node_health": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.orders": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.positions": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.recent_messages": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.risk_decisions": {
+      "type": [
+        "array"
+      ]
+    },
+    "data_source": {
+      "const": "\"postgres_projection\"",
+      "type": [
+        "string"
+      ]
+    },
+    "generated_at": {
+      "type": [
+        "string"
+      ]
+    },
+    "last_execution_event_at": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "missing_nodes": {
+      "type": [
+        "array"
+      ]
+    },
+    "missing_nodes[]": {
+      "type": [
+        "string"
+      ]
+    },
+    "projection_lag_ms": {
+      "type": [
+        "integer"
+      ]
+    },
+    "reconciliation_state": {
+      "enum": [
+        "\"degraded\"",
+        "\"failed\"",
+        "\"healthy\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "schema_version": {
+      "const": "\"1.0\"",
+      "type": [
+        "string"
+      ]
+    },
+    "snapshot_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "stale": {
+      "type": [
+        "boolean"
+      ]
+    }
+  }
+}

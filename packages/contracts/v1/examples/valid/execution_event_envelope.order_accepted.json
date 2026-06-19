@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "event_id": "nautilus-node-1:acct-main:accepted:000001",
+  "node_id": "nautilus-node-1",
+  "account_id": "acct-main",
+  "intent_id": "99999999-9999-4999-8999-999999999999",
+  "client_order_id": "client-order-001",
+  "venue_order_id": "venue-order-001",
+  "trade_id": null,
+  "event_type": "order_accepted",
+  "ts_event": "2026-06-19T12:04:00Z",
+  "ts_ingest": "2026-06-19T12:04:01Z",
+  "payload": {}
+}
+

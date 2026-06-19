@@ -1,0 +1,3 @@
+pytest
+jsonschema[format]  # [format] extra enforces format: date-time / uuid (else invalid-datetime examples slip through)
+

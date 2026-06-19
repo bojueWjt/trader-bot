@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "event_id": "nautilus-node-1:heartbeat:2026-06-19T12:05:00Z",
+  "node_id": "nautilus-node-1",
+  "account_id": "acct-main",
+  "intent_id": null,
+  "client_order_id": null,
+  "venue_order_id": null,
+  "trade_id": null,
+  "event_type": "node_heartbeat",
+  "ts_event": "2026-06-19T12:05:00Z",
+  "ts_ingest": "2026-06-19T12:05:01Z",
+  "payload": {}
+}
+
