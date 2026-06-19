@@ -1,0 +1,10 @@
+{
+  "apiId": "${TELEGRAM_API_ID}",
+  "apiHash": "${TELEGRAM_API_HASH}",
+  "session": "${TELEGRAM_SESSION}",
+  "watchGroups": [
+    "-1002198013097",
+    "-1002228497993",
+    "-1002328068747"
+  ]
+}

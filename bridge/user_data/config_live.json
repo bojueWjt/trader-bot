@@ -1,0 +1,128 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "max_open_trades": 5,
+  "stake_currency": "USDT",
+  "stake_amount": "unlimited",
+  "tradable_balance_ratio": 0.99,
+  "fiat_display_currency": "USD",
+  "dry_run": false,
+  "cancel_open_orders_on_exit": true,
+  "force_entry_enable": false,
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "timeframe": "5m",
+  "strategy": "SignalStrategy",
+  "user_data_dir": "user_data",
+  "strategy_path": "user_data/strategies",
+  "exchange": {
+    "name": "binance",
+    "key": "",
+    "secret": "",
+    "ccxt_config": {
+      "enableRateLimit": true
+    },
+    "ccxt_async_config": {
+      "enableRateLimit": true
+    },
+    "pair_whitelist": [
+      "BTC/USDT:USDT",
+      "ETH/USDT:USDT",
+      "SYRUP/USDT:USDT",
+      "HYPE/USDT:USDT",
+      "WLD/USDT:USDT",
+      "INJ/USDT:USDT",
+      "SOL/USDT:USDT"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "order_types": {
+    "entry": "limit",
+    "exit": "limit",
+    "stoploss": "market",
+    "stoploss_on_exchange": true,
+    "stoploss_on_exchange_interval": 60
+  },
+  "telegram": {
+    "enabled": true,
+    "token": "${FREQTRADE__TELEGRAM__TOKEN}",
+    "chat_id": "${FREQTRADE__TELEGRAM__CHAT_ID}",
+    "allow_custom_messages": true,
+    "notification_settings": {
+      "status": "silent",
+      "warning": "on",
+      "startup": "silent",
+      "entry": "silent",
+      "entry_fill": "on",
+      "entry_cancel": "on",
+      "exit": {
+        "roi": "silent",
+        "emergency_exit": "on",
+        "force_exit": "on",
+        "exit_signal": "on",
+        "trailing_stop_loss": "on",
+        "stop_loss": "on",
+        "stoploss_on_exchange": "on",
+        "custom_exit": "on",
+        "partial_exit": "on"
+      },
+      "exit_fill": "on",
+      "exit_cancel": "on",
+      "protection_trigger": "on",
+      "protection_trigger_global": "on",
+      "strategy_msg": "on",
+      "show_candle": "off"
+    }
+  },
+  "signal_strategy": {
+    "account_id": "jiataotx@gmail.com",
+    "trade_unrouted": false,
+    "lookback_minutes": 240,
+    "equity": 10000,
+    "risk_pct": 0.02,
+    "default_leverage": 3,
+    "min_leverage": 1,
+    "max_leverage": 5,
+    "breakeven_stoploss": {
+      "enabled": true
+    }
+  },
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "dry-run-local-only-change-me",
+    "ws_token": "dry-run-local-only-change-me",
+    "CORS_origins": [],
+    "username": "freqtrade-dry",
+    "password": "dry-run-local-only-change-me"
+  },
+  "bot_name": "trader-bridge-live",
+  "initial_state": "running",
+  "internals": {
+    "process_throttle_secs": 5
+  },
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0.0,
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "position_adjustment_enable": true,
+  "db_url": "sqlite:////data/tradesv3.live.sqlite"
+}

@@ -1,0 +1,15 @@
+node_modules
+dist
+build
+.next
+*.log
+.DS_Store
+.env
+coverage
+.vscode
+.idea
+messages.json
+forwarded.json
+media/
+
+config.json

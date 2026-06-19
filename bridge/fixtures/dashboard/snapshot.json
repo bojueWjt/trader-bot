@@ -1,0 +1,84 @@
+{
+  "overview": {
+    "bot_status": "running",
+    "run_mode": "dry_run",
+    "equity": 12500.75,
+    "free_balance": 10850.25,
+    "margin_used": 1650.5,
+    "realized_pnl_today": 145.32,
+    "unrealized_pnl": 87.41,
+    "open_trade_count": 2,
+    "open_order_count": 1,
+    "today_signal_count": 6,
+    "today_executed_count": 3,
+    "risk_state": "normal",
+    "recent_events": [
+      {
+        "event_id": "evt-risk-001",
+        "event_type": "risk_precheck_passed",
+        "occurred_at": "2026-05-31T13:02:11+00:00",
+        "severity": "info",
+        "message": "BTC breakout signal passed risk checks.",
+        "correlation_id": "sig-btc-breakout-001",
+        "source": "risk_governor"
+      },
+      {
+        "event_id": "evt-order-001",
+        "event_type": "order_submitted",
+        "occurred_at": "2026-05-31T13:03:44+00:00",
+        "severity": "info",
+        "message": "ETH long order submitted in dry run mode.",
+        "correlation_id": "sig-eth-pullback-001",
+        "source": "execution_adapter"
+      }
+    ]
+  },
+  "open_trades": [
+    {
+      "trade_id": "trade-btc-001",
+      "signal_id": "sig-btc-breakout-001",
+      "pair": "BTC/USDT:USDT",
+      "side": "long",
+      "entry_price": 68250.0,
+      "current_price": 68910.5,
+      "stake_amount": 500.0,
+      "leverage": 3.0,
+      "unrealized_pnl": 14.52,
+      "opened_at": "2026-05-31T12:45:00+00:00",
+      "status": "open"
+    },
+    {
+      "trade_id": "trade-eth-001",
+      "signal_id": "sig-eth-pullback-001",
+      "pair": "ETH/USDT:USDT",
+      "side": "long",
+      "entry_price": 3720.5,
+      "current_price": 3748.25,
+      "stake_amount": 350.0,
+      "leverage": 2.0,
+      "unrealized_pnl": 5.22,
+      "opened_at": "2026-05-31T13:05:00+00:00",
+      "status": "open"
+    }
+  ],
+  "events": [
+    {
+      "event_id": "evt-risk-001",
+      "event_type": "risk_precheck_passed",
+      "occurred_at": "2026-05-31T13:02:11+00:00",
+      "severity": "info",
+      "message": "BTC breakout signal passed risk checks.",
+      "correlation_id": "sig-btc-breakout-001",
+      "source": "risk_governor"
+    },
+    {
+      "event_id": "evt-order-001",
+      "event_type": "order_submitted",
+      "occurred_at": "2026-05-31T13:03:44+00:00",
+      "severity": "info",
+      "message": "ETH long order submitted in dry run mode.",
+      "correlation_id": "sig-eth-pullback-001",
+      "source": "execution_adapter"
+    }
+  ]
+}

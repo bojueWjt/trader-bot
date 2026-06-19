@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram Watcher</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --bg2: #0e0e16;
+      --surface: #13131d;
+      --surface2: #1a1a28;
+      --surface3: #222236;
+      --border: rgba(255,255,255,0.06);
+      --border2: rgba(255,255,255,0.10);
+      --text: #e8e8f0;
+      --text2: #6b6b80;
+      --text3: #42424f;
+      --accent: #6366f1;
+      --accent2: #818cf8;
+      --accent-glow: rgba(99,102,241,0.15);
+      --green: #34d399;
+      --green-bg: rgba(52,211,153,0.08);
+      --red: #f87171;
+      --red-bg: rgba(248,113,113,0.08);
+      --orange: #fbbf24;
+      --orange-bg: rgba(251,191,36,0.08);
+      --blue: #60a5fa;
+      --blue-bg: rgba(96,165,250,0.08);
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
+      --shadow-lg: 0 8px 32px rgba(0,0,0,0.4);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ====== Layout ====== */
+    .shell {
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ====== Sidebar ====== */
+    .sidebar {
+      width: 220px;
+      min-width: 220px;
+      background: var(--bg2);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 20px 0;
+    }
+
+    .sidebar-brand {
+      padding: 0 20px 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .sidebar-brand svg {
+      width: 28px; height: 28px;
+      color: var(--accent);
+    }
+
+    .sidebar-brand h1 {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+
+    .status-pill {
+      margin: 0 16px 20px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+    }
+    .status-pill .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    .status-pill.ok { background: var(--green-bg); color: var(--green); }
+    .status-pill.ok .dot { background: var(--green); }
+    .status-pill.warn { background: var(--orange-bg); color: var(--orange); }
+    .status-pill.warn .dot { background: var(--orange); animation: none; }
+    .status-pill.off { background: var(--red-bg); color: var(--red); }
+    .status-pill.off .dot { background: var(--red); animation: none; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .nav { flex: 1; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 20px;
+      font-size: 13px; font-weight: 500;
+      color: var(--text2);
+      cursor: pointer;
+      transition: all 0.15s;
+      border-left: 2px solid transparent;
+    }
+    .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.02); }
+    .nav-item.active {
+      color: var(--accent2);
+      background: var(--accent-glow);
+      border-left-color: var(--accent);
+    }
+    .nav-item svg { width: 16px; height: 16px; flex: none; }
+    .nav-item .count {
+      margin-left: auto;
+      background: var(--surface3);
+      padding: 1px 7px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text2);
+    }
+
+    .nav-sep {
+      height: 1px;
+      background: var(--border);
+      margin: 8px 16px;
+    }
+
+    /* ====== Main ====== */
+    .main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 32px;
+    }
+
+    .page { display: none; }
+    .page.active { display: block; }
+
+    .page-header {
+      margin-bottom: 24px;
+    }
+    .page-header h2 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+    .page-header p {
+      font-size: 13px;
+      color: var(--text2);
+      margin-top: 4px;
+    }
+
+    /* ====== Card ====== */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    .card-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text2);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 16px;
+    }
+
+    /* ====== Forms ====== */
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .form-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .form-full { grid-column: 1 / -1; }
+
+    input, select {
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius-sm);
+      padding: 9px 14px;
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      width: 100%;
+    }
+    input:focus, select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+    input::placeholder { color: var(--text3); }
+
+    .input-group {
+      display: flex;
+      gap: 8px;
+    }
+
+    /* ====== Buttons ====== */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 9px 18px;
+      font-size: 13px;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: #5558e6; }
+    .btn-ghost { background: transparent; color: var(--text2); border: 1px solid var(--border2); }
+    .btn-ghost:hover { background: var(--surface2); color: var(--text); }
+    .btn-danger { background: transparent; color: var(--red); border: 1px solid rgba(248,113,113,0.2); }
+    .btn-danger:hover { background: var(--red-bg); }
+    .btn-sm { padding: 5px 12px; font-size: 12px; }
+    .btn svg { width: 14px; height: 14px; }
+
+    .btn-group {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    /* ====== Checkbox ====== */
+    .check-label {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: var(--text2); cursor: pointer;
+    }
+    .check-label input[type="checkbox"] {
+      width: 16px; height: 16px;
+      accent-color: var(--accent);
+      flex: none;
+    }
+
+    /* ====== Table ====== */
+    .tbl {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .tbl th {
+      text-align: left;
+      padding: 8px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text3);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tbl td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .tbl tr:last-child td { border-bottom: none; }
+    .tbl tbody tr { transition: background 0.1s; }
+    .tbl tbody tr:hover td { background: rgba(255,255,255,0.02); }
+
+    /* ====== Badges ====== */
+    .badge {
+      display: inline-flex; align-items: center;
+      padding: 3px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .badge-open { background: var(--green-bg); color: var(--green); }
+    .badge-pending { background: var(--orange-bg); color: var(--orange); }
+    .badge-closed { background: rgba(107,107,128,0.12); color: var(--text2); }
+    .badge-partial { background: var(--blue-bg); color: var(--blue); }
+    .badge-testnet { background: var(--orange-bg); color: var(--orange); }
+    .badge-live { background: var(--red-bg); color: var(--red); }
+
+    .mono { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+
+    /* ====== Empty ====== */
+    .empty {
+      text-align: center;
+      color: var(--text3);
+      padding: 40px 0;
+      font-size: 13px;
+    }
+    .empty svg { width: 32px; height: 32px; margin-bottom: 8px; opacity: 0.3; }
+
+    .info { font-size: 13px; color: var(--text2); line-height: 1.6; margin-bottom: 12px; }
+    .info a { color: var(--accent2); text-decoration: none; }
+    .info a:hover { text-decoration: underline; }
+
+    /* ====== Messages ====== */
+    .msg-feed { max-height: calc(100vh - 200px); overflow-y: auto; }
+
+    .msg-item {
+      padding: 14px 0;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    .msg-item:last-child { border-bottom: none; }
+
+    .msg-head {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 5px;
+    }
+    .msg-sender {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--accent2);
+    }
+    .msg-chat {
+      font-size: 11px;
+      color: var(--text3);
+      background: var(--surface2);
+      padding: 1px 7px;
+      border-radius: 4px;
+    }
+    .msg-time {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text3);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .msg-text {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg-media {
+      margin-top: 8px;
+    }
+    .msg-media img {
+      max-width: 320px;
+      max-height: 220px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+    }
+
+    /* ====== Groups Picker ====== */
+    .group-list { max-height: 320px; overflow-y: auto; }
+    .group-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .group-row:hover { background: var(--surface2); }
+    .group-row input[type="checkbox"] { flex: none; width: 16px; height: 16px; accent-color: var(--accent); }
+    .group-row .g-title { flex: 1; font-size: 13px; }
+    .group-row .g-tag { font-size: 11px; color: var(--text3); }
+
+    /* ====== Toast ====== */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      padding: 10px 22px;
+      border-radius: 10px;
+      font-size: 13px;
+      box-shadow: var(--shadow-lg);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s, transform 0.2s;
+      z-index: 100;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+      pointer-events: auto;
+    }
+
+    /* ====== Step flow ====== */
+    .step { display: block; }
+
+    /* ====== Scrollbar ====== */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--surface3); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text3); }
+
+    /* ====== Dialog picker (channel routing) ====== */
+    .dialog-pick { max-height: 200px; overflow-y: auto; margin-top: 8px; }
+    .dialog-pick-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: 13px;
+      transition: background 0.1s;
+    }
+    .dialog-pick-item:hover { background: var(--surface2); }
+    .dialog-pick-item .dp-title { flex: 1; }
+    .dialog-pick-item .dp-meta { font-size: 11px; color: var(--text3); font-family: 'JetBrains Mono', monospace; }
+
+    /* ====== Responsive ====== */
+    @media (max-width: 768px) {
+      .sidebar { width: 56px; min-width: 56px; }
+      .sidebar-brand h1, .nav-item span, .nav-item .count, .status-pill span:not(.dot) { display: none; }
+      .sidebar-brand { padding: 0 14px 20px; }
+      .nav-item { padding: 12px 20px; justify-content: center; }
+      .status-pill { justify-content: center; margin: 0 8px 16px; padding: 8px; }
+      .main { padding: 20px 16px; }
+      .form-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <h1>Watcher</h1>
+      </div>
+
+      <div class="status-pill off" id="statusPill">
+        <span class="dot"></span>
+        <span id="statusLabel">离线</span>
+      </div>
+
+      <nav class="nav">
+        <div class="nav-item active" data-page="messages" onclick="go('messages')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>消息流</span>
+          <span class="count" id="msgCount">0</span>
+        </div>
+        <div class="nav-item" data-page="setup" onclick="go('setup')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Telegram 设置</span>
+        </div>
+
+        <div class="nav-sep"></div>
+
+        <div class="nav-item" data-page="accounts" onclick="go('accounts')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+          <span>交易账号</span>
+        </div>
+        <div class="nav-item" data-page="channels" onclick="go('channels')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+          <span>频道路由</span>
+        </div>
+        <div class="nav-item" data-page="risks" onclick="go('risks')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>风控配置</span>
+        </div>
+        <div class="nav-item" data-page="orders" onclick="go('orders')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          <span>订单</span>
+        </div>
+      </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main">
+
+      <!-- ========== Messages ========== -->
+      <div class="page active" id="page-messages">
+        <div class="page-header">
+          <h2>消息流</h2>
+          <p>来自监听频道的实时消息</p>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:16px;">
+          <button class="btn btn-ghost" onclick="refreshMessages()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            刷新
+          </button>
+          <button class="btn btn-ghost" onclick="toggleAutoRefresh()" id="autoRefreshBtn">自动刷新: 关</button>
+        </div>
+        <div class="card" style="padding:0 20px;">
+          <div class="msg-feed" id="msgList">
+            <div class="empty">暂无消息</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== Setup ========== -->
+      <div class="page" id="page-setup">
+        <div class="page-header">
+          <h2>Telegram 设置</h2>
+          <p>API 配置、登录和监听群组管理</p>
+        </div>
+
+        <!-- Config -->
+        <div class="card step active" id="stepConfig">
+          <div class="card-title">API 配置</div>
+          <p class="info">从 <a href="https://my.telegram.org/apps" target="_blank">my.telegram.org/apps</a> 获取 API ID 和 API Hash</p>
+          <div class="form-grid">
+            <input type="text" id="apiId" placeholder="API ID">
+            <input type="text" id="apiHash" placeholder="API Hash">
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
+          </div>
+        </div>
+
+        <!-- Login -->
+        <div class="card step" id="stepLogin">
+          <div class="card-title">账号登录</div>
+          <div id="loginPhone">
+            <div class="input-group">
+              <input type="text" id="phoneNumber" placeholder="+86 手机号 (含国家码)" style="flex:1">
+              <button class="btn btn-primary" onclick="sendCode()">发送验证码</button>
+            </div>
+          </div>
+          <div id="loginCode" style="display:none">
+            <div class="input-group" style="margin-top:10px">
+              <input type="text" id="verifyCode" placeholder="输入验证码" style="flex:1">
+              <button class="btn btn-primary" onclick="submitCode()">验证</button>
+            </div>
+          </div>
+          <div id="loginPassword" style="display:none">
+            <p class="info" style="margin-top:10px">此账号启用了两步验证</p>
+            <div class="input-group">
+              <input type="password" id="twoFaPassword" placeholder="两步验证密码" style="flex:1">
+              <button class="btn btn-primary" onclick="submitPassword()">提交</button>
+            </div>
+          </div>
+          <div id="loginQr" style="margin-top:10px">
+            <button class="btn" onclick="startQrLogin()">扫码登录</button>
+            <div id="qrArea" style="display:none;margin-top:10px;text-align:center">
+              <img id="qrImage" alt="Telegram 登录二维码" style="width:240px;height:240px;background:#fff;padding:4px;border-radius:8px">
+              <p class="info" style="margin-top:6px">Telegram 手机端：设置 → 设备 → 连接桌面设备，扫描二维码（约 30 秒自动刷新）</p>
+            </div>
+            <div id="qrPassword" style="display:none">
+              <p class="info" style="margin-top:10px">此账号启用了两步验证</p>
+              <div class="input-group">
+                <input type="password" id="qrTwoFaPassword" placeholder="两步验证密码" style="flex:1">
+                <button class="btn btn-primary" onclick="submitQrPassword()">提交</button>
+              </div>
+            </div>
+          </div>
+          <div id="loginDone" style="display:none;margin-top:10px">
+            <span class="badge badge-open">✓ 已登录</span>
+          </div>
+        </div>
+
+        <!-- Groups -->
+        <div class="card step" id="stepGroups">
+          <div class="card-title">监听群组</div>
+          <div class="btn-group" style="margin-top:0;margin-bottom:12px">
+            <button class="btn btn-ghost" onclick="loadDialogs()">加载群组列表</button>
+            <button class="btn btn-primary" onclick="saveGroups()">保存选择</button>
+          </div>
+          <div class="group-list" id="groupList">
+            <div class="empty">点击"加载群组列表"</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== Accounts ========== -->
+      <div class="page" id="page-accounts">
+        <div class="page-header">
+          <h2>交易账号</h2>
+          <p>管理 Binance 合约账号凭据</p>
+        </div>
+        <div class="card">
+          <div class="card-title">添加账号</div>
+          <div class="form-grid">
+            <input id="acc-id" placeholder="账号名称 (如: main)">
+            <input id="acc-key" placeholder="API Key">
+            <input id="acc-secret" type="password" placeholder="API Secret">
+            <input id="acc-risk" type="number" step="0.001" value="0.01" placeholder="默认风险比例">
+          </div>
+          <div class="btn-group" style="justify-content:space-between">
+            <label class="check-label">
+              <input type="checkbox" id="acc-testnet" checked> Testnet 模式
+            </label>
+            <button class="btn btn-primary" onclick="addAccount()">添加账号</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">已有账号</div>
+          <div id="accountList"><div class="empty">加载中...</div></div>
+        </div>
+      </div>
+
+      <!-- ========== Channel Routing ========== -->
+      <div class="page" id="page-channels">
+        <div class="page-header">
+          <h2>频道路由</h2>
+          <p>将 Telegram 频道映射到 Binance 交易账号</p>
+        </div>
+        <div class="card">
+          <div class="card-title">添加路由</div>
+          <div class="form-grid cols-3">
+            <input id="ch-id" placeholder="频道 ID (如: -1001234567890)">
+            <input id="ch-name" placeholder="频道名称 (可选)">
+            <select id="ch-account">
+              <option value="">选择目标账号</option>
+            </select>
+          </div>
+          <div class="btn-group" style="justify-content:space-between">
+            <button class="btn btn-ghost" onclick="loadDialogsForRouting()">从 Telegram 选择频道</button>
+            <button class="btn btn-primary" onclick="addChannel()">添加路由</button>
+          </div>
+          <div class="dialog-pick" id="dialogPickerForRouting"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">已有路由</div>
+          <div id="channelList"><div class="empty">加载中...</div></div>
+        </div>
+      </div>
+
+      <!-- ========== Risks ========== -->
+      <div class="page" id="page-risks">
+        <div class="page-header">
+          <h2>风控配置</h2>
+          <p>按品种设置不同的仓位风险比例</p>
+        </div>
+        <div class="card">
+          <div class="card-title">添加品种风控</div>
+          <div class="input-group">
+            <input id="risk-symbol" placeholder="品种 (如: BTCUSDT)" style="flex:1">
+            <input id="risk-ratio" type="number" step="0.001" value="0.01" placeholder="风险比例" style="width:120px">
+            <button class="btn btn-primary" onclick="addRisk()">添加</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">品种风控列表</div>
+          <div id="riskList"><div class="empty">加载中...</div></div>
+        </div>
+      </div>
+
+      <!-- ========== Orders ========== -->
+      <div class="page" id="page-orders">
+        <div class="page-header">
+          <h2>订单</h2>
+          <p>交易信号执行的订单追踪</p>
+        </div>
+        <div class="card">
+          <div style="display:flex;gap:8px;margin-bottom:16px">
+            <select id="order-filter" onchange="loadOrders()" style="width:180px">
+              <option value="">全部状态</option>
+              <option value="OPEN">OPEN</option>
+              <option value="PENDING">PENDING</option>
+              <option value="PARTIAL_CLOSED">PARTIAL_CLOSED</option>
+              <option value="CLOSED">CLOSED</option>
+              <option value="CANCELLED">CANCELLED</option>
+            </select>
+            <button class="btn btn-ghost" onclick="loadOrders()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              刷新
+            </button>
+          </div>
+          <div style="overflow-x:auto">
+            <div id="orderList"><div class="empty">加载中...</div></div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    let autoRefreshTimer = null;
+
+    /* ====== Helpers ====== */
+    function toast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      clearTimeout(el._t);
+      el._t = setTimeout(() => el.classList.remove('show'), 2500);
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch('/api' + path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts,
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+      return res.json();
+    }
+
+    function esc(s) {
+      if (!s) return '';
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function formatTime(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      const now = new Date();
+      const isToday = d.toDateString() === now.toDateString();
+      if (isToday) return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) + ' ' +
+             d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function showStep(id) { document.getElementById(id).classList.add('active'); }
+
+    /* ====== Navigation ====== */
+    function go(pageId) {
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+      document.querySelector(`[data-page="${pageId}"]`).classList.add('active');
+      document.getElementById('page-' + pageId).classList.add('active');
+      if (pageId === 'accounts') loadAccounts();
+      if (pageId === 'channels') loadChannels();
+      if (pageId === 'risks') loadRisks();
+      if (pageId === 'orders') loadOrders();
+    }
+
+    /* ====== Status ====== */
+    async function checkStatus() {
+      const s = await api('/status');
+      const pill = document.getElementById('statusPill');
+      const label = document.getElementById('statusLabel');
+
+      if (s.connected) {
+        pill.className = 'status-pill ok';
+        label.textContent = '已连接';
+        showStep('stepConfig');
+        showStep('stepLogin');
+        showStep('stepGroups');
+        document.getElementById('loginDone').style.display = 'block';
+        document.getElementById('loginPhone').style.display = 'none';
+      } else if (s.loggedIn) {
+        pill.className = 'status-pill warn';
+        label.textContent = '未连接';
+        showStep('stepConfig');
+        showStep('stepLogin');
+        showStep('stepGroups');
+      } else if (s.configured) {
+        pill.className = 'status-pill warn';
+        label.textContent = '需登录';
+        showStep('stepConfig');
+        showStep('stepLogin');
+      } else {
+        pill.className = 'status-pill off';
+        label.textContent = '未配置';
+        showStep('stepConfig');
+      }
+
+      if (s.configured) {
+        document.getElementById('apiId').value = '(已配置)';
+        document.getElementById('apiHash').value = '(已配置)';
+      }
+    }
+
+    /* ====== Telegram Config / Login ====== */
+    async function saveConfig() {
+      const apiId = document.getElementById('apiId').value.trim();
+      const apiHash = document.getElementById('apiHash').value.trim();
+      if (!apiId || !apiHash || apiId === '(已配置)') { toast('请填写 API ID 和 API Hash'); return; }
+      const r = await api('/config', { method: 'POST', body: { apiId, apiHash } });
+      if (r.ok) { toast('已保存'); showStep('stepLogin'); }
+      else toast(r.error || '保存失败');
+    }
+
+    async function sendCode() {
+      const phoneNumber = document.getElementById('phoneNumber').value.trim();
+      if (!phoneNumber) { toast('请输入手机号'); return; }
+      const r = await api('/login/start', { method: 'POST', body: { phoneNumber } });
+      if (r.ok) { document.getElementById('loginCode').style.display = 'block'; toast('验证码已发送'); }
+      else toast(r.error || '发送失败');
+    }
+
+    async function submitCode() {
+      const code = document.getElementById('verifyCode').value.trim();
+      if (!code) { toast('请输入验证码'); return; }
+      await api('/login/code', { method: 'POST', body: { code } });
+      toast('验证中...');
+      setTimeout(pollLogin, 1500);
+    }
+
+    async function submitPassword() {
+      const password = document.getElementById('twoFaPassword').value.trim();
+      if (!password) { toast('请输入密码'); return; }
+      await api('/login/password', { method: 'POST', body: { password } });
+      toast('验证中...');
+      setTimeout(pollLogin, 1500);
+    }
+
+    async function pollLogin() {
+      const s = await api('/login/status');
+      if (s.done) {
+        toast('登录成功!');
+        document.getElementById('loginDone').style.display = 'block';
+        document.getElementById('loginPhone').style.display = 'none';
+        document.getElementById('loginCode').style.display = 'none';
+        document.getElementById('loginPassword').style.display = 'none';
+        showStep('stepGroups');
+        document.getElementById('statusPill').className = 'status-pill ok';
+        document.getElementById('statusLabel').textContent = '已连接';
+        await api('/reconnect', { method: 'POST' });
+      } else if (s.phase === 'password') {
+        document.getElementById('loginPassword').style.display = 'block';
+        toast('需要两步验证密码');
+      } else {
+        setTimeout(pollLogin, 1500);
+      }
+    }
+
+    /* ====== QR Login ====== */
+    let qrPollTimer = null;
+
+    async function startQrLogin() {
+      const r = await api('/login/qr/start', { method: 'POST', body: {} });
+      if (!r.ok) { toast(r.error || '启动扫码登录失败'); return; }
+      document.getElementById('qrArea').style.display = 'block';
+      toast('正在生成二维码...');
+      if (qrPollTimer) clearTimeout(qrPollTimer);
+      pollQrLogin();
+    }
+
+    async function pollQrLogin() {
+      const s = await api('/login/qr/status');
+      if (s.phase === 'none') return;
+      if (s.qr) {
+        document.getElementById('qrImage').src = s.qr;
+      }
+      if (s.done) {
+        toast('扫码登录成功!');
+        document.getElementById('qrArea').style.display = 'none';
+        document.getElementById('qrPassword').style.display = 'none';
+        document.getElementById('loginDone').style.display = 'block';
+        document.getElementById('loginPhone').style.display = 'none';
+        showStep('stepGroups');
+        checkStatus();
+        return;
+      }
+      if (s.phase === 'password') {
+        document.getElementById('qrArea').style.display = 'none';
+        document.getElementById('qrPassword').style.display = 'block';
+      }
+      if (s.error) {
+        toast('扫码登录出错: ' + s.error);
+      }
+      qrPollTimer = setTimeout(pollQrLogin, 2000);
+    }
+
+    async function submitQrPassword() {
+      const password = document.getElementById('qrTwoFaPassword').value.trim();
+      if (!password) { toast('请输入密码'); return; }
+      await api('/login/qr/password', { method: 'POST', body: { password } });
+      toast('验证中...');
+    }
+
+    /* ====== Groups ====== */
+    async function loadDialogs() {
+      const r = await api('/dialogs');
+      if (r.error) { toast(r.error); return; }
+      const status = await api('/status');
+      const watched = status.watchGroups || [];
+      const list = document.getElementById('groupList');
+      if (!r.groups || r.groups.length === 0) { list.innerHTML = '<div class="empty">没有找到群组</div>'; return; }
+      list.innerHTML = r.groups.map(g => `
+        <label class="group-row">
+          <input type="checkbox" value="${g.id}" ${watched.includes(g.id) ? 'checked' : ''}>
+          <span class="g-title">${esc(g.title)}</span>
+          <span class="g-tag">${g.isChannel ? '频道' : '群组'}</span>
+        </label>
+      `).join('');
+    }
+
+    async function saveGroups() {
+      const checked = [...document.querySelectorAll('#groupList input:checked')].map(el => el.value);
+      const r = await api('/groups', { method: 'POST', body: { groups: checked } });
+      if (r.ok) toast(`已选择 ${checked.length} 个群组`);
+    }
+
+    /* ====== Messages ====== */
+    async function refreshMessages() {
+      const r = await api('/messages');
+      const list = document.getElementById('msgList');
+      const count = document.getElementById('msgCount');
+      if (!r.messages || r.messages.length === 0) {
+        list.innerHTML = '<div class="empty">暂无消息</div>';
+        count.textContent = '0';
+        return;
+      }
+      count.textContent = r.messages.length;
+      list.innerHTML = r.messages.map(m => {
+        let mediaHtml = '';
+        if (m.media) {
+          if (m.media.type === 'photo') {
+            mediaHtml = `<div class="msg-media"><img src="/media/${esc(m.media.filename)}" loading="lazy"></div>`;
+          } else if (m.media.type === 'document') {
+            mediaHtml = `<div style="margin-top:6px;font-size:12px;color:var(--text2)">${esc(m.media.filename)} (${(m.media.size/1024).toFixed(1)}KB)</div>`;
+          } else if (m.media.type === 'webpage') {
+            mediaHtml = `<div style="margin-top:6px;font-size:12px"><a href="${esc(m.media.url)}" target="_blank" style="color:var(--accent2)">${esc(m.media.title || m.media.url)}</a></div>`;
+          }
+        }
+        return `<div class="msg-item">
+          <div class="msg-head">
+            <span class="msg-sender">${esc(m.sender)}</span>
+            <span class="msg-chat">${esc(m.chatTitle)}</span>
+            <span class="msg-time">${formatTime(m.date)}</span>
+          </div>
+          <div class="msg-text">${esc(m.text)}</div>
+          ${mediaHtml}
+        </div>`;
+      }).join('');
+    }
+
+    function toggleAutoRefresh() {
+      const btn = document.getElementById('autoRefreshBtn');
+      if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+        btn.textContent = '自动刷新: 关';
+      } else {
+        autoRefreshTimer = setInterval(refreshMessages, 3000);
+        btn.textContent = '自动刷新: 开';
+        refreshMessages();
+      }
+    }
+
+    /* ====== Accounts ====== */
+    async function loadAccounts() {
+      try {
+        const rows = await api('/trading/accounts');
+        if (rows.error) { document.getElementById('accountList').innerHTML = `<div class="empty">${esc(rows.error)}</div>`; return; }
+        if (!Array.isArray(rows) || rows.length === 0) { document.getElementById('accountList').innerHTML = '<div class="empty">暂无账号</div>'; return; }
+        let html = '<table class="tbl"><thead><tr><th>账号</th><th>API Key</th><th>Secret</th><th>风险</th><th>模式</th><th></th></tr></thead><tbody>';
+        for (const a of rows) {
+          const modeBadge = a.is_testnet ? '<span class="badge badge-testnet">Testnet</span>' : '<span class="badge badge-live">Live</span>';
+          html += `<tr>
+            <td><strong>${esc(a.account_id)}</strong></td>
+            <td class="mono">${esc(a.api_key ? a.api_key.substring(0,8) + '...' : '')}</td>
+            <td class="mono">${esc(a.api_secret)}</td>
+            <td>${(a.default_risk_ratio * 100).toFixed(1)}%</td>
+            <td>${modeBadge}</td>
+            <td><button class="btn btn-danger btn-sm" onclick="deleteAccount('${esc(a.account_id)}')">删除</button></td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        document.getElementById('accountList').innerHTML = html;
+      } catch (err) {
+        document.getElementById('accountList').innerHTML = `<div class="empty">加载失败</div>`;
+      }
+    }
+
+    async function addAccount() {
+      const account_id = document.getElementById('acc-id').value.trim();
+      const api_key = document.getElementById('acc-key').value.trim();
+      const api_secret = document.getElementById('acc-secret').value.trim();
+      const default_risk_ratio = parseFloat(document.getElementById('acc-risk').value) || 0.01;
+      const is_testnet = document.getElementById('acc-testnet').checked;
+      if (!account_id || !api_key || !api_secret) { toast('请填写完整信息'); return; }
+      const r = await api('/trading/accounts', { method: 'POST', body: { account_id, api_key, api_secret, default_risk_ratio, is_testnet } });
+      if (r.ok) {
+        toast('账号已添加');
+        ['acc-id','acc-key','acc-secret'].forEach(id => document.getElementById(id).value = '');
+        document.getElementById('acc-risk').value = '0.01';
+        document.getElementById('acc-testnet').checked = true;
+        loadAccounts();
+      } else toast(r.error || '添加失败');
+    }
+
+    async function deleteAccount(id) {
+      if (!confirm(`确定删除账号 "${id}"?`)) return;
+      const r = await (await fetch(`/api/trading/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })).json();
+      if (r.ok) { toast('已删除'); loadAccounts(); }
+      else toast(r.error || '删除失败');
+    }
+
+    /* ====== Channel Routing ====== */
+    async function loadChannels() {
+      try {
+        const accounts = await api('/trading/accounts');
+        const sel = document.getElementById('ch-account');
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">选择目标账号</option>';
+        if (Array.isArray(accounts)) {
+          for (const a of accounts) sel.innerHTML += `<option value="${esc(a.account_id)}">${esc(a.account_id)}</option>`;
+        }
+        sel.value = cur;
+
+        const rows = await api('/trading/channels');
+        if (rows.error) { document.getElementById('channelList').innerHTML = `<div class="empty">${esc(rows.error)}</div>`; return; }
+        if (!Array.isArray(rows) || rows.length === 0) { document.getElementById('channelList').innerHTML = '<div class="empty">暂无路由</div>'; return; }
+        let html = '<table class="tbl"><thead><tr><th>频道 ID</th><th>名称</th><th>目标账号</th><th></th></tr></thead><tbody>';
+        for (const c of rows) {
+          html += `<tr>
+            <td class="mono">${esc(c.channel_id)}</td>
+            <td>${esc(c.channel_name) || '<span style="color:var(--text3)">—</span>'}</td>
+            <td><strong>${esc(c.target_account_id)}</strong></td>
+            <td><button class="btn btn-danger btn-sm" onclick="deleteChannel('${esc(c.channel_id)}')">删除</button></td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        document.getElementById('channelList').innerHTML = html;
+      } catch (err) {
+        document.getElementById('channelList').innerHTML = '<div class="empty">加载失败</div>';
+      }
+    }
+
+    async function addChannel() {
+      const channel_id = document.getElementById('ch-id').value.trim();
+      const target_account_id = document.getElementById('ch-account').value;
+      const channel_name = document.getElementById('ch-name').value.trim();
+      if (!channel_id || !target_account_id) { toast('请填写频道 ID 并选择目标账号'); return; }
+      const r = await api('/trading/channels', { method: 'POST', body: { channel_id, target_account_id, channel_name } });
+      if (r.ok) { toast('路由已添加'); document.getElementById('ch-id').value = ''; document.getElementById('ch-name').value = ''; loadChannels(); }
+      else toast(r.error || '添加失败');
+    }
+
+    async function deleteChannel(id) {
+      if (!confirm(`确定删除频道路由 "${id}"?`)) return;
+      const r = await (await fetch(`/api/trading/channels/${encodeURIComponent(id)}`, { method: 'DELETE' })).json();
+      if (r.ok) { toast('已删除'); loadChannels(); }
+      else toast(r.error || '删除失败');
+    }
+
+    async function loadDialogsForRouting() {
+      const r = await api('/dialogs');
+      if (r.error) { toast(r.error); return; }
+      const container = document.getElementById('dialogPickerForRouting');
+      if (!r.groups || r.groups.length === 0) { container.innerHTML = '<div class="empty" style="padding:12px 0">没有找到频道/群组</div>'; return; }
+      container.innerHTML = r.groups.map(g => `
+        <div class="dialog-pick-item" onclick="pickChannelForRouting('${g.id}', '${esc(g.title || '')}')">
+          <span class="dp-title">${esc(g.title)}</span>
+          <span class="dp-meta">${g.id}</span>
+        </div>
+      `).join('');
+    }
+
+    function pickChannelForRouting(id, title) {
+      document.getElementById('ch-id').value = id;
+      document.getElementById('ch-name').value = title;
+      document.getElementById('dialogPickerForRouting').innerHTML = '';
+      toast('已选择: ' + title);
+    }
+
+    /* ====== Risk Configs ====== */
+    async function loadRisks() {
+      try {
+        const rows = await api('/trading/risks');
+        if (rows.error) { document.getElementById('riskList').innerHTML = `<div class="empty">${esc(rows.error)}</div>`; return; }
+        if (!Array.isArray(rows) || rows.length === 0) { document.getElementById('riskList').innerHTML = '<div class="empty">暂无品种风控配置</div>'; return; }
+        let html = '<table class="tbl"><thead><tr><th>品种</th><th>风险比例</th><th></th></tr></thead><tbody>';
+        for (const r of rows) {
+          html += `<tr>
+            <td><strong>${esc(r.symbol)}</strong></td>
+            <td>${(r.risk_ratio * 100).toFixed(1)}%</td>
+            <td><button class="btn btn-danger btn-sm" onclick="deleteRisk('${esc(r.symbol)}')">删除</button></td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        document.getElementById('riskList').innerHTML = html;
+      } catch (err) {
+        document.getElementById('riskList').innerHTML = '<div class="empty">加载失败</div>';
+      }
+    }
+
+    async function addRisk() {
+      const symbol = document.getElementById('risk-symbol').value.trim().toUpperCase();
+      const risk_ratio = parseFloat(document.getElementById('risk-ratio').value);
+      if (!symbol || isNaN(risk_ratio)) { toast('请填写品种和风险比例'); return; }
+      const r = await api('/trading/risks', { method: 'POST', body: { symbol, risk_ratio } });
+      if (r.ok) { toast('风控已设置'); document.getElementById('risk-symbol').value = ''; document.getElementById('risk-ratio').value = '0.01'; loadRisks(); }
+      else toast(r.error || '设置失败');
+    }
+
+    async function deleteRisk(symbol) {
+      if (!confirm(`确定删除 ${symbol} 的风控配置?`)) return;
+      const r = await (await fetch(`/api/trading/risks/${encodeURIComponent(symbol)}`, { method: 'DELETE' })).json();
+      if (r.ok) { toast('已删除'); loadRisks(); }
+      else toast(r.error || '删除失败');
+    }
+
+    /* ====== Orders ====== */
+    async function loadOrders() {
+      try {
+        const filter = document.getElementById('order-filter').value;
+        const url = filter ? `/trading/orders?status=${encodeURIComponent(filter)}` : '/trading/orders';
+        const rows = await api(url);
+        if (rows.error) { document.getElementById('orderList').innerHTML = `<div class="empty">${esc(rows.error)}</div>`; return; }
+        if (!Array.isArray(rows) || rows.length === 0) { document.getElementById('orderList').innerHTML = '<div class="empty">暂无订单</div>'; return; }
+        let html = '<table class="tbl"><thead><tr><th>ID</th><th>品种</th><th>方向</th><th>入场</th><th>止损</th><th>止盈</th><th>数量</th><th>状态</th><th>时间</th></tr></thead><tbody>';
+        for (const o of rows) {
+          const sc = o.status === 'OPEN' ? 'badge-open' : o.status === 'PENDING' ? 'badge-pending' : o.status === 'PARTIAL_CLOSED' ? 'badge-partial' : 'badge-closed';
+          const sideColor = o.side === 'BUY' ? 'color:var(--green)' : 'color:var(--red)';
+          html += `<tr>
+            <td class="mono">${o.id}</td>
+            <td><strong>${esc(o.symbol)}</strong></td>
+            <td style="${sideColor};font-weight:600">${esc(o.side)}</td>
+            <td class="mono">${o.entry_price != null ? o.entry_price : '—'}</td>
+            <td class="mono">${o.stop_loss != null ? o.stop_loss : '—'}</td>
+            <td class="mono">${o.take_profit != null ? o.take_profit : '—'}</td>
+            <td class="mono">${o.quantity != null ? o.quantity : '—'}</td>
+            <td><span class="badge ${sc}">${esc(o.status)}</span></td>
+            <td style="font-size:11px;color:var(--text3)">${formatTime(o.created_at)}</td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        document.getElementById('orderList').innerHTML = html;
+      } catch (err) {
+        document.getElementById('orderList').innerHTML = '<div class="empty">加载失败</div>';
+      }
+    }
+
+    /* ====== Init ====== */
+    checkStatus().then(() => {
+      refreshMessages();
+      setInterval(refreshMessages, 5000);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes Trader 系统说明</title>
+  <style>
+    :root {
+      --paper: #f8f3e7;
+      --ink: #111827;
+      --muted: #4b5563;
+      --line: #d7cdb6;
+      --blue: #dbeafe;
+      --green: #dcfce7;
+      --yellow: #fef3c7;
+      --pink: #fce7f3;
+      --white: #fffdf7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+    }
+    header {
+      padding: 56px 7vw 34px;
+      border-bottom: 3px solid var(--ink);
+      background: linear-gradient(180deg, #fffaf0 0%, var(--paper) 100%);
+    }
+    main { padding: 34px 7vw 80px; }
+    h1 {
+      margin: 0 0 16px;
+      font-size: clamp(38px, 5vw, 72px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin: 54px 0 18px;
+      font-size: clamp(28px, 3vw, 42px);
+      letter-spacing: 0;
+    }
+    h3 { margin: 26px 0 10px; font-size: 22px; }
+    p { max-width: 980px; color: var(--muted); font-size: 18px; }
+    code {
+      padding: 2px 6px;
+      background: #fff7d6;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 0.95em;
+    }
+    pre {
+      overflow: auto;
+      padding: 18px;
+      background: #1f2937;
+      color: #f9fafb;
+      border-radius: 10px;
+      border: 3px solid var(--ink);
+    }
+    .lede {
+      font-size: 22px;
+      max-width: 1040px;
+      color: #374151;
+    }
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      margin: 34px 0;
+    }
+    .card {
+      background: var(--white);
+      border: 3px solid var(--ink);
+      border-radius: 10px;
+      padding: 20px;
+      box-shadow: 7px 7px 0 #111827;
+    }
+    .card strong {
+      display: block;
+      font-size: 26px;
+      margin-bottom: 8px;
+    }
+    .card span { color: var(--muted); }
+    .green { background: var(--green); }
+    .yellow { background: var(--yellow); }
+    .blue { background: var(--blue); }
+    .pink { background: var(--pink); }
+    figure {
+      margin: 34px 0;
+      padding: 16px;
+      border: 3px solid var(--ink);
+      background: #fffdf7;
+      border-radius: 14px;
+    }
+    figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 8px;
+    }
+    figcaption {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--white);
+      border: 3px solid var(--ink);
+      margin: 24px 0;
+    }
+    th, td {
+      border: 2px solid var(--line);
+      padding: 12px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #fff3bf; color: var(--ink); }
+    .two {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 22px;
+    }
+    .callout {
+      padding: 20px;
+      border-left: 8px solid var(--ink);
+      background: #fff7d6;
+      margin: 28px 0;
+      max-width: 1040px;
+    }
+    .checklist li { margin: 8px 0; }
+    footer {
+      padding: 30px 7vw 60px;
+      border-top: 3px solid var(--ink);
+      color: var(--muted);
+    }
+    @media (max-width: 900px) {
+      .status-grid, .two { grid-template-columns: 1fr; }
+      header, main, footer { padding-left: 22px; padding-right: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Hermes Trader 系统说明</h1>
+    <p class="lede">这是 Telegram 信号、Hermes trader、Freqtrade dry-run、风控审计、Dashboard 与日报的集成说明。当前工程态为 <code>testnet_candidate</code>：本地桥接验证通过，远端服务在线，watcher importer 已写入远端 Signal Store，运营门禁仍需人工执行。</p>
+    <div class="status-grid">
+      <div class="card green"><strong>36/36</strong><span>任务已完成</span></div>
+      <div class="card green"><strong>90 passed</strong><span>本地完整测试套件</span></div>
+      <div class="card yellow"><strong>testnet_candidate</strong><span>等待人工 testnet 门禁</span></div>
+      <div class="card blue"><strong>remote online</strong><span>Freqtrade API pong, dashboard 200, docs 200</span></div>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>1. 系统总览</h2>
+      <p>Telegram watcher 捕获交易信号和媒体，Hermes trader 负责交易上下文与策略调度，Signal Store 承接解析、审批、预留和生命周期，Freqtrade 的 <code>SignalStrategy</code> 读取已审批信号并在 dry-run 中发出入场、止盈、DCA 和成交回写。</p>
+      <figure>
+        <img src="imgs/01-architecture.svg" alt="Hermes Trader architecture">
+        <figcaption>核心数据流：Telegram watcher -> Hermes trader -> Signal Store -> Freqtrade -> Dashboard / Reports。</figcaption>
+      </figure>
+    </section>
+
+    <section>
+      <h2>2. 关键路径</h2>
+      <div class="two">
+        <div class="card">
+          <h3>Hermes / Trader 主机</h3>
+          <p><code>balen.wang</code> 承载 Hermes gateway、trader profile、OpenClaw gateway 和 telegram-watcher。</p>
+          <pre><code>/Users/balen/.hermes/hermes-agent
+/Users/balen/.hermes/config.yaml
+/Users/balen/.hermes/profiles/trader/config.yaml
+/Users/balen/git/telegram-watcher</code></pre>
+        </div>
+        <div class="card">
+          <h3>Freqtrade 主机</h3>
+          <p><code>2001:df1:7880:2::18dc</code> 承载 SignalStrategy、Signal Store、dashboard frontend 和 dry-run API。</p>
+          <pre><code>/root/freqtrade
+docker/docker-compose-signal-dashboard.yml
+user_data/strategies/SignalStrategy.py
+freqtrade/signal_strategy/</code></pre>
+        </div>
+      </div>
+      <figure>
+        <img src="imgs/03-deployment-topology.svg" alt="Remote deployment topology">
+        <figcaption>远端拓扑：Hermes/Telegram watcher 通过 SSH importer bridge 写入 Freqtrade 信号系统；当前 watcher 使用 <code>root@149.104.30.223</code>，运维入口保留 IPv6。</figcaption>
+      </figure>
+    </section>
+
+    <section>
+      <h2>3. 信号生命周期</h2>
+      <p>生命周期由状态机保护：同一个 <code>signal_id</code> 只允许一次 entry reservation。重复 bot loop 会得到 <code>duplicate_operation</code> 或看不到已发送信号，从而避免重复交易。</p>
+      <figure>
+        <img src="imgs/02-lifecycle.svg" alt="Signal lifecycle">
+        <figcaption>从 raw 到 entered/exited 的状态流，以及失败分支。</figcaption>
+      </figure>
+      <table>
+        <thead><tr><th>阶段</th><th>职责</th><th>验证</th></tr></thead>
+        <tbody>
+          <tr><td>解析</td><td>识别 pair、side、entry、SL、TP、leverage</td><td>GS-002/003/005 golden tests</td></tr>
+          <tr><td>审批</td><td>人工或策略确认信号可进入交易</td><td><code>SignalStore.list_approved</code></td></tr>
+          <tr><td>预留</td><td>原子 reservation 防重复入场</td><td>20 并发只 1 个成功</td></tr>
+          <tr><td>执行</td><td>SignalStrategy 发出 long/short、stake、leverage、stoploss</td><td>strategy core tests</td></tr>
+          <tr><td>回写</td><td>order_filled 写入 entered 和 trade_id</td><td>GS-002 dry-run smoke</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>4. API 和界面</h2>
+      <p>Bridge app 挂载了信号、dashboard、reports、risk、audit、security 和 release-gates。受保护接口使用 Bearer token scaffold，并通过 request-id middleware 传播请求 ID。</p>
+      <pre><code>GET  /healthz
+GET  /api/signals/status
+GET  /api/dashboard/overview
+GET  /api/reports/daily/{date}/markdown
+GET  /api/risk/overview
+GET  /api/audit/events
+POST /api/security/scan-report
+GET  /api/release-gates/status</code></pre>
+      <div class="callout">远端 dashboard 当前验证结果：<code>http://127.0.0.1:13000/dashboard</code> 返回 HTTP 200；Freqtrade dry-run API <code>/api/v1/ping</code> 返回 <code>{"status":"pong"}</code>；系统说明页 <code>/system/hermes-trader-system.html</code> 返回 HTTP 200。</div>
+    </section>
+
+    <section>
+      <h2>5. 部署和运维</h2>
+      <table>
+        <thead><tr><th>动作</th><th>命令</th></tr></thead>
+        <tbody>
+          <tr><td>连接 Hermes 主机</td><td><code>ssh -o AddressFamily=inet6 balen@balen.wang</code></td></tr>
+          <tr><td>连接 Freqtrade 主机</td><td><code>ssh -6 root@2001:df1:7880:2::18dc</code></td></tr>
+          <tr><td>查看 Freqtrade 栈</td><td><code>docker compose --env-file .env.signal-dashboard -f docker/docker-compose-signal-dashboard.yml ps</code></td></tr>
+          <tr><td>检查 dry-run API</td><td><code>curl http://127.0.0.1:18081/api/v1/ping</code></td></tr>
+          <tr><td>检查 Dashboard</td><td><code>curl -I http://127.0.0.1:13000/dashboard</code></td></tr>
+        </tbody>
+      </table>
+      <p>telegram-watcher importer 当前环境变量：<code>SIGNAL_IMPORTER_ENABLED=1</code>、<code>SIGNAL_IMPORTER_REMOTE_HOST=root@149.104.30.223</code>、<code>SIGNAL_IMPORTER_REMOTE_CWD=/root/freqtrade</code>、<code>SIGNAL_IMPORTER_SSH_IPV6=0</code>、<code>HERMES_SIGNAL_STORE_URL=sqlite:////root/freqtrade/user_data/signal_strategy.sqlite3</code>。</p>
+      <div class="callout">Bridge smoke：从 Hermes 主机执行 watcher importer 模块，远端 Signal Store 从 6 条增长到 7 条，最新 <code>codex-smoke</code> 信号状态为 <code>needs_review</code>，返回 <code>{"approved":0,"needs_review":1,"rejected":0,"total":1}</code>。</div>
+    </section>
+
+    <section>
+      <h2>6. 门禁状态</h2>
+      <figure>
+        <img src="imgs/04-gates.svg" alt="Readiness gates">
+        <figcaption>当前处于 testnet_candidate。自动化入场保持门禁，直到目标部署上的人工 kill-switch drill 和 testnet key review 完成。</figcaption>
+      </figure>
+      <ul class="checklist">
+        <li>自动化测试、API E2E、安全测试、GS-002 full-system smoke 已通过。</li>
+        <li>Freqtrade API loopback-only compose 绑定已验证。</li>
+        <li>Bearer token auth scaffold 已替换测试 actor headers。</li>
+        <li>kill-switch manual acceptance 等待目标部署操作。</li>
+        <li>exchange API key testnet-only review 等待目标部署凭证核验。</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    Generated for Hermes trader / telegram-watcher / Freqtrade bridge. Source evidence: tasklist.json, docs/dev/testnet_readiness_report.md, docs/dev/remote_hermes_telegram_status.md, docs/dev/remote_freqtrade_deployment_status.md.
+  </footer>
+</body>
+</html>

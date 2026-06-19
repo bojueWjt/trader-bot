@@ -1,0 +1,1842 @@
+{
+  "schema_version": "1.0",
+  "project": "freqtrade-signalstrategy-testnet-live-readiness",
+  "created_at": "2026-05-31T00:00:00-07:00",
+  "source_spec": "Freqtrade SignalStrategy 与交易运营看板验收标准和测试用例",
+  "target_maturity": {
+    "primary": "testnet_candidate",
+    "secondary": "live_readonly_candidate",
+    "future": "live_small_size_candidate",
+    "explicit_non_goal": "Do not enable live automatic entries until live small-size automation gate is passed."
+  },
+  "status_values": [
+    "todo",
+    "in_progress",
+    "blocked",
+    "needs_review",
+    "done"
+  ],
+  "owner_status_values": [
+    "green",
+    "yellow",
+    "red",
+    "bridge_ready"
+  ],
+  "coordination_protocol": {
+    "single_source_of_truth": "tasklist.json",
+    "branch_names": {
+      "window_1_signal_core": "feature/window-1-signal-core",
+      "window_2_dashboard_reports": "feature/window-2-dashboard-reports",
+      "window_3_risk_security": "feature/window-3-risk-security",
+      "window_4_hourly_checker": "feature/window-4-integration-bridge"
+    },
+    "rules": [
+      "Each window must read the latest tasklist.json before editing.",
+      "Each window may only claim and update tasks where owner matches its own window, except window_4 may append health_checks and resolve change_requests.",
+      "Do not rewrite unrelated task fields.",
+      "Do not directly edit forbidden shared files; add a change_requests item instead.",
+      "Every done task must include evidence commands or artifact paths.",
+      "If a contract field changes, update shared_contracts and add a health check note.",
+      "Window 4 enters bridge mode only after windows 1, 2, and 3 are bridge_ready."
+    ]
+  },
+  "path_locks": {
+    "shared_bridge_only": [
+      "apps/api/app/main.py",
+      "apps/api/app/settings.py",
+      "docker-compose.yml",
+      "pyproject.toml",
+      "requirements*.txt",
+      ".github/**",
+      "Makefile",
+      "README.md"
+    ],
+    "window_1_signal_core": [
+      "apps/api/app/signals/**",
+      "apps/api/app/freqtrade_bridge/**",
+      "apps/api/app/contracts/signals.py",
+      "apps/api/app/contracts/freqtrade_events.py",
+      "apps/api/app/db/models_signal.py",
+      "apps/api/app/db/repositories_signal.py",
+      "apps/api/app/services/signal_parser.py",
+      "apps/api/app/services/signal_store.py",
+      "apps/api/app/services/pair_mapper.py",
+      "apps/api/app/services/idempotency.py",
+      "user_data/strategies/SignalStrategy.py",
+      "user_data/strategies/signal_strategy_support/**",
+      "fixtures/signals/**",
+      "fixtures/freqtrade/**",
+      "tests/unit/test_signal_*.py",
+      "tests/unit/test_signalstrategy_*.py",
+      "tests/integration/test_signal_strategy*.py",
+      "docs/dev/window_1_signal_core_notes.md"
+    ],
+    "window_2_dashboard_reports": [
+      "apps/dashboard/**",
+      "apps/api/app/dashboard/**",
+      "apps/api/app/reports/**",
+      "apps/api/app/contracts/dashboard.py",
+      "apps/api/app/contracts/reports.py",
+      "apps/api/app/services/report_snapshot.py",
+      "apps/api/app/services/report_renderer.py",
+      "apps/api/app/services/report_fallback.py",
+      "apps/api/app/db/models_report.py",
+      "fixtures/reports/**",
+      "fixtures/dashboard/**",
+      "tests/unit/test_report_*.py",
+      "tests/e2e_api/test_dashboard_*.py",
+      "tests/e2e_api/test_report_*.py",
+      "docs/dev/window_2_dashboard_reports_notes.md"
+    ],
+    "window_3_risk_security": [
+      "apps/api/app/risk/**",
+      "apps/api/app/security/**",
+      "apps/api/app/audit/**",
+      "apps/api/app/contracts/risk.py",
+      "apps/api/app/contracts/audit.py",
+      "apps/api/app/contracts/security.py",
+      "apps/api/app/db/models_risk.py",
+      "apps/api/app/db/models_audit.py",
+      "apps/api/app/services/risk_governor.py",
+      "apps/api/app/services/permissions.py",
+      "apps/api/app/services/secret_scanner.py",
+      "apps/api/app/services/release_gates.py",
+      "fixtures/risk/**",
+      "fixtures/security/**",
+      "tests/unit/test_risk_*.py",
+      "tests/unit/test_security_*.py",
+      "tests/unit/test_audit_*.py",
+      "tests/e2e_api/test_risk_*.py",
+      "tests/security/**",
+      "docs/runbooks/testnet_gate.md",
+      "docs/runbooks/live_readonly_gate.md",
+      "docs/runbooks/live_small_size_gate.md",
+      "docs/dev/window_3_risk_security_notes.md"
+    ],
+    "window_4_hourly_checker_bridge": [
+      "tasklist.json",
+      "docs/dev/hourly_status.md",
+      "docs/dev/integration_bridge_notes.md",
+      "apps/api/app/main.py",
+      "apps/api/app/settings.py",
+      "apps/api/app/dependencies.py",
+      "apps/api/app/db/session.py",
+      "apps/api/app/db/migrations/**",
+      "docker-compose.yml",
+      "pyproject.toml",
+      "requirements*.txt",
+      "package.json",
+      ".github/workflows/**",
+      "Makefile",
+      "README.md",
+      "tests/e2e/**",
+      "tests/integration/test_full_system*.py",
+      "docs/dev/testnet_readiness_report.md"
+    ]
+  },
+  "shared_contracts": {
+    "signal": {
+      "required_fields": [
+        "signal_id",
+        "source",
+        "source_channel_id",
+        "source_message_id",
+        "received_at",
+        "raw_text",
+        "parser_version",
+        "pair_raw",
+        "pair_freqtrade",
+        "side",
+        "entry",
+        "stop_loss",
+        "take_profits",
+        "leverage",
+        "status",
+        "review_reason_codes",
+        "risk_policy_result"
+      ],
+      "status_machine": [
+        "raw",
+        "parsed",
+        "needs_review",
+        "approved",
+        "rejected",
+        "reserved",
+        "sent_to_freqtrade",
+        "entered",
+        "partially_exited",
+        "exited",
+        "expired",
+        "failed",
+        "ignored",
+        "blocked_by_risk"
+      ],
+      "enter_tag_format": "sig:<signal_id>"
+    },
+    "risk": {
+      "risk_states": [
+        "normal",
+        "warning",
+        "blocked_new_entries",
+        "kill_switch_enabled",
+        "live_readonly"
+      ],
+      "default_policy": {
+        "max_single_trade_risk_pct": 1,
+        "max_total_open_risk_pct": 5,
+        "max_daily_realized_loss_pct": 3,
+        "max_symbol_exposure_pct": 15,
+        "max_correlated_group_exposure_pct": 35,
+        "default_leverage": 3,
+        "max_leverage": 5,
+        "min_liquidation_buffer_pct": 3,
+        "signal_max_age_minutes": 240,
+        "allow_live_without_stop_loss": false,
+        "allow_live_without_take_profit": false,
+        "dry_run_allow_without_take_profit": true
+      }
+    },
+    "dashboard_overview": {
+      "required_fields": [
+        "bot_status",
+        "run_mode",
+        "equity",
+        "free_balance",
+        "margin_used",
+        "realized_pnl_today",
+        "unrealized_pnl",
+        "open_trade_count",
+        "open_order_count",
+        "today_signal_count",
+        "today_executed_count",
+        "risk_state",
+        "recent_events"
+      ]
+    },
+    "audit_event": {
+      "required_fields": [
+        "event_id",
+        "event_type",
+        "actor_id",
+        "actor_role",
+        "occurred_at",
+        "request_id",
+        "correlation_id",
+        "reason",
+        "payload_redacted",
+        "result"
+      ]
+    }
+  },
+  "tasks": [
+    {
+      "id": "W1-SIG-001",
+      "owner": "window_1_signal_core",
+      "title": "Parser and pair mapper for golden samples",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [],
+      "owned_paths": [
+        "apps/api/app/services/signal_parser.py",
+        "apps/api/app/services/pair_mapper.py",
+        "fixtures/signals/**"
+      ],
+      "acceptance": [
+        "GS-002 parses to BTC/USDT:USDT long approved candidate",
+        "GS-003 parses ETH short DCA and missing TP review reason",
+        "GS-005 marks short_price_geometry_invalid candidate data"
+      ],
+      "evidence": [
+        "PYTHONPATH=apps/api .venv/bin/pytest tests/unit/test_signal_parser.py -q -> 3 passed in 0.01s",
+        "PYTHONPATH=apps/api .venv/bin/python -m compileall -q apps/api/app/services/signal_parser.py apps/api/app/services/pair_mapper.py -> exit 0",
+        "fixtures/signals/golden_signals.json includes GS-002, GS-003, GS-005"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:34:00+08:00",
+      "notes": [
+        "Implemented parser and pair mapper for W1 golden samples."
+      ]
+    },
+    {
+      "id": "W1-SIG-002",
+      "owner": "window_1_signal_core",
+      "title": "Signal Store models and repository",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-SIG-001"
+      ],
+      "owned_paths": [
+        "apps/api/app/db/models_signal.py",
+        "apps/api/app/db/repositories_signal.py",
+        "apps/api/app/services/signal_store.py"
+      ],
+      "acceptance": [
+        "Signal lifecycle states stored",
+        "signal_id unique",
+        "status transitions validated"
+      ],
+      "evidence": [
+        "PYTHONPATH=apps/api .venv/bin/pytest tests/unit/test_signal_store.py -q -> 12 passed in 0.03s",
+        "PYTHONPATH=apps/api .venv/bin/pytest tests/unit/test_signal_parser.py -q -> 3 passed in 0.01s",
+        "PYTHONPATH=apps/api .venv/bin/python -m compileall -q apps/api/app/db/models_signal.py apps/api/app/db/repositories_signal.py apps/api/app/services/signal_store.py apps/api/app/services/signal_parser.py -> exit 0"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:09:07+08:00",
+      "notes": [
+        "Implemented in-memory signal lifecycle store with unique signal ids and validated status transitions.",
+        "Quality review fix: duplicate upsert preserves lifecycle status, repository returns copies, transition validation/mutation is repository-atomic, and competing transitions from one source status allow one success.",
+        "Added list_approved contract so SignalStrategy can read approved W1-SIG-002 store signals.",
+        "Added reserve_signal idempotency contract for strategy entry reservation."
+      ]
+    },
+    {
+      "id": "W1-SIG-003",
+      "owner": "window_1_signal_core",
+      "title": "Atomic reservation and idempotency",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-SIG-002"
+      ],
+      "owned_paths": [
+        "apps/api/app/services/idempotency.py",
+        "tests/unit/test_signal_store.py"
+      ],
+      "acceptance": [
+        "20 concurrent reserve calls result in exactly one success",
+        "Duplicate returns duplicate_operation"
+      ],
+      "evidence": [
+        "PYTHONPATH=apps/api .venv/bin/pytest tests/unit/test_signal_store.py -q -> 9 passed in 0.01s",
+        "PYTHONPATH=apps/api .venv/bin/python -m compileall -q apps/api/app/services/idempotency.py tests/unit/test_signal_store.py -> exit 0"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:02:00+08:00",
+      "notes": [
+        "Implemented AtomicReservationStore with lock-protected duplicate_operation semantics."
+      ]
+    },
+    {
+      "id": "W1-STRAT-001",
+      "owner": "window_1_signal_core",
+      "title": "SignalStrategy skeleton and approved signal loading",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-SIG-002"
+      ],
+      "owned_paths": [
+        "user_data/strategies/SignalStrategy.py",
+        "user_data/strategies/signal_strategy_support/**"
+      ],
+      "acceptance": [
+        "bot_loop_start reads approved signals",
+        "Signal Store timeout does not throw",
+        "No new entries on store failure"
+      ],
+      "evidence": [
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit/test_signalstrategy_loading.py -q -> 5 passed in 0.02s",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit/test_signalstrategy_loading.py tests/unit/test_signal_store.py -q -> 17 passed in 0.02s",
+        ".venv/bin/python -m compileall -q apps/api/app/db/repositories_signal.py apps/api/app/services/signal_store.py user_data/strategies/SignalStrategy.py user_data/strategies/signal_strategy_support tests/unit/test_signal_store.py tests/unit/test_signalstrategy_loading.py -> exit 0"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:09:07+08:00",
+      "notes": [
+        "Implemented SignalStrategy skeleton with approved signal loading, store failure guard, and local unit coverage.",
+        "Spec review gap fixed: real W1-SIG-002 SignalStore now exposes list_approved and strategy test covers the real store contract.",
+        "Entry emission now reserves and marks signals sent_to_freqtrade through the store."
+      ]
+    },
+    {
+      "id": "W1-STRAT-002",
+      "owner": "window_1_signal_core",
+      "title": "Entry price, stake, leverage, stoploss",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-STRAT-001"
+      ],
+      "owned_paths": [
+        "user_data/strategies/SignalStrategy.py",
+        "tests/unit/test_signalstrategy_core.py"
+      ],
+      "acceptance": [
+        "long only enter_long",
+        "short only enter_short",
+        "fixed-risk stake model",
+        "leverage capped",
+        "absolute SL used"
+      ],
+      "evidence": [
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit/test_signalstrategy_core.py tests/unit/test_signalstrategy_loading.py -q -> 14 passed in 0.03s",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit/test_signal_parser.py tests/unit/test_signal_store.py tests/unit/test_signalstrategy_loading.py tests/unit/test_signalstrategy_core.py -q -> 29 passed in 0.04s",
+        ".venv/bin/python -m compileall -q apps/api/app/db/repositories_signal.py apps/api/app/services/signal_store.py user_data/strategies/SignalStrategy.py user_data/strategies/signal_strategy_support tests/unit/test_signalstrategy_core.py tests/unit/test_signalstrategy_loading.py tests/unit/test_signal_store.py -> exit 0"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:11:49+08:00",
+      "notes": [
+        "Implemented entry direction, custom entry price, fixed-risk stake sizing, leverage cap, and absolute stoploss conversion.",
+        "Quality review fix: local stoploss_from_absolute fallback now mirrors Freqtrade positive stoploss semantics and custom_entry_price has direct mode coverage."
+      ]
+    },
+    {
+      "id": "W1-STRAT-003",
+      "owner": "window_1_signal_core",
+      "title": "TP, DCA, order event status writeback",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-STRAT-002",
+        "W1-SIG-003"
+      ],
+      "owned_paths": [
+        "user_data/strategies/SignalStrategy.py",
+        "apps/api/app/freqtrade_bridge/**"
+      ],
+      "acceptance": [
+        "single TP exits",
+        "each DCA price triggers once",
+        "order filled updates signal/trade status"
+      ],
+      "evidence": [
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit/test_signalstrategy_exits.py tests/unit/test_signalstrategy_core.py tests/unit/test_signalstrategy_loading.py -q -> 19 passed in 0.03s",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit/test_signal_parser.py tests/unit/test_signal_store.py tests/unit/test_signalstrategy_loading.py tests/unit/test_signalstrategy_core.py tests/unit/test_signalstrategy_exits.py tests/integration/test_signal_strategy_dryrun.py -q -> 35 passed in 0.03s",
+        ".venv/bin/python -m compileall -q apps/api/app/db/repositories_signal.py apps/api/app/services/signal_store.py apps/api/app/services/idempotency.py user_data/strategies/SignalStrategy.py user_data/strategies/signal_strategy_support tests/unit/test_signal_store.py tests/unit/test_signalstrategy_loading.py tests/unit/test_signalstrategy_core.py tests/unit/test_signalstrategy_exits.py tests/integration/test_signal_strategy_dryrun.py -> exit 0"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:31:15+08:00",
+      "notes": [
+        "Implemented single TP exit, one-shot DCA levels, and order_filled status writeback to SignalStore.",
+        "Quality review fix: duplicate TP levels now continue scanning later levels; entry.dca_prices fallback has regression coverage."
+      ]
+    },
+    {
+      "id": "W1-TEST-001",
+      "owner": "window_1_signal_core",
+      "title": "Unit tests for parser, store, strategy",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-SIG-001",
+        "W1-SIG-002",
+        "W1-SIG-003",
+        "W1-STRAT-002"
+      ],
+      "owned_paths": [
+        "tests/unit/test_signal_*.py",
+        "tests/unit/test_signalstrategy_*.py"
+      ],
+      "acceptance": [
+        "pytest unit commands pass or blockers documented"
+      ],
+      "evidence": [
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit/test_signal_parser.py tests/unit/test_signal_store.py tests/unit/test_signalstrategy_loading.py tests/unit/test_signalstrategy_core.py tests/unit/test_signalstrategy_exits.py -q -> 34 passed in 0.03s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:31:15+08:00",
+      "notes": [
+        "Unit coverage now includes parser, store, loading, entry core, TP/DCA, and order writeback."
+      ]
+    },
+    {
+      "id": "W1-TEST-002",
+      "owner": "window_1_signal_core",
+      "title": "Integration dry-run GS-002 flow",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-STRAT-003"
+      ],
+      "owned_paths": [
+        "tests/integration/test_signal_strategy_dryrun.py",
+        "fixtures/freqtrade/**"
+      ],
+      "acceptance": [
+        "GS-002 reaches entered in dry-run/fake adapter",
+        "duplicate bot loop does not duplicate trade"
+      ],
+      "evidence": [
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/integration/test_signal_strategy_dryrun.py -q -> 1 passed in 0.01s",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit/test_signal_parser.py tests/unit/test_signal_store.py tests/unit/test_signalstrategy_loading.py tests/unit/test_signalstrategy_core.py tests/unit/test_signalstrategy_exits.py tests/integration/test_signal_strategy_dryrun.py -q -> 35 passed in 0.03s",
+        "Remote docker W1 verification: PYTHONPATH=/work python -m pytest tests/integration/test_signal_strategy_dryrun.py tests/signal_strategy/test_parser_risk_store.py tests/signal_strategy/test_signal_strategy.py -q -> 95 passed, 1 warning in 2.41s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:49:31+08:00",
+      "notes": [
+        "Added GS-002 fake dry-run integration test covering entered status and duplicate bot loop idempotency."
+      ]
+    },
+    {
+      "id": "W1-HANDOFF-001",
+      "owner": "window_1_signal_core",
+      "title": "Window 1 contract and evidence handoff",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-TEST-001",
+        "W1-TEST-002"
+      ],
+      "owned_paths": [
+        "docs/dev/window_1_signal_core_notes.md",
+        "tasklist.json"
+      ],
+      "acceptance": [
+        "router/env/dependency/migration notes written",
+        "all W1 done tasks have evidence"
+      ],
+      "evidence": [
+        "docs/dev/window_1_signal_core_notes.md",
+        "Remote docker W1 verification: PYTHONPATH=/work python -m pytest tests/integration/test_signal_strategy_dryrun.py tests/signal_strategy/test_parser_risk_store.py tests/signal_strategy/test_signal_strategy.py -q -> 95 passed, 1 warning in 2.41s",
+        "Watcher importer smoke: codex-smoke:codex-smoke-1780235103261 imported as approved BTC/USDT:USDT long and surfaced in dashboard overview"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:49:31+08:00",
+      "notes": [
+        "Handoff documents Freqtrade-native path mapping, runtime importer env, deployed Signal Store, GS-002 integration smoke, and residual live-small-size review items."
+      ]
+    },
+    {
+      "id": "W2-API-001",
+      "owner": "window_2_dashboard_reports",
+      "title": "Dashboard overview/open-trades/events fake adapter",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [],
+      "owned_paths": [
+        "freqtrade/rpc/api_server/api_signal_dashboard.py",
+        "freqtrade/signal_strategy/__init__.py",
+        "tests/e2e_api/test_dashboard_api.py"
+      ],
+      "acceptance": [
+        "/api/dashboard/overview fields complete",
+        "open trades include signal_id",
+        "events include event_id"
+      ],
+      "evidence": [
+        "Remote combined pytest: tests/unit/test_report_fallback.py tests/e2e_api/test_dashboard_api.py tests/e2e_api/test_reports_api.py tests/rpc/test_signal_dashboard_api.py tests/signal_strategy/test_parser_risk_store.py tests/signal_strategy/test_signal_strategy.py -> 114 passed, 2 warnings",
+        "Code: freqtrade/rpc/api_server/api_signal_dashboard.py provides /api/dashboard/overview, /api/dashboard/open-trades, and /api/dashboard/events",
+        "Dashboard action audit events include event_id, event_type, actor_id, actor_role, occurred_at, request_id, correlation_id, reason, payload_redacted, and result"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T23:03:58+08:00",
+      "notes": [
+        "Implemented Freqtrade-native dashboard adapter with TestClient e2e coverage; planned apps/api paths map to Freqtrade RPC API for this deployment."
+      ]
+    },
+    {
+      "id": "W2-UI-001",
+      "owner": "window_2_dashboard_reports",
+      "title": "Dashboard layout and metrics cards",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [
+        "W2-API-001"
+      ],
+      "owned_paths": [
+        "apps/dashboard/**"
+      ],
+      "acceptance": [
+        "dashboard shows bot status, equity, PnL, open trades, risk lamp, recent events"
+      ],
+      "evidence": [
+        "Local npm test -> 9 passed",
+        "Local npm run build -> Vite build succeeded",
+        "Remote curl: http://127.0.0.1:13000/dashboard returned HTTP 200"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:25:00+08:00",
+      "notes": [
+        "Dashboard shows bot status, run mode, equity, PnL, open counts, risk lamps, exposure, and recent events."
+      ]
+    },
+    {
+      "id": "W2-UI-002",
+      "owner": "window_2_dashboard_reports",
+      "title": "Open trades table and detail drawer",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [
+        "W2-API-001"
+      ],
+      "owned_paths": [
+        "apps/dashboard/**"
+      ],
+      "acceptance": [
+        "trade row fields complete",
+        "detail drawer shows raw signal, JSON, trade id, orders/fills, audit timeline"
+      ],
+      "evidence": [
+        "Local npm test -> trade detail smoke passed",
+        "Remote pytest: test_dashboard_events_trade_detail_and_action_aliases_use_w2_contract passed inside 16-test API suite"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:25:00+08:00",
+      "notes": [
+        "Live deployed store currently has no open trades; trade-detail route behavior is covered by API fixture tests."
+      ]
+    },
+    {
+      "id": "W2-UI-003",
+      "owner": "window_2_dashboard_reports",
+      "title": "Dangerous action confirmation UI",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [
+        "W2-UI-001"
+      ],
+      "owned_paths": [
+        "apps/dashboard/**",
+        "tests/e2e_api/test_dashboard_actions.py"
+      ],
+      "acceptance": [
+        "reason required",
+        "pending state shown",
+        "failure does not show success",
+        "CLOSE ALL phrase required"
+      ],
+      "evidence": [
+        "Local npm test -> dangerous action confirmations and failed-action states passed",
+        "Local Playwright -> dashboard trade detail controls passed",
+        "Remote pytest: close-trade, partial close, move-stoploss, pause/resume bot, and lock-pair aliases covered by W2 API suites"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:25:00+08:00",
+      "notes": [
+        "Position close, partial close, move SL, pair lock, bot pause, and bot resume require reason and confirmation. Close-all remains guarded by CLOSE ALL in kill-switch flow."
+      ]
+    },
+    {
+      "id": "W2-UI-004",
+      "owner": "window_2_dashboard_reports",
+      "title": "WebSocket client and REST resync",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [
+        "W2-UI-001"
+      ],
+      "owned_paths": [
+        "apps/dashboard/**"
+      ],
+      "acceptance": [
+        "disconnect notice within 3s",
+        "reconnect every 10s",
+        "REST resync after reconnect",
+        "event dedupe"
+      ],
+      "evidence": [
+        "Local npm test -> realtime disconnect, REST resync, and duplicate event render test passed inside 9-test Vitest suite",
+        "Code: apps/dashboard/src/hooks/useRealtime.ts uses 10s reconnect and REST resync callback",
+        "Code: apps/dashboard/src/utils/api.ts dedupes event payloads by event_id before rendering"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T23:03:58+08:00",
+      "notes": [
+        "SSE stream is implemented at /api/dashboard/stream; client dedupes via REST event render path and full resync."
+      ]
+    },
+    {
+      "id": "W2-REPORT-001",
+      "owner": "window_2_dashboard_reports",
+      "title": "Report source snapshot and fallback renderer",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [],
+      "owned_paths": [
+        "apps/api/app/reports/**",
+        "apps/api/app/services/report_*.py",
+        "fixtures/reports/**"
+      ],
+      "acceptance": [
+        "daily snapshot includes account/trades/signals/risk/open positions",
+        "fallback report includes required sections"
+      ],
+      "evidence": [
+        "Remote pytest: report snapshot and deterministic fallback report tests passed inside 16-test API suite",
+        "Remote curl: /api/reports/daily/2026-06-01/markdown returned required deterministic sections"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:25:00+08:00",
+      "notes": [
+        "LLM fields remain placeholders; generated reports set llm_used=false and do not invent numbers."
+      ]
+    },
+    {
+      "id": "W2-REPORT-002",
+      "owner": "window_2_dashboard_reports",
+      "title": "Report pages, markdown download, versions",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [
+        "W2-REPORT-001"
+      ],
+      "owned_paths": [
+        "apps/dashboard/**",
+        "apps/api/app/reports/**"
+      ],
+      "acceptance": [
+        "daily page renders",
+        "markdown download includes report_id/generated_at",
+        "versions listed"
+      ],
+      "evidence": [
+        "Local npm test -> report center and daily report route tests passed",
+        "Remote curl: /reports returned HTTP 200",
+        "Remote curl: /api/reports/daily/2026-06-01/versions returned HTTP 200",
+        "Remote curl: /api/reports/daily/2026-06-01/telegram-preview returned HTTP 200"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:25:00+08:00",
+      "notes": [
+        "Daily page includes markdown download, HTML preview, version compare, source snapshot, and Telegram preview entry points."
+      ]
+    },
+    {
+      "id": "W2-TEST-001",
+      "owner": "window_2_dashboard_reports",
+      "title": "API and report unit tests",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [
+        "W2-REPORT-001",
+        "W2-API-001"
+      ],
+      "owned_paths": [
+        "tests/unit/test_report_*.py",
+        "tests/e2e_api/test_report_*.py"
+      ],
+      "acceptance": [
+        "pytest report/dashboard API tests pass or blockers documented"
+      ],
+      "evidence": [
+        "Remote pytest: tests/rpc/test_signal_dashboard_api.py -> 16 passed",
+        "Remote pytest: tests/signal_strategy/test_parser_risk_store.py tests/signal_strategy/test_signal_strategy.py -> 94 passed",
+        "Remote combined pytest: tests/unit/test_report_fallback.py tests/e2e_api/test_dashboard_api.py tests/e2e_api/test_reports_api.py tests/rpc/test_signal_dashboard_api.py tests/signal_strategy/test_parser_risk_store.py tests/signal_strategy/test_signal_strategy.py -> 114 passed, 2 warnings"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:45:47+08:00",
+      "notes": [
+        "Pytest ran in hermes-freqtrade-signal:local with /root/freqtrade mounted as /work."
+      ]
+    },
+    {
+      "id": "W2-TEST-002",
+      "owner": "window_2_dashboard_reports",
+      "title": "Playwright smoke tests",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [
+        "W2-UI-001",
+        "W2-UI-002",
+        "W2-REPORT-002"
+      ],
+      "owned_paths": [
+        "apps/dashboard/**"
+      ],
+      "acceptance": [
+        "dashboard smoke test",
+        "trade detail smoke test",
+        "report page smoke test"
+      ],
+      "evidence": [
+        "npm --prefix apps/dashboard run test:e2e -> 5 passed: dashboard, trade detail drawer, daily report page",
+        "npm --prefix apps/dashboard test -> 9 passed",
+        "npm --prefix apps/dashboard run build -> Vite build succeeded"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:12:29+08:00",
+      "notes": [
+        "Playwright harness added under apps/dashboard/e2e."
+      ]
+    },
+    {
+      "id": "W2-HANDOFF-001",
+      "owner": "window_2_dashboard_reports",
+      "title": "Window 2 contract and evidence handoff",
+      "status": "done",
+      "claimed_by": "codex",
+      "branch": "feature/hermes-trader-dashboard",
+      "dependencies": [
+        "W2-TEST-001",
+        "W2-TEST-002"
+      ],
+      "owned_paths": [
+        "docs/dev/window_2_dashboard_reports_notes.md",
+        "tasklist.json"
+      ],
+      "acceptance": [
+        "fake-to-real adapter notes written",
+        "all W2 done tasks have evidence"
+      ],
+      "evidence": [
+        "docs/dev/window_2_dashboard_reports_notes.md added with fake-to-real adapter notes and verification evidence",
+        "tasklist.json W2 statuses and evidence updated",
+        "Hermes/Telegram IPv6 host check on 2026-05-31 succeeded; trader LaunchAgent running, telegram-watcher PM2 online, and importer smoke codex-smoke:codex-smoke-20260531231658 appeared in the remote Signal Store and dashboard event stream",
+        "Trader profile default model changed to qwen3.6-plus; Hermes trader-profile oneshot returned OK"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T23:18:17+08:00",
+      "notes": [
+        "Handoff calls out path mapping from planned apps/api/app to Freqtrade RPC API, Playwright evidence, remote pytest evidence, and Hermes/Telegram runtime evidence."
+      ]
+    },
+    {
+      "id": "W3-RISK-001",
+      "owner": "window_3_risk_security",
+      "title": "Risk policy and price geometry",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [],
+      "owned_paths": [
+        "apps/api/app/risk/**",
+        "fixtures/risk/default_policy.json",
+        "tests/unit/test_risk_governor.py"
+      ],
+      "acceptance": [
+        "long SL < entry < TP passes",
+        "short TP < entry < SL passes",
+        "GS-005 fails short geometry"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/unit/test_risk_governor.py -q -> 17 passed in latest scoped suite; full W3 suite 49 passed, 1 warning in 0.28s",
+        "fixtures/risk/default_policy.json"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-RISK-002",
+      "owner": "window_3_risk_security",
+      "title": "Open risk, daily loss, pair exposure",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-RISK-001"
+      ],
+      "owned_paths": [
+        "apps/api/app/risk/**",
+        "tests/unit/test_risk_governor.py"
+      ],
+      "acceptance": [
+        "single trade risk blocks",
+        "total open risk blocks",
+        "daily loss moves to blocked_new_entries"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/unit/test_risk_governor.py -q -> covered open risk, daily loss, exposure, persistence; full W3 suite 49 passed, 1 warning in 0.28s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-RISK-003",
+      "owner": "window_3_risk_security",
+      "title": "Kill switch and pair lock",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-RISK-002"
+      ],
+      "owned_paths": [
+        "apps/api/app/risk/**",
+        "tests/e2e_api/test_risk_api.py"
+      ],
+      "acceptance": [
+        "kill switch blocks new entries",
+        "close all requires CLOSE ALL",
+        "pair lock blocks and expires"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/e2e_api/test_risk_api.py -q -> covered kill switch, close all, pair locks, auth, invalid payloads; full W3 suite 49 passed, 1 warning in 0.28s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-AUDIT-001",
+      "owner": "window_3_risk_security",
+      "title": "Audit event model/service",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [],
+      "owned_paths": [
+        "apps/api/app/audit/**",
+        "apps/api/app/db/models_audit.py",
+        "tests/unit/test_audit_events.py"
+      ],
+      "acceptance": [
+        "dangerous actions write audit",
+        "payload is redacted",
+        "request_id present"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/unit/test_audit_events.py -q -> covered required fields and key/value redaction; full W3 suite 49 passed, 1 warning in 0.28s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-SEC-001",
+      "owner": "window_3_risk_security",
+      "title": "Roles and dangerous operation guards",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-AUDIT-001"
+      ],
+      "owned_paths": [
+        "apps/api/app/security/**",
+        "tests/unit/test_permissions.py"
+      ],
+      "acceptance": [
+        "viewer 403 for dangerous operations",
+        "trader cannot override risk",
+        "risk_admin can kill switch with confirmation"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/unit/test_permissions.py -q -> covered unknown role, 401/403/422, request id, dangerous operation audit; full W3 suite 49 passed, 1 warning in 0.28s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-SEC-002",
+      "owner": "window_3_risk_security",
+      "title": "Secret scanning and log redaction tests",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-SEC-001"
+      ],
+      "owned_paths": [
+        "apps/api/app/services/secret_scanner.py",
+        "tests/security/**"
+      ],
+      "acceptance": [
+        "frontend bundle secret scan spec exists",
+        "reports secret scan",
+        "logs redact password/JWT/secret"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/security -q -> covered bundle/report scan, log redaction, IPv4/IPv6/public URL binding checks; full W3 suite 49 passed, 1 warning in 0.28s",
+        "fixtures/security/secret_scan_samples.json"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-GATE-001",
+      "owner": "window_3_risk_security",
+      "title": "Release gate evaluator",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-RISK-003",
+        "W3-SEC-002"
+      ],
+      "owned_paths": [
+        "apps/api/app/services/release_gates.py",
+        "tests/e2e_api/test_release_gates.py"
+      ],
+      "acceptance": [
+        "dry-run/testnet/live-readonly/live-small-size gate status computed"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/e2e_api/test_release_gates.py -q -> covered gate evaluation, approval evidence enforcement, status after approval, request id; full W3 suite 49 passed, 1 warning in 0.28s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-GATE-002",
+      "owner": "window_3_risk_security",
+      "title": "Runbooks for testnet/live",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-GATE-001"
+      ],
+      "owned_paths": [
+        "docs/runbooks/testnet_gate.md",
+        "docs/runbooks/live_readonly_gate.md",
+        "docs/runbooks/live_small_size_gate.md"
+      ],
+      "acceptance": [
+        "runbooks include commands, rollback, manual confirmation, disallowed states"
+      ],
+      "evidence": [
+        "docs/runbooks/testnet_gate.md",
+        "docs/runbooks/live_readonly_gate.md",
+        "docs/runbooks/live_small_size_gate.md"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-TEST-001",
+      "owner": "window_3_risk_security",
+      "title": "Risk/security unit tests",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-RISK-002",
+        "W3-AUDIT-001",
+        "W3-SEC-002"
+      ],
+      "owned_paths": [
+        "tests/unit/test_risk_*.py",
+        "tests/unit/test_security_*.py",
+        "tests/unit/test_audit_*.py",
+        "tests/security/**"
+      ],
+      "acceptance": [
+        "pytest unit/security commands pass or blockers documented"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/unit/test_risk_governor.py tests/unit/test_audit_events.py tests/unit/test_permissions.py tests/security -q -> included in full W3 suite 49 passed, 1 warning in 0.28s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-TEST-002",
+      "owner": "window_3_risk_security",
+      "title": "E2E API tests for risk/security",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-RISK-003",
+        "W3-GATE-001"
+      ],
+      "owned_paths": [
+        "tests/e2e_api/test_risk_*.py",
+        "tests/e2e_api/test_release_gates.py"
+      ],
+      "acceptance": [
+        "kill switch API",
+        "pair lock API",
+        "release gate API"
+      ],
+      "evidence": [
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/e2e_api/test_risk_api.py tests/e2e_api/test_release_gates.py -q -> included in full W3 suite 49 passed, 1 warning in 0.28s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W3-HANDOFF-001",
+      "owner": "window_3_risk_security",
+      "title": "Window 3 contract and evidence handoff",
+      "status": "done",
+      "claimed_by": "window_3",
+      "branch": "feature/window-3-risk-security",
+      "dependencies": [
+        "W3-TEST-001",
+        "W3-TEST-002",
+        "W3-GATE-002"
+      ],
+      "owned_paths": [
+        "docs/dev/window_3_risk_security_notes.md",
+        "tasklist.json"
+      ],
+      "acceptance": [
+        "risk/permissions/gate notes written",
+        "all W3 done tasks have evidence"
+      ],
+      "evidence": [
+        "docs/dev/window_3_risk_security_notes.md",
+        "PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/unit/test_risk_governor.py tests/unit/test_audit_events.py tests/unit/test_permissions.py tests/security tests/e2e_api/test_risk_api.py tests/e2e_api/test_release_gates.py -q -> 49 passed, 1 warning in 0.28s",
+        "Remote /root/freqtrade Window 3 validation on 2026-05-31T22:54:44+08:00: unit 26 passed, security 4 passed, e2e risk/release 19 passed via /root/freqtrade/.w3-venv; dry-run API pong and dashboard HTTP 200 after tests"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:52:00+08:00",
+      "notes": [
+        "window 3 implementation complete",
+        "code-review fixes applied: value redaction, pair-lock datetime/listing, invalid precheck payloads, release evidence status, audit permissions, request id propagation, runtime reset hooks"
+      ]
+    },
+    {
+      "id": "W4-CHECK-001",
+      "owner": "window_4_hourly_checker",
+      "title": "Hourly progress check",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [],
+      "owned_paths": [
+        "tasklist.json",
+        "docs/dev/hourly_status.md"
+      ],
+      "acceptance": [
+        "health_checks appended",
+        "blockers/change_requests summarized"
+      ],
+      "evidence": [
+        "jq empty tasklist.json # exit 0",
+        "jq .health_checks[-1] tasklist.json # appended check visible",
+        "test -f docs/dev/hourly_status.md # exit 0",
+        "find apps fixtures tests docs -type f -newermt '2026-05-31 21:00:00' # scope drift recorded in latest health check"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T21:13:00+08:00",
+      "notes": [
+        "Hourly check appended at 2026-05-31T21:13:00+08:00; bridge tasks remain todo because windows 1/2/3 are not bridge_ready.",
+        "Scope drift observed after review: W3-owned risk/audit/security files changed while W3 tasks remain todo; recorded as a health check issue without editing those files."
+      ]
+    },
+    {
+      "id": "W4-BRIDGE-001",
+      "owner": "window_4_hourly_checker",
+      "title": "Merge dependencies and settings",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W1-HANDOFF-001",
+        "W2-HANDOFF-001",
+        "W3-HANDOFF-001"
+      ],
+      "owned_paths": [
+        "pyproject.toml",
+        "requirements*.txt",
+        "package.json",
+        "apps/api/app/settings.py"
+      ],
+      "acceptance": [
+        "all accepted change_requests resolved",
+        "no real secrets committed"
+      ],
+      "evidence": [
+        "requirements.txt and pyproject.toml include fastapi/httpx/pytest/uvicorn bridge dependencies",
+        "package.json added at repo root for bridge package metadata",
+        "apps/api/app/settings.py added with RISK_STATE_PATH and HERMES_SIGNAL_STORE_URL settings",
+        "PYTHONPATH=apps/api .venv/bin/pytest tests/security -q -> 4 passed in 0.01s",
+        "Bearer-token auth dependencies added in apps/api/app/dependencies.py; risk/audit/security/release-gates tests use Authorization headers",
+        "PYTHONPATH=apps/api .venv/bin/pytest tests/e2e_api/test_risk_api.py tests/e2e_api/test_release_gates.py tests/e2e_api/test_main_app.py -q -> 21 passed, 1 warning in 0.49s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:43:37+08:00",
+      "notes": [
+        "Resolved dependency/settings bridge surface and avoided committed real secrets."
+      ]
+    },
+    {
+      "id": "W4-BRIDGE-002",
+      "owner": "window_4_hourly_checker",
+      "title": "Mount routers and app wiring",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W4-BRIDGE-001"
+      ],
+      "owned_paths": [
+        "apps/api/app/main.py",
+        "apps/api/app/dependencies.py"
+      ],
+      "acceptance": [
+        "signals/dashboard/reports/risk/audit/security/release-gates mounted"
+      ],
+      "evidence": [
+        "apps/api/app/main.py mounts signals, dashboard, reports, risk, audit, security, and release-gates routers",
+        "apps/api/app/dependencies.py adds request-id-aware actor context dependency",
+        "PYTHONPATH=apps/api .venv/bin/pytest tests/e2e_api/test_main_app.py -q -> 2 passed, 1 warning in 0.21s",
+        "PYTHONPATH=apps/api .venv/bin/pytest tests/e2e_api -q -> 24 passed, 1 warning in 0.39s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:43:37+08:00",
+      "notes": [
+        "Mounted bridge routers and request id middleware in the integrated FastAPI app."
+      ]
+    },
+    {
+      "id": "W4-BRIDGE-003",
+      "owner": "window_4_hourly_checker",
+      "title": "Compose and migrations",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W4-BRIDGE-002"
+      ],
+      "owned_paths": [
+        "docker-compose.yml",
+        "apps/api/app/db/migrations/**"
+      ],
+      "acceptance": [
+        "postgres/redis/api/frontend/freqtrade-dryrun/worker available",
+        "Freqtrade API not public"
+      ],
+      "evidence": [
+        "docker-compose.yml defines postgres, redis, api, frontend, freqtrade-dryrun, and worker services",
+        "Freqtrade dry-run API compose binding is loopback-only: 127.0.0.1:18082:8080",
+        "apps/api/app/db/migrations/README.md added as migration staging note",
+        "Local docker compose config unavailable: zsh:1: command not found: docker",
+        "Remote Docker check: Docker version 26.1.5+dfsg1; Docker Compose version 2.26.1-4",
+        "docker-compose.yml api and worker services install requirements.txt before startup in clean python:3.12-slim containers"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:43:37+08:00",
+      "notes": [
+        "Compose and migration staging files are present; remote target has Docker Compose available for deployment validation."
+      ]
+    },
+    {
+      "id": "W4-BRIDGE-004",
+      "owner": "window_4_hourly_checker",
+      "title": "Full-system E2E smoke",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W4-BRIDGE-003"
+      ],
+      "owned_paths": [
+        "tests/e2e/**",
+        "tests/integration/test_full_system*.py"
+      ],
+      "acceptance": [
+        "GS-002 parse->approve->reserve->dry-run->dashboard->report smoke passes or exact blockers documented"
+      ],
+      "evidence": [
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/integration/test_full_system_smoke.py -q -> 1 passed, 1 warning in 0.22s",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/e2e_api tests/security tests/integration -q -> 30 passed, 1 warning in 0.33s",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit tests/e2e_api tests/security tests/integration -q -> 90 passed, 1 warning in 0.35s",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit tests/e2e_api tests/security tests/integration -q -> 90 passed, 1 warning in 0.56s"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:43:37+08:00",
+      "notes": [
+        "Added GS-002 full-system smoke covering parse, approve, reserve, dry-run fill, dashboard, and deterministic report."
+      ]
+    },
+    {
+      "id": "W4-BRIDGE-005",
+      "owner": "window_4_hourly_checker",
+      "title": "Testnet readiness report",
+      "status": "done",
+      "claimed_by": null,
+      "branch": null,
+      "dependencies": [
+        "W4-BRIDGE-004"
+      ],
+      "owned_paths": [
+        "docs/dev/testnet_readiness_report.md",
+        "tasklist.json"
+      ],
+      "acceptance": [
+        "testnet gate pass/fail documented",
+        "live-readonly/live-small-size gaps documented"
+      ],
+      "evidence": [
+        "docs/dev/testnet_readiness_report.md documents testnet pass state and live-readonly/live-small-size gaps",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit tests/e2e_api tests/security tests/integration -q -> 90 passed, 1 warning in 0.35s",
+        "docs/dev/testnet_readiness_report.md marks local bridge readiness pass and records pending operator testnet gate items"
+      ],
+      "blocker": null,
+      "last_update": "2026-05-31T22:43:37+08:00",
+      "notes": [
+        "Testnet readiness report written with pass/fail evidence and live gate gaps.",
+        "Review fix: report now distinguishes local bridge readiness from operator testnet gate completion."
+      ]
+    }
+  ],
+  "change_requests": [
+    {
+      "id": "CR-W3-001",
+      "owner": "window_3_risk_security",
+      "target_owner": "window_4_hourly_checker",
+      "status": "resolved",
+      "title": "Mount window 3 routers in main API app",
+      "paths": [
+        "apps/api/app/main.py"
+      ],
+      "request": "Mount /api/risk, /api/audit, /api/security, and /api/release-gates using window 3 routers.",
+      "evidence": [
+        "docs/dev/window_3_risk_security_notes.md",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit tests/e2e_api tests/security tests/integration -q -> 90 passed, 1 warning in 0.35s"
+      ],
+      "resolved_at": "2026-05-31T22:43:37+08:00",
+      "resolved_by": "window_4_hourly_checker",
+      "resolution": "Resolved during W4 bridge wiring."
+    },
+    {
+      "id": "CR-W3-002",
+      "owner": "window_3_risk_security",
+      "target_owner": "window_4_hourly_checker",
+      "status": "resolved",
+      "title": "Add runtime dependencies for API tests and service",
+      "paths": [
+        "pyproject.toml",
+        "requirements*.txt"
+      ],
+      "request": "Ensure fastapi, pydantic, pytest, and httpx or the project standard TestClient dependency are available in the integrated environment.",
+      "evidence": [
+        "Local .venv installed fastapi pytest httpx for window 3 verification.",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit tests/e2e_api tests/security tests/integration -q -> 90 passed, 1 warning in 0.35s"
+      ],
+      "resolved_at": "2026-05-31T22:43:37+08:00",
+      "resolved_by": "window_4_hourly_checker",
+      "resolution": "Resolved during W4 bridge wiring."
+    },
+    {
+      "id": "CR-W3-003",
+      "owner": "window_3_risk_security",
+      "target_owner": "window_4_hourly_checker",
+      "status": "resolved",
+      "title": "Add request id and auth middleware",
+      "paths": [
+        "apps/api/app/main.py",
+        "apps/api/app/dependencies.py",
+        "apps/api/app/settings.py"
+      ],
+      "request": "Provide request id middleware, replace x-actor-id/x-actor-role test headers with real auth dependencies, and configure RISK_STATE_PATH or database-backed persistence for risk state in integrated environments.",
+      "evidence": [
+        "tests/e2e_api/test_risk_api.py exercises 401, 403, 422, failed auth audit, and risk blocked audit.",
+        "apps/api/app/services/risk_governor.py includes JsonRiskStateStore.",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit tests/e2e_api tests/security tests/integration -q -> 90 passed, 1 warning in 0.35s",
+        "Risk, audit, security, and release-gate routers now authenticate with Authorization: Bearer tokens through app.dependencies.require_bearer_user."
+      ],
+      "resolved_at": "2026-05-31T22:43:37+08:00",
+      "resolved_by": "window_4_hourly_checker",
+      "resolution": "Resolved during W4 bridge wiring."
+    },
+    {
+      "id": "CR-W3-004",
+      "owner": "window_3_risk_security",
+      "target_owner": "window_4_hourly_checker",
+      "status": "resolved",
+      "title": "Add security scan to CI",
+      "paths": [
+        ".github/**"
+      ],
+      "request": "Run PYTHONPATH=/Users/balen/dalongxia/trader/apps/api .venv/bin/pytest tests/security -q or integrated equivalent in CI.",
+      "evidence": [
+        "tests/security -> 4 passed in 0.01s",
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/unit tests/e2e_api tests/security tests/integration -q -> 90 passed, 1 warning in 0.35s"
+      ],
+      "resolved_at": "2026-05-31T22:43:37+08:00",
+      "resolved_by": "window_4_hourly_checker",
+      "resolution": "Resolved during W4 bridge wiring."
+    }
+  ],
+  "health": {
+    "overall_status": "testnet_candidate",
+    "window_status": {
+      "window_1_signal_core": "bridge_ready",
+      "window_2_dashboard_reports": "bridge_ready",
+      "window_3_risk_security": "bridge_ready",
+      "window_4_hourly_checker": "bridge_ready"
+    },
+    "bridge_owner": true,
+    "last_checked_at": "2026-05-31T22:43:37+08:00",
+    "summary": {
+      "done_tasks": 36,
+      "total_tasks": 36,
+      "blocked_count": 0,
+      "open_change_requests": 0,
+      "window_1": {
+        "done": 9,
+        "total": 9,
+        "todo": 0,
+        "blocked": 0
+      },
+      "window_2": {
+        "done": 10,
+        "total": 10,
+        "todo": 0,
+        "blocked": 0
+      },
+      "window_3": {
+        "done": 11,
+        "total": 11,
+        "todo": 0,
+        "blocked": 0
+      },
+      "window_4": {
+        "done": 6,
+        "total": 6,
+        "todo": 0,
+        "blocked": 0
+      },
+      "bridge_mode": "complete",
+      "blockers_summary": "No blocked tasks observed.",
+      "change_requests_summary": "All CR-W3-001 through CR-W3-004 resolved; operator testnet gate items remain pending."
+    }
+  },
+  "health_checks": [
+    {
+      "checked_at": "2026-05-31T21:13:00+08:00",
+      "checked_by": "window_4_hourly_checker",
+      "summary": {
+        "window_1_done": 0,
+        "window_1_total": 9,
+        "window_2_done": 0,
+        "window_2_total": 10,
+        "window_3_done": 0,
+        "window_3_total": 11,
+        "window_4_done": 1,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 0,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "warning",
+          "owner": "window_3_risk_security",
+          "task_id": "W3-RISK-001/W3-AUDIT-001/W3-SEC-001",
+          "message": "Filesystem metadata shows W3-owned risk/audit/security files changed around the check time while W3 tasks remain todo; attribution or tasklist evidence is needed."
+        }
+      ],
+      "blockers_summary": "No blocked tasks observed.",
+      "change_requests_summary": "No open change requests observed.",
+      "recommended_next_actions": [
+        "Window 3 reconcile modified risk/audit/security files with task statuses and evidence.",
+        "Window 1/2/3 continue todo implementation tasks and add evidence as tasks complete.",
+        "Window 4 keeps bridge tasks todo until windows 1/2/3 are bridge_ready."
+      ]
+    },
+    {
+      "checked_at": "2026-05-31T21:26:00+08:00",
+      "checked_by": "window_4_hourly_checker",
+      "summary": {
+        "window_1_done": 0,
+        "window_1_total": 9,
+        "window_2_done": 0,
+        "window_2_total": 10,
+        "window_3_done": 11,
+        "window_3_total": 11,
+        "window_4_done": 1,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 4,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "warning",
+          "owner": "window_4_hourly_checker",
+          "task_id": "CR-W3-001/CR-W3-002/CR-W3-003/CR-W3-004",
+          "message": "Open change requests target bridge-owned files and must be resolved during bridge mode."
+        }
+      ],
+      "blockers_summary": "No blocked tasks observed.",
+      "change_requests_summary": "4 open change requests: CR-W3-001, CR-W3-002, CR-W3-003, CR-W3-004",
+      "recommended_next_actions": [
+        "Window 1 complete signal core tasks and attach evidence.",
+        "Window 2 complete dashboard/report tasks and attach evidence.",
+        "Window 4 resolve CR-W3-001 through CR-W3-004 during bridge mode after W1/W2 are bridge_ready."
+      ]
+    },
+    {
+      "checked_at": "2026-05-31T21:28:36+08:00",
+      "checked_by": "window_4_hourly_checker",
+      "summary": {
+        "window_1_done": 0,
+        "window_1_total": 9,
+        "window_2_done": 0,
+        "window_2_total": 10,
+        "window_3_done": 11,
+        "window_3_total": 11,
+        "window_4_done": 1,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 4,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "info",
+          "owner": "window_4_hourly_checker",
+          "task_id": "REMOTE-DEPLOY-20260531",
+          "message": "Freqtrade-native Hermes dashboard deployed to the remote Freqtrade host; healthz, dashboard overview, Freqtrade ping, and dashboard HTML all responded after rebuild."
+        },
+        {
+          "severity": "warning",
+          "owner": "window_4_hourly_checker",
+          "task_id": "W1/W2-CONTRACT-DRIFT",
+          "message": "Current implemented surface is Freqtrade-native while tasklist W1/W2 paths target apps/api; keep W1/W2 todo until contract mapping and evidence are reconciled."
+        }
+      ],
+      "blockers_summary": "No blocked tasks observed.",
+      "change_requests_summary": "4 open change requests: CR-W3-001, CR-W3-002, CR-W3-003, CR-W3-004",
+      "recommended_next_actions": [
+        "Map Freqtrade-native signal strategy and dashboard work to W1/W2 acceptance criteria with evidence.",
+        "Run full GS-002 parse to approve to reserve to dry-run to dashboard to report smoke.",
+        "Resolve CR-W3-001 through CR-W3-004 during bridge mode after W1/W2 are bridge_ready."
+      ]
+    },
+    {
+      "checked_at": "2026-05-31T21:47:00+08:00",
+      "checked_by": "window_4_hourly_checker",
+      "summary": {
+        "window_1_done": 0,
+        "window_1_total": 9,
+        "window_2_done": 0,
+        "window_2_total": 10,
+        "window_3_done": 11,
+        "window_3_total": 11,
+        "window_4_done": 1,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 4,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "info",
+          "owner": "window_4_hourly_checker",
+          "task_id": "WATCHER-IMPORTER-20260531",
+          "message": "telegram-watcher on balen.wang imports to the remote Freqtrade Signal Store through SSH without stdin; smoke signal codex-smoke:codex-smoke-1780235103261 landed as approved BTC/USDT:USDT long and appeared in dashboard overview recent_events."
+        },
+        {
+          "severity": "warning",
+          "owner": "window_2_dashboard_reports",
+          "task_id": "W2-TEST-002",
+          "message": "Playwright smoke coverage is still absent; current dashboard verification is Vitest, build, curl, and remote API evidence."
+        },
+        {
+          "severity": "warning",
+          "owner": "window_1_signal_core",
+          "task_id": "W1-STRAT-003/W1-TEST-002",
+          "message": "GS-002 full parse to approve to reserve to dry-run to dashboard to report flow still needs a dedicated integration smoke and evidence."
+        }
+      ],
+      "blockers_summary": "No blocked tasks observed.",
+      "change_requests_summary": "4 open change requests: CR-W3-001, CR-W3-002, CR-W3-003, CR-W3-004",
+      "recommended_next_actions": [
+        "Add and run a dedicated GS-002 lifecycle smoke covering reserve, dry-run entry, dashboard, and report artifact.",
+        "Add Playwright dashboard smoke for the remote/local dashboard route.",
+        "Create W1 and W2 handoff notes with fresh evidence commands before marking their tasklist items done."
+      ]
+    },
+    {
+      "checked_at": "2026-05-31T22:13:46+08:00",
+      "checked_by": "window_4_hourly_checker",
+      "summary": {
+        "window_1_done": 3,
+        "window_1_total": 9,
+        "window_2_done": 10,
+        "window_2_total": 10,
+        "window_3_done": 11,
+        "window_3_total": 11,
+        "window_4_done": 1,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 4,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "info",
+          "owner": "window_2_dashboard_reports",
+          "task_id": "W2-TEST-002",
+          "message": "Playwright smoke coverage added and verified for dashboard overview, trade detail drawer, and daily report page."
+        },
+        {
+          "severity": "warning",
+          "owner": "window_1_signal_core",
+          "task_id": "W1-STRAT-003/W1-TEST-002",
+          "message": "W1 still needs dedicated GS-002 lifecycle smoke and handoff evidence before bridge mode can start."
+        }
+      ],
+      "blockers_summary": "No blocked tasks observed.",
+      "change_requests_summary": "4 open change requests: CR-W3-001, CR-W3-002, CR-W3-003, CR-W3-004",
+      "recommended_next_actions": [
+        "Add GS-002 full lifecycle integration smoke for parser, approval, reservation, dry-run entry, dashboard, and report.",
+        "Finish W1 handoff notes with fresh evidence commands.",
+        "Resolve CR-W3-001 through CR-W3-004 during bridge mode after W1 is bridge_ready."
+      ]
+    },
+    {
+      "checked_at": "2026-05-31T22:22:38+08:00",
+      "checked_by": "window_4_hourly_checker",
+      "summary": {
+        "window_1_done": 6,
+        "window_1_total": 9,
+        "window_2_done": 10,
+        "window_2_total": 10,
+        "window_3_done": 11,
+        "window_3_total": 11,
+        "window_4_done": 1,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 4,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "info",
+          "owner": "window_1_signal_core",
+          "task_id": "W1-HANDOFF-001",
+          "message": "Window 1 handoff note added with Freqtrade-native path mapping, importer runtime, remote docker test evidence, and remaining review items."
+        },
+        {
+          "severity": "warning",
+          "owner": "window_1_signal_core",
+          "task_id": "W1-STRAT-003/W1-TEST-001/W1-TEST-002",
+          "message": "Three W1 tasks remain needs_review, so bridge mode remains pending owner reconciliation."
+        }
+      ],
+      "blockers_summary": "No blocked tasks observed.",
+      "change_requests_summary": "4 open change requests: CR-W3-001, CR-W3-002, CR-W3-003, CR-W3-004",
+      "recommended_next_actions": [
+        "Review W1 needs_review tasks against docs/dev/window_1_signal_core_notes.md and remote docker test evidence.",
+        "Set window_1_signal_core to bridge_ready after W1 review items are accepted.",
+        "Resolve CR-W3-001 through CR-W3-004 during bridge mode."
+      ]
+    },
+    {
+      "checked_at": "2026-05-31T22:43:37+08:00",
+      "checked_by": "window_4_hourly_checker",
+      "summary": {
+        "window_1_done": 9,
+        "window_1_total": 9,
+        "window_2_done": 10,
+        "window_2_total": 10,
+        "window_3_done": 11,
+        "window_3_total": 11,
+        "window_4_done": 6,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 0,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "info",
+          "owner": "window_4_hourly_checker",
+          "task_id": "W4-BRIDGE-001..005",
+          "message": "Bridge mode complete locally: dependencies, router wiring, compose staging, full-system smoke, and readiness report are done."
+        }
+      ],
+      "blockers_summary": "No blocked tasks observed.",
+      "change_requests_summary": "All CR-W3-001 through CR-W3-004 resolved; operator testnet gate items remain pending.",
+      "recommended_next_actions": [
+        "Run kill-switch manual acceptance on the target deployment.",
+        "Verify exchange API keys are restricted to testnet before enabling any testnet automation.",
+        "Deploy reviewed bridge artifacts to the remote Freqtrade server during the next operations window."
+      ]
+    },
+    {
+      "checked_at": "2026-05-31T23:17:09+08:00",
+      "checked_by": "codex",
+      "summary": {
+        "window_1_done": 9,
+        "window_1_total": 9,
+        "window_2_done": 10,
+        "window_2_total": 10,
+        "window_3_done": 11,
+        "window_3_total": 11,
+        "window_4_done": 6,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 0,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "info",
+          "owner": "runtime",
+          "task_id": "hermes-telegram-runtime",
+          "message": "balen.wang AAAA resolved to 2409:8a55:3333:1ee1:cb3:a3dc:63d3:f147 and ssh -6 balen@balen.wang succeeded; Hermes trader cron health job db69d33f79fd produced HEALTH_OK; telegram-watcher PM2 is online and node tests passed 15/15."
+        },
+        {
+          "severity": "warning",
+          "owner": "runtime",
+          "task_id": "hermes-provider-runtime",
+          "message": "gpt-5.5 returned OK during a direct oneshot health check after earlier 503 errors; qwen3-max still returns 503, while qwen3.6-plus and gemini-2.5-pro returned OK."
+        },
+        {
+          "severity": "info",
+          "owner": "runtime",
+          "task_id": "real-signal-sample-dryrun",
+          "message": "Packaged real sample real-trading-signals-20260531-051540.zip was imported into a temporary remote SQLite store; approve-parsed validation returned approved=0, needs_review=6, rejected=0, proving the sample stays behind manual review and risk gates."
+        }
+      ],
+      "blockers_summary": "No active SSH/DNS blocker observed.",
+      "change_requests_summary": "All CR-W3-001 through CR-W3-004 remain resolved.",
+      "recommended_next_actions": [
+        "Snapshot telegram-watcher runtime changes.",
+        "Decide whether qwen3.6-plus or gemini-2.5-pro should be configured as trader fallback models.",
+        "Run an operator-approved live Telegram message dry-run through Telegram watcher and Hermes trader."
+      ]
+    },
+    {
+      "checked_at": "2026-05-31T23:36:19+08:00",
+      "checked_by": "codex",
+      "summary": {
+        "window_1_done": 9,
+        "window_1_total": 9,
+        "window_2_done": 10,
+        "window_2_total": 10,
+        "window_3_done": 11,
+        "window_3_total": 11,
+        "window_4_done": 6,
+        "window_4_total": 6,
+        "blocked_count": 0,
+        "open_change_requests": 0,
+        "done_without_evidence_count": 0
+      },
+      "issues": [
+        {
+          "severity": "info",
+          "owner": "runtime",
+          "task_id": "hermes-telegram-runtime",
+          "message": "ssh -6 balen@balen.wang succeeded; all Hermes/trader/watcher paths exist; trader LaunchAgent is running with PID 74365; hermes config check passed; cron status reports gateway running and no active jobs."
+        },
+        {
+          "severity": "info",
+          "owner": "runtime",
+          "task_id": "telegram-watcher-runtime",
+          "message": "telegram-watcher PM2 is online with PID 73293; API status is configured=true, loggedIn=true, connected=true; watch groups are -1002198013097, -1002228497993, -1002328068747; npm test passed 15/15."
+        },
+        {
+          "severity": "info",
+          "owner": "runtime",
+          "task_id": "hermes-provider-runtime",
+          "message": "Trader default model is qwen3.6-plus and fallback model is cliproxyapi/gemini-2.5-pro; fallback cron health job fe0175429d04 produced FALLBACK_HEALTH_OK."
+        },
+        {
+          "severity": "info",
+          "owner": "runtime",
+          "task_id": "freqtrade-runtime",
+          "message": "Freqtrade IPv6 SSH succeeded; docker-freqtrade-dryrun-1 and docker-frontend-1 are running on 127.0.0.1; dry-run API returned pong; dashboard returned HTTP 200; packaged real signal sample zip exists on the server."
+        },
+        {
+          "severity": "info",
+          "owner": "runtime",
+          "task_id": "telegram-watcher-snapshot",
+          "message": "telegram-watcher is clean at commit cc829df Harden Hermes trader watcher bridge; origin main was pushed to cc829df at git@gitee.com:leon-wong/telegram-watcher.git."
+        }
+      ],
+      "blockers_summary": "No active runtime blocker observed.",
+      "change_requests_summary": "All CR-W3-001 through CR-W3-004 remain resolved.",
+      "recommended_next_actions": [
+        "Run the operator-approved kill-switch drill and testnet key review for the target deployment.",
+        "Run an operator-approved live Telegram message dry-run through Telegram watcher and Hermes trader.",
+        "Keep qwen3-max out of trader runtime until the provider stops returning HTTP 503."
+      ]
+    }
+  ],
+  "bridge_fixes": [
+    {
+      "fixed_at": "2026-05-31T22:43:37+08:00",
+      "owner": "window_4_hourly_checker",
+      "tasks": [
+        "W4-BRIDGE-001",
+        "W4-BRIDGE-002",
+        "W4-BRIDGE-003",
+        "W4-BRIDGE-004",
+        "W4-BRIDGE-005"
+      ],
+      "change_requests": [
+        "CR-W3-001",
+        "CR-W3-002",
+        "CR-W3-003",
+        "CR-W3-004"
+      ],
+      "evidence": "Full local suite passed: 90 passed, 1 warning in 0.35s"
+    }
+  ],
+  "release_gate_requirements": {
+    "dry_run_gate": [
+      "all UT pass",
+      "all SEC pass",
+      "SignalStrategy loads in Freqtrade",
+      "Dashboard displays fake data",
+      "deterministic fallback report generates"
+    ],
+    "testnet_gate": [
+      "all IT pass",
+      "all core E2E pass",
+      "kill switch manual acceptance pass",
+      "Freqtrade API not public",
+      "exchange API key restricted to testnet"
+    ],
+    "live_readonly_gate": [
+      "live mode has no automatic entries",
+      "Dashboard read-only live bot status",
+      "reports based on live snapshots",
+      "audit logs have no secrets",
+      "manual recovery rehearsed"
+    ],
+    "live_small_size_automation_gate": [
+      "7 consecutive days dry-run reports",
+      "30 dry-run signals complete lifecycle",
+      "all blocked signals explainable",
+      "kill switch drill passed",
+      "daily loss guard drill passed",
+      "default single trade risk <= 0.25%"
+    ]
+  }
+}

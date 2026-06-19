@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820">
+  <rect width="1400" height="820" fill="#f8f3e7"/>
+  <style>
+    .title{font:700 42px system-ui;fill:#1f2937}
+    .h{font:700 24px system-ui;fill:#111827}
+    .t{font:500 18px system-ui;fill:#374151}
+    .s{font:500 15px system-ui;fill:#4b5563}
+    .box{fill:#fffdf7;stroke:#1f2937;stroke-width:3;rx:18}
+    .blue{fill:#dbeafe}
+    .green{fill:#dcfce7}
+    .yellow{fill:#fef3c7}
+    .pink{fill:#fce7f3}
+    .line{stroke:#111827;stroke-width:4;fill:none;marker-end:url(#arrow)}
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#111827"/>
+    </marker>
+  </defs>
+  <text x="70" y="70" class="title">Hermes Trader Signal System</text>
+  <text x="70" y="108" class="t">Telegram signals flow into Hermes, land in Signal Store, drive Freqtrade dry-run, then feed dashboard and reports.</text>
+
+  <rect x="70" y="170" width="265" height="150" class="box blue"/>
+  <text x="100" y="215" class="h">Telegram Watcher</text>
+  <text x="100" y="252" class="t">server.js</text>
+  <text x="100" y="282" class="s">messages, media, alerts</text>
+
+  <rect x="420" y="170" width="265" height="150" class="box yellow"/>
+  <text x="450" y="215" class="h">Hermes Trader</text>
+  <text x="450" y="252" class="t">profile: trader</text>
+  <text x="450" y="282" class="s">crypto-trader skill</text>
+
+  <rect x="770" y="170" width="265" height="150" class="box green"/>
+  <text x="800" y="215" class="h">Signal Store</text>
+  <text x="800" y="252" class="t">parse, approve, reserve</text>
+  <text x="800" y="282" class="s">idempotent lifecycle</text>
+
+  <rect x="1070" y="170" width="265" height="150" class="box pink"/>
+  <text x="1100" y="215" class="h">Freqtrade</text>
+  <text x="1100" y="252" class="t">SignalStrategy</text>
+  <text x="1100" y="282" class="s">dry-run entries</text>
+
+  <path d="M335 245 H420" class="line"/>
+  <path d="M685 245 H770" class="line"/>
+  <path d="M1035 245 H1070" class="line"/>
+
+  <rect x="220" y="470" width="310" height="150" class="box"/>
+  <text x="250" y="515" class="h">Risk And Audit</text>
+  <text x="250" y="552" class="t">kill switch, pair locks</text>
+  <text x="250" y="582" class="s">Bearer auth, request id</text>
+
+  <rect x="610" y="470" width="310" height="150" class="box"/>
+  <text x="640" y="515" class="h">Dashboard</text>
+  <text x="640" y="552" class="t">overview, events, trades</text>
+  <text x="640" y="582" class="s">HTTP 200 on remote</text>
+
+  <rect x="1000" y="470" width="310" height="150" class="box"/>
+  <text x="1030" y="515" class="h">Reports</text>
+  <text x="1030" y="552" class="t">daily markdown</text>
+  <text x="1030" y="582" class="s">deterministic fallback</text>
+
+  <path d="M905 320 C880 390 810 430 765 470" class="line"/>
+  <path d="M1200 320 V470" class="line"/>
+  <path d="M1120 320 C1040 410 925 440 900 470" class="line"/>
+</svg>

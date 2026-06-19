@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.DS_Store
+.runtime/
+.env
+!.env.example
+services/telegram-watcher/config.json
+services/telegram-watcher/*.session

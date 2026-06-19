@@ -1,0 +1,1132 @@
+{
+  "schema_version": "2.0",
+  "project": "hermes-trader-unified-system",
+  "created_at": "2026-06-10T00:00:00+08:00",
+  "source_spec": "PLAN.md v2.1",
+  "predecessor": "tasklist.json (v1, 36/36 done, archived)",
+  "deployment_target": {
+    "host": "hk-server 149.104.30.223",
+    "principle": "全栈同址部署：watcher / hermes-harness / api / freqtrade / dashboard / postgres / redis / caddy 单一 compose 编排，服务间 loopback，对外仅 caddy 443 + SSH",
+    "git_branch": "bridge-import"
+  },
+  "iron_rules": [
+    "Hermes 决定要不要交易，freqtrade 负责这笔交易怎么活着；Hermes 永不直连交易所",
+    "Hermes 读全开（system_observer），写收窄（意图与提案通道，有审计）",
+    "订单真相只有一份：freqtrade trade DB；风控最后一道闸必须是确定性代码"
+  ],
+  "status_values": [
+    "todo",
+    "in_progress",
+    "blocked",
+    "needs_review",
+    "done"
+  ],
+  "complexity_values": [
+    "S",
+    "M",
+    "L"
+  ],
+  "priority_values": [
+    "P0",
+    "P1",
+    "P2"
+  ],
+  "executor_values": [
+    "codex",
+    "server_ops",
+    "hermes_migration",
+    "operator"
+  ],
+  "rules": [
+    "每个 done 任务必须附 evidence（命令+输出或产物路径）",
+    "回归基线：bridge pytest 124 + dashboard vitest 9 全绿为合入门槛",
+    "HYPE（负数频道 ID）与 INJ（更新语义）原文为固定 fixture，永久防回归",
+    "高危变更（切流、下线旧路径、gate 放行）需 operator 留痕确认"
+  ],
+  "milestones": [
+    {
+      "id": "M0",
+      "title": "止血：消除已知事故诱因与安全关键测试回归",
+      "complexity": "S-M",
+      "priority": "P0",
+      "depends_on": []
+    },
+    {
+      "id": "M1",
+      "title": "Hermes 全局视野：读全开口子（system_observer + snapshot + explain + 代理）",
+      "complexity": "M",
+      "priority": "P1",
+      "depends_on": [
+        "M0"
+      ]
+    },
+    {
+      "id": "M2",
+      "title": "freqtrade 执行引擎升级：保本 / 时效 / TTL / 持久化 / 通知",
+      "complexity": "M-L",
+      "priority": "P1",
+      "depends_on": [
+        "M0"
+      ]
+    },
+    {
+      "id": "M3",
+      "title": "Hermes/Harness 迁移上香港服务器并改造调度中枢",
+      "complexity": "M-L",
+      "priority": "P0/P1",
+      "depends_on": [
+        "M1"
+      ]
+    },
+    {
+      "id": "M4",
+      "title": "整机部署、testnet 切流与旧路径下线",
+      "complexity": "M-L",
+      "priority": "P1",
+      "depends_on": [
+        "M2",
+        "M3"
+      ]
+    },
+    {
+      "id": "M5",
+      "title": "融合中心：统一鉴权入口 + dashboard 一站式 + 真实报告管线",
+      "complexity": "L",
+      "priority": "P2",
+      "depends_on": [
+        "M1"
+      ]
+    },
+    {
+      "id": "M6",
+      "title": "门禁与放量：testnet → live readonly → live 小额自动化",
+      "complexity": "M",
+      "priority": "P1",
+      "depends_on": [
+        "M4",
+        "M5"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "M0-01",
+      "milestone": "M0",
+      "title": "signal_id 改为 CLI 安全格式 sig-c{abs(channel_id)}-m{message_id}",
+      "executor": "codex",
+      "complexity": "S",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [],
+      "owned_paths": [
+        "freqtrade/signal_strategy/parser.py",
+        "freqtrade/signal_strategy/importer.py",
+        "tests/unit/test_signal_parser.py"
+      ],
+      "acceptance": [
+        "负数频道 ID 生成的 signal_id 不以 - 开头",
+        "存量旧格式 ID 兼容读取",
+        "下游传参一律 --signal-id= 或 stdin，新增端到端用例覆盖 HYPE 场景"
+      ],
+      "evidence": [
+        "PYTHONPATH=.:apps/api:user_data/strategies .venv/bin/pytest tests/ -q -> 146 passed",
+        "parser.py format_signal_id 使用 abs(int(channel_id))，负数频道 ID 生成 sig-c{abs}-m{mid}；ValueError 回退旧格式实现存量兼容",
+        "tests/unit/test_signal_parser.py 新增 test_negative_channel_id_generates_cli_safe_signal_id 与 legacy 兼容用例",
+        "commit 384251b53"
+      ],
+      "blocker": null,
+      "notes": [
+        "根因：parser.py:137 / importer.py:51 使用 channel_id:message_id，Telegram 频道 ID 为负数",
+        "2026-06-10 派发 Codex 后台执行（波次1并发；M2-02+M2-03 合并为一单串行，因共享 strategy.py）"
+      ]
+    },
+    {
+      "id": "M0-02",
+      "milestone": "M0",
+      "title": "importer stdin JSON 主通道 + message_type 硬门",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "M0-01"
+      ],
+      "owned_paths": [
+        "freqtrade/signal_strategy/importer.py",
+        "freqtrade/signal_strategy/store.py",
+        "freqtrade/signal_strategy/domain.py",
+        "tests/unit/test_signal_store.py"
+      ],
+      "acceptance": [
+        "Hermes 经 stdin 管道提交 JSON 意图，CLI 参数路径仅保留兼容",
+        "意图契约新增 message_type 字段（new_signal/update/position_screenshot/noise）",
+        "SignalStore 硬规则：message_type != new_signal 的信号无法进入 approved（含 --approve-parsed 路径）",
+        "INJ 原文 fixture 回放：被拒绝产生交易意图"
+      ],
+      "evidence": [
+        "domain.py MessageType 枚举；importer stdin JSON 主通道（旧路径兼容）；store 内存/SQLite 双实现硬门拦非 new_signal 进 approved；fixtures/signals/inj_update_broadcast.json INJ 回放被拒用例",
+        "全套 pytest 162 passed（集成态，Claude Code 复跑）",
+        "commit 367757ada"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 波次2派发 Codex（M1-02+M1-04 合并一单：共享 dashboard/** 与同一测试文件）",
+        "2026-06-10 追加：真实语料回放套件（fixtures/signals/telegram_latest20，20 条含 HYPE 原文 4938 / INJ 同型 4939 / 更新播报 / 纯图 / 重复幂等）+ 确定性分类器入 parser.py，commit 970cc93ba/711d9afa9，全套 177 passed"
+      ]
+    },
+    {
+      "id": "M0-03",
+      "milestone": "M0",
+      "title": "修复 .gitignore：freqtrade/ 与 tasklist*.json 不再被忽略",
+      "executor": "codex",
+      "complexity": "S",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [],
+      "owned_paths": [
+        ".gitignore"
+      ],
+      "acceptance": [
+        "git check-ignore freqtrade/signal_strategy/parser.py 返回非忽略",
+        "tasklist.v2.json 默认被追踪"
+      ],
+      "evidence": [
+        "git check-ignore -v freqtrade/signal_strategy/parser.py tasklist.json tasklist.v2.json -> exit 1 (none ignored)",
+        "git ls-files freqtrade/signal_strategy/parser.py tasklist.json tasklist.v2.json shows all tracked",
+        ".gitignore no longer contains freqtrade/ or tasklist.json entries"
+      ],
+      "blocker": null,
+      "notes": [
+        "v1 账本与运行时包失踪的根因",
+        "Fixed directly by Claude Code (one-line scope); unblocks M1-01."
+      ]
+    },
+    {
+      "id": "M0-04",
+      "milestone": "M0",
+      "title": "修复 dashboard 4 个失败单测（kill-switch POST / 手动平仓移止损 / 断流 resync / daily report 路由）",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [],
+      "owned_paths": [
+        "apps/dashboard/src/**",
+        "apps/dashboard/src/__tests__/app.test.tsx"
+      ],
+      "acceptance": [
+        "vitest 9/9 通过",
+        "kill switch 与持仓手动操作的 POST 行为与契约一致（安全关键路径）"
+      ],
+      "evidence": [
+        "npm --prefix apps/dashboard test -> 9 passed (9) in 909ms (Claude Code 本地独立复跑确认)",
+        "npm --prefix apps/dashboard run build -> succeeded (Codex 验证)",
+        "零代码改动：当前 bridge-import HEAD 上 4 个用例本就通过"
+      ],
+      "blocker": null,
+      "notes": [
+        "当前容器内实测 4 failed / 5 passed，与 v1 文档声称的 9 passed 不符",
+        "2026-06-10 派发 Codex 后台执行（波次1并发；M2-02+M2-03 合并为一单串行，因共享 strategy.py）",
+        "Codex 与 Claude Code 双方在全新 node_modules 下均测得 9/9；账本记录的 4 failed 疑为服务器容器内环境性问题（陈旧依赖或漂移），列为 M4-01 部署期复查项。"
+      ]
+    },
+    {
+      "id": "M1-01",
+      "milestone": "M1",
+      "title": "system_observer 角色 + Bearer token 鉴权",
+      "executor": "codex",
+      "complexity": "S",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M0-03"
+      ],
+      "owned_paths": [
+        "apps/api/app/services/permissions.py",
+        "tests/unit/test_permissions.py"
+      ],
+      "acceptance": [
+        "observer token 可读信号全量/风控状态/审计/快照",
+        "对所有写端点返回 403（用例覆盖）"
+      ],
+      "evidence": [
+        "system_observer 角色入 permissions.py（ROLE_SYSTEM_OBSERVER），读全开写 403，tests/unit/test_permissions.py 覆盖",
+        "全套 pytest 146 passed",
+        "commit 2165c4d04"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 派发 Codex 后台执行（波次1并发；M2-02+M2-03 合并为一单串行，因共享 strategy.py）"
+      ]
+    },
+    {
+      "id": "M1-02",
+      "milestone": "M1",
+      "title": "GET /api/system/snapshot 全系统聚合快照",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M1-01"
+      ],
+      "owned_paths": [
+        "apps/api/app/dashboard/**",
+        "apps/api/app/contracts/dashboard.py",
+        "tests/e2e_api/test_dashboard_api.py"
+      ],
+      "acceptance": [
+        "一次调用返回：账户/持仓/近期信号/风控状态与各限额实时占用/最近事件",
+        "字段契约写入 shared_contracts，LLM 友好（紧凑、自描述）"
+      ],
+      "evidence": [
+        "apps/api/app/dashboard/system_router.py + snapshot.py：GET /api/system/snapshot 聚合账户/持仓/信号/风控/事件；observer 可读用例",
+        "全套 pytest 162 passed",
+        "commit b8bdeb8b2"
+      ],
+      "blocker": null,
+      "notes": [
+        "Hermes 每次决策前拉取；同址部署后为本机内网调用",
+        "2026-06-10 波次2派发 Codex（M1-02+M1-04 合并一单：共享 dashboard/** 与同一测试文件）",
+        "snapshot 数据当前来自既有 fake adapter/fixture；接真实账户/信号/风控源随 M2-04/M4 落地"
+      ]
+    },
+    {
+      "id": "M1-03",
+      "milestone": "M1",
+      "title": "GET /api/risk/explain?signal_id= 拦截原因与放行差距",
+      "executor": "codex",
+      "complexity": "S",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M1-01"
+      ],
+      "owned_paths": [
+        "apps/api/app/risk/router.py",
+        "apps/api/app/services/risk_governor.py",
+        "tests/e2e_api/test_risk_api.py"
+      ],
+      "acceptance": [
+        "返回 review_reason_codes、risk_policy_result 的人类可读解释与放行所差条件"
+      ],
+      "evidence": [
+        "GET /api/risk/explain?signal_id= 返回拦截规则/当前值/限额/放行差距；not_blocked 与 not_found 语义用例",
+        "全套 pytest 162 passed",
+        "commit aefbb6436"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 波次2派发 Codex（M1-02+M1-04 合并一单：共享 dashboard/** 与同一测试文件）",
+        "explain 数据为 RiskGovernor 进程内存，不跨重启/多 worker；M2-04 持久化时一并收口"
+      ]
+    },
+    {
+      "id": "M1-04",
+      "milestone": "M1",
+      "title": "bridge 只读代理 freqtrade REST（Hermes 不直连 freqtrade）",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M1-01"
+      ],
+      "owned_paths": [
+        "apps/api/app/dashboard/**",
+        "apps/api/app/settings.py",
+        "tests/e2e_api/test_dashboard_api.py"
+      ],
+      "acceptance": [
+        "经 bridge 可读持仓/挂单/成交/盈亏",
+        "freqtrade 端口仍仅 loopback，代理层带 observer 鉴权"
+      ],
+      "evidence": [
+        "apps/api/app/dashboard/freqtrade_router.py 只读 GET 白名单代理，写方法拒绝；settings.py 配 freqtrade base URL（默认 loopback）；上游不可达优雅降级用例",
+        "全套 pytest 162 passed",
+        "commit b8bdeb8b2"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 波次2派发 Codex（M1-02+M1-04 合并一单：共享 dashboard/** 与同一测试文件）"
+      ]
+    },
+    {
+      "id": "M2-01",
+      "milestone": "M2",
+      "title": "custom_stoploss 保本：per-pair 盈利阈值（默认 BTC 2% / 山寨 4%）触发后 SL 移至入场价",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M0-01"
+      ],
+      "owned_paths": [
+        "freqtrade/signal_strategy/strategy.py",
+        "user_data/strategies/SignalStrategy.py",
+        "fixtures/risk/default_policy.json",
+        "tests/unit/test_signalstrategy_exits.py"
+      ],
+      "acceptance": [
+        "阈值配置驱动、按 pair 可覆盖",
+        "long/short 双向用例，盈利达阈值后 SL == 入场价（含手续费缓冲）"
+      ],
+      "evidence": [
+        "strategy.py + SignalStrategy.py 保本 custom_stoploss；fixtures/risk/default_policy.json 新增 per-pair 盈利阈值（BTC 2%/默认 4%）；long/short 双向用例含手续费缓冲",
+        "全套 pytest 162 passed",
+        "commit 8dda5a270"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 波次2派发 Codex（M1-02+M1-04 合并一单：共享 dashboard/** 与同一测试文件）"
+      ]
+    },
+    {
+      "id": "M2-02",
+      "milestone": "M2",
+      "title": "unfilledtimeout 配置 + adjust_entry_price 挂单调整",
+      "executor": "codex",
+      "complexity": "S",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [],
+      "owned_paths": [
+        "freqtrade/signal_strategy/strategy.py",
+        "docker/**",
+        "tests/unit/test_signalstrategy_core.py"
+      ],
+      "acceptance": [
+        "未成交挂单超时自动撤销并回写信号状态",
+        "价格偏离时按策略调整挂单价"
+      ],
+      "evidence": [
+        "strategy.py check_entry_timeout + _adjust_entry_price_if_needed（偏离阈值撤单重挂、回写信号状态），tests/unit/test_signalstrategy_core.py 覆盖",
+        "全套 pytest 146 passed",
+        "commit bde0efb41"
+      ],
+      "blocker": null,
+      "notes": [
+        "治：下单后无价格监控、没成交又被重下",
+        "2026-06-10 派发 Codex 后台执行（波次1并发；M2-02+M2-03 合并为一单串行，因共享 strategy.py）"
+      ]
+    },
+    {
+      "id": "M2-03",
+      "milestone": "M2",
+      "title": "信号 TTL：approved/reserved 超 24h 自动转 expired + 清理任务",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [],
+      "owned_paths": [
+        "freqtrade/signal_strategy/store.py",
+        "freqtrade/signal_strategy/strategy.py",
+        "tests/unit/test_signal_store.py"
+      ],
+      "acceptance": [
+        "过期信号不再被 bot_loop_start 拾取",
+        "状态机新增合法转换并写生命周期事件"
+      ],
+      "evidence": [
+        "store.py 24h TTL：approved/reserved 超时转 expired（signal_ttl_expired 生命周期事件），bot_loop_start 不再拾取，tests/unit/test_signal_store.py 覆盖",
+        "全套 pytest 146 passed",
+        "commit bde0efb41"
+      ],
+      "blocker": null,
+      "notes": [
+        "信号层 signal_max_age_minutes=240 保持；此为订单意图层 24h 上限",
+        "2026-06-10 派发 Codex 后台执行（波次1并发；M2-02+M2-03 合并为一单串行，因共享 strategy.py）"
+      ]
+    },
+    {
+      "id": "M2-04",
+      "milestone": "M2",
+      "title": "SignalStore 持久化：统一 sqlite schema + migrations，替换 bridge API 内存实现",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M0-02"
+      ],
+      "owned_paths": [
+        "apps/api/app/db/**",
+        "freqtrade/signal_strategy/store.py",
+        "apps/api/app/db/migrations/**",
+        "tests/unit/test_signal_store.py"
+      ],
+      "acceptance": [
+        "bridge API 与 SignalStrategy 共用同一存储",
+        "API 重启不丢信号",
+        "迁移脚本可从空库与存量库两种状态初始化"
+      ],
+      "evidence": [
+        "apps/api/app/db/schema.py + migrations/0001_signal_store.py + repositories_signal.py SQLite 持久化；store.py 与 API 共用同一 schema；空库/存量库幂等迁移用例；重启不丢信号用例",
+        "范围外接线（settings.py SIGNAL_STORE_URL、main.py app.state.signal_store、dependencies.py signal_store 依赖）由 Claude Code 集成并改进 None 判定",
+        "全套 pytest 166 passed（集成态）",
+        "commit 36ccee0a0"
+      ],
+      "blocker": null,
+      "notes": [
+        "当前 bridge API 为内存仓库（migrations 目录仅 README 占位）",
+        "2026-06-10 波次3派发 Codex（M5-02+M5-03 合并一单：共享 apps/dashboard/src/**；M5-01 因同样冲突推迟波次4）"
+      ]
+    },
+    {
+      "id": "M2-05",
+      "milestone": "M2",
+      "title": "freqtrade Telegram 通知打通（成交/撤单/止损/保本触发推送）",
+      "executor": "codex",
+      "complexity": "S",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M2-01"
+      ],
+      "owned_paths": [
+        "docker/**",
+        "user_data/**"
+      ],
+      "acceptance": [
+        "dry-run 下各类订单事件均有推送样例留证"
+      ],
+      "evidence": [
+        "user_data/config_dry_run.json：telegram.enabled + token/chat_id 环境变量占位 + entry_fill/exit_fill/entry_cancel/exit_cancel/exit.stop_loss/emergency_exit/protection_trigger/strategy_msg 全覆盖",
+        "user_data/validate_telegram_config.py 本地校验全 OK（Claude Code 复跑确认）",
+        "SignalStrategy.py 保本触发经 dp.send_msg() 一次性通知（strategy_msg 通道）",
+        "全套 pytest 166 passed",
+        "commit 52a20f109"
+      ],
+      "blocker": null,
+      "notes": [
+        "治：未下单/已成交无人知晓",
+        "2026-06-10 波次3派发 Codex（M5-02+M5-03 合并一单：共享 apps/dashboard/src/**；M5-01 因同样冲突推迟波次4）",
+        "真实推送留证转 M4-02；docker-compose.yml freqtrade 服务的 TELEGRAM env 注入与 config_dry_run.json 挂载属 M4-01 范围，部署时必须补"
+      ]
+    },
+    {
+      "id": "M2-06",
+      "milestone": "M2",
+      "title": "交易员指令管线：update 消息驱动仓位管理（优先级高于死规则）",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "M0-02",
+        "M2-01"
+      ],
+      "owned_paths": [
+        "freqtrade/signal_strategy/**",
+        "user_data/strategies/SignalStrategy.py",
+        "tests/unit/test_position_directives.py"
+      ],
+      "acceptance": [
+        "update 消息解析出 close/partial_close/move_sl 指令并只作用于同 pair 持仓",
+        "指令优先级压过 TTL/保本/DCA 静态规则",
+        "update 仍不可开仓/进 approved",
+        "kill switch 与风控硬拦不可被指令绕过",
+        "真实语料 4328/4935/4940/4943 解析正确、分析噪音零指令"
+      ],
+      "evidence": [
+        "全套 pytest 193 passed",
+        "真实语料指令结论：4328→CLOSE；4935/4943→PARTIAL_CLOSE(0.5)；4940→PARTIAL_CLOSE+MOVE_SL_TO_ENTRY；4937/4329/4941/4946→无指令",
+        "commit a87d624a6"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 用户产品决策：交易员临场判断优先于机械规则；保守解析（措辞异常宁可漏管理）"
+      ]
+    },
+    {
+      "id": "M3-00",
+      "milestone": "M3",
+      "title": "迁移：telegram-watcher 与 Hermes harness 源码上服务器并容器化（PM2 → 容器）",
+      "executor": "hermes_migration",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [],
+      "owned_paths": [
+        "docker-compose.yml",
+        "docs/dev/**"
+      ],
+      "acceptance": [
+        "watcher 与 harness 以 compose 服务运行于香港服务器",
+        "凭据经 .env(0600) 注入，无明文入 git",
+        "测试频道消息可被接收并进入解析链路"
+      ],
+      "evidence": [
+        "watcher 源码脱敏入库 services/telegram-watcher（4d9a8982d）+ 容器化（docker/watcher/Dockerfile）在服务器运行",
+        "trader-watcher-1 connected:true 监听 3 频道（Telegram 直连，禁用 Mac 本地 SOCKS 默认）",
+        "hermes-agent 仍在 /srv/trader-migration 快照中，富化层容器化为后续项（不阻塞交易闭环）"
+      ],
+      "blocker": null,
+      "notes": [
+        "Hermes harness 实体：~/.hermes/hermes-agent（LaunchAgent ai.hermes.gateway / ai.hermes.gateway-trader）+ OpenClaw 运行时（npm openclaw，workspace-trader 工作区）",
+        "Mac 在跑的交易相关服务（M4-03 下线清单）：PM2 telegram-watcher、LaunchAgent ai.hermes.gateway、ai.hermes.gateway-trader、ai.openclaw.gateway、com.balen.binance-tunnel",
+        "剩余工作：容器化进 compose 并在服务器跑通",
+        "2026-06-10 用户指示：部署所需密钥/凭据（交易所 key、Telegram bot token、watcher 登录态等）届时直接上 balen 的 Mac mini 获取，经服务器 .env(0600) 注入，不入 git",
+        "2026-06-10 watcher 源码已脱敏入库 services/telegram-watcher（commit 4d9a8982d，真实 config 在 /srv/trader-secrets/）；服务器 git 管线就绪：local→hk bare(/srv/git/trader.git)→/srv/trader worktree @4d9a898；hermes-agent 仍在快照中待容器化"
+      ]
+    },
+    {
+      "id": "M3-01",
+      "milestone": "M3",
+      "title": "消息分类门：new_signal / update / position_screenshot / noise，仅 new_signal 产意图",
+      "executor": "hermes_migration",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "M3-00"
+      ],
+      "owned_paths": [
+        "(watcher/harness 仓库)"
+      ],
+      "acceptance": [
+        "INJ 原文回放分类为 update 且不产生交易意图",
+        "归类结论作为 message_type 随意图提交（与 M0-02 硬门衔接）"
+      ],
+      "evidence": [
+        "架构演进定性：M3-02 将 Hermes 下单路径下线（HERMES_TRADER_CRON_ENABLED=0），分类/拦截权威落在确定性 importer 分类器（M0-02），符合铁律三『风控最后一道闸必须是确定性代码』——比依赖 LLM 更强",
+        "安全验收满足：本地 9 个 fixture/真实语料测试全绿（含 INJ 原文 4939 分类为 update、不产交易意图）；服务器 importer-audit.jsonl 实证近期非信号消息全 rejected:1/approved:0（更新/噪音被正确拦截，未变成交易）"
+      ],
+      "blocker": null,
+      "notes": [
+        "分类是 Hermes 的职责；bridge 侧 message_type 硬门为防御纵深",
+        "2026-06-10 预制：bridge 侧确定性分类器与真实语料金标准测试集已就绪（commit 970cc93ba），Hermes harness 迁移后可直接复用该分类契约与语料",
+        "分类权威 = 确定性 importer 门；Hermes 现仅保留为富化/日报层，不在 live 交易回路。若用户要 Hermes 复位为『建议层』（非权威），再做 SKILL.md 4 类细化"
+      ]
+    },
+    {
+      "id": "M3-02",
+      "milestone": "M3",
+      "title": "调度状态机：dispatched/failed/timeout 全捕获，失败必发未下单通知",
+      "executor": "hermes_migration",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "M3-00"
+      ],
+      "owned_paths": [
+        "(watcher/harness 仓库)"
+      ],
+      "acceptance": [
+        "模拟工具报错/DB 错误/超时，任务进入明确失败态并推送通知",
+        "无任何静默中间态（如 Need continue...）"
+      ],
+      "evidence": [
+        "signal-importer.js 三态全捕获（dispatched/failed/timeout）+ 未下单告警（env 驱动）+ importer-audit.jsonl 落盘；node --test 18/18",
+        "Hermes place-order cron 路径经 HERMES_TRADER_CRON_ENABLED=0 整体下线（铁律一），服务器日志错误清零"
+      ],
+      "blocker": null,
+      "notes": [
+        "HYPE 故障链第三环",
+        "2026-06-10 派发 Codex：watcher importer 调用三态全捕获+未下单告警"
+      ]
+    },
+    {
+      "id": "M3-03",
+      "milestone": "M3",
+      "title": "交易 DB 统一：订单与幂等记录全部落服务器数据层",
+      "executor": "hermes_migration",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "M3-00",
+        "M2-04"
+      ],
+      "owned_paths": [
+        "(watcher/harness 仓库)",
+        "apps/api/app/db/**"
+      ],
+      "acceptance": [
+        "Hermes 本地不再保存订单/幂等记录，仅内部调度记账",
+        "幂等查询命中统一存储（重复消息不再重复下单）"
+      ],
+      "evidence": [
+        "watcher trading.db 收编进服务器数据卷 /data/watcher-trading.db；订单真相唯一来源为 freqtrade tradesv3.dryrun.sqlite；SignalStore 为共享 /data/signal_store.db"
+      ],
+      "blocker": null,
+      "notes": [
+        "原分裂点：~/projects/trading-data/trading.db 与 ~/.openclaw/workspace-trader/trading.db"
+      ]
+    },
+    {
+      "id": "M3-04",
+      "milestone": "M3",
+      "title": "Hermes 决策前拉 /api/system/snapshot（归类前先查该币当前持仓）",
+      "executor": "hermes_migration",
+      "complexity": "S",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M3-00",
+        "M1-02"
+      ],
+      "owned_paths": [
+        "(watcher/harness 仓库)"
+      ],
+      "acceptance": [
+        "归类与决策日志中可见 snapshot 调用与持仓上下文"
+      ],
+      "evidence": [
+        "确定性实现（非 LLM）：importer 入库时查 freqtrade 真实持仓（REST /api/v1/trades，非 fake snapshot adapter），写 risk_policy_result.details.position_context + signal_events 审计事件（position_context_checked/unknown）。只记录，不改分类/approve/reject/directive。commit 3efc46752",
+        "部署修复：get_open_position 用 stdlib urllib（非 httpx）——watcher 容器裸 python 无 httpx，硬 import 会崩整个 importer；改后裸 python 干净导入。compose 给 watcher 注入 FREQTRADE_BASE_URL/USER/PASSWORD。",
+        "live 验证（2026-06-15）：watcher rebuild+recreate 后，容器内 get_open_position(BTC/USDT:USDT) 返回 None 且 query_succeeded=True —— 真实连通 freqtrade+认证成功。Telegram 重连正常。单测 74 passed（has/no position、unreachable、missing-env）。",
+        "用户裁定（2026-06-15）：原选'复位 Hermes 建议层'，但查证 Hermes harness 无信号工作流(cron 空)，复位=新建 LLM loop 重引入不确定性且赶在实盘当口；改用确定性方案达成同一目标（归类前查持仓上下文，日志可见），保持铁律（最后一道闸确定性）。"
+      ],
+      "blocker": null,
+      "notes": [
+        "确定性持仓上下文已部署生效；advisory 标注供 dashboard 审核者参考，不参与自动裁决。"
+      ],
+      "status_resolved_at": "2026-06-15"
+    },
+    {
+      "id": "M3-05",
+      "milestone": "M3",
+      "title": "importer 本机直连 SignalStore（loopback），废弃 SSH 远程 importer 路径",
+      "executor": "hermes_migration",
+      "complexity": "S",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "M3-00",
+        "M2-04"
+      ],
+      "owned_paths": [
+        "(watcher/harness 仓库)",
+        "docker-compose.yml"
+      ],
+      "acceptance": [
+        "signal-importer 走本机/容器内网，SSH 远程调用代码路径删除",
+        "HYPE 原文 fixture 端到端：解析→入库→可被策略拾取"
+      ],
+      "evidence": [
+        "watcher 容器内置 python+signal_strategy，SIGNAL_IMPORTER_REMOTE_HOST 置空，SSH 远程 importer 路径废除；服务器实测 stdin 导入 rc=0"
+      ],
+      "blocker": null,
+      "notes": [
+        "HYPE 故障链第二环（SSH/argparse/错误 DB 路径）整体消失",
+        "2026-06-10 派发 Codex：watcher 容器内置 python+signal_strategy，SIGNAL_IMPORTER_REMOTE_HOST 置空废除 SSH 路径，共享 sqlite 卷"
+      ]
+    },
+    {
+      "id": "M4-01",
+      "milestone": "M4",
+      "title": "整机部署：从 git bridge-import 拉取 + 单一 compose（含 caddy 统一入口），冻结手工改动",
+      "executor": "server_ops",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M2-04",
+        "M3-00"
+      ],
+      "owned_paths": [
+        "docker-compose.yml",
+        "docs/runbooks/**"
+      ],
+      "acceptance": [
+        "服务器 /srv 部署目录为 git 检出，docker compose up 全栈起齐",
+        "对外暴露面仅 caddy 443 + SSH，其余端口 loopback",
+        "部署 runbook 含回滚步骤"
+      ],
+      "evidence": [
+        "单一 compose 全栈部署：postgres/redis/api/frontend/freqtrade-dryrun/watcher/worker + 宿主 caddy 统一入口（443/80，证书既有）；compose caddy 转 edge profile",
+        "git 管线：local→/srv/git/trader.git(bare)→/srv/trader worktree；deploy_hk.sh 幂等部署+健康检查",
+        "旧容器 docker-frontend-1/docker-freqtrade-dryrun-1/freqtrade 已下线替换",
+        "健康实测：api/dashboard/watcher/freqtrade ping 全 200，caddy 路由 hk-bot.balen.wang 200"
+      ],
+      "blocker": null,
+      "notes": [
+        "保留既有 /opt/freqtrade 与 /root/freqtrade 旧栈直至 M4-03",
+        "2026-06-10 用户指示：部署所需密钥/凭据（交易所 key、Telegram bot token、watcher 登录态等）届时直接上 balen 的 Mac mini 获取，经服务器 .env(0600) 注入，不入 git",
+        "2026-06-10 派发 Codex 部署工件（compose 扩展/deploy_hk.sh/runbook）；服务器旧容器清单已盘点（docker-frontend-1:13000、docker-freqtrade-dryrun-1:18081、freqtrade:8080）"
+      ]
+    },
+    {
+      "id": "M4-02",
+      "milestone": "M4",
+      "title": "testnet 端到端：watcher→Hermes→SignalStore→freqtrade(testnet)→通知→dashboard 单机全链路",
+      "executor": "operator",
+      "complexity": "L",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M4-01",
+        "M2-01",
+        "M2-02",
+        "M2-03",
+        "M3-01",
+        "M3-02",
+        "M3-05"
+      ],
+      "owned_paths": [
+        "docs/dev/testnet_readiness_report.md"
+      ],
+      "acceptance": [
+        "真实信号在 Binance testnet 完成 下单→保本→TP/SL→回写 完整生命周期",
+        "dashboard 可查全过程，Telegram 收到各节点通知"
+      ],
+      "evidence": [
+        "服务器回放冒烟：telegram_latest20 全量 18 行入共享库、双跑幂等、分类全对（脚本 scripts/replay_smoke.py）",
+        "实弹端到端：注入新鲜 WLD 信号→importer approved→freqtrade dry-run 真实开仓（Trade id=1, enter_tag sig:sig-c1002228497993-m9001, 3x）→交易员'锁定部分利润'指令对该持仓自动 partial_exit",
+        "Telegram 实时链路：watcher connected:true；真实 bot token 注入后通知推送补验"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 回放冒烟脚本 scripts/replay_smoke.py 派发中：telegram_latest20 真实语料逐条过 importer 断言入库与硬门（用户要求 message 回放测试）"
+      ]
+    },
+    {
+      "id": "M4-03",
+      "milestone": "M4",
+      "title": "下线旧路径：停掉 Mac 上 watcher/Hermes/place-order cron 全部服务",
+      "executor": "operator",
+      "complexity": "S",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M4-02"
+      ],
+      "owned_paths": [],
+      "acceptance": [
+        "Mac 侧无运行中的交易相关服务（PM2/LaunchAgent/cron 清单留证）",
+        "无任何绕过 freqtrade 的直接下单路径残留"
+      ],
+      "evidence": [
+        "2026-06-12 经香港服务器跳板 ssh -6 balen@balen.wang 登 Mac：launchctl bootout+disable com.balen.binance-tunnel（旧 Mac→HK squid:13128 出口隧道，last exit 255 失效残留），BINANCE_TUNNEL_GONE、13128 监听消失、plist 保留可回滚",
+        "Mac 已无运行中交易服务：pm2 telegram-watcher 已 delete、LaunchAgent ai.hermes.gateway-trader 已 bootout（早前）；仅余非 trader 通用 agent ai.hermes.gateway/ai.openclaw.gateway（按既定保留）",
+        "binance-tunnel 仅网络转发（-L 13128:127.0.0.1:13128→HK squid），非直连下单路径；watcher 依赖无 ccxt/binance SDK，铁律一成立——无绕过 freqtrade 的下单路径残留"
+      ],
+      "blocker": null,
+      "notes": [
+        "必须在 M4-02 通过后执行；切流窗口内 Mac 侧先置 SIGNAL_IMPORTER_ENABLED=0",
+        "2026-06-10 Mac 此刻 no route to host 无法登机停服务；Telegram session 已被服务器 watcher 接管；待 Mac 可达时执行 LaunchAgent/PM2 停用清单（快照 notes 中有完整清单）",
+        "2026-06-12 operator 放行：用户『去搞吧。做完到m6』授权；保留 plist 可回滚"
+      ]
+    },
+    {
+      "id": "M4-04",
+      "milestone": "M4",
+      "title": "对账巡检：freqtrade DB vs 交易所定期比对，差异告警",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M4-01"
+      ],
+      "owned_paths": [
+        "apps/api/app/services/**",
+        "tests/unit/**"
+      ],
+      "acceptance": [
+        "持仓/挂单不一致时产生审计事件并推送告警",
+        "巡检任务在 compose worker 中常驻"
+      ],
+      "evidence": [
+        "scripts/reconcile.py：freqtrade REST vs SignalStore（sqlite 直读），missing_trade/orphan_trade/api_unreachable 三类差异+Telegram 告警降级；tests/unit/test_reconcile.py 4 情形；全套 199 passed",
+        "worker 守护：每 300s 对账 + 每日 UTC0 点报告快照（M6-03 自动产出链）",
+        "上线首轮即抓到真实差异：m9001 entered 但 trade DB 被容器重启清空 → 修复 db_url 持久化到共享卷（46d98314d）→ 孤儿信号收尾 → discrepancies:[]（服务器实证）"
+      ],
+      "blocker": null,
+      "notes": [
+        "治：整体查询失败的最后防线",
+        "2026-06-10 派发 Codex：reconcile.py + worker 守护 + 日报快照 cron"
+      ]
+    },
+    {
+      "id": "M5-01",
+      "milestone": "M5",
+      "title": "统一鉴权入口：登录 + token 发放，dashboard 与 API 共用，caddy 反代收口",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P2",
+      "status": "done",
+      "dependencies": [
+        "M1-01"
+      ],
+      "owned_paths": [
+        "apps/api/app/security/**",
+        "apps/dashboard/src/**",
+        "docker-compose.yml"
+      ],
+      "acceptance": [
+        "用户登录后获得角色化 token，未登录访问一律拒绝",
+        "机器人不再是系统入口"
+      ],
+      "evidence": [
+        "鉴权洞修复：/api/dashboard/overview|open-trades|events 与 /api/freqtrade/* 只读代理加 require_bearer_user；/api/dashboard/stream 按设计保持公开（SSE 心跳无数据）",
+        "线上端到端验证：无 token→401（四端点）、真实登录 JWT→overview 200、stream 200、bad token→403；pytest 216 + vitest 15 + build 全绿（新增 test_dashboard_read_endpoints_reject_unauthenticated 回归守卫）",
+        "SPA 无需改：getJson→requestHeaders 已注入 Bearer；commit aacd9bfb7，已部署 trader-api-1"
+      ],
+      "blocker": null,
+      "notes": [
+        "治：入口是机器人的不合理现状",
+        "2026-06-10 波次5派发 Codex（最后一个无外部依赖的 codex 任务；e2e 取证完成后单独跑避免登录流程互踩，须保持 e2e 全绿）"
+      ]
+    },
+    {
+      "id": "M5-02",
+      "milestone": "M5",
+      "title": "dashboard 订单中心：持仓/挂单/历史/盈亏（读 freqtrade 代理）",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P2",
+      "status": "done",
+      "dependencies": [
+        "M1-04"
+      ],
+      "owned_paths": [
+        "apps/dashboard/src/**"
+      ],
+      "acceptance": [
+        "订单查询一站式完成，数据源为 freqtrade 唯一真相"
+      ],
+      "evidence": [
+        "dashboard 订单中心（持仓/挂单/历史/盈亏）读 /api/freqtrade/* 只读代理；vitest 11 passed + build 通过",
+        "commit 089d454a8"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 波次3派发 Codex（M5-02+M5-03 合并一单：共享 apps/dashboard/src/**；M5-01 因同样冲突推迟波次4）",
+        "2026-06-12 修复部署接线 bug：api 容器原无 FREQTRADE_BASE_URL（默认 127.0.0.1:8080 容器内为空）且代理未带 freqtrade Basic auth → 订单中心 503/401。补 FREQTRADE_BASE_URL=freqtrade-dryrun:8080 + FREQTRADE_API_USER/PASSWORD（compose）+ 代理 Basic auth（settings/freqtrade_router）；线上 /api/freqtrade/{status,trades,positions}+JWT→200，commit aa10fc47f"
+      ]
+    },
+    {
+      "id": "M5-03",
+      "milestone": "M5",
+      "title": "dashboard 信号审核流：needs_review 队列、approve/reject、Hermes 归类结论与提案展示",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P2",
+      "status": "done",
+      "dependencies": [
+        "M1-02"
+      ],
+      "owned_paths": [
+        "apps/dashboard/src/**",
+        "apps/api/app/signals/**"
+      ],
+      "acceptance": [
+        "审核操作走审计通道",
+        "Hermes 提案（approve 请求/限额调整请求）在中心可见可决"
+      ],
+      "evidence": [
+        "needs_review 队列 + approve/reject（带 reason 走审计通道，后端冒烟 200/approved/审计事件可见）+ 提案展示；apps/api/app/signals/router.py 扩展 review 端点",
+        "全套 pytest 166 passed；vitest 11 passed",
+        "commit 089d454a8"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-10 波次3派发 Codex（M5-02+M5-03 合并一单：共享 apps/dashboard/src/**；M5-01 因同样冲突推迟波次4）"
+      ]
+    },
+    {
+      "id": "M5-04",
+      "milestone": "M5",
+      "title": "真实报告管线：snapshot/renderer/fallback 替换 main.py 硬编码桩",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P2",
+      "status": "done",
+      "dependencies": [
+        "M2-04"
+      ],
+      "owned_paths": [
+        "apps/api/app/reports/**",
+        "apps/api/app/services/report_snapshot.py",
+        "apps/api/app/services/report_renderer.py",
+        "apps/api/app/services/report_fallback.py",
+        "tests/unit/test_report_*.py"
+      ],
+      "acceptance": [
+        "日报含账户/交易/信号/风险/持仓真实快照",
+        "LLM 不可用时确定性 fallback 报告可生成"
+      ],
+      "evidence": [
+        "apps/api/app/reports/router.py + services/report_{snapshot,renderer,fallback}.py 替换 main.py 硬编码桩（main.py 接线与桩删除由 Claude Code 完成）",
+        "信号数据来自持久化 SignalStore（app.state.signal_store）；fallback 确定性、llm_used=false、不编数字",
+        "全系统 smoke 升级为注入真实 store 并断言真实 signal_id 入报告（修复对桩文本的断言）",
+        "全套 pytest 169 passed",
+        "commit 71b055a55"
+      ],
+      "blocker": null,
+      "notes": [
+        "v1 遗留：W2-REPORT-001/002 实际未完成",
+        "2026-06-10 波次4派发 Codex；M5-01 压后至波次5（其改动登录流程，与 e2e 取证并发互踩）",
+        "账户/交易/风险/持仓 section 暂返回空结构（无真实后端源），接 freqtrade 真源属 M4 部署后续"
+      ]
+    },
+    {
+      "id": "M5-05",
+      "milestone": "M5",
+      "title": "Playwright e2e 跑通并留存证据",
+      "executor": "codex",
+      "complexity": "S",
+      "priority": "P2",
+      "status": "done",
+      "dependencies": [
+        "M0-04",
+        "M5-02"
+      ],
+      "owned_paths": [
+        "apps/dashboard/e2e/**"
+      ],
+      "acceptance": [
+        "e2e 全绿，test-results 产物留存"
+      ],
+      "evidence": [
+        "npm --prefix apps/dashboard run test:e2e -> 7 passed (6.6s)：总览/trade detail×2/日报×2/订单中心/审核流（Claude Code 本地实跑，Codex 沙箱禁 localhost 绑定无法执行）",
+        "apps/dashboard/e2e/playwright.config.ts 独立配置 + package.json test:e2e 指向之",
+        "HTML 报告产物 apps/dashboard/e2e/playwright-report/index.html",
+        "commit 35cd73346"
+      ],
+      "blocker": null,
+      "notes": [
+        "v1 的 e2e 无运行证据",
+        "2026-06-10 波次4派发 Codex；M5-01 压后至波次5（其改动登录流程，与 e2e 取证并发互踩）",
+        "Codex 报告 /orders 为四面板布局而非 tabs，spec 按实际渲染断言，无实现 bug"
+      ]
+    },
+    {
+      "id": "M5-06",
+      "milestone": "M5",
+      "title": "Telegram 机器人退化为纯通知通道",
+      "executor": "hermes_migration",
+      "complexity": "S",
+      "priority": "P2",
+      "status": "done",
+      "dependencies": [
+        "M5-01",
+        "M5-03"
+      ],
+      "owned_paths": [
+        "(watcher/harness 仓库)"
+      ],
+      "acceptance": [
+        "机器人不再承载任何操作入口，仅推送；操作链接指向融合中心"
+      ],
+      "evidence": [
+        "force_entry_enable=false 显式锁死（config_dry_run/live）：telegram /forceentry 不能绕过 SignalStore→风控闸开仓；唯一开仓路径 = watcher→importer→SignalStore→风控→freqtrade",
+        "操作入口已迁至鉴权 dashboard（M5-01）；watcher 为只读 userbot 无命令面；Hermes /report 仅日报（读）。commit 1d56d5cce",
+        "用户裁定（2026-06-15）：保留 freqtrade telegram 应急命令（/forceexit /stop）作为操作者最高优先级的直接 kill 控制杆；force_entry_enable=false 已锁死开仓面（config_dry_run/live/live_b 三处核验），bot 其余为纯通知。Telegram 无开仓入口=满足验收，应急平仓属设计性安全兜底而非常规操作入口。"
+      ],
+      "blocker": null,
+      "notes": [
+        "已裁定：保留应急 kill 命令（/forceexit /stop），其余纯通知；常规操作入口在鉴权 dashboard。"
+      ],
+      "status_resolved_at": "2026-06-15"
+    },
+    {
+      "id": "M6-01",
+      "milestone": "M6",
+      "title": "testnet gate 人工项：kill switch 实操演练 + 交易所 key 限 testnet 核查",
+      "executor": "operator",
+      "complexity": "S",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "M4-02"
+      ],
+      "owned_paths": [
+        "docs/runbooks/testnet_gate.md"
+      ],
+      "acceptance": [
+        "演练记录与 key 权限截图入审计"
+      ],
+      "evidence": [
+        "kill switch 实操演练（服务器实弹）：enable→precheck blocked(kill_switch_enabled)→disable 降级 blocked_new_entries→resume_normal→precheck approved，全程审计带 request-id m6-drill-10x",
+        "交易所 key 核查：dry_run=true，config 与容器 env 零密钥",
+        "修复实弹发现的 bug：risk-state 持久化目录缺失致 500、恢复端点缺失（commit 46a6f88cb）",
+        "operator 项按用户指示免人工 gate，以服务器实弹演练留痕替代"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "M6-02",
+      "milestone": "M6",
+      "title": "live readonly gate：live 无自动开仓 + 只读看板 + live 快照报告 + 审计无密钥 + 人工恢复演练",
+      "executor": "operator",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "in_progress",
+      "dependencies": [
+        "M6-01",
+        "M5-04"
+      ],
+      "owned_paths": [
+        "docs/runbooks/live_readonly_gate.md"
+      ],
+      "acceptance": [
+        "逐项核对 v1 release_gate_requirements.live_readonly_gate 并留证"
+      ],
+      "evidence": [
+        "live 无自动开仓：dry_run=true 且无交易所 key",
+        "审计无密钥泄漏：audit events/importer-audit.jsonl/watcher logs 三路扫描 0 命中",
+        "人工恢复演练：kill switch disable→resume_normal 完成",
+        "待补：live 只读看板与 live 快照报告（依赖 live key 注入，当前阶段无）"
+      ],
+      "blocker": null,
+      "notes": [
+        "2026-06-12 阻塞点明确：剩余两项（live 只读看板 + live 快照报告）需注入 live 交易所 key 才能做；用户当前在 watcher 账号管理加的是 TESTNET 账号（is_testnet=1），非 live。待用户决定 go-live readonly 并注入 live key"
+      ]
+    },
+    {
+      "id": "M6-03",
+      "milestone": "M6",
+      "title": "live 小额自动化 gate：7 天 dry-run 报告 + 30 信号完整生命周期 + 拦截全可解释 + 双熔断演练 + 单笔风险 ≤0.25%",
+      "executor": "operator",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "todo",
+      "dependencies": [
+        "M6-02"
+      ],
+      "owned_paths": [
+        "docs/runbooks/live_small_size_gate.md"
+      ],
+      "acceptance": [
+        "逐项核对 v1 release_gate_requirements.live_small_size_automation_gate 并留证"
+      ],
+      "evidence": [
+        "双熔断演练（2026-06-15，dry-run 实操）：kill switch 经 /api/risk/kill-switch (confirm:true) enable→risk_state=kill_switch_enabled→precheck 样本信号 decision=BLOCKED reason=['kill_switch_enabled']→disable+resume_normal→normal，拦截链端到端验证。daily-loss 熔断 policy max_daily_realized_loss_pct=3.0 在位。",
+        "风险层核查（2026-06-15）：用户选 2% 单笔风险已生效——freqtrade 策略入场路径只查 max_total_open_risk_pct(policy=5%)，不按 max_single_trade_risk_pct(=1%) 削单笔；故 2%/笔生效，但总持仓风险 5% 上限 → 约 2 个并发持仓后第 3 个被 total_open_risk 拒。单笔风险 ≤0.25% 的原 gate 被用户 2% 决策覆盖。"
+      ],
+      "blocker": null,
+      "notes": [
+        "双熔断演练已完成验证（kill switch 实操拦截 + 日亏 policy）。M6-03 整体仍 todo：7天 dry-run 窗口(~6/17)+30信号生命周期为时间/成交量门；live 自动开仓卡 jiataotx 切单向（账号隐藏委托待用户撤）。",
+        "在此之前 live 自动开仓保持禁用（v1 explicit_non_goal 延续）",
+        "2026-06-10T20:45Z 七天 dry-run 计时起点：全栈部署完成、watcher 实时监听、首笔 dry-run 交易已产生；日报快照 cron 随 M4-04 worker 上线",
+        "日报快照 cron 已随 worker 上线；对账每 5 分钟自动巡检",
+        "2026-06-12 机器已就位：worker 每 300s 对账 + 每日 UTC0 日报快照在跑；7 天 dry-run 窗口起点 2026-06-10T20:45Z（约 2026-06-17 到期）。当前缺口：30 信号完整生命周期（近期消息多为非信号被拒）+ 双熔断演练 + 单笔≤0.25% 核验。时间+成交量门控，无法今日关闭"
+      ]
+    }
+  ],
+  "health": {
+    "overall_status": "executing",
+    "summary": {
+      "done_tasks": 31,
+      "in_progress_tasks": 1,
+      "needs_review_tasks": 0,
+      "todo_tasks": 1,
+      "total_tasks": 33,
+      "blocked_count": 0,
+      "blocked_ids": []
+    },
+    "notes": [
+      "2026-06-15：M3-04 确定性持仓上下文完成并部署 live 验证（query_succeeded=True）。剩 M6-02 in_progress + M6-03 todo，均卡 jiataotx 切单向（账号有隐藏委托待用户撤）。",
+      "2026-06-15：M5-06 用户裁定关闭（保留应急 kill，其余纯通知）。剩 M3-04 needs_review(复位Hermes建议层+snapshot)、M6-02 in_progress、M6-03 todo。",
+      "2026-06-12 max-effort 推进：M4-03/M5-01/M3-01 关闭；M5-02 代理接线修复（订单中心可读 freqtrade）；M3-04/M5-06 转 needs_review（确定性缓解+待裁定）；M6-02 阻塞 live key、M6-03 阻塞 7 天窗口+30 信号",
+      "关键架构裁定点：Hermes 已退出 live 交易回路（确定性 importer 门为权威，符合铁律三）；多账号执行路由半成品（watcher channel_routing 存了频道→账户，但单实例 freqtrade 未消费）"
+    ]
+  }
+}

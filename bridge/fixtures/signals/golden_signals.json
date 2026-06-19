@@ -1,0 +1,47 @@
+[
+  {
+    "sample_id": "GS-002",
+    "signal_id": "-1002328068747:19",
+    "source": "telegram",
+    "source_channel_id": "-1002328068747",
+    "source_channel_name": "coinAlert",
+    "source_message_id": "19",
+    "received_at": "2026-02-08T16:32:18.000Z",
+    "raw_text": "BTCUSDT LONG\n   Entry: 现价\n   SL: 70400\n   TP: 72000",
+    "media": []
+  },
+  {
+    "sample_id": "GS-003",
+    "signal_id": "-1002198013097:3919",
+    "source": "telegram",
+    "source_channel_id": "-1002198013097",
+    "source_channel_name": "B01-03Titan",
+    "source_message_id": "3919",
+    "received_at": "2026-02-09T11:02:17.000Z",
+    "raw_text": "#ETH 空头交易布局 百哥。团购群\n\n杠杆：2倍 - 5倍（仅限此范围）\n\n👉首次入场：2164美元（略作调整）\n👉定投入场：2214美元\n\n严格止损位：2254美元区域\n\n止盈目标：如图所示\n\n👉首次止盈目标获利25%\n👉第二次止盈目标获利50%\n👉第三次止盈目标获利75%\n👉最终止盈目标获利100%",
+    "media": [
+      {
+        "type": "photo",
+        "path": "media/1770634938539-3919.jpg",
+        "mime_type": "image/jpeg"
+      }
+    ]
+  },
+  {
+    "sample_id": "GS-005",
+    "signal_id": "-1002228497993:4651",
+    "source": "telegram",
+    "source_channel_id": "-1002228497993",
+    "source_channel_name": "B01-01Gauls",
+    "source_message_id": "4651",
+    "received_at": "2026-02-10T08:10:35.000Z",
+    "raw_text": "2月10号做空 \n$ZKP Short Setup:\n\n➡️ Entry开单价: CMP市场价 till 1037\n➡️ TP目标: 0.1091\n➡️ SL止损: 0.0761\n\n#TraderGauls 🎭",
+    "media": [
+      {
+        "type": "photo",
+        "path": "media/1770711036161-4651.jpg",
+        "mime_type": "image/jpeg"
+      }
+    ]
+  }
+]

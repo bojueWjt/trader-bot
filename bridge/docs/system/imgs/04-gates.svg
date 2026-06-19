@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="760" viewBox="0 0 1400 760">
+  <rect width="1400" height="760" fill="#f8f3e7"/>
+  <style>
+    .title{font:700 40px system-ui;fill:#111827}.h{font:700 22px system-ui;fill:#111827}.t{font:500 16px system-ui;fill:#374151}
+    .box{fill:#fffdf7;stroke:#111827;stroke-width:3;rx:18}.pass{fill:#dcfce7}.wait{fill:#fef3c7}.lock{fill:#fee2e2}
+    .line{stroke:#111827;stroke-width:4;fill:none;marker-end:url(#arrow)}
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#111827"/></marker></defs>
+  <text x="70" y="70" class="title">Readiness Gates</text>
+
+  <rect x="90" y="170" width="270" height="210" class="box pass"/>
+  <text x="120" y="215" class="h">Local Bridge</text>
+  <text x="120" y="255" class="t">90 tests passed</text>
+  <text x="120" y="285" class="t">GS-002 smoke passed</text>
+  <text x="120" y="315" class="t">routers mounted</text>
+  <text x="120" y="345" class="t">Bearer auth wired</text>
+
+  <rect x="420" y="170" width="270" height="210" class="box wait"/>
+  <text x="450" y="215" class="h">Testnet Candidate</text>
+  <text x="450" y="255" class="t">remote Docker ready</text>
+  <text x="450" y="285" class="t">dashboard online</text>
+  <text x="450" y="315" class="t">manual kill switch pending</text>
+  <text x="450" y="345" class="t">testnet key review pending</text>
+
+  <rect x="750" y="170" width="270" height="210" class="box lock"/>
+  <text x="780" y="215" class="h">Live Readonly</text>
+  <text x="780" y="255" class="t">durable store required</text>
+  <text x="780" y="285" class="t">production auth rotation</text>
+  <text x="780" y="315" class="t">runbook drill</text>
+
+  <rect x="1080" y="170" width="270" height="210" class="box lock"/>
+  <text x="1110" y="215" class="h">Live Small Size</text>
+  <text x="1110" y="255" class="t">risk caps approved</text>
+  <text x="1110" y="285" class="t">monitoring active</text>
+  <text x="1110" y="315" class="t">backout verified</text>
+
+  <path d="M360 275 H420" class="line"/><path d="M690 275 H750" class="line"/><path d="M1020 275 H1080" class="line"/>
+
+  <rect x="180" y="515" width="1040" height="110" class="box"/>
+  <text x="220" y="560" class="h">Operating rule</text>
+  <text x="220" y="595" class="t">Automated entries stay gated until testnet key restriction and manual kill-switch drill are verified on the target deployment.</text>
+</svg>

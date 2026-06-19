@@ -1,0 +1,22 @@
+{
+  "max_single_trade_risk_pct": 1.0,
+  "max_total_open_risk_pct": 5.0,
+  "max_daily_realized_loss_pct": 3.0,
+  "max_symbol_exposure_pct": 15.0,
+  "max_correlated_group_exposure_pct": 35.0,
+  "default_leverage": 3,
+  "max_leverage": 5,
+  "min_liquidation_buffer_pct": 3.0,
+  "breakeven_stoploss": {
+    "enabled": true,
+    "default_trigger_profit_pct": 4.0,
+    "btc_trigger_profit_pct": 2.0,
+    "fee_buffer_pct": 0.001,
+    "pair_overrides": {}
+  },
+  "signal_max_age_minutes": 240,
+  "cmp_max_age_minutes": 30,
+  "allow_live_without_stop_loss": false,
+  "allow_live_without_take_profit": false,
+  "dry_run_allow_without_take_profit": true
+}

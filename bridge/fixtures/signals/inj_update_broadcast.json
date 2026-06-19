@@ -1,0 +1,16 @@
+{
+  "source": "telegram",
+  "source_channel_id": "-1001894206677",
+  "source_channel_name": "Alpha Futures Desk",
+  "source_message_id": "8123",
+  "received_at": "2026-06-09T14:21:00Z",
+  "message_type": "position_screenshot",
+  "raw_text": "INJUSDT LONG UPDATE\nPosition running +18%\nEntry: 14.25\nSL: 13.70\nTP: 14.90\nMove SL to entry and keep holding.",
+  "media": [
+    {
+      "type": "photo",
+      "path": "media/inj-position-8123.jpg",
+      "mime_type": "image/jpeg"
+    }
+  ]
+}

@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交易日报 - 2026-02-10</title>
+    <style>
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #0f3460;
+            --text-primary: #eaeaea;
+            --text-secondary: #a0a0a0;
+            --accent: #e94560;
+            --profit: #00d084;
+            --loss: #ff4757;
+            --long: #00d084;
+            --short: #ff4757;
+            --neutral: #a0a0a0;
+            --border: rgba(255,255,255,0.1);
+            --shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            padding: 30px 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+            background: linear-gradient(90deg, var(--text-primary), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--border);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .card-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .icon {
+            font-size: 1.2rem;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 16px;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 16px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stat-value {
+            font-size: 1.4rem;
+            font-weight: 600;
+            font-family: "SF Mono", Monaco, monospace;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+
+        th, td {
+            padding: 12px 8px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            color: var(--text-secondary);
+            font-weight: 500;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .mono {
+            font-family: "SF Mono", Monaco, monospace;
+        }
+
+        .symbol {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge.long, .badge.executed {
+            background: rgba(0, 208, 132, 0.2);
+            color: var(--long);
+        }
+
+        .badge.short {
+            background: rgba(255, 71, 87, 0.2);
+            color: var(--short);
+        }
+
+        .badge.pending {
+            background: rgba(160, 160, 160, 0.2);
+            color: var(--neutral);
+        }
+
+        .profit {
+            color: var(--profit);
+        }
+
+        .loss {
+            color: var(--loss);
+        }
+
+        .neutral {
+            color: var(--neutral);
+        }
+
+        .risk-indicator {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 16px;
+        }
+
+        .risk-bar {
+            flex: 1;
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .risk-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .risk-fill.low {
+            background: var(--profit);
+            width: 12.6%;
+        }
+
+        .risk-fill.medium {
+            background: #ffa502;
+            width: 12.6%;
+        }
+
+        .risk-fill.high {
+            background: var(--loss);
+            width: 12.6%;
+        }
+
+        .risk-value {
+            font-weight: 600;
+            font-family: "SF Mono", Monaco, monospace;
+        }
+
+        .empty {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 24px;
+            font-style: italic;
+        }
+
+        footer {
+            text-align: center;
+            padding: 30px;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            border-top: 1px solid var(--border);
+            margin-top: 20px;
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 12px;
+            }
+
+            .card {
+                padding: 16px;
+            }
+
+            h1 {
+                font-size: 1.4rem;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 12px;
+            }
+
+            .stat-value {
+                font-size: 1.1rem;
+            }
+
+            th, td {
+                padding: 8px 4px;
+                font-size: 0.85rem;
+            }
+
+            table {
+                font-size: 0.85rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 交易日报</h1>
+            <p class="subtitle">2026-02-10 · 生成于 2026-02-09 21:47:16</p>
+        </header>
+
+        <!-- 账户概览 -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">💰</span>
+                    账户概览
+                </div>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-label">总资产</div>
+                    <div class="stat-value">$1,926.92</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">已用保证金</div>
+                    <div class="stat-value">$500.00</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">可用余额</div>
+                    <div class="stat-value">$1,426.92</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">今日盈亏</div>
+                    <div class="stat-value profit">$120.50</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 当前持仓 -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">📈</span>
+                    当前持仓
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>币种</th>
+                        <th>方向</th>
+                        <th>数量</th>
+                        <th>开仓价</th>
+                        <th>当前价</th>
+                        <th>止损</th>
+                        <th>盈亏</th>
+                    </tr>
+                </thead>
+                <tbody>
+
+            <tr>
+                <td><span class="symbol">BTCUSDT</span></td>
+                <td><span class="badge long">LONG</span></td>
+                <td>0.3570</td>
+                <td class="mono">68,250.00</td>
+                <td class="mono">69,000.00</td>
+                <td class="mono">67,550.00</td>
+                <td class="mono profit">267.75</td>
+            </tr>
+
+            <tr>
+                <td><span class="symbol">ETHUSDT</span></td>
+                <td><span class="badge short">SHORT</span></td>
+                <td>2.5000</td>
+                <td class="mono">3,650.00</td>
+                <td class="mono">3,620.00</td>
+                <td class="mono">3,750.00</td>
+                <td class="mono profit">75.00</td>
+            </tr>
+
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 待处理订单 -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">⏳</span>
+                    待处理订单
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>币种</th>
+                        <th>方向</th>
+                        <th>数量</th>
+                        <th>价格</th>
+                    </tr>
+                </thead>
+                <tbody>
+
+            <tr>
+                <td><span class="symbol">DOTUSDT</span></td>
+                <td><span class="badge long">BUY</span></td>
+                <td>100.0000</td>
+                <td class="mono">4.8500</td>
+            </tr>
+
+            <tr>
+                <td><span class="symbol">SOLUSDT</span></td>
+                <td><span class="badge short">SELL</span></td>
+                <td>10.0000</td>
+                <td class="mono">185.5000</td>
+            </tr>
+
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 24小时信号 -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">🔔</span>
+                    24小时信号
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>币种</th>
+                        <th>动作</th>
+                        <th>状态</th>
+                        <th>时间</th>
+                    </tr>
+                </thead>
+                <tbody>
+
+            <tr>
+                <td><span class="symbol">BTCUSDT</span></td>
+                <td><span class="badge long">LONG</span></td>
+                <td><span class="badge executed">executed</span></td>
+                <td>09:15</td>
+            </tr>
+
+            <tr>
+                <td><span class="symbol">ETHUSDT</span></td>
+                <td><span class="badge short">SHORT</span></td>
+                <td><span class="badge executed">executed</span></td>
+                <td>14:22</td>
+            </tr>
+
+            <tr>
+                <td><span class="symbol">DOTUSDT</span></td>
+                <td><span class="badge long">LONG</span></td>
+                <td><span class="badge pending">pending</span></td>
+                <td>16:45</td>
+            </tr>
+
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 风险概览 -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">⚠️</span>
+                    风险概览
+                </div>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-label">总敞口</div>
+                    <div class="stat-value">$24,385.00</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">敞口比例</div>
+                    <div class="stat-value medium">12.6%</div>
+                </div>
+            </div>
+            <div class="risk-indicator">
+                <div class="risk-bar">
+                    <div class="risk-fill medium"></div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>交易日报 · 仅供个人参考 · 投资有风险</p>
+        </footer>
+    </div>
+</body>
+</html>

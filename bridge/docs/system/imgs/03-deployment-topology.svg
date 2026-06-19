@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820">
+  <rect width="1400" height="820" fill="#f8f3e7"/>
+  <style>
+    .title{font:700 40px system-ui;fill:#111827}.h{font:700 22px system-ui;fill:#111827}.t{font:500 16px system-ui;fill:#374151}
+    .box{fill:#fffdf7;stroke:#111827;stroke-width:3;rx:18}.host{fill:#e0f2fe}.svc{fill:#fefce8}.safe{fill:#dcfce7}
+    .line{stroke:#111827;stroke-width:4;fill:none;marker-end:url(#arrow)}
+  </style>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#111827"/></marker></defs>
+  <text x="70" y="70" class="title">Remote Deployment Topology</text>
+
+  <rect x="70" y="140" width="560" height="560" class="box host"/>
+  <text x="105" y="185" class="h">balen.wang</text>
+  <text x="105" y="218" class="t">Hermes trader and telegram-watcher</text>
+  <rect x="115" y="265" width="460" height="95" class="box svc"/>
+  <text x="145" y="305" class="h">LaunchAgents</text>
+  <text x="145" y="335" class="t">ai.hermes.gateway, ai.hermes.gateway-trader, ai.openclaw.gateway</text>
+  <rect x="115" y="405" width="460" height="95" class="box svc"/>
+  <text x="145" y="445" class="h">PM2 telegram-watcher</text>
+  <text x="145" y="475" class="t">imports signal, forwards trader cron</text>
+  <rect x="115" y="545" width="460" height="95" class="box svc"/>
+  <text x="145" y="585" class="h">crypto-trader skill</text>
+  <text x="145" y="615" class="t">/Users/balen/.hermes/profiles/trader/skills</text>
+
+  <rect x="770" y="140" width="560" height="560" class="box host"/>
+  <text x="805" y="185" class="h">Freqtrade Server</text>
+  <text x="805" y="218" class="t">2001:df1:7880:2::18dc</text>
+  <rect x="815" y="265" width="460" height="95" class="box safe"/>
+  <text x="845" y="305" class="h">freqtrade-dryrun</text>
+  <text x="845" y="335" class="t">127.0.0.1:18081 -> API pong</text>
+  <rect x="815" y="405" width="460" height="95" class="box safe"/>
+  <text x="845" y="445" class="h">dashboard frontend</text>
+  <text x="845" y="475" class="t">127.0.0.1:13000/dashboard -> HTTP 200</text>
+  <rect x="815" y="545" width="460" height="95" class="box safe"/>
+  <text x="845" y="585" class="h">signal store and reports</text>
+  <text x="845" y="615" class="t">SQLite-backed SignalStrategy runtime</text>
+
+  <path d="M575 452 C660 420 710 420 815 452" class="line"/>
+  <text x="612" y="395" class="t">SSH importer bridge: root@149.104.30.223</text>
+</svg>

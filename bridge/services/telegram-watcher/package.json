@@ -1,0 +1,22 @@
+{
+  "name": "telegram-watcher",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test __tests__/*.test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "express": "^5.2.1",
+    "input": "^1.0.1",
+    "qrcode": "^1.5.4",
+    "telegram": "^2.26.22"
+  }
+}

@@ -1,0 +1,25 @@
+# 顶层兜底忽略（各子目录另有更细的 .gitignore）
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 运行时与密钥
+.env
+.runtime/
+*.session
+
+# 编辑器
+*.swp

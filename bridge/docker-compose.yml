@@ -1,0 +1,205 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: trader
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_dev_only}
+    ports:
+      - "127.0.0.1:15432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+
+  api:
+    image: python:3.12-slim
+    working_dir: /work
+    command: sh -c "python -m pip install -r requirements.txt && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      PYTHONPATH: /work/apps/api
+      RISK_STATE_PATH: /work/.runtime/risk-state.json
+      SIGNAL_STORE_URL: sqlite:////data/signal_store.db
+      AUTH_USERNAME: ${AUTH_USERNAME:-}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      AUTH_ROLE: ${AUTH_ROLE:-risk_admin}
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-}
+      RISK_ADMIN_API_TOKEN: ${RISK_ADMIN_API_TOKEN:-}
+      VIEWER_API_TOKEN: ${VIEWER_API_TOKEN:-}
+      TRADER_API_TOKEN: ${TRADER_API_TOKEN:-}
+      SYSTEM_OBSERVER_API_TOKEN: ${SYSTEM_OBSERVER_API_TOKEN:-}
+      FREQTRADE_BASE_URL: ${FREQTRADE_API_URL:-http://freqtrade-dryrun:8080}
+      FREQTRADE_API_USER: ${FREQTRADE_API_USERNAME:-freqtrade-dry}
+      FREQTRADE_API_PASSWORD: ${FREQTRADE_API_PASSWORD:-dry-run-local-only-change-me}
+    ports:
+      - "127.0.0.1:8000:8000"
+    expose:
+      - "8000"
+    volumes:
+      - .:/work
+      - signal-data:/data
+
+  frontend:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:3000:80"
+    expose:
+      - "80"
+    volumes:
+      - ./apps/dashboard/dist:/usr/share/nginx/html:ro
+      - ./docker/frontend/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      default:
+        aliases:
+          - dashboard
+
+  freqtrade-dryrun:
+    image: freqtradeorg/freqtrade:stable
+    # FREQTRADE_CONFIG=config_live.json in /srv/trader/.env switches to live;
+    # default stays dry-run so local/dev never trades real money
+    command: trade --config /freqtrade/user_data/${FREQTRADE_CONFIG:-config_dry_run.json} --strategy SignalStrategy
+    environment:
+      SIGNAL_STORE_URL: sqlite:////data/signal_store.db
+      # channel_routing lookup source for per-account signal filtering
+      TRADING_DB_PATH: /data/watcher-trading.db
+      # telegram stays off until real bot token is injected (M4-02 follow-up)
+      FREQTRADE__TELEGRAM__ENABLED: "false"
+      # FreqUI rides hk.balen.wang on 443; freqtrade login is the auth gate,
+      # so production overrides the local-only defaults via /srv/trader/.env
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_API_USERNAME:-freqtrade-dry}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_API_PASSWORD:-dry-run-local-only-change-me}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_JWT_SECRET_KEY:-dry-run-local-only-change-me}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${FREQTRADE_WS_TOKEN:-dry-run-local-only-change-me}
+      # live exchange keys (M6-02): read-only validation while dry_run stays on;
+      # values live only in /srv/trader/.env (0600), empty locally
+      FREQTRADE__EXCHANGE__KEY: ${FREQTRADE_EXCHANGE_KEY:-}
+      FREQTRADE__EXCHANGE__SECRET: ${FREQTRADE_EXCHANGE_SECRET:-}
+    ports:
+      - "127.0.0.1:18081:8080"
+    expose:
+      - "8080"
+    volumes:
+      - ./user_data:/freqtrade/user_data
+      - ./freqtrade/signal_strategy:/freqtrade/freqtrade/signal_strategy:ro
+      - ./apps/api/app:/freqtrade/app:ro
+      - signal-data:/data
+    restart: unless-stopped
+
+  freqtrade-b:
+    # Second live execution instance (account balenwong3@gmail.com).
+    # Reads the SAME signal_store + channel_routing as freqtrade-dryrun; the
+    # per-account channel filter (signal_strategy.account_id) keeps the two
+    # instances on disjoint channels so they never reserve the same signal.
+    # FREQTRADE_CONFIG_B=config_live_b.json in /srv/trader/.env switches to live;
+    # default stays dry-run so local/dev never trades real money.
+    image: freqtradeorg/freqtrade:stable
+    command: trade --config /freqtrade/user_data/${FREQTRADE_CONFIG_B:-config_dry_run.json} --strategy SignalStrategy
+    environment:
+      SIGNAL_STORE_URL: sqlite:////data/signal_store.db
+      TRADING_DB_PATH: /data/watcher-trading.db
+      FREQTRADE__TELEGRAM__ENABLED: "false"
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_API_USERNAME:-freqtrade-dry}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_API_PASSWORD:-dry-run-local-only-change-me}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_JWT_SECRET_KEY:-dry-run-local-only-change-me}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${FREQTRADE_WS_TOKEN:-dry-run-local-only-change-me}
+      # balenwong3 live keys; values live only in /srv/trader/.env (0600), empty locally
+      FREQTRADE__EXCHANGE__KEY: ${FREQTRADE_EXCHANGE_KEY_B:-}
+      FREQTRADE__EXCHANGE__SECRET: ${FREQTRADE_EXCHANGE_SECRET_B:-}
+    ports:
+      - "127.0.0.1:18082:8080"
+    expose:
+      - "8080"
+    volumes:
+      - ./user_data:/freqtrade/user_data
+      - ./freqtrade/signal_strategy:/freqtrade/freqtrade/signal_strategy:ro
+      - ./apps/api/app:/freqtrade/app:ro
+      - signal-data:/data
+    restart: unless-stopped
+
+  watcher:
+    build:
+      context: .
+      dockerfile: docker/watcher/Dockerfile
+    volumes:
+      # rw: a fresh Telegram login persists its new session back into this file
+      - /srv/trader-secrets/telegram-watcher.config.json:/app/config.json
+      - signal-data:/data
+    environment:
+      SIGNAL_IMPORTER_REMOTE_HOST: ""
+      SIGNAL_IMPORTER_CWD: /app
+      SIGNAL_STORE_URL: sqlite:////data/signal_store.db
+      TRADING_DB_PATH: /data/watcher-trading.db
+      # M3-04: the python importer (invoked here via execFile) reads these to
+      # query freqtrade for the signal pair's current position (advisory context)
+      FREQTRADE_BASE_URL: ${FREQTRADE_API_URL:-http://freqtrade-dryrun:8080}
+      FREQTRADE_API_USER: ${FREQTRADE_API_USERNAME:-freqtrade-dry}
+      FREQTRADE_API_PASSWORD: ${FREQTRADE_API_PASSWORD:-dry-run-local-only-change-me}
+      # HK server reaches Telegram directly; the SOCKS default targets the Mac's local Clash
+      TELEGRAM_PROXY_ENABLED: "0"
+      # provider DPI kills plain MTProto TCP (connect ok, then 90s silence + close);
+      # WSS rides TLS on 443 and gets through
+      TELEGRAM_USE_WSS: "1"
+      # iron rule #1: the Hermes place-order cron path is retired wholesale;
+      # freqtrade is the only execution engine
+      HERMES_TRADER_CRON_ENABLED: "0"
+      IMPORTER_AUDIT_LOG: /data/importer-audit.jsonl
+      WATCHER_ALERT_BOT_TOKEN: ""
+      WATCHER_ALERT_CHAT_ID: ""
+      WATCHER_HOST: 0.0.0.0
+      WATCHER_MEDIA_DIR: /data/media
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9100"
+    expose:
+      - "9100"
+
+  caddy:
+    # HK server uses the host caddy (owns 443 + certs for *.balen.wang);
+    # this containerized edge is for hosts without a system caddy.
+    profiles: ["edge"]
+    image: caddy:2-alpine
+    depends_on:
+      - api
+      - frontend
+      - watcher
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+
+  worker:
+    image: python:3.12-slim
+    working_dir: /work
+    command: >
+      sh -c 'python -m pip install -r requirements.txt || exit 1;
+      last_daily_date="" ;
+      while true; do
+        python scripts/reconcile.py;
+        current_hour=$$(date -u +%H);
+        current_date=$$(date -u +%F);
+        report_hour=$${RECONCILE_DAILY_REPORT_UTC_HOUR:-0};
+        report_hour=$$(printf "%02d" "$$report_hour");
+        if [ "$$current_hour" = "$$report_hour" ] && [ "$$last_daily_date" != "$$current_date" ]; then
+          python -c "import datetime, httpx; d = datetime.datetime.now(datetime.timezone.utc).date().isoformat(); httpx.post(\"http://api:8000/api/reports/daily/snapshot\", json={\"date\": d}, timeout=30).raise_for_status()" && last_daily_date="$$current_date";
+        fi;
+        sleep "$${RECONCILE_INTERVAL_SECONDS:-300}";
+      done'
+    environment:
+      FREQTRADE_API_URL: ${FREQTRADE_API_URL:-http://freqtrade-dryrun:8080}
+      FREQTRADE_API_USERNAME: ${FREQTRADE_API_USERNAME:-}
+      FREQTRADE_API_PASSWORD: ${FREQTRADE_API_PASSWORD:-}
+      SIGNAL_STORE_URL: ${SIGNAL_STORE_URL:-sqlite:////data/signal_store.db}
+      RECONCILE_ALERT_BOT_TOKEN: ${RECONCILE_ALERT_BOT_TOKEN:-}
+      RECONCILE_ALERT_CHAT_ID: ${RECONCILE_ALERT_CHAT_ID:-}
+      RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-300}
+      RECONCILE_DAILY_REPORT_UTC_HOUR: ${RECONCILE_DAILY_REPORT_UTC_HOUR:-0}
+    volumes:
+      - .:/work
+      - signal-data:/data
+
+volumes:
+  signal-data:

@@ -1,0 +1,17 @@
+{$CADDY_DOMAIN} {
+	# For local development with Caddy's internal CA, uncomment:
+	# tls internal
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle /watcher/* {
+		uri strip_prefix /watcher
+		reverse_proxy watcher:9100
+	}
+
+	handle {
+		reverse_proxy dashboard:80
+	}
+}

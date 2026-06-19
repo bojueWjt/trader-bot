@@ -1,0 +1,48 @@
+{
+	# Host caddy config for HK server (149.104.30.223), caddy 2.6.x syntax.
+	# Deployed to /etc/caddy/Caddyfile; reload with: systemctl reload caddy
+	# Provider security group only opens 22/80/443 — everything rides 443.
+}
+
+hk.balen.wang {
+	# FreqUI (freqtrade dry-run web console). No caddy basicauth here:
+	# FreqUI's own login uses the Authorization header (Basic for token
+	# endpoints, Bearer after), which basicauth would swallow. The gate is
+	# freqtrade's api_server login with strong creds from /srv/trader/.env.
+	handle /health {
+		respond "ok\n" 200
+	}
+	# the old catch-all probe token, kept reachable at its exact path
+	handle /qctbhy0a32hucub {
+		respond "qctbhy0a32hucub\n" 200
+	}
+	handle {
+		reverse_proxy 127.0.0.1:18081
+	}
+}
+
+hk-bot.balen.wang {
+	# telegram-watcher UI + its API/media (no built-in auth -> basicauth gate).
+	# Watcher API subpaths are disjoint from the bridge API namespace.
+	@watcher path /watcher /watcher/* /api/status /api/config /api/messages /api/messages/* /api/dialogs /api/dialogs/* /api/login/* /api/disconnect /api/reconnect /api/groups /api/trading/* /api/price-alerts /api/price-alerts/* /api/price-monitor/* /media/*
+	handle @watcher {
+		basicauth {
+			balen $2a$14$bDfyWbBtmH1hAh73Ni0dfel8JSjC1MlJ/FocSsmUyrf/kPilM/Ebq
+		}
+		uri strip_prefix /watcher
+		reverse_proxy 127.0.0.1:9090
+	}
+
+	# bridge API (signals, risk, audit, system snapshot, freqtrade read proxy, auth)
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle /auth/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# dashboard SPA (default)
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}
