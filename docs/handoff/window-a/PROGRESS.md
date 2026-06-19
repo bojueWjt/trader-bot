@@ -19,10 +19,12 @@
 | A-07 | ✅ done | `198cb0d` | auth/permission/audit (222 bridge + 10 sec tests) |
 | A-05 | ✅ done* | `2655ca1` | Hermes worker — code + 11 tests; *real smoke BLOCKED |
 | fix | ✅ done | `134a49e` | 0002 migration: A-02/A-04 queue schema mismatch |
-| A-06 | 🔄 in_progress | — | decision gateway + risk governor (←A-05) |
-| A-08 | ⬜ ready | — | kill switch + node commands (←A-07) |
-| A-09 | ⬜ ready | — | real projection snapshot/API (←A-07) |
-| A-11 | ⬜ pending | — | ←all |
+| A-06 | ✅ done | `98bc4b2` | decision gateway + risk governor (28 tests) |
+| A-08 | ✅ done | `2c2f3da` | kill switch + node command acks (8 tests) |
+| A-09 | ✅ done | `72a803d` | real projection SystemSnapshotV1 + de-fake (9 tests) |
+| A-11 | ✅ done | (this commit) | regression + WINDOW_A_HANDOFF.md |
+
+**Window A complete.** Full regression: 92 (python, real pg@16) + 222 (bridge) = **314 passing**; no-semantic-regex gate **147 files / 0 violations**. A-05's real-Hermes 10-message smoke remains **BLOCKED** on a real endpoint + data (see `WINDOW_A_HANDOFF.md` §6). Codex hit its usage limit mid-run; A-05/A-06/A-08/A-09 + the 0002/0003 integration fixes were implemented directly by Claude and verified on real pg@16. Handoff: `WINDOW_A_HANDOFF.md`.
 
 ## A-00 — 建立安全基线并冻结旧自动开仓路径 — DONE
 Commit: `00b8bc0cf2a6500f7d0296875f1c13e187458e07`
