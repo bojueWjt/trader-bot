@@ -223,3 +223,170 @@ def ingest_execution_event(
         return {"ingested": ev_id, "status": "ok"}
     finally:
         conn.close()
+
+
+def _cp_paths() -> None:
+    """Put the control-plane sibling packages on sys.path (idempotent)."""
+    cp = _HERE.parent
+    for p in (cp, cp / "commands", cp / "security", cp / "db", cp / "risk", cp / "risk_state"):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+
+
+# operator_commands.command_type (A) -> node CommandType (B)
+_NODE_COMMAND_TYPE_MAP = {
+    "HALT": "halt", "RESUME": "resume", "REDUCE": "set_reducing",
+    "CANCEL_ALL": "cancel_all", "CLOSE_ALL": "close_all",
+}
+# node CommandAckStatus (B) -> command_node_acks.status (A)
+_NODE_ACK_STATUS_MAP = {"accepted": "acked", "completed": "acked", "failed": "failed"}
+
+
+@app.post("/v1/nodes/{node_id}/intents/{intent_id}/ack")
+def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
+                    authorization: str | None = Header(default=None)):
+    """A<->B seam: node acks an intent (received/accepted/executed/rejected/...)."""
+    require_node(authorization)
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    _cp_paths()
+    from audit import record_audit_event
+
+    status = str(body.get("status") or "received")
+    conn = psycopg2.connect(database_url)
+    try:
+        record_audit_event(
+            conn, event_type=f"intent_ack.{status}", aggregate_type="trade_intent",
+            aggregate_id=intent_id, actor=f"node:{node_id}",
+            payload={"status": status, "detail": body.get("detail"), "account_id": body.get("account_id")},
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.post("/v1/nodes/{node_id}/execution-events")
+def post_node_events(node_id: str, body: dict = Body(default={}),
+                     authorization: str | None = Header(default=None)):
+    """A<->B seam: node pushes a batch of ExecutionEventEnvelopeV1; idempotent by event_id."""
+    require_node(authorization)
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    _cp_paths()
+    from repository import ProjectionWriter
+
+    conn = psycopg2.connect(database_url)
+    acked: list[str] = []
+    try:
+        writer = ProjectionWriter(conn)
+        for ev in body.get("events", []):
+            if not ev.get("event_id"):
+                continue
+            writer.insert_execution_event({**ev, "node_id": ev.get("node_id") or node_id})
+            hints = ev.get("payload") or {}
+            ev_id, ts = ev["event_id"], ev.get("ts_event")
+            if isinstance(hints.get("account"), dict):
+                writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
+            if isinstance(hints.get("position"), dict):
+                writer.upsert_position_projection({**hints["position"], "event_id": ev_id, "ts_event": ts})
+            if isinstance(hints.get("order"), dict):
+                writer.upsert_order_projection({**hints["order"], "event_id": ev_id, "ts_event": ts})
+            acked.append(str(ev["event_id"]))
+        conn.commit()
+        return {"acked_event_ids": acked}
+    finally:
+        conn.close()
+
+
+@app.post("/v1/nodes/{node_id}/heartbeat")
+def node_heartbeat(node_id: str, body: dict = Body(default={}),
+                   authorization: str | None = Header(default=None)):
+    """A<->B seam: node liveness + readiness; feeds snapshot freshness/missing_nodes."""
+    require_node(authorization)
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    from psycopg2.extras import Json
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO node_heartbeats (node_id, account_id, status, version, payload, last_seen_at) "
+                "VALUES (%s,%s,%s,%s,%s, now()) "
+                "ON CONFLICT (node_id) DO UPDATE SET account_id=COALESCE(EXCLUDED.account_id, node_heartbeats.account_id), "
+                "status=EXCLUDED.status, version=EXCLUDED.version, payload=EXCLUDED.payload, last_seen_at=now()",
+                (node_id, body.get("account_id"), str(body.get("trading_state") or "UNKNOWN"),
+                 body.get("version"),
+                 Json({k: body.get(k) for k in
+                       ("readiness", "projection_lag_ms", "reconciliation_state", "last_event_id", "ts")})),
+            )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/v1/nodes/{node_id}/commands")
+def node_commands(node_id: str, after: str | None = None,
+                  authorization: str | None = Header(default=None)):
+    """A<->B seam: node polls its pending operator commands (kill-switch path)."""
+    require_node(authorization)
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT oc.command_id::text, oc.command_type, oc.scope, oc.created_at "
+                "FROM operator_commands oc JOIN command_node_acks na ON na.command_id=oc.command_id "
+                "WHERE na.node_id=%s AND na.status='pending' ORDER BY oc.created_at",
+                (node_id,),
+            )
+            rows = cur.fetchall()
+        return {"commands": [
+            {"command_id": r[0], "type": _NODE_COMMAND_TYPE_MAP.get(r[1], r[1].lower()),
+             "args": r[2] or {}, "issued_at": r[3].isoformat() if r[3] else None}
+            for r in rows
+        ]}
+    finally:
+        conn.close()
+
+
+@app.post("/v1/nodes/{node_id}/commands/{command_id}/ack")
+def ack_node_command(node_id: str, command_id: str, body: dict = Body(default={}),
+                     authorization: str | None = Header(default=None)):
+    """A<->B seam: node acks an operator command; recomputes the command's rollup."""
+    require_node(authorization)
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    _cp_paths()
+    from commands import record_ack
+
+    status = _NODE_ACK_STATUS_MAP.get(str(body.get("status")), "acked")
+    conn = psycopg2.connect(database_url)
+    try:
+        record_ack(conn, command_id, node_id, status=status, detail=body.get("error"))
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/v1/accounts/{account_id}")
+def account_generated_at(account_id: str, authorization: str | None = Header(default=None)):
+    """A<->B seam: node reads the snapshot freshness (generated_at) for its account."""
+    require_node(authorization)
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    conn = psycopg2.connect(database_url)
+    try:
+        snap = build_system_snapshot(conn)
+        return {"account_id": account_id, "generated_at": snap.get("generated_at")}
+    finally:
+        conn.close()

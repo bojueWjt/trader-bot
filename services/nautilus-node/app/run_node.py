@@ -65,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
     node = runtime.trading_node
     if node is None:
         raise RuntimeError("TradingNode was not assembled")
+    # Nautilus lifecycle: build the data/exec clients from the registered adapter
+    # factories before starting. Host-verify gap: the live path skipped node.build(),
+    # so node.run() raised "clients have not been built".
+    node.build()
     node.run()
     return 0
 
