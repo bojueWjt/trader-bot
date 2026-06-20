@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.7
+
+# B-00: base image pinned by digest discovered on the target host
+# (Debian 13 / Python 3.12.13) via services/nautilus-node/spike/run_spike.sh on 2026-06-19.
+# Re-pin if the base image is rebuilt upstream.
+FROM python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH="/home/nautilus/.local/bin:${PATH}"
+
+RUN groupadd --system nautilus \
+    && useradd --system --gid nautilus --home-dir /home/nautilus --create-home nautilus
+
+WORKDIR /workspace
+
+COPY infra/docker/nautilus/requirements.spike.lock.txt /tmp/requirements.spike.lock.txt
+
+RUN test -s /tmp/requirements.spike.lock.txt \
+    && ! grep -q "Host-generated placeholder" /tmp/requirements.spike.lock.txt \
+    && python -m pip install --require-hashes -r /tmp/requirements.spike.lock.txt
+
+COPY services/nautilus-node/spike/ services/nautilus-node/spike/
+COPY tests/nautilus/spike/ tests/nautilus/spike/
+COPY docs/handoff/window-b/NAUTILUS_COMPATIBILITY_REPORT.md docs/handoff/window-b/NAUTILUS_COMPATIBILITY_REPORT.md
+
+RUN chown -R nautilus:nautilus /workspace
+
+USER nautilus
+
+CMD ["python", "services/nautilus-node/spike/check_version.py"]
