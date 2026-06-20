@@ -46,9 +46,18 @@ def main(argv: list[str] | None = None) -> int:
         sqlite_conn.row_factory = sqlite3.Row
         with psycopg2.connect(args.pg_dsn) as pg_conn:
             ensure_legacy_tables(pg_conn)
-            import_signals(sqlite_conn, pg_conn)
-            import_signal_events(sqlite_conn, pg_conn)
-            import_signal_operations(sqlite_conn, pg_conn)
+            # Legacy SQLite schemas vary across deployments. Import each source table
+            # that exists; skip (don't abort) the ones this DB doesn't have. The
+            # sqlite read raises before any PostgreSQL write, so the tx stays clean.
+            for label, importer in (
+                ("signals", import_signals),
+                ("signal_events", import_signal_events),
+                ("signal_operations", import_signal_operations),
+            ):
+                try:
+                    importer(sqlite_conn, pg_conn)
+                except sqlite3.OperationalError as exc:
+                    print(f"skip legacy source '{label}': {exc}")
             pg_conn.commit()
 
             for table_name in TABLE_ORDER:
