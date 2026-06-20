@@ -144,7 +144,14 @@ def evaluate(
 
     # 8. exposure caps (only opening actions add exposure)
     if action in OPENING_ACTIONS:
-        existing_notional = float(risk_state.get("exposure_notional", 0) or 0)
+        # instrument exposure = live notional already open on this account+instrument
+        # (from the positions projection), not a stale/never-written risk_state counter.
+        existing_notional = sum(
+            float(p.get("notional", 0) or 0)
+            for p in positions
+            if p.get("account_id") == account_id and p.get("instrument_id") == instrument
+        )
+        # open_risk_fraction stays from risk_state until the projection populates it.
         existing_risk = float(risk_state.get("open_risk_fraction", 0) or 0)
         if existing_notional >= policy.max_instrument_notional:
             return reject("instrument_exposure", "instrument notional cap reached", account_id)
