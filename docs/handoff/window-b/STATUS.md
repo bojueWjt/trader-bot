@@ -21,14 +21,18 @@ SHA (PLAN "不可伪造完成").
 | B-01 | Per-account TradingNode lifecycle | **done** | `9245c4d` — hk container: pytest 4/4, fail-closed creds, BinanceAccountType.USDT_FUTURES + Environment.TESTNET |
 | B-02 | ApprovedTradeIntent CustomData + Data Client | **done** | `8ff1d2e` — hk pytest 15 passed; DataType API bug found+fixed |
 | B-03 | IntentExecutionStrategy open/add | **done** | hk pytest 10 passed/2 skipped; StrategyConfig + read-only-cache API bugs found+fixed |
-| B-04 | Stops/TPs/position updates | todo | depends B-03 |
-| B-05 | RiskEngine + trading-state commands | todo | depends B-01,B-03 |
+| B-04 | Stops/TPs/position updates | **done** | `d470980` — hk 21 passed; OrderFactory/Strategy order API introspection-confirmed |
+| B-05 | RiskEngine + trading-state commands | **done** | `cf6c21c` — hk 12 passed; LiveRiskEngineConfig fields confirmed; close_all sequence |
 | B-06 | Persistent cache/bus + reconciliation | **done** | `81f356a` — hk pytest 15 passed; per-account Redis prefix + reconciliation config |
-| B-07 | Projection Actor + spool | todo | depends B-01,B-03,B-04 |
-| B-08 | Two-account isolation + routing | todo | depends B-01,B-02,B-06,B-07 |
+| B-07 | Projection Actor + spool | **done** | `8401a86` — hk 6 passed; deterministic event_id; ordered spool |
+| B-08 | Two-account isolation + routing | **done** | `7db40e3` — hk 7 passed; `docker compose config` OK |
 | B-09 | Dashboard → real control-plane API | **done** | `8bf28ae` — local vitest 7/7, build green, no prod fake hits (FRONTEND fakes only) |
-| B-10 | Containers/secrets/health/repro build | todo | depends B-00,B-01,B-08,B-09 |
-| B-11 | Regression + handoff (WINDOW_B_HANDOFF.md @ repo root, then GO-SIGNAL B_READY=1) | todo | depends all; testnet evidence runtime-gated |
+| B-10 | Containers/secrets/health/repro build | **done** | `496330d` — node assembles to HALTED/testnet from source + built image; clean lockfile build; compose OK; no plaintext secrets |
+| B-11 | Regression + handoff | **done** | `9cec593` regression (hk 84 passed/11 skipped/0 failed); `WINDOW_B_HANDOFF.md` @ repo root; `GO-SIGNAL B_READY=1` |
+
+**Window B complete:** all 12 P0 tasks done & hk-verified. Residual = testnet-keyed acceptance
+(needs_review) + 11 deferred running-node/real-Redis integration tests (window C). See
+`WINDOW_B_HANDOFF.md`.
 
 **hk runtime test loop:** isolated `/srv/hermes-nautilus-b/repo` + `nautilus-spike:1.227.0` image (nautilus + pytest; `pip install pydantic` for verification). Node tests run there per-task; window-C handoff via `trader-bot-window-c-staging/GO-SIGNAL.txt` (`B_READY=1`) only after B-11.
 
