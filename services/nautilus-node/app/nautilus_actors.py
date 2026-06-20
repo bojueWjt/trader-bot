@@ -201,6 +201,79 @@ class ExecutionProjectionActor(Actor):
             return
 
 
+class CommandPollerActor(Actor):
+    """Polls operator commands from the control-plane and applies them to the node
+    lifecycle (kill-switch path: HALT/RESUME/SET_REDUCING -> trading state). The intent
+    consumer already gates new positions on HALTED, so HALT stops new entries at once."""
+
+    def __init__(
+        self,
+        control_plane: Any,
+        lifecycle: Any,
+        node_id: str,
+        *,
+        poll_interval_seconds: float = 2.0,
+        timer_name: str = "operator-commands.poll",
+    ) -> None:
+        _init_actor_base(self)
+        self._control_plane = control_plane
+        self._lifecycle = lifecycle
+        self._node_id = node_id
+        self._poll_interval_seconds = poll_interval_seconds
+        self._timer_name = timer_name
+
+    def on_start(self) -> None:
+        self._register_poll_timer()
+
+    def _register_poll_timer(self) -> None:
+        clock = getattr(self, "clock", None)
+        set_timer = getattr(clock, "set_timer", None) if clock is not None else None
+        if not callable(set_timer):
+            return
+        interval = timedelta(seconds=self._poll_interval_seconds)
+        try:
+            set_timer(name=self._timer_name, interval=interval, callback=self._on_poll_timer)
+            return
+        except TypeError:
+            pass
+        set_timer(self._timer_name, interval, self._on_poll_timer)
+
+    def _on_poll_timer(self, *_args: Any, **_kwargs: Any) -> None:
+        self.poll_once()
+
+    def poll_once(self) -> int:
+        commands = self._control_plane.poll_commands(self._node_id, None)
+        for cmd in commands:
+            status, error = self._apply(cmd)
+            try:
+                self._control_plane.ack_command(self._node_id, cmd.command_id, status, error=error)
+            except Exception:  # ack failure must not crash the poll loop
+                pass
+        return len(commands)
+
+    def _apply(self, cmd: Any):
+        from execution_domain.control_plane import (  # type: ignore
+            CommandAckStatus,
+            CommandType,
+            TradingState,
+        )
+
+        try:
+            if cmd.type == CommandType.HALT:
+                self._lifecycle.apply_operator_state(TradingState.HALTED, "operator_command")
+            elif cmd.type == CommandType.RESUME:
+                self._lifecycle.apply_operator_state(TradingState.ACTIVE, "operator_command")
+            elif cmd.type == CommandType.SET_REDUCING:
+                self._lifecycle.apply_operator_state(TradingState.REDUCING, "operator_command")
+            else:
+                # cancel_all / close_all need order/position actions on the trader -
+                # not yet wired into the node (follow-up).
+                return CommandAckStatus.ACCEPTED, "node_action_not_wired"
+            return CommandAckStatus.COMPLETED, None
+        except Exception as exc:  # e.g. readiness gate on RESUME
+            return CommandAckStatus.FAILED, repr(exc)
+
+
 def _init_actor_base(instance: Actor) -> None:
     try:
         Actor.__init__(instance)

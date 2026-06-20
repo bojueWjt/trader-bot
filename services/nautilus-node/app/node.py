@@ -133,7 +133,11 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
     from nautilus_trader.config import TradingNodeConfig  # type: ignore[import-not-found]
     from nautilus_trader.live.node import TradingNode  # type: ignore[import-not-found]
 
-    from app.nautilus_actors import ExecutionProjectionActor, IntentPublisherActor
+    from app.nautilus_actors import (
+        CommandPollerActor,
+        ExecutionProjectionActor,
+        IntentPublisherActor,
+    )
     from persistence.nautilus_config import (  # lazy: imports Nautilus config classes
         build_cache_config,
         build_live_exec_engine_config,
@@ -163,6 +167,9 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
     node.trader.add_strategy(strategy)
     node.trader.add_actor(IntentPublisherActor(runtime.intent_data_client))
     node.trader.add_actor(ExecutionProjectionActor(runtime.projection_actor))
+    node.trader.add_actor(
+        CommandPollerActor(runtime.control_plane, runtime.lifecycle, runtime.config.node_id)
+    )
     return node
 
 
