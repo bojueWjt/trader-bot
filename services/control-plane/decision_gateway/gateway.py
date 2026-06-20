@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,15 @@ def process_one_decision(
                     ),
                 )
 
+            stale = _freshness_problem(row, decision, policy)
+            if stale:
+                return _write_outcome(
+                    cur, row, governor.RiskDecision(
+                        "needs_review", None, row["instrument_symbol"], {},
+                        stale, [{"name": "freshness", "passed": False}],
+                    ),
+                )
+
             account_id = decision["intent"].get("target_account_id") or policy.default_account_id
             positions = _load_positions(cur, account_id) if account_id else []
             risk_state = (
@@ -104,6 +114,30 @@ def process_one_decision(
                 decision, positions=positions, risk_state=risk_state, policy=policy
             )
             return _write_outcome(cur, row, outcome, decision=decision, policy=policy)
+
+
+def _freshness_problem(row: dict[str, Any], decision: dict[str, Any], policy: RiskPolicy) -> str | None:
+    """Stale-context guard: a decision created too long ago, or already past its
+    valid_until, must not produce new risk (fail closed -> needs_review)."""
+    now = datetime.now(timezone.utc)
+    created = row.get("created_at")
+    if isinstance(created, datetime):
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age = (now - created).total_seconds()
+        if age > policy.freshness_seconds:
+            return f"decision_stale: age {int(age)}s > freshness {policy.freshness_seconds}s"
+    valid_until = (decision.get("intent") or {}).get("valid_until")
+    if valid_until:
+        try:
+            vu = datetime.fromisoformat(str(valid_until).replace("Z", "+00:00"))
+        except ValueError:
+            return f"decision_valid_until_unparseable: {valid_until}"
+        if vu.tzinfo is None:
+            vu = vu.replace(tzinfo=timezone.utc)
+        if now > vu:
+            return f"decision_expired: valid_until {valid_until} passed"
+    return None
 
 
 def _write_outcome(

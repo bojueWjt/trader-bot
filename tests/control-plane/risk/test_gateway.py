@@ -136,6 +136,20 @@ def test_missing_risk_state_fails_closed_to_needs_review(db_conn):
     assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
 
 
+def test_stale_decision_fails_closed_to_needs_review(db_conn):
+    # A decision older than the freshness window must not auto-execute.
+    dec_id = seed_decision(db_conn)
+    seed_risk_state(db_conn)
+    with transaction(db_conn), db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE hermes_decisions SET created_at = now() - interval '2 hours' WHERE decision_id=%s",
+            (dec_id,),
+        )
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+    assert result["status"] == "needs_review"
+    assert result["intent_id"] is None
+
+
 def test_ambiguous_needs_review_without_intent(db_conn):
     seed_decision(db_conn, ambiguous=True)
     result = gateway.process_one_decision(db_conn, policy=POLICY)
