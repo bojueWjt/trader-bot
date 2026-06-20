@@ -123,7 +123,7 @@ class RealHermesClient:
             raise HermesResponseError(f"unexpected response shape: {exc}") from exc
 
         try:
-            return json.loads(content)
+            return json.loads(_extract_json_object(content))
         except (TypeError, json.JSONDecodeError) as exc:
             raise HermesResponseError(f"model content is not valid JSON: {exc}") from exc
 
@@ -132,3 +132,23 @@ class RealHermesClient:
         if base.endswith("/chat/completions"):
             return base
         return f"{base}/chat/completions"
+
+
+def _extract_json_object(content: str | None) -> str:
+    """Reasoning models often wrap the JSON in ```json ... ``` fences or add stray
+    prose. Strip a leading/trailing code fence, then fall back to the outermost
+    {...} span so json.loads sees a clean object."""
+    if not content:
+        return ""
+    text = content.strip()
+    if text.startswith("```"):
+        newline = text.find("\n")
+        text = text[newline + 1:] if newline != -1 else text[3:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
+    if not text.startswith("{"):
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            text = text[start:end + 1]
+    return text

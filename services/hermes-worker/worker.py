@@ -306,8 +306,15 @@ def _assemble_decision(
     model_version: str,
     created_at: str,
 ) -> dict[str, Any]:
-    """Keep the model's semantics; force authoritative identity + pinned model block."""
-    decision = dict(candidate)
+    """Keep the model's semantics; force authoritative identity + pinned model block.
+
+    Whitelist only the contract's semantic fields so a model that adds extra keys
+    (metadata, extracted_data, ...) does not trip additionalProperties validation."""
+    decision = {
+        key: candidate[key]
+        for key in ("classification", "intent", "evidence", "confidence")
+        if key in candidate
+    }
     decision["schema_version"] = "1.0"
     decision["decision_id"] = decision_id
     decision["raw_message_id"] = raw_message_id
