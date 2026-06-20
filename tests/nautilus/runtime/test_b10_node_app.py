@@ -184,9 +184,14 @@ class NautilusActorAdapterTest(unittest.TestCase):
 
         projection = _PlainProjection()
         msgbus = _RecordingMessageBus()
-        actor = ExecutionProjectionActor(projection)
-        actor.msgbus = msgbus  # type: ignore[attr-defined]
 
+        # Nautilus Actor.msgbus is read-only and supplied on register; inject the
+        # recording bus through the _subscription_targets seam instead of assigning it.
+        class _BoundProjectionActor(ExecutionProjectionActor):
+            def _subscription_targets(self):
+                return (msgbus,)
+
+        actor = _BoundProjectionActor(projection)
         actor.on_start()
         actor.on_event("order-event")
 

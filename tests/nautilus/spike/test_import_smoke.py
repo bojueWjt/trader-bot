@@ -20,7 +20,7 @@ def test_nautilus_trader_version_is_pinned() -> None:
     [
         ("nautilus_trader", "__version__"),
         ("nautilus_trader.adapters.binance", "BINANCE"),
-        ("nautilus_trader.adapters.binance", "BINANCE_USDM"),
+        ("nautilus_trader.adapters.binance.common.enums", "BinanceAccountType"),
         ("nautilus_trader.adapters.binance.config", "BinanceDataClientConfig"),
         ("nautilus_trader.adapters.binance.config", "BinanceExecClientConfig"),
         ("nautilus_trader.live.node", "TradingNode"),

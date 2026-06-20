@@ -170,11 +170,20 @@ class ExecutionProjectionActor(Actor):
             return None
         return self.on_event(args[-1])
 
-    def _subscribe_execution_topic(self, topic: str) -> None:
-        for subscriber in (
+    def _subscription_targets(self) -> tuple[Any, ...]:
+        # Resolved at runtime from the registered node. On a bare (unregistered)
+        # Actor these are None and subscription is a no-op; Nautilus sets msgbus on
+        # register. Extracted as a seam so tests can inject a recording bus without
+        # assigning to the read-only ``Actor.msgbus`` property.
+        return (
             _first_attr(self, ("msgbus", "message_bus", "_msgbus")),
             _first_attr(self, ("trader", "_trader")),
-        ):
+        )
+
+    def _subscribe_execution_topic(self, topic: str) -> None:
+        for subscriber in self._subscription_targets():
+            if subscriber is None:
+                continue
             subscribe = getattr(subscriber, "subscribe", None)
             if not callable(subscribe):
                 continue
