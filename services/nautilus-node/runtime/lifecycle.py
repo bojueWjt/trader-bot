@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -46,7 +47,11 @@ class NodeLifecycle:
         self._clock = clock or SystemClock()
         self._control_plane = control_plane
         self._ready_dependencies: set[DependencyName] = set()
-        self._trading_state = TradingState.HALTED
+        # HALTED is the safe default (PLAN: live off by default). Testnet acceptance
+        # may override until the operator RESUME command path is wired into the node.
+        self._trading_state = TradingState(
+            os.environ.get("NAUTILUS_INITIAL_TRADING_STATE", "HALTED")
+        )
         self._halt_reason = "startup"
         self._last_control_plane_ok_at: Optional[datetime] = None
         self._last_event_id: Optional[str] = None

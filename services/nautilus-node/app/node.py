@@ -229,7 +229,10 @@ def _build_route(config: NodeConfig, spool_root: str | Path | None) -> AccountRo
             "NAUTILUS_SPOOL_ROOT", "/var/lib/nautilus-node/spool"
         ),
         environment=config.binance.environment,
-        initial_trading_state="HALTED",
+        # HALTED is the safe default (PLAN: live off by default). Overridable for
+        # testnet acceptance until the operator RESUME command path is wired into the
+        # node (host-verify gap: no command poller calls control_plane.poll_commands).
+        initial_trading_state=os.environ.get("NAUTILUS_INITIAL_TRADING_STATE", "HALTED"),
     )
 
 

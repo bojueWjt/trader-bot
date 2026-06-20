@@ -319,6 +319,7 @@ class IntentExecutionStrategy(Strategy):
         # time_in_force/client_order_id/tags/reduce_only directly in Nautilus
         # 1.227.0.
         from nautilus_trader.model.enums import OrderSide, TimeInForce  # type: ignore
+        from nautilus_trader.model.identifiers import ClientOrderId  # type: ignore
 
         side = OrderSide.BUY if plan.side == "BUY" else OrderSide.SELL
         tif = getattr(TimeInForce, plan.time_in_force)
@@ -328,7 +329,8 @@ class IntentExecutionStrategy(Strategy):
             "order_side": side,
             "quantity": quantity,
             "time_in_force": tif,
-            "client_order_id": plan.client_order_id,
+            # host-verify: Nautilus order factory needs a ClientOrderId, not a str.
+            "client_order_id": ClientOrderId(str(plan.client_order_id)),
             "tags": list(plan.tags),
         }
         if plan.reduce_only:
