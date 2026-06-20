@@ -85,14 +85,84 @@ class ProjectionWriter:
     def __init__(self, conn: PsycopgConnection):
         self.conn = conn
 
-    def upsert_order_projection(self, payload: dict) -> None:
-        raise NotImplementedError("projection consumer interface placeholder")
-
-    def upsert_position_projection(self, payload: dict) -> None:
-        raise NotImplementedError("projection consumer interface placeholder")
+    def insert_execution_event(self, payload: dict) -> None:
+        # idempotent by event_id: duplicate WS / reconciliation replay must not double-insert.
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO execution_events
+                    (execution_event_row_id, event_id, schema_version, node_id, account_id,
+                     intent_id, client_order_id, venue_order_id, trade_id, event_type, ts_event, payload)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (event_id) DO NOTHING
+                """,
+                (str(uuid4()), payload["event_id"], payload.get("schema_version", "1.0"),
+                 payload["node_id"], payload["account_id"], payload.get("intent_id"),
+                 payload.get("client_order_id"), payload.get("venue_order_id"), payload.get("trade_id"),
+                 payload["event_type"], payload["ts_event"], Json(payload.get("payload") or {})),
+            )
 
     def upsert_account_projection(self, payload: dict) -> None:
-        raise NotImplementedError("projection consumer interface placeholder")
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO accounts_projection
+                    (account_id, currency, equity, margin, available_balance, reconciliation_state,
+                     last_execution_event_at, updated_from_event_id, updated_at, payload)
+                VALUES (%s,%s,%s,%s,%s, COALESCE(%s,'healthy')::reconciliation_state_v1, %s,%s, now(), %s)
+                ON CONFLICT (account_id) DO UPDATE SET
+                    currency=EXCLUDED.currency, equity=EXCLUDED.equity, margin=EXCLUDED.margin,
+                    available_balance=EXCLUDED.available_balance,
+                    reconciliation_state=EXCLUDED.reconciliation_state,
+                    last_execution_event_at=EXCLUDED.last_execution_event_at,
+                    updated_from_event_id=EXCLUDED.updated_from_event_id, updated_at=now(), payload=EXCLUDED.payload
+                """,
+                (payload["account_id"], payload.get("currency", "USDT"), payload.get("equity", 0),
+                 payload.get("margin", 0), payload.get("available_balance"),
+                 payload.get("reconciliation_state"), payload.get("last_execution_event_at"),
+                 payload.get("event_id"), Json(payload.get("payload") or {})),
+            )
 
-    def insert_execution_event(self, payload: dict) -> None:
-        raise NotImplementedError("projection consumer interface placeholder")
+    def upsert_position_projection(self, payload: dict) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO positions_projection
+                    (account_id, position_id, instrument_id, side, quantity, avg_entry_price,
+                     mark_price, unrealized_pnl, status, updated_from_event_id, ts_event, updated_at, payload)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(), %s)
+                ON CONFLICT (account_id, position_id) DO UPDATE SET
+                    instrument_id=EXCLUDED.instrument_id, side=EXCLUDED.side, quantity=EXCLUDED.quantity,
+                    avg_entry_price=EXCLUDED.avg_entry_price, mark_price=EXCLUDED.mark_price,
+                    unrealized_pnl=EXCLUDED.unrealized_pnl, status=EXCLUDED.status,
+                    updated_from_event_id=EXCLUDED.updated_from_event_id, ts_event=EXCLUDED.ts_event,
+                    updated_at=now(), payload=EXCLUDED.payload
+                """,
+                (payload["account_id"], payload["position_id"], payload["instrument_id"],
+                 payload.get("side", "long"), payload.get("quantity", 0), payload.get("avg_entry_price"),
+                 payload.get("mark_price"), payload.get("unrealized_pnl"), payload.get("status", "open"),
+                 payload.get("event_id"), payload.get("ts_event"), Json(payload.get("payload") or {})),
+            )
+
+    def upsert_order_projection(self, payload: dict) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO orders_projection
+                    (order_projection_id, account_id, instrument_id, intent_id, client_order_id,
+                     venue_order_id, status, side, order_type, quantity, filled_quantity,
+                     updated_from_event_id, ts_event, updated_at, payload)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s,0),%s,%s, now(), %s)
+                ON CONFLICT (account_id, client_order_id) DO UPDATE SET
+                    instrument_id=EXCLUDED.instrument_id, intent_id=EXCLUDED.intent_id,
+                    venue_order_id=EXCLUDED.venue_order_id, status=EXCLUDED.status, side=EXCLUDED.side,
+                    order_type=EXCLUDED.order_type, quantity=EXCLUDED.quantity,
+                    filled_quantity=EXCLUDED.filled_quantity, updated_from_event_id=EXCLUDED.updated_from_event_id,
+                    ts_event=EXCLUDED.ts_event, updated_at=now(), payload=EXCLUDED.payload
+                """,
+                (str(uuid4()), payload["account_id"], payload["instrument_id"], payload.get("intent_id"),
+                 payload.get("client_order_id"), payload.get("venue_order_id"), payload.get("status", "submitted"),
+                 payload.get("side"), payload.get("order_type"), payload.get("quantity"),
+                 payload.get("filled_quantity"), payload.get("event_id"), payload.get("ts_event"),
+                 Json(payload.get("payload") or {})),
+            )

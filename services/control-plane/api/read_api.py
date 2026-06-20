@@ -185,3 +185,41 @@ def issue_operator_command(
         return result
     finally:
         conn.close()
+
+
+@app.post("/v1/nodes/{node_id}/events")
+def ingest_execution_event(
+    node_id: str,
+    body: dict = Body(default={}),
+    authorization: str | None = Header(default=None),
+):
+    """A↔B seam: a node pushes an ExecutionEventEnvelopeV1; idempotent by event_id.
+    Projection hints embedded in payload.{account,position,order} update the read model."""
+    require_node(authorization)
+    if not body.get("event_id") or not body.get("event_type"):
+        raise HTTPException(status_code=400, detail="event_id and event_type required")
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="projection store unavailable")
+    _cp = _HERE.parent
+    for _p in (_cp, _cp / "db"):
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+    from repository import ProjectionWriter
+
+    conn = psycopg2.connect(database_url)
+    try:
+        writer = ProjectionWriter(conn)
+        writer.insert_execution_event({**body, "node_id": body.get("node_id") or node_id})
+        hints = body.get("payload") or {}
+        ev_id, ts = body["event_id"], body.get("ts_event")
+        if isinstance(hints.get("account"), dict):
+            writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
+        if isinstance(hints.get("position"), dict):
+            writer.upsert_position_projection({**hints["position"], "event_id": ev_id, "ts_event": ts})
+        if isinstance(hints.get("order"), dict):
+            writer.upsert_order_projection({**hints["order"], "event_id": ev_id, "ts_event": ts})
+        conn.commit()
+        return {"ingested": ev_id, "status": "ok"}
+    finally:
+        conn.close()
