@@ -1,7 +1,18 @@
-# 最终验收报告（INTERIM — gate=blocked）
+# 最终验收报告（INTERIM — gate=testnet_core_proven，未达 testnet_only 全量）
 
-> 分支 `work/integration-acceptance-v3`。本报告随验收推进更新；当前为**集成+A 安全修复完成、等待运行时基础设施**阶段。
-> **release gate = `blocked`**（默认上限 `testnet_only` 都未达到；B 未在真机验证、真实回放/testnet 未跑）。**不可 live。**
+> 分支 `work/integration-acceptance-v3`。当前为**核心验收链路真机打通**阶段：真实图文回放 + testnet 真实下单已亲验，但全量 testnet（C-08 十四场景）/混沌(C-07)/面板对账(C-06)/kill-switch 演练(C-09) 与 A↔B order_plan 对齐未完成。
+> **release gate = `blocked`（不可 live）**：核心执行链已验证，但默认上限 `testnet_only` 的全量验收未过，且 live 需 operator 签名。
+
+## 0. 真机验收里程碑（hk，2026-06-20）
+
+两大头部验收项已在真机亲验：
+
+- **C-04/C-05 真实多模态 Hermes 回放**：80 条真实 Telegram 语料(text+图)→ ingress → PostgreSQL → **真 Hermes `gemini-3.1-pro`** → 决策。**75/75 成功**（8 并发，102s）。判定合理：analysis/noise→ignore 36、new_signal→open_position 14（从图里读出 instrument/side/stop）、update→needs_review 19（空快照下 fail-safe）。提交 `3b3cd52`。
+- **C-08 核心 testnet 真实下单**：intent → control-plane → node 轮询(1s) → strategy → **Binance USDT-M testnet 真实成交**（BTCUSDT 0.0020 @ 63474.35，venue_order_id 15670069285，OrderFilled→PositionOpened）→ execution_events 回流 control-plane。提交 `be928f9`。
+
+为打通执行链，修了一串 **B host-verify 缺陷**（B 从未在真机跑过）：`node.build()` 缺失(崩溃循环)；node↔control-plane seam 6 个端点 A 侧从未实现（我补齐：intents-ack/execution-events/heartbeat/commands/account）；`subscribe_data` 在 1.227.0 拒绝无 client 自定义数据(改走 msgbus)；`ClientOrderId` 传 str；lifecycle 硬编码 HALTED 无 RESUME 通路。提交 `dcd6d90`/`571e4c7`/`be928f9`。
+
+**剩余缺口（findings，risk-critical 未仓促改）**：① A↔B **order_plan 契约不一致**（A gateway `{side:long,entry{type}}` vs B planner `{side:buy|sell,type,quantity}`+需仓位定量）—— 不对齐则真 gateway 决策无法在 node 执行；② **command poller 未接进 node**（RESUME/kill-switch 到不了节点，卡 C-09）；③ **snapshot 投影未从 node 执行事件派生**（事件已入 `execution_events`，但 AccountState 载荷空、OrderFilled 稀疏，需 node ExecutionProjectionActor 富化 + 派生逻辑，卡 C-06）。
 
 ## 1. 已完成并验证（C-00 + A 的 8 个 P0）
 
