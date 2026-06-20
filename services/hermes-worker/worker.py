@@ -153,6 +153,8 @@ def process_one(
                 f"{location}: {first.message}",
             )
 
+        _enforce_action_safety(decision)
+
         response_sha256 = hashlib.sha256(
             json.dumps(candidate, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
@@ -266,6 +268,32 @@ def _recent_context(
 
 
 # --- decision assembly + persistence ----------------------------------------------
+
+
+def _enforce_action_safety(decision: dict) -> None:
+    """Deterministic backstop (not prompt-only): illegal action combinations are
+    coerced to needs_review before persistence (PLAN: update messages never open a
+    position; close/partial/move actions require a target_position_id)."""
+    classification = decision["classification"]
+    intent = decision.get("intent") or {}
+    action = classification.get("action")
+    message_type = classification.get("message_type")
+    reasons = classification.setdefault("ambiguity_reasons", [])
+
+    def to_review(reason: str) -> None:
+        classification["action"] = "needs_review"
+        if reason not in reasons:
+            reasons.append(reason)
+
+    update_types = {"position_update", "close_update"}
+    update_actions = {
+        "partial_close", "close_position", "move_stop_loss",
+        "move_stop_to_entry", "replace_take_profits",
+    }
+    if message_type in update_types and action == "open_position":
+        to_review(f"update message_type {message_type} cannot open a position")
+    if action in update_actions and not intent.get("target_position_id"):
+        to_review(f"{action} requires a target_position_id")
 
 
 def _assemble_decision(
