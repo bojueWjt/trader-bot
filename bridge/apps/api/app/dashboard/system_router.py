@@ -40,13 +40,18 @@ def _read_user(authorization: str | None) -> dict[str, str]:
 
 
 def _token_users() -> dict[str, dict[str, str]]:
-    risk_admin_token = os.environ.get("RISK_ADMIN_API_TOKEN", "test-risk-admin-token")
-    viewer_token = os.environ.get("VIEWER_API_TOKEN", "test-viewer-token")
-    trader_token = os.environ.get("TRADER_API_TOKEN", "test-trader-token")
-    observer_token = os.environ.get("SYSTEM_OBSERVER_API_TOKEN", "test-system-observer-token")
-    return {
-        risk_admin_token: {"actor_id": "risk-admin", "role": "risk_admin"},
-        viewer_token: {"actor_id": "viewer", "role": "viewer"},
-        trader_token: {"actor_id": "trader", "role": "trader"},
-        observer_token: {"actor_id": "system-observer", "role": "system_observer"},
-    }
+    # Secrets fail closed: tokens come ONLY from env, never a hardcoded default.
+    # An unset token simply cannot authenticate (no known-default backdoor).
+    # Canonical roles only (no `trader`); reviewer is the approval role.
+    specs = [
+        ("RISK_ADMIN_API_TOKEN", "risk-admin", "risk_admin"),
+        ("VIEWER_API_TOKEN", "viewer", "viewer"),
+        ("REVIEWER_API_TOKEN", "reviewer", "reviewer"),
+        ("SYSTEM_OBSERVER_API_TOKEN", "system-observer", "system_observer"),
+    ]
+    users: dict[str, dict[str, str]] = {}
+    for env_name, actor_id, role in specs:
+        token = os.environ.get(env_name, "").strip()
+        if token:
+            users[token] = {"actor_id": actor_id, "role": role}
+    return users

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -11,16 +12,20 @@ class IngressDeliveryError(RuntimeError):
 
 
 class HTTPIngressClient:
-    def __init__(self, endpoint: str, timeout_seconds: float = 10):
+    def __init__(self, endpoint: str, timeout_seconds: float = 10, token: str | None = None):
         self.endpoint = endpoint.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.token = token if token is not None else (os.environ.get("INGRESS_API_TOKEN", "").strip() or None)
 
     def submit(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload, sort_keys=True).encode("utf-8")
+        headers = {"content-type": "application/json"}
+        if self.token:
+            headers["authorization"] = f"Bearer {self.token}"
         request = Request(
             f"{self.endpoint}/telegram/raw",
             data=body,
-            headers={"content-type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:

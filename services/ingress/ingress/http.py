@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -10,8 +12,12 @@ from .service import IngressValidationError, ingest_raw_telegram_update
 
 class IngressHTTPHandler(BaseHTTPRequestHandler):
     database_url: str | None = None
+    expected_token: str | None = None
 
     def do_POST(self) -> None:
+        if not self._authorized():
+            self._write_json(401, {"error": "unauthorized"})
+            return
         if self.path != "/telegram/raw":
             self._write_json(404, {"error": "not_found"})
             return
@@ -27,6 +33,18 @@ class IngressHTTPHandler(BaseHTTPRequestHandler):
             return
 
         self._write_json(201 if result["inserted"] else 200, result)
+
+    def _authorized(self) -> bool:
+        # Fail closed: the raw-message write path requires a shared secret.
+        # No token configured -> deny everything (no anonymous write).
+        expected = self.expected_token
+        if not expected:
+            return False
+        header = self.headers.get("authorization", "")
+        prefix = "Bearer "
+        if not header.startswith(prefix):
+            return False
+        return hmac.compare_digest(header[len(prefix):].strip(), expected)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
@@ -48,8 +66,17 @@ class IngressHTTPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _require_ingress_token() -> str:
+    # Secret fail-closed: refuse to start the writer without a configured token.
+    token = os.environ.get("INGRESS_API_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("INGRESS_API_TOKEN is required (fail-closed; no default)")
+    return token
+
+
 def run(host: str, port: int, database_url: str | None = None) -> None:
     IngressHTTPHandler.database_url = database_url
+    IngressHTTPHandler.expected_token = _require_ingress_token()
     server = ThreadingHTTPServer((host, port), IngressHTTPHandler)
     server.serve_forever()
 
