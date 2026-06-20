@@ -57,8 +57,7 @@
     },
     "order_plan": {
       "type": "object",
-      "additionalProperties": false,
-      "properties": {}
+      "description": "Action-specific execution plan carried into Nautilus; shape validated by the execution strategy per action. Open at the contract level (window C lock per window-B CCR). A's freeze had this as a closed empty object, which could carry no order detail and made the execution link unusable."
     },
     "risk_budget": {
       "type": "object",

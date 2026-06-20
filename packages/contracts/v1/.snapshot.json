@@ -80,7 +80,6 @@
       ]
     },
     "order_plan": {
-      "properties": [],
       "type": [
         "object"
       ]

@@ -167,10 +167,21 @@ def iter_schema_nodes(schema):
             yield from iter_schema_nodes(schema["items"])
 
 
-def assert_all_objects_are_strict(schema):
-    for node in iter_schema_nodes(schema):
-        if "object" in schema_types(node):
-            assert node.get("additionalProperties") is False
+# order_plan is intentionally OPEN: it carries the action-specific execution plan
+# into Nautilus and is validated by the execution strategy per action (window C
+# contract lock per window-B CCR). Every other object must stay strict.
+OPEN_OBJECTS = {"order_plan"}
+
+
+def assert_all_objects_are_strict(schema, name=None):
+    if not isinstance(schema, dict):
+        return
+    if "object" in schema_types(schema) and name not in OPEN_OBJECTS:
+        assert schema.get("additionalProperties") is False
+    for child_name, child in schema.get("properties", {}).items():
+        assert_all_objects_are_strict(child, child_name)
+    if isinstance(schema.get("items"), dict):
+        assert_all_objects_are_strict(schema["items"], name)
 
 
 def schema_for_example(example_path):
