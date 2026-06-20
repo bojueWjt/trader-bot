@@ -45,7 +45,18 @@ def make_decision(
 
 
 def ev(decision, *, positions=None, risk_state=None, policy=POLICY):
-    return governor.evaluate(decision, positions=positions or [], risk_state=risk_state or {}, policy=policy)
+    # Default to an explicit ACTIVE risk context so geometry/leverage/update tests
+    # reach those checks. Tests that pass risk_state (HALTED/REDUCING/exposure/{})
+    # override this. A missing context now fails closed (risk_context_incomplete).
+    if risk_state is None:
+        risk_state = {"mode": "ACTIVE"}
+    return governor.evaluate(decision, positions=positions or [], risk_state=risk_state, policy=policy)
+
+
+def test_missing_risk_state_fails_closed():
+    out = ev(make_decision(), risk_state={})  # no mode -> incomplete -> no new risk
+    assert out.status == "needs_review"
+    assert "risk_context_incomplete" in out.reason
 
 
 # --- non-actionable ---------------------------------------------------------------

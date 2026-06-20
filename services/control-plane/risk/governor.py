@@ -82,6 +82,17 @@ def evaluate(
         return reject("price_precision", "price exceeds allowed precision", account_id)
     ev.ok("instrument_whitelist")
 
+    # 2.5 risk context must be present. A missing/incomplete risk_state is NEVER
+    # treated as a healthy ACTIVE account — fail closed (PLAN: incomplete risk
+    # snapshot -> no new risk). Only an explicit risk_state row carries a mode.
+    if risk_state.get("mode") is None:
+        return review(
+            "risk_context",
+            "risk_context_incomplete: risk_state unavailable for account/instrument",
+            account_id,
+        )
+    ev.ok("risk_context")
+
     # 3. update messages must never open
     if message_type in UPDATE_MESSAGE_TYPES and action in OPENING_ACTIONS:
         return reject("update_message_cannot_open", f"{message_type} produced {action}", account_id)
