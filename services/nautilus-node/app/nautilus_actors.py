@@ -58,15 +58,13 @@ class IntentPublisherActor(Actor):
         return int(poll_once(limit=self._poll_limit, wait_ms=self._wait_ms))
 
     def publish(self, intent: Any) -> None:
-        custom_data = self._build_custom_data(intent)
-        data_type = getattr(custom_data, "data_type")
-        data = getattr(custom_data, "data")
-
-        publish_data = getattr(self, "publish_data", None)
-        if callable(publish_data):
-            # TODO(host-verify): confirm Actor.publish_data(DataType, Data) is the
-            # preferred Nautilus 1.227.0 path for strategy subscribe_data delivery.
-            publish_data(data_type, data)
+        # C-08 host-verify fix: deliver the approved intent over the msgbus on the
+        # per-account topic the IntentExecutionStrategy subscribes to. publish_data +
+        # subscribe_data does not route clientless custom data in Nautilus 1.227.0.
+        message_bus = _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
+        if message_bus is not None and hasattr(message_bus, "publish"):
+            account_id = getattr(intent, "account_id", None)
+            message_bus.publish(topic=f"intents.{account_id}", msg=intent)
             return
 
         self._publish_via_engine_or_bus(intent)

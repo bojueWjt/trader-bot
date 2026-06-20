@@ -76,12 +76,22 @@ class IntentExecutionStrategy(Strategy):
         self._trading_state_getter = getter
 
     def on_start(self) -> None:
-        data_type = _approved_intent_data_type(self.config.account_id)
-        # TODO(host-verify): confirm Strategy.subscribe_data accepts the DataType
-        # object directly for CustomData in Nautilus 1.227.0.
-        self.subscribe_data(data_type)  # type: ignore[attr-defined]
+        # C-08 host-verify fix: subscribe_data(data_type) is rejected for clientless
+        # custom data in Nautilus 1.227.0 (it requires client_id/instrument_id).
+        # Approved intents are internal actor->strategy data, so deliver them over the
+        # msgbus on a controlled per-account topic the IntentPublisher publishes to.
+        self.msgbus.subscribe(  # type: ignore[attr-defined]
+            topic=f"intents.{self.config.account_id}",
+            handler=self._on_intent_msg,
+        )
+
+    def _on_intent_msg(self, intent: Any) -> None:
+        # msgbus delivers the ApprovedTradeIntentV1 directly.
+        if intent is not None:
+            self._handle_intent(intent)
 
     def on_data(self, data: Any) -> None:
+        # Retained for the publish_data path / tests: unwrap CustomData if used.
         intent = _intent_from_custom_data(data)
         if intent is None:
             return
