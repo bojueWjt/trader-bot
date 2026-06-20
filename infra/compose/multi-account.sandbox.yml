@@ -1,0 +1,122 @@
+name: trader-bot-nautilus-multi-account
+
+services:
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - nautilus-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  nautilus-node-account-a:
+    image: ${NAUTILUS_NODE_IMAGE:-trader-bot/nautilus-node:pending-b10}
+    entrypoint: ${NAUTILUS_NODE_ENTRYPOINT:-/app/bin/run-nautilus-node}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_CONFIG_PATH: /app/config/account-a.sandbox.json
+      NAUTILUS_ACCOUNT_ID: account-a
+      NAUTILUS_NODE_ID: nautilus-node-account-a
+      BINANCE_ENVIRONMENT: testnet
+      TRADING_INITIAL_STATE: HALTED
+      REDIS_URL: redis://redis:6379/0
+      REDIS_KEY_PREFIX: nautilus:account-a:node-a
+      CONTROL_PLANE_BASE_URL: ${CONTROL_PLANE_BASE_URL:-http://control-plane:8080}
+      BINANCE_ACCOUNT_A_API_KEY: ${BINANCE_ACCOUNT_A_API_KEY:-}
+      BINANCE_ACCOUNT_A_API_SECRET: ${BINANCE_ACCOUNT_A_API_SECRET:-}
+      CONTROL_PLANE_ACCOUNT_A_TOKEN: ${CONTROL_PLANE_ACCOUNT_A_TOKEN:-}
+    secrets:
+      - source: binance_account_a_api_key
+        target: binance_account_a_api_key
+      - source: binance_account_a_api_secret
+        target: binance_account_a_api_secret
+      - source: control_plane_account_a_token
+        target: control_plane_account_a_token
+    configs:
+      - source: account_a_sandbox_config
+        target: /app/config/account-a.sandbox.json
+    volumes:
+      - account-a-spool:/var/lib/nautilus-node/spool/account-a
+    networks:
+      - nautilus-internal
+    healthcheck:
+      test: ["CMD-SHELL", "${NAUTILUS_NODE_HEALTHCHECK:-test -e /tmp/nautilus-node-ready || exit 0}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  nautilus-node-account-b:
+    image: ${NAUTILUS_NODE_IMAGE:-trader-bot/nautilus-node:pending-b10}
+    entrypoint: ${NAUTILUS_NODE_ENTRYPOINT:-/app/bin/run-nautilus-node}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_CONFIG_PATH: /app/config/account-b.sandbox.json
+      NAUTILUS_ACCOUNT_ID: account-b
+      NAUTILUS_NODE_ID: nautilus-node-account-b
+      BINANCE_ENVIRONMENT: testnet
+      TRADING_INITIAL_STATE: HALTED
+      REDIS_URL: redis://redis:6379/0
+      REDIS_KEY_PREFIX: nautilus:account-b:node-b
+      CONTROL_PLANE_BASE_URL: ${CONTROL_PLANE_BASE_URL:-http://control-plane:8080}
+      BINANCE_ACCOUNT_B_API_KEY: ${BINANCE_ACCOUNT_B_API_KEY:-}
+      BINANCE_ACCOUNT_B_API_SECRET: ${BINANCE_ACCOUNT_B_API_SECRET:-}
+      CONTROL_PLANE_ACCOUNT_B_TOKEN: ${CONTROL_PLANE_ACCOUNT_B_TOKEN:-}
+    secrets:
+      - source: binance_account_b_api_key
+        target: binance_account_b_api_key
+      - source: binance_account_b_api_secret
+        target: binance_account_b_api_secret
+      - source: control_plane_account_b_token
+        target: control_plane_account_b_token
+    configs:
+      - source: account_b_sandbox_config
+        target: /app/config/account-b.sandbox.json
+    volumes:
+      - account-b-spool:/var/lib/nautilus-node/spool/account-b
+    networks:
+      - nautilus-internal
+    healthcheck:
+      test: ["CMD-SHELL", "${NAUTILUS_NODE_HEALTHCHECK:-test -e /tmp/nautilus-node-ready || exit 0}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+networks:
+  nautilus-internal:
+    internal: true
+
+volumes:
+  redis-data:
+  account-a-spool:
+  account-b-spool:
+
+configs:
+  account_a_sandbox_config:
+    file: ../../services/nautilus-node/config/examples/account-a.sandbox.json
+  account_b_sandbox_config:
+    file: ../../services/nautilus-node/config/examples/account-b.sandbox.json
+
+secrets:
+  binance_account_a_api_key:
+    external: true
+  binance_account_a_api_secret:
+    external: true
+  control_plane_account_a_token:
+    external: true
+  binance_account_b_api_key:
+    external: true
+  binance_account_b_api_secret:
+    external: true
+  control_plane_account_b_token:
+    external: true
