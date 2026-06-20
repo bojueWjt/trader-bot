@@ -9,7 +9,23 @@ from uuid import UUID
 
 OPEN_POSITION = "open_position"
 ADD_POSITION = "add_position"
+PARTIAL_CLOSE = "partial_close"
+CLOSE_POSITION = "close_position"
+MOVE_STOP_LOSS = "move_stop_loss"
+MOVE_STOP_TO_ENTRY = "move_stop_to_entry"
+REPLACE_TAKE_PROFITS = "replace_take_profits"
 ENTRY_ACTIONS = frozenset({OPEN_POSITION, ADD_POSITION})
+EXIT_ACTIONS = frozenset({PARTIAL_CLOSE, CLOSE_POSITION})
+POSITION_REQUIRED_ACTIONS = frozenset(
+    {
+        PARTIAL_CLOSE,
+        CLOSE_POSITION,
+        MOVE_STOP_LOSS,
+        MOVE_STOP_TO_ENTRY,
+        REPLACE_TAKE_PROFITS,
+    }
+)
+MANAGEMENT_ACTIONS = EXIT_ACTIONS | POSITION_REQUIRED_ACTIONS
 SUPPORTED_TIF = frozenset({"GTC", "IOC", "FOK", "GTD"})
 
 
@@ -25,6 +41,20 @@ class PositionSnapshot:
     instrument_id: str
     side: str
     quantity: str
+    position_id: Optional[str] = None
+    entry_price: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class OrderSnapshot:
+    client_order_id: str
+    instrument_id: str
+    order_type: str
+    side: str
+    quantity: str
+    price: Optional[str]
+    trigger_price: Optional[str]
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -34,6 +64,8 @@ class PlannerContext:
     now: datetime
     instrument: Optional[InstrumentSpec]
     position: Optional[PositionSnapshot] = None
+    positions: tuple[PositionSnapshot, ...] = ()
+    existing_orders: tuple[OrderSnapshot, ...] = ()
     existing_intent_ids: frozenset[str] = frozenset()
 
 
@@ -54,6 +86,18 @@ class OrderPlan:
     quantity: str
     price: Optional[str]
     time_in_force: str
+    reduce_only: bool = False
+    trigger_price: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ManagementPlan:
+    intent_id: UUID
+    action: str
+    instrument_id: str
+    target_position_id: Optional[str]
+    cancel_order_ids: tuple[str, ...]
+    orders: tuple[OrderPlan, ...]
 
 
 @dataclass(frozen=True)
@@ -86,13 +130,15 @@ def decode_client_order_id(client_order_id: str) -> ClientOrderTrace:
     return ClientOrderTrace(intent_id=UUID(hex=intent_hex), sequence=int(sequence_raw))
 
 
-def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | OrderDenied:
+def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | ManagementPlan | OrderDenied:
     action = _enum_value(getattr(intent, "action", ""))
-    if action not in ENTRY_ACTIONS:
+    if action not in ENTRY_ACTIONS and action not in MANAGEMENT_ACTIONS:
         return OrderDenied("unsupported_action", action)
 
     trading_state = _enum_value(context.trading_state).upper()
-    if trading_state != "ACTIVE":
+    if action in ENTRY_ACTIONS and trading_state != "ACTIVE":
+        return OrderDenied("trading_not_active", trading_state)
+    if action in MANAGEMENT_ACTIONS and trading_state not in {"ACTIVE", "REDUCING"}:
         return OrderDenied("trading_not_active", trading_state)
 
     intent_id = getattr(intent, "intent_id")
@@ -111,6 +157,9 @@ def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | O
     valid_until = _ensure_aware(getattr(intent, "valid_until"))
     if valid_until <= _ensure_aware(context.now):
         return OrderDenied("expired", valid_until.isoformat())
+
+    if action in MANAGEMENT_ACTIONS:
+        return _plan_management_intent(intent, action, context)
 
     side_result = _parse_side(getattr(intent, "order_plan", {}).get("side"))
     if isinstance(side_result, OrderDenied):
@@ -135,6 +184,86 @@ def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | O
         quantity=order_spec.quantity,
         price=order_spec.price,
         time_in_force=order_spec.time_in_force,
+    )
+
+
+def _plan_management_intent(
+    intent: Any,
+    action: str,
+    context: PlannerContext,
+) -> ManagementPlan | OrderDenied:
+    assert context.instrument is not None
+    instrument_id = str(getattr(intent, "instrument_id"))
+    position = _select_target_position(intent, context, instrument_id)
+    if isinstance(position, OrderDenied):
+        return position
+
+    order_plan = getattr(intent, "order_plan", {}) or {}
+    side = _exit_side(position)
+    cancel_role: Optional[str] = None
+    orders: tuple[OrderPlan, ...]
+
+    if action == PARTIAL_CLOSE:
+        order = _build_exit_order(intent, action, order_plan, context.instrument, position, side)
+        if isinstance(order, OrderDenied):
+            return order
+        orders = (order,)
+    elif action == CLOSE_POSITION:
+        close_plan = dict(order_plan)
+        close_plan["quantity"] = position.quantity
+        order = _build_exit_order(intent, action, close_plan, context.instrument, position, side)
+        if isinstance(order, OrderDenied):
+            return order
+        orders = (order,)
+    elif action == MOVE_STOP_LOSS:
+        order = _build_stop_order(intent, action, order_plan, context.instrument, position, side)
+        if isinstance(order, OrderDenied):
+            return order
+        cancel_role = "stop_loss"
+        orders = (order,)
+    elif action == MOVE_STOP_TO_ENTRY:
+        entry_price = position.entry_price or order_plan.get("entry_price")
+        if entry_price is None:
+            return OrderDenied("position_entry_price_required", _position_detail(position, instrument_id))
+        stop_plan = dict(order_plan)
+        stop_plan["stop_price"] = entry_price
+        order = _build_stop_order(intent, action, stop_plan, context.instrument, position, side)
+        if isinstance(order, OrderDenied):
+            return order
+        cancel_role = "stop_loss"
+        orders = (order,)
+    elif action == REPLACE_TAKE_PROFITS:
+        take_profit_orders = _build_take_profit_orders(
+            intent,
+            order_plan,
+            context.instrument,
+            position,
+            side,
+        )
+        if isinstance(take_profit_orders, OrderDenied):
+            return take_profit_orders
+        cancel_role = "take_profit"
+        orders = take_profit_orders
+    else:  # pragma: no cover - guarded by MANAGEMENT_ACTIONS.
+        return OrderDenied("unsupported_action", action)
+
+    cancel_order_ids = (
+        _matching_lifecycle_order_ids(
+            context.existing_orders,
+            role=cancel_role,
+            position_id=position.position_id,
+            instrument_id=instrument_id,
+        )
+        if cancel_role is not None
+        else ()
+    )
+    return ManagementPlan(
+        intent_id=getattr(intent, "intent_id"),
+        action=action,
+        instrument_id=instrument_id,
+        target_position_id=position.position_id,
+        cancel_order_ids=cancel_order_ids,
+        orders=orders,
     )
 
 
@@ -183,6 +312,223 @@ def _build_order_spec(order_plan: dict[str, Any], instrument: InstrumentSpec) ->
         return _OrderSpec("LIMIT", quantity=quantity, price=zone_price, time_in_force=tif)
 
     return OrderDenied("unsupported_order_spec", f"type={order_type}")
+
+
+def _build_exit_order(
+    intent: Any,
+    action: str,
+    order_plan: dict[str, Any],
+    instrument: InstrumentSpec,
+    position: PositionSnapshot,
+    side: str,
+) -> OrderPlan | OrderDenied:
+    normalized = dict(order_plan)
+    normalized["side"] = side.lower()
+    order_spec = _build_order_spec(normalized, instrument)
+    if isinstance(order_spec, OrderDenied):
+        return order_spec
+    quantity_denial = _deny_if_quantity_exceeds_position(order_spec.quantity, position.quantity)
+    if quantity_denial is not None:
+        return quantity_denial
+    return OrderPlan(
+        intent_id=getattr(intent, "intent_id"),
+        client_order_id=encode_client_order_id(getattr(intent, "intent_id"), sequence=1),
+        tags=_intent_tags(intent, action, lifecycle_role="exit", position_id=position.position_id),
+        instrument_id=str(getattr(intent, "instrument_id")),
+        side=side,
+        order_type=order_spec.order_type,
+        quantity=order_spec.quantity,
+        price=order_spec.price,
+        time_in_force=order_spec.time_in_force,
+        reduce_only=True,
+    )
+
+
+def _build_stop_order(
+    intent: Any,
+    action: str,
+    order_plan: dict[str, Any],
+    instrument: InstrumentSpec,
+    position: PositionSnapshot,
+    side: str,
+) -> OrderPlan | OrderDenied:
+    order_type = str(order_plan.get("type", "stop_market")).lower()
+    if order_type not in {"stop_market", "stop_limit"}:
+        return OrderDenied("unsupported_order_spec", f"type={order_type}")
+
+    raw_trigger = order_plan.get("stop_price", order_plan.get("trigger_price"))
+    trigger_price = _rounded_positive(raw_trigger, instrument.price_increment, "stop_price")
+    if isinstance(trigger_price, OrderDenied):
+        return trigger_price
+
+    price: Optional[str] = None
+    planned_order_type = "STOP_MARKET"
+    if order_type == "stop_limit":
+        raw_price = order_plan.get("limit_price", order_plan.get("price"))
+        price = _rounded_positive(raw_price, instrument.price_increment, "limit_price")
+        if isinstance(price, OrderDenied):
+            return price
+        planned_order_type = "STOP_LIMIT"
+
+    quantity = _rounded_positive(position.quantity, instrument.quantity_increment, "quantity")
+    if isinstance(quantity, OrderDenied):
+        return quantity
+    tif = _parse_tif(order_plan.get("time_in_force"), default="GTC")
+    if isinstance(tif, OrderDenied):
+        return tif
+    return OrderPlan(
+        intent_id=getattr(intent, "intent_id"),
+        client_order_id=encode_client_order_id(getattr(intent, "intent_id"), sequence=1),
+        tags=_intent_tags(intent, action, lifecycle_role="stop_loss", position_id=position.position_id),
+        instrument_id=str(getattr(intent, "instrument_id")),
+        side=side,
+        order_type=planned_order_type,
+        quantity=quantity,
+        price=price,
+        time_in_force=tif,
+        reduce_only=True,
+        trigger_price=trigger_price,
+    )
+
+
+def _build_take_profit_orders(
+    intent: Any,
+    order_plan: dict[str, Any],
+    instrument: InstrumentSpec,
+    position: PositionSnapshot,
+    side: str,
+) -> tuple[OrderPlan, ...] | OrderDenied:
+    raw_targets = order_plan.get("take_profits", order_plan.get("targets"))
+    if not isinstance(raw_targets, list) or len(raw_targets) == 0:
+        return OrderDenied("unsupported_order_spec", "take_profits")
+
+    orders: list[OrderPlan] = []
+    total = Decimal("0")
+    for index, raw_target in enumerate(raw_targets, start=1):
+        if not isinstance(raw_target, dict):
+            return OrderDenied("unsupported_order_spec", f"take_profits[{index - 1}]")
+        quantity = _rounded_positive(
+            raw_target.get("quantity"),
+            instrument.quantity_increment,
+            f"take_profits[{index - 1}].quantity",
+        )
+        if isinstance(quantity, OrderDenied):
+            return quantity
+        total += Decimal(quantity)
+        trigger_price = _rounded_positive(
+            raw_target.get("trigger_price", raw_target.get("price")),
+            instrument.price_increment,
+            f"take_profits[{index - 1}].price",
+        )
+        if isinstance(trigger_price, OrderDenied):
+            return trigger_price
+        limit_price = _rounded_positive(
+            raw_target.get("limit_price", raw_target.get("price", trigger_price)),
+            instrument.price_increment,
+            f"take_profits[{index - 1}].limit_price",
+        )
+        if isinstance(limit_price, OrderDenied):
+            return limit_price
+        tif = _parse_tif(raw_target.get("time_in_force", order_plan.get("time_in_force")), default="GTC")
+        if isinstance(tif, OrderDenied):
+            return tif
+        orders.append(
+            OrderPlan(
+                intent_id=getattr(intent, "intent_id"),
+                client_order_id=encode_client_order_id(getattr(intent, "intent_id"), sequence=index),
+                tags=_intent_tags(
+                    intent,
+                    REPLACE_TAKE_PROFITS,
+                    lifecycle_role="take_profit",
+                    position_id=position.position_id,
+                )
+                + (f"take_profit_index={index}",),
+                instrument_id=str(getattr(intent, "instrument_id")),
+                side=side,
+                order_type="LIMIT_IF_TOUCHED",
+                quantity=quantity,
+                price=limit_price,
+                time_in_force=tif,
+                reduce_only=True,
+                trigger_price=trigger_price,
+            )
+        )
+
+    position_quantity = Decimal(str(position.quantity))
+    if total > position_quantity:
+        return OrderDenied("quantity_exceeds_position", f"{format(total, 'f')}>{position.quantity}")
+    return tuple(orders)
+
+
+def _select_target_position(
+    intent: Any,
+    context: PlannerContext,
+    instrument_id: str,
+) -> PositionSnapshot | OrderDenied:
+    positions = tuple(
+        position
+        for position in _context_positions(context)
+        if position.instrument_id == instrument_id and Decimal(str(position.quantity)) != Decimal("0")
+    )
+    target_position_id = getattr(intent, "target_position_id", None)
+    if target_position_id:
+        matches = tuple(position for position in positions if position.position_id == target_position_id)
+        if len(matches) == 0:
+            return OrderDenied("position_required", str(target_position_id))
+        if len(matches) > 1:
+            return OrderDenied("position_not_unique", str(target_position_id))
+        return matches[0]
+    if len(positions) == 0:
+        return OrderDenied("position_required", instrument_id)
+    if len(positions) > 1:
+        return OrderDenied("position_not_unique", instrument_id)
+    return positions[0]
+
+
+def _context_positions(context: PlannerContext) -> tuple[PositionSnapshot, ...]:
+    if context.positions:
+        return context.positions
+    if context.position is not None:
+        return (context.position,)
+    return ()
+
+
+def _exit_side(position: PositionSnapshot) -> str:
+    return "SELL" if position.side.upper() == "LONG" else "BUY"
+
+
+def _deny_if_quantity_exceeds_position(
+    quantity: str,
+    position_quantity: str,
+) -> Optional[OrderDenied]:
+    if Decimal(quantity) > Decimal(str(position_quantity)):
+        return OrderDenied("quantity_exceeds_position", f"{quantity}>{position_quantity}")
+    return None
+
+
+def _matching_lifecycle_order_ids(
+    orders: tuple[OrderSnapshot, ...],
+    role: Optional[str],
+    position_id: Optional[str],
+    instrument_id: str,
+) -> tuple[str, ...]:
+    if role is None:
+        return ()
+    result: list[str] = []
+    for order in orders:
+        if order.instrument_id != instrument_id:
+            continue
+        tags = set(order.tags)
+        if f"lifecycle_role={role}" not in tags:
+            continue
+        if position_id is not None and f"position_id={position_id}" not in tags:
+            continue
+        result.append(order.client_order_id)
+    return tuple(result)
+
+
+def _position_detail(position: PositionSnapshot, instrument_id: str) -> str:
+    return position.position_id or instrument_id
 
 
 def _zone_boundary_price(order_plan: dict[str, Any], instrument: InstrumentSpec) -> str | OrderDenied:
@@ -270,8 +616,13 @@ def _decimal(raw: Any, field: str) -> Decimal | OrderDenied:
         return OrderDenied("unsupported_order_spec", field)
 
 
-def _intent_tags(intent: Any, action: str) -> tuple[str, ...]:
-    return (
+def _intent_tags(
+    intent: Any,
+    action: str,
+    lifecycle_role: Optional[str] = None,
+    position_id: Optional[str] = None,
+) -> tuple[str, ...]:
+    tags = (
         f"intent_id={getattr(intent, 'intent_id')}",
         f"decision_id={getattr(intent, 'decision_id')}",
         f"risk_decision_id={getattr(intent, 'risk_decision_id')}",
@@ -279,6 +630,11 @@ def _intent_tags(intent: Any, action: str) -> tuple[str, ...]:
         f"action={action}",
         f"account_id={getattr(intent, 'account_id')}",
     )
+    if lifecycle_role is not None:
+        tags += (f"lifecycle_role={lifecycle_role}",)
+    if position_id is not None:
+        tags += (f"position_id={position_id}",)
+    return tags
 
 
 def _enum_value(value: Any) -> str:

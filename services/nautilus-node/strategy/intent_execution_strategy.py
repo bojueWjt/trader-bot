@@ -6,8 +6,10 @@ from typing import Any, Callable, Iterable, Optional
 
 from strategy.intent_execution_planner import (
     InstrumentSpec,
+    ManagementPlan,
     OrderDenied,
     OrderPlan,
+    OrderSnapshot,
     PlannerContext,
     PositionSnapshot,
     decode_client_order_id,
@@ -83,13 +85,17 @@ class IntentExecutionStrategy(Strategy):
         intent = _intent_from_custom_data(data)
         if intent is None:
             return
+        self._handle_intent(intent)
 
+    def _handle_intent(self, intent: Any) -> None:
         context = PlannerContext(
             account_id=self.config.account_id,
             trading_state=self._trading_state(),
             now=self._now(),
             instrument=self._instrument_spec(str(intent.instrument_id)),
             position=self._position_snapshot(str(intent.instrument_id)),
+            positions=self._position_snapshots(str(intent.instrument_id)),
+            existing_orders=self._order_snapshots(str(intent.instrument_id)),
             existing_intent_ids=frozenset(
                 self._processed_intent_ids | self._active_intent_ids(intent.instrument_id)
             ),
@@ -99,8 +105,12 @@ class IntentExecutionStrategy(Strategy):
             self._record_denial(result)
             return
 
-        self._submit_order_plan(result)
-        self._processed_intent_ids.add(str(result.intent_id))
+        if isinstance(result, ManagementPlan):
+            submitted = self._submit_management_plan(result)
+        else:
+            submitted = self._submit_order_plan(result)
+        if submitted:
+            self._processed_intent_ids.add(str(result.intent_id))
 
     def _trading_state(self) -> str:
         if self._trading_state_getter is not None:
@@ -144,11 +154,44 @@ class IntentExecutionStrategy(Strategy):
         position = _first_nonzero_position(self._cache_positions(instrument_id))
         if position is None:
             return None
+        return self._position_snapshot_from_cache(position, instrument_id)
+
+    def _position_snapshots(self, instrument_id: str) -> tuple[PositionSnapshot, ...]:
+        return tuple(
+            self._position_snapshot_from_cache(position, instrument_id)
+            for position in _nonzero_positions(self._cache_positions(instrument_id))
+        )
+
+    def _position_snapshot_from_cache(self, position: Any, instrument_id: str) -> PositionSnapshot:
         return PositionSnapshot(
             instrument_id=instrument_id,
             side=_position_side(position),
             quantity=_position_quantity(position),
+            position_id=_position_id(position),
+            entry_price=_position_entry_price(position),
         )
+
+    def _order_snapshots(self, instrument_id: str) -> tuple[OrderSnapshot, ...]:
+        snapshots: list[OrderSnapshot] = []
+        for order in self._cache_orders(instrument_id):
+            client_order_id = getattr(order, "client_order_id", None)
+            if client_order_id is None:
+                continue
+            snapshots.append(
+                OrderSnapshot(
+                    client_order_id=str(client_order_id),
+                    instrument_id=str(getattr(order, "instrument_id", instrument_id)),
+                    order_type=_enum_name(getattr(order, "order_type", "")),
+                    side=_enum_name(getattr(order, "side", getattr(order, "order_side", ""))),
+                    quantity=str(getattr(order, "quantity", getattr(order, "qty", ""))),
+                    price=_optional_str(getattr(order, "price", None)),
+                    trigger_price=_optional_str(
+                        getattr(order, "trigger_price", getattr(order, "stop_price", None))
+                    ),
+                    tags=tuple(str(tag) for tag in (getattr(order, "tags", ()) or ())),
+                )
+            )
+        return tuple(snapshots)
 
     def _active_intent_ids(self, instrument_id: Any) -> set[str]:
         ids: set[str] = set()
@@ -218,21 +261,53 @@ class IntentExecutionStrategy(Strategy):
                     continue
         return ()
 
-    def _submit_order_plan(self, plan: OrderPlan) -> None:
+    def _submit_order_plan(self, plan: OrderPlan) -> bool:
         instrument = self._cache_instrument(plan.instrument_id)
         if instrument is None:
             self._record_denial(OrderDenied("instrument_not_found", plan.instrument_id))
-            return
+            return False
 
         try:
             order = self._build_nautilus_order(plan, instrument)
             self.submit_order(order)  # type: ignore[attr-defined]
+            return True
         except Exception as exc:  # Fail closed: no silent drops on adapter/API mismatch.
             self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
+            return False
+
+    def _submit_management_plan(self, plan: ManagementPlan) -> bool:
+        for client_order_id in plan.cancel_order_ids:
+            if not self._cancel_order_by_client_order_id(plan.instrument_id, client_order_id):
+                return False
+        for order_plan in plan.orders:
+            if not self._submit_order_plan(order_plan):
+                return False
+        return True
+
+    def _cancel_order_by_client_order_id(
+        self,
+        instrument_id: str,
+        client_order_id: str,
+    ) -> bool:
+        for order in self._cache_orders(instrument_id):
+            if str(getattr(order, "client_order_id", "")) != client_order_id:
+                continue
+            try:
+                # TODO(host-verify): confirm Strategy.cancel_order takes the order
+                # object directly in Nautilus 1.227.0 for Binance futures.
+                self.cancel_order(order)  # type: ignore[attr-defined]
+                return True
+            except Exception as exc:
+                self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
+                return False
+        self._record_denial(OrderDenied("order_cancel_not_found", client_order_id))
+        return False
 
     def _build_nautilus_order(self, plan: OrderPlan, instrument: Any) -> Any:
-        # TODO(host-verify): confirm OrderFactory methods and whether market orders
-        # accept time_in_force/client_order_id/tags directly in Nautilus 1.227.0.
+        # TODO(host-verify): confirm OrderFactory methods and whether market,
+        # stop_market, stop_limit, and limit_if_touched orders accept
+        # time_in_force/client_order_id/tags/reduce_only directly in Nautilus
+        # 1.227.0.
         from nautilus_trader.model.enums import OrderSide, TimeInForce  # type: ignore
 
         side = OrderSide.BUY if plan.side == "BUY" else OrderSide.SELL
@@ -246,11 +321,27 @@ class IntentExecutionStrategy(Strategy):
             "client_order_id": plan.client_order_id,
             "tags": list(plan.tags),
         }
+        if plan.reduce_only:
+            kwargs["reduce_only"] = True
         if plan.order_type == "MARKET":
             return self.order_factory.market(**kwargs)  # type: ignore[attr-defined]
         if plan.order_type == "LIMIT":
             kwargs["price"] = _make_price(instrument, plan.price)
             return self.order_factory.limit(**kwargs)  # type: ignore[attr-defined]
+        if plan.order_type == "STOP_MARKET":
+            kwargs["trigger_price"] = _make_price(instrument, plan.trigger_price)
+            return self.order_factory.stop_market(**kwargs)  # type: ignore[attr-defined]
+        if plan.order_type == "STOP_LIMIT":
+            kwargs["price"] = _make_price(instrument, plan.price)
+            kwargs["trigger_price"] = _make_price(instrument, plan.trigger_price)
+            return self.order_factory.stop_limit(**kwargs)  # type: ignore[attr-defined]
+        if plan.order_type == "LIMIT_IF_TOUCHED":
+            kwargs["price"] = _make_price(instrument, plan.price)
+            kwargs["trigger_price"] = _make_price(instrument, plan.trigger_price)
+            return self.order_factory.limit_if_touched(**kwargs)  # type: ignore[attr-defined]
+        if plan.order_type == "MARKET_IF_TOUCHED":
+            kwargs["trigger_price"] = _make_price(instrument, plan.trigger_price)
+            return self.order_factory.market_if_touched(**kwargs)  # type: ignore[attr-defined]
         raise RuntimeError(f"unsupported order_type from planner: {plan.order_type}")
 
     def _record_denial(self, denial: OrderDenied) -> None:
@@ -307,13 +398,20 @@ def _decimalish_to_str(value: Any) -> str:
 
 
 def _first_nonzero_position(positions: Iterable[Any]) -> Optional[Any]:
+    for position in _nonzero_positions(positions):
+        return position
+    return None
+
+
+def _nonzero_positions(positions: Iterable[Any]) -> tuple[Any, ...]:
+    result: list[Any] = []
     for position in positions:
         try:
             if float(_position_quantity(position)) != 0.0:
-                return position
+                result.append(position)
         except (TypeError, ValueError):
             continue
-    return None
+    return tuple(result)
 
 
 def _position_side(position: Any) -> str:
@@ -339,6 +437,22 @@ def _position_quantity(position: Any) -> str:
     return "0"
 
 
+def _position_id(position: Any) -> Optional[str]:
+    for name in ("id", "position_id"):
+        value = getattr(position, name, None)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _position_entry_price(position: Any) -> Optional[str]:
+    for name in ("entry_price", "avg_px_open", "average_open_price"):
+        value = getattr(position, name, None)
+        if value is not None:
+            return _decimalish_to_str(value)
+    return None
+
+
 def _intent_ids_from_tags(item: Any) -> set[str]:
     ids: set[str] = set()
     tags = getattr(item, "tags", ()) or ()
@@ -347,6 +461,17 @@ def _intent_ids_from_tags(item: Any) -> set[str]:
         if text.startswith("intent_id="):
             ids.add(text.split("=", 1)[1])
     return ids
+
+
+def _enum_name(value: Any) -> str:
+    raw = getattr(value, "name", getattr(value, "value", value))
+    return str(raw).upper()
+
+
+def _optional_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return _decimalish_to_str(value)
 
 
 def _make_quantity(instrument: Any, quantity: str) -> Any:
