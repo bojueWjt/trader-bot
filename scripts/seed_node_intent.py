@@ -39,14 +39,16 @@ cur.execute(
     "VALUES (%s,%s,'approved','account-a','seed')",
     (str(risk_id), str(dec_id)),
 )
-order_plan = {  # B planner format: side buy/sell, top-level type + quantity
-    "side": "buy", "type": "market", "quantity": "0.002", "time_in_force": "IOC",
+order_plan = {  # A SEMANTIC format (control-plane seam translates to B execution format)
+    "side": "long",
+    "entry": {"type": "market", "price": 3000, "price_min": None, "price_max": None},
+    "leverage": 2, "stop_loss": 2800, "take_profits": [3200],
 }
-risk_budget = {"risk_fraction": 0.01, "max_notional": 1000, "max_leverage": 5}
+risk_budget = {"risk_fraction": 0.01, "max_notional": 60, "max_leverage": 5}
 cur.execute(
     "INSERT INTO trade_intents (intent_id, hermes_decision_id, risk_decision_id, schema_version, account_id, "
     "instrument_id, action, status, order_plan, risk_budget, valid_until, idempotency_key, approved_at) "
-    "VALUES (%s,%s,%s,'1.0','account-a','BTCUSDT-PERP.BINANCE','open_position','approved',%s,%s,%s,%s, now())",
+    "VALUES (%s,%s,%s,'1.0','account-a','ETHUSDT','open_position','approved',%s,%s,%s,%s, now())",
     (str(intent_id), str(dec_id), str(risk_id), Json(order_plan), Json(risk_budget),
      now + timedelta(days=1), idem),
 )

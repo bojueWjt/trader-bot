@@ -76,6 +76,46 @@ def require_node(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="node token required")
 
 
+def _nautilus_instrument_id(instr: str | None) -> str | None:
+    """A↔B seam: map a bare Binance USDT-M symbol (BTCUSDT) to the Nautilus
+    InstrumentId the node's cache uses (BTCUSDT-PERP.BINANCE). Pass through if
+    already venue-qualified."""
+    if not instr or "." in instr:
+        return instr
+    return f"{instr}-PERP.BINANCE"
+
+
+def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None) -> dict:
+    """A↔B seam: translate A's semantic order_plan ({side:long/short, entry:{type,price}})
+    to B's execution order_plan ({side:buy/sell, type, quantity, ...}). Sizes the order
+    from risk_budget.max_notional / entry price (notional-capped). Pass through if already
+    in B's shape."""
+    op = dict(order_plan or {})
+    side = str(op.get("side") or "").lower()
+    if op.get("type") and op.get("quantity") is not None and side in ("buy", "sell"):
+        return op  # already B execution format
+    b_side = {"long": "buy", "buy": "buy", "short": "sell", "sell": "sell"}.get(side, side)
+    entry = op.get("entry") or {}
+    entry_type = str(entry.get("type") or "market").lower()
+    if entry_type == "none":
+        entry_type = "market"
+    entry_price = entry.get("price") if entry.get("price") is not None else entry.get("price_min")
+    max_notional = (risk_budget or {}).get("max_notional")
+    quantity = op.get("quantity")
+    if quantity is None and entry_price and max_notional:
+        try:
+            quantity = float(max_notional) / float(entry_price)
+        except (TypeError, ValueError, ZeroDivisionError):
+            quantity = None
+    out: dict = {"side": b_side, "type": entry_type,
+                 "time_in_force": "IOC" if entry_type == "market" else "GTC"}
+    if quantity is not None:
+        out["quantity"] = str(quantity)
+    if entry_type in ("limit", "zone") and entry_price is not None:
+        out["price"] = entry_price
+    return out
+
+
 @app.get("/v1/nodes/{node_id}/intents")
 def node_intents(
     node_id: str,
@@ -122,8 +162,11 @@ def node_intents(
             "cursor": cur_str,
             "intent": {
                 "schema_version": ver, "intent_id": str(iid_), "decision_id": str(dec),
-                "risk_decision_id": str(risk), "account_id": acct, "instrument_id": instr,
-                "action": act, "order_plan": order_plan, "risk_budget": risk_budget,
+                "risk_decision_id": str(risk), "account_id": acct,
+                "instrument_id": _nautilus_instrument_id(instr),
+                "action": act,
+                "order_plan": _execution_order_plan(order_plan, risk_budget),
+                "risk_budget": risk_budget,
                 "target_position_id": tpid,
                 "valid_until": valid_until.isoformat() if valid_until else None,
                 "idempotency_key": idem,
