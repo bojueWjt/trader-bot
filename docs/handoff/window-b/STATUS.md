@@ -14,21 +14,23 @@ SHA (PLAN "不可伪造完成").
 
 ## Task board
 
-| Task | Title | Status | Notes |
+| Task | Title | Status | Evidence / Notes |
 |---|---|---|---|
-| B-FND | Foundation (scaffold, contracts, seam, execution-domain) | in_progress | this commit |
-| B-00 | Nautilus/Binance compat spike + pin | todo | **runtime-gated**: Linux+Docker+Py3.12 + Binance USDT-M Futures **testnet keys** |
-| B-01 | Per-account TradingNode lifecycle | todo | code authorable now; runtime tests gated |
-| B-02 | ApprovedTradeIntent CustomData + Data Client | todo | builds against §1 seam + frozen schema |
-| B-03 | IntentExecutionStrategy open/add | todo | sandbox (simulated venue) testable; testnet for B-11 |
+| B-FND | Foundation (scaffold, contracts, seam, execution-domain) | **done** | `58a0904` |
+| B-00 | Nautilus/Binance compat spike + pin | **done*** | `32e35e1` — 1.227.0 validated on hk (Py3.12.13), capability matrix, deps hash-locked, base digest pinned. *testnet order/cancel/conditional smoke = needs_review (Binance testnet keys deferred) |
+| B-01 | Per-account TradingNode lifecycle | **done** | `9245c4d` — hk container: pytest 4/4, fail-closed creds, BinanceAccountType.USDT_FUTURES + Environment.TESTNET |
+| B-02 | ApprovedTradeIntent CustomData + Data Client | **done** | `8ff1d2e` — hk pytest 15 passed; DataType API bug found+fixed |
+| B-03 | IntentExecutionStrategy open/add | **done** | hk pytest 10 passed/2 skipped; StrategyConfig + read-only-cache API bugs found+fixed |
 | B-04 | Stops/TPs/position updates | todo | depends B-03 |
 | B-05 | RiskEngine + trading-state commands | todo | depends B-01,B-03 |
-| B-06 | Persistent cache/bus + reconciliation | todo | depends B-01 |
+| B-06 | Persistent cache/bus + reconciliation | **done** | `81f356a` — hk pytest 15 passed; per-account Redis prefix + reconciliation config |
 | B-07 | Projection Actor + spool | todo | depends B-01,B-03,B-04 |
 | B-08 | Two-account isolation + routing | todo | depends B-01,B-02,B-06,B-07 |
-| B-09 | Dashboard → real control-plane API | todo | **locally buildable** (Node 24); FRONTEND fakes only |
+| B-09 | Dashboard → real control-plane API | **done** | `8bf28ae` — local vitest 7/7, build green, no prod fake hits (FRONTEND fakes only) |
 | B-10 | Containers/secrets/health/repro build | todo | depends B-00,B-01,B-08,B-09 |
-| B-11 | Regression + handoff | todo | depends all; testnet evidence runtime-gated |
+| B-11 | Regression + handoff (WINDOW_B_HANDOFF.md @ repo root, then GO-SIGNAL B_READY=1) | todo | depends all; testnet evidence runtime-gated |
+
+**hk runtime test loop:** isolated `/srv/hermes-nautilus-b/repo` + `nautilus-spike:1.227.0` image (nautilus + pytest; `pip install pydantic` for verification). Node tests run there per-task; window-C handoff via `trader-bot-window-c-staging/GO-SIGNAL.txt` (`B_READY=1`) only after B-11.
 
 ## Environment dependencies (external, must be provisioned)
 
