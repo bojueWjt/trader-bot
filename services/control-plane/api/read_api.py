@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 import psycopg2
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -132,3 +132,56 @@ def node_intents(
         })
         next_cursor = cur_str
     return {"items": items, "next_cursor": next_cursor}
+
+
+@app.post("/v1/commands")
+def issue_operator_command(
+    body: dict = Body(default={}),
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+):
+    """Operator dangerous-op command (HALT/REDUCE/RESUME/CANCEL_ALL/CLOSE_ALL).
+    risk_admin only; requires request_id + reason + confirm=true; writes a durable
+    audit_events row; issue_command sets risk_state so the gateway fails closed."""
+    role = require_reader(authorization)
+    if role != "risk_admin":
+        raise HTTPException(status_code=403, detail="risk_admin required")
+    command_type = (body.get("type") or body.get("command_type") or "").upper()
+    if command_type not in ("HALT", "REDUCE", "RESUME", "CANCEL_ALL", "CLOSE_ALL"):
+        raise HTTPException(status_code=400, detail="invalid command_type")
+    reason = (body.get("reason") or "").strip()
+    request_id = (x_request_id or body.get("request_id") or "").strip()
+    if not reason or body.get("confirm") is not True or not request_id:
+        raise HTTPException(status_code=400, detail="dangerous op requires request_id + reason + confirm=true")
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="command store unavailable")
+    _cp = _HERE.parent
+    for _p in (_cp, _cp / "commands", _cp / "security", _cp / "db", _cp / "risk", _cp / "risk_state"):
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+    from commands import issue_command
+    from audit import dangerous_operation_payload, record_audit_event
+
+    target_nodes = body.get("target_nodes") or []
+    scope = body.get("scope") or {}
+    conn = psycopg2.connect(database_url)
+    try:
+        result = issue_command(
+            conn, command_type=command_type, requested_by="risk_admin", reason=reason,
+            idempotency_key=body.get("idempotency_key") or request_id,
+            target_nodes=target_nodes, scope=scope,
+        )
+        record_audit_event(
+            conn, event_type="operator_command", aggregate_type="operator_command",
+            aggregate_id=result["command_id"], actor="risk_admin",
+            payload=dangerous_operation_payload(
+                request_id=request_id, reason=reason,
+                actor={"actor_id": "risk-admin", "role": "risk_admin"},
+                operation=command_type, payload={"target_nodes": target_nodes, "scope": scope},
+            ),
+        )
+        conn.commit()
+        return result
+    finally:
+        conn.close()
