@@ -130,6 +130,7 @@ def test_fresh_migration_creates_required_tables_constraints_indexes_and_project
                     "ck_trade_intents_approved_chain",
                     "uq_trade_intents_idempotency_key",
                     "uq_execution_events_event_id",
+                    "uq_hermes_decisions_raw_message_id",
                 ],
             ),
         )
@@ -139,6 +140,7 @@ def test_fresh_migration_creates_required_tables_constraints_indexes_and_project
             "ck_trade_intents_approved_chain",
             "uq_trade_intents_idempotency_key",
             "uq_execution_events_event_id",
+            "uq_hermes_decisions_raw_message_id",
         }
 
         cur.execute(
