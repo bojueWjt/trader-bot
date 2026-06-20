@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "program": "hermes-nautilus-migration",
+  "plan_version": "v3.0",
+  "contract_version": "contracts-v1",
+  "window": "C",
+  "gate_states_allowed": ["blocked", "shadow_only", "testnet_only", "live_readonly", "live_small"],
+  "current_state": "blocked",
+  "default_ceiling": "testnet_only",
+  "rule": "Any failing global_release_condition OR any unmet safety_metric forces current_state=blocked. Window C may not exceed default_ceiling. live_readonly/live_small require operator_signoff.",
+  "evaluated_at": null,
+  "evaluated_commit": null,
+  "operator_signoff": {
+    "required_for": ["live_readonly", "live_small"],
+    "present": false,
+    "operator": null,
+    "signed_at": null,
+    "reason": null,
+    "preconditions_for_live_small": [
+      "all P0/P1 defects closed",
+      "corpus report passed",
+      "testnet report passed",
+      "kill-switch drill passed",
+      "rollback drill passed",
+      "exchange key has no withdrawal permission and is IP-whitelisted",
+      "first stage limited to small size, low leverage, limited instruments",
+      "initial node state HALTED, manual activation only"
+    ]
+  },
+  "global_release_conditions": [
+    {"id": "G1", "status": "pending", "verified_by": "C-10", "evidence": null, "text": "Code search shows no production `raw message -> regex parser -> approved` path."},
+    {"id": "G2", "status": "pending", "verified_by": "C-07", "evidence": null, "text": "When Hermes is unavailable, the number of new-risk commands is 0."},
+    {"id": "G3", "status": "pending", "verified_by": "C-06", "evidence": null, "text": "No FakeAdapter, fixture fallback, or hard-coded account values exist in the Dashboard production build."},
+    {"id": "G4", "status": "pending", "verified_by": "C-06", "evidence": null, "text": "Dashboard and Hermes snapshot call only the control-plane API; the API reads only PostgreSQL projections."},
+    {"id": "G5", "status": "pending", "verified_by": "C-09", "evidence": null, "text": "Every execution node can independently enter HALTED and REDUCING and write back acknowledgement."},
+    {"id": "G6", "status": "pending", "verified_by": "C-08", "evidence": null, "text": "The two accounts' intent, order, position, Redis key, and client order ID never cross."},
+    {"id": "G7", "status": "pending", "verified_by": "C-05", "evidence": null, "text": "After replaying duplicate messages, edited messages, WS reconnects, and reconciliation there are no duplicate orders or duplicate fill projections."},
+    {"id": "G8", "status": "pending", "verified_by": "C-05", "evidence": null, "text": "Real multimodal (text+image) replay acceptance fully passes."},
+    {"id": "G9", "status": "pending", "verified_by": "C-08", "evidence": null, "text": "Binance testnet fully covers: open, partial fill, cancel, stop-loss, scaled take-profit, move-to-breakeven, partial close, full close, restart+reconciliation."},
+    {"id": "G10", "status": "pending", "verified_by": "C-10", "evidence": null, "text": "Security check confirms: no test-token fallback, no anonymous watcher write endpoint, no plaintext exchange secrets in the DB, no default live credentials."}
+  ],
+  "safety_metrics": [
+    {"id": "S1", "status": "pending", "target": 0, "measured": null, "verified_by": "C-05", "text": "Executable intents not originating from Hermes."},
+    {"id": "S2", "status": "pending", "target": 0, "measured": null, "verified_by": "C-05", "text": "New-risk orders wrongly produced by update/noise/analysis/ambiguous messages."},
+    {"id": "S3", "status": "pending", "target": 0, "measured": null, "verified_by": "C-07", "text": "New-risk orders created when images are missing, image parsing failed, or context is stale."},
+    {"id": "S4", "status": "pending", "target": 0, "measured": null, "verified_by": "C-05", "text": "Duplicate orders caused by duplicate message/decision/intent."},
+    {"id": "S5", "status": "pending", "target": 0, "measured": null, "verified_by": "C-08", "text": "Two-account mis-routing."},
+    {"id": "S6", "status": "pending", "target": 0, "measured": null, "verified_by": "C-05", "text": "Executable gold labels whose final action/instrument/side disagree with Hermes+Gateway (uncertainty must be needs_review)."},
+    {"id": "S7", "status": "pending", "target": "100%", "measured": null, "verified_by": "C-05", "text": "Trace completeness across all execution events."},
+    {"id": "S8", "status": "pending", "target": 0, "measured": null, "verified_by": "C-06", "text": "Dashboard fixture/fake data hits."},
+    {"id": "S9", "status": "pending", "target": "100%", "measured": null, "verified_by": "C-06", "text": "Field consistency of Dashboard against projections."},
+    {"id": "S10", "status": "pending", "target": "100%", "measured": null, "verified_by": "C-09", "text": "Kill-switch acknowledgement completeness across all nodes."},
+    {"id": "S11", "status": "pending", "target": 0, "measured": null, "verified_by": "C-07", "text": "Automatic new-risk when a node is unreachable or a projection is stale."}
+  ],
+  "blocking_summary": "INITIAL: gate is blocked. Windows A and B handoffs not yet merged; no condition or metric evaluated.",
+  "notes": [
+    "This file is the single machine-readable scoreboard for the release gate.",
+    "Each global condition and safety metric is flipped to passed ONLY with reproducible command + output/report path + commit SHA recorded in `evidence`.",
+    "Hermes text wording may vary across the 3 clean replays, but safety classification/action/key trade fields must be stable; unstable samples go to human review and do NOT count as pass."
+  ]
+}
