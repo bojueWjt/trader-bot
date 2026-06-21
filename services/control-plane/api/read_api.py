@@ -310,6 +310,59 @@ def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
         conn.close()
 
 
+# Nautilus enum ints: OrderSide BUY=1/SELL=2 ; PositionSide LONG=2/SHORT=3.
+_ORDER_SIDE = {1: "long", 2: "short", "BUY": "long", "SELL": "short"}
+_POSITION_SIDE = {2: "long", 3: "short", "LONG": "long", "SHORT": "short",
+                  "long": "long", "short": "short"}
+
+
+def _num(value):
+    """Coerce a possibly-string/None numeric payload field to float, else None.
+    Required because repository upserts wrap quantities in COALESCE(%s, 0): a
+    string like '0.0008' would be cast to integer and raise InvalidTextRepresentation."""
+    if value is None:
+        return None
+    try:
+        return float(str(value).split()[0])  # tolerates '−0.02 USDT' style suffixes
+    except (ValueError, IndexError):
+        return None
+
+
+def _derive_projection_from_event(writer, ev: dict) -> None:
+    """C-06: derive read-model projections from the node's raw (flat-payload)
+    execution events. Raises on DB error so the caller's SAVEPOINT can roll back
+    just this event instead of poisoning the whole batch transaction."""
+    et = str(ev.get("event_type") or "")
+    p = ev.get("payload") or {}
+    acct = ev.get("account_id")
+    ev_id, ts = ev.get("event_id"), ev.get("ts_event")
+    if not acct:
+        return
+    if et.startswith("Position") and p.get("position_id"):
+        qty = abs(_num(p.get("quantity")) or 0.0)
+        writer.upsert_position_projection({
+            "account_id": acct, "position_id": p["position_id"],
+            "instrument_id": p.get("instrument_id"),
+            "side": _POSITION_SIDE.get(p.get("side"), "long"),
+            "quantity": qty, "avg_entry_price": _num(p.get("last_px")),
+            "status": "closed" if (et == "PositionClosed" or qty == 0) else "open",
+            "event_id": ev_id, "ts_event": ts,
+        })
+    elif et.startswith("Order") and (ev.get("client_order_id") or p.get("client_order_id")):
+        fill_qty = _num(p.get("last_qty")) or _num(p.get("filled_qty"))
+        writer.upsert_order_projection({
+            "account_id": acct, "instrument_id": p.get("instrument_id"),
+            "client_order_id": ev.get("client_order_id") or p.get("client_order_id"),
+            "venue_order_id": ev.get("venue_order_id"),
+            "status": (et[5:].lower() or "submitted"),
+            "side": _ORDER_SIDE.get(p.get("order_side")),
+            "order_type": (str(p.get("order_type")) if p.get("order_type") is not None else None),
+            "quantity": _num(p.get("quantity")) or fill_qty,
+            "filled_quantity": fill_qty,
+            "event_id": ev_id, "ts_event": ts,
+        })
+
+
 @app.post("/v1/nodes/{node_id}/execution-events")
 def post_node_events(node_id: str, body: dict = Body(default={}),
                      authorization: str | None = Header(default=None)):
@@ -328,15 +381,28 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
         for ev in body.get("events", []):
             if not ev.get("event_id"):
                 continue
+            # Persist the raw event first (idempotent, outside the savepoint) so it is
+            # always durable even if projection derivation fails on a malformed payload.
             writer.insert_execution_event({**ev, "node_id": ev.get("node_id") or node_id})
             hints = ev.get("payload") or {}
             ev_id, ts = ev["event_id"], ev.get("ts_event")
-            if isinstance(hints.get("account"), dict):
-                writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
-            if isinstance(hints.get("position"), dict):
-                writer.upsert_position_projection({**hints["position"], "event_id": ev_id, "ts_event": ts})
-            if isinstance(hints.get("order"), dict):
-                writer.upsert_order_projection({**hints["order"], "event_id": ev_id, "ts_event": ts})
+            with conn.cursor() as sp:
+                sp.execute("SAVEPOINT proj")
+            try:
+                if isinstance(hints.get("account"), dict):
+                    writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
+                if isinstance(hints.get("position"), dict):
+                    writer.upsert_position_projection({**hints["position"], "event_id": ev_id, "ts_event": ts})
+                if isinstance(hints.get("order"), dict):
+                    writer.upsert_order_projection({**hints["order"], "event_id": ev_id, "ts_event": ts})
+                _derive_projection_from_event(writer, ev)
+                with conn.cursor() as sp:
+                    sp.execute("RELEASE SAVEPOINT proj")
+            except Exception:
+                # One bad payload must not abort the batch: roll back just this
+                # event's projection writes; the raw event above stays committed.
+                with conn.cursor() as sp:
+                    sp.execute("ROLLBACK TO SAVEPOINT proj")
             acked.append(str(ev["event_id"]))
         conn.commit()
         return {"acked_event_ids": acked}
