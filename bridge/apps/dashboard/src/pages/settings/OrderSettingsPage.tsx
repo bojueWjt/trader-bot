@@ -27,17 +27,25 @@ import type {
   SystemHealthSnapshot
 } from "../../utils/api";
 import {
+  advancedSettingsFields,
+  emergencySettingsFields,
   entrySettingsFields,
   generalSettingsFields,
   moneySettingsFields,
+  notificationsSettingsFields,
   priceMonitorSettingsFields,
+  protectionSettingsFields,
   reconciliationSettingsFields
 } from "./orderSettingsDescriptor";
+import { AdvancedTab } from "./tabs/AdvancedTab";
+import { EmergencyTab } from "./tabs/EmergencyTab";
 import type { OrderSettingsCategoryKey, SettingsFieldDescriptor } from "./orderSettingsDescriptor";
 import { EntryOrdersTab } from "./tabs/EntryOrdersTab";
 import { GeneralTab } from "./tabs/GeneralTab";
 import { MoneyRiskTab } from "./tabs/MoneyRiskTab";
 import { MonitoringTab } from "./tabs/MonitoringTab";
+import { NotificationsTab } from "./tabs/NotificationsTab";
+import { ProtectionTab } from "./tabs/ProtectionTab";
 import { formatSettingValue } from "./tabs/SettingsField";
 import type { SettingsFieldState } from "./tabs/SettingsField";
 
@@ -45,7 +53,7 @@ type OrderSettingsPageProps = {
   role: AuthRole;
 };
 
-type SettingsTab = "entry" | "general" | "money" | "monitoring";
+type SettingsTab = "advanced" | "emergency" | "entry" | "general" | "money" | "monitoring" | "notifications" | "protection";
 
 type LiveRiskRelaxation = {
   active: boolean;
@@ -130,10 +138,14 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
   }, [refreshKey, scope]);
 
   const allFields = useMemo<Record<OrderSettingsCategoryKey, SettingsFieldDescriptor[]>>(() => ({
+    advanced: advancedSettingsFields,
+    emergency: emergencySettingsFields,
     entry: entrySettingsFields,
     general: generalSettingsFields,
     money: moneySettingsFields,
+    notifications: notificationsSettingsFields,
     price_monitor: priceMonitorSettingsFields,
+    protection: protectionSettingsFields,
     reconciliation: reconciliationSettingsFields
   }), []);
 
@@ -237,6 +249,13 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
   }
 
   async function validateDraft(): Promise<boolean> {
+    const localErrors = validateLocalSettings(currentFieldValue);
+    if (localErrors.length > 0) {
+      setValidationErrors(localErrors);
+      setStatus("Validation failed");
+      return false;
+    }
+
     const result = await validateSettings(draftSettings);
     setValidationErrors(result.errors);
     if (!result.valid) {
@@ -262,6 +281,13 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
 
     if (liveRiskRelaxation.active && !liveRiskConfirmed) {
       setValidationErrors(["Live risk relaxation confirmation is required before saving settings"]);
+      setStatus("Validation failed");
+      return;
+    }
+
+    const localErrors = validateLocalSettings(currentFieldValue);
+    if (localErrors.length > 0) {
+      setValidationErrors(localErrors);
       setStatus("Validation failed");
       return;
     }
@@ -386,7 +412,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
         <>
           {validationErrors.length > 0 && (
             <section className="validation-summary" role="alert" aria-labelledby="settings-error-summary">
-              <h3 id="settings-error-summary">Validation errors</h3>
+              <h3 id="settings-error-summary">Settings validation errors</h3>
               <ul>
                 {validationErrors.map((validationError) => (
                   <li key={validationError}>{validationError}</li>
@@ -436,6 +462,17 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                   Money & Risk
                 </button>
                 <button
+                  aria-selected={activeTab === "protection"}
+                  className={activeTab === "protection" ? "secondary-button active" : "secondary-button"}
+                  onClick={() => {
+                    setActiveTab("protection");
+                  }}
+                  role="tab"
+                  type="button"
+                >
+                  Protection & Exits
+                </button>
+                <button
                   aria-selected={activeTab === "monitoring"}
                   className={activeTab === "monitoring" ? "secondary-button active" : "secondary-button"}
                   onClick={() => {
@@ -445,6 +482,39 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                   type="button"
                 >
                   Monitoring
+                </button>
+                <button
+                  aria-selected={activeTab === "emergency"}
+                  className={activeTab === "emergency" ? "secondary-button active" : "secondary-button"}
+                  onClick={() => {
+                    setActiveTab("emergency");
+                  }}
+                  role="tab"
+                  type="button"
+                >
+                  Emergency
+                </button>
+                <button
+                  aria-selected={activeTab === "notifications"}
+                  className={activeTab === "notifications" ? "secondary-button active" : "secondary-button"}
+                  onClick={() => {
+                    setActiveTab("notifications");
+                  }}
+                  role="tab"
+                  type="button"
+                >
+                  Notifications
+                </button>
+                <button
+                  aria-selected={activeTab === "advanced"}
+                  className={activeTab === "advanced" ? "secondary-button active" : "secondary-button"}
+                  onClick={() => {
+                    setActiveTab("advanced");
+                  }}
+                  role="tab"
+                  type="button"
+                >
+                  Advanced
                 </button>
               </div>
             </header>
@@ -477,12 +547,48 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 onFieldChange={changeField}
               />
             )}
+            {activeTab === "protection" && (
+              <ProtectionTab
+                fieldState={fieldState}
+                readonly={readonly}
+                scope={scope.scope}
+                onClear={clearOverride}
+                onFieldChange={changeField}
+              />
+            )}
             {activeTab === "monitoring" && (
               <MonitoringTab
                 fieldState={fieldState}
                 readonly={readonly}
                 scope={scope.scope}
                 systemHealth={systemHealth}
+                onClear={clearOverride}
+                onFieldChange={changeField}
+              />
+            )}
+            {activeTab === "emergency" && (
+              <EmergencyTab
+                fieldState={fieldState}
+                readonly={readonly}
+                scope={scope.scope}
+                onClear={clearOverride}
+                onFieldChange={changeField}
+              />
+            )}
+            {activeTab === "notifications" && (
+              <NotificationsTab
+                fieldState={fieldState}
+                readonly={readonly}
+                scope={scope.scope}
+                onClear={clearOverride}
+                onFieldChange={changeField}
+              />
+            )}
+            {activeTab === "advanced" && (
+              <AdvancedTab
+                fieldState={fieldState}
+                readonly={readonly}
+                scope={scope.scope}
                 onClear={clearOverride}
                 onFieldChange={changeField}
               />
@@ -583,6 +689,66 @@ function requestId(): string {
   }
 
   return `settings-${Date.now()}`;
+}
+
+function validateLocalSettings(
+  currentFieldValue: (category: OrderSettingsCategoryKey, key: string) => OrderSettingScalar | ""
+): string[] {
+  const errors: string[] = [];
+  const executionMode = String(currentFieldValue("general", "execution_mode"));
+  const requireStop = currentFieldValue("protection", "require_stop") === true;
+  const breakevenEnabled = currentFieldValue("protection", "breakeven_enabled") === true;
+  const trailingEnabled = currentFieldValue("protection", "trailing_stop_enabled") === true;
+  const trailingCallbackRate = Number(currentFieldValue("protection", "trailing_callback_rate"));
+  const ladderTotal = takeProfitLadderFractionTotal(currentFieldValue("protection", "take_profit_ladder"));
+
+  if (ladderTotal > 1) {
+    errors.push(`Take-profit fractions total ${formatValidationNumber(ladderTotal)}; maximum is 1`);
+  }
+
+  if (executionMode === "live" && !requireStop) {
+    errors.push("Require stop cannot be disabled while execution mode is live");
+  }
+
+  if (!requireStop && breakevenEnabled) {
+    errors.push("Breakeven cannot be enabled when Require stop is disabled");
+  }
+
+  if (!requireStop && trailingEnabled) {
+    errors.push("Trailing stop cannot be enabled when Require stop is disabled");
+  }
+
+  if (trailingEnabled && (!Number.isFinite(trailingCallbackRate) || trailingCallbackRate <= 0)) {
+    errors.push("Trailing callback rate must be greater than 0 when trailing stop is enabled");
+  }
+
+  return errors;
+}
+
+function takeProfitLadderFractionTotal(value: OrderSettingScalar | ""): number {
+  if (typeof value !== "string" || !value.trim()) {
+    return 0;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      return 0;
+    }
+
+    return parsed.reduce((sum, raw) => {
+      const record = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
+      const fraction = Number(record.fraction);
+      return Number.isFinite(fraction) ? sum + fraction : sum;
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
+function formatValidationNumber(value: number): string {
+  const rounded = Math.round(value * 1000) / 1000;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
 }
 
 const riskRelaxationRules: Record<string, "decrease" | "increase"> = {

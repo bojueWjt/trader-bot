@@ -174,8 +174,12 @@ export type DailyReport = {
 };
 
 export type OrderCenterPosition = {
+  accountId: string;
+  executionJobId: string;
   id: string;
+  instrument: string;
   pair: string;
+  protectionStatus: string;
   side: string;
   amount: number;
   stakeAmount: number;
@@ -185,12 +189,31 @@ export type OrderCenterPosition = {
   pnlPct: number;
   leverage: number;
   openDate: string;
+  signalId: string;
   status: string;
+  stopLoss: number | false;
+  takeProfit: number | false;
+};
+
+export type OrderCenterEvent = {
+  id: string;
+  message: string;
+  status: string;
+  time: string;
+  type: string;
 };
 
 export type OrderCenterOrder = {
+  accountId: string;
   id: string;
+  executionJobId: string;
+  events: OrderCenterEvent[];
+  instrument: string;
+  intentId: string;
   pair: string;
+  positionId: string;
+  protectionStatus: string;
+  role: string;
   side: string;
   type: string;
   status: string;
@@ -203,7 +226,9 @@ export type OrderCenterOrder = {
 };
 
 export type OrderCenterTrade = {
+  accountId: string;
   id: string;
+  instrument: string;
   pair: string;
   side: string;
   status: string;
@@ -1005,33 +1030,55 @@ function positionFromApi(value: Record<string, unknown>, index: number): Positio
 function orderPositionFromApi(value: Record<string, unknown>, index: number): OrderCenterPosition {
   const side = firstString([value.side, value.position_side], "long").toLowerCase();
   const entry = firstNumber([value.entry_price, value.entry_rate, value.open_rate]);
+  const stopLoss = firstNumber([value.stop_loss, value.stop_loss_price], Number.NaN);
+  const takeProfit = firstNumber([value.take_profit, value.take_profit_price, value.next_take_profit_price], Number.NaN);
+  const positionId = firstString([value.position_id, value.trade_id, value.id], `position-${index}`);
   return {
+    accountId: firstString([value.account_id, value.account, value.exchange_account_id]),
     amount: firstNumber([value.amount, value.size, value.quantity]),
     current: firstNumber([value.mark_price, value.current_rate, value.current_price], entry),
     entry,
-    id: firstString([value.position_id, value.trade_id, value.id], `position-${index}`),
+    executionJobId: firstString([value.execution_job_id, value.job_id]),
+    id: positionId,
+    instrument: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
     leverage: firstNumber([value.leverage], 1),
     openDate: firstString([value.opened_at, value.created_at, value.open_date], "--"),
     pair: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
     pnl: firstNumber([value.unrealized_pnl, value.pnl]),
     pnlPct: firstNumber([value.pnl_pct, value.profit_pct]),
+    protectionStatus: firstString(
+      [value.protection_status, value.protection_state],
+      Number.isFinite(stopLoss) && stopLoss > 0 ? "protected" : "missing"
+    ),
+    signalId: firstString([value.signal_id, value.intent_id]),
     side: side === "short" || side === "sell" ? "short" : "long",
     stakeAmount: firstNumber([value.notional, value.stake_amount]),
-    status: firstString([value.status], "open")
+    status: firstString([value.status], "open"),
+    stopLoss: Number.isFinite(stopLoss) && stopLoss > 0 ? stopLoss : false,
+    takeProfit: Number.isFinite(takeProfit) && takeProfit > 0 ? takeProfit : false
   };
 }
 
 function orderFromApi(value: Record<string, unknown>, index: number): OrderCenterOrder {
   const amount = firstNumber([value.amount, value.quantity, value.order_amount]);
   const filled = firstNumber([value.filled, value.filled_amount], 0);
+  const orderId = firstString([value.order_id, value.venue_order_id, value.id], `order-${index}`);
   return {
+    accountId: firstString([value.account_id, value.account, value.exchange_account_id]),
     amount,
     createdAt: firstString([value.created_at, value.submitted_at], "--"),
+    events: orderEventsFromApi(value),
+    executionJobId: firstString([value.execution_job_id, value.job_id]),
     filled,
-    id: firstString([value.order_id, value.venue_order_id, value.id], `order-${index}`),
+    id: orderId,
+    instrument: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    intentId: firstString([value.intent_id, value.signal_id, value.client_order_id]),
     pair: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    positionId: firstString([value.position_id, value.trade_id]),
     price: firstNumber([value.price, value.limit_price, value.average_price]),
+    protectionStatus: firstString([value.protection_status, value.protection_state], "unknown"),
     remaining: firstNumber([value.remaining, value.remaining_amount], Math.max(0, amount - filled)),
+    role: firstString([value.role, value.order_role], "entry"),
     side: firstString([value.side], "--"),
     status: firstString([value.status], "--"),
     tradeId: firstString([value.trade_id, value.position_id]),
@@ -1042,10 +1089,12 @@ function orderFromApi(value: Record<string, unknown>, index: number): OrderCente
 function tradeFromApi(value: Record<string, unknown>, index: number): OrderCenterTrade {
   const side = firstString([value.side, value.position_side], "long").toLowerCase();
   return {
+    accountId: firstString([value.account_id, value.account, value.exchange_account_id]),
     amount: firstNumber([value.amount, value.size, value.quantity]),
     closeDate: firstString([value.closed_at, value.close_date], "--"),
     closeRate: firstNumber([value.close_price, value.close_rate, value.exit_rate]),
     id: firstString([value.trade_id, value.id], `trade-${index}`),
+    instrument: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
     openDate: firstString([value.opened_at, value.created_at, value.open_date], "--"),
     openRate: firstNumber([value.open_price, value.entry_price, value.open_rate]),
     ordersCount: asRecordArray(value.orders).length,
@@ -1055,6 +1104,16 @@ function tradeFromApi(value: Record<string, unknown>, index: number): OrderCente
     side: side === "short" || side === "sell" ? "short" : "long",
     status: firstString([value.status], "closed")
   };
+}
+
+function orderEventsFromApi(value: Record<string, unknown>): OrderCenterEvent[] {
+  return asRecordArray(value.events ?? value.audit_timeline ?? value.timeline).map((event, index) => ({
+    id: firstString([event.event_id, event.id], `event-${index}`),
+    message: firstString([event.message, event.summary, event.detail, event.status], "order event"),
+    status: firstString([event.status], "--"),
+    time: firstString([event.occurred_at, event.generated_at, event.created_at, event.timestamp], "--"),
+    type: firstString([event.event_type, event.type], "event")
+  }));
 }
 
 function orderCenterFromPayloads(
@@ -1709,6 +1768,13 @@ export async function closePosition(tradeId: string, reason: string, signalId: s
     reason,
     scope: "position",
     signal_id: signalId
+  });
+}
+
+export async function cancelOrder(orderId: string, reason: string): Promise<CommandResult> {
+  return issueCommand("cancel_order", {
+    order_id: orderId,
+    reason
   });
 }
 
