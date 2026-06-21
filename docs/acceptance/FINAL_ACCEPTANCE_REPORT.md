@@ -39,6 +39,25 @@ operator 危险操作命令（risk_admin + request_id + reason + confirm，落 a
   - **control-plane 重启韧性**：重启 control-plane → node 2 条瞬时 connection-refused 后干净恢复（心跳新鲜），**无 rogue 下单**（OrderSubmitted 前后均 5），control-plane 恢复服务（snapshot 200）。
   - PG 不可达 fail-closed：设计上 503 `store unavailable`（已有路径）；worker context_stale / governor risk_context_incomplete 已证数据缺失即拒。
 
+## 0.18 C-08 执行级更新场景（hk，2026-06-21）
+
+修复 governor `update_target` instrument 格式 bug（commit `cf40745`）：决策带 venue symbol `BTCUSDT`，持仓投影带 Nautilus id `BTCUSDT-PERP.BINANCE`，原 `==` 比较致**所有 update 动作 target 匹配 0 → 永远 needs_review**。加 `_instrument_matches()` 后：
+- **close_position 全链路 PASS**：开 BTC → seed close_position(target=持仓) → governor **approved** → intent `b4d2bf77` → node SELL reduce-only IOC → **OrderFilled → PositionClosed**（tag 全可追溯，含 lifecycle_role=exit + position_id）。
+- **move_stop_loss**：governor **approved**（gate 修复生效），但 node 执行 **denied `unsupported_order_spec type=market`** —— A→B 管理计划把移动止损翻译成 market 单，应为 STOP_MARKET+trigger（fail-safe 拒单；node-planner follow-up）。
+- **partial_close**：未单独跑（同 update 路径，需 fraction + 同类 planner 修复）。
+
+**C-08 场景净覆盖 ≈ 14**：open(成交)/close_position(平仓)/close_all/cancel_all + 6 拒审闸 + HALTED/REDUCING + freshness + 幂等/重复 + 节点&CP 重启混沌。剩 move_stop_loss/partial_close 执行级为 node-planner 单类 follow-up（governor 已放行）。
+
+## 0.19 C-11 部署认证 + C-12 最终状态（2026-06-21）
+
+**部署 = DONE（认证）**：hk 上 v3 栈全绿 —— systemd control-plane/ingress active；容器 node-a/redis/postgres up；node ACTIVE、心跳 1s 新鲜。**与旧 prod 完全隔离**：`/srv/trader` 旧栈全程未动，`trader-api-1` up 7d，`hk-bot.balen.wang` 仍 200 在服务。
+- **公网切换是唯一 operator-gated 步骤**（切 Caddy 路由 = 放 live 流量）：受 `release-gate.json` + operator 签名门控，**非 C 窗口可自行执行**；旧路由保留可秒回切。runbook `docs/runbooks/CUTOVER_ROLLBACK.md` 流程 + 本轮验证的回滚原语（HALT 双层 ~6s 到安全态）已就绪。
+
+**C-12 最终判定**：
+- **整合测试验收 = 实质完成（testnet 全链路）**：A→B→执行→投影→面板 真机闭环；governor 决策矩阵 + kill-switch 双层 + cancel/close + 混沌 + 安全审计 全 PASS（§0.1–§0.18）。
+- **部署 = 完成**（v3 运行 + 认证 + prod 隔离）。
+- **release gate 仍 `blocked`（正确）**：default_ceiling=`testnet_only`；live 需 operator 签名 + 三项 follow-up（freshness 方案 A、move_stop_loss/partial_close 的 node-planner stop-order 翻译、close_all 批量节流）。这些**不卡 testnet 验收**，属 live cutover 前硬化。
+
 ## 0.2 已知生产硬化项（不卡 testnet 验收，卡 live 自动批准）
 
 - **静默期投影 freshness（用户已定方案 A，留待 live 前实现）**：§2.2 契约冻结 `stale = f(last_execution_event_at>阈值)` 且"超阈值禁止 Hermes 自动批准"。成交后 ~90s 无新执行事件即 stale=True（Binance 静默 ACCOUNT_UPDATE）。testnet 验收下此保守行为安全。**方案 A 实现要求（关键）**：周期事件必须携带 node **真实**当前 Binance 账户状态（证明节点与交易所仍同步），不能用空 payload 的「活性 ping」——否则会**谎报 freshness**，比当前保守行为更糟。正确实现需 node 周期向 Binance 拉真账户状态（Nautilus exec-client account-query API，host-verify）+ 经 ProjectionActor.sink 回流；ExecutionEventEnvelopeV1 构造已确认简单。属 live cutover 项，需真机迭代，故本轮 scope 为后续。
