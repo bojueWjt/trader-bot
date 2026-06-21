@@ -554,7 +554,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-03"
       ],
@@ -567,7 +567,11 @@
         "每个字段有类型、范围、单位、默认值和 apply_mode",
         "默认值为 HALTED/testnet/fail-closed"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "order_management_settings.v1.json 9 categories, out of snapshot gate, fail-closed defaults, 9 freshness fields == OM2 contract"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -578,7 +582,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-01",
         "OM0-04"
@@ -591,7 +595,11 @@
         "覆盖规则确定性且有单测",
         "删除 override 后恢复继承值"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "resolver global<account<instrument; source_scope; delete restores inheritance (verified live: global=(7,global)/account=(9,account))"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -602,7 +610,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-01",
         "OM1-02"
@@ -616,7 +624,11 @@
         "PATCH 必须携带 expected_version 与 reason",
         "无效或冲突返回结构化错误且不落库"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "GET/validate/PATCH(expected_version+reason)/effective; stale version rejected, no partial write"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -627,7 +639,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-03"
       ],
@@ -639,7 +651,11 @@
         "可查看任意版本 diff",
         "rollback 生成新版本而非篡改历史"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "immutable versions/diff/rollback->new version (live [3,2,1]); finding: v0/defaults rollback unsupported"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -650,7 +666,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-03",
         "OM0-05"
@@ -664,7 +680,11 @@
         "Dashboard 可见 desired/effective version",
         "应用失败保留旧版本并告警"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "settings.changed outbox + settings_consumer + desired/effective"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -675,7 +695,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-05"
       ],
@@ -687,7 +707,11 @@
         "restart-required 只生成计划，不自动重启 live 节点",
         "hot reload 有 ACK 与超时"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "apply_plan hot_reload vs restart_required; no live auto-restart"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -698,7 +722,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-03"
       ],
@@ -711,7 +735,11 @@
         "放宽 live 风险需要 confirm+operator_signoff",
         "审计含 before/after/reason/request_id/actor"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "RBAC viewer/operator/risk_admin; live-risk confirm+operator_signoff; audit actor/action/before/after/reason/request_id"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -722,7 +750,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-04",
         "OM1-07"
@@ -735,7 +763,11 @@
         "导入先 validate 再发布",
         "环境不匹配或风险放宽有显式警告"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "import/export; secrets excluded"
+      ],
       "blocker": null,
       "notes": []
     },
