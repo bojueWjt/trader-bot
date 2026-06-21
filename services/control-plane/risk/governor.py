@@ -9,6 +9,7 @@ anything out of policy becomes rejected.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from policy import (
@@ -146,14 +147,15 @@ def evaluate(
     if action in OPENING_ACTIONS:
         # instrument exposure = live notional already open on this account+instrument
         # (from the positions projection), not a stale/never-written risk_state counter.
+        proposed_notional = _proposed_notional(intent, risk_budget)
         existing_notional = sum(
             float(p.get("notional", 0) or 0)
             for p in positions
-            if p.get("account_id") == account_id and p.get("instrument_id") == instrument
+            if p.get("account_id") == account_id and _instrument_matches(instrument, p.get("instrument_id"))
         )
         # open_risk_fraction stays from risk_state until the projection populates it.
         existing_risk = float(risk_state.get("open_risk_fraction", 0) or 0)
-        if existing_notional >= policy.max_instrument_notional:
+        if existing_notional + float(proposed_notional) > policy.max_instrument_notional:
             return reject("instrument_exposure", "instrument notional cap reached", account_id)
         if existing_risk + risk_fraction > policy.max_total_risk_fraction:
             return reject("total_risk", "total open risk fraction cap reached", account_id)
@@ -162,9 +164,9 @@ def evaluate(
             group_notional = sum(
                 float(p.get("notional", 0) or 0)
                 for p in positions
-                if p.get("account_id") == account_id and p.get("instrument_id") in group[1:]
+                if p.get("account_id") == account_id and _instrument_in_group(p.get("instrument_id"), group[1:])
             )
-            if group_notional >= policy.max_correlated_notional:
+            if group_notional + float(proposed_notional) > policy.max_correlated_notional:
                 return reject("correlated_exposure", f"group {group[0]} notional cap", account_id)
         ev.ok("exposure")
 
@@ -182,6 +184,23 @@ def _instrument_matches(symbol: str | None, instrument_id: str | None) -> bool:
     from order_management.identifiers import instruments_match
 
     return instruments_match(symbol, instrument_id)
+
+
+def _instrument_in_group(instrument_id: str | None, members: tuple[str, ...]) -> bool:
+    return any(_instrument_matches(member, instrument_id) for member in members)
+
+
+def _proposed_notional(intent: dict[str, Any], risk_budget: dict[str, float]) -> Decimal:
+    sizing = intent.get("sizing") or {}
+    explicit = sizing.get("notional") or sizing.get("max_notional")
+    if explicit is not None:
+        return Decimal(str(explicit))
+    quantity = sizing.get("quantity")
+    entry = intent.get("entry") or {}
+    price = entry.get("price") or entry.get("price_min") or entry.get("price_max")
+    if quantity is not None and price is not None:
+        return abs(Decimal(str(quantity)) * Decimal(str(price)))
+    return Decimal(str(risk_budget.get("max_notional", 0)))
 
 
 def _precision_ok(intent: dict[str, Any], policy: RiskPolicy) -> bool:
