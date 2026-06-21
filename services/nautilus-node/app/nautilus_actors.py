@@ -212,6 +212,7 @@ class CommandPollerActor(Actor):
         lifecycle: Any,
         node_id: str,
         *,
+        account_id: str | None = None,
         poll_interval_seconds: float = 2.0,
         timer_name: str = "operator-commands.poll",
     ) -> None:
@@ -219,6 +220,7 @@ class CommandPollerActor(Actor):
         self._control_plane = control_plane
         self._lifecycle = lifecycle
         self._node_id = node_id
+        self._account_id = account_id
         self._poll_interval_seconds = poll_interval_seconds
         self._timer_name = timer_name
 
@@ -274,9 +276,16 @@ class CommandPollerActor(Actor):
                 self._lifecycle.apply_operator_state(TradingState.ACTIVE, "operator_command")
             elif cmd.type == CommandType.SET_REDUCING:
                 self._lifecycle.apply_operator_state(TradingState.REDUCING, "operator_command")
+            elif cmd.type in (CommandType.CANCEL_ALL, CommandType.CLOSE_ALL):
+                # Only a Strategy may submit/cancel/close on Nautilus, so route the
+                # action to the IntentExecutionStrategy over the msgbus. Returns
+                # ACCEPTED (received + dispatched); the strategy executes best-effort.
+                message_bus = _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
+                if message_bus is not None and hasattr(message_bus, "publish"):
+                    message_bus.publish(topic=f"node.commands.{self._account_id}", msg=cmd)
+                    return CommandAckStatus.ACCEPTED, "dispatched_to_strategy"
+                return CommandAckStatus.FAILED, "no_msgbus_for_dispatch"
             else:
-                # cancel_all / close_all need order/position actions on the trader -
-                # not yet wired into the node (follow-up).
                 return CommandAckStatus.ACCEPTED, "node_action_not_wired"
             return CommandAckStatus.COMPLETED, None
         except Exception as exc:  # e.g. readiness gate on RESUME

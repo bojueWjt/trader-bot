@@ -168,7 +168,12 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
     node.trader.add_actor(IntentPublisherActor(runtime.intent_data_client))
     node.trader.add_actor(ExecutionProjectionActor(runtime.projection_actor))
     node.trader.add_actor(
-        CommandPollerActor(runtime.control_plane, runtime.lifecycle, runtime.config.node_id)
+        CommandPollerActor(
+            runtime.control_plane,
+            runtime.lifecycle,
+            runtime.config.node_id,
+            account_id=runtime.config.account_id,
+        )
     )
     return node
 

@@ -85,11 +85,68 @@ class IntentExecutionStrategy(Strategy):
             topic=f"intents.{self.config.account_id}",
             handler=self._on_intent_msg,
         )
+        # Kill-switch operator actions (cancel_all/close_all) are routed here by the
+        # CommandPollerActor: only a Strategy may submit/cancel/close on Nautilus.
+        self.msgbus.subscribe(  # type: ignore[attr-defined]
+            topic=f"node.commands.{self.config.account_id}",
+            handler=self._on_node_command,
+        )
 
     def _on_intent_msg(self, intent: Any) -> None:
         # msgbus delivers the ApprovedTradeIntentV1 directly.
         if intent is not None:
             self._handle_intent(intent)
+
+    def _on_node_command(self, cmd: Any) -> None:
+        """Execute operator cancel_all / close_all. Best-effort per item: a failure on
+        one order/position is recorded but does not stop the rest (kill-switch must be
+        as complete as possible)."""
+        ctype = getattr(cmd, "type", cmd)
+        ctype = str(getattr(ctype, "value", ctype))
+        if ctype == "cancel_all":
+            for order in self._all_open_orders():
+                try:
+                    self.cancel_order(order)  # type: ignore[attr-defined]
+                except Exception as exc:
+                    self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
+        elif ctype == "close_all":
+            for position in self._all_open_positions():
+                try:
+                    # Nautilus submits a reduce-only market order to flatten.
+                    self.close_position(position)  # type: ignore[attr-defined]
+                except Exception as exc:
+                    self._record_denial(OrderDenied("position_close_failed", repr(exc)))
+
+    def _all_open_orders(self) -> tuple[Any, ...]:
+        cache = getattr(self, "cache", None)
+        if cache is None:
+            return ()
+        for name in ("orders_open", "orders"):
+            method = getattr(cache, name, None)
+            if method is None:
+                continue
+            try:
+                return tuple(method() or ())
+            except TypeError:
+                continue
+        return ()
+
+    def _all_open_positions(self) -> tuple[Any, ...]:
+        cache = getattr(self, "cache", None)
+        if cache is None:
+            return ()
+        for name in ("positions_open", "positions"):
+            method = getattr(cache, name, None)
+            if method is None:
+                continue
+            try:
+                return tuple(
+                    p for p in (method() or ())
+                    if Decimal(str(_position_quantity(p) or 0)) != 0
+                )
+            except TypeError:
+                continue
+        return ()
 
     def on_data(self, data: Any) -> None:
         # Retained for the publish_data path / tests: unwrap CustomData if used.
