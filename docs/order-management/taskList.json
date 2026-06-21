@@ -2047,7 +2047,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-03",
         "OM1-04",
@@ -2065,7 +2065,11 @@
         "必须填写 reason",
         "expected_version 冲突可刷新/重放而不覆盖"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 6fce861",
+        "npm build + 22 vitest pass (incl. isolation); 2 real failures caught+fixed in acceptance",
+        "SaveReviewDialog before/after/effective diff; reason required; 409 conflict refresh/replay no overwrite"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -2076,7 +2080,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-04",
         "OM1-05",
@@ -2090,7 +2094,11 @@
         "节点未应用时显著告警",
         "rollback 走同样验证与确认流程"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 6fce861",
+        "npm build + 22 vitest pass (incl. isolation); 2 real failures caught+fixed in acceptance",
+        "SettingsHistory versions author/time/reason/diff; desired!=effective drift warning; rollback through review"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -2101,7 +2109,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-07",
         "OM7-08"
@@ -2114,7 +2122,11 @@
         "risk_admin 权限由 API 决定",
         "高危确认不可仅靠前端"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 6fce861",
+        "npm build + 22 vitest pass (incl. isolation); 2 real failures caught+fixed in acceptance",
+        "DangerConfirmDialog viewer no write controls; risk_admin from API; danger confirm+operator_signoff backend-enforced"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -2156,7 +2168,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM7-01",
         "OM7-11"
@@ -2170,7 +2182,11 @@
         "错误摘要和 ARIA 标签完整",
         "桌面与窄屏无阻断"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 6fce861",
+        "npm build + 22 vitest pass (incl. isolation); 2 real failures caught+fixed in acceptance",
+        "a11y ARIA/keyboard/error-summary/focus + responsive + Playwright e2e specs + data-testid selectors"
+      ],
       "blocker": null,
       "notes": []
     },
