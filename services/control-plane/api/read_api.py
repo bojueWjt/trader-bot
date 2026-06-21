@@ -939,12 +939,12 @@ def v1_trades(authorization: str | None = Header(default=None)):
 
 @app.get("/v1/messages")
 def v1_messages(
-    limit: int = 50,
+    limit: int = 200,
     status: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     require_reader(authorization)
-    limit = max(1, min(int(limit), 200))
+    limit = max(1, min(int(limit), 500))
     conn = _read_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
