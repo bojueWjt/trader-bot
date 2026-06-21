@@ -51,6 +51,10 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
         account_type=account_type,
         environment=environment,
         instrument_provider=instrument_provider,
+        # The live Binance accounts run in Hedge Mode, where Binance/Nautilus reject
+        # reduce_only (positionSide is used instead). Testnet runs one-way — the tested
+        # path — where reduce_only is valid, so keep it there unchanged.
+        use_reduce_only=(env_name != "live"),
     )
     return data_config, exec_config
 
