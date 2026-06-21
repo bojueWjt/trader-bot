@@ -14,8 +14,8 @@
   "current_state": "blocked",
   "default_ceiling": "testnet_only",
   "rule": "Any failing global_release_condition OR any unmet safety_metric forces current_state=blocked. Window C may not exceed default_ceiling. live_readonly/live_small require operator_signoff.",
-  "evaluated_at": "2026-06-20T10:02:33Z",
-  "evaluated_commit": "be5e2f9037e2855219f6c0aafb82000bb644eaa9",
+  "evaluated_at": "2026-06-21T03:00:00Z",
+  "evaluated_commit": "46bf90fae97b16123ad3815f358202e10d6c4e5c",
   "operator_signoff": {
     "required_for": [
       "live_readonly",
