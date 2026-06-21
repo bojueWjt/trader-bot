@@ -2374,7 +2374,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM7-12",
         "OM8-03"
@@ -2388,7 +2388,11 @@
         "危险操作有确认",
         "E2E 失败返回非零"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 7321030",
+        "host-run chromium: npm run build + playwright test -> 15 passed; vitest 22 passed",
+        "order-settings + order-center specs (page.route mocked): all tabs/scope/validate/save/conflict/history/rollback/RBAC/danger-confirm + order timeline/manual actions; failing e2e non-zero"
+      ],
       "blocker": null,
       "notes": []
     },
