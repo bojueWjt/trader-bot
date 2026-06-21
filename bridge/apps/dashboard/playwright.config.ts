@@ -1,15 +1,30 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { defineConfig, devices } from "@playwright/test";
 import type { PlaywrightTestConfig } from "@playwright/test";
 
+const dashboardRoot = dirname(fileURLToPath(import.meta.url));
+const e2eRoot = join(dashboardRoot, "e2e");
 const envExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const cachedExecutablePath = join(
   homedir(),
   "Library/Caches/ms-playwright/chromium-1223/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
 );
+const e2eAuthStorageState = {
+  cookies: [],
+  origins: [
+    {
+      localStorage: [
+        { name: "hermes.auth.token", value: "om8-e2e-token" },
+        { name: "hermes.auth.role", value: "risk_admin" }
+      ],
+      origin: "http://127.0.0.1:4173"
+    }
+  ]
+};
 
 let executablePath = "";
 if (envExecutablePath && existsSync(envExecutablePath)) {
@@ -22,6 +37,8 @@ if (!executablePath && existsSync(cachedExecutablePath)) {
 
 const dashboardUse: PlaywrightTestConfig["use"] = {
   baseURL: "http://127.0.0.1:4173",
+  screenshot: "only-on-failure",
+  storageState: e2eAuthStorageState,
   trace: "retain-on-failure"
 };
 
@@ -32,22 +49,29 @@ if (executablePath) {
 }
 
 export default defineConfig({
-  testDir: "./e2e",
-  timeout: 30000,
   expect: {
     timeout: 10000
   },
-  use: dashboardUse,
-  webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 4173",
-    reuseExistingServer: true,
-    timeout: 30000,
-    url: "http://127.0.0.1:4173"
-  },
+  outputDir: join(e2eRoot, "test-results"),
   projects: [
     {
       name: "chromium",
       use: devices["Desktop Chrome"]
     }
-  ]
+  ],
+  reporter: [
+    ["list"],
+    ["html", { open: "never", outputFolder: join(e2eRoot, "playwright-report") }]
+  ],
+  testDir: e2eRoot,
+  timeout: 30000,
+  use: dashboardUse,
+  webServer: {
+    command: "npm run dev -- --host 127.0.0.1 --port 4173",
+    cwd: dashboardRoot,
+    env: { ...process.env, VITE_AUTH_DISABLED: "false" },
+    reuseExistingServer: true,
+    timeout: 30000,
+    url: "http://127.0.0.1:4173"
+  }
 });
