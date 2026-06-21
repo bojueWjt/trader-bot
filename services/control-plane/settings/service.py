@@ -217,6 +217,8 @@ class SettingsService:
             raise SettingsServiceError("confirmation_required", "rollback requires confirm=true")
         if not str(reason or "").strip():
             raise SettingsServiceError("reason_required", "reason is required")
+        if not str(request_id or "").strip():
+            raise SettingsServiceError("request_id_required", "request_id is required")
         scope, scope_key = self._scope(scope, scope_key)
         try:
             target_version_row = get_version(self.conn, scope, scope_key, int(target_version))
