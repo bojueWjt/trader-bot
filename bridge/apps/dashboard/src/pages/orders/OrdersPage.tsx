@@ -84,7 +84,7 @@ export function OrdersPage({ refreshKey, role, onRefresh }: OrdersPageProps): Re
   const filtered = useMemo(() => filterOrderCenter(data, filters), [data, filters]);
 
   return (
-    <section className="page-grid">
+    <section className="page-grid" data-testid="orders-page">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Order Center</p>
@@ -271,7 +271,7 @@ function OrdersFilterBar({
   onChange: (filters: OrdersFilters) => void;
 }): ReactElement {
   return (
-    <section className="orders-filter-bar" aria-label="Order filters">
+    <section className="orders-filter-bar" aria-label="Order filters" data-testid="orders-filter-bar">
       <div className="orders-filter-heading">
         <SlidersHorizontal size={16} aria-hidden="true" />
         <h3>Filters</h3>
@@ -280,6 +280,7 @@ function OrdersFilterBar({
         <span>Account</span>
         <select
           aria-label="Account"
+          data-testid="orders-filter-account"
           onChange={(event) => {
             onChange({ ...filters, account: event.target.value });
           }}
@@ -293,6 +294,7 @@ function OrdersFilterBar({
         <span>Instrument</span>
         <select
           aria-label="Instrument"
+          data-testid="orders-filter-instrument"
           onChange={(event) => {
             onChange({ ...filters, instrument: event.target.value });
           }}
@@ -306,6 +308,7 @@ function OrdersFilterBar({
         <span>Status</span>
         <select
           aria-label="Status"
+          data-testid="orders-filter-status"
           onChange={(event) => {
             onChange({ ...filters, status: event.target.value });
           }}
@@ -319,6 +322,7 @@ function OrdersFilterBar({
         <span>Role</span>
         <select
           aria-label="Role"
+          data-testid="orders-filter-role"
           onChange={(event) => {
             onChange({ ...filters, role: event.target.value });
           }}
@@ -332,6 +336,7 @@ function OrdersFilterBar({
         <span>Time range</span>
         <select
           aria-label="Time range"
+          data-testid="orders-filter-time-range"
           onChange={(event) => {
             onChange({ ...filters, timeRange: event.target.value });
           }}
@@ -359,7 +364,7 @@ function OrderPositionsTable({
   onOpenDetail: (position: OrderCenterPosition) => void;
 }): ReactElement {
   return (
-    <div className="table-wrap">
+    <div className="table-wrap" data-testid="orders-positions-table">
       <table>
         <thead>
           <tr>
@@ -408,17 +413,18 @@ function OrderPositionsTable({
                   >
                     <ChevronRight size={16} />
                   </button>
-                  <button
-                    aria-label={`Close position ${position.id}`}
-                    className="danger-button"
-                    disabled={actionsDisabled}
-                    onClick={() => {
-                      onAction({ kind: "close", position });
-                    }}
-                    type="button"
-                  >
-                    Close
-                  </button>
+                  {!actionsDisabled && (
+                    <button
+                      aria-label={`Close position ${position.id}`}
+                      className="danger-button"
+                      onClick={() => {
+                        onAction({ kind: "close", position });
+                      }}
+                      type="button"
+                    >
+                      Close
+                    </button>
+                  )}
                 </div>
               </td>
             </tr>
@@ -442,7 +448,7 @@ function OrderOrdersTable({
   onOpenDetail: (order: OrderCenterOrder) => void;
 }): ReactElement {
   return (
-    <div className="table-wrap">
+    <div className="table-wrap" data-testid="orders-open-orders-table">
       <table>
         <thead>
           <tr>
@@ -493,17 +499,19 @@ function OrderOrdersTable({
                   >
                     <ChevronRight size={16} />
                   </button>
-                  <button
-                    aria-label={`Cancel order ${order.id}`}
-                    className="danger-button"
-                    disabled={actionsDisabled || order.status.toLowerCase() === "filled" || order.status.toLowerCase() === "closed"}
-                    onClick={() => {
-                      onAction({ kind: "cancel", order });
-                    }}
-                    type="button"
-                  >
-                    Cancel
-                  </button>
+                  {!actionsDisabled && (
+                    <button
+                      aria-label={`Cancel order ${order.id}`}
+                      className="danger-button"
+                      disabled={order.status.toLowerCase() === "filled" || order.status.toLowerCase() === "closed"}
+                      onClick={() => {
+                        onAction({ kind: "cancel", order });
+                      }}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                  )}
                 </div>
               </td>
             </tr>
@@ -523,7 +531,7 @@ function OrderHistoryTable({
   onOpenDetail: (trade: OrderCenterTrade) => void;
 }): ReactElement {
   return (
-    <div className="table-wrap">
+    <div className="table-wrap" data-testid="orders-history-table">
       <table>
         <thead>
           <tr>
@@ -605,7 +613,7 @@ function OrderDetailDrawer({
   const events = order?.events || [];
 
   return (
-    <aside className="drawer" role="complementary" aria-label={`${title} detail`}>
+    <aside className="drawer" role="complementary" aria-label={`${title} detail`} data-testid="orders-detail-drawer">
       <div className="drawer-card orders-detail-drawer">
         <header>
           <div>
@@ -663,11 +671,11 @@ function OrderDetailDrawer({
         </section>
 
         <section className="drawer-actions" aria-label="Manual order controls">
-          {order && (
+          {!readonly && order && (
             <button
               aria-label={`Cancel order ${order.id}`}
               className="danger-button"
-              disabled={readonly || order.status.toLowerCase() === "filled" || order.status.toLowerCase() === "closed"}
+              disabled={order.status.toLowerCase() === "filled" || order.status.toLowerCase() === "closed"}
               onClick={() => {
                 onAction({ kind: "cancel", order });
               }}
@@ -677,12 +685,11 @@ function OrderDetailDrawer({
               Cancel order
             </button>
           )}
-          {position && (
+          {!readonly && position && (
             <>
               <button
                 aria-label={`Move stop ${position.id}`}
                 className="secondary-button"
-                disabled={readonly}
                 onClick={() => {
                   onAction({ kind: "move-stop", position });
                 }}
@@ -694,7 +701,6 @@ function OrderDetailDrawer({
               <button
                 aria-label={`Partial close ${position.id}`}
                 className="secondary-button"
-                disabled={readonly}
                 onClick={() => {
                   onAction({ kind: "partial-close", position });
                 }}
@@ -706,7 +712,6 @@ function OrderDetailDrawer({
               <button
                 aria-label={`Close position ${position.id}`}
                 className="danger-button"
-                disabled={readonly}
                 onClick={() => {
                   onAction({ kind: "close", position });
                 }}
@@ -750,8 +755,8 @@ function OrderActionConfirm({
   const enabled = reason.trim().length > 0 && stopValid && partialValid;
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="order-action-title">
+    <div className="modal-backdrop" role="presentation" data-testid="order-action-backdrop">
+      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="order-action-title" data-testid="order-action-dialog">
         <header>
           <div>
             <p className="eyebrow">Manual Action</p>

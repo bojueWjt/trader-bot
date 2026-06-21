@@ -18,6 +18,8 @@ const baseQuality = {
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
+  sessionStorage.clear();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -381,6 +383,65 @@ describe("control-plane dashboard contracts", () => {
       }));
     });
     expect(await screen.findByText("Command completed")).toBeInTheDocument();
+  });
+
+  it("does not render manual order write controls for viewer role", async () => {
+    const tokenPayload = btoa(JSON.stringify({ exp: 4102444800, role: "viewer" }))
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replace(/=+$/, "");
+    localStorage.setItem("hermes.auth.token", `header.${tokenPayload}.sig`);
+    stubControlPlane(vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/v1/positions")) {
+        return jsonResponse(envelope({
+          positions: [
+            {
+              account_id: "acc-1",
+              amount: 1,
+              entry_price: 40000,
+              instrument_symbol: "BTC/USDT",
+              position_id: "pos-1",
+              signal_id: "sig-1",
+              status: "open"
+            }
+          ]
+        }));
+      }
+      if (path.startsWith("/v1/orders")) {
+        return jsonResponse(envelope({
+          orders: [
+            {
+              account_id: "acc-1",
+              amount: 1,
+              created_at: "2026-06-20T12:02:00Z",
+              instrument_symbol: "BTC/USDT",
+              order_id: "ord-1",
+              order_type: "limit",
+              status: "open",
+              trade_id: "pos-1"
+            }
+          ]
+        }));
+      }
+      if (path.startsWith("/v1/trades")) {
+        return jsonResponse(envelope({ trades: [] }));
+      }
+      return jsonResponse(envelope({ accounts: [], decisions: [], messages: [], nodes: [], positions: [], trades: [] }));
+    }), false);
+
+    render(<App initialPath="/orders" />);
+
+    expect(await screen.findByText("Read-only viewer")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open order ord-1 detail" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel order ord-1" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close position pos-1" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open position pos-1 detail" }));
+    const detail = await screen.findByRole("complementary", { name: "Position pos-1 detail" });
+    expect(within(detail).queryByRole("button", { name: "Move stop pos-1" })).not.toBeInTheDocument();
+    expect(within(detail).queryByRole("button", { name: "Partial close pos-1" })).not.toBeInTheDocument();
+    expect(within(detail).queryByRole("button", { name: "Close position pos-1" })).not.toBeInTheDocument();
   });
 });
 

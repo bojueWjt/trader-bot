@@ -50,7 +50,7 @@ export function MoneyRiskTab({
   onFieldChange
 }: MoneyRiskTabProps): ReactElement {
   return (
-    <div className="settings-fields" role="tabpanel" aria-label="Money and Risk settings">
+    <div className="settings-fields" role="tabpanel" aria-label="Money and Risk settings" data-testid="settings-tabpanel-money">
       {moneySettingsFields.map((field) => {
         const state = fieldState("money", field.key);
         return (

@@ -28,6 +28,22 @@ function jsonResponse(payload: unknown): Promise<Response> {
   } as Response);
 }
 
+function httpJsonResponse(payload: unknown, status = 200): Promise<Response> {
+  return Promise.resolve({
+    json: () => Promise.resolve(payload),
+    ok: status >= 200 && status < 300,
+    status
+  } as Response);
+}
+
+function requestBody(init?: RequestInit): Record<string, unknown> {
+  if (!init?.body || typeof init.body !== "string") {
+    return {};
+  }
+
+  return JSON.parse(init.body) as Record<string, unknown>;
+}
+
 function settingsPayload(
   scope: string,
   scopeKey: string,
@@ -139,15 +155,20 @@ function baseEffectiveSettings(): Record<string, Record<string, Record<string, u
 type SettingsApiOptions = {
   effectiveSettings?: Record<string, Record<string, Record<string, unknown>>>;
   globalSettings?: Record<string, Record<string, unknown>>;
+  globalVersion?: number;
+  onPatch?: (body: Record<string, unknown>) => Promise<Response>;
+  onValidate?: (body: Record<string, unknown>) => Promise<Response>;
   riskState?: Record<string, unknown>;
   role?: string;
   snapshot?: Record<string, unknown>;
+  versions?: Record<string, unknown>[];
 };
 
 function stubSettingsApi(options: string | SettingsApiOptions = "risk_admin"): ReturnType<typeof vi.fn> {
   const config = typeof options === "string" ? { role: options } : options;
   const role = config.role || "risk_admin";
   const globalSettings = config.globalSettings || baseGlobalSettings();
+  const globalVersion = config.globalVersion ?? 7;
   const effectiveSettings = config.effectiveSettings || baseEffectiveSettings();
   const riskState = config.riskState || {
     ...baseQuality,
@@ -158,11 +179,42 @@ function stubSettingsApi(options: string | SettingsApiOptions = "risk_admin"): R
   };
   const snapshot = config.snapshot || systemSnapshot();
 
-  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
+    const method = init?.method || "GET";
+
+    if (path === "/v1/order-management/settings/validate" && method === "POST") {
+      if (config.onValidate) {
+        return config.onValidate(requestBody(init));
+      }
+
+      return jsonResponse({
+        diff: [],
+        impact: [],
+        valid: true
+      });
+    }
+
+    if (path === "/v1/order-management/settings" && method === "PATCH") {
+      if (config.onPatch) {
+        return config.onPatch(requestBody(init));
+      }
+
+      return jsonResponse({
+        ok: true,
+        version: globalVersion + 1
+      });
+    }
+
+    if (path === "/v1/order-management/settings/versions?scope=global&scope_key=" && method === "GET") {
+      return jsonResponse({
+        ...baseQuality,
+        versions: config.versions || []
+      });
+    }
 
     if (path === "/v1/order-management/settings?scope=global&scope_key=") {
-      return jsonResponse(settingsPayload("global", "", globalSettings));
+      return jsonResponse(settingsPayload("global", "", globalSettings, globalVersion));
     }
 
     if (path === "/v1/order-management/settings/effective?account_id=&instrument_id=") {
@@ -277,12 +329,15 @@ describe("order management settings", () => {
     expect(await screen.findByText("Read-only viewer")).toBeInTheDocument();
     expect(screen.getByLabelText("Order manager enabled")).toBeDisabled();
     expect(screen.getByLabelText("Execution mode")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Clear Order manager enabled override" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "Money & Risk" }));
     expect(await screen.findByLabelText("Risk per trade pct")).toBeDisabled();
     fireEvent.click(screen.getByRole("tab", { name: "Monitoring" }));
     expect(await screen.findByLabelText("Market data stale seconds")).toBeDisabled();
     expect(screen.getByLabelText("Startup reconciliation required")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Validate" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save settings" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Reason")).not.toBeInTheDocument();
   });
 
   it("renders Money & Risk fields from metadata with usage and post-change estimates", async () => {
@@ -308,7 +363,7 @@ describe("order management settings", () => {
     expect(within(riskPerTrade).getByText("25%")).toBeInTheDocument();
   });
 
-  it("requires a prominent confirmation before saving live risk relaxations", async () => {
+  it("requires dangerous signoff before saving live risk relaxations", async () => {
     const globalSettings = baseGlobalSettings();
     globalSettings.general = {
       ...globalSettings.general,
@@ -319,20 +374,283 @@ describe("order management settings", () => {
       ...effectiveSettings.general,
       execution_mode: field("live", "global", false)
     };
-    stubSettingsApi({ effectiveSettings, globalSettings });
+    const patchBodies: Record<string, unknown>[] = [];
+    stubSettingsApi({
+      effectiveSettings,
+      globalSettings,
+      onPatch: (body) => {
+        patchBodies.push(body);
+        return httpJsonResponse({ ok: true, version: 8 });
+      },
+      onValidate: () => httpJsonResponse({
+        diff: [
+          { after: 2, before: 1, category: "money", effective: 2, key: "risk_per_trade_pct", label: "Risk per trade pct" }
+        ],
+        impact: ["hot_reload: risk limits update on active nodes"],
+        valid: true
+      })
+    });
 
     render(<App initialPath="/settings/orders" />);
 
     fireEvent.click(await screen.findByRole("tab", { name: "Money & Risk" }));
     fireEvent.change(screen.getByLabelText("Risk per trade pct"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "live risk budget increase" } });
 
     const dangerConfirmation = await screen.findByRole("alert", { name: "Live risk relaxation confirmation" });
-    expect(dangerConfirmation).toHaveTextContent("Live risk relaxation requires confirmation");
+    expect(dangerConfirmation).toHaveTextContent("Live risk relaxation requires dangerous confirmation");
     expect(dangerConfirmation).toHaveTextContent("Risk per trade pct: 1 -> 2");
-    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
-
-    fireEvent.click(within(dangerConfirmation).getByLabelText("I understand this relaxes live risk limits"));
     expect(screen.getByRole("button", { name: "Save settings" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+    const reviewDialog = await screen.findByRole("dialog", { name: "Review settings save" });
+    expect(reviewDialog).toHaveTextContent("Risk per trade pct");
+    expect(reviewDialog).toHaveTextContent("hot_reload: risk limits update on active nodes");
+    fireEvent.click(within(reviewDialog).getByRole("button", { name: "Continue to dangerous confirmation" }));
+
+    const dangerDialog = await screen.findByRole("dialog", { name: "Dangerous settings confirmation" });
+    expect(dangerDialog).toHaveTextContent("Why this is required");
+    expect(dangerDialog).toHaveTextContent("Backend validation and audit policy remain authoritative");
+    expect(within(dangerDialog).getByRole("button", { name: "Confirm dangerous settings save" })).toBeDisabled();
+
+    fireEvent.click(within(dangerDialog).getByLabelText("I confirm this dangerous live-risk settings change"));
+    expect(within(dangerDialog).getByRole("button", { name: "Confirm dangerous settings save" })).toBeDisabled();
+
+    fireEvent.change(within(dangerDialog).getByLabelText("Operator signoff"), {
+      target: { value: "risk-admin alice" }
+    });
+    fireEvent.click(within(dangerDialog).getByRole("button", { name: "Confirm dangerous settings save" }));
+
+    await waitFor(() => {
+      expect(patchBodies).toHaveLength(1);
+    });
+    expect(patchBodies[0]).toMatchObject({
+      confirm: true,
+      operator_signoff: "risk-admin alice",
+      reason: "live risk budget increase"
+    });
+  });
+
+  it("requires a reason and server review before patching settings", async () => {
+    const patchBodies: Record<string, unknown>[] = [];
+    const validateBodies: Record<string, unknown>[] = [];
+    stubSettingsApi({
+      onPatch: (body) => {
+        patchBodies.push(body);
+        return httpJsonResponse({ ok: true, version: 8 });
+      },
+      onValidate: (body) => {
+        validateBodies.push(body);
+        return httpJsonResponse({
+          diff: [
+            { after: 2, before: 1, category: "money", effective: 2, key: "risk_per_trade_pct", label: "Risk per trade pct" }
+          ],
+          impact: ["node-a hot_reload"],
+          valid: true
+        });
+      }
+    });
+
+    render(<App initialPath="/settings/orders" />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Money & Risk" }));
+    fireEvent.change(screen.getByLabelText("Risk per trade pct"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(await screen.findByRole("alert", { name: "Settings validation errors" })).toHaveTextContent(
+      "Reason is required before saving settings"
+    );
+    expect(validateBodies).toHaveLength(0);
+    expect(patchBodies).toHaveLength(0);
+
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "raise risk for scheduled event" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Review settings save" });
+    expect(dialog).toHaveTextContent("Expected version 7");
+    expect(dialog).toHaveTextContent("raise risk for scheduled event");
+    expect(dialog).toHaveTextContent("Risk per trade pct");
+    expect(dialog).toHaveTextContent("1");
+    expect(dialog).toHaveTextContent("2");
+    expect(dialog).toHaveTextContent("node-a hot_reload");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm settings save" }));
+
+    await waitFor(() => {
+      expect(patchBodies).toHaveLength(1);
+    });
+    expect(validateBodies).toHaveLength(1);
+    expect(patchBodies[0]).toMatchObject({
+      expected_version: 7,
+      reason: "raise risk for scheduled event",
+      scope: "global",
+      scope_key: ""
+    });
+    expect(await screen.findByText("Settings saved at version 8")).toBeInTheDocument();
+  });
+
+  it("refreshes and replays the review when expected version conflicts", async () => {
+    let currentVersion = 7;
+    let currentSettings = baseGlobalSettings();
+    const patchBodies: Record<string, unknown>[] = [];
+    const validateBodies: Record<string, unknown>[] = [];
+
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = init?.method || "GET";
+
+      if (path === "/v1/order-management/settings?scope=global&scope_key=") {
+        return jsonResponse(settingsPayload("global", "", currentSettings, currentVersion));
+      }
+      if (path === "/v1/order-management/settings/effective?account_id=&instrument_id=") {
+        return jsonResponse(effectivePayload(baseEffectiveSettings()));
+      }
+      if (path === "/v1/risk/state") {
+        return jsonResponse({
+          ...baseQuality,
+          daily_loss_usage_pct: 40,
+          pair_locks: [],
+          single_trade_risk_usage_pct: 50,
+          total_open_risk_usage_pct: 25
+        });
+      }
+      if (path === "/api/system/snapshot") {
+        return jsonResponse(systemSnapshot());
+      }
+      if (path === "/v1/order-management/settings/versions?scope=global&scope_key=") {
+        return jsonResponse({ ...baseQuality, versions: [] });
+      }
+      if (path === "/v1/order-management/settings/validate" && method === "POST") {
+        validateBodies.push(requestBody(init));
+        return httpJsonResponse({
+          diff: [
+            { after: 2, before: currentSettings.money.risk_per_trade_pct, category: "money", effective: 2, key: "risk_per_trade_pct", label: "Risk per trade pct" }
+          ],
+          impact: [`validated against version ${currentVersion}`],
+          valid: true
+        });
+      }
+      if (path === "/v1/order-management/settings" && method === "PATCH") {
+        patchBodies.push(requestBody(init));
+        if (patchBodies.length === 1) {
+          currentVersion = 9;
+          currentSettings = {
+            ...baseGlobalSettings(),
+            money: {
+              ...baseGlobalSettings().money,
+              risk_per_trade_pct: 1.5
+            }
+          };
+          return httpJsonResponse({ current_version: 9, errors: ["expected_version conflict"], ok: false }, 409);
+        }
+
+        return httpJsonResponse({ ok: true, version: 10 });
+      }
+
+      return Promise.reject(new Error(`unexpected ${method} ${path}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("EventSource", undefined);
+
+    render(<App initialPath="/settings/orders" />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Money & Risk" }));
+    fireEvent.change(screen.getByLabelText("Risk per trade pct"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "replay after current settings refresh" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Review settings save" })).getByRole("button", {
+      name: "Confirm settings save"
+    }));
+
+    const conflict = await screen.findByRole("alert", { name: "Settings version conflict" });
+    expect(conflict).toHaveTextContent("current version 9");
+    expect(patchBodies).toHaveLength(1);
+
+    fireEvent.click(within(conflict).getByRole("button", { name: "Refresh and replay review" }));
+
+    const replayed = await screen.findByRole("dialog", { name: "Review settings save" });
+    expect(replayed).toHaveTextContent("Expected version 9");
+    expect(replayed).toHaveTextContent("validated against version 9");
+    expect(replayed).toHaveTextContent("1.5");
+    expect(patchBodies).toHaveLength(1);
+
+    fireEvent.click(within(replayed).getByRole("button", { name: "Confirm settings save" }));
+
+    await waitFor(() => {
+      expect(patchBodies).toHaveLength(2);
+    });
+    expect(patchBodies[1]).toMatchObject({ expected_version: 9 });
+    expect(validateBodies).toHaveLength(2);
+  });
+
+  it("lists settings versions, warns on desired/effective drift, and rolls back through review", async () => {
+    const patchBodies: Record<string, unknown>[] = [];
+    stubSettingsApi({
+      onPatch: (body) => {
+        patchBodies.push(body);
+        return httpJsonResponse({ ok: true, version: 9 });
+      },
+      onValidate: () => httpJsonResponse({
+        diff: [
+          { after: 1, before: 2, category: "money", effective: 1, key: "risk_per_trade_pct", label: "Risk per trade pct" }
+        ],
+        impact: ["rollback requires hot_reload"],
+        valid: true
+      }),
+      versions: [
+        {
+          author: "alice",
+          created_at: "2026-06-20T09:10:00Z",
+          desired_version: 8,
+          diff: [{ after: 2, before: 1, key: "money.risk_per_trade_pct" }],
+          effective_version: 7,
+          node_id: "node-a",
+          reason: "temporary event risk",
+          settings: {
+            ...baseGlobalSettings(),
+            money: {
+              ...baseGlobalSettings().money,
+              risk_per_trade_pct: 2
+            }
+          },
+          version: 8
+        },
+        {
+          author: "bob",
+          created_at: "2026-06-19T08:00:00Z",
+          diff: [{ after: 1, before: 0.5, key: "money.risk_per_trade_pct" }],
+          reason: "restore baseline risk",
+          settings: baseGlobalSettings(),
+          version: 6
+        }
+      ]
+    });
+
+    render(<App initialPath="/settings/orders" />);
+
+    const history = await screen.findByTestId("settings-history");
+    expect(history).toHaveTextContent("alice");
+    expect(history).toHaveTextContent("temporary event risk");
+    expect(history).toHaveTextContent("money.risk_per_trade_pct");
+
+    const driftWarning = within(history).getByRole("alert", { name: "Desired settings not fully applied" });
+    expect(driftWarning).toHaveTextContent("node-a desired 8 effective 7");
+
+    fireEvent.click(within(history).getByRole("button", { name: "Rollback to version 6" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Review settings save" });
+    expect(dialog).toHaveTextContent("Rollback to version 6");
+    expect(dialog).toHaveTextContent("rollback requires hot_reload");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm settings save" }));
+
+    await waitFor(() => {
+      expect(patchBodies).toHaveLength(1);
+    });
+    expect(patchBodies[0]).toMatchObject({
+      reason: "Rollback to version 6",
+      settings: baseGlobalSettings()
+    });
   });
 
   it("renders Monitoring fields and surfaces stale live freshness state", async () => {

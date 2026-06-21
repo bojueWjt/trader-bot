@@ -15,7 +15,7 @@ type GeneralTabProps = {
 
 export function GeneralTab({ fieldState, readonly, scope, onClear, onFieldChange }: GeneralTabProps): ReactElement {
   return (
-    <div className="settings-fields" role="tabpanel" aria-label="General settings">
+    <div className="settings-fields" role="tabpanel" aria-label="General settings" data-testid="settings-tabpanel-general">
       {generalSettingsFields.map((field) => {
         const state = fieldState("general", field.key);
         return (

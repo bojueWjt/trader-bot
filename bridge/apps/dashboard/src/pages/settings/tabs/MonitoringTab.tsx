@@ -43,7 +43,7 @@ export function MonitoringTab({
   onFieldChange
 }: MonitoringTabProps): ReactElement {
   return (
-    <div className="monitoring-tab" role="tabpanel" aria-label="Monitoring settings">
+    <div className="monitoring-tab" role="tabpanel" aria-label="Monitoring settings" data-testid="settings-tabpanel-monitoring">
       <FreshnessPanel fieldState={fieldState} systemHealth={systemHealth} />
 
       <div className="settings-fields">

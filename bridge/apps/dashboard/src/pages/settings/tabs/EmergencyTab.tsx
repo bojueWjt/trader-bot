@@ -21,7 +21,7 @@ export function EmergencyTab({
   onFieldChange
 }: EmergencyTabProps): ReactElement {
   return (
-    <div className="settings-fields" role="tabpanel" aria-label="Emergency settings">
+    <div className="settings-fields" role="tabpanel" aria-label="Emergency settings" data-testid="settings-tabpanel-emergency">
       {emergencySettingsFields.map((field) => {
         const state = fieldState("emergency", field.key);
         return (

@@ -21,7 +21,7 @@ export function NotificationsTab({
   onFieldChange
 }: NotificationsTabProps): ReactElement {
   return (
-    <div className="settings-fields" role="tabpanel" aria-label="Notifications settings">
+    <div className="settings-fields" role="tabpanel" aria-label="Notifications settings" data-testid="settings-tabpanel-notifications">
       {notificationsSettingsFields.map((field) => {
         const state = fieldState("notifications", field.key);
         return (

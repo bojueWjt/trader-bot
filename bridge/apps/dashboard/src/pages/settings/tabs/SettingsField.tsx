@@ -49,7 +49,7 @@ export function SettingsField({
     : `Overridden at ${effective.sourceScope || scope}`;
 
   return (
-    <section className="settings-field" role="group" aria-label={`${field.label} setting`}>
+    <section className="settings-field" role="group" aria-label={`${field.label} setting`} data-testid={`settings-field-${category}-${field.key}`}>
       <div className="settings-field-copy">
         <div className="settings-field-heading">
           <label htmlFor={inputId}>{field.label}</label>
@@ -84,17 +84,19 @@ export function SettingsField({
           <dd>{String(effective.inherited)}</dd>
         </div>
       </dl>
-      <button
-        aria-label={`Clear ${field.label} override`}
-        className="secondary-button"
-        disabled={readonly || !isOverridden}
-        onClick={() => {
-          onClear(category, field.key);
-        }}
-        type="button"
-      >
-        Clear override
-      </button>
+      {!readonly && (
+        <button
+          aria-label={`Clear ${field.label} override`}
+          className="secondary-button"
+          disabled={!isOverridden}
+          onClick={() => {
+            onClear(category, field.key);
+          }}
+          type="button"
+        >
+          Clear override
+        </button>
+      )}
     </section>
   );
 
@@ -104,6 +106,7 @@ export function SettingsField({
         <input
           aria-describedby={`${helpId} ${metaId}`}
           checked={value === true}
+          data-testid={`settings-control-${category}-${field.key}`}
           disabled={controlDisabled}
           id={inputId}
           onChange={(event) => {
@@ -118,6 +121,7 @@ export function SettingsField({
       return (
         <select
           aria-describedby={`${helpId} ${metaId}`}
+          data-testid={`settings-control-${category}-${field.key}`}
           disabled={controlDisabled}
           id={inputId}
           onChange={(event) => {
@@ -138,6 +142,7 @@ export function SettingsField({
       return (
         <input
           aria-describedby={`${helpId} ${metaId}`}
+          data-testid={`settings-control-${category}-${field.key}`}
           disabled={controlDisabled}
           id={inputId}
           max={field.max}
@@ -156,6 +161,7 @@ export function SettingsField({
     return (
       <input
         aria-describedby={`${helpId} ${metaId}`}
+        data-testid={`settings-control-${category}-${field.key}`}
         disabled={controlDisabled}
         id={inputId}
         onChange={(event) => {

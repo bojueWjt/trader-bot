@@ -25,6 +25,7 @@ input,
 select,
 textarea {
   font: inherit;
+  min-width: 0;
 }
 
 button {
@@ -935,10 +936,17 @@ td {
 
 .modal {
   width: min(460px, 100%);
+  max-height: calc(100vh - 36px);
+  overflow: auto;
   border: 1px solid #7e2e36;
   border-radius: 8px;
   background: #111923;
   padding: 16px;
+}
+
+.save-review-dialog,
+.danger-confirm-dialog {
+  width: min(760px, 100%);
 }
 
 .modal-copy {
@@ -955,6 +963,20 @@ td {
   padding: 8px 10px;
   background: #0c1117;
   color: #f7fafc;
+}
+
+.dialog-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: #dce3eb;
+  font-weight: 700;
+}
+
+.dialog-field span {
+  color: #91a0b0;
+  font-size: 12px;
+  text-transform: uppercase;
 }
 
 .modal-status {
@@ -1403,6 +1425,172 @@ td {
   accent-color: #ef4444;
 }
 
+.save-review-summary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.audit-panel,
+.review-diff-section {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  border: 1px solid #263547;
+  border-radius: 8px;
+  padding: 12px;
+  background: #0f1720;
+}
+
+.audit-panel h4,
+.review-diff-section h4,
+.compact-summary h4 {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  margin: 0;
+  color: #f3f6fb;
+  font-size: 13px;
+}
+
+.audit-panel p,
+.review-diff-section p {
+  color: #dce3eb;
+}
+
+.danger-audit-panel {
+  border-color: #7e2e36;
+  background: #24151a;
+}
+
+.audit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.audit-grid div {
+  min-width: 0;
+}
+
+.audit-grid dt {
+  color: #8b98a7;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.audit-grid dd {
+  margin: 3px 0 0;
+  color: #f7fafc;
+  overflow-wrap: anywhere;
+}
+
+.danger-confirm-check {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  width: fit-content;
+  margin-top: 12px;
+  color: #fff1f3;
+  font-weight: 800;
+}
+
+.danger-confirm-check input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: #ef4444;
+}
+
+.review-diff-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.review-diff-table {
+  min-width: 620px;
+}
+
+.review-diff-table td,
+.review-diff-table th {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.settings-history {
+  overflow: visible;
+}
+
+.settings-drift-warning {
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid #896827;
+  padding: 12px;
+  background: #191b18;
+  color: #ffd47a;
+}
+
+.settings-drift-warning ul,
+.settings-history-diff {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.settings-history-list {
+  display: grid;
+  gap: 1px;
+  background: #1f2a37;
+}
+
+.settings-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  background: #111923;
+}
+
+.settings-history-main {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.settings-history-main strong,
+.settings-history-main span {
+  display: block;
+}
+
+.settings-history-main span,
+.settings-history-diff span {
+  color: #91a0b0;
+}
+
+.settings-history-meta {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.4fr) minmax(0, 1fr);
+  gap: 8px;
+  margin: 0;
+}
+
+.settings-history-meta dt {
+  color: #8b98a7;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.settings-history-meta dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
 .monitoring-tab {
   display: grid;
   gap: 12px;
@@ -1533,7 +1721,9 @@ td {
   }
 
   .settings-version,
-  .settings-effective {
+  .settings-effective,
+  .settings-history-meta,
+  .audit-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -1579,7 +1769,10 @@ td {
   .risk-lamps,
   .detail-grid,
   .settings-version,
-  .settings-effective {
+  .settings-effective,
+  .settings-history-row,
+  .settings-history-meta,
+  .audit-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1601,8 +1794,32 @@ td {
   }
 
   .secondary-button,
-  .danger-button {
+  .danger-button,
+  .primary-button {
     flex: 1;
+  }
+
+  .settings-tabs,
+  .scope-buttons,
+  .save-review-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-tabs button,
+  .scope-buttons button {
+    width: 100%;
+  }
+
+  .modal-backdrop {
+    align-items: stretch;
+    place-items: stretch;
+    padding: 10px;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: calc(100vh - 20px);
   }
 }
 
