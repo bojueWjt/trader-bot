@@ -16,6 +16,7 @@ from strategy.intent_execution_planner import (
     decode_client_order_id,
     plan_intent_execution,
 )
+from strategy.price_guard import PriceGuardDecision
 
 
 try:  # pragma: no cover - Nautilus is unavailable on local Py3.14 dev hosts.
@@ -70,11 +71,15 @@ class IntentExecutionStrategy(Strategy):
         self._processed_intent_ids: set[str] = set(config.existing_intent_ids)
         self.denials: list[OrderDenied] = []
         self._trading_state_getter: Optional[Callable[[], Any]] = None
+        self._price_guard: Any = None
 
     def set_trading_state_getter(self, getter: Optional[Callable[[], Any]]) -> None:
         """Inject the node's live trading-state source. Kept out of the serializable
         StrategyConfig; node wiring calls this after construction."""
         self._trading_state_getter = getter
+
+    def set_price_guard(self, guard: Any) -> None:
+        self._price_guard = guard
 
     def on_start(self) -> None:
         # C-08 host-verify fix: subscribe_data(data_type) is rejected for clientless
@@ -357,12 +362,34 @@ class IntentExecutionStrategy(Strategy):
             return False
 
         try:
+            guard_decision = self._check_price_guard(plan)
+            if guard_decision is not None and not guard_decision.allowed:
+                self._record_denial(OrderDenied(guard_decision.reason, repr(guard_decision)))
+                return False
             order = self._build_nautilus_order(plan, instrument)
             self.submit_order(order)  # type: ignore[attr-defined]
             return True
         except Exception as exc:  # Fail closed: no silent drops on adapter/API mismatch.
             self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
             return False
+
+    def _check_price_guard(self, plan: OrderPlan) -> PriceGuardDecision | None:
+        if self._price_guard is None:
+            return None
+        if plan.order_type not in {"MARKET", "LIMIT"}:
+            return None
+        max_slippage = Decimal(plan.max_slippage_bps) if plan.max_slippage_bps is not None else None
+        intended_raw = plan.price if plan.price is not None else plan.guard_price
+        intended_price = Decimal(intended_raw) if intended_raw is not None else None
+        return self._price_guard.check(
+            account_id=self.config.account_id,
+            venue_symbol=plan.instrument_id,
+            side=plan.side,
+            order_type=plan.order_type,
+            intended_price=intended_price,
+            max_slippage_bps=max_slippage,
+            now=self._now(),
+        )
 
     def _submit_management_plan(self, plan: ManagementPlan) -> bool:
         for client_order_id in plan.cancel_order_ids:
@@ -414,6 +441,8 @@ class IntentExecutionStrategy(Strategy):
         }
         if plan.reduce_only:
             kwargs["reduce_only"] = True
+        if plan.post_only:
+            kwargs["post_only"] = True
         if plan.order_type == "MARKET":
             return self.order_factory.market(**kwargs)  # type: ignore[attr-defined]
         if plan.order_type == "LIMIT":
