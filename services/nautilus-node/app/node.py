@@ -314,11 +314,21 @@ def _build_strategy_config(config: NodeConfig, lifecycle: Any) -> Any:
     from strategy.intent_execution_strategy import IntentExecutionStrategyConfig
 
     del lifecycle
-    return IntentExecutionStrategyConfig(
+    kwargs: dict[str, Any] = dict(
         account_id=config.account_id,
         node_id=config.node_id,
         trading_state="HALTED",
     )
+    # Live Binance accounts here run in Hedge Mode: every order needs a positionSide,
+    # which the exec client derives from a per-side position_id. The default (NETTING)
+    # leaves position_id None and the adapter raises "position_id was None"; HEDGING
+    # makes Nautilus manage a position per side so the adapter can set positionSide.
+    # Testnet stays one-way (the tested path) with the default OMS.
+    if config.binance.environment == "live":
+        from nautilus_trader.model.enums import OmsType
+
+        kwargs["oms_type"] = OmsType.HEDGING
+    return IntentExecutionStrategyConfig(**kwargs)
 
 
 def _build_strategy(runtime: AccountRuntime) -> Any:
