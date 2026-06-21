@@ -13,6 +13,18 @@ const cachedExecutablePath = join(
   homedir(),
   "Library/Caches/ms-playwright/chromium-1223/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
 );
+const e2eAuthStorageState = {
+  cookies: [],
+  origins: [
+    {
+      localStorage: [
+        { name: "hermes.auth.token", value: "om8-e2e-token" },
+        { name: "hermes.auth.role", value: "risk_admin" }
+      ],
+      origin: "http://127.0.0.1:4173"
+    }
+  ]
+};
 
 let executablePath = "";
 if (envExecutablePath && existsSync(envExecutablePath)) {
@@ -26,6 +38,7 @@ if (!executablePath && existsSync(cachedExecutablePath)) {
 const dashboardUse: PlaywrightTestConfig["use"] = {
   baseURL: "http://127.0.0.1:4173",
   screenshot: "only-on-failure",
+  storageState: e2eAuthStorageState,
   trace: "retain-on-failure"
 };
 
@@ -56,7 +69,7 @@ export default defineConfig({
   webServer: {
     command: "npm run dev -- --host 127.0.0.1 --port 4173",
     cwd: dashboardRoot,
-    env: { ...process.env, VITE_AUTH_DISABLED: "true" },
+    env: { ...process.env, VITE_AUTH_DISABLED: "false" },
     reuseExistingServer: true,
     timeout: 30000,
     url: "http://127.0.0.1:4173"
