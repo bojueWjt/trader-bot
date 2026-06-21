@@ -24,7 +24,7 @@ export function EntryOrdersTab({
   const partialFillPolicy = String(fieldState("entry", "partial_fill_policy").value);
 
   return (
-    <div className="settings-fields" role="tabpanel" aria-label="Entry Orders settings">
+    <div className="settings-fields" role="tabpanel" aria-label="Entry Orders settings" data-testid="settings-tabpanel-entry">
       {entrySettingsFields.map((field) => {
         const state = fieldState("entry", field.key);
         return (

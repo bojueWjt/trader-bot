@@ -362,9 +362,20 @@ export type OrderSettingsScopeParams = {
 };
 
 export type OrderSettingsValidationResult = {
+  diff: SettingsDiffEntry[];
   errors: string[];
+  impact: string[];
   raw: Record<string, unknown>;
   valid: boolean;
+};
+
+export type SettingsDiffEntry = {
+  after: string;
+  before: string;
+  category: string;
+  effective: string;
+  key: string;
+  label: string;
 };
 
 export type OrderSettingsPatchRequest = {
@@ -379,10 +390,31 @@ export type OrderSettingsPatchRequest = {
 };
 
 export type OrderSettingsPatchResult = {
+  conflict: boolean;
+  currentVersion: number | null;
   errors: string[];
   ok: boolean;
   raw: Record<string, unknown>;
+  status: number;
   version: number | null;
+};
+
+export type SettingsVersionRecord = {
+  author: string;
+  desiredVersion: number | null;
+  diff: SettingsDiffEntry[];
+  effectiveVersion: number | null;
+  nodeId: string;
+  reason: string;
+  settings: OrderSettingsValues;
+  timestamp: string;
+  version: number | null;
+};
+
+export type SettingsVersionsResult = {
+  dataSource: DataSourceState;
+  raw: Record<string, unknown>;
+  versions: SettingsVersionRecord[];
 };
 
 function apiUrl(path: string): string {
@@ -624,6 +656,28 @@ async function postJson(path: string, body: Record<string, unknown>): Promise<un
 
 async function patchJson(path: string, body: Record<string, unknown>): Promise<unknown> {
   return sendJson(path, "PATCH", body);
+}
+
+async function patchJsonDetailed(path: string, body: Record<string, unknown>): Promise<{ ok: boolean; payload: Record<string, unknown>; status: number } | false> {
+  try {
+    const response = await fetch(apiUrl(path), {
+      body: JSON.stringify(body),
+      headers: requestHeaders({
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      }),
+      method: "PATCH"
+    });
+    const payload = asRecord(await response.json().catch(() => ({})));
+
+    return {
+      ok: response.ok,
+      payload,
+      status: response.status
+    };
+  } catch {
+    return false;
+  }
 }
 
 async function getText(path: string): Promise<string | false> {
@@ -1545,6 +1599,11 @@ function effectiveOrderSettingsPath(params: OrderSettingsScopeParams): string {
   return `/v1/order-management/settings/effective?account_id=${encodeURIComponent(accountId)}&instrument_id=${encodeURIComponent(instrumentId)}`;
 }
 
+function settingsVersionsPath(params: OrderSettingsScopeParams): string {
+  const scopeKey = params.scopeKey || "";
+  return `/v1/order-management/settings/versions?scope=${encodeURIComponent(params.scope)}&scope_key=${encodeURIComponent(scopeKey)}`;
+}
+
 function validationErrorsFromPayload(payload: Record<string, unknown>): string[] {
   const rawErrors = [...asArray(payload.errors), ...asArray(payload.messages), ...asArray(payload.detail)];
   return rawErrors
@@ -1557,6 +1616,113 @@ function validationErrorsFromPayload(payload: Record<string, unknown>): string[]
       return firstString([record.message, record.msg, record.detail, record.reason], "");
     })
     .filter(Boolean);
+}
+
+function settingsDiffFromUnknown(value: unknown): SettingsDiffEntry[] {
+  if (Array.isArray(value)) {
+    return value.map(settingsDiffEntryFromRecord);
+  }
+
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) {
+    return [];
+  }
+
+  return Object.entries(record).flatMap(([key, rawChange]) => {
+    const change = asRecord(rawChange);
+    return settingsDiffEntryFromRecord({
+      ...change,
+      key: firstString([change.key], key)
+    });
+  });
+}
+
+function settingsDiffEntryFromRecord(value: unknown): SettingsDiffEntry {
+  const record = asRecord(value);
+  const rawKey = firstString([record.key, record.path, record.field], "");
+  const [categoryFromKey, fieldFromKey] = rawKey.includes(".") ? rawKey.split(".", 2) : ["", rawKey];
+  const category = firstString([record.category, record.section], categoryFromKey);
+  const key = firstString([record.setting, record.name], fieldFromKey || rawKey);
+  const label = firstString([record.label, record.title], key || rawKey || "setting");
+
+  return {
+    after: stringifySettingValue(record.after ?? record.next ?? record.to),
+    before: stringifySettingValue(record.before ?? record.previous ?? record.from),
+    category,
+    effective: stringifySettingValue(record.effective ?? record.effective_after ?? record.resolved),
+    key,
+    label
+  };
+}
+
+function settingsImpactFromPayload(payload: Record<string, unknown>): string[] {
+  const rawImpact = payload.impact ?? payload.impacts ?? payload.impact_summary;
+  if (Array.isArray(rawImpact)) {
+    return rawImpact.map(stringifySettingValue).filter((item) => item !== "");
+  }
+
+  if (typeof rawImpact === "string") {
+    return rawImpact ? [rawImpact] : [];
+  }
+
+  const impactRecord = asRecord(rawImpact);
+  if (Object.keys(impactRecord).length > 0) {
+    return Object.entries(impactRecord).map(([key, value]) => `${key}: ${stringifySettingValue(value)}`);
+  }
+
+  return [];
+}
+
+function stringifySettingValue(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function settingsVersionsFromPayload(payload: Record<string, unknown>, quality: DataSourceState): SettingsVersionsResult {
+  const data = asRecord(payload.data);
+  const rows = getRows(payload, ["versions", "items", "history"]);
+  const sourceRows = rows.length > 0 ? rows : getRows(data, ["versions", "items", "history"]);
+
+  return {
+    dataSource: quality,
+    raw: payload,
+    versions: sourceRows.map(settingsVersionFromRecord)
+  };
+}
+
+function settingsVersionFromRecord(record: Record<string, unknown>): SettingsVersionRecord {
+  const version = firstNumber([record.version, record.settings_version], Number.NaN);
+  const desiredVersion = firstNumber([record.desired_version, record.desiredVersion], Number.NaN);
+  const effectiveVersion = firstNumber([record.effective_version, record.effectiveVersion, record.applied_version], Number.NaN);
+  const snapshot = asRecord(record.snapshot);
+  const settingsSource = Object.keys(asRecord(record.settings)).length > 0 ? record.settings : snapshot.settings;
+
+  return {
+    author: firstString([record.author, record.created_by, record.operator, record.user], "unknown"),
+    desiredVersion: Number.isFinite(desiredVersion) ? desiredVersion : null,
+    diff: settingsDiffFromUnknown(record.diff ?? record.changes),
+    effectiveVersion: Number.isFinite(effectiveVersion) ? effectiveVersion : null,
+    nodeId: firstString([record.node_id, record.nodeId, record.node, record.name], ""),
+    reason: firstString([record.reason, record.audit_reason, record.comment], "No reason provided"),
+    settings: orderSettingsValuesFromRecord(settingsSource),
+    timestamp: firstString([record.created_at, record.timestamp, record.applied_at, record.updated_at], ""),
+    version: Number.isFinite(version) ? version : null
+  };
 }
 
 function commandResultFromPayload(payload: unknown): CommandResult {
@@ -1709,11 +1875,18 @@ export async function fetchEffectiveSettings(params: OrderSettingsScopeParams): 
   return effectiveOrderSettingsFromPayload(result.payload, result.quality);
 }
 
+export async function fetchSettingsVersions(params: OrderSettingsScopeParams): Promise<SettingsVersionsResult> {
+  const result = await getJson(settingsVersionsPath(params));
+  return settingsVersionsFromPayload(result.payload, result.quality);
+}
+
 export async function validateSettings(settings: OrderSettingsValues): Promise<OrderSettingsValidationResult> {
   const payload = await postJson("/v1/order-management/settings/validate", { settings });
   if (payload === false) {
     return {
+      diff: [],
       errors: ["Settings validation request failed"],
+      impact: [],
       raw: {},
       valid: false
     };
@@ -1724,32 +1897,41 @@ export async function validateSettings(settings: OrderSettingsValues): Promise<O
   const valid = typeof result.valid === "boolean" ? result.valid : result.ok === true || errors.length === 0;
 
   return {
+    diff: settingsDiffFromUnknown(result.diff ?? result.changes),
     errors,
+    impact: settingsImpactFromPayload(result),
     raw: result,
     valid
   };
 }
 
 export async function patchSettings(request: OrderSettingsPatchRequest): Promise<OrderSettingsPatchResult> {
-  const payload = await patchJson("/v1/order-management/settings", request);
-  if (payload === false) {
+  const response = await patchJsonDetailed("/v1/order-management/settings", request);
+  if (response === false) {
     return {
+      conflict: false,
+      currentVersion: null,
       errors: ["Settings save request failed"],
       ok: false,
       raw: {},
+      status: 0,
       version: null
     };
   }
 
-  const result = asRecord(payload);
+  const result = response.payload;
   const errors = validationErrorsFromPayload(result);
+  const currentVersion = firstNumber([result.current_version, result.currentVersion, result.expected_version], Number.NaN);
   const version = firstNumber([result.version, result.settings_version], Number.NaN);
-  const ok = typeof result.ok === "boolean" ? result.ok : errors.length === 0;
+  const ok = response.ok && (typeof result.ok === "boolean" ? result.ok : errors.length === 0);
 
   return {
+    conflict: response.status === 409,
+    currentVersion: Number.isFinite(currentVersion) ? currentVersion : null,
     errors,
     ok,
     raw: result,
+    status: response.status,
     version: Number.isFinite(version) ? version : null
   };
 }

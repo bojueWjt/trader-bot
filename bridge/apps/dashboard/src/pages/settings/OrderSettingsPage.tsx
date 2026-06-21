@@ -1,6 +1,9 @@
 import { AlertTriangle, RefreshCcw, Save, Settings2 } from "lucide-react";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { DangerConfirmDialog } from "../../components/settings/DangerConfirmDialog";
+import { SaveReviewDialog } from "../../components/settings/SaveReviewDialog";
+import type { SaveReviewChange } from "../../components/settings/SaveReviewDialog";
 import { ScopeSelector } from "../../components/settings/ScopeSelector";
 import type { SettingsScopeSelection } from "../../components/settings/ScopeSelector";
 import {
@@ -23,7 +26,9 @@ import type {
   OrderSettingScalar,
   OrderSettingsScope,
   OrderSettingsValues,
+  OrderSettingsValidationResult,
   RiskOverview,
+  SettingsVersionRecord,
   SystemHealthSnapshot
 } from "../../utils/api";
 import {
@@ -46,6 +51,7 @@ import { MoneyRiskTab } from "./tabs/MoneyRiskTab";
 import { MonitoringTab } from "./tabs/MonitoringTab";
 import { NotificationsTab } from "./tabs/NotificationsTab";
 import { ProtectionTab } from "./tabs/ProtectionTab";
+import { SettingsHistory } from "./SettingsHistory";
 import { formatSettingValue } from "./tabs/SettingsField";
 import type { SettingsFieldState } from "./tabs/SettingsField";
 
@@ -68,6 +74,24 @@ type LiveRiskRelaxationChange = {
   label: string;
 };
 
+type SettingsSnapshot = {
+  effective: EffectiveOrderSettings;
+  inherited: EffectiveOrderSettings;
+  raw: OrderManagementSettings;
+  risk: RiskOverview;
+  systemHealth: SystemHealthSnapshot;
+};
+
+type PendingSaveReview = {
+  changes: SaveReviewChange[];
+  dangerous: boolean;
+  expectedVersion: number | null;
+  reason: string;
+  settings: OrderSettingsValues;
+  titleDetail: string;
+  validation: OrderSettingsValidationResult;
+};
+
 const defaultScope: SettingsScopeSelection = {
   scope: "global",
   scopeKey: ""
@@ -88,8 +112,45 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
   const [reason, setReason] = useState("");
   const [status, setStatus] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
-  const [liveRiskConfirmed, setLiveRiskConfirmed] = useState(false);
+  const [review, setReview] = useState<PendingSaveReview | null>(null);
+  const [dangerReview, setDangerReview] = useState<PendingSaveReview | null>(null);
+  const [conflictedReview, setConflictedReview] = useState<PendingSaveReview | null>(null);
   const readonly = role === "viewer";
+
+  async function fetchSettingsSnapshot(nextScope: SettingsScopeSelection): Promise<SettingsSnapshot> {
+    const inheritedScope = parentScope(nextScope);
+    const [nextRaw, nextEffective, nextInherited, nextRiskOverview, nextSystemHealth] = await Promise.all([
+      fetchOrderManagementSettings(nextScope),
+      fetchEffectiveSettings(nextScope),
+      inheritedScope ? fetchEffectiveSettings(inheritedScope) : Promise.resolve(getEmptyEffectiveSettings("global scope")),
+      fetchRiskOverview(),
+      fetchSystemHealthSnapshot()
+    ]);
+
+    return {
+      effective: nextEffective,
+      inherited: nextInherited,
+      raw: nextRaw,
+      risk: nextRiskOverview,
+      systemHealth: nextSystemHealth
+    };
+  }
+
+  function applySettingsSnapshot(snapshot: SettingsSnapshot, replaceDraft: boolean): void {
+    setRawSettings(snapshot.raw);
+    setEffectiveSettings(snapshot.effective);
+    setInheritedSettings(snapshot.inherited);
+    setRiskOverview(snapshot.risk);
+    setSystemHealth(snapshot.systemHealth);
+    if (replaceDraft) {
+      setDraftSettings(cloneSettings(snapshot.raw.settings));
+    }
+
+    const failure = [snapshot.raw.dataSource, snapshot.effective.dataSource, snapshot.inherited.dataSource].find(
+      (quality) => quality.reconciliation_state === "failed"
+    );
+    setError(failure ? failure.reason || "Order management settings unavailable" : "");
+  }
 
   useEffect(() => {
     let active = true;
@@ -98,36 +159,18 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
       setLoading(true);
       setError("");
       setValidationErrors([]);
-      setStatus("");
+      setReview(null);
+      setDangerReview(null);
+      setConflictedReview(null);
 
-      const inheritedScope = parentScope(scope);
-      const [nextRaw, nextEffective, nextInherited, nextRiskOverview, nextSystemHealth] = await Promise.all([
-        fetchOrderManagementSettings(scope),
-        fetchEffectiveSettings(scope),
-        inheritedScope ? fetchEffectiveSettings(inheritedScope) : Promise.resolve(getEmptyEffectiveSettings("global scope")),
-        fetchRiskOverview(),
-        fetchSystemHealthSnapshot()
-      ]);
+      const snapshot = await fetchSettingsSnapshot(scope);
 
       if (!active) {
         return;
       }
 
-      setRawSettings(nextRaw);
-      setEffectiveSettings(nextEffective);
-      setInheritedSettings(nextInherited);
-      setRiskOverview(nextRiskOverview);
-      setSystemHealth(nextSystemHealth);
-      setDraftSettings(cloneSettings(nextRaw.settings));
-      setLiveRiskConfirmed(false);
+      applySettingsSnapshot(snapshot, true);
       setLoading(false);
-
-      const failure = [nextRaw.dataSource, nextEffective.dataSource, nextInherited.dataSource].find(
-        (quality) => quality.reconciliation_state === "failed"
-      );
-      if (failure) {
-        setError(failure.reason || "Order management settings unavailable");
-      }
     }
 
     void load();
@@ -217,10 +260,6 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
     [baselineFieldValue, currentFieldValue]
   );
 
-  useEffect(() => {
-    setLiveRiskConfirmed(false);
-  }, [liveRiskRelaxation.signature]);
-
   function changeField(category: OrderSettingsCategoryKey, key: string, value: OrderSettingScalar): void {
     setDraftSettings((current) => ({
       ...current,
@@ -229,7 +268,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
         [key]: value
       }
     }));
-    setLiveRiskConfirmed(false);
+    clearPendingSaveState();
     setValidationErrors([]);
     setStatus("");
   }
@@ -243,9 +282,15 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
         [category]: categoryValues
       };
     });
-    setLiveRiskConfirmed(false);
+    clearPendingSaveState();
     setValidationErrors([]);
     setStatus("");
+  }
+
+  function clearPendingSaveState(): void {
+    setReview(null);
+    setDangerReview(null);
+    setConflictedReview(null);
   }
 
   async function validateDraft(): Promise<boolean> {
@@ -273,42 +318,66 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
     }
 
     const trimmedReason = reason.trim();
+    await prepareReview(draftSettings, trimmedReason, "");
+  }
+
+  async function prepareReview(settings: OrderSettingsValues, trimmedReason: string, titleDetail: string): Promise<void> {
     if (!trimmedReason) {
       setValidationErrors(["Reason is required before saving settings"]);
       setStatus("Validation failed");
       return;
     }
 
-    if (liveRiskRelaxation.active && !liveRiskConfirmed) {
-      setValidationErrors(["Live risk relaxation confirmation is required before saving settings"]);
-      setStatus("Validation failed");
-      return;
-    }
-
-    const localErrors = validateLocalSettings(currentFieldValue);
+    const localErrors = validateLocalSettings((category, key) => reviewFieldValue(settings, category, key));
     if (localErrors.length > 0) {
       setValidationErrors(localErrors);
       setStatus("Validation failed");
       return;
     }
 
-    const valid = await validateDraft();
-    if (!valid) {
+    const validation = await validateSettings(settings);
+    setValidationErrors(validation.errors);
+    if (!validation.valid) {
+      setStatus("Validation failed");
       return;
     }
 
-    const result = await patchSettings({
-      expected_version: rawSettings.version,
+    setReview({
+      changes: buildReviewChanges(rawSettings.settings, settings),
+      dangerous: detectLiveRiskRelaxation(
+        (category, key) => reviewFieldValue(settings, category, key),
+        baselineFieldValue
+      ).active,
+      expectedVersion: rawSettings.version,
       reason: trimmedReason,
+      settings: cloneSettings(settings),
+      titleDetail,
+      validation
+    });
+    setStatus("Review required before save");
+  }
+
+  async function submitReviewedSettings(nextReview: PendingSaveReview, danger?: { operatorSignoff: string }): Promise<void> {
+    const result = await patchSettings({
+      expected_version: nextReview.expectedVersion,
+      reason: nextReview.reason,
       request_id: requestId(),
       scope: scope.scope,
       scope_key: scope.scopeKey,
-      settings: draftSettings,
-      ...(liveRiskRelaxation.active ? { confirm: true } : {})
+      settings: nextReview.settings,
+      ...(danger ? { confirm: true, operator_signoff: danger.operatorSignoff } : {})
     });
 
     setValidationErrors(result.errors);
+    setReview(null);
+    setDangerReview(null);
     if (!result.ok) {
+      if (result.conflict) {
+        setConflictedReview(nextReview);
+        setStatus(`Version conflict: current version ${result.currentVersion ?? "unknown"}`);
+        return;
+      }
+
       setStatus("Save failed");
       return;
     }
@@ -318,8 +387,127 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
     setRefreshKey((current) => current + 1);
   }
 
+  async function replayAfterConflict(): Promise<void> {
+    if (!conflictedReview) {
+      return;
+    }
+
+    const snapshot = await fetchSettingsSnapshot(scope);
+    applySettingsSnapshot(snapshot, false);
+    setDraftSettings(cloneSettings(conflictedReview.settings));
+
+    const validation = await validateSettings(conflictedReview.settings);
+    setValidationErrors(validation.errors);
+    if (!validation.valid) {
+      setStatus("Validation failed after refresh");
+      setConflictedReview(null);
+      return;
+    }
+
+    setReview({
+      ...conflictedReview,
+      changes: buildReviewChanges(snapshot.raw.settings, conflictedReview.settings),
+      dangerous: detectLiveRiskRelaxation(
+        (category, key) => reviewFieldValue(conflictedReview.settings, category, key),
+        (category, key) => baselineFieldValueFromSnapshot(snapshot, category, key)
+      ).active,
+      expectedVersion: snapshot.raw.version,
+      validation
+    });
+    setConflictedReview(null);
+    setStatus("Review refreshed after conflict");
+  }
+
+  function rollbackVersion(version: SettingsVersionRecord): void {
+    if (readonly || Object.keys(version.settings).length === 0) {
+      return;
+    }
+
+    const rollbackReason = `Rollback to version ${version.version ?? "unversioned"}`;
+    setReason(rollbackReason);
+    setDraftSettings(cloneSettings(version.settings));
+    void prepareReview(version.settings, rollbackReason, rollbackReason);
+  }
+
+  function reviewFieldValue(
+    settings: OrderSettingsValues,
+    category: OrderSettingsCategoryKey,
+    key: string
+  ): OrderSettingScalar | "" {
+    const categorySettings = settings[category] || {};
+    if (Object.prototype.hasOwnProperty.call(categorySettings, key)) {
+      return categorySettings[key];
+    }
+
+    const field = allFields[category].find((candidate) => candidate.key === key);
+    if (scope.scope !== "global") {
+      return inheritedSettings.settings[category]?.[key]?.value ?? field?.defaultValue ?? "";
+    }
+
+    return effectiveSettings.settings[category]?.[key]?.value ?? field?.defaultValue ?? "";
+  }
+
+  function buildReviewChanges(before: OrderSettingsValues, after: OrderSettingsValues): SaveReviewChange[] {
+    const categories = Array.from(new Set([...Object.keys(before), ...Object.keys(after)])) as OrderSettingsCategoryKey[];
+    return categories.flatMap((category) => {
+      const descriptors = allFields[category] || [];
+      const keys = Array.from(new Set([
+        ...Object.keys(before[category] || {}),
+        ...Object.keys(after[category] || {})
+      ]));
+
+      return keys.flatMap((key) => {
+        const descriptor = descriptors.find((field) => field.key === key);
+        const beforeValue = reviewValueFromSettings(before, category, key);
+        const afterValue = reviewFieldValue(after, category, key);
+        const beforeText = formatSettingValue(beforeValue);
+        const afterText = formatSettingValue(afterValue);
+        if (beforeText === afterText) {
+          return [];
+        }
+
+        return [{
+          after: afterText,
+          before: beforeText,
+          category,
+          effective: formatSettingValue(afterValue),
+          key,
+          label: descriptor?.label || key
+        }];
+      });
+    });
+  }
+
+  function reviewValueFromSettings(
+    settings: OrderSettingsValues,
+    category: OrderSettingsCategoryKey,
+    key: string
+  ): OrderSettingScalar | "" {
+    const categorySettings = settings[category] || {};
+    if (Object.prototype.hasOwnProperty.call(categorySettings, key)) {
+      return categorySettings[key];
+    }
+
+    const field = allFields[category].find((candidate) => candidate.key === key);
+    return effectiveSettings.settings[category]?.[key]?.value ?? field?.defaultValue ?? "";
+  }
+
+  function baselineFieldValueFromSnapshot(
+    snapshot: SettingsSnapshot,
+    category: OrderSettingsCategoryKey,
+    key: string
+  ): OrderSettingScalar | "" {
+    const field = allFields[category].find((candidate) => candidate.key === key);
+    const rawCategory = snapshot.raw.settings[category] || {};
+    if (Object.prototype.hasOwnProperty.call(rawCategory, key)) {
+      return rawCategory[key];
+    }
+
+    return snapshot.effective.settings[category]?.[key]?.value ?? field?.defaultValue ?? "";
+  }
+
   return (
-    <section className="page-grid">
+    <section className="page-grid" data-testid="settings-orders-page">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Order Management</p>
@@ -334,6 +522,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
             className="icon-button"
             disabled={loading}
             onClick={() => {
+              setStatus("");
               setRefreshKey((current) => current + 1);
             }}
             title="Refresh settings"
@@ -345,7 +534,14 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
       </div>
 
       <section className="settings-toolbar" aria-label="Settings scope and status">
-        <ScopeSelector disabled={loading} value={scope} onChange={setScope} />
+        <ScopeSelector
+          disabled={loading}
+          value={scope}
+          onChange={(nextScope) => {
+            setStatus("");
+            setScope(nextScope);
+          }}
+        />
         <dl className="settings-version">
           <div>
             <dt>scope</dt>
@@ -385,6 +581,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
             <button
               className="secondary-button"
               onClick={() => {
+                setStatus("");
                 setRefreshKey((current) => current + 1);
               }}
               type="button"
@@ -421,6 +618,25 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
             </section>
           )}
 
+          {conflictedReview && (
+            <section className="validation-summary" role="alert" aria-label="Settings version conflict">
+              <h3>Settings version conflict</h3>
+              <p>{status}</p>
+              <div className="settings-state-actions">
+                <button
+                  className="secondary-button"
+                  onClick={() => {
+                    void replayAfterConflict();
+                  }}
+                  type="button"
+                >
+                  <RefreshCcw size={16} />
+                  Refresh and replay review
+                </button>
+              </div>
+            </section>
+          )}
+
           <section className="panel settings-panel">
             <header className="panel-header">
               <div>
@@ -431,6 +647,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 <button
                   aria-selected={activeTab === "general"}
                   className={activeTab === "general" ? "secondary-button active" : "secondary-button"}
+                  data-testid="settings-tab-general"
                   onClick={() => {
                     setActiveTab("general");
                   }}
@@ -442,6 +659,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 <button
                   aria-selected={activeTab === "entry"}
                   className={activeTab === "entry" ? "secondary-button active" : "secondary-button"}
+                  data-testid="settings-tab-entry"
                   onClick={() => {
                     setActiveTab("entry");
                   }}
@@ -453,6 +671,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 <button
                   aria-selected={activeTab === "money"}
                   className={activeTab === "money" ? "secondary-button active" : "secondary-button"}
+                  data-testid="settings-tab-money"
                   onClick={() => {
                     setActiveTab("money");
                   }}
@@ -464,6 +683,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 <button
                   aria-selected={activeTab === "protection"}
                   className={activeTab === "protection" ? "secondary-button active" : "secondary-button"}
+                  data-testid="settings-tab-protection"
                   onClick={() => {
                     setActiveTab("protection");
                   }}
@@ -475,6 +695,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 <button
                   aria-selected={activeTab === "monitoring"}
                   className={activeTab === "monitoring" ? "secondary-button active" : "secondary-button"}
+                  data-testid="settings-tab-monitoring"
                   onClick={() => {
                     setActiveTab("monitoring");
                   }}
@@ -486,6 +707,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 <button
                   aria-selected={activeTab === "emergency"}
                   className={activeTab === "emergency" ? "secondary-button active" : "secondary-button"}
+                  data-testid="settings-tab-emergency"
                   onClick={() => {
                     setActiveTab("emergency");
                   }}
@@ -497,6 +719,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 <button
                   aria-selected={activeTab === "notifications"}
                   className={activeTab === "notifications" ? "secondary-button active" : "secondary-button"}
+                  data-testid="settings-tab-notifications"
                   onClick={() => {
                     setActiveTab("notifications");
                   }}
@@ -508,6 +731,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 <button
                   aria-selected={activeTab === "advanced"}
                   className={activeTab === "advanced" ? "secondary-button active" : "secondary-button"}
+                  data-testid="settings-tab-advanced"
                   onClick={() => {
                     setActiveTab("advanced");
                   }}
@@ -595,75 +819,107 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
             )}
           </section>
 
-          <section className="settings-save-panel" aria-label="Save settings">
-            {liveRiskRelaxation.active && (
-              <section
-                aria-label="Live risk relaxation confirmation"
-                className="live-risk-confirmation"
-                role="alert"
-              >
-                <header>
-                  <AlertTriangle size={18} aria-hidden="true" />
-                  <h3>Live risk relaxation requires confirmation</h3>
-                </header>
-                <p>Execution mode is live and these changes relax risk limits:</p>
-                <ul>
-                  {liveRiskRelaxation.changes.map((change) => (
-                    <li key={change.key}>
-                      {change.label}: {formatSettingValue(change.before)} -&gt; {formatSettingValue(change.after)}
-                    </li>
-                  ))}
-                </ul>
-                <label>
-                  <input
-                    checked={liveRiskConfirmed}
-                    disabled={readonly}
-                    onChange={(event) => {
-                      setLiveRiskConfirmed(event.target.checked);
-                    }}
-                    type="checkbox"
-                  />
-                  <span>I understand this relaxes live risk limits</span>
-                </label>
-              </section>
-            )}
-            <label>
-              <span>Reason</span>
-              <textarea
-                disabled={readonly}
-                onChange={(event) => {
-                  setReason(event.target.value);
-                }}
-                rows={3}
-                value={reason}
-              />
-            </label>
-            <div className="button-row">
-              <button
-                className="secondary-button"
-                disabled={readonly}
-                onClick={() => {
-                  void validateDraft();
-                }}
-                type="button"
-              >
-                Validate
-              </button>
-              <button
-                className="primary-button"
-                disabled={readonly || (liveRiskRelaxation.active && !liveRiskConfirmed)}
-                onClick={() => {
-                  void saveDraft();
-                }}
-                type="button"
-              >
-                <Save size={16} />
-                Save settings
-              </button>
-            </div>
-            {status && <p className="drawer-status" role="status">{status}</p>}
-          </section>
+          {!readonly && (
+            <section className="settings-save-panel" aria-label="Save settings" data-testid="settings-save-panel">
+              {liveRiskRelaxation.active && (
+                <section
+                  aria-label="Live risk relaxation confirmation"
+                  className="live-risk-confirmation"
+                  role="alert"
+                >
+                  <header>
+                    <AlertTriangle size={18} aria-hidden="true" />
+                    <h3>Live risk relaxation requires dangerous confirmation</h3>
+                  </header>
+                  <p>Execution mode is live and these changes relax risk limits:</p>
+                  <ul>
+                    {liveRiskRelaxation.changes.map((change) => (
+                      <li key={change.key}>
+                        {change.label}: {formatSettingValue(change.before)} -&gt; {formatSettingValue(change.after)}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              <label>
+                <span>Reason</span>
+                <textarea
+                  data-testid="settings-save-reason"
+                  onChange={(event) => {
+                    setReason(event.target.value);
+                  }}
+                  rows={3}
+                  value={reason}
+                />
+              </label>
+              <div className="button-row">
+                <button
+                  className="secondary-button"
+                  data-testid="settings-validate-button"
+                  onClick={() => {
+                    void validateDraft();
+                  }}
+                  type="button"
+                >
+                  Validate
+                </button>
+                <button
+                  className="primary-button"
+                  data-testid="settings-save-button"
+                  onClick={() => {
+                    void saveDraft();
+                  }}
+                  type="button"
+                >
+                  <Save size={16} />
+                  Save settings
+                </button>
+              </div>
+              {status && <p className="drawer-status" role="status">{status}</p>}
+            </section>
+          )}
+
+          <SettingsHistory
+            readonly={readonly}
+            refreshKey={refreshKey}
+            scope={{ scope: scope.scope, scopeKey: scope.scopeKey }}
+            onRollback={rollbackVersion}
+          />
         </>
+      )}
+      {review && (
+        <SaveReviewDialog
+          changes={review.changes}
+          dangerous={review.dangerous}
+          expectedVersion={review.expectedVersion}
+          reason={review.reason}
+          titleDetail={review.titleDetail}
+          validation={review.validation}
+          onCancel={() => {
+            setReview(null);
+          }}
+          onConfirm={() => {
+            if (review.dangerous) {
+              setDangerReview(review);
+              setReview(null);
+              return;
+            }
+
+            void submitReviewedSettings(review);
+          }}
+        />
+      )}
+      {dangerReview && (
+        <DangerConfirmDialog
+          changes={dangerReview.changes}
+          reason={dangerReview.reason}
+          onCancel={() => {
+            setDangerReview(null);
+          }}
+          onConfirm={(operatorSignoff) => {
+            void submitReviewedSettings(dangerReview, { operatorSignoff });
+          }}
+        />
       )}
     </section>
   );

@@ -22,7 +22,7 @@ export function AdvancedTab({
   onFieldChange
 }: AdvancedTabProps): ReactElement {
   return (
-    <div className="settings-fields" role="tabpanel" aria-label="Advanced settings">
+    <div className="settings-fields" role="tabpanel" aria-label="Advanced settings" data-testid="settings-tabpanel-advanced">
       {advancedSettingsFields.map((field) => {
         const state = fieldState("advanced", field.key);
         return (

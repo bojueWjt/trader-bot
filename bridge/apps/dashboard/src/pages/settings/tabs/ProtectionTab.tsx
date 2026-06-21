@@ -29,7 +29,7 @@ export function ProtectionTab({
   const requireStop = fieldState("protection", "require_stop").value === true;
 
   return (
-    <div className="settings-fields" role="tabpanel" aria-label="Protection and Exits settings">
+    <div className="settings-fields" role="tabpanel" aria-label="Protection and Exits settings" data-testid="settings-tabpanel-protection">
       {protectionSettingsFields.map((field) => {
         const state = fieldState("protection", field.key);
         return (
@@ -84,7 +84,7 @@ function TakeProfitLadderEditor({
   }
 
   return (
-    <section className="tp-ladder-editor" role="group" aria-label="Take-profit ladder editor">
+    <section className="tp-ladder-editor" role="group" aria-label="Take-profit ladder editor" data-testid="take-profit-ladder-editor">
       <div className="tp-ladder-heading">
         <span>Take-profit ladder</span>
         <button
