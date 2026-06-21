@@ -56,6 +56,12 @@ operator 危险操作命令（risk_admin + request_id + reason + confirm，落 a
 
 **剩余缺口（findings，risk-critical 未仓促改）**：① A↔B **order_plan 契约不一致**（A gateway `{side:long,entry{type}}` vs B planner `{side:buy|sell,type,quantity}`+需仓位定量）—— 不对齐则真 gateway 决策无法在 node 执行；② **command poller 未接进 node**（RESUME/kill-switch 到不了节点，卡 C-09）；③ **snapshot 投影未从 node 执行事件派生**（事件已入 `execution_events`，但 AccountState 载荷空、OrderFilled 稀疏，需 node ExecutionProjectionActor 富化 + 派生逻辑，卡 C-06）。
 
+## 0.3 ⚠ §0.1–§0.17 取代下文 §3–§6（历史「待基础设施」评估）
+
+下文 §3「gate=blocked，B 未在真机验证」「§5 唯一阻塞=缺主机/密钥」等是**基础设施到位前**的旧评估，已被 §0.1–§0.17 真机证据取代：v3 栈已在 hk 部署运行，B 执行层已真机亲验（含 testnet 真实开/平仓），密钥/主机/Hermes/对象存储均已具备。当前真实状态以 §0.x 为准。`current_state` 仍 `blocked` 的原因**不再是缺基础设施**，而是：① 默认上限 `testnet_only` 的全量执行级场景（partial_close / move_stop_loss 等逐项）未全跑；② freshness 方案 A（live 项）未实现；③ live 需 operator 签名。
+
+**本轮（2026-06-21）C 窗口验收净结果**：C-04/05 真回放、C-06 投影、C-07 混沌(2)、C-08 gateway 矩阵(6/6)+核心成交、C-09 kill-switch 双层+cancel/close、C-10 安全、C-11 回滚演练 —— 均真机 PASS（见 §0.1–§0.17）。10 个 commit（`b16d605`→`366555e`）。
+
 ## 1. 已完成并验证（C-00 + A 的 8 个 P0）
 
 合并 A+B：0 冲突（`268c84c`）。随后修复并用真实 pg 验证 A 的 8 个 P0：
