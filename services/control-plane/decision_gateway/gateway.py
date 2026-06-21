@@ -240,14 +240,16 @@ def _write_trade_intent(
 
 
 def _projection_is_stale(cur, threshold_ms: int = 60_000) -> bool:
-    """Mirror the SystemSnapshotV1 §2.2 freshness check (primary clause): the read-model
-    projection is stale when the newest execution event is older than the threshold. An
-    empty system (no events yet) is treated as fresh, matching build_system_snapshot."""
-    cur.execute("SELECT max(ts_event) AS t FROM execution_events")
+    """Freshness for auto-approval = the execution projection is CURRENT, which a live node
+    proves by HEARTBEATING — not by having traded recently. A quiet (no new fills) period
+    must not block new risk while the node is connected and pushing events, otherwise every
+    actionable signal during a calm market is held forever (auto-trading deadlock). Fail
+    closed: stale when no node has heartbeat within the threshold (node down / no node)."""
+    cur.execute("SELECT max(last_seen_at) AS t FROM node_heartbeats")
     row = cur.fetchone()
     last = row["t"] if row else None
     if last is None:
-        return False
+        return True
     return (datetime.now(timezone.utc) - last).total_seconds() * 1000 > threshold_ms
 
 
