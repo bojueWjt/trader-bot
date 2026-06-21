@@ -1208,7 +1208,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-04",
         "OM0-05",
@@ -1222,7 +1222,11 @@
         "多 worker SKIP LOCKED 不重复 claim",
         "job 有 retry/terminal 状态"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "execution_jobs: job+outbox in approval txn (gateway additive); FOR UPDATE SKIP LOCKED no double-claim (live verified)"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1233,7 +1237,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-03",
         "OM3-02",
@@ -1248,7 +1252,11 @@
         "zone 边界确定性",
         "数量/价格/TIF 全部来自有效设置和批准 intent"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "intent_execution_planner market/limit/zone; deterministic zone; qty/price/TIF from intent+settings"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1259,7 +1267,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-04",
         "OM2-05",
@@ -1273,7 +1281,11 @@
         "超过 bps 限制拒绝并回写",
         "重试不得绕过 guard"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "price_guard fresh ref pre-submit; reject >max_slippage_bps; retry re-checks (no bypass)"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1284,7 +1296,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-02",
         "OM4-02",
@@ -1298,7 +1310,11 @@
         "max_reprices 达到后进入明确终态",
         "每次重挂 parent/child 可追溯"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "unfilled_manager confirm cancel terminal before reprice; max_reprices terminal; parent/child traceable"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1309,7 +1325,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-02",
         "OM4-04"
@@ -1322,7 +1338,11 @@
         "剩余数量按 increment 计算",
         "market conversion 有独立滑点上限"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "partial_fill keep/cancel/convert/abort-reduce; remainder by increment; market-conversion own slippage cap"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1333,7 +1353,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM4-01",
         "OM4-02"
@@ -1347,7 +1367,11 @@
         "unknown 不自动重复提交",
         "重试次数与退避可设置且有指标"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "errors+retry_policy retryable/permanent/UNKNOWN; unknown->reconcile (never blind resubmit); backoff+metrics"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1358,7 +1382,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-02",
         "OM4-01",
@@ -1372,7 +1396,11 @@
         "intent 可区分 denied/rejected/failed/completed",
         "Dashboard 时间线可见 detail"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "intent_status denial/reject/fill terminal writeback; denied/rejected/failed/completed distinguishable"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1383,7 +1411,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-07",
         "OM4-01",
@@ -1398,7 +1426,11 @@
         "unknown job 先对账再决定",
         "cursor/spool/job 状态可恢复"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "recovery: accepted not resubmitted; unknown reconciled first; idempotent restart"
+      ],
       "blocker": null,
       "notes": []
     },
