@@ -2211,7 +2211,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-06",
         "OM2-07",
@@ -2227,7 +2227,11 @@
         "告警有 dedupe/cooldown",
         "恢复事件可见"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 9eb6226",
+        "DB om_v3_om8b: 229 passed",
+        "alerts.py severity Critical/High/Medium; must-alert no-protection/stale/drift/close_all-fail; dedupe+cooldown; recovery events; notification outbox routing"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -2271,7 +2275,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM8-03"
       ],
@@ -2283,7 +2287,11 @@
         "可注入 accept-unknown 与乱序事件",
         "失败返回非零"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 9eb6226",
+        "DB om_v3_om8b: 229 passed",
+        "simulated_venue FakeVenue + injectable faults (accept-then-unknown/out-of-order/dup/timeout) + scenario matrix market/limit/partial/cancel/stop/TP/move/close/cancel_all/close_all/restart; failures non-zero"
+      ],
       "blocker": null,
       "notes": []
     },
