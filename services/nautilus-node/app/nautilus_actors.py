@@ -213,6 +213,7 @@ class CommandPollerActor(Actor):
         node_id: str,
         *,
         account_id: str | None = None,
+        result_sink: Any | None = None,
         poll_interval_seconds: float = 2.0,
         timer_name: str = "operator-commands.poll",
     ) -> None:
@@ -221,6 +222,7 @@ class CommandPollerActor(Actor):
         self._lifecycle = lifecycle
         self._node_id = node_id
         self._account_id = account_id
+        self._result_sink = result_sink
         self._poll_interval_seconds = poll_interval_seconds
         self._timer_name = timer_name
 
@@ -282,7 +284,16 @@ class CommandPollerActor(Actor):
                 # ACCEPTED (received + dispatched); the strategy executes best-effort.
                 message_bus = _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
                 if message_bus is not None and hasattr(message_bus, "publish"):
-                    message_bus.publish(topic=f"node.commands.{self._account_id}", msg=cmd)
+                    topic = f"node.commands.{self._account_id}"
+                    message_bus.publish(topic=topic, msg=cmd)
+                    if self._result_sink is not None:
+                        try:
+                            self._result_sink.record_running(
+                                cmd.command_id,
+                                result={"dispatched_to_strategy": True, "topic": topic},
+                            )
+                        except Exception:
+                            pass
                     return CommandAckStatus.ACCEPTED, "dispatched_to_strategy"
                 return CommandAckStatus.FAILED, "no_msgbus_for_dispatch"
             else:

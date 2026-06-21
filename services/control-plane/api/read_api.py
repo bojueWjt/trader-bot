@@ -298,7 +298,16 @@ _NODE_COMMAND_TYPE_MAP = {
     "CANCEL_ALL": "cancel_all", "CLOSE_ALL": "close_all",
 }
 # node CommandAckStatus (B) -> command_node_acks.status (A)
-_NODE_ACK_STATUS_MAP = {"accepted": "acked", "completed": "acked", "failed": "failed"}
+_NODE_ACK_STATUS_MAP = {
+    "completed": "acked",
+    "partial": "failed",
+    "failed": "failed",
+    "timed_out": "failed",
+}
+
+
+def _legacy_ack_status_for_node_status(status: str) -> str | None:
+    return _NODE_ACK_STATUS_MAP.get(str(status))
 
 
 @app.post("/v1/nodes/{node_id}/intents/{intent_id}/ack")
@@ -467,9 +476,19 @@ def node_commands(node_id: str, after: str | None = None,
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT oc.command_id::text, oc.command_type, oc.scope, oc.created_at "
-                "FROM operator_commands oc JOIN command_node_acks na ON na.command_id=oc.command_id "
-                "WHERE na.node_id=%s AND na.status='pending' ORDER BY oc.created_at",
+                """
+                SELECT oc.command_id::text, oc.command_type, oc.scope, oc.created_at
+                FROM operator_commands oc
+                JOIN command_node_acks na ON na.command_id=oc.command_id
+                LEFT JOIN node_command_runs ncr
+                  ON ncr.command_id=oc.command_id
+                 AND ncr.node_id=na.node_id
+                 AND ncr.status IN ('accepted', 'running', 'verifying')
+                WHERE na.node_id=%s
+                  AND na.status='pending'
+                  AND ncr.node_command_run_id IS NULL
+                ORDER BY oc.created_at
+                """,
                 (node_id,),
             )
             rows = cur.fetchall()
@@ -493,13 +512,91 @@ def ack_node_command(node_id: str, command_id: str, body: dict = Body(default={}
     _cp_paths()
     from commands import record_ack
 
-    status = _NODE_ACK_STATUS_MAP.get(str(body.get("status")), "acked")
+    node_status = str(body.get("status") or "accepted")
     conn = psycopg2.connect(database_url)
     try:
-        record_ack(conn, command_id, node_id, status=status, detail=body.get("error"))
+        _persist_node_command_ack_progress(conn, node_id, command_id, node_status, body)
+        status = _legacy_ack_status_for_node_status(node_status)
+        if status is not None:
+            record_ack(conn, command_id, node_id, status=status, detail=body.get("error"))
         return {"ok": True}
     finally:
         conn.close()
+
+
+def _persist_node_command_ack_progress(
+    conn,
+    node_id: str,
+    command_id: str,
+    node_status: str,
+    body: dict,
+) -> None:
+    from order_management.commands import (
+        get_command_run,
+        mark_running,
+        mark_terminal,
+        mark_verifying,
+        request_command_run,
+    )
+
+    command_type, scope = _command_row(conn, command_id)
+    result = body.get("result") if isinstance(body.get("result"), dict) else {}
+    request_id = str(body.get("request_id") or result.get("request_id") or command_id)
+    payload = {
+        "command_id": command_id,
+        "scope": scope or {},
+        "ack": {k: v for k, v in body.items() if k != "result"},
+    }
+    if result:
+        payload["result"] = result
+
+    run = request_command_run(
+        conn,
+        node_id=node_id,
+        command_type=_NODE_COMMAND_TYPE_MAP.get(command_type, command_type.lower()),
+        request_id=request_id,
+        command_id=command_id,
+        idempotency_key=command_id,
+        payload=payload,
+    )
+    if node_status == "accepted":
+        return
+    if node_status == "running":
+        _ensure_running(conn, request_id, run["status"], result=result)
+        return
+
+    current = get_command_run(conn, request_id=request_id)
+    if current["status"] == "accepted":
+        current = mark_running(conn, request_id=request_id, result=result)
+    if node_status == "completed" and current["status"] == "running":
+        current = mark_verifying(conn, request_id=request_id, result=result)
+    if node_status in {"completed", "partial", "failed", "timed_out"}:
+        mark_terminal(
+            conn,
+            request_id=request_id,
+            status=node_status,
+            result=result,
+            error=body.get("error"),
+        )
+
+
+def _ensure_running(conn, request_id: str, current_status: str, *, result: dict) -> None:
+    from order_management.commands import mark_running
+
+    if current_status == "accepted":
+        mark_running(conn, request_id=request_id, result=result)
+
+
+def _command_row(conn, command_id: str) -> tuple[str, dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT command_type, scope FROM operator_commands WHERE command_id=%s",
+            (command_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown command")
+    return row[0], row[1] or {}
 
 
 @app.get("/v1/accounts/{account_id}")
