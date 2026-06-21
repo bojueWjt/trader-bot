@@ -1,0 +1,13 @@
+{
+  "account_ids": [
+    "",
+    "   "
+  ],
+  "position_keys": [
+    {
+      "account_id": "acct-1",
+      "instrument": "BTCUSDT",
+      "side": "both"
+    }
+  ]
+}

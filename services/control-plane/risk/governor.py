@@ -172,14 +172,16 @@ def evaluate(
 
 
 def _instrument_matches(symbol: str | None, instrument_id: str | None) -> bool:
-    """A decision carries the venue symbol (``BTCUSDT``); the position projection carries
-    the Nautilus instrument id (``BTCUSDT-PERP.BINANCE``). Match them format-tolerantly so
-    update actions can resolve their target position (the symbol is the id's leading token)."""
-    if not symbol or not instrument_id:
-        return False
-    if symbol == instrument_id:
-        return True
-    return instrument_id.split("-", 1)[0] == symbol
+    import sys
+    from pathlib import Path
+
+    _CP = Path(__file__).resolve().parents[1]  # services/control-plane
+    if str(_CP) not in sys.path:
+        sys.path.insert(0, str(_CP))
+
+    from order_management.identifiers import instruments_match
+
+    return instruments_match(symbol, instrument_id)
 
 
 def _precision_ok(intent: dict[str, Any], policy: RiskPolicy) -> bool:

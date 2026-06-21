@@ -1,0 +1,6 @@
+{
+  "domain": "order",
+  "from": "planned",
+  "to": "filled",
+  "trigger": "plan_committed"
+}

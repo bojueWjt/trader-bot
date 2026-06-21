@@ -1,0 +1,37 @@
+{
+  "instrument_cases": [
+    {
+      "raw": "BTCUSDT-PERP.BINANCE",
+      "venue_symbol": "BTCUSDT",
+      "venue": "BINANCE",
+      "product": "PERP",
+      "match": "BTCUSDT"
+    },
+    {
+      "raw": "ethusdt",
+      "venue_symbol": "ETHUSDT",
+      "venue": null,
+      "product": null,
+      "match": "ETHUSDT-PERP.BINANCE"
+    }
+  ],
+  "position_keys": [
+    {
+      "account_id": "acct-1",
+      "instrument": "BTCUSDT-PERP.BINANCE",
+      "key": "acct-1:BTCUSDT"
+    },
+    {
+      "account_id": "acct-1",
+      "instrument": "BTCUSDT-PERP.BINANCE",
+      "side": "long",
+      "key": "acct-1:BTCUSDT:long"
+    },
+    {
+      "account_id": "acct-1",
+      "instrument": "btcusdt",
+      "side": "SHORT",
+      "key": "acct-1:BTCUSDT:short"
+    }
+  ]
+}
