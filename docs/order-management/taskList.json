@@ -1756,7 +1756,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-03"
       ],
@@ -1769,7 +1769,11 @@
         "支持 loading/error/empty/readonly 状态",
         "不使用生产 fixture fallback"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 115813c",
+        "tsc build + 10 vitest pass (3 new + 7 existing, no regression); getEmpty* no fixture fallback",
+        "/settings/orders route + sidebar nav additive in App.tsx; loading/error/empty/readonly(viewer) states; api.ts settings client"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1780,7 +1784,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-02",
         "OM7-01"
@@ -1793,7 +1797,11 @@
         "字段显示 inherited/source/effective",
         "清除 override 可恢复继承"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 115813c",
+        "tsc build + 10 vitest pass (3 new + 7 existing, no regression); getEmpty* no fixture fallback",
+        "ScopeSelector global/account/instrument; inherited/source/effective; clear-override restores inheritance"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1804,7 +1812,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-01",
         "OM7-01",
@@ -1819,7 +1827,11 @@
         "范围/单位/帮助文本完整",
         "字段联动与禁用条件正确"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 115813c",
+        "tsc build + 10 vitest pass (3 new + 7 existing, no regression); getEmpty* no fixture fallback",
+        "General+Entry tabs schema-driven (orderSettingsDescriptor); unit/range/help; interlock/disable"
+      ],
       "blocker": null,
       "notes": []
     },
