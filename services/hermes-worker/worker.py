@@ -103,7 +103,12 @@ def process_one(
 
         snapshot = snapshot_provider.current()
         snapshot_problem = _snapshot_problem(snapshot)
-        if snapshot_problem is not None:
+        # A stale-but-present projection must NEVER drop the user's signal: Hermes still
+        # classifies the message (it is recorded + visible, never blocked). Per contract
+        # §2.2 the staleness gates only AUTO-APPROVAL of new risk downstream (enforced in
+        # the Decision Gateway), not classification. Only a structurally unusable snapshot
+        # (no PostgreSQL projection at all) is a hard fail.
+        if snapshot_problem == "context_unavailable":
             return _fail(conn, run_id, raw_message_id, snapshot_problem, "system snapshot unusable")
 
         request = HermesRequest(

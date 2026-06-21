@@ -113,6 +113,16 @@ def process_one_decision(
             outcome = governor.evaluate(
                 decision, positions=positions, risk_state=risk_state, policy=policy
             )
+            # Contract §2.2: never AUTO-approve new risk on a stale projection. The signal
+            # is already classified + recorded (never dropped); a stale-context approval is
+            # held for human review instead of auto-executing. This moves the staleness gate
+            # from "drop the message" (wrong) to "hold the approval" (correct).
+            if outcome.status == "approved" and _projection_is_stale(cur):
+                outcome.status = "needs_review"
+                outcome.reason = "context_stale: approval held pending fresh projection"
+                outcome.checks = list(outcome.checks) + [
+                    {"name": "context_freshness", "passed": False}
+                ]
             return _write_outcome(cur, row, outcome, decision=decision, policy=policy)
 
 
@@ -227,6 +237,18 @@ def _write_trade_intent(
         (str(uuid4()), intent_id, Json({"intent_id": intent_id, "risk_decision_id": risk_decision_id})),
     )
     return intent_id
+
+
+def _projection_is_stale(cur, threshold_ms: int = 60_000) -> bool:
+    """Mirror the SystemSnapshotV1 §2.2 freshness check (primary clause): the read-model
+    projection is stale when the newest execution event is older than the threshold. An
+    empty system (no events yet) is treated as fresh, matching build_system_snapshot."""
+    cur.execute("SELECT max(ts_event) AS t FROM execution_events")
+    row = cur.fetchone()
+    last = row["t"] if row else None
+    if last is None:
+        return False
+    return (datetime.now(timezone.utc) - last).total_seconds() * 1000 > threshold_ms
 
 
 def _idempotency_key(row, outcome) -> str:
