@@ -1,7 +1,7 @@
 """Runtime lifecycle primitives for one-account Nautilus node processes."""
 
 from .health import HealthResponse, HealthService
-from .lifecycle import DependencyName, NodeLifecycle, ReadinessStatus
+from .lifecycle import DependencyName, NodeLifecycle, ReadinessStatus, TradingLifecycle
 
 __all__ = [
     "DependencyName",
@@ -9,4 +9,5 @@ __all__ = [
     "HealthService",
     "NodeLifecycle",
     "ReadinessStatus",
+    "TradingLifecycle",
 ]

@@ -8,9 +8,15 @@ anything out of policy becomes rejected.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
+
+_CP = Path(__file__).resolve().parents[1]  # services/control-plane
+if str(_CP) not in sys.path:
+    sys.path.insert(0, str(_CP))
 
 from policy import (
     NON_ACTIONABLE_ACTIONS,
@@ -19,6 +25,7 @@ from policy import (
     UPDATE_MESSAGE_TYPES,
     RiskPolicy,
 )
+from order_management.state_descriptor import halted_action_allowed
 
 
 @dataclass
@@ -116,10 +123,8 @@ def evaluate(
 
     # 5. kill switch / risk state
     mode = (risk_state.get("mode") or "ACTIVE").upper()
-    if mode == "HALTED":
-        return reject("kill_switch", "risk_state HALTED: no new risk", account_id)
-    if mode == "REDUCING" and action in OPENING_ACTIONS:
-        return reject("kill_switch", "risk_state REDUCING: opening risk blocked", account_id)
+    if not _halted_action_allowed(action, mode):
+        return reject("kill_switch", f"risk_state {mode}: action {action} blocked", account_id)
     ev.ok("kill_switch")
 
     # 6. geometry for opening actions
@@ -188,6 +193,13 @@ def _instrument_matches(symbol: str | None, instrument_id: str | None) -> bool:
 
 def _instrument_in_group(instrument_id: str | None, members: tuple[str, ...]) -> bool:
     return any(_instrument_matches(member, instrument_id) for member in members)
+
+
+def _halted_action_allowed(action: str, mode: str) -> bool:
+    try:
+        return halted_action_allowed(action, mode)
+    except KeyError:
+        return False
 
 
 def _proposed_notional(intent: dict[str, Any], risk_budget: dict[str, float]) -> Decimal:
