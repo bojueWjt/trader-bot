@@ -30,11 +30,20 @@ operator 危险操作命令（risk_admin + request_id + reason + confirm，落 a
 - ⚠ **运营要点**：完整 kill-switch 必须同时带 `target_nodes`（停执行）+ `scope.{account_id,instruments}`（停网关批准）。仅 `target_nodes` 只停节点执行、不停网关批准（积压 approved 在 RESUME 后会执行）。runbook 已记。
 - **剩余**：cancel_all/close_all 节点动作（Codex 并行实现中）。
 
+## 0.17 C-09 cancel_all/close_all + C-07 混沌（hk，2026-06-21）
+
+- **close_all 真机亲验**（commit `bb4c738`）：`POST /v1/commands {type:CLOSE_ALL}` → CommandPollerActor 经 msgbus `node.commands.{account_id}` 路由到 strategy → 提交 reduce-only SELL market 平 BTC+ETH → Binance testnet 实平（持仓归零）。cancel_all 同路由（当前无挂单，路径已证）。
+- **cancel_all/close_all 发现**：① 批量平仓在同一 tick 撞 Nautilus RiskEngine `MAX_ORDER_SUBMIT_RATE` 节流 → 部分被 drop（需分批/重试，第二次 CLOSE_ALL 补平 ETH）；② 平仓用 position_id `...-EXTERNAL` ≠ 开仓 `...-BOTH` → 投影残留一条 stale open 行（实盘已平，C-06 position_id 对账边界）。
+- **C-07 混沌 2 项 PASS**：
+  - **节点重启幂等**：重启 node，已成交 intent `f035bd12` 不重复执行（订单数不变，cursor 拉取 restart-safe，无重复下单）。
+  - **control-plane 重启韧性**：重启 control-plane → node 2 条瞬时 connection-refused 后干净恢复（心跳新鲜），**无 rogue 下单**（OrderSubmitted 前后均 5），control-plane 恢复服务（snapshot 200）。
+  - PG 不可达 fail-closed：设计上 503 `store unavailable`（已有路径）；worker context_stale / governor risk_context_incomplete 已证数据缺失即拒。
+
 ## 0.2 已知生产硬化项（不卡 testnet 验收，卡 live 自动批准）
 
-- **静默期投影 freshness**：§2.2 契约冻结 `stale = f(last_execution_event_at>阈值)` 且"超阈值禁止 Hermes 自动批准"。成交后 ~90s 无新执行事件即 stale=True（Binance 静默 ACCOUNT_UPDATE）。testnet 验收下此保守行为安全；live 自动批准前需二选一：**(A)** node 周期转发 AccountState（保持契约，最契合设计）或 **(B)** §2.2 freshness 纳入 node 心跳活性（需 PLAN owner 改契约）。建议 (A)。
-- **cancel_all/close_all 节点动作**：CommandPollerActor 仍回 `node_action_not_wired`（HALT/RESUME/REDUCING 已通）。
-- **denial 反馈**：node 内部拒单未回写 intent 状态（cursor-based 拉取已防重复处理，幂等安全）。
+- **静默期投影 freshness（用户已定方案 A，留待 live 前实现）**：§2.2 契约冻结 `stale = f(last_execution_event_at>阈值)` 且"超阈值禁止 Hermes 自动批准"。成交后 ~90s 无新执行事件即 stale=True（Binance 静默 ACCOUNT_UPDATE）。testnet 验收下此保守行为安全。**方案 A 实现要求（关键）**：周期事件必须携带 node **真实**当前 Binance 账户状态（证明节点与交易所仍同步），不能用空 payload 的「活性 ping」——否则会**谎报 freshness**，比当前保守行为更糟。正确实现需 node 周期向 Binance 拉真账户状态（Nautilus exec-client account-query API，host-verify）+ 经 ProjectionActor.sink 回流；ExecutionEventEnvelopeV1 构造已确认简单。属 live cutover 项，需真机迭代，故本轮 scope 为后续。
+- **close_all 批量节流 + position_id 对账**：见 §0.17 两个 finding（分批/重试；EXTERNAL vs BOTH）。
+- **denial 反馈**：node 内部拒单未回写 intent 状态（cursor-based 拉取已防重复处理，幂等安全；trade_intent 终态枚举无 executed，成交以 execution_events/投影为准）。
 
 ## 0. 真机验收里程碑（hk，2026-06-20）
 
