@@ -25,10 +25,17 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
     )
 
     account_type = _enum_value(BinanceAccountType, ("USDT_FUTURES", "USDT_M_FUTURES"))
-    environment = _enum_value(
-        BinanceEnvironment,
-        ("TESTNET", "SANDBOX", "DEMO"),
-    )
+    # Honor the validated config.binance.environment. node_config restricts it to
+    # {sandbox, testnet, live}; "live" -> real money (BinanceEnvironment.LIVE),
+    # testnet/sandbox -> TESTNET. Anything unexpected is default-safe to TESTNET so a
+    # missing/garbled value can never silently route to mainnet.
+    env_name = (getattr(config.binance, "environment", "") or "").strip().lower()
+    env_candidates = {
+        "live": ("LIVE",),
+        "testnet": ("TESTNET", "SANDBOX", "DEMO"),
+        "sandbox": ("TESTNET", "SANDBOX", "DEMO"),
+    }.get(env_name, ("TESTNET", "SANDBOX", "DEMO"))
+    environment = _enum_value(BinanceEnvironment, env_candidates)
     instrument_provider = BinanceInstrumentProviderConfig(load_all=True)
 
     data_config = BinanceDataClientConfig(

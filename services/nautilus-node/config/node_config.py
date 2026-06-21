@@ -115,9 +115,9 @@ def load_node_config(path: str | Path) -> NodeConfig:
     reconciliation = _load_reconciliation_config(raw.get("reconciliation"))
 
     environment = _required_str(binance_raw, "environment").lower()
-    if environment not in {"sandbox", "testnet"}:
+    if environment not in {"sandbox", "testnet", "live"}:
         raise NodeConfigError(
-            f"binance.environment must be sandbox/testnet for B-01, got {environment!r}"
+            f"binance.environment must be sandbox/testnet/live, got {environment!r}"
         )
     account_type = _required_str(binance_raw, "account_type")
     if account_type not in {"USDT-M", "USDT_FUTURES", "USDT-FUTURES"}:
