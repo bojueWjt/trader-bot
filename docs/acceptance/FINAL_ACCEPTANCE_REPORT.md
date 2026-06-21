@@ -15,6 +15,10 @@
 - **kill-switch 决策矩阵真机亲验**（governor 级）：`risk_state HALTED → rejected: no new risk`；`REDUCING → rejected: opening risk blocked`；`ACTIVE → approved`。工具 `scripts/governor_demo.py`。
 - **真语料 governor 回归**：75 条真 Hermes 决策过真 gateway → 全部 `needs_review: decision_stale`（freshness 1800s 闸正确 fail-closed，~48000s 老决策）。
 
+## 0.15 C-10 安全审计（hk，2026-06-21）— 全过
+
+只读核查全过：① secrets `0600` + `secrets/` `0700`（root）；② v3 服务仅绑 `127.0.0.1`（8080/8087），redis/pg 仅本机发布，node 容器不发布端口；③ git 仓库无任何明文密钥（testnet key 片段/`BINANCE_API_SECRET` 0 命中）；④ 端点 fail-closed：无 token 的 ingress 写 + snapshot 读均 **401**；⑤ **live-off 关键闸**：node 运行时 base url = `https://demo-fapi.binance.com`（testnet，非主网），ws=`stream.binancefuture.com`。
+
 ## 0.2 已知生产硬化项（不卡 testnet 验收，卡 live 自动批准）
 
 - **静默期投影 freshness**：§2.2 契约冻结 `stale = f(last_execution_event_at>阈值)` 且"超阈值禁止 Hermes 自动批准"。成交后 ~90s 无新执行事件即 stale=True（Binance 静默 ACCOUNT_UPDATE）。testnet 验收下此保守行为安全；live 自动批准前需二选一：**(A)** node 周期转发 AccountState（保持契约，最契合设计）或 **(B)** §2.2 freshness 纳入 node 心跳活性（需 PLAN owner 改契约）。建议 (A)。
