@@ -14,6 +14,7 @@
 - **🎯 全链路真机亲验**：新鲜决策 `3e89ffbe` → 真 gateway → 真 governor **approved（all checks passed）** → ApprovedTradeIntentV1 `f035bd12` → node 轮询拉取 → **Binance testnet 真实成交 0.0032 BTC @ ~64306**（venue_order_id 15778571551，3 笔分批 OrderFilled→PositionOpened）→ execution_events 回流 → 投影更新。订单 tag 全程可追溯（intent→decision→risk→idempotency_key）。幂等已验（单订单无重复）。
 - **kill-switch 决策矩阵真机亲验**（governor 级）：`risk_state HALTED → rejected: no new risk`；`REDUCING → rejected: opening risk blocked`；`ACTIVE → approved`。工具 `scripts/governor_demo.py`。
 - **真语料 governor 回归**：75 条真 Hermes 决策过真 gateway → 全部 `needs_review: decision_stale`（freshness 1800s 闸正确 fail-closed，~48000s 老决策）。
+- **C-08 gateway/governor 场景矩阵 6/6**（`scripts/c08_scenarios.py`，确定性无下单）：whitelist_reject（DOGEUSDT not allowed）、precision_reject、ambiguous_review、update_message_cannot_open（position_update produced open_position）、update_no_target（缺 target_position_id→review）、leverage_reject（20>10）。叠加已证 approve→fill / HALTED / REDUCING / freshness / 幂等 ≈ 11 个确定性场景。**剩余执行级场景**（close/partial/move_SL/cancel_all/close_all/对账）待 node 侧 close/cancel 接线（Codex 并行实现中）。
 
 ## 0.15 C-10 安全审计（hk，2026-06-21）— 全过
 
