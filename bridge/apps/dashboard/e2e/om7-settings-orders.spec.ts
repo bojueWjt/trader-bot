@@ -260,9 +260,10 @@ test("settings save review is completable by keyboard with server diff and audit
   await page.getByTestId("settings-save-button").focus();
   await page.keyboard.press("Enter");
 
-  await expect(page.getByTestId("save-review-dialog")).toBeVisible();
-  await expect(page.getByText("Risk per trade pct")).toBeVisible();
-  await expect(page.getByText("node-a hot_reload")).toBeVisible();
+  const dialog = page.getByTestId("save-review-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("region", { name: "Server diff" })).toContainText("Risk per trade pct");
+  await expect(dialog.getByRole("region", { name: "Save impact" })).toContainText("node-a hot_reload");
 
   await page.getByTestId("save-review-confirm").focus();
   await page.keyboard.press("Enter");
