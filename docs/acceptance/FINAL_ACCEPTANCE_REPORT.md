@@ -1,7 +1,25 @@
-# 最终验收报告（INTERIM — gate=testnet_core_proven，未达 testnet_only 全量）
+# 最终验收报告（INTERIM — gate=testnet_full_pipeline_proven，未达 testnet_only 全量）
 
-> 分支 `work/integration-acceptance-v3`。当前为**核心验收链路真机打通**阶段：真实图文回放 + testnet 真实下单已亲验，但全量 testnet（C-08 十四场景）/混沌(C-07)/面板对账(C-06)/kill-switch 演练(C-09) 与 A↔B order_plan 对齐未完成。
-> **release gate = `blocked`（不可 live）**：核心执行链已验证，但默认上限 `testnet_only` 的全量验收未过，且 live 需 operator 签名。
+> 分支 `work/integration-acceptance-v3`。**全链路（含真 governor 自动批准）真机打通**：真实图文回放 + 真 gateway/governor 决策 + testnet 真实成交全部亲验。剩余：全量 testnet 十四场景(C-08)/混沌(C-07)/安全审计(C-10)/切换演练(C-11)，以及静默期投影 freshness 硬化（见 §0.2）。
+> **release gate = `blocked`（不可 live）**：默认上限 `testnet_only` 的全量验收未过，且 live 需 operator 签名。
+
+## 0.1 全链路里程碑（hk，2026-06-21）— 真 governor → testnet 成交
+
+**§0 三项 findings 全部闭合 + 全链路自动批准打通：**
+
+- **A↔B order_plan 对齐已验证**：control-plane A→B seam 翻译（A 语义 `{side,entry{type}}` → B 执行 `{side,type,quantity}`，quantity=max_notional/entry_price）真机生效。
+- **C-06 投影派生修复**（commit `b16d605`）：execution-event → 读模型投影根因修复（数量字符串被 `COALESCE(%s,0)` 当 integer 解析 → `InvalidTextRepresentation` 污染事务 → 500）。改：`_num()` 数值强转 + 每事件 SAVEPOINT 隔离。真机：positions_projection 实时反映 testnet 持仓。
+- **node 周期心跳**（commit `6096c00`）：`send_heartbeat()` 原仅启动时一次 → CommandPollerActor 每 tick 刷新 → snapshot `missing_nodes` 清空、node 真活性可见。
+- **position_exists 误判修复**（commit `0681f86`）：`_cache_positions` 用 InstrumentId 作用域 + 按 instrument/非零过滤 → 开 BTC 不再被无关 ETH 持仓挡。
+- **🎯 全链路真机亲验**：新鲜决策 `3e89ffbe` → 真 gateway → 真 governor **approved（all checks passed）** → ApprovedTradeIntentV1 `f035bd12` → node 轮询拉取 → **Binance testnet 真实成交 0.0032 BTC @ ~64306**（venue_order_id 15778571551，3 笔分批 OrderFilled→PositionOpened）→ execution_events 回流 → 投影更新。订单 tag 全程可追溯（intent→decision→risk→idempotency_key）。幂等已验（单订单无重复）。
+- **kill-switch 决策矩阵真机亲验**（governor 级）：`risk_state HALTED → rejected: no new risk`；`REDUCING → rejected: opening risk blocked`；`ACTIVE → approved`。工具 `scripts/governor_demo.py`。
+- **真语料 governor 回归**：75 条真 Hermes 决策过真 gateway → 全部 `needs_review: decision_stale`（freshness 1800s 闸正确 fail-closed，~48000s 老决策）。
+
+## 0.2 已知生产硬化项（不卡 testnet 验收，卡 live 自动批准）
+
+- **静默期投影 freshness**：§2.2 契约冻结 `stale = f(last_execution_event_at>阈值)` 且"超阈值禁止 Hermes 自动批准"。成交后 ~90s 无新执行事件即 stale=True（Binance 静默 ACCOUNT_UPDATE）。testnet 验收下此保守行为安全；live 自动批准前需二选一：**(A)** node 周期转发 AccountState（保持契约，最契合设计）或 **(B)** §2.2 freshness 纳入 node 心跳活性（需 PLAN owner 改契约）。建议 (A)。
+- **cancel_all/close_all 节点动作**：CommandPollerActor 仍回 `node_action_not_wired`（HALT/RESUME/REDUCING 已通）。
+- **denial 反馈**：node 内部拒单未回写 intent 状态（cursor-based 拉取已防重复处理，幂等安全）。
 
 ## 0. 真机验收里程碑（hk，2026-06-20）
 
