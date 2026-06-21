@@ -2318,7 +2318,7 @@
       "executor": "server_ops",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "blocked",
       "dependencies": [
         "OM8-04"
       ],
@@ -2331,8 +2331,12 @@
         "每项记录订单 ID、事件链、最终交易所状态",
         "失败项不得被报告为通过"
       ],
-      "evidence": [],
-      "blocker": null,
+      "evidence": [
+        "artifact commit: 1546cf0",
+        "scripts/order_management_acceptance.py --list=22 (§15.3) + --dry-run OK offline; TESTNET_REPORT template",
+        "BLOCKED on operator: live run needs Binance testnet creds (BINANCE_TESTNET_API_KEY/SECRET) + running system. Run: python scripts/order_management_acceptance.py (records order IDs/event chain/exchange status; failures non-zero)"
+      ],
+      "blocker": "execution requires operator/infra (Binance testnet creds / chaos env / operator signoff); artifacts ready",
       "notes": []
     },
     {
@@ -2342,7 +2346,7 @@
       "executor": "server_ops",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "blocked",
       "dependencies": [
         "OM8-05"
       ],
@@ -2355,8 +2359,12 @@
         "stale 时新增风险为 0",
         "恢复后先对账再 ACTIVE"
       ],
-      "evidence": [],
-      "blocker": null,
+      "evidence": [
+        "artifact commit: 1546cf0",
+        "scripts/order_management_chaos.py --list/--dry-run OK offline; CHAOS_REPORT template",
+        "BLOCKED on infra: live run needs node/CP/PG/Redis restart + network/WS/DB fault injection environment"
+      ],
+      "blocker": "execution requires operator/infra (Binance testnet creds / chaos env / operator signoff); artifacts ready",
       "notes": []
     },
     {
@@ -2391,7 +2399,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM1-07",
         "OM7-10",
@@ -2405,7 +2413,11 @@
         "无 secret 回显/入库/导出",
         "高危操作审计与 request_id 100% 完整"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 1546cf0",
+        "DB om_v3_om8: tests/order_management/security/ 6 passed",
+        "SECURITY_REPORT control matrix: no anonymous/viewer writes (router require_settings_actor + RBAC), no secret echo/store/export, request_id+audit 100% on dangerous ops — each control mapped to enforcing code + test"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -2442,7 +2454,7 @@
       "executor": "operator",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "blocked",
       "dependencies": [
         "OM8-09"
       ],
@@ -2455,8 +2467,12 @@
         "live 前有 operator signoff",
         "旧 prod 路径不被无意修改"
       ],
-      "evidence": [],
-      "blocker": null,
+      "evidence": [
+        "artifact commit: 1546cf0",
+        "docs/runbooks/ORDER_MANAGEMENT_OPERATIONS.md + ROLLBACK.md (HALT/cancel_all/close_all/rollback steps; shadow->testnet->live-readonly->live-small)",
+        "BLOCKED on operator: staged live rollout requires explicit operator signoff + release-gate approval; old prod path untouched"
+      ],
+      "blocker": "execution requires operator/infra (Binance testnet creds / chaos env / operator signoff); artifacts ready",
       "notes": []
     }
   ]
