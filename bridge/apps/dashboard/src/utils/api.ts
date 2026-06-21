@@ -128,6 +128,26 @@ export type RiskOverview = {
   dataSource: DataSourceState;
 };
 
+export type FreshnessSignalKey = "market_data" | "account_data" | "execution_event" | "projection" | "reconciliation";
+
+export type FreshnessSignal = {
+  available: boolean;
+  current: string;
+  key: FreshnessSignalKey;
+  label: string;
+  observedAt: string;
+  stale: boolean;
+  status: string;
+  valueMs: number | null;
+};
+
+export type SystemHealthSnapshot = {
+  dataSource: DataSourceState;
+  empty: boolean;
+  raw: Record<string, unknown>;
+  signals: FreshnessSignal[];
+};
+
 export type DailyReport = {
   date: string;
   account: {
@@ -491,6 +511,15 @@ export function getEmptyRiskOverview(reason = "loading"): RiskOverview {
   return riskFromPayload({}, emptyQuality(reason));
 }
 
+export function getEmptySystemHealthSnapshot(reason = "loading"): SystemHealthSnapshot {
+  return {
+    dataSource: emptyQuality(reason),
+    empty: true,
+    raw: {},
+    signals: emptyFreshnessSignals()
+  };
+}
+
 export function getEmptyDailyReport(date: string, reason = "loading"): DailyReport {
   return reportFromPayload({}, date, emptyQuality(reason));
 }
@@ -656,6 +685,18 @@ function asRecord(value: unknown): Record<string, unknown> {
   }
 
   return {};
+}
+
+function asJsonRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === "string" && value.trim()) {
+    try {
+      return asRecord(JSON.parse(value));
+    } catch {
+      return {};
+    }
+  }
+
+  return asRecord(value);
 }
 
 function asArray(value: unknown): unknown[] {
@@ -1066,6 +1107,165 @@ function riskFromPayload(payload: Record<string, unknown>, quality: DataSourceSt
   };
 }
 
+function systemHealthFromPayload(payload: Record<string, unknown>, quality: DataSourceState): SystemHealthSnapshot {
+  if (Object.keys(payload).length === 0) {
+    return {
+      dataSource: quality,
+      empty: true,
+      raw: payload,
+      signals: emptyFreshnessSignals()
+    };
+  }
+
+  return {
+    dataSource: quality,
+    empty: false,
+    raw: payload,
+    signals: freshnessSignalsFromPayload(payload, quality)
+  };
+}
+
+function emptyFreshnessSignals(): FreshnessSignal[] {
+  return [
+    unavailableFreshnessSignal("market_data", "Market data"),
+    unavailableFreshnessSignal("account_data", "Account data"),
+    unavailableFreshnessSignal("execution_event", "Execution event"),
+    unavailableFreshnessSignal("projection", "Projection"),
+    unavailableFreshnessSignal("reconciliation", "Reconciliation")
+  ];
+}
+
+function unavailableFreshnessSignal(key: FreshnessSignalKey, label: string): FreshnessSignal {
+  return {
+    available: false,
+    current: "unavailable",
+    key,
+    label,
+    observedAt: "",
+    stale: false,
+    status: "unavailable",
+    valueMs: null
+  };
+}
+
+function freshnessSignalsFromPayload(payload: Record<string, unknown>, quality: DataSourceState): FreshnessSignal[] {
+  const data = asRecord(payload.data);
+  const nodeHealth = asRecordArray(data.node_health);
+  const nodePayloads = nodeHealth.map((node) => asJsonRecord(node.payload));
+  const signalSources = [payload, data, ...nodeHealth, ...nodePayloads];
+  const marketData = timestampSignal(
+    "market_data",
+    "Market data",
+    signalSources,
+    ["market_data_last_seen_at", "market_data_at", "market_data_ts", "last_market_data_at"],
+    ["market_data_stale", "stale_market"]
+  );
+  const accountData = timestampSignal(
+    "account_data",
+    "Account data",
+    signalSources,
+    ["account_data_last_seen_at", "account_data_at", "account_data_ts", "last_account_data_at"],
+    ["account_data_stale", "stale_account"]
+  );
+  const executionEvent = timestampSignal(
+    "execution_event",
+    "Execution event",
+    signalSources,
+    ["last_execution_event_at", "execution_event_last_seen_at", "execution_event_at", "last_event_at"],
+    ["execution_event_stale", "stale_execution_event"]
+  );
+  const projectionLag = firstNumber(
+    [quality.projection_lag_ms, payload.projection_lag_ms, ...nodePayloads.map((nodePayload) => nodePayload.projection_lag_ms)],
+    Number.NaN
+  );
+  const reconciliationStatus = quality.reconciliation_state;
+
+  return [
+    marketData,
+    accountData,
+    {
+      ...executionEvent,
+      observedAt: executionEvent.observedAt || quality.last_execution_event_at || "",
+      current: executionEvent.current !== "unavailable"
+        ? executionEvent.current
+        : quality.last_execution_event_at || "unavailable",
+      available: executionEvent.available || Boolean(quality.last_execution_event_at)
+    },
+    {
+      available: Number.isFinite(projectionLag),
+      current: Number.isFinite(projectionLag) ? `${Math.round(projectionLag)} ms` : "unavailable",
+      key: "projection",
+      label: "Projection",
+      observedAt: quality.generated_at,
+      stale: quality.stale,
+      status: Number.isFinite(projectionLag) ? "tracked" : "unavailable",
+      valueMs: Number.isFinite(projectionLag) ? Math.round(projectionLag) : null
+    },
+    {
+      available: true,
+      current: reconciliationStatus,
+      key: "reconciliation",
+      label: "Reconciliation",
+      observedAt: firstPayloadString(signalSources, ["reconciliation_verified_at", "last_reconciliation_at"]),
+      stale: reconciliationStatus !== "healthy",
+      status: reconciliationStatus,
+      valueMs: null
+    }
+  ];
+}
+
+function timestampSignal(
+  key: FreshnessSignalKey,
+  label: string,
+  sources: Record<string, unknown>[],
+  timestampKeys: string[],
+  staleKeys: string[]
+): FreshnessSignal {
+  const observedAt = firstPayloadString(sources, timestampKeys);
+  const explicitStale = firstPayloadBoolean(sources, staleKeys);
+
+  if (!observedAt) {
+    return {
+      ...unavailableFreshnessSignal(key, label),
+      stale: explicitStale === true
+    };
+  }
+
+  return {
+    available: true,
+    current: observedAt,
+    key,
+    label,
+    observedAt,
+    stale: explicitStale === true,
+    status: explicitStale === true ? "stale" : "tracked",
+    valueMs: null
+  };
+}
+
+function firstPayloadString(sources: Record<string, unknown>[], keys: string[]): string {
+  for (const source of sources) {
+    const value = firstString(keys.map((key) => source[key]), "");
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function firstPayloadBoolean(sources: Record<string, unknown>[], keys: string[]): boolean | null {
+  for (const source of sources) {
+    for (const key of keys) {
+      if (typeof source[key] === "boolean") {
+        return source[key] as boolean;
+      }
+    }
+  }
+
+  return null;
+}
+
 function reportFromPayload(payload: Record<string, unknown>, date: string, quality: DataSourceState): DailyReport {
   const account = asRecord(payload.account);
   const trades = asRecord(payload.trades);
@@ -1428,6 +1628,11 @@ export async function rejectReviewProposal(proposalId: string, reason: string): 
 export async function fetchRiskOverview(): Promise<RiskOverview> {
   const risk = await getJson("/v1/risk/state");
   return riskFromPayload(risk.payload, risk.quality);
+}
+
+export async function fetchSystemHealthSnapshot(): Promise<SystemHealthSnapshot> {
+  const snapshot = await getJson("/api/system/snapshot");
+  return systemHealthFromPayload(snapshot.payload, snapshot.quality);
 }
 
 export async function fetchDailyReport(date: string): Promise<DailyReport> {

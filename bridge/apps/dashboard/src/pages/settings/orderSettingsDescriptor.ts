@@ -1,6 +1,6 @@
 import type { OrderSettingScalar } from "../../utils/api";
 
-export type OrderSettingsCategoryKey = "entry" | "general";
+export type OrderSettingsCategoryKey = "entry" | "general" | "money" | "price_monitor" | "reconciliation";
 
 export type SettingsFieldType = "boolean" | "enum" | "integer" | "number" | "string";
 
@@ -308,5 +308,446 @@ export const entrySettingsFields = [
     secret: false,
     type: "number",
     unit: "bps"
+  }
+] satisfies SettingsFieldDescriptor[];
+
+export const moneySettingsFields = [
+  {
+    applyMode: "hot_reload",
+    defaultValue: "fixed_risk",
+    enumValues: ["fixed_risk", "fixed_notional", "equity_fraction"],
+    help: "Controls whether orders are sized from risk, a fixed notional amount, or an equity fraction.",
+    key: "sizing_mode",
+    label: "Sizing mode",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "mode"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Fixed quote-currency notional used when sizing mode is fixed_notional.",
+    key: "fixed_notional",
+    label: "Fixed notional",
+    max: 1000000000,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "quote_currency"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Fraction of account equity used when sizing mode is equity_fraction.",
+    key: "equity_fraction",
+    label: "Equity fraction",
+    max: 1,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "ratio"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Maximum account equity percentage risked on a single trade.",
+    key: "risk_per_trade_pct",
+    label: "Risk per trade pct",
+    max: 10,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "percent"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Maximum quote-currency notional accepted for one order.",
+    key: "max_notional_per_order",
+    label: "Max notional per order",
+    max: 1000000000,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "quote_currency"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 1,
+    help: "Maximum leverage multiple allowed for a managed order.",
+    key: "max_leverage",
+    label: "Max leverage",
+    max: 125,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "multiple"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Maximum number of open positions allowed by the money guard.",
+    key: "max_open_positions",
+    label: "Max open positions",
+    max: 1000,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "count"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Maximum quote-currency exposure allowed for one instrument.",
+    key: "max_instrument_exposure",
+    label: "Max instrument exposure",
+    max: 1000000000,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "quote_currency"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Maximum quote-currency exposure allowed across correlated instruments.",
+    key: "max_correlated_exposure",
+    label: "Max correlated exposure",
+    max: 1000000000,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "quote_currency"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Maximum total open risk as a percentage of account equity.",
+    key: "max_total_risk_pct",
+    label: "Max total risk pct",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "percent"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 100,
+    help: "Minimum free margin percentage that must remain after a new order.",
+    key: "minimum_free_margin_pct",
+    label: "Minimum free margin pct",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "percent"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 100,
+    help: "Account balance percentage reserved from new-risk sizing.",
+    key: "reserve_balance_pct",
+    label: "Reserve balance pct",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "percent"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Maximum daily realized loss percentage before new risk is blocked.",
+    key: "daily_loss_limit_pct",
+    label: "Daily loss limit pct",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "percent"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Maximum account drawdown percentage allowed before risk controls intervene.",
+    key: "max_drawdown_pct",
+    label: "Max drawdown pct",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "percent"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 1440,
+    help: "Cooldown after a loss-limit breach before opening risk can resume.",
+    key: "loss_cooldown_minutes",
+    label: "Loss cooldown minutes",
+    max: 10080,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "minutes"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 300,
+    help: "How long risk reservations remain valid before expiring.",
+    key: "risk_reservation_ttl_seconds",
+    label: "Risk reservation ttl seconds",
+    max: 86400,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  }
+] satisfies SettingsFieldDescriptor[];
+
+export const priceMonitorSettingsFields = [
+  {
+    applyMode: "hot_reload",
+    defaultValue: 10,
+    help: "Maximum age for market data before it is treated as stale.",
+    key: "market_data_stale_seconds",
+    label: "Market data stale seconds",
+    max: 3600,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 15,
+    help: "Maximum age for account data before it is treated as stale.",
+    key: "account_data_stale_seconds",
+    label: "Account data stale seconds",
+    max: 3600,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 30,
+    help: "Maximum age for execution-event data before it is treated as stale.",
+    key: "execution_event_stale_seconds",
+    label: "Execution event stale seconds",
+    max: 3600,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 5000,
+    help: "Maximum projection lag before the price monitor treats projections as stale.",
+    key: "projection_lag_threshold_ms",
+    label: "Projection lag threshold ms",
+    max: 600000,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "milliseconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 300,
+    help: "Maximum age for reconciliation verification before it is treated as stale.",
+    key: "reconciliation_stale_seconds",
+    label: "Reconciliation stale seconds",
+    max: 86400,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 200,
+    help: "Maximum tolerated price deviation before protection policies apply.",
+    key: "price_deviation_bps",
+    label: "Price deviation bps",
+    max: 10000,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "bps"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 5,
+    help: "How often the monitor evaluates live price and data freshness.",
+    key: "evaluation_interval_seconds",
+    label: "Evaluation interval seconds",
+    max: 3600,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 10,
+    help: "How often the protection watchdog checks disconnected or stale states.",
+    key: "protection_watchdog_interval_seconds",
+    label: "Protection watchdog interval seconds",
+    max: 3600,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "halt",
+    enumValues: ["halt", "reducing", "hold"],
+    help: "Action taken when price-monitor connectivity is lost.",
+    key: "disconnect_action",
+    label: "Disconnect action",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "action"
+  }
+] satisfies SettingsFieldDescriptor[];
+
+export const reconciliationSettingsFields = [
+  {
+    applyMode: "restart_required",
+    defaultValue: true,
+    help: "Requires startup reconciliation before order management resumes.",
+    key: "startup_reconciliation_required",
+    label: "Startup reconciliation required",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 300,
+    help: "Seconds between scheduled reconciliation checks.",
+    key: "reconciliation_interval_seconds",
+    label: "Reconciliation interval seconds",
+    max: 86400,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "halt",
+    enumValues: ["halt", "cancel", "adopt", "ignore"],
+    help: "Policy applied when an unmanaged open order is found.",
+    key: "orphan_order_policy",
+    label: "Orphan order policy",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "policy"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "halt",
+    enumValues: ["halt", "reduce", "adopt", "ignore"],
+    help: "Policy applied when an unmanaged external position is found.",
+    key: "external_position_policy",
+    label: "External position policy",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "policy"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "halt",
+    enumValues: ["halt", "reducing", "auto_repair", "alert_only"],
+    help: "Policy applied when projection and venue state drift.",
+    key: "drift_policy",
+    label: "Drift policy",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "policy"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: false,
+    help: "Allows reconciliation to adopt eligible external resources automatically.",
+    key: "auto_adopt_enabled",
+    label: "Auto adopt enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 3,
+    help: "Maximum retry attempts for reconciliation repair actions.",
+    key: "retry_limit",
+    label: "Retry limit",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "count"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 1,
+    help: "Backoff delay between reconciliation repair retry attempts.",
+    key: "retry_backoff_seconds",
+    label: "Retry backoff seconds",
+    max: 3600,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "seconds"
+  },
+  {
+    applyMode: "restart_required",
+    defaultValue: "halt_until_reconciled",
+    enumValues: ["halt_until_reconciled", "resume_after_reconcile"],
+    help: "Restart behavior after reconciliation has completed.",
+    key: "restart_recovery_mode",
+    label: "Restart recovery mode",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "mode"
   }
 ] satisfies SettingsFieldDescriptor[];

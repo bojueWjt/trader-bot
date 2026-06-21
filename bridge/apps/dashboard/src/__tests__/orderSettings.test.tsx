@@ -59,35 +59,114 @@ function effectivePayload(settings: Record<string, Record<string, Record<string,
   };
 }
 
-function stubSettingsApi(role = "risk_admin"): ReturnType<typeof vi.fn> {
+function systemSnapshot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...baseQuality,
+    data_source: "postgres_projection",
+    schema_version: "1.0",
+    data: {
+      account: {},
+      audit_trail: [],
+      balances: { equity: 10000, margin: 2500 },
+      hermes_decisions: [],
+      node_health: [],
+      orders: [],
+      positions: [],
+      recent_messages: [],
+      risk_decisions: []
+    },
+    ...overrides
+  };
+}
+
+function baseGlobalSettings(): Record<string, Record<string, unknown>> {
+  return {
+    entry: {
+      default_order_type: "limit",
+      limit_offset_bps: 5
+    },
+    general: {
+      execution_mode: "shadow",
+      order_manager_enabled: true
+    },
+    money: {
+      max_total_risk_pct: 8,
+      risk_per_trade_pct: 1,
+      sizing_mode: "fixed_risk"
+    },
+    price_monitor: {
+      market_data_stale_seconds: 10,
+      projection_lag_threshold_ms: 5000
+    },
+    reconciliation: {
+      orphan_order_policy: "halt",
+      reconciliation_interval_seconds: 300,
+      startup_reconciliation_required: true
+    }
+  };
+}
+
+function baseEffectiveSettings(): Record<string, Record<string, Record<string, unknown>>> {
+  return {
+    entry: {
+      default_order_type: field("limit", "global", false),
+      limit_offset_bps: field(5, "global", false)
+    },
+    general: {
+      execution_mode: field("shadow", "global", false),
+      max_concurrent_execution_jobs: field(3, "global", false),
+      order_manager_enabled: field(true, "global", false)
+    },
+    money: {
+      daily_loss_limit_pct: field(5, "global", false),
+      max_drawdown_pct: field(12, "global", false),
+      max_total_risk_pct: field(8, "global", false),
+      risk_per_trade_pct: field(1, "global", false),
+      sizing_mode: field("fixed_risk", "global", false)
+    },
+    price_monitor: {
+      market_data_stale_seconds: field(10, "global", false),
+      projection_lag_threshold_ms: field(5000, "global", false)
+    },
+    reconciliation: {
+      orphan_order_policy: field("halt", "global", false),
+      reconciliation_interval_seconds: field(300, "global", false),
+      startup_reconciliation_required: field(true, "global", false)
+    }
+  };
+}
+
+type SettingsApiOptions = {
+  effectiveSettings?: Record<string, Record<string, Record<string, unknown>>>;
+  globalSettings?: Record<string, Record<string, unknown>>;
+  riskState?: Record<string, unknown>;
+  role?: string;
+  snapshot?: Record<string, unknown>;
+};
+
+function stubSettingsApi(options: string | SettingsApiOptions = "risk_admin"): ReturnType<typeof vi.fn> {
+  const config = typeof options === "string" ? { role: options } : options;
+  const role = config.role || "risk_admin";
+  const globalSettings = config.globalSettings || baseGlobalSettings();
+  const effectiveSettings = config.effectiveSettings || baseEffectiveSettings();
+  const riskState = config.riskState || {
+    ...baseQuality,
+    daily_loss_usage_pct: 40,
+    pair_locks: [],
+    single_trade_risk_usage_pct: 50,
+    total_open_risk_usage_pct: 25
+  };
+  const snapshot = config.snapshot || systemSnapshot();
+
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const path = String(input);
 
     if (path === "/v1/order-management/settings?scope=global&scope_key=") {
-      return jsonResponse(settingsPayload("global", "", {
-        entry: {
-          default_order_type: "limit",
-          limit_offset_bps: 5
-        },
-        general: {
-          execution_mode: "shadow",
-          order_manager_enabled: true
-        }
-      }));
+      return jsonResponse(settingsPayload("global", "", globalSettings));
     }
 
     if (path === "/v1/order-management/settings/effective?account_id=&instrument_id=") {
-      return jsonResponse(effectivePayload({
-        entry: {
-          default_order_type: field("limit", "global", false),
-          limit_offset_bps: field(5, "global", false)
-        },
-        general: {
-          execution_mode: field("shadow", "global", false),
-          max_concurrent_execution_jobs: field(3, "global", false),
-          order_manager_enabled: field(true, "global", false)
-        }
-      }));
+      return jsonResponse(effectivePayload(effectiveSettings));
     }
 
     if (path === "/v1/order-management/settings?scope=account&scope_key=acc-1") {
@@ -109,6 +188,14 @@ function stubSettingsApi(role = "risk_admin"): ReturnType<typeof vi.fn> {
           order_manager_enabled: field(true, "global", true)
         }
       }));
+    }
+
+    if (path === "/v1/risk/state") {
+      return jsonResponse(riskState);
+    }
+
+    if (path === "/api/system/snapshot") {
+      return jsonResponse(snapshot);
     }
 
     return Promise.reject(new Error(`unexpected ${path}`));
@@ -190,6 +277,93 @@ describe("order management settings", () => {
     expect(await screen.findByText("Read-only viewer")).toBeInTheDocument();
     expect(screen.getByLabelText("Order manager enabled")).toBeDisabled();
     expect(screen.getByLabelText("Execution mode")).toBeDisabled();
+    fireEvent.click(screen.getByRole("tab", { name: "Money & Risk" }));
+    expect(await screen.findByLabelText("Risk per trade pct")).toBeDisabled();
+    fireEvent.click(screen.getByRole("tab", { name: "Monitoring" }));
+    expect(await screen.findByLabelText("Market data stale seconds")).toBeDisabled();
+    expect(screen.getByLabelText("Startup reconciliation required")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+  });
+
+  it("renders Money & Risk fields from metadata with usage and post-change estimates", async () => {
+    stubSettingsApi();
+
+    render(<App initialPath="/settings/orders" />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Money & Risk" }));
+
+    expect(screen.getByLabelText("Sizing mode")).toHaveRole("combobox");
+    expect(screen.getByLabelText("Risk per trade pct")).toHaveAttribute("type", "number");
+    expect(screen.getByLabelText("Max instrument exposure")).toHaveAttribute("type", "number");
+    expect(screen.getByLabelText("Risk reservation ttl seconds")).toHaveAttribute("type", "number");
+    expect(screen.getByText("Default fixed_risk")).toBeInTheDocument();
+    expect(screen.getByText("Range 0-10")).toBeInTheDocument();
+
+    const riskPerTrade = screen.getByRole("group", { name: "Risk per trade pct setting" });
+    expect(within(riskPerTrade).getByText("Current usage")).toBeInTheDocument();
+    expect(within(riskPerTrade).getByText("50%")).toBeInTheDocument();
+    expect(within(riskPerTrade).getByText("Post-change estimate")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Risk per trade pct"), { target: { value: "2" } });
+    expect(within(riskPerTrade).getByText("25%")).toBeInTheDocument();
+  });
+
+  it("requires a prominent confirmation before saving live risk relaxations", async () => {
+    const globalSettings = baseGlobalSettings();
+    globalSettings.general = {
+      ...globalSettings.general,
+      execution_mode: "live"
+    };
+    const effectiveSettings = baseEffectiveSettings();
+    effectiveSettings.general = {
+      ...effectiveSettings.general,
+      execution_mode: field("live", "global", false)
+    };
+    stubSettingsApi({ effectiveSettings, globalSettings });
+
+    render(<App initialPath="/settings/orders" />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Money & Risk" }));
+    fireEvent.change(screen.getByLabelText("Risk per trade pct"), { target: { value: "2" } });
+
+    const dangerConfirmation = await screen.findByRole("alert", { name: "Live risk relaxation confirmation" });
+    expect(dangerConfirmation).toHaveTextContent("Live risk relaxation requires confirmation");
+    expect(dangerConfirmation).toHaveTextContent("Risk per trade pct: 1 -> 2");
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+
+    fireEvent.click(within(dangerConfirmation).getByLabelText("I understand this relaxes live risk limits"));
+    expect(screen.getByRole("button", { name: "Save settings" })).not.toBeDisabled();
+  });
+
+  it("renders Monitoring fields and surfaces stale live freshness state", async () => {
+    stubSettingsApi({
+      snapshot: systemSnapshot({
+        missing_nodes: ["node-a"],
+        projection_lag_ms: 120000,
+        reconciliation_state: "failed",
+        stale: true
+      })
+    });
+
+    render(<App initialPath="/settings/orders" />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Monitoring" }));
+
+    expect(screen.getByLabelText("Market data stale seconds")).toHaveAttribute("type", "number");
+    expect(screen.getByLabelText("Projection lag threshold ms")).toHaveAttribute("type", "number");
+    expect(screen.getByLabelText("Orphan order policy")).toHaveRole("combobox");
+    expect(screen.getByLabelText("External position policy")).toHaveRole("combobox");
+    expect(screen.getByLabelText("Drift policy")).toHaveRole("combobox");
+    expect(screen.getByText("Default halt_until_reconciled")).toBeInTheDocument();
+
+    const staleAlert = await screen.findByRole("alert", { name: "Monitoring freshness alert" });
+    expect(staleAlert).toHaveTextContent("stale=true; missing_nodes=node-a; reconciliation_state=failed");
+
+    expect(screen.getByRole("group", { name: "Market data freshness" })).toHaveTextContent("Threshold 10 seconds");
+    expect(screen.getByRole("group", { name: "Account data freshness" })).toHaveTextContent("unavailable");
+    const projectionFreshness = screen.getByRole("group", { name: "Projection freshness" });
+    expect(projectionFreshness).toHaveTextContent("Current 120000 ms");
+    expect(projectionFreshness).toHaveTextContent("stale");
+    expect(screen.getByRole("group", { name: "Reconciliation freshness" })).toHaveTextContent("failed");
   });
 });
