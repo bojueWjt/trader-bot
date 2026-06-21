@@ -1868,7 +1868,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM3-07",
         "OM7-02"
@@ -1881,7 +1881,11 @@
         "展示当前占用与变更后预估",
         "放宽 live 风险突出高危提示"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 3efba95",
+        "tsc build + 13 vitest pass (no regression)",
+        "MoneyRiskTab sizing/exposure/margin/loss/drawdown/reservation; live-risk relaxation prominent confirm in OrderSettingsPage save flow (detectLiveRiskRelaxation + confirm:true)"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1892,7 +1896,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-05",
         "OM2-07",
@@ -1906,7 +1910,11 @@
         "支持 drift/orphan/external 策略",
         "当前 unhealthy 状态不可被 UI 隐藏"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 3efba95",
+        "tsc build + 13 vitest pass (no regression)",
+        "MonitoringTab price_monitor freshness thresholds + reconciliation drift/orphan/external; live freshness signals surfaced (FreshnessSignal), unhealthy not hidden"
+      ],
       "blocker": null,
       "notes": []
     },
