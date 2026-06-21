@@ -358,11 +358,40 @@ class IntentExecutionStrategy(Strategy):
 
         try:
             order = self._build_nautilus_order(plan, instrument)
-            self.submit_order(order)  # type: ignore[attr-defined]
+            position_id = self._hedge_position_id(order, plan)
+            if position_id is not None:
+                self.submit_order(order, position_id=position_id)  # type: ignore[attr-defined]
+            else:
+                self.submit_order(order)  # type: ignore[attr-defined]
             return True
         except Exception as exc:  # Fail closed: no silent drops on adapter/API mismatch.
             self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
             return False
+
+    def _hedge_position_id(self, order: Any, plan: OrderPlan) -> Any:
+        """Binance Hedge Mode requires every order to carry a ``position_id`` whose value
+        ends with ``LONG``/``SHORT`` — the exec client parses that suffix into the
+        Binance ``positionSide``. One-way (NETTING) mode needs none, so return None there
+        and the order submits unchanged (the tested testnet path).
+
+        positionSide is the position BOOK the order acts on, not the order side:
+        opening  -> BUY=LONG,  SELL=SHORT;
+        reducing -> BUY closes SHORT, SELL closes LONG.
+        """
+        try:
+            from nautilus_trader.model.enums import OmsType
+        except Exception:  # pragma: no cover - non-Nautilus host
+            return None
+        if getattr(self.config, "oms_type", None) != OmsType.HEDGING:
+            return None
+        from nautilus_trader.model.identifiers import PositionId
+
+        is_buy = plan.side == "BUY"
+        if plan.reduce_only:
+            book = "SHORT" if is_buy else "LONG"
+        else:
+            book = "LONG" if is_buy else "SHORT"
+        return PositionId(f"{order.instrument_id}-{book}")
 
     def _submit_management_plan(self, plan: ManagementPlan) -> bool:
         for client_order_id in plan.cancel_order_ids:
