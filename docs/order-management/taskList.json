@@ -2432,7 +2432,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM8-05",
         "OM8-06",
@@ -2447,7 +2447,11 @@
         "未满足条件保持 blocked/testnet_only",
         "evaluated_commit 等于分支头"
       ],
-      "evidence": [],
+      "evidence": [
+        "release-gate.json order_management section: 12 gates (9 passed w/ commit SHAs, 3 blocked OM8-05/06/10)",
+        "evaluated_commit=cc3759d (branch head); state=blocked; ceiling=testnet_only; window-C gate untouched",
+        "unmet gates (testnet/chaos/rollout) keep state blocked per acceptance"
+      ],
       "blocker": null,
       "notes": []
     },
