@@ -1930,7 +1930,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM5-01",
         "OM5-02",
@@ -1945,7 +1945,11 @@
         "TP fraction 总和实时校验",
         "危险组合无法保存"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 640fd7a",
+        "tsc + 18 vitest pass (no regression)",
+        "ProtectionTab stop/TP ladder/breakeven/trailing/partial-close; real-time TP fraction-sum; dangerous combos block save"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -2013,7 +2017,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM6-01",
         "OM7-02"
@@ -2028,7 +2032,11 @@
         "通知事件与严重级别可配置",
         "Advanced 明确标识高风险"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 640fd7a",
+        "tsc + 18 vitest pass (no regression)",
+        "Emergency/Notifications/Advanced tabs; batch/retry/timeout; per-event severity; Advanced HIGH RISK flag"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -2117,7 +2125,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-02",
         "OM2-06",
@@ -2133,7 +2141,11 @@
         "详情展示 intent→job→order→event→position 链",
         "人工 cancel/move-stop/partial-close/close 有确认与结果"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 640fd7a",
+        "tsc + 18 vitest pass (no regression)",
+        "OrdersPage filter account/instrument/status/role/time; intent->job->order->event->position timeline; manual cancel/move-stop/partial-close/close with confirm+result"
+      ],
       "blocker": null,
       "notes": []
     },
