@@ -39,6 +39,13 @@ READER_TOKEN_ENV = {
 
 app = FastAPI(title="Hermes control-plane read API", version="contracts-v1")
 
+_CONTROL_PLANE_ROOT = _HERE.parent
+if str(_CONTROL_PLANE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_CONTROL_PLANE_ROOT))
+from settings.router import router as order_management_settings_router  # noqa: E402
+
+app.include_router(order_management_settings_router)
+
 
 def _reader_tokens() -> dict[str, str]:
     tokens = {}
