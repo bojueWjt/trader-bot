@@ -13,6 +13,7 @@ from psycopg2.extras import Json, RealDictCursor
 
 from db.connection import transaction
 
+from .metrics import inject_trace_context
 from .outbox import enqueue_order_management_event
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -101,6 +102,19 @@ def build_execution_job_request(
         },
         "reservation": reservation,
     }
+    payload = inject_trace_context(
+        payload,
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+        intent_id=intent_id,
+    )
+    payload["intent"] = inject_trace_context(
+        payload["intent"],
+        trace_id=payload["trace_id"],
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+        intent_id=intent_id,
+    )
     return ExecutionJobRequest(
         execution_job_id=job_id,
         intent_id=intent_id,

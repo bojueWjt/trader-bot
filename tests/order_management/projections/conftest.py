@@ -65,53 +65,59 @@ def _clean_projection_tables(conn) -> None:
 
 
 def _temporary_migrated_postgres():
-    initdb = _find_pg_tool("initdb")
-    pg_ctl = _find_pg_tool("pg_ctl")
     data_dir = Path(tempfile.mkdtemp(prefix="om2-pg-data-", dir="/private/tmp"))
     socket_dir = Path(tempfile.mkdtemp(prefix="om2-pg-socket-", dir="/private/tmp"))
-    port = str(55450 + (os.getpid() % 1000))
-    log_file = data_dir / "postgres.log"
-    subprocess.run(
-        [initdb, "-D", str(data_dir), "-A", "trust", "-U", os.environ.get("USER", "pudu")],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            pg_ctl,
-            "-D",
-            str(data_dir),
-            "-l",
-            str(log_file),
-            "-o",
-            f"-p {port} -k {socket_dir} -c timezone=UTC",
-            "-w",
-            "start",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    database_url = f"postgresql://localhost/postgres?host={socket_dir}&port={port}"
-    env = os.environ.copy()
-    env["DATABASE_URL"] = database_url
-    migrated = subprocess.run(
-        [sys.executable, str(MIGRATE), "up"],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-    )
+    pg_ctl: str | None = None
+    started = False
     try:
-        assert migrated.returncode == 0, migrated.stdout + migrated.stderr
-        yield database_url
-    finally:
+        initdb = _find_pg_tool("initdb")
+        pg_ctl = _find_pg_tool("pg_ctl")
+        port = str(55450 + (os.getpid() % 1000))
+        log_file = data_dir / "postgres.log"
         subprocess.run(
-            [pg_ctl, "-D", str(data_dir), "-w", "stop"],
+            [initdb, "-D", str(data_dir), "-A", "trust", "-U", os.environ.get("USER", "pudu")],
+            check=True,
             text=True,
             capture_output=True,
         )
+        subprocess.run(
+            [
+                pg_ctl,
+                "-D",
+                str(data_dir),
+                "-l",
+                str(log_file),
+                "-o",
+                f"-p {port} -k {socket_dir} -c timezone=UTC",
+                "-w",
+                "start",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        started = True
+        database_url = f"postgresql://localhost/postgres?host={socket_dir}&port={port}"
+        env = os.environ.copy()
+        env["DATABASE_URL"] = database_url
+        migrated = subprocess.run(
+            [sys.executable, str(MIGRATE), "up"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+        yield database_url
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f"projection DB unavailable and temporary postgres could not start: {exc}")
+    finally:
+        if started and pg_ctl is not None:
+            subprocess.run(
+                [pg_ctl, "-D", str(data_dir), "-w", "stop"],
+                text=True,
+                capture_output=True,
+            )
         shutil.rmtree(data_dir, ignore_errors=True)
         shutil.rmtree(socket_dir, ignore_errors=True)
 

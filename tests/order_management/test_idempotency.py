@@ -110,7 +110,9 @@ def test_enqueue_order_management_event_uses_deterministic_id_and_conflict_noop(
     assert inserted == str(expected_id)
     assert "ON CONFLICT (outbox_event_id) DO NOTHING" in sql
     assert params[:4] == (str(expected_id), "order", "order-1", "order.submitted")
-    assert params[4].adapted == {"status": "submitted", "request_id": "req-1"}
+    assert params[4].adapted["status"] == "submitted"
+    assert params[4].adapted["request_id"] == "req-1"
+    assert params[4].adapted["trace_id"] == params[5]
 
 
 def test_enqueue_replay_returns_same_id_when_insert_conflicts():

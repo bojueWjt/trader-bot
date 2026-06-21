@@ -199,7 +199,11 @@ class FakeCursor:
             return
 
         if normalized.startswith("insert into outbox_events"):
-            outbox_event_id, aggregate_type, aggregate_id, event_type, payload = params
+            if len(params) == 6:
+                outbox_event_id, aggregate_type, aggregate_id, event_type, payload, trace_id = params
+            else:
+                outbox_event_id, aggregate_type, aggregate_id, event_type, payload = params
+                trace_id = None
             if any(row["outbox_event_id"] == outbox_event_id for row in self.db.outbox):
                 self._rows = []
                 return
@@ -211,6 +215,7 @@ class FakeCursor:
                     "aggregate_id": aggregate_id,
                     "event_type": event_type,
                     "payload": _unwrap_json(payload),
+                    "trace_id": trace_id,
                 }
             )
             self._rows = [(outbox_event_id,)]
