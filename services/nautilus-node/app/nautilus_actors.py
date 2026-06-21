@@ -242,6 +242,15 @@ class CommandPollerActor(Actor):
         self.poll_once()
 
     def poll_once(self) -> int:
+        # Liveness: refresh the control-plane heartbeat on every tick so
+        # node_heartbeats.last_seen_at stays fresh and the system snapshot's
+        # stale/missing_nodes gate reflects the node actually being alive. Without
+        # this the heartbeat is sent only once at startup and the snapshot goes
+        # permanently stale. Failure here must not stop operator-command polling.
+        try:
+            self._lifecycle.send_heartbeat()
+        except Exception:
+            pass
         commands = self._control_plane.poll_commands(self._node_id, None)
         for cmd in commands:
             status, error = self._apply(cmd)
