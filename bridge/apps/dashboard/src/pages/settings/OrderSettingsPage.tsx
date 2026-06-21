@@ -6,8 +6,12 @@ import type { SettingsScopeSelection } from "../../components/settings/ScopeSele
 import {
   fetchEffectiveSettings,
   fetchOrderManagementSettings,
+  fetchRiskOverview,
+  fetchSystemHealthSnapshot,
   getEmptyEffectiveSettings,
   getEmptyOrderManagementSettings,
+  getEmptyRiskOverview,
+  getEmptySystemHealthSnapshot,
   patchSettings,
   validateSettings
 } from "../../utils/api";
@@ -18,19 +22,43 @@ import type {
   OrderManagementSettings,
   OrderSettingScalar,
   OrderSettingsScope,
-  OrderSettingsValues
+  OrderSettingsValues,
+  RiskOverview,
+  SystemHealthSnapshot
 } from "../../utils/api";
-import { entrySettingsFields, generalSettingsFields } from "./orderSettingsDescriptor";
+import {
+  entrySettingsFields,
+  generalSettingsFields,
+  moneySettingsFields,
+  priceMonitorSettingsFields,
+  reconciliationSettingsFields
+} from "./orderSettingsDescriptor";
 import type { OrderSettingsCategoryKey, SettingsFieldDescriptor } from "./orderSettingsDescriptor";
 import { EntryOrdersTab } from "./tabs/EntryOrdersTab";
 import { GeneralTab } from "./tabs/GeneralTab";
+import { MoneyRiskTab } from "./tabs/MoneyRiskTab";
+import { MonitoringTab } from "./tabs/MonitoringTab";
+import { formatSettingValue } from "./tabs/SettingsField";
 import type { SettingsFieldState } from "./tabs/SettingsField";
 
 type OrderSettingsPageProps = {
   role: AuthRole;
 };
 
-type SettingsTab = "entry" | "general";
+type SettingsTab = "entry" | "general" | "money" | "monitoring";
+
+type LiveRiskRelaxation = {
+  active: boolean;
+  changes: LiveRiskRelaxationChange[];
+  signature: string;
+};
+
+type LiveRiskRelaxationChange = {
+  after: OrderSettingScalar | "";
+  before: OrderSettingScalar | "";
+  key: string;
+  label: string;
+};
 
 const defaultScope: SettingsScopeSelection = {
   scope: "global",
@@ -43,6 +71,8 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
   const [rawSettings, setRawSettings] = useState<OrderManagementSettings>(() => getEmptyOrderManagementSettings());
   const [effectiveSettings, setEffectiveSettings] = useState<EffectiveOrderSettings>(() => getEmptyEffectiveSettings());
   const [inheritedSettings, setInheritedSettings] = useState<EffectiveOrderSettings>(() => getEmptyEffectiveSettings());
+  const [riskOverview, setRiskOverview] = useState<RiskOverview>(() => getEmptyRiskOverview());
+  const [systemHealth, setSystemHealth] = useState<SystemHealthSnapshot>(() => getEmptySystemHealthSnapshot());
   const [draftSettings, setDraftSettings] = useState<OrderSettingsValues>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -50,6 +80,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
   const [reason, setReason] = useState("");
   const [status, setStatus] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const [liveRiskConfirmed, setLiveRiskConfirmed] = useState(false);
   const readonly = role === "viewer";
 
   useEffect(() => {
@@ -62,10 +93,12 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
       setStatus("");
 
       const inheritedScope = parentScope(scope);
-      const [nextRaw, nextEffective, nextInherited] = await Promise.all([
+      const [nextRaw, nextEffective, nextInherited, nextRiskOverview, nextSystemHealth] = await Promise.all([
         fetchOrderManagementSettings(scope),
         fetchEffectiveSettings(scope),
-        inheritedScope ? fetchEffectiveSettings(inheritedScope) : Promise.resolve(getEmptyEffectiveSettings("global scope"))
+        inheritedScope ? fetchEffectiveSettings(inheritedScope) : Promise.resolve(getEmptyEffectiveSettings("global scope")),
+        fetchRiskOverview(),
+        fetchSystemHealthSnapshot()
       ]);
 
       if (!active) {
@@ -75,7 +108,10 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
       setRawSettings(nextRaw);
       setEffectiveSettings(nextEffective);
       setInheritedSettings(nextInherited);
+      setRiskOverview(nextRiskOverview);
+      setSystemHealth(nextSystemHealth);
       setDraftSettings(cloneSettings(nextRaw.settings));
+      setLiveRiskConfirmed(false);
       setLoading(false);
 
       const failure = [nextRaw.dataSource, nextEffective.dataSource, nextInherited.dataSource].find(
@@ -93,9 +129,12 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
     };
   }, [refreshKey, scope]);
 
-  const allFields = useMemo(() => ({
+  const allFields = useMemo<Record<OrderSettingsCategoryKey, SettingsFieldDescriptor[]>>(() => ({
     entry: entrySettingsFields,
-    general: generalSettingsFields
+    general: generalSettingsFields,
+    money: moneySettingsFields,
+    price_monitor: priceMonitorSettingsFields,
+    reconciliation: reconciliationSettingsFields
   }), []);
 
   const fieldState = useCallback(
@@ -143,6 +182,33 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
 
   const hasSettings = !rawSettings.empty || !effectiveSettings.empty;
 
+  const baselineFieldValue = useCallback(
+    (category: OrderSettingsCategoryKey, key: string): OrderSettingScalar | "" => {
+      const field = allFields[category].find((candidate) => candidate.key === key);
+      const rawCategory = rawSettings.settings[category] || {};
+      if (Object.prototype.hasOwnProperty.call(rawCategory, key)) {
+        return rawCategory[key];
+      }
+
+      return effectiveSettings.settings[category]?.[key]?.value ?? field?.defaultValue ?? "";
+    },
+    [allFields, effectiveSettings.settings, rawSettings.settings]
+  );
+
+  const currentFieldValue = useCallback(
+    (category: OrderSettingsCategoryKey, key: string): OrderSettingScalar | "" => fieldState(category, key).value,
+    [fieldState]
+  );
+
+  const liveRiskRelaxation = useMemo(
+    () => detectLiveRiskRelaxation(currentFieldValue, baselineFieldValue),
+    [baselineFieldValue, currentFieldValue]
+  );
+
+  useEffect(() => {
+    setLiveRiskConfirmed(false);
+  }, [liveRiskRelaxation.signature]);
+
   function changeField(category: OrderSettingsCategoryKey, key: string, value: OrderSettingScalar): void {
     setDraftSettings((current) => ({
       ...current,
@@ -151,6 +217,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
         [key]: value
       }
     }));
+    setLiveRiskConfirmed(false);
     setValidationErrors([]);
     setStatus("");
   }
@@ -164,6 +231,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
         [category]: categoryValues
       };
     });
+    setLiveRiskConfirmed(false);
     setValidationErrors([]);
     setStatus("");
   }
@@ -192,6 +260,12 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
       return;
     }
 
+    if (liveRiskRelaxation.active && !liveRiskConfirmed) {
+      setValidationErrors(["Live risk relaxation confirmation is required before saving settings"]);
+      setStatus("Validation failed");
+      return;
+    }
+
     const valid = await validateDraft();
     if (!valid) {
       return;
@@ -203,7 +277,8 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
       request_id: requestId(),
       scope: scope.scope,
       scope_key: scope.scopeKey,
-      settings: draftSettings
+      settings: draftSettings,
+      ...(liveRiskRelaxation.active ? { confirm: true } : {})
     });
 
     setValidationErrors(result.errors);
@@ -349,6 +424,28 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 >
                   Entry Orders
                 </button>
+                <button
+                  aria-selected={activeTab === "money"}
+                  className={activeTab === "money" ? "secondary-button active" : "secondary-button"}
+                  onClick={() => {
+                    setActiveTab("money");
+                  }}
+                  role="tab"
+                  type="button"
+                >
+                  Money & Risk
+                </button>
+                <button
+                  aria-selected={activeTab === "monitoring"}
+                  className={activeTab === "monitoring" ? "secondary-button active" : "secondary-button"}
+                  onClick={() => {
+                    setActiveTab("monitoring");
+                  }}
+                  role="tab"
+                  type="button"
+                >
+                  Monitoring
+                </button>
               </div>
             </header>
             {activeTab === "general" && (
@@ -369,9 +466,61 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
                 onFieldChange={changeField}
               />
             )}
+            {activeTab === "money" && (
+              <MoneyRiskTab
+                baselineFieldValue={baselineFieldValue}
+                fieldState={fieldState}
+                readonly={readonly}
+                riskOverview={riskOverview}
+                scope={scope.scope}
+                onClear={clearOverride}
+                onFieldChange={changeField}
+              />
+            )}
+            {activeTab === "monitoring" && (
+              <MonitoringTab
+                fieldState={fieldState}
+                readonly={readonly}
+                scope={scope.scope}
+                systemHealth={systemHealth}
+                onClear={clearOverride}
+                onFieldChange={changeField}
+              />
+            )}
           </section>
 
           <section className="settings-save-panel" aria-label="Save settings">
+            {liveRiskRelaxation.active && (
+              <section
+                aria-label="Live risk relaxation confirmation"
+                className="live-risk-confirmation"
+                role="alert"
+              >
+                <header>
+                  <AlertTriangle size={18} aria-hidden="true" />
+                  <h3>Live risk relaxation requires confirmation</h3>
+                </header>
+                <p>Execution mode is live and these changes relax risk limits:</p>
+                <ul>
+                  {liveRiskRelaxation.changes.map((change) => (
+                    <li key={change.key}>
+                      {change.label}: {formatSettingValue(change.before)} -&gt; {formatSettingValue(change.after)}
+                    </li>
+                  ))}
+                </ul>
+                <label>
+                  <input
+                    checked={liveRiskConfirmed}
+                    disabled={readonly}
+                    onChange={(event) => {
+                      setLiveRiskConfirmed(event.target.checked);
+                    }}
+                    type="checkbox"
+                  />
+                  <span>I understand this relaxes live risk limits</span>
+                </label>
+              </section>
+            )}
             <label>
               <span>Reason</span>
               <textarea
@@ -396,7 +545,7 @@ export function OrderSettingsPage({ role }: OrderSettingsPageProps): ReactElemen
               </button>
               <button
                 className="primary-button"
-                disabled={readonly}
+                disabled={readonly || (liveRiskRelaxation.active && !liveRiskConfirmed)}
                 onClick={() => {
                   void saveDraft();
                 }}
@@ -434,4 +583,69 @@ function requestId(): string {
   }
 
   return `settings-${Date.now()}`;
+}
+
+const riskRelaxationRules: Record<string, "decrease" | "increase"> = {
+  daily_loss_limit_pct: "increase",
+  equity_fraction: "increase",
+  fixed_notional: "increase",
+  loss_cooldown_minutes: "decrease",
+  max_correlated_exposure: "increase",
+  max_drawdown_pct: "increase",
+  max_instrument_exposure: "increase",
+  max_leverage: "increase",
+  max_notional_per_order: "increase",
+  max_open_positions: "increase",
+  max_total_risk_pct: "increase",
+  minimum_free_margin_pct: "decrease",
+  reserve_balance_pct: "decrease",
+  risk_per_trade_pct: "increase",
+  risk_reservation_ttl_seconds: "decrease"
+};
+
+function detectLiveRiskRelaxation(
+  currentFieldValue: (category: OrderSettingsCategoryKey, key: string) => OrderSettingScalar | "",
+  baselineFieldValue: (category: OrderSettingsCategoryKey, key: string) => OrderSettingScalar | ""
+): LiveRiskRelaxation {
+  if (String(currentFieldValue("general", "execution_mode")) !== "live") {
+    return {
+      active: false,
+      changes: [],
+      signature: ""
+    };
+  }
+
+  const changes = moneySettingsFields.flatMap((field) => {
+    const direction = riskRelaxationRules[field.key];
+    if (!direction) {
+      return [];
+    }
+
+    const before = baselineFieldValue("money", field.key);
+    const after = currentFieldValue("money", field.key);
+    const beforeNumber = Number(before);
+    const afterNumber = Number(after);
+
+    if (!Number.isFinite(beforeNumber) || !Number.isFinite(afterNumber) || beforeNumber === afterNumber) {
+      return [];
+    }
+
+    const relaxed = direction === "increase" ? afterNumber > beforeNumber : afterNumber < beforeNumber;
+    if (!relaxed) {
+      return [];
+    }
+
+    return [{
+      after,
+      before,
+      key: field.key,
+      label: field.label
+    }];
+  });
+
+  return {
+    active: changes.length > 0,
+    changes,
+    signature: changes.map((change) => `${change.key}:${change.before}->${change.after}`).join("|")
+  };
 }

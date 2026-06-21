@@ -1,9 +1,10 @@
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import type { EffectiveOrderSetting, OrderSettingScalar, OrderSettingsScope } from "../../../utils/api";
 import type { OrderSettingsCategoryKey, SettingsFieldDescriptor } from "../orderSettingsDescriptor";
 
 type SettingsFieldProps = {
   category: OrderSettingsCategoryKey;
+  children?: ReactNode;
   disabledReason: string;
   effective: EffectiveOrderSetting;
   field: SettingsFieldDescriptor;
@@ -23,6 +24,7 @@ export type SettingsFieldState = {
 
 export function SettingsField({
   category,
+  children,
   disabledReason,
   effective,
   field,
@@ -64,7 +66,10 @@ export function SettingsField({
           {disabledReason && <span>{disabledReason}</span>}
         </div>
       </div>
-      <div className="settings-control">{renderControl()}</div>
+      <div className="settings-control">
+        {renderControl()}
+        {children && <div className="settings-control-extra">{children}</div>}
+      </div>
       <dl className="settings-effective" aria-label={`${field.label} effective value`}>
         <div>
           <dt>Effective value</dt>

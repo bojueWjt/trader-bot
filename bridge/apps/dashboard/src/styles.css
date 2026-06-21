@@ -1158,6 +1158,43 @@ td {
   min-width: 0;
 }
 
+.settings-control-extra {
+  margin-top: 9px;
+}
+
+.settings-limit-usage {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.settings-limit-usage div {
+  border: 1px solid #263547;
+  border-radius: 7px;
+  padding: 8px;
+  background: #0f1720;
+}
+
+.settings-limit-usage dt {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  color: #8b98a7;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.settings-limit-usage dd {
+  margin: 3px 0 0;
+  color: #f7fafc;
+  font-weight: 800;
+}
+
+.settings-limit-usage.unavailable dd {
+  color: #ffd47a;
+}
+
 .settings-effective {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1181,6 +1218,131 @@ td {
 .settings-save-panel textarea {
   min-height: 76px;
   resize: vertical;
+}
+
+.live-risk-confirmation {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #7e2e36;
+  border-radius: 8px;
+  padding: 12px;
+  background: #24151a;
+  color: #ffd9de;
+}
+
+.live-risk-confirmation header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.live-risk-confirmation ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.live-risk-confirmation label {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  width: fit-content;
+  color: #fff1f3;
+  font-weight: 800;
+}
+
+.live-risk-confirmation input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: #ef4444;
+}
+
+.monitoring-tab {
+  display: grid;
+  gap: 12px;
+}
+
+.monitoring-freshness-panel {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #1f2a37;
+  padding: 14px;
+  background: #111923;
+}
+
+.monitoring-freshness-heading,
+.freshness-card-heading {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.monitoring-freshness-heading > div {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.monitoring-freshness-heading h4 {
+  font-size: 14px;
+}
+
+.monitoring-freshness-alert {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #7e2e36;
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: #23161a;
+  color: #ffb7bf;
+  font-weight: 800;
+}
+
+.freshness-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.freshness-card {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid #263547;
+  border-radius: 8px;
+  padding: 10px;
+  background: #0f1720;
+}
+
+.freshness-card.warning {
+  border-color: #896827;
+}
+
+.freshness-card.danger {
+  border-color: #7e2e36;
+}
+
+.freshness-card dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.freshness-card dt {
+  color: #8b98a7;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.freshness-card dd {
+  margin: 2px 0 0;
+  color: #f7fafc;
+  overflow-wrap: anywhere;
 }
 
 .validation-summary {
@@ -1216,6 +1378,7 @@ td {
   }
 
   .exposure-grid,
+  .freshness-grid,
   .settings-field,
   .settings-toolbar,
   .two-column,
