@@ -392,6 +392,14 @@ class IntentExecutionStrategy(Strategy):
         )
 
     def _submit_management_plan(self, plan: ManagementPlan) -> bool:
+        if plan.cancel_after_submit:
+            for order_plan in plan.orders:
+                if not self._submit_order_plan(order_plan):
+                    return False
+            for client_order_id in plan.cancel_order_ids:
+                if not self._cancel_order_by_client_order_id(plan.instrument_id, client_order_id):
+                    return False
+            return True
         for client_order_id in plan.cancel_order_ids:
             if not self._cancel_order_by_client_order_id(plan.instrument_id, client_order_id):
                 return False
