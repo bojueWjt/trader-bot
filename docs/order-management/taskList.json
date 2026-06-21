@@ -2169,7 +2169,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-02",
         "OM4-07",
@@ -2184,7 +2184,11 @@
         "关键延迟和失败率可监控",
         "日志不含 secrets"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 177e6b2",
+        "DB om_v3_om8: 205 passed",
+        "metrics.py + nautilus observability tracing/metrics/logs; trace-id correlation intent->job->order->event->command (inject_trace_context additive); latency/failure metrics; structured logs redact secrets (verified test)"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -2222,7 +2226,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-06",
         "OM1-08",
@@ -2240,7 +2244,11 @@
         "重复/乱序/精度/冲突均有用例",
         "测试不依赖外部网络"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 177e6b2",
+        "DB om_v3_om8: 205 passed",
+        "unit/** branch coverage of P0 exception paths (illegal transitions, settings conflict, sizing fail-closed, idempotency replay, dup/out-of-order/precision, over-allocation, empty-heartbeat) + JSON-Schema<->pydantic + descriptor consistency; deterministic, no network"
+      ],
       "blocker": null,
       "notes": []
     },
