@@ -1005,7 +1005,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-03",
         "OM2-05"
@@ -1018,7 +1018,11 @@
         "stale account 不允许新增风险",
         "多账户预算完全隔离"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "account_budget equity/free-margin/margin-ratio; freshness-gated stale->no new risk; multi-account isolated"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1029,7 +1033,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM3-01",
         "OM1-01",
@@ -1043,7 +1047,11 @@
         "按 instrument increment 向下取整",
         "缺止损或数量小于交易所最小值时 fail-closed"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "position_sizing PLAN §9.1 formula; floor_to_increment; fail-closed no-stop/below-min"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1054,7 +1062,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-02",
         "OM3-01"
@@ -1068,7 +1076,11 @@
         "检查 existing + proposed 而非只检查 existing",
         "关联组与总风险在多账户下正确"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "exposure+governor canonical keys; checks EXISTING+PROPOSED; correlated/total"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1079,7 +1091,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM3-01",
         "OM1-01"
@@ -1092,7 +1104,11 @@
         "达到阈值自动 REDUCING/HALT",
         "冷却结束不自动 ACTIVE，需策略/人工确认"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "loss_limits daily reset; threshold->REDUCING/HALT; cooldown needs explicit confirm"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1103,7 +1119,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-04",
         "OM3-02"
@@ -1116,7 +1132,11 @@
         "杠杆与保证金不足在提交前拒绝",
         "校验结果进入 risk explain"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "exchange_filters min-notional/lot/leverage; reject pre-submit; feeds explain"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1127,7 +1147,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-04",
         "OM0-05",
@@ -1142,7 +1162,11 @@
         "失败/取消/过期释放 reservation",
         "成交后转为 live exposure，重启后可修复"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "reservations+TTL; concurrent cannot over-allocate (live: held(700)/rejected); release on fail/cancel/expire; restart recover"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1153,7 +1177,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM3-02",
         "OM3-03",
@@ -1169,7 +1193,11 @@
         "说明每个 cap 的剩余额度",
         "不暴露 secrets"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "risk explain inputs/final qty/remaining headroom; no secrets"
+      ],
       "blocker": null,
       "notes": []
     },
