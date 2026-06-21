@@ -746,7 +746,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-02",
         "OM0-04"
@@ -759,7 +759,11 @@
         "重复事件稳定生成同 event_id",
         "数值使用 Decimal-safe JSON 表示"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a642860 (merge 7a61bca)",
+        "test: tests/order_management/projections/test_event_mapper.py",
+        "Decimal-safe payloads; stable event_id dedup"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -770,7 +774,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-01",
         "OM2-01"
@@ -783,7 +787,11 @@
         "乱序和重复事件可重放",
         "非法倒退记录 finding 而不静默覆盖"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a642860",
+        "test: test_order_reducer.py + live replay om_v3_om2",
+        "driven by FROZEN order_state.v1.json (state_descriptor); illegal transition -> reconciliation finding, no silent overwrite; replay/out-of-order/dup safe"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -794,7 +802,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-02",
         "OM2-01"
@@ -808,7 +816,11 @@
         "余额/free/margin/equity 可查询",
         "position close 后保护单关联可清理"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a642860",
+        "test: test_position_account_reducers.py",
+        "canonical PositionKey/identifiers; no phantom EXTERNAL/BOTH; close merge; protection cleanup; balances queryable"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -819,7 +831,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-01"
       ],
@@ -831,7 +843,11 @@
         "按账户/币种输出价格状态事件",
         "断流与重连有状态和指标"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a642860",
+        "test: test_market_data.py",
+        "mark/last/book price_feed; disconnect/reconnect status+metrics (WS mocked)"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -842,7 +858,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-03",
         "OM2-04",
@@ -856,7 +872,11 @@
         "空 heartbeat 不更新数据 freshness",
         "任一关键数据 stale 时新增风险为 0"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a642860",
+        "test: test_freshness.py (empty-heartbeat-no-advance; stale->new-risk=0, reduce allowed via HALTED matrix)",
+        "5 freshness timestamps; fail-closed"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -867,7 +887,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-02",
         "OM2-03",
@@ -881,7 +901,11 @@
         "无保护仓位在阈值内被发现",
         "策略可选择 repair/REDUCING/HALT"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a642860",
+        "test: test_protection_watchdog.py",
+        "actual vs expected vs venue; missing-protection finding; repair/REDUCING/HALT policy"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -892,7 +916,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-02",
         "OM2-03",
@@ -906,7 +930,11 @@
         "周期对账覆盖 orders/positions/account",
         "每次运行保存结果与差异"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a642860",
+        "test: test_reconciliation.py",
+        "startup gate before ACTIVE; periodic orders/positions/account; persists runs+findings"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -917,7 +945,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-07",
         "OM1-01"
@@ -930,7 +958,11 @@
         "自动 adopt 仅限安全白名单场景",
         "无法唯一解释时保持 HALTED/needs_review"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a642860",
+        "test: test_drift_policy.py",
+        "adopt/cancel/review/halt; auto-adopt whitelist-only; unresolved->HALTED/needs_review"
+      ],
       "blocker": null,
       "notes": []
     },
