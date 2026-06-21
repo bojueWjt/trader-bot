@@ -1671,7 +1671,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-04",
         "OM0-05",
@@ -1685,7 +1685,11 @@
         "命令重放返回同一结果",
         "accepted 不等于 completed"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "commands orchestrator FSM requested->accepted->running->verifying->terminal; replay idempotent on request_id; accepted!=completed; node_command_runs"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1696,7 +1700,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM6-01",
         "OM2-07"
@@ -1709,7 +1713,11 @@
         "每张订单有结果",
         "交易所无工作订单后才 completed"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "cancel_all batch+delay+retry; per-order result; completed only after venue no-working-orders verify"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1720,7 +1728,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM6-01",
         "OM5-07"
@@ -1733,7 +1741,11 @@
         "部分失败自动有限重试",
         "所有目标仓位交易所 flat 后才 completed"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "close_all reduce-only via injectable close_one; no same-tick drops; bounded retry; completed only after all targets flat"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1744,7 +1756,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-01",
         "OM3-03"
@@ -1758,7 +1770,11 @@
         "HALTED 仍允许 cancel/partial/full close",
         "REDUCING 只允许风险下降动作"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "governor consults FROZEN halted_action_allowed matrix; HALTED blocks open/add allows cancel/partial/full close; REDUCING risk-reducing only; gateway/governor tests pass"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1769,7 +1785,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM6-01",
         "OM6-02",
@@ -1784,7 +1800,11 @@
         "错误和每项结果可查询",
         "ACK 失败可重试且幂等"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "result_sink + nautilus_actors writeback running/completed/failed; idempotent ACK retry"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1795,7 +1815,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-02",
         "OM2-03",
@@ -1809,7 +1829,11 @@
         "投影不残留假 open 行",
         "close_all testnet 后 DB 与交易所均 flat"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "position_identity EXTERNAL/BOTH merge; no phantom open"
+      ],
       "blocker": null,
       "notes": []
     },
