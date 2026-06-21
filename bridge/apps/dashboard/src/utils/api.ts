@@ -2,6 +2,7 @@ import { formatCurrency, formatPercent } from "./format";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_BASE || "";
 export const AUTH_TOKEN_STORAGE_KEY = "hermes.auth.token";
+export const AUTH_ROLE_STORAGE_KEY = "hermes.auth.role";
 
 export type Severity = "info" | "warning" | "critical";
 
@@ -278,6 +279,67 @@ export type LoginResult = {
   role: string;
 };
 
+export type AuthRole = "viewer" | "operator" | "risk_admin" | string;
+
+export type OrderSettingsScope = "global" | "account" | "instrument";
+
+export type OrderSettingScalar = boolean | number | string;
+
+export type OrderSettingsValues = Record<string, Record<string, OrderSettingScalar>>;
+
+export type OrderManagementSettings = {
+  dataSource: DataSourceState;
+  empty: boolean;
+  raw: Record<string, unknown>;
+  scope: OrderSettingsScope;
+  scopeKey: string;
+  settings: OrderSettingsValues;
+  version: number | null;
+};
+
+export type EffectiveOrderSetting = {
+  applyMode: string;
+  inherited: boolean;
+  sourceScope: string;
+  value: OrderSettingScalar | "";
+};
+
+export type EffectiveOrderSettings = {
+  dataSource: DataSourceState;
+  empty: boolean;
+  raw: Record<string, unknown>;
+  settings: Record<string, Record<string, EffectiveOrderSetting>>;
+};
+
+export type OrderSettingsScopeParams = {
+  scope: OrderSettingsScope;
+  scopeKey?: string;
+};
+
+export type OrderSettingsValidationResult = {
+  errors: string[];
+  raw: Record<string, unknown>;
+  valid: boolean;
+};
+
+export type OrderSettingsPatchRequest = {
+  expected_version: number | null;
+  reason: string;
+  request_id: string;
+  scope: OrderSettingsScope;
+  scope_key: string;
+  settings: OrderSettingsValues;
+  confirm?: boolean;
+  operator_signoff?: string;
+};
+
+export type OrderSettingsPatchResult = {
+  errors: string[];
+  ok: boolean;
+  raw: Record<string, unknown>;
+  version: number | null;
+};
+
 function apiUrl(path: string): string {
   if (!apiBaseUrl) {
     return path;
@@ -308,14 +370,58 @@ export function getStoredAuthToken(): string {
   return token;
 }
 
-export function storeAuthToken(token: string): void {
+export function getStoredAuthRole(): AuthRole {
+  if (isAuthDisabled()) {
+    return "risk_admin";
+  }
+
+  const storedRole = localStorage.getItem(AUTH_ROLE_STORAGE_KEY) || sessionStorage.getItem(AUTH_ROLE_STORAGE_KEY) || "";
+  if (storedRole) {
+    return storedRole;
+  }
+
+  const token = getStoredAuthToken();
+  if (!token) {
+    return "operator";
+  }
+
+  const payload = tokenPayload(token);
+  const role = payload ? firstString([payload.role, payload.auth_role, payload.user_role], "") : "";
+  if (role) {
+    return role;
+  }
+
+  const roles = payload ? asStringArray(payload.roles) : [];
+  if (roles.includes("viewer")) {
+    return "viewer";
+  }
+  if (roles.includes("risk_admin")) {
+    return "risk_admin";
+  }
+  if (roles.includes("operator")) {
+    return "operator";
+  }
+
+  return "operator";
+}
+
+export function storeAuthToken(token: string, role = ""): void {
   localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
   sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  if (role) {
+    localStorage.setItem(AUTH_ROLE_STORAGE_KEY, role);
+    sessionStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+  } else {
+    localStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+    sessionStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+  }
 }
 
 export function clearAuthToken(): void {
   localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
   sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  localStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+  sessionStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
 }
 
 export async function login(username: string, password: string): Promise<LoginResult | false> {
@@ -397,6 +503,27 @@ export function getEmptySignalReview(reason = "loading"): SignalReviewData {
   return signalReviewFromPayloads({}, {}, emptyQuality(reason));
 }
 
+export function getEmptyOrderManagementSettings(reason = "loading"): OrderManagementSettings {
+  return {
+    dataSource: emptyQuality(reason),
+    empty: true,
+    raw: {},
+    scope: "global",
+    scopeKey: "",
+    settings: {},
+    version: null
+  };
+}
+
+export function getEmptyEffectiveSettings(reason = "loading"): EffectiveOrderSettings {
+  return {
+    dataSource: emptyQuality(reason),
+    empty: true,
+    raw: {},
+    settings: {}
+  };
+}
+
 async function getJson(path: string): Promise<JsonResult> {
   try {
     const response = await fetch(apiUrl(path), {
@@ -416,7 +543,7 @@ async function getJson(path: string): Promise<JsonResult> {
   }
 }
 
-async function postJson(path: string, body: Record<string, unknown>): Promise<unknown> {
+async function sendJson(path: string, method: "PATCH" | "POST", body: Record<string, unknown>): Promise<unknown> {
   try {
     const response = await fetch(apiUrl(path), {
       body: JSON.stringify(body),
@@ -424,7 +551,7 @@ async function postJson(path: string, body: Record<string, unknown>): Promise<un
         Accept: "application/json",
         "Content-Type": "application/json"
       }),
-      method: "POST"
+      method
     });
 
     if (!response.ok) {
@@ -435,6 +562,14 @@ async function postJson(path: string, body: Record<string, unknown>): Promise<un
   } catch {
     return false;
   }
+}
+
+async function postJson(path: string, body: Record<string, unknown>): Promise<unknown> {
+  return sendJson(path, "POST", body);
+}
+
+async function patchJson(path: string, body: Record<string, unknown>): Promise<unknown> {
+  return sendJson(path, "PATCH", body);
 }
 
 async function getText(path: string): Promise<string | false> {
@@ -491,10 +626,19 @@ function storedTokenIsValid(token: string): boolean {
     return true;
   }
 
+  const payload = tokenPayload(token);
+  const exp = payload ? payload.exp : undefined;
+  return typeof exp === "number" && exp > Math.floor(Date.now() / 1000);
+}
+
+function tokenPayload(token: string): Record<string, unknown> | false {
+  const segments = token.split(".");
+  if (segments.length !== 3) {
+    return false;
+  }
+
   try {
-    const payload = JSON.parse(base64UrlDecode(segments[1])) as Record<string, unknown>;
-    const exp = payload.exp;
-    return typeof exp === "number" && exp > Math.floor(Date.now() / 1000);
+    return asRecord(JSON.parse(base64UrlDecode(segments[1])));
   } catch {
     return false;
   }
@@ -1014,6 +1158,148 @@ function signalReviewFromPayloads(
   };
 }
 
+function orderSettingsFromPayload(
+  payload: Record<string, unknown>,
+  quality: DataSourceState,
+  fallbackScope: OrderSettingsScopeParams
+): OrderManagementSettings {
+  const data = asRecord(payload.data);
+  const source = Object.keys(asRecord(payload.settings)).length > 0 || payload.version !== undefined || payload.settings_version !== undefined
+    ? payload
+    : data;
+  const version = firstNumber([source.version, source.settings_version], Number.NaN);
+  const settings = orderSettingsValuesFromRecord(source.settings);
+  const scope = normalizeOrderSettingsScope(asString(source.scope, fallbackScope.scope));
+  const scopeKey = firstString([source.scope_key, source.scopeKey, fallbackScope.scopeKey], "");
+
+  return {
+    dataSource: quality,
+    empty: Object.keys(settings).length === 0 && !Number.isFinite(version),
+    raw: payload,
+    scope,
+    scopeKey,
+    settings,
+    version: Number.isFinite(version) ? version : null
+  };
+}
+
+function effectiveOrderSettingsFromPayload(payload: Record<string, unknown>, quality: DataSourceState): EffectiveOrderSettings {
+  const data = asRecord(payload.data);
+  const source = Object.keys(asRecord(payload.settings)).length > 0 ? payload : data;
+  const settings = effectiveSettingsValuesFromRecord(source.settings);
+
+  return {
+    dataSource: quality,
+    empty: Object.keys(settings).length === 0,
+    raw: payload,
+    settings
+  };
+}
+
+function orderSettingsValuesFromRecord(value: unknown): OrderSettingsValues {
+  const categories = asRecord(value);
+  const result: OrderSettingsValues = {};
+
+  Object.entries(categories).forEach(([categoryKey, categoryValue]) => {
+    const fields = asRecord(categoryValue);
+    const parsedFields: Record<string, OrderSettingScalar> = {};
+
+    Object.entries(fields).forEach(([fieldKey, fieldValue]) => {
+      const scalar = orderSettingScalar(fieldValue);
+      if (scalar !== undefined) {
+        parsedFields[fieldKey] = scalar;
+      }
+    });
+
+    if (Object.keys(parsedFields).length > 0) {
+      result[categoryKey] = parsedFields;
+    }
+  });
+
+  return result;
+}
+
+function effectiveSettingsValuesFromRecord(value: unknown): Record<string, Record<string, EffectiveOrderSetting>> {
+  const categories = asRecord(value);
+  const result: Record<string, Record<string, EffectiveOrderSetting>> = {};
+
+  Object.entries(categories).forEach(([categoryKey, categoryValue]) => {
+    const fields = asRecord(categoryValue);
+    const parsedFields: Record<string, EffectiveOrderSetting> = {};
+
+    Object.entries(fields).forEach(([fieldKey, fieldValue]) => {
+      const fieldRecord = asRecord(fieldValue);
+      const rawValue = Object.keys(fieldRecord).length > 0 ? fieldRecord.value : fieldValue;
+      const scalar = orderSettingScalar(rawValue);
+      if (scalar === undefined) {
+        return;
+      }
+
+      parsedFields[fieldKey] = {
+        applyMode: asString(fieldRecord.apply_mode, "hot_reload"),
+        inherited: fieldRecord.inherited === true,
+        sourceScope: asString(fieldRecord.source_scope, "default"),
+        value: scalar
+      };
+    });
+
+    if (Object.keys(parsedFields).length > 0) {
+      result[categoryKey] = parsedFields;
+    }
+  });
+
+  return result;
+}
+
+function orderSettingScalar(value: unknown): OrderSettingScalar | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return undefined;
+}
+
+function normalizeOrderSettingsScope(value: string): OrderSettingsScope {
+  if (value === "account" || value === "instrument") {
+    return value;
+  }
+
+  return "global";
+}
+
+function orderSettingsPath(params: OrderSettingsScopeParams): string {
+  const scopeKey = params.scopeKey || "";
+  return `/v1/order-management/settings?scope=${encodeURIComponent(params.scope)}&scope_key=${encodeURIComponent(scopeKey)}`;
+}
+
+function effectiveOrderSettingsPath(params: OrderSettingsScopeParams): string {
+  const accountId = params.scope === "account" ? params.scopeKey || "" : "";
+  const instrumentId = params.scope === "instrument" ? params.scopeKey || "" : "";
+  return `/v1/order-management/settings/effective?account_id=${encodeURIComponent(accountId)}&instrument_id=${encodeURIComponent(instrumentId)}`;
+}
+
+function validationErrorsFromPayload(payload: Record<string, unknown>): string[] {
+  const rawErrors = [...asArray(payload.errors), ...asArray(payload.messages), ...asArray(payload.detail)];
+  return rawErrors
+    .map((error) => {
+      if (typeof error === "string") {
+        return error;
+      }
+
+      const record = asRecord(error);
+      return firstString([record.message, record.msg, record.detail, record.reason], "");
+    })
+    .filter(Boolean);
+}
+
 function commandResultFromPayload(payload: unknown): CommandResult {
   if (payload === false) {
     return {
@@ -1147,6 +1433,61 @@ export async function fetchRiskOverview(): Promise<RiskOverview> {
 export async function fetchDailyReport(date: string): Promise<DailyReport> {
   const report = await getJson(`/v1/reports/daily/${date}`);
   return reportFromPayload(report.payload, date, report.quality);
+}
+
+export async function fetchOrderManagementSettings(params: OrderSettingsScopeParams): Promise<OrderManagementSettings> {
+  const result = await getJson(orderSettingsPath(params));
+  return orderSettingsFromPayload(result.payload, result.quality, params);
+}
+
+export async function fetchEffectiveSettings(params: OrderSettingsScopeParams): Promise<EffectiveOrderSettings> {
+  const result = await getJson(effectiveOrderSettingsPath(params));
+  return effectiveOrderSettingsFromPayload(result.payload, result.quality);
+}
+
+export async function validateSettings(settings: OrderSettingsValues): Promise<OrderSettingsValidationResult> {
+  const payload = await postJson("/v1/order-management/settings/validate", { settings });
+  if (payload === false) {
+    return {
+      errors: ["Settings validation request failed"],
+      raw: {},
+      valid: false
+    };
+  }
+
+  const result = asRecord(payload);
+  const errors = validationErrorsFromPayload(result);
+  const valid = typeof result.valid === "boolean" ? result.valid : result.ok === true || errors.length === 0;
+
+  return {
+    errors,
+    raw: result,
+    valid
+  };
+}
+
+export async function patchSettings(request: OrderSettingsPatchRequest): Promise<OrderSettingsPatchResult> {
+  const payload = await patchJson("/v1/order-management/settings", request);
+  if (payload === false) {
+    return {
+      errors: ["Settings save request failed"],
+      ok: false,
+      raw: {},
+      version: null
+    };
+  }
+
+  const result = asRecord(payload);
+  const errors = validationErrorsFromPayload(result);
+  const version = firstNumber([result.version, result.settings_version], Number.NaN);
+  const ok = typeof result.ok === "boolean" ? result.ok : errors.length === 0;
+
+  return {
+    errors,
+    ok,
+    raw: result,
+    version: Number.isFinite(version) ? version : null
+  };
 }
 
 export async function activateKillSwitch(reason: string, closeAll: boolean, confirmationPhrase: string): Promise<CommandResult> {

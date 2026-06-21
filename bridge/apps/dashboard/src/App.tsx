@@ -14,6 +14,7 @@ import {
   Radio,
   RefreshCcw,
   Send,
+  Settings,
   Sigma,
   ShieldAlert,
   ShieldCheck,
@@ -25,6 +26,7 @@ import type { ReactElement, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRealtimeConnection } from "./hooks/useRealtime";
 import { LoginPage } from "./pages/LoginPage";
+import { OrderSettingsPage } from "./pages/settings/OrderSettingsPage";
 import {
   activateKillSwitch,
   approveReviewProposal,
@@ -47,6 +49,7 @@ import {
   getEmptyRiskOverview,
   getEmptySignalReview,
   getStoredAuthToken,
+  getStoredAuthRole,
   isAuthDisabled,
   lockPair,
   moveStopLoss,
@@ -321,6 +324,7 @@ export function App({ initialPath }: AppProps): ReactElement {
         {path === "/risk" && <RiskPage />}
         {path === "/orders" && <OrderCenterPage refreshKey={dashboardRefreshKey} onRefresh={resyncDashboard} />}
         {path === "/review" && <SignalReviewPage refreshKey={dashboardRefreshKey} onRefresh={resyncDashboard} />}
+        {(path === "/settings" || path === "/settings/orders") && <OrderSettingsPage role={getStoredAuthRole()} />}
         {path === "/reports" && <ReportsPage onNavigate={navigate} />}
         {/^\/reports\/daily\/\d{4}-\d{2}-\d{2}$/.test(path) && <DailyReportPage date={reportDate} />}
         {path === "/dashboard" && <DashboardPage refreshKey={dashboardRefreshKey} />}
@@ -342,6 +346,7 @@ function Sidebar({ currentPath, onNavigate }: SidebarProps): ReactElement {
     { path: "/review", label: "Review", icon: Inbox },
     { path: "/risk", label: "Risk", icon: ShieldAlert },
     { path: "/reports", label: "Reports", icon: FileText },
+    { path: "/settings/orders", label: "Settings", icon: Settings },
     { path: `/reports/daily/${today}`, label: "Daily", icon: FileText }
   ];
 
@@ -360,6 +365,9 @@ function Sidebar({ currentPath, onNavigate }: SidebarProps): ReactElement {
           let active = currentPath === item.path || currentPath.startsWith(item.path);
           if (item.path === "/reports") {
             active = currentPath === "/reports";
+          }
+          if (item.path === "/settings/orders") {
+            active = currentPath === "/settings" || currentPath === "/settings/orders";
           }
 
           return (

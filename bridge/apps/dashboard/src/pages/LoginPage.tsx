@@ -31,7 +31,7 @@ export function LoginPage({ onAuthenticated }: LoginPageProps): ReactElement {
       return;
     }
 
-    storeAuthToken(result.token);
+    storeAuthToken(result.token, result.role);
     onAuthenticated();
   }
 
