@@ -1820,8 +1820,8 @@ export async function fetchOrderCenter(): Promise<OrderCenterData> {
 
 export async function fetchSignalReview(): Promise<SignalReviewData> {
   const [decisions, messages] = await Promise.all([
-    getJson("/v1/risk/decisions"),
-    getJson("/v1/messages?status=needs_review")
+    getJson("/v1/risk/decisions?limit=500"),
+    getJson("/v1/messages?status=needs_review&limit=500")
   ]);
   return signalReviewFromPayloads(decisions.payload, messages.payload, combineQuality([decisions.quality, messages.quality]));
 }
