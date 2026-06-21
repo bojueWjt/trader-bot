@@ -102,6 +102,7 @@ class ManagementPlan:
     target_position_id: Optional[str]
     cancel_order_ids: tuple[str, ...]
     orders: tuple[OrderPlan, ...]
+    cancel_after_submit: bool = False
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,7 @@ def _plan_management_intent(
     order_plan = getattr(intent, "order_plan", {}) or {}
     side = _exit_side(position)
     cancel_role: Optional[str] = None
+    cancel_after_submit = False
     orders: tuple[OrderPlan, ...]
 
     if action == PARTIAL_CLOSE:
@@ -231,6 +233,7 @@ def _plan_management_intent(
         if isinstance(order, OrderDenied):
             return order
         cancel_role = "stop_loss"
+        cancel_after_submit = True
         orders = (order,)
     elif action == MOVE_STOP_TO_ENTRY:
         entry_price = position.entry_price or order_plan.get("entry_price")
@@ -242,6 +245,7 @@ def _plan_management_intent(
         if isinstance(order, OrderDenied):
             return order
         cancel_role = "stop_loss"
+        cancel_after_submit = True
         orders = (order,)
     elif action == REPLACE_TAKE_PROFITS:
         take_profit_orders = _build_take_profit_orders(
@@ -275,6 +279,7 @@ def _plan_management_intent(
         target_position_id=position.position_id,
         cancel_order_ids=cancel_order_ids,
         orders=orders,
+        cancel_after_submit=cancel_after_submit,
     )
 
 
@@ -398,6 +403,13 @@ def _build_exit_order(
 ) -> OrderPlan | OrderDenied:
     normalized = dict(order_plan)
     normalized["side"] = side.lower()
+    if "quantity" not in normalized and "fraction" in normalized:
+        fraction = _decimal(normalized.get("fraction"), "fraction")
+        if isinstance(fraction, OrderDenied):
+            return fraction
+        if fraction <= Decimal("0") or fraction > Decimal("1"):
+            return OrderDenied("unsupported_order_spec", "fraction")
+        normalized["quantity"] = Decimal(str(position.quantity)) * fraction
     order_spec = _build_order_spec(normalized, instrument)
     if isinstance(order_spec, OrderDenied):
         return order_spec
