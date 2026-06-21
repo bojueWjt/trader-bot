@@ -16,6 +16,7 @@ from psycopg2.extras import Json
 
 from db.connection import transaction
 
+from .metrics import inject_trace_context
 from .state_descriptor import legal_transition
 
 
@@ -57,7 +58,12 @@ def request_command_run(
     _require("command_type", command_type)
     request_id = _require("request_id", request_id)
     idem = idempotency_key or request_id
-    run_payload = dict(payload or {})
+    run_payload = inject_trace_context(
+        payload or {},
+        request_id=request_id,
+        idempotency_key=idem,
+        command_id=command_id,
+    )
 
     with transaction(conn):
         with conn.cursor() as cur:
@@ -222,7 +228,12 @@ def _transition(
             if not legal_transition("command", current, status):
                 raise CommandRunTransitionError(f"illegal command transition {current!r} -> {status!r}")
 
-            payload = dict(row[7] or {})
+            payload = inject_trace_context(
+                row[7] or {},
+                request_id=request_id,
+                idempotency_key=row[5],
+                command_id=row[1],
+            )
             if result is not None:
                 payload["result"] = dict(result)
             if error is not None:

@@ -17,6 +17,8 @@ if str(_EXECUTION_DOMAIN) not in sys.path:
 
 from execution_domain.idempotency import RequestId  # noqa: E402
 
+from .metrics import inject_trace_context
+
 __all__ = [
     "deterministic_outbox_event_id",
     "enqueue_order_management_event",
@@ -58,9 +60,17 @@ def enqueue_order_management_event(
         event_type,
         idempotency_key,
     )
-    event_payload = dict(payload or {})
+    event_payload = inject_trace_context(
+        payload or {},
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+        execution_job_id=aggregate_id if aggregate_type == "execution_job" else None,
+        command_id=aggregate_id if aggregate_type == "command" else None,
+        order_id=aggregate_id if aggregate_type == "order" else None,
+    )
     if request_id is not None:
         event_payload.setdefault("request_id", str(RequestId.from_value(request_id)))
+    trace_id = event_payload["trace_id"]
 
     with conn.cursor() as cur:
         cur.execute(
@@ -71,9 +81,10 @@ def enqueue_order_management_event(
                 aggregate_type,
                 aggregate_id,
                 event_type,
-                payload
+                payload,
+                trace_id
             )
-            VALUES (%s, 'pending', %s, %s, %s, %s)
+            VALUES (%s, 'pending', %s, %s, %s, %s, %s)
             ON CONFLICT (outbox_event_id) DO NOTHING
             RETURNING outbox_event_id::text
             """,
@@ -83,6 +94,7 @@ def enqueue_order_management_event(
                 aggregate_id,
                 event_type,
                 Json(event_payload),
+                trace_id,
             ),
         )
         row = cur.fetchone()
