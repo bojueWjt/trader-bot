@@ -1,6 +1,15 @@
 import type { OrderSettingScalar } from "../../utils/api";
 
-export type OrderSettingsCategoryKey = "entry" | "general" | "money" | "price_monitor" | "reconciliation";
+export type OrderSettingsCategoryKey =
+  | "advanced"
+  | "emergency"
+  | "entry"
+  | "general"
+  | "money"
+  | "notifications"
+  | "price_monitor"
+  | "protection"
+  | "reconciliation";
 
 export type SettingsFieldType = "boolean" | "enum" | "integer" | "number" | "string";
 
@@ -308,6 +317,205 @@ export const entrySettingsFields = [
     secret: false,
     type: "number",
     unit: "bps"
+  }
+] satisfies SettingsFieldDescriptor[];
+
+export const protectionSettingsFields = [
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Requires a protective stop to be installed after a managed entry opens exposure.",
+    key: "require_stop",
+    label: "Require stop",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "stop_market",
+    enumValues: ["stop_market", "stop_limit"],
+    help: "Order type used when installing the primary protective stop.",
+    key: "stop_order_type",
+    label: "Stop order type",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "order_type"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "mark",
+    enumValues: ["mark", "last"],
+    help: "Price basis used to trigger protective stop orders.",
+    key: "stop_trigger_basis",
+    label: "Stop trigger basis",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "price_basis"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 15,
+    help: "Maximum time allowed for initial protection installation after entry fill.",
+    key: "protection_install_timeout_seconds",
+    label: "Protection install timeout seconds",
+    max: 3600,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "",
+    help: "JSON take-profit ladder. Each rung uses an R multiple and fraction of the position to close.",
+    key: "take_profit_ladder",
+    label: "Take profit ladder",
+    scopeOverridable: true,
+    secret: false,
+    type: "string",
+    unit: "json"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: false,
+    help: "Moves stop protection to breakeven after the configured R multiple is reached.",
+    key: "breakeven_enabled",
+    label: "Breakeven enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 1,
+    help: "R multiple that triggers breakeven stop movement.",
+    key: "breakeven_trigger_r",
+    label: "Breakeven trigger R",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "r_multiple"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0,
+    help: "Offset from entry price applied when moving the stop to breakeven.",
+    key: "breakeven_offset_bps",
+    label: "Breakeven offset bps",
+    max: 1000,
+    min: -1000,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "bps"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: false,
+    help: "Enables trailing stop management after activation.",
+    key: "trailing_stop_enabled",
+    label: "Trailing stop enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 1.5,
+    help: "R multiple that activates trailing stop management.",
+    key: "trailing_activation_r",
+    label: "Trailing activation R",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "r_multiple"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0.5,
+    help: "Trailing callback rate used by venues that support percentage trailing stops.",
+    key: "trailing_callback_rate",
+    label: "Trailing callback rate",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "percent"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 5,
+    help: "Minimum stop movement before a trailing update is submitted.",
+    key: "trailing_min_step_bps",
+    label: "Trailing min step bps",
+    max: 10000,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "bps"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 5,
+    help: "Minimum delay between trailing stop update commands.",
+    key: "trailing_update_rate_limit_seconds",
+    label: "Trailing update rate limit seconds",
+    max: 3600,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 0.25,
+    help: "Default fraction used when an operator requests a manual partial close.",
+    key: "partial_close_default_fraction",
+    label: "Partial close default fraction",
+    max: 1,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "number",
+    unit: "ratio"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "cancel_replace",
+    enumValues: ["cancel_replace", "amend_in_place"],
+    help: "How existing protection is replaced when a new protection state is computed.",
+    key: "replace_protection_behavior",
+    label: "Replace protection behavior",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "policy"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "reducing",
+    enumValues: ["halt", "reducing", "auto_repair", "alert_only"],
+    help: "Policy applied when required protection is missing or inconsistent.",
+    key: "protection_repair_policy",
+    label: "Protection repair policy",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "policy"
   }
 ] satisfies SettingsFieldDescriptor[];
 
@@ -749,5 +957,358 @@ export const reconciliationSettingsFields = [
     secret: false,
     type: "enum",
     unit: "mode"
+  }
+] satisfies SettingsFieldDescriptor[];
+
+export const emergencySettingsFields = [
+  {
+    applyMode: "hot_reload",
+    defaultValue: 10,
+    help: "Number of open orders included in each emergency cancel batch.",
+    key: "cancel_batch_size",
+    label: "Cancel batch size",
+    max: 1000,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "orders"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 5,
+    help: "Number of positions included in each emergency close batch.",
+    key: "close_batch_size",
+    label: "Close batch size",
+    max: 1000,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "positions"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 250,
+    help: "Delay inserted between emergency order commands.",
+    key: "inter_order_delay_ms",
+    label: "Inter order delay ms",
+    max: 60000,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "milliseconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 3,
+    help: "Maximum retry attempts for emergency operator commands.",
+    key: "command_max_retries",
+    label: "Command max retries",
+    max: 100,
+    min: 0,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "count"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 30,
+    help: "Maximum wait time for emergency command verification.",
+    key: "verify_timeout_seconds",
+    label: "Verify timeout seconds",
+    max: 86400,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "flat",
+    enumValues: ["flat", "cancelled_and_flat"],
+    help: "Final state required after a close-all emergency workflow completes.",
+    key: "close_all_final_state",
+    label: "Close all final state",
+    scopeOverridable: true,
+    secret: false,
+    type: "enum",
+    unit: "state"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Allows emergency close commands to proceed when the order manager is HALTED.",
+    key: "allow_close_while_halted",
+    label: "Allow close while HALTED",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "restart_required",
+    defaultValue: 30,
+    help: "Number of days emergency command records are retained.",
+    key: "command_retention_days",
+    label: "Command retention days",
+    max: 3650,
+    min: 1,
+    scopeOverridable: false,
+    secret: false,
+    type: "integer",
+    unit: "days"
+  }
+] satisfies SettingsFieldDescriptor[];
+
+export const notificationsSettingsFields = [
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications when a venue accepts an order.",
+    key: "order_accepted_enabled",
+    label: "Order accepted enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications when a venue rejects an order.",
+    key: "order_rejected_enabled",
+    label: "Order rejected enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications when an order is filled.",
+    key: "order_filled_enabled",
+    label: "Order filled enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications for partial fills.",
+    key: "partial_fill_enabled",
+    label: "Partial fill enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications when required protection is missing.",
+    key: "protection_missing_enabled",
+    label: "Protection missing enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications for stale market-data conditions.",
+    key: "stale_market_enabled",
+    label: "Stale market enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications for stale account-data conditions.",
+    key: "stale_account_enabled",
+    label: "Stale account enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications when reconciliation detects venue/projection drift.",
+    key: "reconciliation_drift_enabled",
+    label: "Reconciliation drift enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications when daily loss thresholds are reached.",
+    key: "daily_loss_enabled",
+    label: "Daily loss enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications when drawdown thresholds are reached.",
+    key: "drawdown_enabled",
+    label: "Drawdown enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Emits notifications for cancel-all and close-all command results.",
+    key: "emergency_command_results_enabled",
+    label: "Emergency command results enabled",
+    scopeOverridable: true,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "dashboard",
+    help: "Comma-separated notification channels available to severity routing.",
+    key: "notification_channels",
+    label: "Notification channels",
+    scopeOverridable: true,
+    secret: false,
+    type: "string",
+    unit: "csv_channels"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: "critical:operator,high:operator,medium:dashboard",
+    help: "Severity-to-channel routing policy for order-management events.",
+    key: "severity_routing",
+    label: "Severity routing",
+    scopeOverridable: true,
+    secret: false,
+    type: "string",
+    unit: "routing_policy"
+  }
+] satisfies SettingsFieldDescriptor[];
+
+export const advancedSettingsFields = [
+  {
+    applyMode: "hot_reload",
+    defaultValue: 100,
+    help: "Maximum outbox events processed per worker batch.",
+    key: "outbox_batch_size",
+    label: "Outbox batch size",
+    max: 10000,
+    min: 1,
+    scopeOverridable: false,
+    secret: false,
+    type: "integer",
+    unit: "events"
+  },
+  {
+    applyMode: "restart_required",
+    defaultValue: 10000,
+    help: "Maximum command spool items retained before backpressure policies apply.",
+    key: "spool_max_items",
+    label: "Spool max items",
+    max: 1000000,
+    min: 0,
+    scopeOverridable: false,
+    secret: false,
+    type: "integer",
+    unit: "items"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 3600,
+    help: "Maximum age for spool items before they are eligible for cleanup.",
+    key: "spool_max_age_seconds",
+    label: "Spool max age seconds",
+    max: 2592000,
+    min: 1,
+    scopeOverridable: false,
+    secret: false,
+    type: "integer",
+    unit: "seconds"
+  },
+  {
+    applyMode: "restart_required",
+    defaultValue: 24,
+    help: "Projection replay lookback used when rebuilding reducer state.",
+    key: "reducer_replay_window_hours",
+    label: "Reducer replay window hours",
+    max: 8760,
+    min: 1,
+    scopeOverridable: false,
+    secret: false,
+    type: "integer",
+    unit: "hours"
+  },
+  {
+    applyMode: "restart_required",
+    defaultValue: 90,
+    help: "Number of days order-management events are retained.",
+    key: "event_retention_days",
+    label: "Event retention days",
+    max: 3650,
+    min: 1,
+    scopeOverridable: false,
+    secret: false,
+    type: "integer",
+    unit: "days"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: 60,
+    help: "Global order-management command rate limit.",
+    key: "rate_limit_per_minute",
+    label: "Rate limit per minute",
+    max: 100000,
+    min: 1,
+    scopeOverridable: true,
+    secret: false,
+    type: "integer",
+    unit: "requests_per_minute"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Allows diagnostics bundles to be generated from order-management state.",
+    key: "diagnostics_bundle_enabled",
+    label: "Diagnostics bundle enabled",
+    scopeOverridable: false,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
+  },
+  {
+    applyMode: "hot_reload",
+    defaultValue: true,
+    help: "Allows settings import/export workflows for order-management configuration.",
+    key: "import_export_enabled",
+    label: "Import export enabled",
+    scopeOverridable: false,
+    secret: false,
+    type: "boolean",
+    unit: "flag"
   }
 ] satisfies SettingsFieldDescriptor[];

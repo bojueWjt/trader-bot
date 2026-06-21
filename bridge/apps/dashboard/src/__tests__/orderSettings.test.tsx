@@ -366,4 +366,64 @@ describe("order management settings", () => {
     expect(projectionFreshness).toHaveTextContent("stale");
     expect(screen.getByRole("group", { name: "Reconciliation freshness" })).toHaveTextContent("failed");
   });
+
+  it("validates take-profit ladder fraction sums in real time", async () => {
+    stubSettingsApi();
+
+    render(<App initialPath="/settings/orders" />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Protection & Exits" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add TP rung" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add TP rung" }));
+
+    fireEvent.change(screen.getByLabelText("TP 1 fraction"), { target: { value: "0.7" } });
+    fireEvent.change(screen.getByLabelText("TP 2 fraction"), { target: { value: "0.6" } });
+
+    const ladderEditor = screen.getByRole("group", { name: "Take-profit ladder editor" });
+    expect(within(ladderEditor).getByRole("alert")).toHaveTextContent("Take-profit fractions total 1.3; maximum is 1");
+
+    fireEvent.change(screen.getByLabelText("TP 2 fraction"), { target: { value: "0.3" } });
+    expect(within(ladderEditor).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("blocks dangerous protection combinations before settings save", async () => {
+    const globalSettings = baseGlobalSettings();
+    globalSettings.general = {
+      ...globalSettings.general,
+      execution_mode: "live"
+    };
+    const effectiveSettings = baseEffectiveSettings();
+    effectiveSettings.general = {
+      ...effectiveSettings.general,
+      execution_mode: field("live", "global", false)
+    };
+    const fetchMock = stubSettingsApi({ effectiveSettings, globalSettings });
+
+    render(<App initialPath="/settings/orders" />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Protection & Exits" }));
+    fireEvent.click(screen.getByLabelText("Require stop"));
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "temporarily disable stops" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(await screen.findByRole("alert", { name: "Settings validation errors" })).toHaveTextContent(
+      "Require stop cannot be disabled while execution mode is live"
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith("/v1/order-management/settings/validate", expect.any(Object));
+
+    fireEvent.click(screen.getByLabelText("Require stop"));
+    expect(screen.queryByRole("alert", { name: "Settings validation errors" })).not.toBeInTheDocument();
+  });
+
+  it("flags every Advanced setting as high risk", async () => {
+    stubSettingsApi();
+
+    render(<App initialPath="/settings/orders" />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Advanced" }));
+
+    expect(screen.getByRole("group", { name: "Outbox batch size setting" })).toHaveTextContent("HIGH RISK");
+    expect(screen.getByRole("group", { name: "Spool max items setting" })).toHaveTextContent("HIGH RISK");
+    expect(screen.getByRole("group", { name: "Import export enabled setting" })).toHaveTextContent("HIGH RISK");
+  });
 });

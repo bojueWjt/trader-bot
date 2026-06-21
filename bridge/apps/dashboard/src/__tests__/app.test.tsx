@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { fetchDashboardOverview } from "../utils/api";
@@ -204,6 +204,183 @@ describe("control-plane dashboard contracts", () => {
 
     expect(await screen.findByText("Waiting for 1 node ack: node-b")).toBeInTheDocument();
     expect(screen.queryByText("Kill switch active")).not.toBeInTheDocument();
+  });
+
+  it("filters orders and renders the intent to position timeline with protection status", async () => {
+    stubControlPlane(vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/v1/positions")) {
+        return jsonResponse(envelope({
+          positions: [
+            {
+              account_id: "acc-1",
+              amount: 1,
+              entry_price: 40000,
+              execution_job_id: "job-1",
+              instrument_symbol: "BTC/USDT",
+              leverage: 3,
+              mark_price: 42000,
+              opened_at: "2026-06-20T12:00:00Z",
+              pnl: 2000,
+              pnl_pct: 0.05,
+              position_id: "pos-1",
+              protection_status: "protected",
+              side: "long",
+              status: "open",
+              stop_loss_price: 39000
+            }
+          ]
+        }));
+      }
+      if (path.startsWith("/v1/orders")) {
+        return jsonResponse(envelope({
+          orders: [
+            {
+              account_id: "acc-1",
+              amount: 1,
+              created_at: "2026-06-20T12:02:00Z",
+              events: [
+                {
+                  event_id: "evt-1",
+                  event_type: "order_accepted",
+                  message: "Venue accepted order",
+                  occurred_at: "2026-06-20T12:02:03Z",
+                  status: "accepted"
+                }
+              ],
+              execution_job_id: "job-1",
+              filled: 0.25,
+              instrument_symbol: "BTC/USDT",
+              intent_id: "intent-1",
+              order_id: "ord-1",
+              order_type: "limit",
+              price: 41000,
+              protection_status: "protected",
+              remaining: 0.75,
+              role: "entry",
+              side: "buy",
+              status: "open",
+              trade_id: "pos-1"
+            },
+            {
+              account_id: "acc-2",
+              amount: 2,
+              created_at: "2026-06-20T13:02:00Z",
+              execution_job_id: "job-2",
+              filled: 2,
+              instrument_symbol: "ETH/USDT",
+              intent_id: "intent-2",
+              order_id: "ord-2",
+              order_type: "market",
+              price: 2500,
+              protection_status: "missing",
+              remaining: 0,
+              role: "take_profit",
+              side: "sell",
+              status: "filled",
+              trade_id: "pos-2"
+            }
+          ]
+        }));
+      }
+      if (path.startsWith("/v1/trades")) {
+        return jsonResponse(envelope({ trades: [] }));
+      }
+      return jsonResponse(envelope({ accounts: [], decisions: [], messages: [], nodes: [], positions: [], trades: [] }));
+    }), false);
+
+    render(<App initialPath="/orders" />);
+
+    expect(await screen.findByLabelText("Account")).toBeInTheDocument();
+    expect(screen.getByLabelText("Instrument")).toBeInTheDocument();
+    expect(screen.getByLabelText("Status")).toBeInTheDocument();
+    expect(screen.getByLabelText("Role")).toBeInTheDocument();
+    expect(screen.getByLabelText("Time range")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Account"), { target: { value: "acc-1" } });
+
+    expect(screen.getByText("ord-1")).toBeInTheDocument();
+    expect(screen.queryByText("ord-2")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open order ord-1 detail" }));
+
+    const detail = await screen.findByRole("complementary", { name: "Order ord-1 detail" });
+    expect(within(detail).getByText("Intent intent-1")).toBeInTheDocument();
+    expect(within(detail).getByText("Execution job job-1")).toBeInTheDocument();
+    expect(within(detail).getByText("Order ord-1")).toBeInTheDocument();
+    expect(within(detail).getByText("Events")).toBeInTheDocument();
+    expect(within(detail).getByText("Position pos-1")).toBeInTheDocument();
+    expect(within(detail).getByText("Protection protected")).toBeInTheDocument();
+  });
+
+  it("requires confirmation before submitting a manual cancel order action", async () => {
+    const fetchMock = stubControlPlane(vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (init?.method === "POST" && path === "/v1/commands") {
+        return jsonResponse({
+          ...envelope(),
+          acks: [{ acknowledged_at: "2026-06-20T12:03:00Z", node_id: "node-a", status: "acked" }],
+          command_id: "command-cancel",
+          status: "completed",
+          target_nodes: ["node-a"]
+        });
+      }
+      if (path.startsWith("/v1/positions")) {
+        return jsonResponse(envelope({ positions: [] }));
+      }
+      if (path.startsWith("/v1/orders")) {
+        return jsonResponse(envelope({
+          orders: [
+            {
+              account_id: "acc-1",
+              amount: 1,
+              created_at: "2026-06-20T12:02:00Z",
+              execution_job_id: "job-1",
+              filled: 0,
+              instrument_symbol: "BTC/USDT",
+              intent_id: "intent-1",
+              order_id: "ord-1",
+              order_type: "limit",
+              price: 41000,
+              protection_status: "pending",
+              remaining: 1,
+              role: "entry",
+              side: "buy",
+              status: "open",
+              trade_id: "pos-1"
+            }
+          ]
+        }));
+      }
+      if (path.startsWith("/v1/trades")) {
+        return jsonResponse(envelope({ trades: [] }));
+      }
+      return jsonResponse(envelope({ accounts: [], decisions: [], messages: [], nodes: [], positions: [], trades: [] }));
+    }), false);
+
+    render(<App initialPath="/orders" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel order ord-1" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Cancel order" });
+    expect(within(dialog).getByRole("button", { name: "Confirm cancel order" })).toBeDisabled();
+
+    fireEvent.change(within(dialog).getByLabelText("Action reason"), { target: { value: "stale order" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm cancel order" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/v1/commands", expect.objectContaining({
+        body: JSON.stringify({
+          args: {
+            order_id: "ord-1",
+            reason: "stale order"
+          },
+          type: "cancel_order"
+        }),
+        method: "POST"
+      }));
+    });
+    expect(await screen.findByText("Command completed")).toBeInTheDocument();
   });
 });
 
