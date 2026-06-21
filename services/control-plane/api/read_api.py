@@ -8,6 +8,8 @@ unavailable it returns 503 — never fixtures.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -16,7 +18,8 @@ from uuid import UUID, uuid4
 
 import psycopg2
 from fastapi import Body, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, StreamingResponse
 from psycopg2.extras import RealDictCursor
 
 _HERE = Path(__file__).resolve().parent
@@ -73,6 +76,49 @@ def system_snapshot(authorization: str | None = Header(default=None)):
         return build_system_snapshot(conn)
     finally:
         conn.close()
+
+
+# Dashboard realtime feed (SSE). The v3 SPA opens EventSource("/v1/stream") and
+# listens for `dashboard_snapshot` + `heartbeat` events. We stream the same
+# SystemSnapshotV1 projection that /api/system/snapshot returns, on a fixed
+# interval, plus heartbeats to keep the connection warm through the Caddy proxy.
+# Read-only: no trading side effects.
+_STREAM_INTERVAL_S = 5.0
+
+
+def _dashboard_snapshot_payload() -> dict:
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("projection store unavailable")
+    conn = psycopg2.connect(database_url)
+    try:
+        return build_system_snapshot(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/v1/stream")
+async def v1_stream(authorization: str | None = Header(default=None)):
+    require_reader(authorization)
+
+    async def event_gen():
+        while True:
+            try:
+                snap = await asyncio.to_thread(_dashboard_snapshot_payload)
+                data = json.dumps(jsonable_encoder(snap), separators=(",", ":"))
+                yield f"event: dashboard_snapshot\ndata: {data}\n\n"
+            except Exception as exc:  # keep the stream alive; surface as an SSE error event
+                err = json.dumps({"error": str(exc)})
+                yield f"event: error\ndata: {err}\n\n"
+            beat = json.dumps({"ts": datetime.now(timezone.utc).isoformat()})
+            yield f"event: heartbeat\ndata: {beat}\n\n"
+            await asyncio.sleep(_STREAM_INTERVAL_S)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def require_node(authorization: str | None) -> None:
