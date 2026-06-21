@@ -23,6 +23,7 @@ from psycopg2.extensions import connection as PsycopgConnection
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 for _p in (
+    str(_REPO_ROOT / "services" / "control-plane"),
     str(_REPO_ROOT / "services" / "control-plane" / "db"),
     str(_REPO_ROOT / "services" / "control-plane" / "risk"),
 ):
@@ -31,6 +32,7 @@ for _p in (
 
 import governor  # noqa: E402
 from connection import transaction  # noqa: E402
+from order_management.execution_jobs import create_execution_job_for_approved_intent  # noqa: E402
 from policy import RiskPolicy  # noqa: E402
 
 SCHEMA_PATH = _REPO_ROOT / "packages" / "contracts" / "v1" / "hermes_decision.v1.json"
@@ -185,6 +187,12 @@ def _write_outcome(
         result["intent_id"] = _write_trade_intent(
             cur, row, outcome, decision, policy, risk_decision_id
         )
+        if result["intent_id"] is not None:
+            create_execution_job_for_approved_intent(
+                cur.connection,
+                result["intent_id"],
+                manage_transaction=False,
+            )
     return result
 
 
