@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Iterable, Optional
 
 from strategy.intent_execution_planner import (
@@ -256,20 +257,41 @@ class IntentExecutionStrategy(Strategy):
         cache = getattr(self, "cache", None)
         if cache is None:
             return ()
-        # TODO(host-verify): confirm open-position cache method names and
-        # InstrumentId argument type on Nautilus 1.227.0.
+        target = str(instrument_id)
+        iid = self._as_instrument_id(instrument_id)
+        # Prefer positions_open (excludes closed positions). Try an InstrumentId-typed
+        # scoped query first, then a string arg, then the no-arg form.
+        # TODO(host-verify): confirm open-position cache method names on Nautilus 1.227.0.
         for name in ("positions_open", "positions", "open_positions"):
             method = getattr(cache, name, None)
             if method is None:
                 continue
-            try:
-                return method(instrument_id) or ()
-            except TypeError:
+            raw = None
+            for call in (lambda: method(iid), lambda: method(instrument_id), lambda: method()):
                 try:
-                    return method() or ()
+                    raw = call() or ()
+                    break
                 except TypeError:
                     continue
+            if raw is None:
+                continue
+            # ALWAYS filter by instrument: a no-arg (unscoped) result must never leak
+            # other instruments' positions, e.g. an open ETH blocking a BTC open
+            # (position_exists false-positive). Closed positions are also excluded here.
+            return [
+                p for p in raw
+                if str(getattr(p, "instrument_id", "")) == target
+                and Decimal(str(_position_quantity(p) or 0)) != 0
+            ]
         return ()
+
+    def _as_instrument_id(self, instrument_id: str) -> Any:
+        try:
+            from nautilus_trader.model.identifiers import InstrumentId  # type: ignore
+
+            return InstrumentId.from_str(str(instrument_id))
+        except Exception:
+            return str(instrument_id)
 
     def _submit_order_plan(self, plan: OrderPlan) -> bool:
         instrument = self._cache_instrument(plan.instrument_id)
