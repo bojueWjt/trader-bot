@@ -95,6 +95,45 @@ def seed(instrument, side):
           f"px={g['price']} sl={g['sl']} tp={g['tp']} acct=account-a")
 
 
+def seed_update(instrument, action, target_position_id, new_stop_loss=None):
+    """Seed a fresh UPDATE-action decision (move_stop_loss/close_position/...) that
+    references an existing open position so the governor's update_target gate passes."""
+    g = REF[instrument]
+    conn = _conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        "select side::text sd, evidence, model_provider mp, model_version mv, "
+        "schema_version sv, temperature, confidence from hermes_decisions where action='open_position' limit 1"
+    )
+    base = cur.fetchone()
+    now = datetime.now(timezone.utc)
+    raw_id, run_id, ctx_id, dec_id = (uuid4() for _ in range(4))
+    sl = float(new_stop_loss) if new_stop_loss is not None else g["sl"]
+    cur.execute(
+        "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version, "
+        "source_received_at, content_hash, message_text) VALUES (%s,'telegram','gov-demo',%s,'v1',%s,%s,%s)",
+        (str(raw_id), f"govu-{raw_id}", now, sha256(str(raw_id).encode()).hexdigest(),
+         f"[gov-demo] {instrument} {action} -> {target_position_id}"),
+    )
+    cur.execute("INSERT INTO message_processing_runs (processing_run_id, raw_message_id, status) "
+                "VALUES (%s,%s,'succeeded')", (str(run_id), str(raw_id)))
+    cur.execute("INSERT INTO context_snapshots (context_snapshot_id, raw_message_id, snapshot_type, "
+                "context_version, snapshot) VALUES (%s,%s,'system','v1',%s)", (str(ctx_id), str(raw_id), Json({})))
+    cur.execute(
+        "INSERT INTO hermes_decisions (decision_id, raw_message_id, processing_run_id, context_snapshot_id, "
+        "schema_version, message_type, action, ambiguous, account_scope, target_account_id, target_position_id, "
+        "instrument_symbol, side, entry_type, entry_price, stop_loss, take_profits, leverage, valid_until, "
+        "evidence, model_provider, model_version, prompt_version, context_version, temperature, confidence, created_at) "
+        "VALUES (%s,%s,%s,%s,%s,'position_update',%s,false,'single','account-a',%s,%s,%s,'market',%s,%s,%s,%s,%s,"
+        "%s,%s,%s,'hermes-trader-v1','v1',%s,%s, now())",
+        (str(dec_id), str(raw_id), str(run_id), str(ctx_id), base["sv"], action, target_position_id,
+         instrument, base["sd"], g["price"], sl, Json([g["tp"]]), 2, now + timedelta(hours=1),
+         Json(base["evidence"] or {"x": "govu"}), base["mp"], base["mv"], base["temperature"], base["confidence"]),
+    )
+    conn.commit()
+    print(f"seeded FRESH update decision {dec_id} -> {instrument} {action} target={target_position_id} sl={sl}")
+
+
 def run():
     conn = _conn()
     seen_before = _intent_ids(conn)
@@ -143,6 +182,9 @@ if __name__ == "__main__":
         set_mode(sys.argv[2], sys.argv[3])
     elif cmd == "seed":
         seed(sys.argv[2], sys.argv[3])
+    elif cmd == "seed-update":
+        seed_update(sys.argv[2], sys.argv[3], sys.argv[4],
+                    sys.argv[5] if len(sys.argv) > 5 else None)
     elif cmd == "run":
         run()
     elif cmd == "chain":

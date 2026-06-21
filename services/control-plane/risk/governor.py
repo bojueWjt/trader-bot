@@ -107,7 +107,7 @@ def evaluate(
             p for p in positions
             if p.get("position_id") == target
             and p.get("account_id") == account_id
-            and p.get("instrument_id") == instrument
+            and _instrument_matches(instrument, p.get("instrument_id"))
         ]
         if len(matches) != 1:
             return review("update_target", f"target matched {len(matches)} positions", account_id)
@@ -169,6 +169,17 @@ def evaluate(
         ev.ok("exposure")
 
     return RiskDecision("approved", account_id, instrument, risk_budget, "all checks passed", ev.checks)
+
+
+def _instrument_matches(symbol: str | None, instrument_id: str | None) -> bool:
+    """A decision carries the venue symbol (``BTCUSDT``); the position projection carries
+    the Nautilus instrument id (``BTCUSDT-PERP.BINANCE``). Match them format-tolerantly so
+    update actions can resolve their target position (the symbol is the id's leading token)."""
+    if not symbol or not instrument_id:
+        return False
+    if symbol == instrument_id:
+        return True
+    return instrument_id.split("-", 1)[0] == symbol
 
 
 def _precision_ok(intent: dict[str, Any], policy: RiskPolicy) -> bool:
