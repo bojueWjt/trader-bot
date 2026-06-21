@@ -59,6 +59,185 @@
       "type": "object",
       "description": "Action-specific execution plan carried into Nautilus; shape validated by the execution strategy per action. Open at the contract level (window C lock per window-B CCR). A's freeze had this as a closed empty object, which could carry no order detail and made the execution link unusable."
     },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional additive order-management execution hints. Absence preserves legacy/default v1 behavior: consumers continue to use order_plan and runtime defaults.",
+      "properties": {
+        "order_type": {
+          "type": "string",
+          "enum": [
+            "market",
+            "limit",
+            "zone"
+          ]
+        },
+        "time_in_force": {
+          "type": "string",
+          "enum": [
+            "GTC",
+            "IOC",
+            "FOK",
+            "GTD"
+          ]
+        },
+        "post_only": {
+          "type": "boolean"
+        },
+        "reduce_only": {
+          "type": "boolean"
+        },
+        "max_slippage_bps": {
+          "type": "number",
+          "minimum": 0
+        },
+        "limit_price": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "zone": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "low": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "high": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
+    },
+    "protection": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional additive order-management protection hints. Absence preserves legacy/default v1 behavior: runtime policy supplies protection defaults outside the envelope.",
+      "properties": {
+        "require_stop": {
+          "type": "boolean"
+        },
+        "stop": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "stop_market",
+                "stop_limit"
+              ]
+            },
+            "trigger_basis": {
+              "type": "string",
+              "enum": [
+                "mark",
+                "last"
+              ]
+            },
+            "price": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "distance_pct": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "take_profits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "price": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "r_multiple": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "fraction": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1
+              },
+              "quantity": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "time_in_force": {
+                "type": "string",
+                "enum": [
+                  "GTC",
+                  "IOC",
+                  "FOK",
+                  "GTD"
+                ]
+              }
+            }
+          }
+        },
+        "breakeven": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "trigger_r": {
+              "type": "number",
+              "minimum": 0
+            },
+            "offset_bps": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "trailing": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "activation_r": {
+              "type": "number",
+              "minimum": 0
+            },
+            "callback_rate": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "min_step": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "sizing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional additive order-management sizing hint. Absence preserves legacy/default v1 behavior through risk_budget and order_plan.",
+      "properties": {
+        "quantity": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        }
+      }
+    },
     "risk_budget": {
       "type": "object",
       "additionalProperties": false,
@@ -104,4 +283,3 @@
     }
   }
 }
-

@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "intent_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "decision_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "risk_decision_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "account_id": "acct-1",
+  "instrument_id": "BTCUSDT-PERP.BINANCE",
+  "action": "open_position",
+  "order_plan": {},
+  "protection": {
+    "take_profits": [
+      {
+        "price": 26000,
+        "fraction": 0.7
+      },
+      {
+        "price": 27000,
+        "fraction": 0.4
+      }
+    ]
+  },
+  "risk_budget": {
+    "risk_fraction": 0.01,
+    "max_notional": 10000,
+    "max_leverage": 3
+  },
+  "target_position_id": null,
+  "valid_until": "2026-06-21T12:00:00Z",
+  "idempotency_key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "approved_at": "2026-06-21T11:00:00Z"
+}

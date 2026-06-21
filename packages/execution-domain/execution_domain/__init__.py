@@ -11,11 +11,15 @@ from .contracts import (
     ApprovedTradeIntentV1,
     DataQualityEnvelopeV1,
     EXIT_ACTIONS,
+    Execution,
     ExecutionEventEnvelopeV1,
     IntentAction,
     POSITION_REQUIRED_ACTIONS,
+    Protection,
     ReconciliationState,
     RiskBudget,
+    Sizing,
+    TakeProfitLevel,
 )
 from .control_plane import (
     CommandAckStatus,
@@ -32,6 +36,7 @@ from .control_plane import (
     NodeCommandChannel,
     TradingState,
 )
+from .idempotency import RequestId, execution_job_key, intent_idempotency_key
 
 __all__ = [
     "ApprovedTradeIntentV1",
@@ -40,6 +45,10 @@ __all__ = [
     "IntentAction",
     "ReconciliationState",
     "RiskBudget",
+    "Execution",
+    "Protection",
+    "TakeProfitLevel",
+    "Sizing",
     "EXIT_ACTIONS",
     "POSITION_REQUIRED_ACTIONS",
     "CommandAckStatus",
@@ -55,4 +64,7 @@ __all__ = [
     "NodeCommand",
     "NodeCommandChannel",
     "TradingState",
+    "RequestId",
+    "execution_job_key",
+    "intent_idempotency_key",
 ]

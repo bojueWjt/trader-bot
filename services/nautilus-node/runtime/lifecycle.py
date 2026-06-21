@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Protocol
 
 from config.node_config import NodeConfig
 from execution_domain.contracts import ReconciliationState
 from execution_domain.control_plane import ControlPlaneClient, Heartbeat, TradingState
+
+_REPO = Path(__file__).resolve().parents[3]
+_CONTROL_PLANE = _REPO / "services" / "control-plane"
+if str(_CONTROL_PLANE) not in sys.path:
+    sys.path.insert(0, str(_CONTROL_PLANE))
+
+from order_management.state_descriptor import halted_action_allowed  # noqa: E402
 
 
 class Clock(Protocol):
@@ -89,6 +98,7 @@ class NodeLifecycle:
         self._halt(f"{dependency.value} failed: {reason}")
 
     def apply_operator_state(self, state: TradingState, reason: str) -> None:
+        state = _trading_state(state)
         if state is TradingState.ACTIVE and not self.readiness.ready:
             raise RuntimeError("cannot switch ACTIVE before readiness is true")
         self._trading_state = state
@@ -96,6 +106,9 @@ class NodeLifecycle:
             self._halt_reason = reason
         elif state is TradingState.ACTIVE:
             self._halt_reason = ""
+
+    def action_allowed(self, action: str) -> bool:
+        return _action_allowed(self._trading_state, action)
 
     def build_heartbeat(self) -> Heartbeat:
         return Heartbeat(
@@ -151,3 +164,39 @@ class NodeLifecycle:
     def _halt(self, reason: str) -> None:
         self._trading_state = TradingState.HALTED
         self._halt_reason = reason
+
+
+class TradingLifecycle:
+    """Small command-gate lifecycle for tests and strategy-level command routing."""
+
+    def __init__(self, initial_state: TradingState | str = TradingState.ACTIVE) -> None:
+        self._trading_state = _trading_state(initial_state)
+        self._reason = ""
+
+    @property
+    def trading_state(self) -> TradingState:
+        return self._trading_state
+
+    @property
+    def reason(self) -> str:
+        return self._reason
+
+    def apply_operator_state(self, state: TradingState | str, reason: str) -> None:
+        self._trading_state = _trading_state(state)
+        self._reason = reason
+
+    def action_allowed(self, action: str) -> bool:
+        return _action_allowed(self._trading_state, action)
+
+
+def _trading_state(state: TradingState | str) -> TradingState:
+    if isinstance(state, TradingState):
+        return state
+    return TradingState(str(state))
+
+
+def _action_allowed(state: TradingState, action: str) -> bool:
+    try:
+        return halted_action_allowed(action, state.value)
+    except KeyError:
+        return False

@@ -7,14 +7,13 @@ import {
   ClipboardList,
   Download,
   FileText,
-  History,
   Inbox,
   Lock,
   LogOut,
   Radio,
   RefreshCcw,
   Send,
-  Sigma,
+  Settings,
   ShieldAlert,
   ShieldCheck,
   Siren,
@@ -25,6 +24,8 @@ import type { ReactElement, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRealtimeConnection } from "./hooks/useRealtime";
 import { LoginPage } from "./pages/LoginPage";
+import { OrdersPage } from "./pages/orders/OrdersPage";
+import { OrderSettingsPage } from "./pages/settings/OrderSettingsPage";
 import {
   activateKillSwitch,
   approveReviewProposal,
@@ -37,23 +38,18 @@ import {
   fetchDailyReportTelegramPreview,
   fetchDailyReportVersions,
   fetchDashboardOverview,
-  fetchOrderCenter,
   fetchRiskOverview,
   fetchSignalMediaBlob,
   fetchSignalReview,
   getEmptyDashboardOverview,
   getEmptyDailyReport,
-  getEmptyOrderCenter,
   getEmptyRiskOverview,
   getEmptySignalReview,
   getStoredAuthToken,
+  getStoredAuthRole,
   isAuthDisabled,
   lockPair,
   moveStopLoss,
-  OrderCenterData,
-  OrderCenterOrder,
-  OrderCenterPosition,
-  OrderCenterTrade,
   partialClosePosition,
   pauseBot,
   rejectReviewProposal,
@@ -162,31 +158,6 @@ function useReportData(date: string): LoadState<DailyReport> {
       active = false;
     };
   }, [date]);
-
-  return { data, loading };
-}
-
-function useOrderCenterData(refreshKey: number): LoadState<OrderCenterData> {
-  const [data, setData] = useState<OrderCenterData>(getEmptyOrderCenter());
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let active = true;
-
-    setLoading(true);
-    fetchOrderCenter().then((orders) => {
-      if (!active) {
-        return;
-      }
-
-      setData(orders);
-      setLoading(false);
-    });
-
-    return () => {
-      active = false;
-    };
-  }, [refreshKey]);
 
   return { data, loading };
 }
@@ -319,8 +290,9 @@ export function App({ initialPath }: AppProps): ReactElement {
           onLogout={logout}
         />
         {path === "/risk" && <RiskPage />}
-        {path === "/orders" && <OrderCenterPage refreshKey={dashboardRefreshKey} onRefresh={resyncDashboard} />}
+        {path === "/orders" && <OrdersPage role={getStoredAuthRole()} refreshKey={dashboardRefreshKey} onRefresh={resyncDashboard} />}
         {path === "/review" && <SignalReviewPage refreshKey={dashboardRefreshKey} onRefresh={resyncDashboard} />}
+        {(path === "/settings" || path === "/settings/orders") && <OrderSettingsPage role={getStoredAuthRole()} />}
         {path === "/reports" && <ReportsPage onNavigate={navigate} />}
         {/^\/reports\/daily\/\d{4}-\d{2}-\d{2}$/.test(path) && <DailyReportPage date={reportDate} />}
         {path === "/dashboard" && <DashboardPage refreshKey={dashboardRefreshKey} />}
@@ -342,6 +314,7 @@ function Sidebar({ currentPath, onNavigate }: SidebarProps): ReactElement {
     { path: "/review", label: "Review", icon: Inbox },
     { path: "/risk", label: "Risk", icon: ShieldAlert },
     { path: "/reports", label: "Reports", icon: FileText },
+    { path: "/settings/orders", label: "Settings", icon: Settings },
     { path: `/reports/daily/${today}`, label: "Daily", icon: FileText }
   ];
 
@@ -360,6 +333,9 @@ function Sidebar({ currentPath, onNavigate }: SidebarProps): ReactElement {
           let active = currentPath === item.path || currentPath.startsWith(item.path);
           if (item.path === "/reports") {
             active = currentPath === "/reports";
+          }
+          if (item.path === "/settings/orders") {
+            active = currentPath === "/settings" || currentPath === "/settings/orders";
           }
 
           return (
@@ -650,6 +626,14 @@ function Panel({ title, icon, children }: PanelProps): ReactElement {
 
 function StatusPill({ status }: { status: string }): ReactElement {
   return <span className={`status-pill ${statusTone(status)}`}>{status}</span>;
+}
+
+function EmptyTableRow({ colSpan, label }: { colSpan: number; label: string }): ReactElement {
+  return (
+    <tr>
+      <td className="empty-table" colSpan={colSpan}>{label}</td>
+    </tr>
+  );
 }
 
 function DataQualityPanel({ quality }: { quality: DataSourceState }): ReactElement {
@@ -1299,272 +1283,6 @@ function BotActionConfirm({
       </section>
     </div>
   );
-}
-
-function OrderCenterPage({
-  refreshKey,
-  onRefresh
-}: {
-  refreshKey: number;
-  onRefresh: () => void;
-}): ReactElement {
-  const { data, loading } = useOrderCenterData(refreshKey);
-  const sourceBadgeClass = getSourceBadgeClass(data.dataSource, loading);
-  const sourceBadgeLabel = getSourceBadgeLabel(data.dataSource, loading);
-
-  return (
-    <section className="page-grid">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">Order Center</p>
-          <h2>/orders</h2>
-        </div>
-        <div className="button-row">
-          <span className={sourceBadgeClass}>{sourceBadgeLabel}</span>
-          <button
-            aria-label="Refresh order center"
-            className="secondary-button"
-            onClick={onRefresh}
-            title="Refresh order center"
-            type="button"
-          >
-            <RefreshCcw size={16} />
-            Refresh
-          </button>
-        </div>
-      </div>
-      <DataQualityPanel quality={data.dataSource} />
-
-      <div className="kpi-grid">
-        <MetricCard
-          delta={`${data.summary.openPositionCount} open positions`}
-          label="Open PnL"
-          tone={data.summary.openPnl >= 0 ? "good" : "danger"}
-          value={formatCurrency(data.summary.openPnl)}
-        />
-        <MetricCard
-          delta={`${data.summary.historyCount} trades`}
-          label="Realized PnL"
-          tone={data.summary.realizedPnl >= 0 ? "good" : "danger"}
-          value={formatCurrency(data.summary.realizedPnl)}
-        />
-        <MetricCard
-          delta={`${data.summary.winCount} wins / ${data.summary.lossCount} losses`}
-          label="Total PnL"
-          tone={data.summary.totalPnl >= 0 ? "good" : "danger"}
-          value={formatCurrency(data.summary.totalPnl)}
-        />
-        <MetricCard
-          delta="open / pending"
-          label="挂单"
-          tone={data.summary.pendingOrderCount > 0 ? "warning" : "muted"}
-          value={`${data.summary.pendingOrderCount}`}
-        />
-      </div>
-
-      <Panel title="持仓" icon={<Activity size={17} />}>
-        <OrderPositionsTable positions={data.positions} />
-      </Panel>
-
-      <Panel title="挂单" icon={<ClipboardList size={17} />}>
-        <OrderOrdersTable orders={data.orders} />
-      </Panel>
-
-      <Panel title="历史" icon={<History size={17} />}>
-        <OrderHistoryTable trades={data.history} />
-      </Panel>
-
-      <Panel title="盈亏" icon={<Sigma size={17} />}>
-        <dl className="detail-grid compact">
-          <div>
-            <dt>Open PnL</dt>
-            <dd className={data.summary.openPnl >= 0 ? "good-text" : "danger-text"}>{formatCurrency(data.summary.openPnl)}</dd>
-          </div>
-          <div>
-            <dt>Realized PnL</dt>
-            <dd className={data.summary.realizedPnl >= 0 ? "good-text" : "danger-text"}>
-              {formatCurrency(data.summary.realizedPnl)}
-            </dd>
-          </div>
-          <div>
-            <dt>Total PnL</dt>
-            <dd className={data.summary.totalPnl >= 0 ? "good-text" : "danger-text"}>{formatCurrency(data.summary.totalPnl)}</dd>
-          </div>
-          <div>
-            <dt>Win / Loss</dt>
-            <dd>{data.summary.winCount} / {data.summary.lossCount}</dd>
-          </div>
-        </dl>
-      </Panel>
-    </section>
-  );
-}
-
-function OrderPositionsTable({ positions }: { positions: OrderCenterPosition[] }): ReactElement {
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Pair</th>
-            <th>Side</th>
-            <th>Amount</th>
-            <th>Stake</th>
-            <th>Entry</th>
-            <th>Current</th>
-            <th>Leverage</th>
-            <th>PnL</th>
-            <th>PnL %</th>
-            <th>Opened</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {positions.map((position) => (
-            <tr key={position.id}>
-              <td>{position.pair}</td>
-              <td>{position.side}</td>
-              <td>{formatAmount(position.amount)}</td>
-              <td>{formatCurrency(position.stakeAmount)}</td>
-              <td>{formatCurrency(position.entry)}</td>
-              <td>{formatCurrency(position.current)}</td>
-              <td>{position.leverage}x</td>
-              <td className={position.pnl >= 0 ? "num good-text" : "num danger-text"}>{formatCurrency(position.pnl)}</td>
-              <td>{formatOrderPercent(position.pnlPct)}</td>
-              <td>{formatOrderDate(position.openDate)}</td>
-              <td><StatusPill status={position.status} /></td>
-            </tr>
-          ))}
-          {positions.length === 0 && <EmptyTableRow colSpan={11} label="No open positions from control-plane." />}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function OrderOrdersTable({ orders }: { orders: OrderCenterOrder[] }): ReactElement {
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Order ID</th>
-            <th>Pair</th>
-            <th>Side</th>
-            <th>Type</th>
-            <th>Status</th>
-            <th>Price</th>
-            <th>Amount</th>
-            <th>Filled</th>
-            <th>Remaining</th>
-            <th>Created</th>
-            <th>Trade ID</th>
-          </tr>
-        </thead>
-        <tbody>
-          {orders.map((order) => (
-            <tr key={`${order.tradeId}-${order.id}`}>
-              <td>{order.id}</td>
-              <td>{order.pair}</td>
-              <td>{order.side}</td>
-              <td>{order.type}</td>
-              <td><StatusPill status={order.status} /></td>
-              <td>{formatCurrency(order.price)}</td>
-              <td>{formatAmount(order.amount)}</td>
-              <td>{formatAmount(order.filled)}</td>
-              <td>{formatAmount(order.remaining)}</td>
-              <td>{formatOrderDate(order.createdAt)}</td>
-              <td>{order.tradeId || "--"}</td>
-            </tr>
-          ))}
-          {orders.length === 0 && <EmptyTableRow colSpan={11} label="No open or pending orders from control-plane." />}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function OrderHistoryTable({ trades }: { trades: OrderCenterTrade[] }): ReactElement {
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Trade ID</th>
-            <th>Pair</th>
-            <th>Side</th>
-            <th>Status</th>
-            <th>Amount</th>
-            <th>Open</th>
-            <th>Close</th>
-            <th>PnL</th>
-            <th>PnL %</th>
-            <th>Opened</th>
-            <th>Closed</th>
-            <th>Orders</th>
-          </tr>
-        </thead>
-        <tbody>
-          {trades.map((trade) => (
-            <tr key={trade.id}>
-              <td>{trade.id}</td>
-              <td>{trade.pair}</td>
-              <td>{trade.side}</td>
-              <td><StatusPill status={trade.status} /></td>
-              <td>{formatAmount(trade.amount)}</td>
-              <td>{formatCurrency(trade.openRate)}</td>
-              <td>{trade.closeRate > 0 ? formatCurrency(trade.closeRate) : "--"}</td>
-              <td className={trade.pnl >= 0 ? "num good-text" : "num danger-text"}>{formatCurrency(trade.pnl)}</td>
-              <td>{formatOrderPercent(trade.pnlPct)}</td>
-              <td>{formatOrderDate(trade.openDate)}</td>
-              <td>{formatOrderDate(trade.closeDate)}</td>
-              <td>{trade.ordersCount}</td>
-            </tr>
-          ))}
-          {trades.length === 0 && <EmptyTableRow colSpan={12} label="No trade history from control-plane." />}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function EmptyTableRow({ colSpan, label }: { colSpan: number; label: string }): ReactElement {
-  return (
-    <tr>
-      <td className="empty-table" colSpan={colSpan}>{label}</td>
-    </tr>
-  );
-}
-
-function formatAmount(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 8
-  }).format(value);
-}
-
-function formatOrderPercent(value: number): string {
-  let normalized = value;
-  if (Math.abs(normalized) > 0 && Math.abs(normalized) <= 1) {
-    normalized *= 100;
-  }
-
-  return formatPercent(normalized);
-}
-
-function formatOrderDate(value: string): string {
-  if (!value || value === "--") {
-    return "--";
-  }
-
-  if (/^\d+$/.test(value)) {
-    const timestamp = Number(value);
-    if (Number.isFinite(timestamp)) {
-      const millis = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
-      return new Date(millis).toISOString().replace("T", " ").slice(0, 19);
-    }
-  }
-
-  return value.replace("T", " ").slice(0, 19);
 }
 
 type ReviewDecision =

@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "intent_id": "44444444-4444-4444-8444-444444444444",
+  "decision_id": "55555555-5555-4555-8555-555555555555",
+  "risk_decision_id": "66666666-6666-4666-8666-666666666666",
+  "account_id": "acct-main",
+  "instrument_id": "BTCUSDT-PERP.BINANCE",
+  "action": "open_position",
+  "order_plan": {
+    "legacy": "still-open"
+  },
+  "execution": {
+    "order_type": "limit",
+    "time_in_force": "GTC",
+    "post_only": true,
+    "reduce_only": false,
+    "max_slippage_bps": 12.5,
+    "limit_price": 25000.5,
+    "zone": {
+      "low": 24900,
+      "high": 25100
+    }
+  },
+  "protection": {
+    "require_stop": true,
+    "stop": {
+      "type": "stop_market",
+      "trigger_basis": "mark",
+      "distance_pct": 1.5
+    },
+    "take_profits": [
+      {
+        "price": 26000,
+        "fraction": 0.4,
+        "time_in_force": "GTC"
+      },
+      {
+        "r_multiple": 2,
+        "fraction": 0.6,
+        "time_in_force": "IOC"
+      }
+    ],
+    "breakeven": {
+      "enabled": true,
+      "trigger_r": 1,
+      "offset_bps": 5
+    },
+    "trailing": {
+      "enabled": true,
+      "activation_r": 1.5,
+      "callback_rate": 0.3,
+      "min_step": 10
+    }
+  },
+  "sizing": {
+    "quantity": 0.25
+  },
+  "risk_budget": {
+    "risk_fraction": 0.01,
+    "max_notional": 2500,
+    "max_leverage": 3
+  },
+  "target_position_id": null,
+  "valid_until": "2026-06-19T13:00:00Z",
+  "idempotency_key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "approved_at": "2026-06-19T12:03:00Z"
+}

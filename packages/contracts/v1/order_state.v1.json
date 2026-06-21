@@ -1,0 +1,214 @@
+{
+  "$id": "https://trader-bot.local/contracts/v1/order_state.v1.json",
+  "schema_version": "1.0",
+  "title": "OrderManagementStateMachinesV1",
+  "kind": "state-machine-descriptor",
+  "description": "Canonical, frozen state machines for the order management domain (intent, order, position, command) plus the HALTED/REDUCING action-permission matrix. This is a machine-readable DESCRIPTOR (reference data), not a message-instance JSON Schema, and is intentionally excluded from the contracts-v1 message snapshot gate. It is the single source of truth consumed by projection reducers (OM2), the execution job lifecycle (OM4), the command orchestrator (OM6), and the contract tests. Every legal transition is an explicit edge; any transition not listed (and not covered by a domain's any_state_to interrupts) is illegal and MUST be recorded as an anomaly by the reducer (PLAN §5.2).",
+  "conventions": {
+    "state_kinds": {
+      "active": "non-terminal, work in progress",
+      "success": "terminal, desired outcome reached",
+      "failure": "terminal, undesired but explained outcome",
+      "cancelled": "terminal, intentionally stopped",
+      "quarantine": "non-terminal holding state requiring human/operator resolution (needs_review)",
+      "unknown": "non-terminal local-unexplained state that MUST trigger reconciliation (order.lost)"
+    },
+    "terminal": "A state with terminal=true has no outgoing transitions; reducers must reject any further advance and log an anomaly.",
+    "any_state_to": "Interrupt targets reachable from ANY non-terminal state of the domain. These are driven by an EXPLICIT failure/expiry/cancel/quarantine signal, never by cursor advance alone (PLAN §5.1).",
+    "event_state_map": "Maps a venue/Nautilus execution event_type to the resulting macro-state. 'self' = non-advancing (state unchanged); 'derive' = reducer computes the target from payload (e.g. fill ratio, quantity delta)."
+  },
+  "domains": {
+    "intent": {
+      "title": "ApprovedTradeIntent lifecycle",
+      "initial": "approved",
+      "doc": "PLAN §5.1. Terminal outcome MUST be decided by an execution result or an explicit failure, never by the fact that a cursor advanced.",
+      "states": {
+        "approved": { "kind": "active", "terminal": false },
+        "dispatched": { "kind": "active", "terminal": false },
+        "node_accepted": { "kind": "active", "terminal": false },
+        "executing": { "kind": "active", "terminal": false },
+        "completed": { "kind": "success", "terminal": true },
+        "rejected": { "kind": "failure", "terminal": true },
+        "denied": { "kind": "failure", "terminal": true },
+        "failed": { "kind": "failure", "terminal": true, "retryable": false },
+        "expired": { "kind": "failure", "terminal": true },
+        "cancelled": { "kind": "cancelled", "terminal": true },
+        "needs_review": { "kind": "quarantine", "terminal": false }
+      },
+      "transitions": [
+        { "from": "approved", "to": "dispatched", "trigger": "execution_job_dispatched" },
+        { "from": "dispatched", "to": "node_accepted", "trigger": "node_accepted_intent" },
+        { "from": "node_accepted", "to": "executing", "trigger": "first_order_working_or_fill" },
+        { "from": "executing", "to": "completed", "trigger": "terminal_execution_result" },
+        { "from": "needs_review", "to": "dispatched", "trigger": "operator_resume" },
+        { "from": "needs_review", "to": "cancelled", "trigger": "operator_cancel" }
+      ],
+      "any_state_to": {
+        "targets": ["rejected", "denied", "failed", "expired", "cancelled", "needs_review"],
+        "note": "From any non-terminal intent state an explicit signal may force a terminal/quarantine outcome (node reject/deny, submit failure, valid_until expiry, operator cancel, or an unresolvable ambiguity)."
+      },
+      "reconcile_with": {
+        "db_enum": "trade_intent_status",
+        "existing_values": ["draft", "approved", "rejected", "cancelled", "expired"],
+        "note": "'draft' is the pre-approval state owned by the Decision Gateway and is intentionally out of this lifecycle (which begins at 'approved'). OM0-04 MUST extend the trade_intent_status DB enum to add: dispatched, node_accepted, executing, completed, denied, failed, needs_review."
+      }
+    },
+    "order": {
+      "title": "Exchange order lifecycle",
+      "initial": "planned",
+      "doc": "PLAN §5.2. Status is driven by execution-event reducers. 'lost' means the control-plane locally cannot explain the order's state; it MUST trigger reconciliation and does NOT assert the venue order is absent.",
+      "states": {
+        "planned": { "kind": "active", "terminal": false },
+        "pending_submit": { "kind": "active", "terminal": false },
+        "submitted": { "kind": "active", "terminal": false },
+        "accepted": { "kind": "active", "terminal": false },
+        "working": { "kind": "active", "terminal": false },
+        "partially_filled": { "kind": "active", "terminal": false },
+        "filled": { "kind": "success", "terminal": true },
+        "rejected": { "kind": "failure", "terminal": true },
+        "denied": { "kind": "failure", "terminal": true },
+        "pending_cancel": { "kind": "active", "terminal": false },
+        "cancelled": { "kind": "cancelled", "terminal": true },
+        "expired": { "kind": "failure", "terminal": true },
+        "failed": { "kind": "failure", "terminal": true, "retryable": false },
+        "lost": { "kind": "unknown", "terminal": false }
+      },
+      "transitions": [
+        { "from": "planned", "to": "pending_submit", "trigger": "plan_committed" },
+        { "from": "planned", "to": "denied", "trigger": "risk_denied_pre_submit" },
+        { "from": "pending_submit", "to": "submitted", "trigger": "OrderSubmitted" },
+        { "from": "pending_submit", "to": "failed", "trigger": "submit_failed_terminal" },
+        { "from": "submitted", "to": "accepted", "trigger": "OrderAccepted" },
+        { "from": "submitted", "to": "rejected", "trigger": "OrderRejected" },
+        { "from": "accepted", "to": "working", "trigger": "order_live_on_book" },
+        { "from": "accepted", "to": "partially_filled", "trigger": "OrderFilled_partial" },
+        { "from": "accepted", "to": "filled", "trigger": "OrderFilled_full" },
+        { "from": "working", "to": "partially_filled", "trigger": "OrderFilled_partial" },
+        { "from": "working", "to": "filled", "trigger": "OrderFilled_full" },
+        { "from": "partially_filled", "to": "partially_filled", "trigger": "OrderFilled_partial" },
+        { "from": "partially_filled", "to": "filled", "trigger": "OrderFilled_full" },
+        { "from": "accepted", "to": "pending_cancel", "trigger": "OrderPendingCancel" },
+        { "from": "working", "to": "pending_cancel", "trigger": "OrderPendingCancel" },
+        { "from": "partially_filled", "to": "pending_cancel", "trigger": "OrderPendingCancel" },
+        { "from": "pending_cancel", "to": "cancelled", "trigger": "OrderCanceled" },
+        { "from": "accepted", "to": "cancelled", "trigger": "OrderCanceled" },
+        { "from": "working", "to": "cancelled", "trigger": "OrderCanceled" },
+        { "from": "partially_filled", "to": "cancelled", "trigger": "OrderCanceled" },
+        { "from": "working", "to": "expired", "trigger": "OrderExpired" },
+        { "from": "accepted", "to": "expired", "trigger": "OrderExpired" },
+        { "from": "lost", "to": "working", "trigger": "reconciliation_resolved_live" },
+        { "from": "lost", "to": "filled", "trigger": "reconciliation_resolved_filled" },
+        { "from": "lost", "to": "cancelled", "trigger": "reconciliation_resolved_cancelled" }
+      ],
+      "any_state_to": {
+        "targets": ["lost"],
+        "note": "Any non-terminal order may drop to 'lost' when the local projection cannot reconcile its state from the event stream (event gap, out-of-order, or missing ack). 'lost' is NOT terminal and MUST schedule reconciliation."
+      },
+      "event_state_map": {
+        "OrderSubmitted": "submitted",
+        "OrderAccepted": "accepted",
+        "OrderFilled": "derive",
+        "OrderCanceled": "cancelled",
+        "OrderRejected": "rejected",
+        "OrderExpired": "expired",
+        "OrderUpdated": "self",
+        "OrderPendingUpdate": "self",
+        "OrderPendingCancel": "pending_cancel"
+      },
+      "event_state_map_notes": {
+        "OrderFilled": "Reducer derives 'filled' when leaves_qty<=0 (or filled_qty>=quantity) else 'partially_filled'.",
+        "OrderUpdated": "Replace/move-stop acknowledgement; macro-state unchanged (working stays working).",
+        "OrderPendingUpdate": "In-flight modify; macro-state unchanged until OrderUpdated or rejection."
+      }
+    },
+    "position": {
+      "title": "Position lifecycle",
+      "initial": "opening",
+      "doc": "PLAN §5.3. Position identity is the canonical (account_id, instrument canonical key, position_id) tuple resolved in OM0-02. 'external' = venue position with no owning local intent; 'reconciliation_required' = drift detected.",
+      "states": {
+        "opening": { "kind": "active", "terminal": false },
+        "open": { "kind": "active", "terminal": false },
+        "reducing": { "kind": "active", "terminal": false },
+        "closed": { "kind": "success", "terminal": true },
+        "external": { "kind": "quarantine", "terminal": false, "entry": true },
+        "reconciliation_required": { "kind": "quarantine", "terminal": false }
+      },
+      "transitions": [
+        { "from": "opening", "to": "open", "trigger": "PositionOpened" },
+        { "from": "open", "to": "reducing", "trigger": "PositionChanged_reduce" },
+        { "from": "reducing", "to": "reducing", "trigger": "PositionChanged_reduce" },
+        { "from": "reducing", "to": "open", "trigger": "PositionChanged_increase" },
+        { "from": "open", "to": "closed", "trigger": "PositionClosed" },
+        { "from": "reducing", "to": "closed", "trigger": "PositionClosed" },
+        { "from": "external", "to": "open", "trigger": "reconciliation_adopt_external" },
+        { "from": "external", "to": "closed", "trigger": "reconciliation_close_external" },
+        { "from": "reconciliation_required", "to": "open", "trigger": "reconciliation_resolved_open" },
+        { "from": "reconciliation_required", "to": "closed", "trigger": "reconciliation_resolved_closed" }
+      ],
+      "any_state_to": {
+        "targets": ["reconciliation_required"],
+        "note": "Any non-terminal position may enter reconciliation_required on detected drift between local projection and venue reality (PLAN §3 rule #2: exchange reality wins)."
+      },
+      "event_state_map": {
+        "PositionOpened": "open",
+        "PositionChanged": "derive",
+        "PositionClosed": "closed"
+      },
+      "event_state_map_notes": {
+        "PositionChanged": "Reducer derives 'reducing' when |quantity| decreased toward zero, else 'open'."
+      }
+    },
+    "command": {
+      "title": "Operator/emergency command lifecycle",
+      "initial": "requested",
+      "doc": "PLAN §5.4. cancel_all / close_all may only reach 'completed' after the venue is finally verified (no residual working orders / position flat). The 'verifying' state makes that mandatory.",
+      "states": {
+        "requested": { "kind": "active", "terminal": false },
+        "accepted": { "kind": "active", "terminal": false },
+        "running": { "kind": "active", "terminal": false },
+        "verifying": { "kind": "active", "terminal": false },
+        "completed": { "kind": "success", "terminal": true },
+        "partial": { "kind": "failure", "terminal": true },
+        "failed": { "kind": "failure", "terminal": true },
+        "timed_out": { "kind": "failure", "terminal": true }
+      },
+      "transitions": [
+        { "from": "requested", "to": "accepted", "trigger": "orchestrator_accept" },
+        { "from": "accepted", "to": "running", "trigger": "dispatched_to_nodes" },
+        { "from": "running", "to": "verifying", "trigger": "all_nodes_acked" },
+        { "from": "verifying", "to": "completed", "trigger": "venue_final_verified" },
+        { "from": "verifying", "to": "partial", "trigger": "venue_residual_found" },
+        { "from": "running", "to": "partial", "trigger": "some_nodes_failed" },
+        { "from": "running", "to": "failed", "trigger": "all_nodes_failed" },
+        { "from": "running", "to": "timed_out", "trigger": "ack_timeout" },
+        { "from": "verifying", "to": "timed_out", "trigger": "verify_timeout" }
+      ],
+      "any_state_to": { "targets": [], "note": "No implicit interrupts; all command terminals are reached via explicit transitions above." },
+      "reconcile_with": {
+        "db_table": "operator_commands",
+        "existing_statuses": ["pending", "acknowledged", "partial", "failed", "completed"],
+        "node_ack_statuses": ["pending", "acked", "failed"],
+        "mapping": {
+          "pending": "requested",
+          "acknowledged": "running",
+          "completed": "completed",
+          "partial": "partial",
+          "failed": "failed"
+        },
+        "note": "Existing services/control-plane/commands/commands.py recompute (pending->acknowledged->partial|failed|completed) is a coarse subset. OM6-01 MUST evolve operator_commands to add the 'accepted', 'verifying' and 'timed_out' states and the mandatory venue-verification step before 'completed' for cancel_all/close_all."
+      }
+    }
+  },
+  "halted_semantics": {
+    "doc": "PLAN §3 rule #4 (减仓通道常开) and the existing risk_state modes. HALTED/REDUCING block NEW risk but the reduce-only channel (cancel / partial_close / close / close_all) is ALWAYS open. Reconciles services/control-plane/risk_state (VALID_MODES) and services/control-plane/risk/governor.py (OPENING_ACTIONS gate).",
+    "modes": ["ACTIVE", "REDUCING", "HALTED"],
+    "actions": ["open_position", "add_position", "partial_close", "close_position", "move_stop_loss", "move_stop_to_entry", "replace_take_profits", "cancel", "cancel_all", "close_all"],
+    "opening_actions": ["open_position", "add_position"],
+    "reduce_only_actions": ["partial_close", "close_position", "cancel", "cancel_all", "close_all"],
+    "permission_matrix": {
+      "ACTIVE": { "open_position": true, "add_position": true, "partial_close": true, "close_position": true, "move_stop_loss": true, "move_stop_to_entry": true, "replace_take_profits": true, "cancel": true, "cancel_all": true, "close_all": true },
+      "REDUCING": { "open_position": false, "add_position": false, "partial_close": true, "close_position": true, "move_stop_loss": true, "move_stop_to_entry": true, "replace_take_profits": true, "cancel": true, "cancel_all": true, "close_all": true },
+      "HALTED": { "open_position": false, "add_position": false, "partial_close": true, "close_position": true, "move_stop_loss": true, "move_stop_to_entry": true, "replace_take_profits": true, "cancel": true, "cancel_all": true, "close_all": true }
+    }
+  }
+}

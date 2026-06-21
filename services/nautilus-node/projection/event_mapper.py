@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from hashlib import sha256
+from numbers import Number
 from typing import Any, Callable
 from uuid import UUID
 
@@ -164,13 +166,29 @@ def _payload(event: Any, *, instrument_id: str | None) -> dict[str, Any]:
         "locked",
         "reason",
     )
+    numeric_keys = {
+        "quantity",
+        "qty",
+        "filled_qty",
+        "leaves_qty",
+        "price",
+        "avg_px",
+        "last_px",
+        "last_qty",
+        "realized_pnl",
+        "balance",
+        "margin_balance",
+        "total",
+        "free",
+        "locked",
+    }
     payload: dict[str, Any] = {}
     if instrument_id is not None:
         payload["instrument_id"] = instrument_id
     for key in keys:
         value = _attr(event, key)
         if value is not None:
-            payload[key] = _jsonable(value)
+            payload[key] = _jsonable(value, stringify_numbers=key in numeric_keys)
     tags = _attr(event, "tags")
     if tags:
         payload["tags"] = [str(tag) for tag in tags]
@@ -249,13 +267,20 @@ def _attr(event: Any, *names: str) -> Any:
     return None
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, (str, int, float, bool)) or value is None:
+def _jsonable(value: Any, *, stringify_numbers: bool = False) -> Any:
+    if isinstance(value, bool) or value is None:
         return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (Decimal, Number)):
+        return str(value) if stringify_numbers else value
     if isinstance(value, datetime):
         return _ensure_aware(value).isoformat()
     if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
+        return [_jsonable(item, stringify_numbers=stringify_numbers) for item in value]
     if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
+        return {
+            str(key): _jsonable(item, stringify_numbers=stringify_numbers)
+            for key, item in value.items()
+        }
     return str(getattr(value, "value", value))

@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "intent_id": "77777777-7777-4777-8777-777777777777",
+  "decision_id": "88888888-8888-4888-8888-888888888888",
+  "risk_decision_id": "99999999-9999-4999-8999-999999999999",
+  "account_id": "acct-1",
+  "instrument_id": "BTCUSDT-PERP.BINANCE",
+  "action": "move_stop_loss",
+  "order_plan": {},
+  "sizing": {
+    "fraction": 0.5
+  },
+  "risk_budget": {
+    "risk_fraction": 0.01,
+    "max_notional": 10000,
+    "max_leverage": 3
+  },
+  "target_position_id": "pos-1",
+  "valid_until": "2026-06-21T12:00:00Z",
+  "idempotency_key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "approved_at": "2026-06-21T11:00:00Z"
+}

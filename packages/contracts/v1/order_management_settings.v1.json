@@ -1,0 +1,979 @@
+{
+  "$id": "https://trader-bot.local/contracts/v1/order_management_settings.v1.json",
+  "schema_version": "1.0",
+  "title": "OrderManagementSettingsV1",
+  "kind": "settings-descriptor",
+  "description": "Reference descriptor for order-management business settings. This is not a message-instance JSON Schema and is intentionally excluded from the contracts-v1 message snapshot gate.",
+  "categories": {
+    "general": {
+      "order_manager_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": false,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "execution_mode": {
+        "type": "enum",
+        "unit": "mode",
+        "default": "shadow",
+        "enum": ["shadow", "testnet", "live"],
+        "apply_mode": "restart_required",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "risk_posture": {
+        "type": "enum",
+        "unit": "state",
+        "default": "HALTED",
+        "enum": ["ACTIVE", "REDUCING", "HALTED"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "allowed_instruments": {
+        "type": "string",
+        "unit": "csv_symbols",
+        "default": "",
+        "apply_mode": "restart_required",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "default_account_id": {
+        "type": "string",
+        "unit": "account_id",
+        "default": "",
+        "apply_mode": "restart_required",
+        "scope_overridable": false,
+        "secret": false
+      },
+      "max_concurrent_execution_jobs": {
+        "type": "integer",
+        "unit": "jobs",
+        "default": 1,
+        "min": 1,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "intent_ttl_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 300,
+        "min": 1,
+        "max": 86400,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "idempotency_retention_days": {
+        "type": "integer",
+        "unit": "days",
+        "default": 30,
+        "min": 1,
+        "max": 365,
+        "apply_mode": "hot_reload",
+        "scope_overridable": false,
+        "secret": false
+      },
+      "default_command_timeout_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 30,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      }
+    },
+    "entry": {
+      "default_order_type": {
+        "type": "enum",
+        "unit": "order_type",
+        "default": "limit",
+        "enum": ["market", "limit", "zone"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "time_in_force": {
+        "type": "enum",
+        "unit": "tif",
+        "default": "GTC",
+        "enum": ["GTC", "IOC", "FOK", "GTD"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "post_only": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": false,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_slippage_bps": {
+        "type": "number",
+        "unit": "bps",
+        "default": 25,
+        "min": 0,
+        "max": 1000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "limit_offset_bps": {
+        "type": "number",
+        "unit": "bps",
+        "default": 5,
+        "min": 0,
+        "max": 1000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "unfilled_timeout_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 60,
+        "min": 1,
+        "max": 86400,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "reprice_interval_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 10,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_reprices": {
+        "type": "integer",
+        "unit": "count",
+        "default": 3,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_submit_retries": {
+        "type": "integer",
+        "unit": "count",
+        "default": 3,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "submit_retry_backoff_seconds": {
+        "type": "number",
+        "unit": "seconds",
+        "default": 1,
+        "min": 0,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "partial_fill_policy": {
+        "type": "enum",
+        "unit": "policy",
+        "default": "cancel_remainder",
+        "enum": ["keep_remainder", "cancel_remainder", "convert_remainder_to_market", "abort_and_reduce_filled"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "minimum_fill_ratio": {
+        "type": "number",
+        "unit": "ratio",
+        "default": 0.95,
+        "min": 0,
+        "max": 1,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "partial_fill_timeout_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 30,
+        "min": 1,
+        "max": 86400,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "market_conversion_max_slippage_bps": {
+        "type": "number",
+        "unit": "bps",
+        "default": 50,
+        "min": 0,
+        "max": 2000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      }
+    },
+    "protection": {
+      "require_stop": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "stop_order_type": {
+        "type": "enum",
+        "unit": "order_type",
+        "default": "stop_market",
+        "enum": ["stop_market", "stop_limit"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "stop_trigger_basis": {
+        "type": "enum",
+        "unit": "price_basis",
+        "default": "mark",
+        "enum": ["mark", "last"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "protection_install_timeout_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 15,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "take_profit_ladder": {
+        "type": "string",
+        "unit": "json",
+        "default": "",
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "breakeven_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": false,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "breakeven_trigger_r": {
+        "type": "number",
+        "unit": "r_multiple",
+        "default": 1,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "breakeven_offset_bps": {
+        "type": "number",
+        "unit": "bps",
+        "default": 0,
+        "min": -1000,
+        "max": 1000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "trailing_stop_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": false,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "trailing_activation_r": {
+        "type": "number",
+        "unit": "r_multiple",
+        "default": 1.5,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "trailing_callback_rate": {
+        "type": "number",
+        "unit": "percent",
+        "default": 0.5,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "trailing_min_step_bps": {
+        "type": "number",
+        "unit": "bps",
+        "default": 5,
+        "min": 0,
+        "max": 10000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "trailing_update_rate_limit_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 5,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "partial_close_default_fraction": {
+        "type": "number",
+        "unit": "ratio",
+        "default": 0.25,
+        "min": 0,
+        "max": 1,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "replace_protection_behavior": {
+        "type": "enum",
+        "unit": "policy",
+        "default": "cancel_replace",
+        "enum": ["cancel_replace", "amend_in_place"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "protection_repair_policy": {
+        "type": "enum",
+        "unit": "policy",
+        "default": "reducing",
+        "enum": ["halt", "reducing", "auto_repair", "alert_only"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      }
+    },
+    "money": {
+      "sizing_mode": {
+        "type": "enum",
+        "unit": "mode",
+        "default": "fixed_risk",
+        "enum": ["fixed_risk", "fixed_notional", "equity_fraction"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "fixed_notional": {
+        "type": "number",
+        "unit": "quote_currency",
+        "default": 0,
+        "min": 0,
+        "max": 1000000000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "equity_fraction": {
+        "type": "number",
+        "unit": "ratio",
+        "default": 0,
+        "min": 0,
+        "max": 1,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "risk_per_trade_pct": {
+        "type": "number",
+        "unit": "percent",
+        "default": 0,
+        "min": 0,
+        "max": 10,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_notional_per_order": {
+        "type": "number",
+        "unit": "quote_currency",
+        "default": 0,
+        "min": 0,
+        "max": 1000000000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_leverage": {
+        "type": "number",
+        "unit": "multiple",
+        "default": 1,
+        "min": 1,
+        "max": 125,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_open_positions": {
+        "type": "integer",
+        "unit": "count",
+        "default": 0,
+        "min": 0,
+        "max": 1000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_instrument_exposure": {
+        "type": "number",
+        "unit": "quote_currency",
+        "default": 0,
+        "min": 0,
+        "max": 1000000000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_correlated_exposure": {
+        "type": "number",
+        "unit": "quote_currency",
+        "default": 0,
+        "min": 0,
+        "max": 1000000000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_total_risk_pct": {
+        "type": "number",
+        "unit": "percent",
+        "default": 0,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "minimum_free_margin_pct": {
+        "type": "number",
+        "unit": "percent",
+        "default": 100,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "reserve_balance_pct": {
+        "type": "number",
+        "unit": "percent",
+        "default": 100,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "daily_loss_limit_pct": {
+        "type": "number",
+        "unit": "percent",
+        "default": 0,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "max_drawdown_pct": {
+        "type": "number",
+        "unit": "percent",
+        "default": 0,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "loss_cooldown_minutes": {
+        "type": "integer",
+        "unit": "minutes",
+        "default": 1440,
+        "min": 0,
+        "max": 10080,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "risk_reservation_ttl_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 300,
+        "min": 1,
+        "max": 86400,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      }
+    },
+    "price_monitor": {
+      "market_data_stale_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 10,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "account_data_stale_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 15,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "execution_event_stale_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 30,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "projection_lag_threshold_ms": {
+        "type": "integer",
+        "unit": "milliseconds",
+        "default": 5000,
+        "min": 1,
+        "max": 600000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "reconciliation_stale_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 300,
+        "min": 1,
+        "max": 86400,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "price_deviation_bps": {
+        "type": "number",
+        "unit": "bps",
+        "default": 200,
+        "min": 0,
+        "max": 10000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "evaluation_interval_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 5,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "protection_watchdog_interval_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 10,
+        "min": 1,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "disconnect_action": {
+        "type": "enum",
+        "unit": "action",
+        "default": "halt",
+        "enum": ["halt", "reducing", "hold"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      }
+    },
+    "reconciliation": {
+      "startup_reconciliation_required": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "restart_required",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "reconciliation_interval_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 300,
+        "min": 1,
+        "max": 86400,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "orphan_order_policy": {
+        "type": "enum",
+        "unit": "policy",
+        "default": "halt",
+        "enum": ["halt", "cancel", "adopt", "ignore"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "external_position_policy": {
+        "type": "enum",
+        "unit": "policy",
+        "default": "halt",
+        "enum": ["halt", "reduce", "adopt", "ignore"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "drift_policy": {
+        "type": "enum",
+        "unit": "policy",
+        "default": "halt",
+        "enum": ["halt", "reducing", "auto_repair", "alert_only"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "auto_adopt_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": false,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "retry_limit": {
+        "type": "integer",
+        "unit": "count",
+        "default": 3,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "retry_backoff_seconds": {
+        "type": "number",
+        "unit": "seconds",
+        "default": 1,
+        "min": 0,
+        "max": 3600,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "restart_recovery_mode": {
+        "type": "enum",
+        "unit": "mode",
+        "default": "halt_until_reconciled",
+        "enum": ["halt_until_reconciled", "resume_after_reconcile"],
+        "apply_mode": "restart_required",
+        "scope_overridable": true,
+        "secret": false
+      }
+    },
+    "emergency": {
+      "cancel_batch_size": {
+        "type": "integer",
+        "unit": "orders",
+        "default": 10,
+        "min": 1,
+        "max": 1000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "close_batch_size": {
+        "type": "integer",
+        "unit": "positions",
+        "default": 5,
+        "min": 1,
+        "max": 1000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "inter_order_delay_ms": {
+        "type": "integer",
+        "unit": "milliseconds",
+        "default": 250,
+        "min": 0,
+        "max": 60000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "command_max_retries": {
+        "type": "integer",
+        "unit": "count",
+        "default": 3,
+        "min": 0,
+        "max": 100,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "verify_timeout_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 30,
+        "min": 1,
+        "max": 86400,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "close_all_final_state": {
+        "type": "enum",
+        "unit": "state",
+        "default": "flat",
+        "enum": ["flat", "cancelled_and_flat"],
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "allow_close_while_halted": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "command_retention_days": {
+        "type": "integer",
+        "unit": "days",
+        "default": 30,
+        "min": 1,
+        "max": 3650,
+        "apply_mode": "restart_required",
+        "scope_overridable": false,
+        "secret": false
+      }
+    },
+    "notifications": {
+      "order_accepted_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "order_rejected_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "order_filled_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "partial_fill_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "protection_missing_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "stale_market_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "stale_account_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "reconciliation_drift_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "daily_loss_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "drawdown_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "emergency_command_results_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "notification_channels": {
+        "type": "string",
+        "unit": "csv_channels",
+        "default": "dashboard",
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "severity_routing": {
+        "type": "string",
+        "unit": "routing_policy",
+        "default": "critical:operator,high:operator,medium:dashboard",
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      }
+    },
+    "advanced": {
+      "outbox_batch_size": {
+        "type": "integer",
+        "unit": "events",
+        "default": 100,
+        "min": 1,
+        "max": 10000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": false,
+        "secret": false
+      },
+      "spool_max_items": {
+        "type": "integer",
+        "unit": "items",
+        "default": 10000,
+        "min": 0,
+        "max": 1000000,
+        "apply_mode": "restart_required",
+        "scope_overridable": false,
+        "secret": false
+      },
+      "spool_max_age_seconds": {
+        "type": "integer",
+        "unit": "seconds",
+        "default": 3600,
+        "min": 1,
+        "max": 2592000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": false,
+        "secret": false
+      },
+      "reducer_replay_window_hours": {
+        "type": "integer",
+        "unit": "hours",
+        "default": 24,
+        "min": 1,
+        "max": 8760,
+        "apply_mode": "restart_required",
+        "scope_overridable": false,
+        "secret": false
+      },
+      "event_retention_days": {
+        "type": "integer",
+        "unit": "days",
+        "default": 90,
+        "min": 1,
+        "max": 3650,
+        "apply_mode": "restart_required",
+        "scope_overridable": false,
+        "secret": false
+      },
+      "rate_limit_per_minute": {
+        "type": "integer",
+        "unit": "requests_per_minute",
+        "default": 60,
+        "min": 1,
+        "max": 100000,
+        "apply_mode": "hot_reload",
+        "scope_overridable": true,
+        "secret": false
+      },
+      "diagnostics_bundle_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": false,
+        "secret": false
+      },
+      "import_export_enabled": {
+        "type": "boolean",
+        "unit": "flag",
+        "default": true,
+        "apply_mode": "hot_reload",
+        "scope_overridable": false,
+        "secret": false
+      }
+    }
+  }
+}
