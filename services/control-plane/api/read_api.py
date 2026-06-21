@@ -878,9 +878,23 @@ def v1_message_media(signal_id: str, index: int, authorization: str | None = Hea
     media_root = os.environ.get("MEDIA_ROOT", "").strip()
     object_key = asset.get("object_key")
     if media_root and object_key:
-        path = Path(media_root) / object_key
-        if path.is_file():
-            return FileResponse(path, media_type=asset.get("mime") or "application/octet-stream")
+        base = Path(media_root).resolve()
+        candidate = Path(object_key)
+        if not candidate.is_absolute():
+            candidate = base / object_key
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            candidate = None
+        # sandbox: the resolved path must live inside MEDIA_ROOT. This rejects path
+        # traversal AND an absolute object_key that points outside the media store,
+        # so a poisoned object_key can never exfiltrate an arbitrary host file.
+        if (
+            candidate is not None
+            and candidate.is_file()
+            and (candidate == base or str(candidate).startswith(str(base) + os.sep))
+        ):
+            return FileResponse(candidate, media_type=asset.get("mime") or "application/octet-stream")
     raise HTTPException(status_code=404, detail="media bytes unavailable")
 
 
