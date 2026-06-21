@@ -382,7 +382,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [],
       "owned_paths": [
         "packages/contracts/v1/order_state.v1.json",
@@ -393,7 +393,12 @@
         "终态、重试态、unknown/lost 语义明确",
         "HALTED 允许减仓与撤单的语义写入契约"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: a3bc5d5",
+        "test: tests/order_management/test_state_machines_v1.py — 11 passed (.venv-integration pytest)",
+        "artifacts: packages/contracts/v1/order_state.v1.json, docs/order-management/STATE_MACHINES.md",
+        "reconciled: trade_intent_status enum, ORDER/POSITION event catalogs, operator_command terminals, risk_state VALID_MODES"
+      ],
       "blocker": null,
       "notes": []
     },
