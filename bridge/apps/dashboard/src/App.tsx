@@ -337,21 +337,21 @@ type SidebarProps = {
 function Sidebar({ currentPath, onNavigate }: SidebarProps): ReactElement {
   const today = new Date().toISOString().slice(0, 10);
   const items = [
-    { path: "/dashboard", label: "Dashboard", icon: Activity },
-    { path: "/orders", label: "Orders", icon: ClipboardList },
-    { path: "/review", label: "Review", icon: Inbox },
-    { path: "/risk", label: "Risk", icon: ShieldAlert },
-    { path: "/reports", label: "Reports", icon: FileText },
-    { path: `/reports/daily/${today}`, label: "Daily", icon: FileText }
+    { path: "/dashboard", label: "看板", icon: Activity },
+    { path: "/orders", label: "订单", icon: ClipboardList },
+    { path: "/review", label: "审核", icon: Inbox },
+    { path: "/risk", label: "风控", icon: ShieldAlert },
+    { path: "/reports", label: "报表", icon: FileText },
+    { path: `/reports/daily/${today}`, label: "日报", icon: FileText }
   ];
 
   return (
-    <aside className="sidebar" aria-label="Primary">
+    <aside className="sidebar" aria-label="主导航">
       <div className="brand">
         <span className="brand-mark">HT</span>
         <div>
           <strong>Hermes Trader</strong>
-          <span>Operations</span>
+          <span>运营</span>
         </div>
       </div>
       <nav className="nav-list">
@@ -364,13 +364,13 @@ function Sidebar({ currentPath, onNavigate }: SidebarProps): ReactElement {
 
           return (
             <button
-              aria-label={`Open ${item.label}`}
+              aria-label={`打开${item.label}`}
               className={active ? "nav-item active" : "nav-item"}
               key={item.path}
               onClick={() => {
                 onNavigate(item.path);
               }}
-              title={`Open ${item.label}`}
+              title={`打开${item.label}`}
               type="button"
             >
               <Icon size={17} />
@@ -379,15 +379,15 @@ function Sidebar({ currentPath, onNavigate }: SidebarProps): ReactElement {
           );
         })}
         <a
-          aria-label="Open Telegram watcher console"
+          aria-label="打开 Telegram 监听台"
           className="nav-item"
           href="/watcher/"
           rel="noreferrer"
           target="_blank"
-          title="Open Telegram watcher console"
+          title="打开 Telegram 监听台"
         >
           <Radio size={17} />
-          <span>Watcher</span>
+          <span>监听台</span>
         </a>
       </nav>
     </aside>
@@ -405,7 +405,7 @@ function TopBar({ realtimeLabel, realtimeConnected, showLogout, onLogout }: TopB
   return (
     <header className="topbar">
       <div>
-        <p className="eyebrow">Crypto Ops Console</p>
+        <p className="eyebrow">加密运营控制台</p>
         <h1>实时运营看板</h1>
       </div>
       <div className="topbar-actions">
@@ -414,9 +414,9 @@ function TopBar({ realtimeLabel, realtimeConnected, showLogout, onLogout }: TopB
           <span>{realtimeLabel}</span>
         </div>
         {showLogout && (
-          <button aria-label="Log out" className="secondary-button" onClick={onLogout} title="Log out" type="button">
+          <button aria-label="退出登录" className="secondary-button" onClick={onLogout} title="退出登录" type="button">
             <LogOut size={16} />
-            Log out
+            退出登录
           </button>
         )}
       </div>
@@ -451,8 +451,10 @@ function DashboardPage({ refreshKey }: { refreshKey: number }): ReactElement {
       return;
     }
 
+    const actionLabel = botAction === "pause" ? "暂停" : "恢复";
+
     setBotActionSubmitting(true);
-    setBotActionStatus(`${botAction} request pending`);
+    setBotActionStatus(`${actionLabel}请求处理中`);
 
     let result: CommandResult | false = false;
     if (botAction === "pause") {
@@ -471,38 +473,38 @@ function DashboardPage({ refreshKey }: { refreshKey: number }): ReactElement {
       return;
     }
 
-    setBotActionStatus(`${botAction} failed`);
+    setBotActionStatus(`${actionLabel}失败`);
   }
 
   return (
     <section className="page-grid">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Live Overview</p>
+          <p className="eyebrow">实时总览</p>
           <h2>/dashboard</h2>
         </div>
         <span className={sourceBadgeClass}>{sourceBadgeLabel}</span>
       </div>
       <DataQualityPanel quality={data.dataSource} />
 
-      <section className="ops-strip" aria-label="Operator state">
+      <section className="ops-strip" aria-label="操作员状态">
         <div className={`ops-mode ${statusTone(data.safety.riskState)}`}>
           <ShieldCheck size={18} />
           <div>
-            <span>Run mode</span>
+            <span>运行模式</span>
             <strong>{data.safety.modeLabel}</strong>
           </div>
         </div>
         <div>
-          <span>Data freshness</span>
+          <span>数据新鲜度</span>
           <strong>{data.safety.dataFreshness}</strong>
         </div>
         <div>
-          <span>Operator lane</span>
+          <span>操作员通道</span>
           <strong>{data.safety.operatorLane}</strong>
         </div>
         <div>
-          <span>Last sync</span>
+          <span>上次同步</span>
           <strong>{data.safety.lastSync}</strong>
         </div>
       </section>
@@ -513,7 +515,7 @@ function DashboardPage({ refreshKey }: { refreshKey: number }): ReactElement {
         ))}
       </div>
 
-      <Panel title="Portfolio exposure" icon={<ShieldAlert size={17} />}>
+      <Panel title="组合敞口" icon={<ShieldAlert size={17} />}>
         <div className="exposure-grid">
           {data.exposure.map((bucket) => (
             <div className={`exposure-row ${statusTone(bucket.status)}`} key={bucket.label}>
@@ -605,7 +607,7 @@ function getSourceBadgeClass(dataSource: DataSourceState, loading: boolean): str
 
 function getSourceBadgeLabel(dataSource: DataSourceState, loading: boolean): string {
   if (loading) {
-    return "Loading API";
+    return "接口加载中";
   }
 
   return `${dataSource.source} / ${dataSource.status}`;
@@ -654,7 +656,7 @@ function StatusPill({ status }: { status: string }): ReactElement {
 
 function DataQualityPanel({ quality }: { quality: DataSourceState }): ReactElement {
   return (
-    <section className={quality.stale ? "quality-panel stale" : "quality-panel"} aria-label="Data quality">
+    <section className={quality.stale ? "quality-panel stale" : "quality-panel"} aria-label="数据质量">
       {quality.stale && (
         <div className="stale-banner" role="alert">
           stale=true; missing_nodes={quality.missing_nodes.length > 0 ? quality.missing_nodes.join(", ") : "none"}
@@ -662,31 +664,31 @@ function DataQualityPanel({ quality }: { quality: DataSourceState }): ReactEleme
       )}
       <dl className="quality-grid">
         <div>
-          <dt>data_source</dt>
+          <dt>数据源</dt>
           <dd>{quality.data_source}</dd>
         </div>
         <div>
-          <dt>snapshot_id</dt>
-          <dd>{quality.snapshot_id || "unavailable"}</dd>
+          <dt>快照ID</dt>
+          <dd>{quality.snapshot_id || "不可用"}</dd>
         </div>
         <div>
-          <dt>generated_at</dt>
-          <dd>{quality.generated_at || "unavailable"}</dd>
+          <dt>生成时间</dt>
+          <dd>{quality.generated_at || "不可用"}</dd>
         </div>
         <div>
-          <dt>projection_lag_ms</dt>
+          <dt>投影延迟(ms)</dt>
           <dd>{quality.projection_lag_ms}</dd>
         </div>
         <div>
-          <dt>stale</dt>
+          <dt>是否过期</dt>
           <dd>{String(quality.stale)}</dd>
         </div>
         <div>
-          <dt>missing_nodes</dt>
-          <dd>{quality.missing_nodes.length > 0 ? quality.missing_nodes.join(", ") : "none"}</dd>
+          <dt>缺失节点</dt>
+          <dd>{quality.missing_nodes.length > 0 ? quality.missing_nodes.join(", ") : "无"}</dd>
         </div>
         <div>
-          <dt>reconciliation_state</dt>
+          <dt>对账状态</dt>
           <dd>{quality.reconciliation_state}</dd>
         </div>
       </dl>
@@ -704,13 +706,13 @@ type BotStatusPanelProps = {
 
 function BotStatusPanel({ bots, disabled, status, onAction }: BotStatusPanelProps): ReactElement {
   return (
-    <Panel title="Bot 状态" icon={<Bot size={17} />}>
+    <Panel title="机器人状态" icon={<Bot size={17} />}>
       <div className="bot-list">
         {bots.map((bot) => (
           <div className="bot-row" key={bot.name}>
             <div>
               <strong>{bot.name}</strong>
-              <span>{bot.pairCount} pairs · {bot.openTrades} open</span>
+              <span>{bot.pairCount} 个交易对 · {bot.openTrades} 个持仓</span>
             </div>
             <StatusPill status={bot.status} />
             <small>{bot.lastHeartbeat}</small>
@@ -719,33 +721,33 @@ function BotStatusPanel({ bots, disabled, status, onAction }: BotStatusPanelProp
       </div>
       <div className="button-row compact-actions">
         <button
-          aria-label="Pause bot"
+          aria-label="暂停机器人"
           className="secondary-button"
           disabled={disabled}
           onClick={() => {
             onAction("pause");
           }}
-          title="Pause bot"
+          title="暂停机器人"
           type="button"
         >
           <Siren size={16} />
-          Pause bot
+          暂停机器人
         </button>
         <button
-          aria-label="Resume bot"
+          aria-label="恢复机器人"
           className="secondary-button"
           disabled={disabled}
           onClick={() => {
             onAction("resume");
           }}
-          title="Resume bot"
+          title="恢复机器人"
           type="button"
         >
           <RefreshCcw size={16} />
-          Resume bot
+          恢复机器人
         </button>
       </div>
-      {disabled && <p className="drawer-status">Live readonly blocks manual bot actions.</p>}
+      {disabled && <p className="drawer-status">实盘只读模式禁止手动操作机器人。</p>}
       {status && <p className="drawer-status">{status}</p>}
     </Panel>
   );
@@ -762,7 +764,7 @@ function EventsPanel({ events }: { events: EventLog[] }): ReactElement {
             <p>{event.message}</p>
           </div>
         ))}
-        {events.length === 0 && <p className="empty-copy">No events from control-plane.</p>}
+        {events.length === 0 && <p className="empty-copy">控制面暂无事件。</p>}
       </div>
     </Panel>
   );
@@ -780,19 +782,19 @@ function PositionsPanel({ positions, onSelect }: PositionsPanelProps): ReactElem
         <table>
           <thead>
             <tr>
-              <th>Pair</th>
-              <th>Side</th>
-              <th>Entry</th>
-              <th>Current</th>
-              <th>SL</th>
-              <th>TP</th>
-              <th>Size</th>
-              <th>Leverage</th>
-              <th>PnL</th>
-              <th>R multiple</th>
-              <th>Signal</th>
-              <th>Freqtrade Trade ID</th>
-              <th>Detail</th>
+              <th>交易对</th>
+              <th>方向</th>
+              <th>入场价</th>
+              <th>现价</th>
+              <th>止损</th>
+              <th>止盈</th>
+              <th>数量</th>
+              <th>杠杆</th>
+              <th>盈亏</th>
+              <th>R 倍数</th>
+              <th>信号</th>
+              <th>Freqtrade 交易ID</th>
+              <th>详情</th>
             </tr>
           </thead>
           <tbody>
@@ -802,8 +804,8 @@ function PositionsPanel({ positions, onSelect }: PositionsPanelProps): ReactElem
                 <td>{position.side}</td>
                 <td>{formatCurrency(position.entry)}</td>
                 <td>{formatCurrency(position.mark)}</td>
-                <td>{position.stopLoss ? formatCurrency(position.stopLoss) : "Missing"}</td>
-                <td>{position.takeProfit ? formatCurrency(position.takeProfit) : "Missing"}</td>
+                <td>{position.stopLoss ? formatCurrency(position.stopLoss) : "缺失"}</td>
+                <td>{position.takeProfit ? formatCurrency(position.takeProfit) : "缺失"}</td>
                 <td>{position.size}</td>
                 <td>{position.leverage}x</td>
                 <td className={position.pnl >= 0 ? "num good-text" : "num danger-text"}>
@@ -814,12 +816,12 @@ function PositionsPanel({ positions, onSelect }: PositionsPanelProps): ReactElem
                 <td>{position.freqtradeTradeId}</td>
                 <td>
                   <button
-                    aria-label={`Open ${position.pair} detail`}
+                    aria-label={`打开 ${position.pair} 详情`}
                     className="icon-button"
                     onClick={() => {
                       onSelect(position);
                     }}
-                    title={`Open ${position.pair} detail`}
+                    title={`打开 ${position.pair} 详情`}
                     type="button"
                   >
                     <ChevronRight size={16} />
@@ -827,7 +829,7 @@ function PositionsPanel({ positions, onSelect }: PositionsPanelProps): ReactElem
                 </td>
               </tr>
             ))}
-            {positions.length === 0 && <EmptyTableRow colSpan={13} label="No positions from control-plane." />}
+            {positions.length === 0 && <EmptyTableRow colSpan={13} label="控制面暂无持仓。" />}
           </tbody>
         </table>
       </div>
@@ -884,7 +886,7 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     }
 
     setCloseSubmitting(true);
-    setStatus("Closing position");
+    setStatus("正在平仓");
     setConfirmAction(false);
     const result = await closePosition(position.id, actionReason, position.signalId);
     setCloseSubmitting(false);
@@ -898,12 +900,12 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
 
     const stopLossPrice = Number(stopLossInput);
     if (!Number.isFinite(stopLossPrice) || stopLossPrice <= 0) {
-      setStatus("Enter valid SL");
+      setStatus("请输入有效的止损价");
       return;
     }
 
     setMoveSubmitting(true);
-    setStatus("Moving SL");
+    setStatus("正在移动止损");
     setConfirmAction(false);
     const result = await moveStopLoss(position.id, stopLossPrice, actionReason, position.signalId);
     setMoveSubmitting(false);
@@ -917,12 +919,12 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
 
     const partialAmount = Number((position.size * 0.5).toFixed(8));
     if (!Number.isFinite(partialAmount) || partialAmount <= 0) {
-      setStatus("Partial size unavailable");
+      setStatus("部分平仓数量不可用");
       return;
     }
 
     setPartialSubmitting(true);
-    setStatus("Partial close pending");
+    setStatus("部分平仓处理中");
     setConfirmAction(false);
     const result = await partialClosePosition(position.id, partialAmount, actionReason, position.signalId);
     setPartialSubmitting(false);
@@ -935,7 +937,7 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     }
 
     setLockSubmitting(true);
-    setStatus("Pair lock pending");
+    setStatus("交易对锁定处理中");
     setConfirmAction(false);
     const result = await lockPair(position.pair, actionReason);
     setLockSubmitting(false);
@@ -951,151 +953,151 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
   );
 
   return (
-    <aside className="drawer" aria-label={`${position.pair} detail`}>
+    <aside className="drawer" aria-label={`${position.pair} 详情`}>
       <div className="drawer-card">
         <header>
           <div>
-            <p className="eyebrow">Position Detail</p>
+            <p className="eyebrow">持仓详情</p>
             <h3>{position.pair}</h3>
           </div>
-          <button aria-label="Close detail drawer" className="icon-button" onClick={onClose} title="Close detail drawer" type="button">
+          <button aria-label="关闭详情面板" className="icon-button" onClick={onClose} title="关闭详情面板" type="button">
             <X size={16} />
           </button>
         </header>
         <dl className="detail-grid">
           <div>
-            <dt>Side</dt>
+            <dt>方向</dt>
             <dd>{position.side}</dd>
           </div>
           <div>
-            <dt>Leverage</dt>
+            <dt>杠杆</dt>
             <dd>{position.leverage}x</dd>
           </div>
           <div>
-            <dt>Entry</dt>
+            <dt>入场价</dt>
             <dd>{formatCurrency(position.entry)}</dd>
           </div>
           <div>
-            <dt>Mark</dt>
+            <dt>标记价</dt>
             <dd>{formatCurrency(position.mark)}</dd>
           </div>
           <div>
-            <dt>Size</dt>
+            <dt>数量</dt>
             <dd>{position.size}</dd>
           </div>
           <div>
-            <dt>PnL</dt>
+            <dt>盈亏</dt>
             <dd className={position.pnl >= 0 ? "good-text" : "danger-text"}>{formatCurrency(position.pnl)}</dd>
           </div>
           <div>
-            <dt>Stop Loss</dt>
-            <dd>{position.stopLoss ? formatCurrency(position.stopLoss) : "Missing"}</dd>
+            <dt>止损</dt>
+            <dd>{position.stopLoss ? formatCurrency(position.stopLoss) : "缺失"}</dd>
           </div>
           <div>
-            <dt>Take Profit</dt>
-            <dd>{position.takeProfit ? formatCurrency(position.takeProfit) : "Missing"}</dd>
+            <dt>止盈</dt>
+            <dd>{position.takeProfit ? formatCurrency(position.takeProfit) : "缺失"}</dd>
           </div>
           <div>
-            <dt>R Multiple</dt>
+            <dt>R 倍数</dt>
             <dd>{position.rMultiple}</dd>
           </div>
           <div>
-            <dt>Signal</dt>
+            <dt>信号</dt>
             <dd>{position.signalId}</dd>
           </div>
           <div>
-            <dt>Freqtrade Trade ID</dt>
+            <dt>Freqtrade 交易ID</dt>
             <dd>{position.freqtradeTradeId}</dd>
           </div>
           <div>
-            <dt>Anomaly</dt>
-            <dd>{position.anomaly ? position.anomaly : "Normal"}</dd>
+            <dt>异常</dt>
+            <dd>{position.anomaly ? position.anomaly : "正常"}</dd>
           </div>
         </dl>
         <section className="drawer-detail-section">
-          <h4>Raw Signal</h4>
+          <h4>原始信号</h4>
           <p>{position.rawSignal}</p>
         </section>
         <section className="drawer-detail-section">
-          <h4>Structured Signal JSON</h4>
+          <h4>结构化信号 JSON</h4>
           <pre>{JSON.stringify(position.structuredSignal, undefined, 2)}</pre>
         </section>
         <section className="drawer-detail-section">
-          <h4>Orders / Fills</h4>
+          <h4>订单 / 成交</h4>
           <pre>{JSON.stringify({ fills: position.fills, orders: position.orders }, undefined, 2)}</pre>
         </section>
         <section className="drawer-detail-section">
-          <h4>Audit Timeline</h4>
+          <h4>审计时间线</h4>
           <pre>{JSON.stringify(position.auditTimeline, undefined, 2)}</pre>
         </section>
-        <section className="drawer-actions" aria-label="Manual position controls">
+        <section className="drawer-actions" aria-label="手动持仓操作">
           <button
-            aria-label="Close position"
+            aria-label="平仓"
             className="danger-button"
             disabled={actionsDisabled || closeSubmitting}
             onClick={() => {
               openAction("close");
             }}
-            title="Close position"
+            title="平仓"
             type="button"
           >
             <XCircle size={16} />
-            Close position
+            平仓
           </button>
           <button
-            aria-label="Partial close position"
+            aria-label="部分平仓"
             className="secondary-button"
             disabled={actionsDisabled || partialSubmitting}
             onClick={() => {
               openAction("partial");
             }}
-            title="Partial close position"
+            title="部分平仓"
             type="button"
           >
             <XCircle size={16} />
-            Partial 50%
+            部分平仓 50%
           </button>
           <div className="move-stop-control">
             <input
-              aria-label="Move SL price"
+              aria-label="移动止损价"
               inputMode="decimal"
               min="0"
               onChange={(event) => {
                 setStopLossInput(event.target.value);
               }}
-              placeholder="SL price"
+              placeholder="止损价"
               step="0.0001"
               type="number"
               value={stopLossInput}
             />
             <button
-              aria-label="Move SL"
+              aria-label="移动止损"
               className="secondary-button"
               disabled={actionsDisabled || moveSubmitting}
               onClick={() => {
                 openAction("move");
               }}
-              title="Move SL"
+              title="移动止损"
               type="button"
             >
               <Send size={16} />
-              Move SL
+              移动止损
             </button>
           </div>
           <button
-            aria-label="Lock pair"
+            aria-label="锁定交易对"
             className="secondary-button"
             disabled={actionsDisabled || lockSubmitting}
             onClick={() => {
               openAction("lock");
             }}
-            title="Lock pair"
+            title="锁定交易对"
             type="button"
           >
             <Lock size={16} />
-            Lock pair
+            锁定交易对
           </button>
-          {actionsDisabled && <p className="drawer-status">Live readonly blocks manual position actions.</p>}
+          {actionsDisabled && <p className="drawer-status">实盘只读模式禁止手动持仓操作。</p>}
           {status && <p className="drawer-status">{status}</p>}
         </section>
         {confirmAction && (
@@ -1181,24 +1183,24 @@ function PositionActionConfirm({
   onSubmit
 }: PositionActionConfirmProps): ReactElement {
   const enabled = reason.trim().length > 0 && !submitting;
-  let label = "Confirm close position";
-  let title = "Close position";
-  let buttonText = "Confirm close";
+  let label = "确认平仓";
+  let title = "平仓";
+  let buttonText = "确认平仓";
 
   if (action === "move") {
-    label = "Confirm move stop loss";
-    title = "Move stop loss";
-    buttonText = "Confirm move";
+    label = "确认移动止损";
+    title = "移动止损";
+    buttonText = "确认移动";
   }
   if (action === "partial") {
-    label = "Confirm partial close";
-    title = "Partial close position";
-    buttonText = "Confirm partial close";
+    label = "确认部分平仓";
+    title = "部分平仓";
+    buttonText = "确认部分平仓";
   }
   if (action === "lock") {
-    label = "Confirm pair lock";
-    title = "Lock pair";
-    buttonText = "Confirm lock";
+    label = "确认锁定交易对";
+    title = "锁定交易对";
+    buttonText = "确认锁定";
   }
 
   return (
@@ -1206,30 +1208,30 @@ function PositionActionConfirm({
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="position-action-title">
         <header>
           <div>
-            <p className="eyebrow">Manual Action</p>
+            <p className="eyebrow">手动操作</p>
             <h3 id="position-action-title">{title}</h3>
           </div>
-          <button aria-label="Cancel position action" className="icon-button" onClick={onCancel} title="Cancel position action" type="button">
+          <button aria-label="取消持仓操作" className="icon-button" onClick={onCancel} title="取消持仓操作" type="button">
             <X size={16} />
           </button>
         </header>
-        <p className="modal-copy">Reason is required before submitting the request.</p>
+        <p className="modal-copy">提交请求前必须填写原因。</p>
         <input
-          aria-label="Action reason"
+          aria-label="操作原因"
           onChange={(event) => {
             onReasonChange(event.target.value);
           }}
-          placeholder="Reason"
+          placeholder="原因"
           value={reason}
         />
         <div className="modal-actions">
-          <button aria-label="Cancel manual action" className="secondary-button" onClick={onCancel} title="Cancel manual action" type="button">
+          <button aria-label="取消手动操作" className="secondary-button" onClick={onCancel} title="取消手动操作" type="button">
             <X size={16} />
-            Cancel
+            取消
           </button>
           <button aria-label={label} className="danger-button" disabled={!enabled} onClick={onSubmit} title={label} type="button">
             <Send size={16} />
-            {submitting ? "Submitting" : buttonText}
+            {submitting ? "提交中" : buttonText}
           </button>
         </div>
       </section>
@@ -1255,14 +1257,14 @@ function BotActionConfirm({
   onSubmit
 }: BotActionConfirmProps): ReactElement {
   const enabled = reason.trim().length > 0 && !submitting;
-  let title = "Pause bot";
-  let label = "Confirm pause bot";
-  let buttonText = "Confirm pause";
+  let title = "暂停机器人";
+  let label = "确认暂停机器人";
+  let buttonText = "确认暂停";
 
   if (action === "resume") {
-    title = "Resume bot";
-    label = "Confirm resume bot";
-    buttonText = "Confirm resume";
+    title = "恢复机器人";
+    label = "确认恢复机器人";
+    buttonText = "确认恢复";
   }
 
   return (
@@ -1270,30 +1272,30 @@ function BotActionConfirm({
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="bot-action-title">
         <header>
           <div>
-            <p className="eyebrow">Bot Control</p>
+            <p className="eyebrow">机器人控制</p>
             <h3 id="bot-action-title">{title}</h3>
           </div>
-          <button aria-label="Cancel bot action" className="icon-button" onClick={onCancel} title="Cancel bot action" type="button">
+          <button aria-label="取消机器人操作" className="icon-button" onClick={onCancel} title="取消机器人操作" type="button">
             <X size={16} />
           </button>
         </header>
-        <p className="modal-copy">Reason is required before submitting the request.</p>
+        <p className="modal-copy">提交请求前必须填写原因。</p>
         <input
-          aria-label="Bot action reason"
+          aria-label="机器人操作原因"
           onChange={(event) => {
             onReasonChange(event.target.value);
           }}
-          placeholder="Reason"
+          placeholder="原因"
           value={reason}
         />
         <div className="modal-actions">
-          <button aria-label="Cancel bot manual action" className="secondary-button" onClick={onCancel} title="Cancel bot manual action" type="button">
+          <button aria-label="取消机器人手动操作" className="secondary-button" onClick={onCancel} title="取消机器人手动操作" type="button">
             <X size={16} />
-            Cancel
+            取消
           </button>
           <button aria-label={label} className="danger-button" disabled={!enabled} onClick={onSubmit} title={label} type="button">
             <Send size={16} />
-            {submitting ? "Submitting" : buttonText}
+            {submitting ? "提交中" : buttonText}
           </button>
         </div>
       </section>
@@ -1316,20 +1318,20 @@ function OrderCenterPage({
     <section className="page-grid">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Order Center</p>
+          <p className="eyebrow">订单中心</p>
           <h2>/orders</h2>
         </div>
         <div className="button-row">
           <span className={sourceBadgeClass}>{sourceBadgeLabel}</span>
           <button
-            aria-label="Refresh order center"
+            aria-label="刷新订单中心"
             className="secondary-button"
             onClick={onRefresh}
-            title="Refresh order center"
+            title="刷新订单中心"
             type="button"
           >
             <RefreshCcw size={16} />
-            Refresh
+            刷新
           </button>
         </div>
       </div>
@@ -1337,25 +1339,25 @@ function OrderCenterPage({
 
       <div className="kpi-grid">
         <MetricCard
-          delta={`${data.summary.openPositionCount} open positions`}
-          label="Open PnL"
+          delta={`${data.summary.openPositionCount} 个持仓`}
+          label="浮动盈亏"
           tone={data.summary.openPnl >= 0 ? "good" : "danger"}
           value={formatCurrency(data.summary.openPnl)}
         />
         <MetricCard
-          delta={`${data.summary.historyCount} trades`}
-          label="Realized PnL"
+          delta={`${data.summary.historyCount} 笔交易`}
+          label="已实现盈亏"
           tone={data.summary.realizedPnl >= 0 ? "good" : "danger"}
           value={formatCurrency(data.summary.realizedPnl)}
         />
         <MetricCard
-          delta={`${data.summary.winCount} wins / ${data.summary.lossCount} losses`}
-          label="Total PnL"
+          delta={`${data.summary.winCount} 胜 / ${data.summary.lossCount} 负`}
+          label="总盈亏"
           tone={data.summary.totalPnl >= 0 ? "good" : "danger"}
           value={formatCurrency(data.summary.totalPnl)}
         />
         <MetricCard
-          delta="open / pending"
+          delta="挂单 / 待成交"
           label="挂单"
           tone={data.summary.pendingOrderCount > 0 ? "warning" : "muted"}
           value={`${data.summary.pendingOrderCount}`}
@@ -1377,21 +1379,21 @@ function OrderCenterPage({
       <Panel title="盈亏" icon={<Sigma size={17} />}>
         <dl className="detail-grid compact">
           <div>
-            <dt>Open PnL</dt>
+            <dt>浮动盈亏</dt>
             <dd className={data.summary.openPnl >= 0 ? "good-text" : "danger-text"}>{formatCurrency(data.summary.openPnl)}</dd>
           </div>
           <div>
-            <dt>Realized PnL</dt>
+            <dt>已实现盈亏</dt>
             <dd className={data.summary.realizedPnl >= 0 ? "good-text" : "danger-text"}>
               {formatCurrency(data.summary.realizedPnl)}
             </dd>
           </div>
           <div>
-            <dt>Total PnL</dt>
+            <dt>总盈亏</dt>
             <dd className={data.summary.totalPnl >= 0 ? "good-text" : "danger-text"}>{formatCurrency(data.summary.totalPnl)}</dd>
           </div>
           <div>
-            <dt>Win / Loss</dt>
+            <dt>胜 / 负</dt>
             <dd>{data.summary.winCount} / {data.summary.lossCount}</dd>
           </div>
         </dl>
@@ -1406,17 +1408,17 @@ function OrderPositionsTable({ positions }: { positions: OrderCenterPosition[] }
       <table>
         <thead>
           <tr>
-            <th>Pair</th>
-            <th>Side</th>
-            <th>Amount</th>
-            <th>Stake</th>
-            <th>Entry</th>
-            <th>Current</th>
-            <th>Leverage</th>
-            <th>PnL</th>
-            <th>PnL %</th>
-            <th>Opened</th>
-            <th>Status</th>
+            <th>交易对</th>
+            <th>方向</th>
+            <th>数量</th>
+            <th>保证金</th>
+            <th>入场价</th>
+            <th>现价</th>
+            <th>杠杆</th>
+            <th>盈亏</th>
+            <th>盈亏 %</th>
+            <th>开仓时间</th>
+            <th>状态</th>
           </tr>
         </thead>
         <tbody>
@@ -1435,7 +1437,7 @@ function OrderPositionsTable({ positions }: { positions: OrderCenterPosition[] }
               <td><StatusPill status={position.status} /></td>
             </tr>
           ))}
-          {positions.length === 0 && <EmptyTableRow colSpan={11} label="No open positions from control-plane." />}
+          {positions.length === 0 && <EmptyTableRow colSpan={11} label="控制面暂无持仓。" />}
         </tbody>
       </table>
     </div>
@@ -1448,17 +1450,17 @@ function OrderOrdersTable({ orders }: { orders: OrderCenterOrder[] }): ReactElem
       <table>
         <thead>
           <tr>
-            <th>Order ID</th>
-            <th>Pair</th>
-            <th>Side</th>
-            <th>Type</th>
-            <th>Status</th>
-            <th>Price</th>
-            <th>Amount</th>
-            <th>Filled</th>
-            <th>Remaining</th>
-            <th>Created</th>
-            <th>Trade ID</th>
+            <th>订单ID</th>
+            <th>交易对</th>
+            <th>方向</th>
+            <th>类型</th>
+            <th>状态</th>
+            <th>价格</th>
+            <th>数量</th>
+            <th>已成交</th>
+            <th>剩余</th>
+            <th>创建时间</th>
+            <th>交易ID</th>
           </tr>
         </thead>
         <tbody>
@@ -1477,7 +1479,7 @@ function OrderOrdersTable({ orders }: { orders: OrderCenterOrder[] }): ReactElem
               <td>{order.tradeId || "--"}</td>
             </tr>
           ))}
-          {orders.length === 0 && <EmptyTableRow colSpan={11} label="No open or pending orders from control-plane." />}
+          {orders.length === 0 && <EmptyTableRow colSpan={11} label="控制面暂无挂单或待成交订单。" />}
         </tbody>
       </table>
     </div>
@@ -1490,18 +1492,18 @@ function OrderHistoryTable({ trades }: { trades: OrderCenterTrade[] }): ReactEle
       <table>
         <thead>
           <tr>
-            <th>Trade ID</th>
-            <th>Pair</th>
-            <th>Side</th>
-            <th>Status</th>
-            <th>Amount</th>
-            <th>Open</th>
-            <th>Close</th>
-            <th>PnL</th>
-            <th>PnL %</th>
-            <th>Opened</th>
-            <th>Closed</th>
-            <th>Orders</th>
+            <th>交易ID</th>
+            <th>交易对</th>
+            <th>方向</th>
+            <th>状态</th>
+            <th>数量</th>
+            <th>开仓价</th>
+            <th>平仓价</th>
+            <th>盈亏</th>
+            <th>盈亏 %</th>
+            <th>开仓时间</th>
+            <th>平仓时间</th>
+            <th>订单数</th>
           </tr>
         </thead>
         <tbody>
@@ -1521,7 +1523,7 @@ function OrderHistoryTable({ trades }: { trades: OrderCenterTrade[] }): ReactEle
               <td>{trade.ordersCount}</td>
             </tr>
           ))}
-          {trades.length === 0 && <EmptyTableRow colSpan={12} label="No trade history from control-plane." />}
+          {trades.length === 0 && <EmptyTableRow colSpan={12} label="控制面暂无交易历史。" />}
         </tbody>
       </table>
     </div>
@@ -1600,7 +1602,7 @@ function SignalReviewPage({
     }
 
     setSubmitting(true);
-    setStatus("Review decision pending");
+    setStatus("审核决策处理中");
     let accepted = false;
     if (decision.kind === "signal" && decision.action === "approve") {
       accepted = await approveReviewSignal(decision.item.signalId, actionReason);
@@ -1618,7 +1620,7 @@ function SignalReviewPage({
     setSubmitting(false);
     setDecision(false);
     setReason("");
-    setStatus(accepted ? "Review decision submitted" : "Review decision failed");
+    setStatus(accepted ? "审核决策已提交" : "审核决策失败");
     if (accepted) {
       onRefresh();
     }
@@ -1633,49 +1635,49 @@ function SignalReviewPage({
     <section className="page-grid">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Signal Review</p>
+          <p className="eyebrow">信号审核</p>
           <h2>/review</h2>
         </div>
         <div className="button-row">
           <span className={sourceBadgeClass}>{sourceBadgeLabel}</span>
           <button
-            aria-label="Refresh signal review"
+            aria-label="刷新信号审核"
             className="secondary-button"
             onClick={onRefresh}
-            title="Refresh signal review"
+            title="刷新信号审核"
             type="button"
           >
             <RefreshCcw size={16} />
-            Refresh
+            刷新
           </button>
         </div>
       </div>
       <DataQualityPanel quality={data.dataSource} />
 
       <div className="kpi-grid">
-        <MetricCard delta="awaiting human review" label="needs_review" tone={data.signals.length > 0 ? "warning" : "muted"} value={`${data.signals.length}`} />
-        <MetricCard delta="open Hermes proposals" label="Proposals" tone={data.proposals.length > 0 ? "warning" : "muted"} value={`${data.proposals.length}`} />
-        <MetricCard delta="approve requests" label="Approve Requests" tone="muted" value={`${countProposalType(data.proposals, "approve_request")}`} />
+        <MetricCard delta="等待人工审核" label="待审核" tone={data.signals.length > 0 ? "warning" : "muted"} value={`${data.signals.length}`} />
+        <MetricCard delta="待处理 Hermes 提案" label="提案" tone={data.proposals.length > 0 ? "warning" : "muted"} value={`${data.proposals.length}`} />
+        <MetricCard delta="放行请求" label="放行请求" tone="muted" value={`${countProposalType(data.proposals, "approve_request")}`} />
         <MetricCard
-          delta="rate-limit adjustment"
-          label="Rate Limit"
+          delta="限流调整"
+          label="限流"
           tone="muted"
           value={`${countProposalType(data.proposals, "rate_limit_adjustment")}`}
         />
       </div>
 
       <div className="two-column wide-left">
-        <Panel title="needs_review queue" icon={<Inbox size={17} />}>
+        <Panel title="待审核队列" icon={<Inbox size={17} />}>
           <div className="review-list">
             {data.signals.map((signal) => (
               <button
-                aria-label={`Open signal ${signal.signalId}`}
+                aria-label={`打开信号 ${signal.signalId}`}
                 className={selectedSignal && selectedSignal.signalId === signal.signalId ? "review-row active" : "review-row"}
                 key={signal.signalId}
                 onClick={() => {
                   setSelectedSignalId(signal.signalId);
                 }}
-                title={`Open signal ${signal.signalId}`}
+                title={`打开信号 ${signal.signalId}`}
                 type="button"
               >
                 <div>
@@ -1685,11 +1687,11 @@ function SignalReviewPage({
                 <StatusPill status={signal.status} />
               </button>
             ))}
-            {data.signals.length === 0 && <p className="empty-state">No signals awaiting review.</p>}
+            {data.signals.length === 0 && <p className="empty-state">暂无待审核信号。</p>}
           </div>
         </Panel>
 
-        <Panel title="Hermes classification" icon={<ShieldCheck size={17} />}>
+        <Panel title="Hermes 分类" icon={<ShieldCheck size={17} />}>
           {selectedSignal ? (
             <SignalReviewDetail
               signal={selectedSignal}
@@ -1701,12 +1703,12 @@ function SignalReviewPage({
               }}
             />
           ) : (
-            <p className="empty-state">Select a signal to review classification details.</p>
+            <p className="empty-state">请选择一个信号以查看分类详情。</p>
           )}
         </Panel>
       </div>
 
-      <Panel title="Hermes proposals" icon={<ClipboardList size={17} />}>
+      <Panel title="Hermes 提案" icon={<ClipboardList size={17} />}>
         <SignalProposalTable
           proposals={data.proposals}
           onApprove={(proposal) => {
@@ -1750,55 +1752,55 @@ function SignalReviewDetail({
     <div className="review-detail">
       <dl className="detail-grid compact">
         <div>
-          <dt>Pair</dt>
+          <dt>交易对</dt>
           <dd>{signal.pair}</dd>
         </div>
         <div>
-          <dt>Side</dt>
+          <dt>方向</dt>
           <dd>{signal.side}</dd>
         </div>
         <div>
-          <dt>Entry</dt>
+          <dt>入场</dt>
           <dd>{signal.entryMode} {signal.entryPrice > 0 ? formatCurrency(signal.entryPrice) : "CMP"}</dd>
         </div>
         <div>
-          <dt>Stop Loss</dt>
-          <dd>{signal.stopLoss > 0 ? formatCurrency(signal.stopLoss) : "Missing"}</dd>
+          <dt>止损</dt>
+          <dd>{signal.stopLoss > 0 ? formatCurrency(signal.stopLoss) : "缺失"}</dd>
         </div>
         <div>
-          <dt>Take Profits</dt>
-          <dd>{signal.takeProfits.length > 0 ? signal.takeProfits.map(formatCurrency).join(", ") : "Missing"}</dd>
+          <dt>止盈</dt>
+          <dd>{signal.takeProfits.length > 0 ? signal.takeProfits.map(formatCurrency).join(", ") : "缺失"}</dd>
         </div>
         <div>
-          <dt>Leverage</dt>
+          <dt>杠杆</dt>
           <dd>{signal.leverage}</dd>
         </div>
         <div>
-          <dt>Conclusion</dt>
+          <dt>结论</dt>
           <dd>{signal.classification.conclusion}</dd>
         </div>
         <div>
-          <dt>Confidence</dt>
+          <dt>置信度</dt>
           <dd>{signal.classification.confidence}</dd>
         </div>
       </dl>
       <section className="drawer-detail-section">
-        <h4>Reason Codes</h4>
-        <p>{signal.reasonCodes.length > 0 ? signal.reasonCodes.join(", ") : "none"}</p>
+        <h4>原因代码</h4>
+        <p>{signal.reasonCodes.length > 0 ? signal.reasonCodes.join(", ") : "无"}</p>
       </section>
       <section className="drawer-detail-section">
-        <h4>Raw Signal</h4>
+        <h4>原始信号</h4>
         <p>{signal.rawText || "--"}</p>
       </section>
       <SignalReviewMedia signal={signal} />
       <div className="button-row compact-actions">
-        <button aria-label="Approve signal" className="secondary-button" onClick={onApprove} title="Approve signal" type="button">
+        <button aria-label="通过信号" className="secondary-button" onClick={onApprove} title="通过信号" type="button">
           <CheckCircle2 size={16} />
-          Approve
+          通过
         </button>
-        <button aria-label="Reject signal" className="danger-button" onClick={onReject} title="Reject signal" type="button">
+        <button aria-label="拒绝信号" className="danger-button" onClick={onReject} title="拒绝信号" type="button">
           <XCircle size={16} />
-          Reject
+          拒绝
         </button>
       </div>
     </div>
@@ -1855,18 +1857,18 @@ function SignalReviewMedia({ signal }: { signal: SignalReviewItem }): ReactEleme
 
   return (
     <>
-      <section aria-label="Signal media thumbnails" className="signal-media-strip">
+      <section aria-label="信号媒体缩略图" className="signal-media-strip">
         {mediaUrls.map((item) => {
-          const label = `Signal ${signal.signalId} media ${item.index + 1}`;
+          const label = `信号 ${signal.signalId} 媒体 ${item.index + 1}`;
           return (
             <button
-              aria-label={`Open ${label.toLowerCase()}`}
+              aria-label={`打开${label}`}
               className="signal-media-thumb"
               key={item.index}
               onClick={() => {
                 setPreview(item);
               }}
-              title={`Open ${label.toLowerCase()}`}
+              title={`打开${label}`}
               type="button"
             >
               <img alt={label} src={item.url} />
@@ -1875,23 +1877,23 @@ function SignalReviewMedia({ signal }: { signal: SignalReviewItem }): ReactEleme
         })}
       </section>
       {preview && (
-        <section aria-label="Signal media preview" aria-modal="true" className="modal-backdrop" role="dialog">
+        <section aria-label="信号媒体预览" aria-modal="true" className="modal-backdrop" role="dialog">
           <div className="signal-media-lightbox">
             <header>
-              <h3>Media {preview.index + 1}</h3>
+              <h3>媒体 {preview.index + 1}</h3>
               <button
-                aria-label="Close signal media preview"
+                aria-label="关闭信号媒体预览"
                 className="icon-button"
                 onClick={() => {
                   setPreview(false);
                 }}
-                title="Close signal media preview"
+                title="关闭信号媒体预览"
                 type="button"
               >
                 <X size={16} />
               </button>
             </header>
-            <img alt={`Signal ${signal.signalId} media ${preview.index + 1}`} src={preview.url} />
+            <img alt={`信号 ${signal.signalId} 媒体 ${preview.index + 1}`} src={preview.url} />
           </div>
         </section>
       )}
@@ -1913,13 +1915,13 @@ function SignalProposalTable({
       <table>
         <thead>
           <tr>
-            <th>Proposal</th>
-            <th>Type</th>
-            <th>Signal</th>
-            <th>Conclusion</th>
-            <th>Detail</th>
-            <th>Status</th>
-            <th>Decision</th>
+            <th>提案</th>
+            <th>类型</th>
+            <th>信号</th>
+            <th>结论</th>
+            <th>详情</th>
+            <th>状态</th>
+            <th>决策</th>
           </tr>
         </thead>
         <tbody>
@@ -1934,34 +1936,34 @@ function SignalProposalTable({
               <td>
                 <div className="button-row compact-actions no-margin">
                   <button
-                    aria-label={`Approve proposal ${proposal.proposalId}`}
+                    aria-label={`通过提案 ${proposal.proposalId}`}
                     className="secondary-button"
                     onClick={() => {
                       onApprove(proposal);
                     }}
-                    title={`Approve proposal ${proposal.proposalId}`}
+                    title={`通过提案 ${proposal.proposalId}`}
                     type="button"
                   >
                     <CheckCircle2 size={16} />
-                    Approve
+                    通过
                   </button>
                   <button
-                    aria-label={`Reject proposal ${proposal.proposalId}`}
+                    aria-label={`拒绝提案 ${proposal.proposalId}`}
                     className="danger-button"
                     onClick={() => {
                       onReject(proposal);
                     }}
-                    title={`Reject proposal ${proposal.proposalId}`}
+                    title={`拒绝提案 ${proposal.proposalId}`}
                     type="button"
                   >
                     <XCircle size={16} />
-                    Reject
+                    拒绝
                   </button>
                 </div>
               </td>
             </tr>
           ))}
-          {proposals.length === 0 && <EmptyTableRow colSpan={7} label="No Hermes proposals awaiting decision." />}
+          {proposals.length === 0 && <EmptyTableRow colSpan={7} label="暂无待决策的 Hermes 提案。" />}
         </tbody>
       </table>
     </div>
@@ -1985,38 +1987,40 @@ function ReviewDecisionConfirm({
 }): ReactElement {
   const enabled = reason.trim().length > 0 && !submitting;
   const targetLabel = decision.kind === "signal" ? decision.item.signalId : decision.item.proposalId;
-  const title = `${decision.action === "approve" ? "Approve" : "Reject"} ${decision.kind}`;
-  const ariaLabel = `Confirm ${decision.action} ${decision.kind}`;
+  const actionText = decision.action === "approve" ? "通过" : "拒绝";
+  const kindText = decision.kind === "signal" ? "信号" : "提案";
+  const title = `${actionText}${kindText}`;
+  const ariaLabel = `确认${actionText}${kindText}`;
 
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="review-decision-title">
         <header>
           <div>
-            <p className="eyebrow">Audit Required</p>
+            <p className="eyebrow">需审计</p>
             <h3 id="review-decision-title">{title}</h3>
           </div>
-          <button aria-label="Cancel review decision" className="icon-button" onClick={onCancel} title="Cancel review decision" type="button">
+          <button aria-label="取消审核决策" className="icon-button" onClick={onCancel} title="取消审核决策" type="button">
             <X size={16} />
           </button>
         </header>
-        <p className="modal-copy">Reason is required and will be written to the audit log for {targetLabel}.</p>
+        <p className="modal-copy">必须填写原因，且将写入 {targetLabel} 的审计日志。</p>
         <input
-          aria-label="Review decision reason"
+          aria-label="审核决策原因"
           onChange={(event) => {
             onReasonChange(event.target.value);
           }}
-          placeholder="Reason"
+          placeholder="原因"
           value={reason}
         />
         <div className="modal-actions">
-          <button aria-label="Cancel review manual action" className="secondary-button" onClick={onCancel} title="Cancel review manual action" type="button">
+          <button aria-label="取消审核手动操作" className="secondary-button" onClick={onCancel} title="取消审核手动操作" type="button">
             <X size={16} />
-            Cancel
+            取消
           </button>
           <button aria-label={ariaLabel} className="danger-button" disabled={!enabled} onClick={onSubmit} title={ariaLabel} type="button">
             <Send size={16} />
-            {submitting ? "Submitting" : "Confirm"}
+            {submitting ? "提交中" : "确认"}
           </button>
         </div>
       </section>
@@ -2036,20 +2040,20 @@ function RiskPage(): ReactElement {
     <section className="page-grid">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Risk Controls</p>
+          <p className="eyebrow">风控</p>
           <h2>/risk</h2>
         </div>
         <button
-          aria-label="Open kill switch modal"
+          aria-label="打开紧急停机弹窗"
           className="danger-button"
           onClick={() => {
             setModalOpen(true);
           }}
-          title="Open kill switch modal"
+          title="打开紧急停机弹窗"
           type="button"
         >
           <Siren size={16} />
-          Kill Switch
+          紧急停机
         </button>
       </div>
       <DataQualityPanel quality={data.dataSource} />
@@ -2061,22 +2065,22 @@ function RiskPage(): ReactElement {
       </div>
 
       <div className="two-column">
-        <Panel title="Blocking Reasons" icon={<XCircle size={17} />}>
+        <Panel title="阻断原因" icon={<XCircle size={17} />}>
           <ul className="reason-list">
             {data.blockingReasons.map((reason) => (
               <li key={reason}>{reason}</li>
             ))}
           </ul>
         </Panel>
-        <Panel title="Pair Lock 表" icon={<Lock size={17} />}>
+        <Panel title="交易对锁定表" icon={<Lock size={17} />}>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Pair</th>
-                  <th>Reason</th>
-                  <th>Until</th>
-                  <th>Owner</th>
+                  <th>交易对</th>
+                  <th>原因</th>
+                  <th>截止时间</th>
+                  <th>负责人</th>
                 </tr>
               </thead>
               <tbody>
@@ -2094,7 +2098,7 @@ function RiskPage(): ReactElement {
         </Panel>
       </div>
 
-      <span className={loading ? "load-badge loading" : "load-badge"}>{loading ? "Loading API" : "Risk data ready"}</span>
+      <span className={loading ? "load-badge loading" : "load-badge"}>{loading ? "接口加载中" : "风控数据就绪"}</span>
       {modalOpen && (
         <KillSwitchModal
           onClose={() => {
@@ -2111,7 +2115,7 @@ function RiskMetricCard({ metric }: { metric: RiskMetric }): ReactElement {
     <article className={`metric-card ${statusTone(metric.status)}`}>
       <span>{metric.label}</span>
       <strong>{metric.value}</strong>
-      <small>Limit {metric.limit}</small>
+      <small>上限 {metric.limit}</small>
     </article>
   );
 }
@@ -2129,7 +2133,7 @@ function KillSwitchModal({ onClose }: { onClose: () => void }): ReactElement {
     }
 
     setSubmitting(true);
-    setStatus("Submitting kill switch");
+    setStatus("正在提交紧急停机");
     const result = await activateKillSwitch(reason.trim(), true, confirmText);
     setSubmitting(false);
     setStatus(result.statusText);
@@ -2144,24 +2148,24 @@ function KillSwitchModal({ onClose }: { onClose: () => void }): ReactElement {
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="kill-title">
         <header>
           <div>
-            <p className="eyebrow">Destructive Control</p>
-            <h3 id="kill-title">Kill Switch</h3>
+            <p className="eyebrow">高危操作</p>
+            <h3 id="kill-title">紧急停机</h3>
           </div>
-          <button aria-label="Close kill switch modal" className="icon-button" onClick={onClose} title="Close kill switch modal" type="button">
+          <button aria-label="关闭紧急停机弹窗" className="icon-button" onClick={onClose} title="关闭紧急停机弹窗" type="button">
             <X size={16} />
           </button>
         </header>
         <p className="modal-copy">输入 CLOSE ALL 执行全平确认</p>
         <input
-          aria-label="Kill switch reason"
+          aria-label="紧急停机原因"
           onChange={(event) => {
             setReason(event.target.value);
           }}
-          placeholder="Reason"
+          placeholder="原因"
           value={reason}
         />
         <input
-          aria-label="Type CLOSE ALL to confirm"
+          aria-label="输入 CLOSE ALL 确认"
           onChange={(event) => {
             setConfirmText(event.target.value);
           }}
@@ -2169,22 +2173,22 @@ function KillSwitchModal({ onClose }: { onClose: () => void }): ReactElement {
           value={confirmText}
         />
         <div className="modal-actions">
-          <button aria-label="Cancel kill switch" className="secondary-button" onClick={onClose} title="Cancel kill switch" type="button">
+          <button aria-label="取消紧急停机" className="secondary-button" onClick={onClose} title="取消紧急停机" type="button">
             <X size={16} />
-            Cancel
+            取消
           </button>
           <button
-            aria-label="Close all positions"
+            aria-label="全部平仓"
             className="danger-button"
             disabled={!enabled}
             onClick={() => {
               void submitKillSwitch();
             }}
-            title="Close all positions"
+            title="全部平仓"
             type="button"
           >
             <Siren size={16} />
-            {submitting ? "Submitting" : "CLOSE ALL"}
+            {submitting ? "提交中" : "CLOSE ALL"}
           </button>
         </div>
         {status && <p className="modal-status">{status}</p>}
@@ -2200,16 +2204,16 @@ function ReportsPage({ onNavigate }: { onNavigate: (path: string) => void }): Re
     <section className="page-grid">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Report Center</p>
+          <p className="eyebrow">报表中心</p>
           <h2>/reports</h2>
         </div>
         <button
-          aria-label="Open latest daily report"
+          aria-label="打开最新日报"
           className="secondary-button"
           onClick={() => {
             onNavigate(`/reports/daily/${today}`);
           }}
-          title="Open latest daily report"
+          title="打开最新日报"
           type="button"
         >
           <FileText size={16} />
@@ -2218,7 +2222,7 @@ function ReportsPage({ onNavigate }: { onNavigate: (path: string) => void }): Re
       </div>
 
       <Panel title="日报入口" icon={<FileText size={17} />}>
-        <p className="empty-copy">Open a daily report to load the control-plane snapshot for that date.</p>
+        <p className="empty-copy">打开某日日报以加载该日期的控制面快照。</p>
       </Panel>
     </section>
   );
@@ -2253,7 +2257,7 @@ function DailyReportPage({ date }: { date: string }): ReactElement {
       return;
     }
 
-    setPreviewBody("Telegram preview unavailable");
+    setPreviewBody("Telegram 预览不可用");
   }
 
   async function showHtmlPreview(): Promise<void> {
@@ -2274,111 +2278,111 @@ function DailyReportPage({ date }: { date: string }): ReactElement {
 
   async function showSourceSnapshot(): Promise<void> {
     const snapshot = await createDailyReportSnapshot(data.date);
-    setPreviewTitle("Source Snapshot");
+    setPreviewTitle("源数据快照");
     if (snapshot) {
       setPreviewBody(JSON.stringify(snapshot, undefined, 2));
       return;
     }
 
-    setPreviewBody("Source snapshot unavailable");
+    setPreviewBody("源数据快照不可用");
   }
 
   return (
     <section className="page-grid">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Daily Report</p>
+          <p className="eyebrow">日报</p>
           <h2>{data.date}</h2>
         </div>
         <div className="button-row">
           <button
-            aria-label="Download Markdown"
+            aria-label="下载 Markdown"
             className="secondary-button"
             onClick={() => {
               void downloadMarkdown();
             }}
-            title="Download Markdown"
+            title="下载 Markdown"
             type="button"
           >
             <Download size={16} />
             下载 Markdown
           </button>
           <button
-            aria-label="Telegram brief"
+            aria-label="Telegram 简版"
             className="secondary-button"
             onClick={() => {
               void showTelegramPreview();
             }}
-            title="Telegram brief"
+            title="Telegram 简版"
             type="button"
           >
             <Send size={16} />
             Telegram 简版
           </button>
           <button
-            aria-label="HTML preview"
+            aria-label="HTML 预览"
             className="secondary-button"
             onClick={() => {
               void showHtmlPreview();
             }}
-            title="HTML preview"
+            title="HTML 预览"
             type="button"
           >
             <FileText size={16} />
             HTML 预览
           </button>
           <button
-            aria-label="Compare report versions"
+            aria-label="版本对比"
             className="secondary-button"
             onClick={() => {
               void showVersions();
             }}
-            title="Compare report versions"
+            title="版本对比"
             type="button"
           >
             <RefreshCcw size={16} />
             版本对比
           </button>
           <button
-            aria-label="View source snapshot"
+            aria-label="查看源数据快照"
             className="secondary-button"
             onClick={() => {
               void showSourceSnapshot();
             }}
-            title="View source snapshot"
+            title="查看源数据快照"
             type="button"
           >
             <FileText size={16} />
-            Source Snapshot
+            源数据快照
           </button>
         </div>
       </div>
       <DataQualityPanel quality={data.dataSource} />
 
       <div className="kpi-grid">
-        <MetricCard delta="Total equity" label="账户权益" tone="good" value={formatCurrency(data.account.equity)} />
-        <MetricCard delta="Net realized + open" label="净收益" tone="good" value={formatCurrency(data.account.netPnl)} />
-        <MetricCard delta="Intraday max" label="最大回撤" tone="warning" value={formatPercent(data.account.maxDrawdown)} />
-        <MetricCard delta="Executed notional" label="成交额" tone="muted" value={formatCurrency(data.account.volume)} />
+        <MetricCard delta="账户总权益" label="账户权益" tone="good" value={formatCurrency(data.account.equity)} />
+        <MetricCard delta="已实现 + 浮动" label="净收益" tone="good" value={formatCurrency(data.account.netPnl)} />
+        <MetricCard delta="日内最大" label="最大回撤" tone="warning" value={formatPercent(data.account.maxDrawdown)} />
+        <MetricCard delta="成交名义额" label="成交额" tone="muted" value={formatCurrency(data.account.volume)} />
       </div>
 
       <div className="two-column">
         <Panel title="交易表现" icon={<CheckCircle2 size={17} />}>
           <dl className="detail-grid compact">
             <div>
-              <dt>Trades</dt>
+              <dt>交易笔数</dt>
               <dd>{data.performance.trades}</dd>
             </div>
             <div>
-              <dt>Win Rate</dt>
+              <dt>胜率</dt>
               <dd>{formatPercent(data.performance.winRate)}</dd>
             </div>
             <div>
-              <dt>Profit Factor</dt>
+              <dt>盈利因子</dt>
               <dd>{data.performance.profitFactor}</dd>
             </div>
             <div>
-              <dt>Avg R</dt>
+              <dt>平均R倍</dt>
               <dd>{data.performance.avgR}</dd>
             </div>
           </dl>
@@ -2386,10 +2390,10 @@ function DailyReportPage({ date }: { date: string }): ReactElement {
 
         <Panel title="信号漏斗" icon={<RefreshCcw size={17} />}>
           <div className="funnel">
-            <FunnelBar label="Scanned" max={data.funnel.scanned} value={data.funnel.scanned} />
-            <FunnelBar label="Signaled" max={data.funnel.scanned} value={data.funnel.signaled} />
-            <FunnelBar label="Entered" max={data.funnel.scanned} value={data.funnel.entered} />
-            <FunnelBar label="Closed" max={data.funnel.scanned} value={data.funnel.closed} />
+            <FunnelBar label="已扫描" max={data.funnel.scanned} value={data.funnel.scanned} />
+            <FunnelBar label="已生成信号" max={data.funnel.scanned} value={data.funnel.signaled} />
+            <FunnelBar label="已入场" max={data.funnel.scanned} value={data.funnel.entered} />
+            <FunnelBar label="已平仓" max={data.funnel.scanned} value={data.funnel.closed} />
           </div>
         </Panel>
       </div>
@@ -2405,7 +2409,7 @@ function DailyReportPage({ date }: { date: string }): ReactElement {
         </Panel>
       )}
 
-      <span className={loading ? "load-badge loading" : "load-badge"}>{loading ? "Loading API" : "Report ready"}</span>
+      <span className={loading ? "load-badge loading" : "load-badge"}>{loading ? "接口加载中" : "日报就绪"}</span>
     </section>
   );
 }
@@ -2436,19 +2440,19 @@ function FunnelBar({ label, value, max }: FunnelBarProps): ReactElement {
 
 function buildMarkdown(report: DailyReport): string {
   const funnel = [
-    `- Scanned: ${report.funnel.scanned}`,
-    `- Signaled: ${report.funnel.signaled}`,
-    `- Entered: ${report.funnel.entered}`,
-    `- Closed: ${report.funnel.closed}`
+    `- 已扫描: ${report.funnel.scanned}`,
+    `- 已生成信号: ${report.funnel.signaled}`,
+    `- 已入场: ${report.funnel.entered}`,
+    `- 已平仓: ${report.funnel.closed}`
   ];
   const positions = report.positions.map((position) => {
-    let stopLoss = "Missing";
+    let stopLoss = "缺失";
 
     if (position.stopLoss) {
       stopLoss = formatCurrency(position.stopLoss);
     }
 
-    return `- ${position.pair} ${position.side} size ${position.size} PnL ${formatCurrency(position.pnl)} SL ${stopLoss}`;
+    return `- ${position.pair} ${position.side} 数量 ${position.size} 盈亏 ${formatCurrency(position.pnl)} 止损 ${stopLoss}`;
   });
 
   return [
@@ -2458,21 +2462,21 @@ function buildMarkdown(report: DailyReport): string {
     "renderer: dashboard",
     "---",
     "",
-    `# Hermes Daily Report ${report.date}`,
+    `# Hermes 日报 ${report.date}`,
     "",
-    `- Equity: ${formatCurrency(report.account.equity)}`,
-    `- Net PnL: ${formatCurrency(report.account.netPnl)}`,
-    `- Max Drawdown: ${formatPercent(report.account.maxDrawdown)}`,
-    `- Trades: ${report.performance.trades}`,
-    `- Win Rate: ${formatPercent(report.performance.winRate)}`,
+    `- 账户权益: ${formatCurrency(report.account.equity)}`,
+    `- 净收益: ${formatCurrency(report.account.netPnl)}`,
+    `- 最大回撤: ${formatPercent(report.account.maxDrawdown)}`,
+    `- 交易笔数: ${report.performance.trades}`,
+    `- 胜率: ${formatPercent(report.performance.winRate)}`,
     "",
-    "## Signal Funnel",
+    "## 信号漏斗",
     ...funnel,
     "",
-    "## Risk Events",
+    "## 风险事件",
     ...report.riskEvents.map((event) => `- ${event.time} ${event.source}: ${event.message}`),
     "",
-    "## Positions",
+    "## 持仓",
     ...positions
   ].join("\n");
 }

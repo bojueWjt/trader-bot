@@ -27,7 +27,7 @@ export function LoginPage({ onAuthenticated }: LoginPageProps): ReactElement {
     setSubmitting(false);
 
     if (!result) {
-      setStatus("Invalid username or password");
+      setStatus("用户名或密码错误");
       return;
     }
 
@@ -37,24 +37,24 @@ export function LoginPage({ onAuthenticated }: LoginPageProps): ReactElement {
 
   return (
     <main className="login-shell">
-      <section className="login-panel" aria-label="Login">
+      <section className="login-panel" aria-label="登录">
         <div className="login-brand">
           <span className="brand-mark">HT</span>
           <div>
             <strong>Hermes Trader</strong>
-            <span>Operations</span>
+            <span>运营</span>
           </div>
         </div>
         <div className="login-heading">
           <ShieldCheck size={20} />
           <div>
-            <p className="eyebrow">Secure Access</p>
-            <h1>Sign in</h1>
+            <p className="eyebrow">安全访问</p>
+            <h1>登录</h1>
           </div>
         </div>
         <form className="login-form" onSubmit={(event) => void submit(event)}>
           <label>
-            <span>Username</span>
+            <span>用户名</span>
             <input
               autoComplete="username"
               name="username"
@@ -67,7 +67,7 @@ export function LoginPage({ onAuthenticated }: LoginPageProps): ReactElement {
             />
           </label>
           <label>
-            <span>Password</span>
+            <span>密码</span>
             <input
               autoComplete="current-password"
               name="password"
@@ -81,7 +81,7 @@ export function LoginPage({ onAuthenticated }: LoginPageProps): ReactElement {
           </label>
           <button className="primary-button" disabled={submitting} type="submit">
             <LogIn size={16} />
-            Sign in
+            登录
           </button>
           {status && <p className="login-status" role="alert">{status}</p>}
         </form>
