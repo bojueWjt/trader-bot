@@ -1441,7 +1441,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-06",
         "OM4-07"
@@ -1455,7 +1455,11 @@
         "保护失败进入 REDUCING/HALT 并告警",
         "保护数量与实际持仓一致"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "protection_manager+protection: post-fill stop within threshold; failure->REDUCING/HALT+alert; qty==position"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1466,7 +1470,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM5-01"
       ],
@@ -1478,7 +1482,11 @@
         "每级 order role 与 position 可追溯",
         "部分成交后正确更新剩余保护"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "take_profit ladder sum<=position; roles via order_links; recompute after partial"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1489,7 +1497,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-03",
         "OM5-01"
@@ -1502,7 +1510,11 @@
         "先建新保护再安全撤旧单或使用交易所支持的 replace",
         "testnet move stop 成功"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "planner move_stop->STOP_MARKET/STOP_LIMIT+trigger (never plain market); new-before-cancel"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1513,7 +1525,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-04",
         "OM5-03"
@@ -1526,7 +1538,11 @@
         "offset 与费用保护可设置",
         "行情 stale 时不应用侧误触发"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "breakeven R/price once; offset+fee_buffer; stale-safe (price_stale guard)"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1537,7 +1553,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P1",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-04",
         "OM2-05",
@@ -1552,7 +1568,11 @@
         "应用侧 trailing 有 update rate limit",
         "断流时 fail-safe 且不放宽 stop"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "trailing native preferred; app-side rate-limited; never_loosen on disconnect"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1563,7 +1583,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-03",
         "OM2-03",
@@ -1578,7 +1598,11 @@
         "reduce-only 且不超过实际仓位",
         "完成后重算 stop/TP 数量"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "exits.partial_close reduce-only<=position; recompute stop/TP"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1589,7 +1613,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM5-01",
         "OM5-06"
@@ -1602,7 +1626,11 @@
         "flat 后撤残余 stop/TP",
         "最终对账通过才 completed"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "exits.close_position exchange actual qty; cancel residual; completed only after reconcile"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -1613,7 +1641,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM2-07",
         "OM5-01",
@@ -1628,7 +1656,11 @@
         "修复动作幂等",
         "无法安全修复时保持 REDUCING/HALT"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "protection_recovery restart missing/dup; idempotent; unsafe->REDUCING/HALT"
+      ],
       "blocker": null,
       "notes": []
     },
