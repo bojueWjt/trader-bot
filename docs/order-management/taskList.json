@@ -409,7 +409,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-01"
       ],
@@ -422,7 +422,11 @@
         "EXTERNAL/BOTH position identity 有统一 canonical key",
         "全链路不再用裸字符串精确比较判断同一币种"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 1169e05",
+        "test: tests/order_management/test_identifiers.py pass; existing risk/gateway/commands 31 passed (governor._instrument_matches delegates to instruments_match)",
+        "BTCUSDT==BTCUSDT-PERP.BINANCE canonical; PositionKey netting/hedge"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -433,7 +437,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-01",
         "OM0-02"
@@ -447,7 +451,11 @@
         "管理动作与入场动作字段互斥验证",
         "旧 v1 intent 有显式兼容/迁移策略"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 1169e05",
+        "test: tests/order_management/test_intent_fields.py pass; tests/contracts/test_contracts_v1.py 5 passed (snapshot refreshed)",
+        "optional execution/protection/sizing additive; order_plan stays open; legacy intents valid; management-vs-entry mutual exclusion in pydantic"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -458,7 +466,7 @@
       "executor": "codex",
       "complexity": "L",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-01",
         "OM0-02"
@@ -471,7 +479,12 @@
         "event_id 与 account+idempotency_key 唯一",
         "迁移可重复验证且不破坏现有数据"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 1169e05",
+        "live DB postgresql:///om_v3_om0: migrate up 0001..0005 clean; isolated 0005 down keeps baseline intent_id + audit_events table, drops 11 new tables + new cols; re-up clean; up idempotent 2x",
+        "test: tests/order_management/test_migration_0005.py pass",
+        "audit_events enhanced additively (ALTER, not CREATE); fixed Codex dead-no-op + my own down data-loss bug"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -482,7 +495,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-01",
         "OM0-04"
@@ -496,7 +509,11 @@
         "网络超时后重试不会造成未知重复提交",
         "所有写命令可通过 request_id 查询最终结果"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 1169e05",
+        "test: tests/order_management/test_idempotency.py pass",
+        "intent_idempotency_key mirrors decision_gateway sha256; deterministic outbox id ON CONFLICT DO NOTHING; query-by-request_id"
+      ],
       "blocker": null,
       "notes": []
     },
@@ -507,7 +524,7 @@
       "executor": "codex",
       "complexity": "M",
       "priority": "P0",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "OM0-03",
         "OM0-04",
@@ -522,7 +539,11 @@
         "CI 校验 JSON Schema 与 Python/TypeScript 类型一致",
         "非法组合在进入执行层前被拒绝"
       ],
-      "evidence": [],
+      "evidence": [
+        "commit: 1169e05",
+        "test: tests/order_management/ + tests/contracts -> 54 passed",
+        "JSON-Schema<->pydantic round-trip; illegal combos rejected pre-execution"
+      ],
       "blocker": null,
       "notes": []
     },
