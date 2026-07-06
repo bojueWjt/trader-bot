@@ -1,0 +1,20 @@
+{
+  "approved_trade_intent": [
+    "approved_trade_intent.move_stop_loss.json",
+    "approved_trade_intent.open_position.json",
+    "approved_trade_intent.zone_ladder_v11.json",
+    "approved_trade_intent.zone_wire_v10.json"
+  ],
+  "execution_event_envelope": [
+    "execution_event_envelope.node_heartbeat.json",
+    "execution_event_envelope.order_accepted.json"
+  ],
+  "hermes_decision": [
+    "hermes_decision.needs_review.json",
+    "hermes_decision.open_limit.json"
+  ],
+  "system_snapshot": [
+    "system_snapshot.active.json",
+    "system_snapshot.empty.json"
+  ]
+}

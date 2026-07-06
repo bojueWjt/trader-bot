@@ -58,7 +58,145 @@
     "order_plan": {
       "type": "object",
       "additionalProperties": false,
-      "properties": {}
+      "properties": {
+        "side": {
+          "type": "string",
+          "enum": [
+            "buy",
+            "sell"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "market",
+            "limit",
+            "zone"
+          ]
+        },
+        "time_in_force": {
+          "type": "string",
+          "enum": [
+            "GTC",
+            "IOC",
+            "FOK",
+            "GTD"
+          ]
+        },
+        "quantity": {
+          "type": "string"
+        },
+        "price": {
+          "type": "number"
+        },
+        "price_min": {
+          "type": "number"
+        },
+        "price_max": {
+          "type": "number"
+        },
+        "stop_loss": {
+          "type": "number"
+        },
+        "stop_price": {
+          "type": "number"
+        },
+        "limit_price": {
+          "type": "number"
+        },
+        "trigger_price": {
+          "type": "number"
+        },
+        "leverage": {
+          "type": "number"
+        },
+        "take_profits": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "plan_version": {
+          "type": "string",
+          "enum": [
+            "1.1"
+          ]
+        },
+        "policy": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "zone_ladder",
+            "single_limit",
+            "market"
+          ]
+        },
+        "tranches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tranche_id",
+              "seq",
+              "price",
+              "quantity"
+            ],
+            "properties": {
+              "tranche_id": {
+                "type": "string"
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9
+              },
+              "price": {
+                "type": "number"
+              },
+              "quantity": {
+                "type": "string"
+              },
+              "risk_weight": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "style": {
+                "type": "string",
+                "enum": [
+                  "chase",
+                  "rest"
+                ]
+              },
+              "limit_cap": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        "invalidation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cancel_on_price_touch": {
+              "type": "number"
+            },
+            "cancel_on_close_beyond": {
+              "type": "number"
+            },
+            "close_bar": {
+              "type": "string"
+            },
+            "expires_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        }
+      }
     },
     "risk_budget": {
       "type": "object",
@@ -105,4 +243,3 @@
     }
   }
 }
-

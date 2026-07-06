@@ -181,7 +181,11 @@ def schema_for_example(example_path):
 
 
 def valid_examples():
-    return sorted((V1_ROOT / "examples" / "valid").glob("*.json"))
+    return sorted(
+        path
+        for path in (V1_ROOT / "examples" / "valid").glob("*.json")
+        if path.name != "index.json"
+    )
 
 
 def invalid_examples():
@@ -260,6 +264,57 @@ def test_valid_examples_pass():
         validate(load_json(path), schema_for_example(path))
 
 
+def test_approved_trade_intent_wire_order_plan_variants_pass():
+    schema = load_json(SCHEMAS["approved_trade_intent"])
+    base = load_json(V1_ROOT / "examples" / "valid" / "approved_trade_intent.open_position.json")
+    order_plans = [
+        {
+            "side": "sell",
+            "type": "zone",
+            "time_in_force": "GTC",
+            "quantity": "0.0019261637239165329",
+            "price": 62300.0,
+            "price_min": 62300.0,
+            "price_max": 62700.0,
+            "stop_loss": 63100.0,
+            "take_profits": [
+                61500,
+                60800,
+                60000,
+            ],
+            "leverage": 10.0,
+        },
+        {
+            "side": "sell",
+            "type": "market",
+            "time_in_force": "IOC",
+            "quantity": "0.002",
+            "stop_loss": 70000.0,
+            "take_profits": [],
+        },
+        {
+            "side": "sell",
+            "type": "market",
+            "time_in_force": "IOC",
+            "take_profits": [],
+        },
+        {
+            "side": "sell",
+            "type": "market",
+            "time_in_force": "IOC",
+            "quantity": "0.002",
+            "stop_price": 70100.0,
+            "limit_price": 70050.0,
+            "trigger_price": 69950.0,
+            "take_profits": [],
+        },
+    ]
+    for order_plan in order_plans:
+        instance = dict(base)
+        instance["order_plan"] = order_plan
+        validate(instance, schema)
+
+
 def test_invalid_examples_fail():
     reason_checks = {
         "additional_property": ("additionalProperties",),
@@ -287,6 +342,17 @@ def test_round_trip():
         validate(original, schema_for_example(path))
         dumped = canonical_dumps(original)
         assert canonical_dumps(json.loads(dumped)) == dumped
+
+
+def test_valid_examples_index_matches_files():
+    index_path = V1_ROOT / "examples" / "valid" / "index.json"
+    index = load_json(index_path)
+    listed = []
+    for schema_name, examples in index.items():
+        assert schema_name in SCHEMAS
+        assert isinstance(examples, list)
+        listed.extend(examples)
+    assert sorted(listed) == sorted(path.name for path in valid_examples())
 
 
 def test_schema_invariants():

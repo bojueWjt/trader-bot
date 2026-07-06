@@ -80,9 +80,231 @@
       ]
     },
     "order_plan": {
-      "properties": [],
+      "properties": [
+        "invalidation",
+        "leverage",
+        "limit_price",
+        "mode",
+        "plan_version",
+        "policy",
+        "price",
+        "price_max",
+        "price_min",
+        "quantity",
+        "side",
+        "stop_loss",
+        "stop_price",
+        "take_profits",
+        "time_in_force",
+        "tranches",
+        "trigger_price",
+        "type"
+      ],
       "type": [
         "object"
+      ]
+    },
+    "order_plan.invalidation": {
+      "properties": [
+        "cancel_on_close_beyond",
+        "cancel_on_price_touch",
+        "close_bar",
+        "expires_at"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "order_plan.invalidation.cancel_on_close_beyond": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.invalidation.cancel_on_price_touch": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.invalidation.close_bar": {
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.invalidation.expires_at": {
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.leverage": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.limit_price": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.mode": {
+      "enum": [
+        "\"market\"",
+        "\"single_limit\"",
+        "\"zone_ladder\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.plan_version": {
+      "enum": [
+        "\"1.1\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.policy": {
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.price": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.price_max": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.price_min": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.quantity": {
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.side": {
+      "enum": [
+        "\"buy\"",
+        "\"sell\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.stop_loss": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.stop_price": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.take_profits": {
+      "type": [
+        "array"
+      ]
+    },
+    "order_plan.take_profits[]": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.time_in_force": {
+      "enum": [
+        "\"FOK\"",
+        "\"GTC\"",
+        "\"GTD\"",
+        "\"IOC\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.tranches": {
+      "type": [
+        "array"
+      ]
+    },
+    "order_plan.tranches[]": {
+      "properties": [
+        "limit_cap",
+        "price",
+        "quantity",
+        "risk_weight",
+        "seq",
+        "style",
+        "tranche_id"
+      ],
+      "required": [
+        "price",
+        "quantity",
+        "seq",
+        "tranche_id"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "order_plan.tranches[].limit_cap": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.tranches[].price": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.tranches[].quantity": {
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.tranches[].risk_weight": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.tranches[].seq": {
+      "type": [
+        "integer"
+      ]
+    },
+    "order_plan.tranches[].style": {
+      "enum": [
+        "\"chase\"",
+        "\"rest\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.tranches[].tranche_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "order_plan.trigger_price": {
+      "type": [
+        "number"
+      ]
+    },
+    "order_plan.type": {
+      "enum": [
+        "\"limit\"",
+        "\"market\"",
+        "\"zone\""
+      ],
+      "type": [
+        "string"
       ]
     },
     "risk_budget": {
