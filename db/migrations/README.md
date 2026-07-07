@@ -83,3 +83,4 @@ It receives no `SELECT` privilege and no grants on raw ingest, Hermes semantic, 
 - Approved trade intents require non-null FKs to both Hermes and risk decisions.
 - `outbox_events` is designed for same-transaction writes with business data.
 - `execution_events.event_id` and intent/command idempotency keys are unique.
+- `0006_trade_outcomes` adds the offline `trade_outcomes` ledger for closed-intent outcome metrics.
