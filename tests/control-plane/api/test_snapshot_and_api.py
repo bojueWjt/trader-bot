@@ -84,6 +84,20 @@ def test_snapshot_includes_market_prices_from_price_feed_status(db_conn):
     ]
 
 
+def test_snapshot_survives_missing_price_feed_status_table(db_conn):
+    # Live deployments still on migration 0004 have no price_feed_status table;
+    # the snapshot must degrade to an empty list instead of erroring.
+    with transaction(db_conn), db_conn.cursor() as cur:
+        cur.execute("ALTER TABLE price_feed_status RENAME TO price_feed_status_hidden")
+    try:
+        snap = build_system_snapshot(db_conn)
+        validate_snapshot(snap)
+        assert snap["data"]["market_prices"] == []
+    finally:
+        with transaction(db_conn), db_conn.cursor() as cur:
+            cur.execute("ALTER TABLE price_feed_status_hidden RENAME TO price_feed_status")
+
+
 def test_stale_when_last_event_old(db_conn):
     _seed_account(db_conn, last_event_minutes_ago=120)
     snap = build_system_snapshot(db_conn, staleness_threshold_ms=60_000)
