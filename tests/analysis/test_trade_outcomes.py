@@ -15,7 +15,7 @@ import psycopg2
 import pytest
 from psycopg2.extras import Json
 
-from scripts.analysis.trade_outcomes import build_trade_outcome
+from scripts.analysis.trade_outcomes import build_position_episodes, build_trade_outcome
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -160,6 +160,84 @@ def test_build_trade_outcome_keeps_partially_exited_intent_open():
     ]
 
     assert build_trade_outcome(intent, events, klines=[], kline_source="fixture") is None
+
+
+def test_build_position_episodes_reconstructs_live_shape_lifecycle():
+    # Live shape: entry fill tagged with the open intent, closing fill tagged
+    # with a separate close_position intent, PositionClosed untagged (no
+    # intent_id). One episode, attributed to the open intent.
+    start = datetime(2026, 7, 3, 9, 0, tzinfo=timezone.utc)
+
+    def record(event_type, ts, payload, *, intent_id=None, instrument_id=None, order_plan=None):
+        return {
+            "account_id": "acct-a",
+            "intent_id": intent_id,
+            "event_type": event_type,
+            "ts_event": ts,
+            "payload": payload,
+            "instrument_id": instrument_id,
+            "order_plan": order_plan or {},
+        }
+
+    records = [
+        record(
+            "OrderFilled",
+            start,
+            {"order_side": 1, "last_qty": "2", "avg_px": "100", "instrument_id": "BTCUSDT-PERP.BINANCE"},
+            intent_id="aaaaaaaa-0000-0000-0000-000000000001",
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            order_plan={"side": "buy", "stop_loss": "95"},
+        ),
+        record(
+            "OrderFilled",
+            start + timedelta(hours=1),
+            {"order_side": 2, "last_qty": "2", "avg_px": "108", "instrument_id": "BTCUSDT-PERP.BINANCE"},
+            intent_id="bbbbbbbb-0000-0000-0000-000000000002",  # separate close_position intent
+            instrument_id="BTCUSDT-PERP.BINANCE",
+        ),
+        record(
+            "PositionClosed",
+            start + timedelta(hours=1, seconds=2),
+            {"side": "LONG", "realized_pnl": "15.5", "instrument_id": "BTCUSDT-PERP.BINANCE"},
+        ),
+    ]
+
+    episodes = build_position_episodes(records)
+    assert len(episodes) == 1
+    episode = episodes[0]
+    assert episode["intent_id"] == "aaaaaaaa-0000-0000-0000-000000000001"
+    assert episode["order_plan"]["side"] == "long"  # derived from fill sign, not the plan's "buy"
+    assert episode["order_plan"]["stop_loss"] == "95"
+    assert episode["contributing_intent_ids"] == [
+        "aaaaaaaa-0000-0000-0000-000000000001",
+        "bbbbbbbb-0000-0000-0000-000000000002",
+    ]
+
+    outcome = build_trade_outcome(episode, episode["events"], klines=[], kline_source="fixture")
+    assert outcome is not None
+    assert outcome["realized_pnl"] == Decimal("15.5")  # from the matched untagged PositionClosed
+    assert outcome["entry_avg_price"] == Decimal("100")
+    assert outcome["exit_avg_price"] == Decimal("108")
+    assert outcome["details"]["close_basis"] == "position_closed_event"
+    assert outcome["details"]["contributing_intent_ids"] == episode["contributing_intent_ids"]
+
+
+def test_build_position_episodes_skips_untagged_and_open_positions():
+    start = datetime(2026, 7, 3, 10, 0, tzinfo=timezone.utc)
+    records = [
+        # fully untagged episode: cannot attribute -> skipped
+        {"account_id": "acct-a", "intent_id": None, "event_type": "OrderFilled", "ts_event": start,
+         "payload": {"order_side": 1, "last_qty": "1", "avg_px": "50", "instrument_id": "ETHUSDT-PERP.BINANCE"},
+         "instrument_id": None, "order_plan": {}},
+        {"account_id": "acct-a", "intent_id": None, "event_type": "OrderFilled", "ts_event": start + timedelta(minutes=1),
+         "payload": {"order_side": 2, "last_qty": "1", "avg_px": "51", "instrument_id": "ETHUSDT-PERP.BINANCE"},
+         "instrument_id": None, "order_plan": {}},
+        # tagged but still open (net != 0) -> no episode
+        {"account_id": "acct-a", "intent_id": "cccccccc-0000-0000-0000-000000000003", "event_type": "OrderFilled",
+         "ts_event": start, "payload": {"order_side": 1, "last_qty": "3", "avg_px": "100", "instrument_id": "SOLUSDT-PERP.BINANCE"},
+         "instrument_id": "SOLUSDT-PERP.BINANCE", "order_plan": {"side": "long"}},
+    ]
+    assert build_position_episodes(records) == []
 
 
 def test_migration_0006_files_match_required_contract():

@@ -70,6 +70,9 @@ def build_trade_outcome(
     mae_mfe = _mae_mfe(side, entry_avg, klines or [], first_fill_at, closed_at)
 
     details: dict[str, Any] = {"close_basis": closure["close_basis"]}
+    contributing = intent.get("contributing_intent_ids")
+    if contributing and len(contributing) > 1:
+        details["contributing_intent_ids"] = list(contributing)
     if fee_reason:
         details["fees"] = {"reason": fee_reason}
     if risk_detail:
@@ -105,51 +108,166 @@ def build_trade_outcome(
 
 
 def load_closed_intents(conn: Any, *, intent_id: str | None = None) -> list[dict[str, Any]]:
-    params: list[Any] = []
-    intent_filter = ""
-    if intent_id:
-        intent_filter = "AND ti.intent_id = %s"
-        params.append(intent_id)
-    sql = f"""
+    sql = """
         SELECT
-            ti.intent_id::text,
-            ti.account_id,
+            ee.account_id,
+            ee.intent_id::text,
+            ee.event_type,
+            ee.ts_event,
+            ee.payload,
             ti.instrument_id,
-            ti.order_plan,
-            jsonb_agg(
-                jsonb_build_object(
-                    'event_type', ee.event_type,
-                    'ts_event', ee.ts_event,
-                    'account_id', ee.account_id,
-                    'payload', ee.payload
-                )
-                ORDER BY ee.ts_event, ee.event_id
-            ) AS events
-        FROM trade_intents ti
-        JOIN execution_events ee ON ee.intent_id = ti.intent_id
-        WHERE EXISTS (
-            SELECT 1 FROM execution_events filled
-            WHERE filled.intent_id = ti.intent_id
-              AND filled.account_id = ti.account_id
-              AND filled.event_type = 'OrderFilled'
-        )
-          {intent_filter}
-        GROUP BY ti.intent_id, ti.account_id, ti.instrument_id, ti.order_plan
-        ORDER BY ti.account_id, ti.intent_id
+            ti.order_plan
+        FROM execution_events ee
+        LEFT JOIN trade_intents ti ON ti.intent_id = ee.intent_id
+        WHERE ee.event_type IN ('OrderFilled', 'PositionClosed')
+        ORDER BY ee.account_id, ee.ts_event, ee.event_id
     """
     with conn.cursor() as cur:
-        cur.execute(sql, params)
+        cur.execute(sql)
         rows = cur.fetchall()
-    return [
+    records = [
         {
-            "intent_id": row[0],
-            "account_id": row[1],
-            "instrument_id": row[2],
-            "order_plan": row[3] or {},
-            "events": row[4] or [],
+            "account_id": row[0],
+            "intent_id": row[1],
+            "event_type": row[2],
+            "ts_event": row[3],
+            "payload": row[4] or {},
+            "instrument_id": row[5],
+            "order_plan": row[6] or {},
         }
         for row in rows
     ]
+    episodes = build_position_episodes(records)
+    if intent_id:
+        episodes = [episode for episode in episodes if episode["intent_id"] == intent_id]
+    return episodes
+
+
+def _signed_fill_qty(payload: Mapping[str, Any]) -> Decimal | None:
+    qty = _payload_decimal(payload, "last_qty", "quantity", "filled_qty")
+    if qty is None:
+        return None
+    order_side = ORDER_SIDE.get(payload.get("order_side"))
+    if order_side == "buy":
+        return qty
+    if order_side == "sell":
+        return -qty
+    return None
+
+
+def _episode_instrument_key(record: Mapping[str, Any]) -> str | None:
+    for candidate in (record.get("instrument_id"), (record.get("payload") or {}).get("instrument_id")):
+        if candidate:
+            try:
+                return normalize_symbol(str(candidate))
+            except Exception:
+                return str(candidate)
+    return None
+
+
+def build_position_episodes(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Reconstruct position lifecycles from the raw fill stream.
+
+    Live closes run through separate management intents (partial_close /
+    close_position), so a single intent never sees both legs. Group fills by
+    (account, instrument), track net quantity, and cut an episode each time the
+    position returns to flat. The episode is attributed to the first tagged
+    entry fill's intent; untagged PositionClosed events within the closing
+    window are attached so realized_pnl can come from the venue when available.
+    """
+    streams: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    closes: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for record in records:
+        key_symbol = _episode_instrument_key(record)
+        if key_symbol is None:
+            continue
+        key = (str(record.get("account_id")), key_symbol)
+        if record.get("event_type") == "OrderFilled":
+            streams.setdefault(key, []).append(record)
+        elif record.get("event_type") == "PositionClosed":
+            closes.setdefault(key, []).append(record)
+
+    episodes: list[dict[str, Any]] = []
+    for key, fills in streams.items():
+        net = Decimal("0")
+        current: list[Mapping[str, Any]] = []
+        for fill in fills:
+            signed = _signed_fill_qty(fill.get("payload") or {})
+            if signed is None:
+                continue
+            current.append(fill)
+            net += signed
+            if current and net == 0:
+                episode = _finalize_episode(key, current, closes.get(key) or [])
+                if episode is not None:
+                    episodes.append(episode)
+                current = []
+        # non-flat trailing fills = still-open position; intentionally dropped
+    return episodes
+
+
+_CLOSE_MATCH_WINDOW = timedelta(minutes=5)
+
+
+def _finalize_episode(
+    key: tuple[str, str],
+    fills: Sequence[Mapping[str, Any]],
+    close_events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    first_signed = None
+    for fill in fills:
+        first_signed = _signed_fill_qty(fill.get("payload") or {})
+        if first_signed is not None:
+            break
+    if not first_signed:
+        return None
+    entry_sign = 1 if first_signed > 0 else -1
+    side = "long" if entry_sign > 0 else "short"
+
+    primary = None
+    for fill in fills:
+        signed = _signed_fill_qty(fill.get("payload") or {})
+        if signed is None or (signed > 0) != (entry_sign > 0):
+            continue
+        if fill.get("intent_id"):
+            primary = fill
+            break
+    if primary is None:
+        return None  # untagged legacy episode: cannot attribute, skip
+
+    last_ts = max(_event_time(fill) for fill in fills)
+    matched_closes = [
+        {
+            "event_type": "PositionClosed",
+            "ts_event": close.get("ts_event"),
+            "account_id": close.get("account_id"),
+            "payload": close.get("payload") or {},
+        }
+        for close in close_events
+        if abs(_event_time(close) - last_ts) <= _CLOSE_MATCH_WINDOW
+    ]
+
+    events = [
+        {
+            "event_type": "OrderFilled",
+            "ts_event": fill.get("ts_event"),
+            "account_id": fill.get("account_id"),
+            "payload": fill.get("payload") or {},
+        }
+        for fill in fills
+    ] + matched_closes
+
+    order_plan = dict(primary.get("order_plan") or {})
+    order_plan["side"] = side  # fill-stream sign is authoritative over plan wording (buy/sell vs long/short)
+    contributing = sorted({str(f.get("intent_id")) for f in fills if f.get("intent_id")})
+    return {
+        "intent_id": primary.get("intent_id"),
+        "account_id": key[0],
+        "instrument_id": primary.get("instrument_id") or key[1],
+        "order_plan": order_plan,
+        "events": events,
+        "contributing_intent_ids": contributing,
+    }
 
 
 def compute_outcomes(
