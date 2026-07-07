@@ -276,6 +276,7 @@ def test_invalid_examples_fail():
         "additional_property": ("additionalProperties",),
         "bad_date_time": ("date-time", "format"),
         "bad_idempotency_key": ("pattern", "minLength", "maxLength"),
+        "bad_market_prices_type": ("type",),
         "invalid_enum": ("enum",),
         "missing_required": ("required",),
     }

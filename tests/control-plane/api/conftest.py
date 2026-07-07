@@ -15,7 +15,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CP = REPO_ROOT / "services" / "control-plane"
 MIGRATE = CP / "db" / "migrate.py"
-PG_PORT = "55440"
+PG_PORT = "55442"
 
 for _p in (str(CP / "api"), str(CP / "db")):
     if _p not in sys.path:

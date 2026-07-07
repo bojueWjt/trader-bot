@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "data_source": "postgres_projection",
+  "snapshot_id": "77777777-7777-4777-8777-777777777777",
+  "generated_at": "2026-06-19T12:08:00Z",
+  "last_execution_event_at": "2026-06-19T12:07:59Z",
+  "projection_lag_ms": 100,
+  "stale": false,
+  "missing_nodes": [],
+  "reconciliation_state": "healthy",
+  "data": {
+    "account": {},
+    "balances": {
+      "equity": 12500.25,
+      "margin": 3200.5
+    },
+    "orders": [],
+    "positions": [],
+    "recent_messages": [],
+    "hermes_decisions": [],
+    "risk_decisions": [],
+    "node_health": [],
+    "audit_trail": [],
+    "market_prices": [
+      {
+        "account_id": "acct-main",
+        "venue_symbol": "BTCUSDT",
+        "source": "binance_ws",
+        "mark_price": 65123.45,
+        "last_price": 65120.0,
+        "bid_price": 65119.5,
+        "ask_price": 65121.0,
+        "last_event_at": "2026-06-19T12:07:58Z",
+        "stale": false
+      },
+      {
+        "account_id": "acct-main",
+        "venue_symbol": "ETHUSDT",
+        "source": "binance_rest",
+        "mark_price": null,
+        "last_price": null,
+        "bid_price": null,
+        "ask_price": null,
+        "last_event_at": null,
+        "stale": true
+      }
+    ]
+  }
+}

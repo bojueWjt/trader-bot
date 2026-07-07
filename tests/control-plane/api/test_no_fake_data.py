@@ -6,13 +6,18 @@ from pathlib import Path
 import pytest
 
 BRIDGE_API = Path(__file__).resolve().parents[3] / "bridge" / "apps" / "api"
-if str(BRIDGE_API) not in sys.path:
-    sys.path.insert(0, str(BRIDGE_API))
+if str(BRIDGE_API) in sys.path:
+    sys.path.remove(str(BRIDGE_API))
+sys.path.insert(0, str(BRIDGE_API))
 
 
 def _reimport_provider():
-    for mod in ("app.services.dashboard_provider", "app.services.dashboard_fake_adapter"):
-        sys.modules.pop(mod, None)
+    if str(BRIDGE_API) in sys.path:
+        sys.path.remove(str(BRIDGE_API))
+    sys.path.insert(0, str(BRIDGE_API))
+    for mod in list(sys.modules):
+        if mod == "app" or mod.startswith("app."):
+            sys.modules.pop(mod, None)
 
 
 def test_production_dashboard_uses_empty_adapter_not_fixtures(monkeypatch):

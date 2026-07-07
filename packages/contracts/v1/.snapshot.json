@@ -845,6 +845,7 @@
         "audit_trail",
         "balances",
         "hermes_decisions",
+        "market_prices",
         "node_health",
         "orders",
         "positions",
@@ -903,6 +904,88 @@
     "data.hermes_decisions": {
       "type": [
         "array"
+      ]
+    },
+    "data.market_prices": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.market_prices[]": {
+      "properties": [
+        "account_id",
+        "ask_price",
+        "bid_price",
+        "last_event_at",
+        "last_price",
+        "mark_price",
+        "source",
+        "stale",
+        "venue_symbol"
+      ],
+      "required": [
+        "account_id",
+        "ask_price",
+        "bid_price",
+        "last_event_at",
+        "last_price",
+        "mark_price",
+        "source",
+        "stale",
+        "venue_symbol"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "data.market_prices[].account_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "data.market_prices[].ask_price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "data.market_prices[].bid_price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "data.market_prices[].last_event_at": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "data.market_prices[].last_price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "data.market_prices[].mark_price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "data.market_prices[].source": {
+      "type": [
+        "string"
+      ]
+    },
+    "data.market_prices[].stale": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "data.market_prices[].venue_symbol": {
+      "type": [
+        "string"
       ]
     },
     "data.node_health": {

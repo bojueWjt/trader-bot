@@ -118,11 +118,20 @@ def _fallback_daily_response(report_date: str, fallback: dict) -> dict:
 
 
 def _trades_summary(trades: list[dict]) -> dict[str, int]:
+    realized_pnls = [_realized_pnl(trade) for trade in trades]
     return {
         "closed_today_count": len(trades),
         "closed_count": len(trades),
-        "win_count": 0,
+        "win_count": sum(1 for pnl in realized_pnls if pnl is not None and pnl > 0),
+        "loss_count": sum(1 for pnl in realized_pnls if pnl is not None and pnl < 0),
     }
+
+
+def _realized_pnl(trade: dict) -> float | None:
+    value = trade.get("realized_pnl", trade.get("pnl"))
+    if value is None:
+        return None
+    return float(value)
 
 
 def _signals_summary(signals: list[dict]) -> dict[str, int]:

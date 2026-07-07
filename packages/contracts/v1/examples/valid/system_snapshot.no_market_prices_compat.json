@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "data_source": "postgres_projection",
+  "snapshot_id": "88888888-8888-4888-8888-888888888888",
+  "generated_at": "2026-06-19T12:09:00Z",
+  "last_execution_event_at": null,
+  "projection_lag_ms": 0,
+  "stale": false,
+  "missing_nodes": [],
+  "reconciliation_state": "healthy",
+  "data": {
+    "account": {},
+    "balances": {
+      "equity": 0,
+      "margin": 0
+    },
+    "orders": [],
+    "positions": [],
+    "recent_messages": [],
+    "hermes_decisions": [],
+    "risk_decisions": [],
+    "node_health": [],
+    "audit_trail": []
+  }
+}

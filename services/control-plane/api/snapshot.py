@@ -37,6 +37,11 @@ def build_system_snapshot(
         accounts = _rows(cur, "SELECT * FROM accounts_projection ORDER BY account_id")
         orders = _rows(cur, "SELECT * FROM orders_projection ORDER BY updated_at DESC LIMIT %s", (limit,))
         positions = _rows(cur, "SELECT * FROM positions_projection ORDER BY updated_at DESC LIMIT %s", (limit,))
+        market_prices = _rows(
+            cur,
+            "SELECT account_id, venue_symbol, source, mark_price, last_price, bid_price, ask_price, "
+            "last_event_at, stale FROM price_feed_status ORDER BY account_id, venue_symbol, source",
+        )
         recent_messages = _rows(
             cur,
             "SELECT id, channel_id, source_received_at, message_text FROM raw_messages "
@@ -95,6 +100,7 @@ def build_system_snapshot(
             "balances": {"equity": equity, "margin": margin},
             "orders": _jsonify(orders),
             "positions": _jsonify(positions),
+            "market_prices": _jsonify(market_prices),
             "recent_messages": _jsonify(recent_messages),
             "hermes_decisions": _jsonify(hermes_decisions),
             "risk_decisions": _jsonify(risk_decisions),

@@ -32,6 +32,7 @@ def test_empty_system_returns_real_empty_state(db_conn):
     assert snap["reconciliation_state"] == "healthy"
     assert snap["data"]["balances"] == {"equity": 0.0, "margin": 0.0}
     assert snap["data"]["orders"] == []
+    assert snap["data"]["market_prices"] == []
     assert snap["missing_nodes"] == []
 
 
@@ -42,6 +43,45 @@ def test_populated_snapshot_is_schema_valid(db_conn):
     assert snap["data"]["balances"]["equity"] == 1000.0
     assert snap["last_execution_event_at"] is not None
     assert snap["stale"] is False
+
+
+def test_snapshot_includes_market_prices_from_price_feed_status(db_conn):
+    event_at = datetime(2026, 6, 19, 12, 5, 1, tzinfo=timezone.utc)
+    with transaction(db_conn), db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO price_feed_status ("
+            "price_feed_status_id, account_id, venue_symbol, source, mark_price, last_price, "
+            "bid_price, ask_price, last_event_at, stale"
+            ") VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                "acct-1",
+                "BTCUSDT",
+                "binance_ws",
+                65123.45,
+                65120.0,
+                65119.5,
+                65121.0,
+                event_at,
+                False,
+            ),
+        )
+
+    snap = build_system_snapshot(db_conn)
+    validate_snapshot(snap)
+
+    assert snap["data"]["market_prices"] == [
+        {
+            "account_id": "acct-1",
+            "venue_symbol": "BTCUSDT",
+            "source": "binance_ws",
+            "mark_price": 65123.45,
+            "last_price": 65120.0,
+            "bid_price": 65119.5,
+            "ask_price": 65121.0,
+            "last_event_at": event_at.isoformat(),
+            "stale": False,
+        }
+    ]
 
 
 def test_stale_when_last_event_old(db_conn):
