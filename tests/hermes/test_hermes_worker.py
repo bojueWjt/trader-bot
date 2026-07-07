@@ -44,6 +44,26 @@ class StaticSnapshot:
         return self._snapshot
 
 
+class FakeMarketContextFetcher:
+    def __init__(self, *, snapshot=None, raises=None):
+        self._snapshot = snapshot or {
+            "context_version": "market-v1",
+            "symbol": "BTCUSDT",
+            "status": "ok",
+            "partial_failures": [],
+        }
+        self._raises = raises
+        self.symbols = []
+
+    def fetch(self, symbol):
+        self.symbols.append(symbol)
+        if self._raises is not None:
+            raise self._raises
+        result = dict(self._snapshot)
+        result["symbol"] = symbol
+        return result
+
+
 def fresh_snapshot():
     return {
         "data_source": "postgres_projection",
@@ -58,7 +78,7 @@ def fresh_snapshot():
     }
 
 
-def valid_candidate(action="open_position", message_type="new_signal", side="long"):
+def valid_candidate(action="open_position", message_type="new_signal", side="long", symbol="BTCUSDT"):
     return {
         "classification": {
             "message_type": message_type,
@@ -70,7 +90,7 @@ def valid_candidate(action="open_position", message_type="new_signal", side="lon
             "account_scope": "unassigned",
             "target_account_id": None,
             "target_position_id": None,
-            "instrument_symbol": "BTCUSDT",
+            "instrument_symbol": symbol,
             "side": side,
             "entry": {"type": "market", "price": None, "price_min": None, "price_max": None},
             "stop_loss": None,
@@ -128,13 +148,14 @@ def add_media(conn, raw_message_id, *, download_status="downloaded"):
         )
 
 
-def run_worker(conn, client, *, media_loader=None, snapshot=None):
+def run_worker(conn, client, *, media_loader=None, snapshot=None, market_context_fetcher=None):
     return worker.process_one(
         conn,
         worker_id="w1",
         client=client,
         media_loader=media_loader or MockMediaLoader(),
         snapshot_provider=StaticSnapshot(snapshot or fresh_snapshot()),
+        market_context_fetcher=market_context_fetcher,
         model_version="mock-hermes",
         timeout=5,
         lease_seconds=30,
@@ -151,6 +172,20 @@ def _run_status(conn, run_id):
     with conn.cursor() as cur:
         cur.execute("SELECT status FROM message_processing_runs WHERE processing_run_id = %s", (run_id,))
         return cur.fetchone()[0]
+
+
+def _market_snapshots(conn, raw_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT context_version, snapshot
+            FROM context_snapshots
+            WHERE raw_message_id = %s AND snapshot_type = 'market'
+            ORDER BY created_at
+            """,
+            (raw_id,),
+        )
+        return cur.fetchall()
 
 
 # --- happy paths ------------------------------------------------------------------
@@ -190,6 +225,52 @@ def test_decision_persists_classification_and_intent(db_conn):
         )
         row = cur.fetchone()
     assert row == ("new_signal", "open_position", "long", "BTCUSDT", "hermes", "hermes-trader-v1")
+
+
+def test_actionable_decision_writes_market_snapshot_from_structured_symbol(db_conn):
+    raw_id = seed_message(db_conn, text="message text mentions ETHUSDT but intent is structured")
+    market = FakeMarketContextFetcher(snapshot={"context_version": "market-v1", "status": "ok"})
+    client = MockHermesClient(candidate=valid_candidate(symbol="BTCUSDT"))
+
+    result = run_worker(db_conn, client, market_context_fetcher=market)
+
+    assert result.status == "succeeded"
+    assert market.symbols == ["BTCUSDT"]
+    rows = _market_snapshots(db_conn, raw_id)
+    assert rows == [
+        (
+            "market-v1",
+            {"context_version": "market-v1", "status": "ok", "symbol": "BTCUSDT", "partial_failures": []},
+        )
+    ]
+
+
+def test_market_context_fetch_failure_is_fail_open_and_records_skipped(db_conn):
+    raw_id = seed_message(db_conn)
+    market = FakeMarketContextFetcher(raises=TimeoutError("market deadline"))
+    client = MockHermesClient(candidate=valid_candidate())
+
+    result = run_worker(db_conn, client, market_context_fetcher=market)
+
+    assert result.status == "succeeded"
+    assert _count(db_conn, "SELECT count(*) FROM hermes_decisions WHERE raw_message_id = %s", (raw_id,)) == 1
+    rows = _market_snapshots(db_conn, raw_id)
+    assert rows[0][0] == "market-v1"
+    assert rows[0][1]["status"] == "skipped"
+    assert rows[0][1]["reason"] == "market_context_fetch_failed"
+    assert "market deadline" in rows[0][1]["detail"]
+
+
+def test_market_context_does_not_parse_symbol_from_raw_message_text(db_conn):
+    raw_id = seed_message(db_conn, text="BTCUSDT long entry now")
+    market = FakeMarketContextFetcher()
+    client = MockHermesClient(candidate=valid_candidate(symbol=None))
+
+    result = run_worker(db_conn, client, market_context_fetcher=market)
+
+    assert result.status == "succeeded"
+    assert market.symbols == []
+    assert _market_snapshots(db_conn, raw_id) == []
 
 
 # --- fail-closed paths ------------------------------------------------------------

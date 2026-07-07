@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_DIR = REPO_ROOT / "services" / "control-plane" / "db"
 HERMES_WORKER = REPO_ROOT / "services" / "hermes-worker"
 MIGRATE = DB_DIR / "migrate.py"
-PG_PORT = "55437"
+PG_PORT = "55441"
 
 # Make worker / claims / connection / repository importable at COLLECTION time
 # (test modules import `worker` at top level, before any fixture runs).
@@ -43,8 +43,22 @@ def pg_cluster():
     data_dir = Path(tempfile.mkdtemp(prefix="pg-a05-data-"))
     socket_dir = Path(f"/tmp/pg-a05-{uuid.uuid4()}")
     socket_dir.mkdir(parents=True)
-    subprocess.run([initdb, "-D", str(data_dir), "-A", "trust", "-U", getpass.getuser()],
-                   check=True, text=True, capture_output=True)
+    subprocess.run(
+        [
+            initdb,
+            "-D",
+            str(data_dir),
+            "-A",
+            "trust",
+            "-U",
+            getpass.getuser(),
+            "-c",
+            "dynamic_shared_memory_type=posix",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
     subprocess.run(
         [pg_ctl, "-D", str(data_dir), "-l", str(data_dir / "postgres.log"),
          "-o", f"-p {PG_PORT} -k {socket_dir} -c timezone=UTC", "-w", "start"],

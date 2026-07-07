@@ -39,12 +39,22 @@ from hermes_client import (  # noqa: E402
     HermesTimeoutError,
     HermesUnavailableError,
 )
+from market_context import MARKET_CONTEXT_VERSION, MarketContextFetcher  # noqa: E402
 from prompt import MODEL_TEMPERATURE, PROMPT_VERSION  # noqa: E402
 
 CONTEXT_VERSION = "ctx-v1"
 SCHEMA_PATH = _REPO_ROOT / "packages" / "contracts" / "v1" / "hermes_decision.v1.json"
 DEFAULT_TIMEOUT = 30.0
 RECENT_CONTEXT_LIMIT = 5
+MARKET_CONTEXT_ACTIONS = {
+    "open_position",
+    "add_position",
+    "partial_close",
+    "close_position",
+    "move_stop_loss",
+    "move_stop_to_entry",
+    "replace_take_profits",
+}
 
 
 class MediaLoader(Protocol):
@@ -56,6 +66,12 @@ class MediaLoader(Protocol):
 class SnapshotProvider(Protocol):
     def current(self) -> dict[str, Any]:
         """Return a SystemSnapshotV1-shaped dict (must include data_source/stale/...)."""
+        ...
+
+
+class MarketContextProvider(Protocol):
+    def fetch(self, symbol: str) -> dict[str, Any]:
+        """Return a market-v1 snapshot for a structured instrument symbol."""
         ...
 
 
@@ -86,6 +102,7 @@ def process_one(
     timeout: float = DEFAULT_TIMEOUT,
     lease_seconds: int = 30,
     now_iso: str | None = None,
+    market_context_fetcher: MarketContextProvider | None = None,
 ) -> WorkerResult:
     run = claims.claim(conn, worker_id, lease_seconds=lease_seconds)
     if run is None:
@@ -171,6 +188,12 @@ def process_one(
             snapshot=snapshot,
             decision=decision,
             response_sha256=response_sha256,
+        )
+        _persist_market_context_snapshot_fail_open(
+            conn,
+            raw_message_id=raw_message_id,
+            decision=decision,
+            market_context_fetcher=market_context_fetcher,
         )
         return WorkerResult(
             status="succeeded",
@@ -432,6 +455,65 @@ def _persist_success(
                     },
                 },
             )
+
+
+def _persist_market_context_snapshot_fail_open(
+    conn: PsycopgConnection,
+    *,
+    raw_message_id: str,
+    decision: dict[str, Any],
+    market_context_fetcher: MarketContextProvider | None,
+) -> None:
+    symbol = _market_context_symbol(decision)
+    if not symbol:
+        return
+
+    try:
+        fetcher = market_context_fetcher or MarketContextFetcher()
+        snapshot = fetcher.fetch(symbol)
+        if not isinstance(snapshot, dict):
+            snapshot = _skipped_market_snapshot(symbol, "market_context_fetch_failed", "non-object snapshot")
+    except Exception as exc:
+        snapshot = _skipped_market_snapshot(symbol, "market_context_fetch_failed", str(exc))
+
+    snapshot.setdefault("context_version", MARKET_CONTEXT_VERSION)
+    snapshot.setdefault("symbol", symbol)
+    snapshot.setdefault("partial_failures", [])
+
+    try:
+        with transaction(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO context_snapshots
+                        (context_snapshot_id, raw_message_id, snapshot_type, context_version, snapshot)
+                    VALUES (%s, %s, 'market', %s, %s)
+                    """,
+                    (str(uuid4()), raw_message_id, MARKET_CONTEXT_VERSION, Json(snapshot)),
+                )
+    except Exception:
+        conn.rollback()
+
+
+def _market_context_symbol(decision: dict[str, Any]) -> str | None:
+    classification = decision.get("classification") or {}
+    intent = decision.get("intent") or {}
+    if classification.get("action") not in MARKET_CONTEXT_ACTIONS:
+        return None
+    symbol = intent.get("instrument_symbol")
+    return symbol if isinstance(symbol, str) and symbol.strip() else None
+
+
+def _skipped_market_snapshot(symbol: str, reason: str, detail: str) -> dict[str, Any]:
+    return {
+        "context_version": MARKET_CONTEXT_VERSION,
+        "symbol": symbol,
+        "status": "skipped",
+        "reason": reason,
+        "detail": detail[:500],
+        "fetched_at": _utc_now_iso(),
+        "partial_failures": [],
+    }
 
 
 def _fail(
