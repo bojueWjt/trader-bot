@@ -122,6 +122,46 @@ def test_build_trade_outcome_without_stop_loss_leaves_r_metrics_null():
     assert result["details"]["r_multiple"]["reason"] == "missing stop_loss"
 
 
+def test_build_trade_outcome_closes_on_full_exit_without_position_event():
+    # Live Nautilus Position* events carry no intent_id, so an intent's event
+    # stream contains only its fills; full exit by quantity must close it.
+    start = datetime(2026, 7, 2, 15, 0, tzinfo=timezone.utc)
+    intent = {
+        "intent_id": "44444444-4444-4444-4444-444444444444",
+        "account_id": "acct-4",
+        "instrument_id": "BTCUSDT-PERP.BINANCE",
+        "order_plan": {"side": "long", "stop_loss": "95"},
+    }
+    events = [
+        event("OrderFilled", start, {"order_side": "BUY", "last_qty": "2", "avg_px": "101", "commission": "0.10"}),
+        event("OrderFilled", start + timedelta(minutes=9), {"order_side": "SELL", "last_qty": "2", "avg_px": "110", "commission": "0.40"}),
+    ]
+
+    result = build_trade_outcome(intent, events, klines=[], kline_source="fixture")
+
+    assert result is not None
+    assert result["details"]["close_basis"] == "fills_fully_exited"
+    assert result["realized_pnl"] == Decimal("18")  # (110-101)*2 fallback, no PositionClosed payload
+    assert result["closed_at"] == start + timedelta(minutes=9)
+    assert result["holding_seconds"] == 540
+
+
+def test_build_trade_outcome_keeps_partially_exited_intent_open():
+    start = datetime(2026, 7, 2, 16, 0, tzinfo=timezone.utc)
+    intent = {
+        "intent_id": "55555555-5555-5555-5555-555555555555",
+        "account_id": "acct-5",
+        "instrument_id": "BTCUSDT-PERP.BINANCE",
+        "order_plan": {"side": "long", "stop_loss": "95"},
+    }
+    events = [
+        event("OrderFilled", start, {"order_side": "BUY", "last_qty": "2", "avg_px": "101"}),
+        event("OrderFilled", start + timedelta(minutes=5), {"order_side": "SELL", "last_qty": "1", "avg_px": "110"}),
+    ]
+
+    assert build_trade_outcome(intent, events, klines=[], kline_source="fixture") is None
+
+
 def test_migration_0006_files_match_required_contract():
     up_sql = UP.read_text(encoding="utf-8")
     down_sql = DOWN.read_text(encoding="utf-8")

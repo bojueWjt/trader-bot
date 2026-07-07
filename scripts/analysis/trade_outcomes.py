@@ -48,24 +48,18 @@ def build_trade_outcome(
     kline_source: str | None,
     kline_skip_reason: str | None = None,
 ) -> dict[str, Any] | None:
-    fills = [event for event in events if str(event.get("event_type") or "") == "OrderFilled"]
-    closed_events = [event for event in events if str(event.get("event_type") or "") == "PositionClosed"]
-    if not fills or not closed_events:
+    closure = _closure_info(intent, events)
+    if closure is None:
         return None
 
-    side = _infer_side(intent, events)
-    if side is None:
-        return None
-
-    entry_fills, exit_fills = _split_entry_exit_fills(side, fills)
-    if not entry_fills:
-        return None
-
-    entry_avg, entry_qty = _weighted_average(entry_fills)
-    exit_avg, exit_qty = _weighted_average(exit_fills)
+    side = closure["side"]
+    fills = closure["fills"]
+    closed_events = closure["closed_events"]
+    entry_avg, entry_qty = closure["entry_avg"], closure["entry_qty"]
+    exit_avg, exit_qty = closure["exit_avg"], closure["exit_qty"]
     filled_quantity = entry_qty
-    first_fill_at = min(_event_time(event) for event in fills)
-    closed_at = max(_event_time(event) for event in closed_events)
+    first_fill_at = closure["first_fill_at"]
+    closed_at = closure["closed_at"]
     holding_seconds = int((closed_at - first_fill_at).total_seconds())
     realized_pnl = _position_closed_realized_pnl(closed_events)
     if realized_pnl is None and entry_avg is not None and exit_avg is not None:
@@ -75,7 +69,7 @@ def build_trade_outcome(
     initial_risk, r_multiple, risk_detail = _risk_metrics(intent.get("order_plan") or {}, entry_avg, filled_quantity, realized_pnl)
     mae_mfe = _mae_mfe(side, entry_avg, klines or [], first_fill_at, closed_at)
 
-    details: dict[str, Any] = {}
+    details: dict[str, Any] = {"close_basis": closure["close_basis"]}
     if fee_reason:
         details["fees"] = {"reason": fee_reason}
     if risk_detail:
@@ -134,12 +128,6 @@ def load_closed_intents(conn: Any, *, intent_id: str | None = None) -> list[dict
         FROM trade_intents ti
         JOIN execution_events ee ON ee.intent_id = ti.intent_id
         WHERE EXISTS (
-            SELECT 1 FROM execution_events closed
-            WHERE closed.intent_id = ti.intent_id
-              AND closed.account_id = ti.account_id
-              AND closed.event_type = 'PositionClosed'
-        )
-          AND EXISTS (
             SELECT 1 FROM execution_events filled
             WHERE filled.intent_id = ti.intent_id
               AND filled.account_id = ti.account_id
@@ -174,7 +162,9 @@ def compute_outcomes(
     outcomes: list[dict[str, Any]] = []
     for intent in intents:
         events = list(intent.get("events") or [])
-        first_fill_at, closed_at = _holding_window(events)
+        closure = _closure_info(intent, events)
+        first_fill_at = closure["first_fill_at"] if closure else None
+        closed_at = closure["closed_at"] if closure else None
         klines: list[Kline] | None = None
         kline_source: str | None = None
         skip_reason: str | None = None
@@ -271,6 +261,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     Path(args.output).write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     print(f"processed {len(intents)} closed intents; upserted {upserted_count}; wrote JSON result to {args.output}")
     return 0
+
+
+FULL_EXIT_TOLERANCE = Decimal("0.999999")
+
+
+def _closure_info(intent: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Determine whether an intent's position is closed and how.
+
+    Live Nautilus Position* events carry no intent_id, so intent-linked
+    PositionClosed rows only exist for fixture/legacy data. The authoritative
+    live signal is the intent's own fills: exit quantity covering entry
+    quantity means the intent is fully exited.
+    """
+    fills = [event for event in events if str(event.get("event_type") or "") == "OrderFilled"]
+    if not fills:
+        return None
+    side = _infer_side(intent, events)
+    if side is None:
+        return None
+    entry_fills, exit_fills = _split_entry_exit_fills(side, fills)
+    if not entry_fills:
+        return None
+    entry_avg, entry_qty = _weighted_average(entry_fills)
+    exit_avg, exit_qty = _weighted_average(exit_fills)
+    closed_events = [event for event in events if str(event.get("event_type") or "") == "PositionClosed"]
+    if closed_events:
+        close_basis = "position_closed_event"
+        closed_at = max(_event_time(event) for event in closed_events)
+    elif entry_qty and exit_qty and exit_qty >= entry_qty * FULL_EXIT_TOLERANCE:
+        close_basis = "fills_fully_exited"
+        closed_at = max(_event_time(event) for event in exit_fills)
+    else:
+        return None
+    return {
+        "side": side,
+        "fills": fills,
+        "entry_avg": entry_avg,
+        "entry_qty": entry_qty,
+        "exit_avg": exit_avg,
+        "exit_qty": exit_qty,
+        "closed_events": closed_events,
+        "close_basis": close_basis,
+        "first_fill_at": min(_event_time(event) for event in fills),
+        "closed_at": closed_at,
+    }
 
 
 def _infer_side(intent: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> str | None:
@@ -404,14 +439,6 @@ def _mae_mfe(
         mae = (mae_price - entry_avg) / entry_avg
         mfe = (entry_avg - mfe_price) / entry_avg
     return {"mae": float(mae), "mfe": float(mfe), "mae_price": mae_price, "mfe_price": mfe_price}
-
-
-def _holding_window(events: Sequence[Mapping[str, Any]]) -> tuple[datetime | None, datetime | None]:
-    fill_times = [_event_time(event) for event in events if event.get("event_type") == "OrderFilled"]
-    closed_times = [_event_time(event) for event in events if event.get("event_type") == "PositionClosed"]
-    if not fill_times or not closed_times:
-        return None, None
-    return min(fill_times), max(closed_times)
 
 
 def _event_time(event: Mapping[str, Any]) -> datetime:
