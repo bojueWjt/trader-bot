@@ -300,6 +300,11 @@ def compute_outcomes(
                 )
             except (MissingKlines, UnsupportedSymbol) as exc:
                 skip_reason = str(exc)
+            except OSError as exc:
+                # kline source unreachable (e.g. geo-blocked CDN): keep the
+                # PnL/R metrics and record why MAE/MFE is missing.
+                skip_reason = f"kline fetch failed: {exc}"
+                klines = None
                 kline_source = f"binance_vision:{market}:1m"
         outcome = build_trade_outcome(
             intent,
