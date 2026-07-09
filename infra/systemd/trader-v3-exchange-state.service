@@ -1,0 +1,14 @@
+[Unit]
+Description=Trader v3: exchange state mirror (read-only truth of positions/orders/algo orders)
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/trader-v3
+EnvironmentFile=/srv/trader-v3/.env.v3
+ExecStart=/srv/trader-v3/.venv-cp/bin/python services/control-plane/tools/exchange_state_recorder.py --interval 45
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -48,6 +48,19 @@ def build_system_snapshot(
             )
         else:
             market_prices = []
+        # exchange_state_mirror arrives with migration 0007 (read-only truth of
+        # positions/orders/algo orders polled from the venue); older deployments
+        # keep serving snapshots without it.
+        cur.execute("SELECT to_regclass('public.exchange_state_mirror') IS NOT NULL AS present")
+        if cur.fetchone()["present"]:
+            exchange_state = _rows(
+                cur,
+                "SELECT account_id, payload, updated_at, "
+                "(now() - updated_at) > interval '180 seconds' AS stale "
+                "FROM exchange_state_mirror ORDER BY account_id",
+            )
+        else:
+            exchange_state = []
         recent_messages = _rows(
             cur,
             "SELECT id, channel_id, source_received_at, message_text FROM raw_messages "
@@ -107,6 +120,7 @@ def build_system_snapshot(
             "orders": _jsonify(orders),
             "positions": _jsonify(positions),
             "market_prices": _jsonify(market_prices),
+            "exchange_state": _jsonify(exchange_state),
             "recent_messages": _jsonify(recent_messages),
             "hermes_decisions": _jsonify(hermes_decisions),
             "risk_decisions": _jsonify(risk_decisions),

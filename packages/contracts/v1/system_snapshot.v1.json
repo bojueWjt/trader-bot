@@ -189,6 +189,13 @@
               }
             }
           }
+        },
+        "exchange_state": {
+          "type": "array",
+          "description": "Read-only per-account mirror of real exchange state (positions, open orders, algo/conditional orders incl. stop-loss) polled from the venue; absent on deployments without migration 0007.",
+          "items": {
+            "type": "object"
+          }
         }
       }
     }
