@@ -26,6 +26,117 @@ DEFAULT_EXECUTION_EVENT_TOPICS: tuple[str, ...] = (
 )
 
 
+ORDER_SNAPSHOT_LIMIT = 100
+
+
+def _string_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "value"):
+        value = value.value
+    return str(value)
+
+
+def _safe_attr(source: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        try:
+            value = getattr(source, name)
+        except Exception:
+            continue
+        if value is not None:
+            return value
+    return None
+
+
+def _safe_call(source: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        fn = _safe_attr(source, (name,))
+        if not callable(fn):
+            continue
+        try:
+            return fn()
+        except Exception:
+            continue
+    return None
+
+
+def _order_field(order: Any, names: tuple[str, ...]) -> Any:
+    value = _safe_attr(order, names)
+    if value is not None:
+        return value
+    return _safe_call(order, names)
+
+
+def order_snapshot_payload(order: Any) -> dict:
+    fields = {
+        "client_order_id": _order_field(order, ("client_order_id", "client_id")),
+        "instrument_id": _order_field(order, ("instrument_id", "instrument")),
+        "order_type": _order_field(order, ("order_type", "type")),
+        "side": _order_field(order, ("side", "order_side")),
+        "quantity": _order_field(order, ("quantity", "qty")),
+        "price": _order_field(order, ("price", "limit_price")),
+        "trigger_price": _order_field(order, ("trigger_price", "stop_price")),
+        "reduce_only": _order_field(order, ("reduce_only", "is_reduce_only")),
+        "position_id": _order_field(order, ("position_id",)),
+    }
+    return {key: _string_value(value) for key, value in fields.items() if value is not None}
+
+
+def open_orders_snapshot(cache: Any, limit: int = ORDER_SNAPSHOT_LIMIT) -> list[dict]:
+    orders = _safe_call(cache, ("orders_open", "open_orders", "orders_active"))
+    if orders is None:
+        orders = _safe_attr(cache, ("orders_open", "open_orders", "orders_active"))
+    if orders is None:
+        return []
+    out = []
+    try:
+        iterator = iter(orders)
+    except TypeError:
+        return []
+    for order in iterator:
+        try:
+            payload = order_snapshot_payload(order)
+        except Exception:
+            continue
+        if payload.get("client_order_id"):
+            out.append(payload)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _cache_order(cache: Any, client_order_id: Any) -> Any:
+    if cache is None or client_order_id is None:
+        return None
+    for method in ("order", "order_by_client_order_id"):
+        fn = _safe_attr(cache, (method,))
+        if not callable(fn):
+            continue
+        try:
+            found = fn(client_order_id)
+        except Exception:
+            continue
+        if found is not None:
+            return found
+    for order in _safe_call(cache, ("orders_open", "open_orders", "orders_active")) or ():
+        if _string_value(_order_field(order, ("client_order_id", "client_id"))) == _string_value(client_order_id):
+            return order
+    return None
+
+
+def order_event_payload_fields(event: Any, cache: Any = None) -> dict:
+    client_order_id = _safe_attr(event, ("client_order_id", "client_id"))
+    order = _safe_attr(event, ("order",)) or _cache_order(cache, client_order_id)
+    if client_order_id is None and order is None:
+        return {}
+    merged = order_snapshot_payload(order) if order is not None else {}
+    event_fields = order_snapshot_payload(event)
+    merged.update({key: value for key, value in event_fields.items() if value is not None})
+    if client_order_id is not None:
+        merged.setdefault("client_order_id", _string_value(client_order_id))
+    return merged
+
+
 class IntentPublisherActor(Actor):
     """Nautilus ``Actor`` wrapper around the plain ``ApprovedIntentDataClient``."""
 
@@ -148,7 +259,25 @@ class ExecutionProjectionActor(Actor):
             flush()
 
     def on_event(self, event: Any) -> Any:
+        extra = order_event_payload_fields(event, self._cache())
+        if extra:
+            attach = getattr(self._projection_actor, "attach_order_payload_fields", None)
+            if callable(attach):
+                try:
+                    attach(event, extra)
+                except Exception:
+                    pass
+            else:
+                try:
+                    setattr(event, "_projection_payload_extra", extra)
+                except Exception:
+                    pass
         return self._projection_actor.on_event(event)
+
+    def _cache(self) -> Any:
+        return _first_attr(self, ("cache", "_cache")) or _first_attr(
+            self._projection_actor, ("cache", "_cache")
+        )
 
     def on_order_event(self, event: Any) -> Any:
         return self.on_event(event)
@@ -213,7 +342,6 @@ class CommandPollerActor(Actor):
         node_id: str,
         *,
         account_id: str | None = None,
-        result_sink: Any | None = None,
         poll_interval_seconds: float = 2.0,
         timer_name: str = "operator-commands.poll",
     ) -> None:
@@ -222,7 +350,6 @@ class CommandPollerActor(Actor):
         self._lifecycle = lifecycle
         self._node_id = node_id
         self._account_id = account_id
-        self._result_sink = result_sink
         self._poll_interval_seconds = poll_interval_seconds
         self._timer_name = timer_name
 
@@ -245,6 +372,11 @@ class CommandPollerActor(Actor):
     def _on_poll_timer(self, *_args: Any, **_kwargs: Any) -> None:
         self.poll_once()
 
+    def _cache(self) -> Any:
+        return _first_attr(self, ("cache", "_cache")) or _first_attr(
+            self._lifecycle, ("cache", "_cache")
+        )
+
     def poll_once(self) -> int:
         # Liveness: refresh the control-plane heartbeat on every tick so
         # node_heartbeats.last_seen_at stays fresh and the system snapshot's
@@ -252,6 +384,11 @@ class CommandPollerActor(Actor):
         # this the heartbeat is sent only once at startup and the snapshot goes
         # permanently stale. Failure here must not stop operator-command polling.
         try:
+            if not getattr(self, '_oo_provider_registered', False):
+                register = getattr(self._lifecycle, 'set_open_orders_provider', None)
+                if callable(register):
+                    register(lambda: open_orders_snapshot(self._cache()))
+                    self._oo_provider_registered = True
             self._lifecycle.send_heartbeat()
         except Exception:
             pass
@@ -284,16 +421,7 @@ class CommandPollerActor(Actor):
                 # ACCEPTED (received + dispatched); the strategy executes best-effort.
                 message_bus = _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
                 if message_bus is not None and hasattr(message_bus, "publish"):
-                    topic = f"node.commands.{self._account_id}"
-                    message_bus.publish(topic=topic, msg=cmd)
-                    if self._result_sink is not None:
-                        try:
-                            self._result_sink.record_running(
-                                cmd.command_id,
-                                result={"dispatched_to_strategy": True, "topic": topic},
-                            )
-                        except Exception:
-                            pass
+                    message_bus.publish(topic=f"node.commands.{self._account_id}", msg=cmd)
                     return CommandAckStatus.ACCEPTED, "dispatched_to_strategy"
                 return CommandAckStatus.FAILED, "no_msgbus_for_dispatch"
             else:

@@ -260,7 +260,9 @@ def _build_risk_limit_config() -> RiskLimitConfig:
     return RiskLimitConfig(
         max_notional_per_order=max_notional,
         max_order_submit_rate=os.environ.get(
-            "NAUTILUS_MAX_ORDER_SUBMIT_RATE", "1/00:00:01"
+            # zone-ladder submits up to 3 entry + 4 protection orders in one burst;
+            # Nautilus default 1/s throttled tranches 2/3. Binance API allows far more.
+            "NAUTILUS_MAX_ORDER_SUBMIT_RATE", "50/00:00:01"
         ),
         max_order_modify_rate=os.environ.get(
             "NAUTILUS_MAX_ORDER_MODIFY_RATE", "1/00:00:01"
@@ -336,7 +338,28 @@ def _build_strategy(runtime: AccountRuntime) -> Any:
 
     strategy = IntentExecutionStrategy(runtime.strategy_config)
     strategy.set_trading_state_getter(lambda: runtime.lifecycle.trading_state)
+    strategy.set_denial_reporter(_build_denial_reporter(runtime))
     return strategy
+
+
+def _build_denial_reporter(runtime: AccountRuntime) -> Callable[[Any, Any], None]:
+    def report(intent: Any, denial: Any) -> None:
+        try:
+            from execution_domain.control_plane import IntentAckStatus
+
+            status = IntentAckStatus.REJECTED
+        except ModuleNotFoundError:
+            status = "rejected"
+        detail = f"denied:{getattr(denial, 'reason', '')}:{getattr(denial, 'detail', '')}"[:200]
+        runtime.control_plane.ack_intent(
+            account_id=runtime.config.account_id,
+            node_id=runtime.config.node_id,
+            intent_id=getattr(intent, "intent_id"),
+            status=status,
+            detail=detail,
+        )
+
+    return report
 
 
 def _check_redis(config: NodeConfig) -> bool:

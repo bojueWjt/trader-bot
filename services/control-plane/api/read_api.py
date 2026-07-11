@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -41,13 +43,6 @@ READER_TOKEN_ENV = {
 }
 
 app = FastAPI(title="Hermes control-plane read API", version="contracts-v1")
-
-_CONTROL_PLANE_ROOT = _HERE.parent
-if str(_CONTROL_PLANE_ROOT) not in sys.path:
-    sys.path.insert(0, str(_CONTROL_PLANE_ROOT))
-from settings.router import router as order_management_settings_router  # noqa: E402
-
-app.include_router(order_management_settings_router)
 
 
 def _reader_tokens() -> dict[str, str]:
@@ -147,26 +142,149 @@ def _nautilus_instrument_id(instr: str | None) -> str | None:
     return f"{instr}-PERP.BINANCE"
 
 
-def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None) -> dict:
+def _binance_mark_price(symbol: str | None) -> float | None:
+    """Live futures mark price for sizing a MARKET order that carries no entry price.
+    fapi.binance.com is dest-routed via the JP WireGuard tunnel on hk, so the HK 451
+    geo-block does not apply. Fails soft (returns None) so a fetch error just leaves the
+    order unsized (denied downstream) rather than throwing in the intent-serving path."""
+    if not symbol:
+        return None
+    sym = str(symbol).split("-")[0].split(".")[0].upper()
+    import json as _json
+    import urllib.request as _url
+    url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={sym}"
+    for _attempt in range(2):
+        try:
+            with _url.urlopen(url, timeout=3) as resp:
+                data = _json.loads(resp.read())
+            price = data.get("markPrice")
+            return float(price) if price and float(price) > 0 else None
+        except Exception:
+            continue
+    return None
+
+
+_MANAGEMENT_ACTIONS = frozenset(
+    {
+        "close_position",
+        "partial_close",
+        "move_stop_loss",
+        "move_stop_to_entry",
+        "replace_take_profits",
+        "cancel_order",
+    }
+)
+
+# zone-ladder v1 已定参数，改动须过再校准。
+_ZONE_LADDER_TRANCHES = (
+    (1, "t1_near", Decimal("0.55"), Decimal("0")),
+    (2, "t2_mid", Decimal("0.30"), Decimal("0.50")),
+    (3, "t3_deep", Decimal("0.15"), Decimal("0.85")),
+)
+_ZONE_LADDER_MIN_WIDTH_FRACTION = Decimal("0.0015")
+_ZONE_LADDER_QTY_QUANTUM = Decimal("0.000000000001")
+
+
+def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
+                          symbol: str | None = None,
+                          action: str | None = None) -> dict:
     """A↔B seam: translate A's semantic order_plan ({side:long/short, entry:{type,price}})
     to B's execution order_plan ({side:buy/sell, type, quantity, ...}). Sizes the order
-    from risk_budget.max_notional / entry price (notional-capped). Pass through if already
-    in B's shape."""
+    from risk_budget.max_notional / price (notional-capped): limit/zone use the entry price;
+    a MARKET order with no entry price uses the live Binance mark price. Pass through if
+    already in B's shape."""
     op = dict(order_plan or {})
     side = str(op.get("side") or "").lower()
     if op.get("type") and op.get("quantity") is not None and side in ("buy", "sell"):
         return op  # already B execution format
     b_side = {"long": "buy", "buy": "buy", "short": "sell", "sell": "sell"}.get(side, side)
     entry = op.get("entry") or {}
-    entry_type = str(entry.get("type") or "market").lower()
+    raw_entry_type = str(entry.get("type") or op.get("type") or "").lower()
+    act = str(action or "").lower()
+    if act in _MANAGEMENT_ACTIONS:
+        out: dict = {"side": b_side}
+        if raw_entry_type and raw_entry_type != "none":
+            out["type"] = raw_entry_type
+            out["time_in_force"] = "IOC" if raw_entry_type == "market" else "GTC"
+        if op.get("quantity") is not None:
+            out["quantity"] = str(op.get("quantity"))
+        if op.get("price") is not None:
+            out["price"] = op.get("price")
+        if op.get("limit_price") is not None:
+            out["limit_price"] = op.get("limit_price")
+        if op.get("stop_price") is not None:
+            out["stop_price"] = op.get("stop_price")
+        elif act == "move_stop_loss" and op.get("stop_loss") is not None:
+            out["stop_price"] = op.get("stop_loss")
+        if op.get("trigger_price") is not None:
+            out["trigger_price"] = op.get("trigger_price")
+        if op.get("stop_loss") is not None:
+            out["stop_loss"] = op.get("stop_loss")
+        if op.get("take_profits") is not None:
+            out["take_profits"] = op.get("take_profits")
+        if op.get("cancel_client_order_id") is not None:
+            out["cancel_client_order_id"] = op.get("cancel_client_order_id")
+        if op.get("leverage") is not None:
+            out["leverage"] = op.get("leverage")
+        return out
+
+    entry_type = raw_entry_type or "market"
     if entry_type == "none":
         entry_type = "market"
     entry_price = entry.get("price") if entry.get("price") is not None else entry.get("price_min")
+    price_min = entry.get("price_min")
+    price_max = entry.get("price_max")
+
+    single_plan = _single_execution_order_plan(
+        op,
+        risk_budget,
+        symbol,
+        b_side,
+        entry_type,
+        entry_price,
+        price_min,
+        price_max,
+    )
+    if entry_type == "zone":
+        try:
+            ladder_plan = _zone_ladder_order_plan(
+                op,
+                risk_budget,
+                symbol,
+                b_side,
+                price_min,
+                price_max,
+            )
+            if ladder_plan is not None:
+                return ladder_plan
+        except Exception:
+            return single_plan
+    return single_plan
+
+
+def _single_execution_order_plan(
+    op: dict,
+    risk_budget: dict | None,
+    symbol: str | None,
+    b_side: str,
+    entry_type: str,
+    entry_price,
+    price_min,
+    price_max,
+) -> dict:
     max_notional = (risk_budget or {}).get("max_notional")
     quantity = op.get("quantity")
-    if quantity is None and entry_price and max_notional:
+    # Price used ONLY to size the notional cap into a quantity. limit/zone: the entry price.
+    # market (no entry price): the live mark price (fetched over the JP-routed fapi).
+    if entry_type == "zone":
+        sizing_price = price_min if b_side == "sell" else price_max
+    else:
+        sizing_price = entry_price
+    if quantity is None and sizing_price is None and entry_type == "market" and max_notional:
+        sizing_price = _binance_mark_price(symbol)
+    if quantity is None and sizing_price and max_notional:
         try:
-            quantity = float(max_notional) / float(entry_price)
+            quantity = float(max_notional) / float(sizing_price)
         except (TypeError, ValueError, ZeroDivisionError):
             quantity = None
     out: dict = {"side": b_side, "type": entry_type,
@@ -175,7 +293,146 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None) -> 
         out["quantity"] = str(quantity)
     if entry_type in ("limit", "zone") and entry_price is not None:
         out["price"] = entry_price
+    if entry_type == "zone":
+        if price_min is not None:
+            out["price_min"] = price_min
+        if price_max is not None:
+            out["price_max"] = price_max
+    if op.get("stop_loss") is not None:
+        out["stop_loss"] = op.get("stop_loss")
+    if op.get("take_profits") is not None:
+        out["take_profits"] = op.get("take_profits")
+    if op.get("leverage") is not None:
+        out["leverage"] = op.get("leverage")
+    if op.get("expire_hours") is not None and entry_type in ("limit", "zone"):
+        out["expire_hours"] = op.get("expire_hours")
     return out
+
+
+def _zone_ladder_order_plan(
+    op: dict,
+    risk_budget: dict | None,
+    symbol: str | None,
+    b_side: str,
+    price_min,
+    price_max,
+) -> dict | None:
+    if price_min is None or price_max is None:
+        return None
+    if op.get("stop_loss") is None:
+        return None
+
+    min_price = _positive_decimal_or_none(price_min)
+    max_price = _positive_decimal_or_none(price_max)
+    stop_loss = _positive_decimal_or_none(op.get("stop_loss"))
+    max_notional = _positive_decimal_or_none((risk_budget or {}).get("max_notional"))
+    if min_price is None or max_price is None or stop_loss is None or max_notional is None:
+        return None
+    if min_price >= max_price:
+        return None
+
+    if b_side == "sell":
+        if stop_loss <= max_price:
+            return None
+        near_edge = min_price
+        far_edge = max_price
+    elif b_side == "buy":
+        if stop_loss >= min_price:
+            return None
+        near_edge = max_price
+        far_edge = min_price
+    else:
+        return None
+
+    if (max_price - min_price) / near_edge < _ZONE_LADDER_MIN_WIDTH_FRACTION:
+        return None
+
+    mark_price = _positive_decimal_or_none(_binance_mark_price(symbol))
+    if mark_price is None:
+        return None
+    if b_side == "sell" and mark_price >= min_price:
+        return None
+    if b_side == "buy" and mark_price <= max_price:
+        return None
+
+    single_qty = max_notional / near_edge
+    total_risk = single_qty * abs(near_edge - stop_loss)
+    if single_qty <= 0 or total_risk <= 0:
+        return None
+
+    raw_tranches: list[tuple[int, str, Decimal, Decimal]] = []
+    for seq, tranche_id, weight, depth in _ZONE_LADDER_TRANCHES:
+        price = near_edge + (depth * (far_edge - near_edge))
+        stop_distance = abs(price - stop_loss)
+        if price <= 0 or stop_distance <= 0:
+            return None
+        quantity = (total_risk * weight) / stop_distance
+        if quantity <= 0:
+            return None
+        raw_tranches.append((seq, tranche_id, price, quantity))
+
+    total_notional = sum(quantity * price for _, _, price, quantity in raw_tranches)
+    if total_notional <= 0:
+        return None
+    scale = Decimal("1")
+    if total_notional > max_notional:
+        scale = max_notional / total_notional
+
+    tranches = []
+    for seq, tranche_id, price, quantity in raw_tranches:
+        scaled_quantity = _round_down_ladder_quantity(quantity * scale)
+        if scaled_quantity is None or scaled_quantity <= 0:
+            return None
+        tranches.append(
+            {
+                "seq": seq,
+                "tranche_id": tranche_id,
+                "price": float(price),
+                "quantity": _format_decimal_plain(scaled_quantity),
+            }
+        )
+    if len(tranches) != len(_ZONE_LADDER_TRANCHES):
+        return None
+
+    out: dict = {
+        "side": b_side,
+        "type": "zone_ladder",
+        "time_in_force": "GTC",
+        "tranches": tranches,
+        "stop_loss": op.get("stop_loss"),
+        "take_profits": op.get("take_profits") or [],
+        "price_min": price_min,
+        "price_max": price_max,
+    }
+    if op.get("leverage") is not None:
+        out["leverage"] = op.get("leverage")
+    return out
+
+
+def _positive_decimal_or_none(value) -> Decimal | None:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _round_down_ladder_quantity(value: Decimal) -> Decimal | None:
+    try:
+        rounded = (value / _ZONE_LADDER_QTY_QUANTUM).quantize(
+            Decimal("1"),
+            rounding=ROUND_DOWN,
+        ) * _ZONE_LADDER_QTY_QUANTUM
+    except (InvalidOperation, ValueError):
+        return None
+    return rounded if rounded > 0 else None
+
+
+def _format_decimal_plain(value: Decimal) -> str:
+    text = format(value.quantize(_ZONE_LADDER_QTY_QUANTUM), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 @app.get("/v1/nodes/{node_id}/intents")
@@ -206,7 +463,7 @@ def node_intents(
                 "SELECT intent_id, hermes_decision_id, risk_decision_id, schema_version, "
                 "account_id, instrument_id, action::text, order_plan, risk_budget, "
                 "target_position_id, valid_until, idempotency_key, approved_at, created_at "
-                "FROM trade_intents WHERE account_id=%s AND status='approved'"
+                "FROM trade_intents WHERE account_id=%s AND status='approved' AND valid_until > now()"
                 + cursor_clause
                 + " ORDER BY created_at, intent_id LIMIT %s",
                 params + [limit],
@@ -227,7 +484,7 @@ def node_intents(
                 "risk_decision_id": str(risk), "account_id": acct,
                 "instrument_id": _nautilus_instrument_id(instr),
                 "action": act,
-                "order_plan": _execution_order_plan(order_plan, risk_budget),
+                "order_plan": _execution_order_plan(order_plan, risk_budget, instr, action=act),
                 "risk_budget": risk_budget,
                 "target_position_id": tpid,
                 "valid_until": valid_until.isoformat() if valid_until else None,
@@ -321,9 +578,16 @@ def ingest_execution_event(
         if isinstance(hints.get("account"), dict):
             writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
         if isinstance(hints.get("position"), dict):
-            writer.upsert_position_projection({**hints["position"], "event_id": ev_id, "ts_event": ts})
+            pos_hint = _normalize_position_hint(
+                {**hints["position"], "event_id": ev_id, "ts_event": ts},
+                body.get("event_type"),
+            )
+            if pos_hint is not None:
+                writer.upsert_position_projection(pos_hint)
         if isinstance(hints.get("order"), dict):
-            writer.upsert_order_projection({**hints["order"], "event_id": ev_id, "ts_event": ts})
+            order_hint = _normalize_order_hint({**hints["order"], "event_id": ev_id, "ts_event": ts})
+            if order_hint is not None:
+                writer.upsert_order_projection(order_hint)
         conn.commit()
         return {"ingested": ev_id, "status": "ok"}
     finally:
@@ -344,16 +608,7 @@ _NODE_COMMAND_TYPE_MAP = {
     "CANCEL_ALL": "cancel_all", "CLOSE_ALL": "close_all",
 }
 # node CommandAckStatus (B) -> command_node_acks.status (A)
-_NODE_ACK_STATUS_MAP = {
-    "completed": "acked",
-    "partial": "failed",
-    "failed": "failed",
-    "timed_out": "failed",
-}
-
-
-def _legacy_ack_status_for_node_status(status: str) -> str | None:
-    return _NODE_ACK_STATUS_MAP.get(str(status))
+_NODE_ACK_STATUS_MAP = {"accepted": "acked", "completed": "acked", "failed": "failed"}
 
 
 @app.post("/v1/nodes/{node_id}/intents/{intent_id}/ack")
@@ -367,24 +622,49 @@ def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
     _cp_paths()
     from audit import record_audit_event
 
-    status = str(body.get("status") or "received")
+    status = str(getattr(body.get("status"), "value", body.get("status") or "received")).lower()
     conn = psycopg2.connect(database_url)
     try:
+        intent_status = None
+        if status in ("rejected", "expired"):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE trade_intents SET status=%s "
+                    "WHERE intent_id=%s AND status='approved' RETURNING status::text",
+                    (status, intent_id),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    intent_status = row[0]
+                else:
+                    cur.execute(
+                        "SELECT status::text FROM trade_intents WHERE intent_id=%s",
+                        (intent_id,),
+                    )
+                    row = cur.fetchone()
+                    intent_status = row[0] if row is not None else None
         record_audit_event(
             conn, event_type=f"intent_ack.{status}", aggregate_type="trade_intent",
             aggregate_id=intent_id, actor=f"node:{node_id}",
             payload={"status": status, "detail": body.get("detail"), "account_id": body.get("account_id")},
         )
         conn.commit()
-        return {"ok": True}
+        result = {"ok": True}
+        if intent_status is not None:
+            result["intent_status"] = intent_status
+        return result
     finally:
         conn.close()
 
 
-# Nautilus enum ints: OrderSide BUY=1/SELL=2 ; PositionSide LONG=2/SHORT=3.
-_ORDER_SIDE = {1: "long", 2: "short", "BUY": "long", "SELL": "short"}
-_POSITION_SIDE = {2: "long", 3: "short", "LONG": "long", "SHORT": "short",
-                  "long": "long", "short": "short"}
+# Nautilus enum ints: OrderSide BUY=1/SELL=2 ; PositionSide FLAT=1/LONG=2/SHORT=3.
+_ORDER_SIDE = {
+    1: "long", 2: "short",
+    "BUY": "long", "SELL": "short", "buy": "long", "sell": "short",
+    "LONG": "long", "SHORT": "short", "long": "long", "short": "short",
+}
+_POSITION_SIDE = {1: "flat", 2: "long", 3: "short", "FLAT": "flat", "flat": "flat",
+                  "LONG": "long", "SHORT": "short", "long": "long", "short": "short"}
 
 
 def _num(value):
@@ -399,6 +679,145 @@ def _num(value):
         return None
 
 
+def _enum_key(value):
+    if hasattr(value, "value"):
+        value = value.value
+    if hasattr(value, "name"):
+        value = value.name
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+        return stripped
+    return value
+
+
+def _bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in ("true", "t", "1", "yes", "y"):
+        return True
+    if text in ("false", "f", "0", "no", "n"):
+        return False
+    return None
+
+
+def _position_side(value) -> str | None:
+    return _POSITION_SIDE.get(_enum_key(value))
+
+
+def _order_side(value) -> str | None:
+    return _ORDER_SIDE.get(_enum_key(value))
+
+
+def _canonical_position_id(instrument_id: str | None, side: str | None,
+                           fallback: str | None = None) -> str | None:
+    if instrument_id and side in ("long", "short"):
+        return f"{instrument_id}-{side.upper()}"
+    return fallback
+
+
+def _normalize_position_hint(hint: dict, event_type: str | None = None) -> dict | None:
+    out = dict(hint or {})
+    instrument_id = out.get("instrument_id")
+    side = _position_side(out.get("side") or out.get("position_side")) or out.get("side")
+    if side not in ("long", "short", "flat"):
+        side = "long"
+    original_position_id = out.get("position_id")
+    canonical_id = _canonical_position_id(instrument_id, side, original_position_id)
+    if canonical_id is None:
+        return None
+    qty = abs(_num(out.get("quantity")) or 0.0)
+    status = out.get("status")
+    if event_type == "PositionClosed" or qty == 0 or side == "flat":
+        status = "closed"
+    else:
+        status = status or "open"
+    out["position_id"] = canonical_id
+    out["side"] = "long" if side == "flat" else side
+    out["quantity"] = qty
+    out["status"] = status
+    if original_position_id and original_position_id != canonical_id:
+        payload = dict(out.get("payload") or {})
+        payload.setdefault("node_position_id", original_position_id)
+        out["payload"] = payload
+    return out
+
+
+def _normalize_order_hint(hint: dict) -> dict | None:
+    out = dict(hint or {})
+    if not out.get("client_order_id"):
+        return None
+    side = _order_side(out.get("side") or out.get("order_side"))
+    if side is not None:
+        out["side"] = side
+    if out.get("order_type") is not None:
+        out["order_type"] = str(out.get("order_type"))
+    for src, dst in (("price", "price"), ("trigger_price", "trigger_price"),
+                     ("quantity", "quantity"), ("filled_quantity", "filled_quantity")):
+        if src in out:
+            out[dst] = _num(out.get(src))
+    if "reduce_only" in out:
+        out["reduce_only"] = _bool(out.get("reduce_only"))
+    return out
+
+
+def _position_projection_from_event(ev: dict) -> dict | None:
+    et = str(ev.get("event_type") or "")
+    p = ev.get("payload") or {}
+    acct = ev.get("account_id")
+    instrument_id = p.get("instrument_id")
+    if not acct or not et.startswith("Position") or not instrument_id:
+        return None
+    qty = abs(_num(p.get("quantity")) or 0.0)
+    hint = {
+        "account_id": acct,
+        "position_id": p.get("position_id"),
+        "instrument_id": instrument_id,
+        "side": p.get("side") or p.get("position_side"),
+        "quantity": qty,
+        "avg_entry_price": _num(p.get("avg_entry_price")) or _num(p.get("last_px")),
+        "mark_price": _num(p.get("mark_price")),
+        "unrealized_pnl": _num(p.get("unrealized_pnl")),
+        "status": "closed" if (et == "PositionClosed" or qty == 0) else "open",
+        "event_id": ev.get("event_id"),
+        "ts_event": ev.get("ts_event"),
+        "payload": p,
+    }
+    return _normalize_position_hint(hint, et)
+
+
+def _order_projection_from_event(ev: dict) -> dict | None:
+    et = str(ev.get("event_type") or "")
+    p = ev.get("payload") or {}
+    acct = ev.get("account_id")
+    cid = ev.get("client_order_id") or p.get("client_order_id")
+    if not acct or not et.startswith("Order") or not cid:
+        return None
+    fill_qty = _num(p.get("last_qty")) or _num(p.get("filled_qty"))
+    hint = {
+        "account_id": acct,
+        "instrument_id": p.get("instrument_id"),
+        "client_order_id": cid,
+        "venue_order_id": ev.get("venue_order_id") or p.get("venue_order_id"),
+        "status": (et[5:].lower() or "submitted"),
+        "side": p.get("side") or p.get("order_side"),
+        "order_type": p.get("order_type"),
+        "quantity": _num(p.get("quantity")) or fill_qty,
+        "filled_quantity": fill_qty,
+        "price": p.get("price"),
+        "trigger_price": p.get("trigger_price"),
+        "reduce_only": p.get("reduce_only"),
+        "event_id": ev.get("event_id"),
+        "ts_event": ev.get("ts_event"),
+        "payload": p,
+    }
+    return _normalize_order_hint(hint)
+
+
 def _derive_projection_from_event(writer, ev: dict) -> None:
     """C-06: derive read-model projections from the node's raw (flat-payload)
     execution events. Raises on DB error so the caller's SAVEPOINT can roll back
@@ -409,29 +828,13 @@ def _derive_projection_from_event(writer, ev: dict) -> None:
     ev_id, ts = ev.get("event_id"), ev.get("ts_event")
     if not acct:
         return
-    if et.startswith("Position") and p.get("position_id"):
-        qty = abs(_num(p.get("quantity")) or 0.0)
-        writer.upsert_position_projection({
-            "account_id": acct, "position_id": p["position_id"],
-            "instrument_id": p.get("instrument_id"),
-            "side": _POSITION_SIDE.get(p.get("side"), "long"),
-            "quantity": qty, "avg_entry_price": _num(p.get("last_px")),
-            "status": "closed" if (et == "PositionClosed" or qty == 0) else "open",
-            "event_id": ev_id, "ts_event": ts,
-        })
-    elif et.startswith("Order") and (ev.get("client_order_id") or p.get("client_order_id")):
-        fill_qty = _num(p.get("last_qty")) or _num(p.get("filled_qty"))
-        writer.upsert_order_projection({
-            "account_id": acct, "instrument_id": p.get("instrument_id"),
-            "client_order_id": ev.get("client_order_id") or p.get("client_order_id"),
-            "venue_order_id": ev.get("venue_order_id"),
-            "status": (et[5:].lower() or "submitted"),
-            "side": _ORDER_SIDE.get(p.get("order_side")),
-            "order_type": (str(p.get("order_type")) if p.get("order_type") is not None else None),
-            "quantity": _num(p.get("quantity")) or fill_qty,
-            "filled_quantity": fill_qty,
-            "event_id": ev_id, "ts_event": ts,
-        })
+    position_hint = _position_projection_from_event(ev)
+    if position_hint is not None:
+        writer.upsert_position_projection(position_hint)
+        return
+    order_hint = _order_projection_from_event(ev)
+    if order_hint is not None:
+        writer.upsert_order_projection(order_hint)
 
 
 @app.post("/v1/nodes/{node_id}/execution-events")
@@ -463,9 +866,16 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
                 if isinstance(hints.get("account"), dict):
                     writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
                 if isinstance(hints.get("position"), dict):
-                    writer.upsert_position_projection({**hints["position"], "event_id": ev_id, "ts_event": ts})
+                    pos_hint = _normalize_position_hint(
+                        {**hints["position"], "event_id": ev_id, "ts_event": ts},
+                        ev.get("event_type"),
+                    )
+                    if pos_hint is not None:
+                        writer.upsert_position_projection(pos_hint)
                 if isinstance(hints.get("order"), dict):
-                    writer.upsert_order_projection({**hints["order"], "event_id": ev_id, "ts_event": ts})
+                    order_hint = _normalize_order_hint({**hints["order"], "event_id": ev_id, "ts_event": ts})
+                    if order_hint is not None:
+                        writer.upsert_order_projection(order_hint)
                 _derive_projection_from_event(writer, ev)
                 with conn.cursor() as sp:
                     sp.execute("RELEASE SAVEPOINT proj")
@@ -502,7 +912,8 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                 (node_id, body.get("account_id"), str(body.get("trading_state") or "UNKNOWN"),
                  body.get("version"),
                  Json({k: body.get(k) for k in
-                       ("readiness", "projection_lag_ms", "reconciliation_state", "last_event_id", "ts")})),
+                       ("readiness", "projection_lag_ms", "reconciliation_state", "last_event_id", "ts",
+                        "open_orders")})),
             )
         conn.commit()
         return {"ok": True}
@@ -522,19 +933,9 @@ def node_commands(node_id: str, after: str | None = None,
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT oc.command_id::text, oc.command_type, oc.scope, oc.created_at
-                FROM operator_commands oc
-                JOIN command_node_acks na ON na.command_id=oc.command_id
-                LEFT JOIN node_command_runs ncr
-                  ON ncr.command_id=oc.command_id
-                 AND ncr.node_id=na.node_id
-                 AND ncr.status IN ('accepted', 'running', 'verifying')
-                WHERE na.node_id=%s
-                  AND na.status='pending'
-                  AND ncr.node_command_run_id IS NULL
-                ORDER BY oc.created_at
-                """,
+                "SELECT oc.command_id::text, oc.command_type, oc.scope, oc.created_at "
+                "FROM operator_commands oc JOIN command_node_acks na ON na.command_id=oc.command_id "
+                "WHERE na.node_id=%s AND na.status='pending' ORDER BY oc.created_at",
                 (node_id,),
             )
             rows = cur.fetchall()
@@ -558,91 +959,13 @@ def ack_node_command(node_id: str, command_id: str, body: dict = Body(default={}
     _cp_paths()
     from commands import record_ack
 
-    node_status = str(body.get("status") or "accepted")
+    status = _NODE_ACK_STATUS_MAP.get(str(body.get("status")), "acked")
     conn = psycopg2.connect(database_url)
     try:
-        _persist_node_command_ack_progress(conn, node_id, command_id, node_status, body)
-        status = _legacy_ack_status_for_node_status(node_status)
-        if status is not None:
-            record_ack(conn, command_id, node_id, status=status, detail=body.get("error"))
+        record_ack(conn, command_id, node_id, status=status, detail=body.get("error"))
         return {"ok": True}
     finally:
         conn.close()
-
-
-def _persist_node_command_ack_progress(
-    conn,
-    node_id: str,
-    command_id: str,
-    node_status: str,
-    body: dict,
-) -> None:
-    from order_management.commands import (
-        get_command_run,
-        mark_running,
-        mark_terminal,
-        mark_verifying,
-        request_command_run,
-    )
-
-    command_type, scope = _command_row(conn, command_id)
-    result = body.get("result") if isinstance(body.get("result"), dict) else {}
-    request_id = str(body.get("request_id") or result.get("request_id") or command_id)
-    payload = {
-        "command_id": command_id,
-        "scope": scope or {},
-        "ack": {k: v for k, v in body.items() if k != "result"},
-    }
-    if result:
-        payload["result"] = result
-
-    run = request_command_run(
-        conn,
-        node_id=node_id,
-        command_type=_NODE_COMMAND_TYPE_MAP.get(command_type, command_type.lower()),
-        request_id=request_id,
-        command_id=command_id,
-        idempotency_key=command_id,
-        payload=payload,
-    )
-    if node_status == "accepted":
-        return
-    if node_status == "running":
-        _ensure_running(conn, request_id, run["status"], result=result)
-        return
-
-    current = get_command_run(conn, request_id=request_id)
-    if current["status"] == "accepted":
-        current = mark_running(conn, request_id=request_id, result=result)
-    if node_status == "completed" and current["status"] == "running":
-        current = mark_verifying(conn, request_id=request_id, result=result)
-    if node_status in {"completed", "partial", "failed", "timed_out"}:
-        mark_terminal(
-            conn,
-            request_id=request_id,
-            status=node_status,
-            result=result,
-            error=body.get("error"),
-        )
-
-
-def _ensure_running(conn, request_id: str, current_status: str, *, result: dict) -> None:
-    from order_management.commands import mark_running
-
-    if current_status == "accepted":
-        mark_running(conn, request_id=request_id, result=result)
-
-
-def _command_row(conn, command_id: str) -> tuple[str, dict]:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT command_type, scope FROM operator_commands WHERE command_id=%s",
-            (command_id,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="unknown command")
-    return row[0], row[1] or {}
 
 
 @app.get("/v1/accounts/{account_id}")
@@ -1219,3 +1542,553 @@ def v1_review_reject(decision_id: str, body: dict = Body(default={}),
     if role not in ("reviewer", "risk_admin"):
         raise HTTPException(status_code=403, detail="reviewer required")
     return _review_decide(decision_id, "rejected", body, role)
+
+
+# ---------------------------------------------------------------------------
+# Operator order entry (Hermes agent = the decision maker; added 2026-07-02)
+#
+# Hermes decides WHETHER to trade (from channel signals or the user's verbal
+# instruction) and places the order HERE — never on the exchange directly.
+# This endpoint writes the same audit chain the decision gateway wrote
+# (raw_message -> processing_run -> context_snapshot -> hermes_decision ->
+# risk_decision -> approved trade_intent), so the nautilus node pulls and
+# executes it exactly like any other approved intent (JP-routed egress,
+# hedge-mode planner, reduce-only exits). Caps are enforced server-side and
+# fail closed because the caller is an LLM agent.
+# ---------------------------------------------------------------------------
+
+_OPERATOR_ACTIONS = (
+    "open_position",
+    "close_position",
+    "partial_close",
+    "move_stop_loss",
+    "replace_take_profits",
+    "cancel_order",
+)
+# Protection management: no new exposure (node places reduce-only orders sized to
+# the live position), so these skip notional sizing entirely.
+_OPERATOR_PROTECT_ACTIONS = ("move_stop_loss", "replace_take_profits")
+_OPERATOR_ACCOUNTS = ("account-a", "account-b")
+_WATCHER_TRADING_DB = os.environ.get(
+    "WATCHER_TRADING_DB",
+    "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db",
+)
+
+
+def _operator_caps() -> dict:
+    return {
+        # optional extra fixed ceiling; unset/0 = disabled (risk cap governs)
+        "max_notional": float(os.environ.get("OPERATOR_MAX_NOTIONAL_USDT", "0") or 0) or None,
+        "max_leverage": float(os.environ.get("OPERATOR_MAX_LEVERAGE", "10")),
+        # per-order max loss at stop, as fraction of account equity (user rule: 6%)
+        "max_risk_fraction": float(os.environ.get("OPERATOR_MAX_RISK_FRACTION", "0.06")),
+        # orders without a stop loss cannot be risk-checked: cap notional instead
+        "no_sl_equity_fraction": float(os.environ.get("OPERATOR_NO_SL_EQUITY_FRACTION", "0.2")),
+    }
+
+
+def _account_equity(account_id: str) -> float | None:
+    """Account equity for sizing. Env override first (accounts_projection is not
+    yet populated by the node's AccountState events — payload arrives empty);
+    falls back to the projection so this self-heals once that gap is fixed."""
+    env_key = "OPERATOR_EQUITY_" + account_id.upper().replace("-", "_")
+    raw = os.environ.get(env_key, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    try:
+        conn = psycopg2.connect(os.environ.get("DATABASE_URL", ""))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT equity FROM accounts_projection WHERE account_id=%s "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (account_id,),
+                )
+                row = cur.fetchone()
+                if row and row[0] and float(row[0]) > 0:
+                    return float(row[0])
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return None
+
+
+def _symbol_risk_ratio(symbol: str) -> float:
+    """Per-symbol risk fraction — the user's config in the watcher DB is the
+    single source of truth (e.g. BTCUSDT 0.02 = risk 2% of equity per trade);
+    symbols without a config default to 1%."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{_WATCHER_TRADING_DB}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT risk_ratio FROM symbol_risk_configs WHERE symbol=?", (symbol,)
+            ).fetchone()
+            if row and row[0] and 0 < float(row[0]) <= 0.1:
+                return float(row[0])
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return float(os.environ.get("OPERATOR_DEFAULT_RISK_RATIO", "0.01"))
+
+
+def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
+                     entry_price, entry_price_min, entry_price_max,
+                     stop_loss, caps, checks) -> float:
+    """Risk-based sizing: notional = equity * risk_ratio / stop_distance.
+    Hard cap (fail closed): loss at stop <= max_risk_fraction of equity.
+    Without a stop loss the order cannot be risk-checked, so an explicit
+    notional is required and capped at no_sl_equity_fraction of equity."""
+    equity = _account_equity(account_id)
+    if equity is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"account equity unknown for {account_id}: set OPERATOR_EQUITY_"
+                   f"{account_id.upper().replace('-', '_')} in the control-plane env",
+        )
+    # price reference for the stop distance
+    if entry_type == "limit":
+        ref = entry_price
+    elif entry_type == "zone":
+        if stop_loss is not None:
+            # conservative: the zone boundary FARTHEST from the stop gives the
+            # largest loss per unit if filled there — size against that
+            ref = (entry_price_min
+                   if abs(entry_price_min - stop_loss) >= abs(entry_price_max - stop_loss)
+                   else entry_price_max)
+        else:
+            ref = (entry_price_min + entry_price_max) / 2
+    else:
+        ref = _binance_mark_price(symbol)
+
+    notional: float
+    if stop_loss is not None and ref:
+        if side == "short" and stop_loss <= ref:
+            raise HTTPException(status_code=400, detail="short stop_loss must be above entry")
+        if side == "long" and stop_loss >= ref:
+            raise HTTPException(status_code=400, detail="long stop_loss must be below entry")
+        stop_frac = abs(ref - stop_loss) / ref
+        risk_ratio = _symbol_risk_ratio(symbol)
+        auto = equity * risk_ratio / stop_frac
+        notional = explicit_notional if explicit_notional is not None else auto
+        max_risk = equity * caps["max_risk_fraction"]
+        est_risk = notional * stop_frac
+        if est_risk > max_risk + 1e-9:
+            raise HTTPException(
+                status_code=400,
+                detail=f"loss at stop ~{est_risk:.1f}U exceeds per-order risk cap "
+                       f"{max_risk:.1f}U ({caps['max_risk_fraction']:.0%} of equity {equity:.0f}U)",
+            )
+        checks.append({"name": "risk_sizing", "passed": True, "equity": equity,
+                       "risk_ratio": risk_ratio, "stop_frac": round(stop_frac, 5),
+                       "sizing_price": ref, "notional": round(notional, 1),
+                       "est_risk": round(est_risk, 1), "risk_cap": round(max_risk, 1),
+                       "auto_sized": explicit_notional is None})
+    else:
+        if explicit_notional is None:
+            raise HTTPException(
+                status_code=400,
+                detail="auto-sizing needs a stop_loss (and a resolvable price); "
+                       "pass notional_usdt explicitly for stop-less orders",
+            )
+        ceiling = equity * caps["no_sl_equity_fraction"]
+        if explicit_notional > ceiling:
+            raise HTTPException(
+                status_code=400,
+                detail=f"stop-less order notional {explicit_notional:.0f}U exceeds "
+                       f"{ceiling:.0f}U ({caps['no_sl_equity_fraction']:.0%} of equity)",
+            )
+        notional = explicit_notional
+        checks.append({"name": "no_sl_notional_cap", "passed": True,
+                       "notional": notional, "ceiling": round(ceiling, 1)})
+
+    lev_ceiling = equity * caps["max_leverage"]
+    if notional > lev_ceiling:
+        raise HTTPException(status_code=400,
+                            detail=f"notional {notional:.0f}U exceeds equity*max_leverage {lev_ceiling:.0f}U")
+    if caps["max_notional"] and notional > caps["max_notional"]:
+        raise HTTPException(status_code=400,
+                            detail=f"notional {notional:.0f}U exceeds OPERATOR_MAX_NOTIONAL_USDT {caps['max_notional']:.0f}U")
+    return notional
+
+
+def _validate_stop_direction(symbol: str, account_id: str, stop_loss: float) -> None:
+    """A stop on the wrong side of the mark price is rejected by Binance (-2021)
+    only AFTER the node has already cancelled the old stop — validate up front.
+    Soft check: skipped when the position or mark price cannot be resolved."""
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        return
+    side = None
+    try:
+        conn = psycopg2.connect(database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT side FROM positions_projection WHERE account_id=%s "
+                    "AND instrument_id LIKE %s AND status='open' AND quantity::numeric != 0",
+                    (account_id, symbol + "%"),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        if len(rows) != 1:
+            return  # none/ambiguous: let the node planner decide
+        side = str(rows[0][0]).lower()
+    except Exception:
+        return
+    mark = _binance_mark_price(symbol)
+    if not mark:
+        return
+    if side == "long" and stop_loss >= mark:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stop_loss {stop_loss} is above mark {mark} for a long position",
+        )
+    if side == "short" and stop_loss <= mark:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stop_loss {stop_loss} is below mark {mark} for a short position",
+        )
+
+
+def _safe_execution_preview(order_plan, risk_budget, symbol, action):
+    """The intent row is committed before the response is built: a preview failure
+    must never turn a successfully-placed intent into an HTTP error."""
+    try:
+        return _execution_order_plan(order_plan, risk_budget, symbol, action=action)
+    except Exception as exc:  # noqa: BLE001
+        return {"preview_unavailable": str(exc)[:200]}
+
+
+def _op_num(value, field: str, required: bool = False):
+    if value is None:
+        if required:
+            raise HTTPException(status_code=400, detail=f"{field} required")
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field} must be a number")
+    if num <= 0:
+        raise HTTPException(status_code=400, detail=f"{field} must be > 0")
+    return num
+
+
+@app.post("/v1/operator/orders")
+def operator_order(
+    body: dict = Body(default={}),
+    authorization: str | None = Header(default=None),
+):
+    import hashlib
+    from datetime import timedelta
+    from psycopg2.extras import Json
+
+    role = require_reader(authorization)
+    if role != "risk_admin":
+        raise HTTPException(status_code=403, detail="risk_admin required")
+
+    action = str(body.get("action") or "").strip()
+    if action not in _OPERATOR_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"action must be one of {list(_OPERATOR_ACTIONS)}")
+    symbol = str(body.get("symbol") or "").upper().split("-")[0].split(".")[0]
+    if not symbol or not symbol.isalnum() or not symbol.endswith("USDT"):
+        raise HTTPException(status_code=400, detail="symbol required, e.g. BTCUSDT")
+    account_id = str(body.get("account_id") or os.environ.get("OPERATOR_DEFAULT_ACCOUNT", "account-a"))
+    if account_id not in _OPERATOR_ACCOUNTS:
+        raise HTTPException(status_code=400, detail=f"account_id must be one of {list(_OPERATOR_ACCOUNTS)}")
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason required (audit trail)")
+    source = str(body.get("source") or "hermes-agent")[:64]
+
+    caps = _operator_caps()
+    checks = [{"name": "operator_auth", "passed": True}]
+    entry = dict(body.get("entry") or {"type": "market"})
+    entry_type = str(entry.get("type") or "market").lower()
+    if entry_type == "none":
+        entry_type = "market"
+    if entry_type not in ("market", "limit", "zone"):
+        raise HTTPException(status_code=400, detail="entry.type must be market|limit|zone")
+    entry_price = _op_num(entry.get("price"), "entry.price")
+    entry_price_min = _op_num(entry.get("price_min"), "entry.price_min")
+    entry_price_max = _op_num(entry.get("price_max"), "entry.price_max")
+    if entry_type == "limit" and entry_price is None:
+        raise HTTPException(status_code=400, detail="limit entry requires entry.price")
+    if entry_type == "zone" and (entry_price_min is None or entry_price_max is None):
+        raise HTTPException(status_code=400, detail="zone entry requires entry.price_min + entry.price_max")
+
+    side = str(body.get("side") or "").lower() or None
+    leverage = _op_num(body.get("leverage"), "leverage")
+    if leverage is not None and leverage > caps["max_leverage"]:
+        raise HTTPException(status_code=400, detail=f"leverage {leverage} exceeds cap {caps['max_leverage']}")
+    cancel_client_order_id = None
+    if action == "cancel_order":
+        cancel_client_order_id = str(body.get("client_order_id") or "").strip()
+        # Only OUR deterministic ids are cancellable: external/manual orders on
+        # the same account must never be touchable through this endpoint.
+        if not re.fullmatch(r"B[0-9a-f]{32}[0-9]{2}", cancel_client_order_id):
+            raise HTTPException(
+                status_code=400,
+                detail="cancel_order requires client_order_id in system format "
+                       "(B + 32 hex + 2 digits); external orders cannot be cancelled here",
+            )
+        # Format alone is forgeable: the embedded uuid must reference an intent WE
+        # issued. This is the actual ownership proof (adversarial review P1-1).
+        _own_db = os.environ.get("DATABASE_URL")
+        if _own_db:
+            _own_conn = psycopg2.connect(_own_db)
+            try:
+                with _own_conn.cursor() as _own_cur:
+                    _own_cur.execute(
+                        "SELECT 1 FROM trade_intents WHERE intent_id::text = %s",
+                        (str(UUID(hex=cancel_client_order_id[1:33])),),
+                    )
+                    if _own_cur.fetchone() is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="client_order_id does not belong to a system intent",
+                        )
+            finally:
+                _own_conn.close()
+    stop_loss = _op_num(body.get("stop_loss"), "stop_loss")
+    if action == "move_stop_loss":
+        if stop_loss is None:
+            raise HTTPException(status_code=400, detail="move_stop_loss requires stop_loss")
+        _validate_stop_direction(symbol, account_id, stop_loss)
+    if action == "open_position" and not str(body.get("client_ref") or "").strip() \
+            and body.get("dry_run") is not True:
+        # The caller is an LLM: a timeout-retry without an idempotency key would
+        # double the position (hedge mode never blocks a second open).
+        raise HTTPException(
+            status_code=400,
+            detail="open_position requires client_ref (idempotency key): use the "
+                   "signal message id, or a stable slug for verbal orders",
+        )
+    if action == "replace_take_profits":
+        raw_tps = body.get("take_profits")
+        if not isinstance(raw_tps, list) or not raw_tps:
+            raise HTTPException(
+                status_code=400,
+                detail="replace_take_profits requires take_profits: [{price, quantity}, ...]",
+            )
+        take_profits = []
+        for i, item in enumerate(raw_tps):
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="take_profits entries must be {price, quantity} objects",
+                )
+            take_profits.append({
+                "price": _op_num(item.get("price"), f"take_profits[{i}].price", required=True),
+                "quantity": _op_num(item.get("quantity"), f"take_profits[{i}].quantity", required=True),
+            })
+    else:
+        take_profits = [
+            _op_num(tp, "take_profits[]") for tp in (body.get("take_profits") or [])
+        ]
+
+    notional = None
+    quantity = None
+    if action == "open_position":
+        if side not in ("long", "short"):
+            raise HTTPException(status_code=400, detail="side must be long|short for open_position")
+        notional = _size_open_order(
+            _op_num(body.get("notional_usdt"), "notional_usdt"),
+            symbol, account_id, side, entry_type,
+            entry_price, entry_price_min, entry_price_max,
+            stop_loss, caps, checks,
+        )
+    elif action == "partial_close":
+        quantity = _op_num(body.get("quantity"), "quantity", required=True)
+
+    expire_hours = _op_num(body.get("expire_hours"), "expire_hours")
+    valid_seconds = int(_op_num(body.get("valid_seconds"), "valid_seconds") or 900)
+    valid_seconds = max(60, min(valid_seconds, 3600))
+
+    if action == "cancel_order":
+        order_plan = {"cancel_client_order_id": cancel_client_order_id}
+    elif action in _OPERATOR_PROTECT_ACTIONS:
+        # Minimal semantic plan: the node planner derives side/quantity from the
+        # live position; an entry block here would be misparsed as an order type.
+        order_plan = {}
+        if action == "move_stop_loss":
+            order_plan["stop_loss"] = stop_loss
+        else:
+            order_plan["take_profits"] = take_profits
+    else:
+        order_plan = {
+            "side": side,
+            "entry": {"type": entry_type, "price": entry_price,
+                      "price_min": entry_price_min, "price_max": entry_price_max},
+            "stop_loss": stop_loss,
+            "take_profits": take_profits,
+            "leverage": leverage,
+        }
+        if expire_hours and entry_type in ("limit", "zone"):
+            order_plan["expire_hours"] = expire_hours
+        if quantity is not None:
+            order_plan["quantity"] = str(quantity)
+    # Shape must match the node RiskBudget contract exactly (extra=forbid,
+    # all three fields required): risk_fraction/max_notional/max_leverage.
+    risk_budget: dict = {
+        "risk_fraction": 0.0,
+        "max_notional": notional if notional is not None else 0.0,
+        "max_leverage": leverage or caps["max_leverage"],
+    }
+
+    if body.get("dry_run") is True:
+        return {
+            "dry_run": True, "action": action, "symbol": symbol, "account_id": account_id,
+            "computed_notional": notional, "checks": checks,
+            "order_plan_preview": {"side": side, "entry": {"type": entry_type},
+                                   "stop_loss": stop_loss, "take_profits": take_profits},
+        }
+
+    client_ref = str(body.get("client_ref") or "").strip()
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="intent store unavailable")
+
+    now = datetime.now(timezone.utc)
+    raw_id, run_id, ctx_id, dec_id, risk_id, intent_id = (str(uuid4()) for _ in range(6))
+    idem = (
+        hashlib.sha256(f"operator|{account_id}|{client_ref}".encode()).hexdigest()
+        if client_ref else hashlib.sha256(intent_id.encode()).hexdigest()
+    )
+    message_type = "new_signal" if action == "open_position" else "position_update"
+    valid_until = now + timedelta(seconds=valid_seconds)
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT intent_id::text, status::text, valid_until FROM trade_intents WHERE idempotency_key=%s",
+                (idem,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                return {
+                    "intent_id": existing[0], "status": existing[1], "replay": True,
+                    "valid_until": existing[2].isoformat() if existing[2] else None,
+                }
+            cur.execute(
+                "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version, "
+                "source_received_at, content_hash, message_text) "
+                "VALUES (%s,'operator','hermes-operator',%s,'v1',%s,%s,%s)",
+                (raw_id, client_ref or f"operator-{raw_id}", now,
+                 hashlib.sha256(f"{raw_id}|{json.dumps(body, sort_keys=True, default=str)}".encode()).hexdigest(),
+                 f"[{source}] {action} {symbol}: {reason}"),
+            )
+            cur.execute(
+                "INSERT INTO message_processing_runs (processing_run_id, raw_message_id, status) "
+                "VALUES (%s,%s,'succeeded')",
+                (run_id, raw_id),
+            )
+            cur.execute(
+                "INSERT INTO context_snapshots (context_snapshot_id, raw_message_id, snapshot_type, "
+                "context_version, snapshot) VALUES (%s,%s,'system','v1',%s)",
+                (ctx_id, raw_id, Json({"operator_request": body})),
+            )
+            cur.execute(
+                "INSERT INTO hermes_decisions (decision_id, raw_message_id, processing_run_id, "
+                "context_snapshot_id, message_type, action, ambiguous, account_scope, target_account_id, "
+                "instrument_symbol, side, entry_type, entry_price, entry_price_min, entry_price_max, "
+                "stop_loss, take_profits, leverage, valid_until, evidence, model_provider, model_version, "
+                "prompt_version, context_version, temperature, created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,false,'single',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'hermes',%s,"
+                "'operator-v1','v1',0,%s)",
+                (dec_id, raw_id, run_id, ctx_id, message_type, action, account_id, symbol, side,
+                 entry_type, entry_price, entry_price_min, entry_price_max, stop_loss,
+                 Json(take_profits), leverage, valid_until,
+                 Json([{"source": source, "quote": reason}]), source, now),
+            )
+            cur.execute(
+                "INSERT INTO risk_decisions (risk_decision_id, hermes_decision_id, status, account_id, "
+                "instrument_id, risk_budget, checks, reason, decided_by) "
+                "VALUES (%s,%s,'approved',%s,%s,%s,%s,%s,'hermes-operator')",
+                (risk_id, dec_id, account_id, symbol, Json(risk_budget), Json(checks), reason),
+            )
+            cur.execute(
+                "INSERT INTO trade_intents (intent_id, hermes_decision_id, risk_decision_id, schema_version, "
+                "account_id, instrument_id, action, status, order_plan, risk_budget, target_position_id, "
+                "valid_until, idempotency_key, approved_at) "
+                "VALUES (%s,%s,%s,'1.0',%s,%s,%s,'approved',%s,%s,%s,%s,%s, now())",
+                (intent_id, dec_id, risk_id, account_id, symbol, action, Json(order_plan),
+                 Json(risk_budget), body.get("target_position_id"), valid_until, idem),
+            )
+            cur.execute(
+                "INSERT INTO outbox_events (outbox_event_id, status, aggregate_type, aggregate_id, "
+                "event_type, payload) VALUES (%s,'pending','trade_intent',%s,'trade_intent.approved',%s)",
+                (str(uuid4()), intent_id,
+                 Json({"intent_id": intent_id, "risk_decision_id": risk_id, "source": source})),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "intent_id": intent_id,
+        "status": "approved",
+        "replay": False,
+        "account_id": account_id,
+        "instrument_id": symbol,
+        "action": action,
+        "order_plan": order_plan,
+        "execution_preview": _safe_execution_preview(order_plan, risk_budget, symbol, action),
+        "risk_budget": risk_budget,
+        "valid_until": valid_until.isoformat(),
+    }
+
+
+@app.get("/v1/operator/orders/{intent_id}")
+def operator_order_status(intent_id: str, authorization: str | None = Header(default=None)):
+    """Execution status of an operator-placed intent: intent row + order projections
+    (fills) + the current position on that instrument, so Hermes can report back."""
+    require_reader(authorization)
+    try:
+        UUID(intent_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="intent_id must be a uuid")
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT intent_id::text, account_id, instrument_id, action::text, status::text, "
+                "order_plan, risk_budget, valid_until, approved_at, created_at "
+                "FROM trade_intents WHERE intent_id=%s",
+                (intent_id,),
+            )
+            intent = cur.fetchone()
+            if intent is None:
+                raise HTTPException(status_code=404, detail="intent not found")
+            cur.execute(
+                "SELECT client_order_id, status::text, filled_quantity, average_fill_price, updated_at "
+                "FROM orders_projection WHERE intent_id=%s ORDER BY updated_at",
+                (intent_id,),
+            )
+            orders = cur.fetchall()
+            cur.execute(
+                "SELECT account_id, instrument_id, side::text, quantity, avg_entry_price, status::text "
+                "FROM positions_projection WHERE account_id=%s AND instrument_id LIKE %s AND status='open'",
+                (intent["account_id"], intent["instrument_id"].split("-")[0] + "%"),
+            )
+            positions = cur.fetchall()
+            cur.execute(
+                "SELECT event_type, client_order_id, venue_order_id, trade_id, payload, ts_event "
+                "FROM execution_events WHERE intent_id=%s ORDER BY ts_event",
+                (intent_id,),
+            )
+            events = cur.fetchall()
+    finally:
+        conn.close()
+    return jsonable_encoder({"intent": intent, "orders": orders,
+                             "execution_events": events, "open_positions": positions})
