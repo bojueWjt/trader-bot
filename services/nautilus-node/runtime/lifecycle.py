@@ -169,3 +169,6 @@ class NodeLifecycle:
     def _halt(self, reason: str) -> None:
         self._trading_state = TradingState.HALTED
         self._halt_reason = reason
+        # A silent halt cost 2h of debugging on 2026-07-10: every halt must be
+        # loud. print reaches docker logs regardless of logging config.
+        print(f"[NodeLifecycle] TRADING HALTED: {reason}", flush=True)

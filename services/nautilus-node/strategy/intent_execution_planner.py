@@ -527,6 +527,13 @@ def _select_target_position(
         for position in _context_positions(context)
         if position.instrument_id == instrument_id and Decimal(str(position.quantity)) != Decimal("0")
     )
+    # Hedge mode can hold LONG and SHORT simultaneously on one instrument; an
+    # order_plan position_side hint ("long"/"short") disambiguates which book a
+    # management action targets (2026-07-10: ETH dual-side made every
+    # move_stop_loss die with position_not_unique).
+    side_hint = str((getattr(intent, "order_plan", {}) or {}).get("position_side") or "").strip().upper()
+    if side_hint in ("LONG", "SHORT"):
+        positions = tuple(p for p in positions if str(p.side).upper() == side_hint)
     target_position_id = getattr(intent, "target_position_id", None)
     if target_position_id:
         matches = tuple(position for position in positions if position.position_id == target_position_id)

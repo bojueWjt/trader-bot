@@ -77,6 +77,12 @@ class ProjectionEventMapper:
         ts_event_raw = _attr(event, "ts_event", "timestamp", "event_time")
         ts_event = _timestamp_to_datetime(ts_event_raw)
         ts_ingest = _ensure_aware(self._now())
+        # PATCH 2026-07-10 (hk): events occasionally carry no ts_event (raw
+        # None/0 -> 1970 epoch); the projection actor then computes a ~56-year
+        # lag and silently halts trading (lag guard misfire). A missing event
+        # time is not "infinitely stale" - stamp it with ingest time.
+        if ts_event < datetime(2020, 1, 1, tzinfo=timezone.utc):
+            ts_event = ts_ingest
         client_order_id = _optional_str(_attr(event, "client_order_id"))
         venue_order_id = _optional_str(_attr(event, "venue_order_id", "order_id"))
         trade_id = _optional_str(_attr(event, "trade_id", "venue_trade_id"))

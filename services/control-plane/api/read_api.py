@@ -1717,10 +1717,12 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
     return notional
 
 
-def _validate_stop_direction(symbol: str, account_id: str, stop_loss: float) -> None:
+def _validate_stop_direction(symbol: str, account_id: str, stop_loss: float,
+                             position_side: str | None = None) -> None:
     """A stop on the wrong side of the mark price is rejected by Binance (-2021)
     only AFTER the node has already cancelled the old stop — validate up front.
-    Soft check: skipped when the position or mark price cannot be resolved."""
+    Soft check: skipped when the position or mark price cannot be resolved.
+    position_side (long|short) narrows the check to one book in hedge mode."""
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         return
@@ -1737,6 +1739,8 @@ def _validate_stop_direction(symbol: str, account_id: str, stop_loss: float) -> 
                 rows = cur.fetchall()
         finally:
             conn.close()
+        if position_side:
+            rows = [r for r in rows if str(r[0]).lower() == position_side]
         if len(rows) != 1:
             return  # none/ambiguous: let the node planner decide
         side = str(rows[0][0]).lower()
@@ -1824,6 +1828,12 @@ def operator_order(
         raise HTTPException(status_code=400, detail="zone entry requires entry.price_min + entry.price_max")
 
     side = str(body.get("side") or "").lower() or None
+    # Hedge mode holds LONG and SHORT simultaneously: management actions on a
+    # dual-side instrument need an explicit book, otherwise the node planner
+    # denies with position_not_unique (2026-07-10 ETH incident).
+    position_side = str(body.get("position_side") or "").strip().lower() or None
+    if position_side is not None and position_side not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="position_side must be long|short")
     leverage = _op_num(body.get("leverage"), "leverage")
     if leverage is not None and leverage > caps["max_leverage"]:
         raise HTTPException(status_code=400, detail=f"leverage {leverage} exceeds cap {caps['max_leverage']}")
@@ -1860,7 +1870,7 @@ def operator_order(
     if action == "move_stop_loss":
         if stop_loss is None:
             raise HTTPException(status_code=400, detail="move_stop_loss requires stop_loss")
-        _validate_stop_direction(symbol, account_id, stop_loss)
+        _validate_stop_direction(symbol, account_id, stop_loss, position_side)
     if action == "open_position" and not str(body.get("client_ref") or "").strip() \
             and body.get("dry_run") is not True:
         # The caller is an LLM: a timeout-retry without an idempotency key would
@@ -1921,6 +1931,8 @@ def operator_order(
             order_plan["stop_loss"] = stop_loss
         else:
             order_plan["take_profits"] = take_profits
+        if position_side:
+            order_plan["position_side"] = position_side
     else:
         order_plan = {
             "side": side,
@@ -1934,6 +1946,8 @@ def operator_order(
             order_plan["expire_hours"] = expire_hours
         if quantity is not None:
             order_plan["quantity"] = str(quantity)
+        if position_side and action in ("close_position", "partial_close"):
+            order_plan["position_side"] = position_side
     # Shape must match the node RiskBudget contract exactly (extra=forbid,
     # all three fields required): risk_fraction/max_notional/max_leverage.
     risk_budget: dict = {

@@ -7,7 +7,13 @@ this process NEVER touches the exchange and NEVER cancels anything itself:
 1. Entry-order TTL (default 48h): a resting SYSTEM entry order (client id
    B{uuid32}{01-09}) older than ORDER_TTL_HOURS wakes a Hermes job that decides
    cancel-vs-renew (renewable exactly once). Protection orders (seq >= 11) and
-   external/manual orders are never TTL'd.
+   external/manual orders are never TTL'd. Before waking, the row is checked
+   against exchange_state_mirror (the read-only Binance REST truth): a ledger
+   row whose order is no longer on the exchange is a ghost — it is terminalized
+   in orders_projection (the one DB write this process makes; it still never
+   touches the exchange) instead of driving cancel wakes forever (the
+   2026-07-10 spam storm: node restarts forget resting orders, so cancels were
+   re-attempted every 2h against orders that no longer existed).
 2. Price alerts: for every open position's live SL/TP protection orders, watch
    mark price; on approach (within APPROACH_FRACTION) or touch, wake a Hermes
    job (delivers to Telegram) with the channel context so it can manage the
@@ -41,6 +47,7 @@ POLL_SECONDS = 15
 TTL_SWEEP_SECONDS = 600
 RECON_SWEEP_SECONDS = 3600
 ORDER_SNAPSHOT_MAX_AGE_SECONDS = 300
+MIRROR_MAX_AGE_SECONDS = 300  # exchange_state_mirror refreshes every ~45s
 ORDER_TTL_HOURS = float(os.environ.get("ORDER_TTL_HOURS", "48"))
 APPROACH_FRACTION = 0.004
 ALERT_DEDUP_SECONDS = 24 * 3600
@@ -56,7 +63,7 @@ TG_CHAT_ID = "8545234287"
 BRAIN_PROBES = (
     # (name, url, key_env, style, model)
     ("primary", "https://api.balenw.cloud/v1/chat/completions", "CLIPROXYAPI_API_KEY",
-     "openai", "gpt-5.5"),
+     "openai", "gpt-5.6-sol"),
     ("fallback", "https://open.bigmodel.cn/api/anthropic/v1/messages", "BIGMODEL_API_KEY",
      "anthropic", "glm-5.2"),
 )
@@ -315,6 +322,61 @@ def _heartbeat_open_order_snapshot() -> tuple[list[dict] | None, float | None]:
     return orders, newest_age
 
 
+def _exchange_open_order_ids() -> dict[str, set[str] | None]:
+    """Per-account client_order_ids truly open on the exchange, from
+    exchange_state_mirror (read-only Binance REST poll, ~45s refresh).
+
+    NOT the node-heartbeat snapshot: nodes forget resting orders older than
+    the reconciliation lookback on every restart (2026-07-10 incident), so
+    their view cannot distinguish "gone from exchange" from "forgotten".
+
+    An account maps to None when its mirror row is stale/absent — callers
+    must fail open for that account (cannot classify ghosts safely)."""
+    out: dict[str, set[str] | None] = {}
+    try:
+        rows = q(
+            "SELECT account_id, EXTRACT(EPOCH FROM (now() - updated_at)), "
+            "COALESCE(payload->'open_orders','[]'::jsonb)::text "
+            "FROM exchange_state_mirror"
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"exchange mirror read failed: {exc!r}")
+        return out
+    for account_id, age_raw, orders_raw in rows:
+        try:
+            age = float(age_raw)
+        except (TypeError, ValueError):
+            out[account_id] = None
+            continue
+        if age > MIRROR_MAX_AGE_SECONDS:
+            out[account_id] = None
+            continue
+        ids: set[str] = set()
+        for order in _parse_snapshot_orders(orders_raw):
+            cid = str(order.get("client_order_id") or order.get("clientOrderId") or "")
+            if cid:
+                ids.add(cid)
+        out[account_id] = ids
+    return out
+
+
+def heal_ghost_order(cid: str, account_id: str, dry_run: bool) -> None:
+    """Terminalize a ledger row whose order no longer exists on the exchange.
+    'canceled' is a best guess (the terminal event was lost while a node was
+    down/amnesiac); the payload marker keeps the heal auditable."""
+    if dry_run:
+        log(f"DRY-RUN would heal ghost order {cid} ({account_id})")
+        return
+    q(
+        "UPDATE orders_projection SET status='canceled', updated_at=now(), "
+        "payload = payload || jsonb_build_object('lifecycle_heal', "
+        "'not-on-exchange ' || to_char(now(), 'YYYY-MM-DD HH24:MI')) "
+        f"WHERE client_order_id='{cid}' AND account_id='{account_id}' "
+        "AND status IN ('accepted','partially_filled','updated')"
+    )
+    log(f"healed ghost order {cid} ({account_id}): projection -> canceled")
+
+
 def prune_state(state: dict, live_ids: set[str], now_ts: float,
                 max_age: float = None) -> None:
     """Drop bookkeeping for orders that left the book long ago (P2-1: the state
@@ -444,10 +506,11 @@ def wake_hermes(prompt: str, name: str, dry_run: bool) -> bool:
 def sweep_ttl(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
     now_ts = now_ts or time.time()
     rows = q(
-        "SELECT client_order_id, instrument_id, "
+        "SELECT client_order_id, account_id, instrument_id, "
         "EXTRACT(EPOCH FROM (now() - ts_event))/3600.0 "
         "FROM orders_projection WHERE status IN ('accepted','partially_filled')"
     )
+    exchange_ids = _exchange_open_order_ids()
     uuids = sorted({u for u in (intent_uuid_of(r[0]) for r in rows) if u})
     actions: dict[str, str] = {}
     if uuids:
@@ -457,8 +520,15 @@ def sweep_ttl(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
             f"WHERE intent_id::text IN ({placeholders})"
         ):
             actions[iid_] = act_
-    for cid, instrument_id, age_h in rows:
+    for cid, account_id, instrument_id, age_h in rows:
         try:
+            live_ids = exchange_ids.get(account_id)
+            if live_ids is not None and cid not in live_ids and float(age_h) > 1.0:
+                # The mirror is fresh and the exchange has no such order: this
+                # ledger row is a ghost. Heal it instead of waking Hermes to
+                # cancel a nonexistent order (denied:order_not_found loop).
+                heal_ghost_order(cid, account_id, dry_run)
+                continue
             renew_key = f"ttl:{cid}"
             entry = state.get(renew_key) or {}
             intent_action = actions.get(intent_uuid_of(cid) or "", "")
