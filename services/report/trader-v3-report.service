@@ -1,0 +1,19 @@
+[Unit]
+Description=Trader V3 Hermes report service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/trader-v3/services/report
+EnvironmentFile=/srv/trader-v3/.env.v3
+Environment=REPORT_HOST=127.0.0.1
+Environment=REPORT_PORT=8090
+Environment=REPORT_DIR=/srv/trader-v3/reports
+Environment=PUBLIC_BASE=https://hk.balen.wang
+ExecStart=/srv/trader-v3/.venv-report/bin/uvicorn report_service:app --host ${REPORT_HOST} --port ${REPORT_PORT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

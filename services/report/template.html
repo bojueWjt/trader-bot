@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes Report</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080a0f;
+      --panel: #121722;
+      --panel-2: #171d29;
+      --line: #2a3445;
+      --text: #edf2f7;
+      --muted: #9aa7b8;
+      --green: #32d583;
+      --red: #ff6b6b;
+      --yellow: #f5c451;
+      --blue: #67b7ff;
+      --violet: #b58cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      overflow-x: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+      letter-spacing: 0;
+    }
+    main { width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: 24px 0 42px; }
+    header { padding: 10px 0 20px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 6vw, 52px); line-height: 1.02; letter-spacing: 0; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    h3 { margin: 0 0 8px; font-size: 15px; }
+    .meta, .muted { color: var(--muted); font-size: 13px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 18px; }
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      min-width: 0;
+    }
+    .kpi .label { color: var(--muted); font-size: 12px; }
+    .kpi .value { font-size: 24px; font-weight: 740; margin-top: 6px; overflow-wrap: anywhere; }
+    .kpi .hint { color: var(--muted); font-size: 12px; margin-top: 2px; min-height: 18px; }
+    .chart { width: 100%; height: 310px; }
+    .small-chart { height: 260px; }
+    .placeholder {
+      min-height: 120px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      text-align: center;
+    }
+    .pos-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    .pos-card { background: var(--panel-2); }
+    .pos-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .pos-head h3 { margin: 0; font-size: 16px; }
+    .pos-rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; font-size: 13px; }
+    .pos-rows > div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dashed var(--line); padding: 5px 0; min-width: 0; }
+    .pos-rows .label { color: var(--muted); flex-shrink: 0; }
+    .pos-rows .val { overflow-wrap: anywhere; text-align: right; }
+    .pos-foot { margin-top: 8px; }
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+    .badge { display: inline-flex; align-items: center; min-height: 24px; padding: 0 9px; border-radius: 999px; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    .bullish { color: #062414; background: var(--green); }
+    .bearish { color: #2a0505; background: var(--red); }
+    .neutral { color: #071927; background: var(--blue); }
+    .mixed { color: #271c04; background: var(--yellow); }
+    .view-card { background: var(--panel-2); }
+    .symbols { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+    .symbol { color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; font-size: 12px; }
+    .gallery { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .gallery img { width: 100%; border-radius: 8px; border: 1px solid var(--line); display: block; background: #05070a; }
+    .caption { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .narrative p { margin: 0 0 10px; color: #dbe5ef; }
+    .narrative ul { margin: 0 0 10px 18px; padding: 0; color: #dbe5ef; }
+    .missing li { margin: 6px 0; color: var(--muted); overflow-wrap: anywhere; }
+    @media (min-width: 900px) {
+      main { padding-top: 34px; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .span-2 { grid-column: span 2; }
+      .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pos-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <main id="app"></main>
+  <script>/*__ECHARTS__*/</script>
+  <script>window.REPORT_DATA = /*__REPORT_DATA__*/;</script>
+  <script>
+    const root = document.getElementById('app');
+    const data = window.REPORT_DATA || {};
+    const report = data.report || {};
+    const db = data.db || {};
+    const money = value => {
+      const n = Number(value || 0);
+      const sign = n > 0 ? '+' : '';
+      return `${sign}${n.toFixed(2)} USDT`;
+    };
+    const pct = value => value === null || value === undefined ? 'N/A' : `${Number(value).toFixed(1)}%`;
+    const cls = value => Number(value || 0) >= 0 ? 'positive' : 'negative';
+    const fmtPrice = value => {
+      if (value === null || value === undefined || value === '') return '—';
+      const n = Number(value);
+      if (!Number.isFinite(n)) return String(value);
+      return String(parseFloat(n >= 1000 ? n.toFixed(2) : n.toPrecision(6)));
+    };
+    const fmtQty = value => {
+      const n = Number(value);
+      return Number.isFinite(n) ? String(parseFloat(Math.abs(n).toPrecision(8))) : String(value ?? '—');
+    };
+    const fmtTime = value => String(value || '').replace('T', ' ').slice(5, 16);
+    const tip = extra => ({trigger: 'axis', valueFormatter: v => (typeof v === 'number' ? v.toFixed(2) : v), ...extra});
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const hasRows = rows => Array.isArray(rows) && rows.length > 0;
+
+    function card(title, body, extra = '') {
+      return `<section class="card ${extra}"><h2>${escapeHtml(title)}</h2>${body}</section>`;
+    }
+    function placeholder(text) {
+      return `<div class="placeholder">${escapeHtml(text)}</div>`;
+    }
+    function chartCard(title, id, cardExtra = '', chartExtra = '') {
+      return card(title, `<div id="${id}" class="chart ${chartExtra}"></div>`, cardExtra);
+    }
+
+    function renderShell() {
+      const k = db.kpis || {};
+      const baseKpis = [
+        ['周期盈亏', money(k.period_pnl), '已平仓盈亏', cls(k.period_pnl)],
+        ['胜率', pct(k.win_rate), '按已平仓计', ''],
+        ['交易数', String(k.trade_count || 0), '已平仓笔数', ''],
+        ['平均R', k.avg_r === null || k.avg_r === undefined ? 'N/A' : Number(k.avg_r).toFixed(2), '风险倍数', '']
+      ];
+      const extra = (report.extra_metrics || []).map(m => [m.label, m.value, m.hint || '', '']);
+      const kpis = baseKpis.concat(extra).map(item => `
+        <article class="card kpi">
+          <div class="label">${escapeHtml(item[0])}</div>
+          <div class="value ${item[3] || ''}">${escapeHtml(item[1])}</div>
+          <div class="hint">${escapeHtml(item[2])}</div>
+        </article>`).join('');
+      root.innerHTML = `
+        <header>
+          <h1>${escapeHtml(report.title || 'Hermes Report')}</h1>
+          <div class="meta">${report.type === 'weekly' ? '周报' : '日报'} · ${escapeHtml(report.date || '')} · 生成于 ${escapeHtml(fmtTime(data.generated_at))} UTC</div>
+        </header>
+        <section class="grid kpis">${kpis}</section>
+        <section class="grid">
+          ${chartCard('累计盈亏', 'cumulativePnlChart', 'span-2')}
+          ${chartCard('每日盈亏', 'dailyPnlChart')}
+          ${chartCard('胜率', 'winRateChart', '', 'small-chart')}
+          ${chartCard('R 分布', 'rDistributionChart')}
+          ${chartCard('分币种盈亏', 'symbolPnlChart')}
+          ${card('持仓敞口', '<div id="positionsTable"></div>', 'span-2')}
+          ${chartCard('意向活动', 'intentActivityChart', 'span-2')}
+          ${card('频道观点', '<div id="channelViews"></div>', 'span-2')}
+          ${card('图片', '<div id="gallery"></div>', 'span-2')}
+          ${card('叙事', '<div id="narrative"></div>', 'span-2 narrative')}
+          ${card('数据缺失', '<ul id="missingData" class="missing"></ul>', 'span-2')}
+        </section>`;
+    }
+
+    function mountPlaceholder(id, text) {
+      const el = document.getElementById(id);
+      if (el) el.outerHTML = placeholder(text);
+    }
+    function makeChart(id, option, rows, emptyText) {
+      if (!hasRows(rows) || !window.echarts) {
+        mountPlaceholder(id, emptyText);
+        return;
+      }
+      const chart = echarts.init(document.getElementById(id), null, {renderer: 'canvas'});
+      chart.setOption(option);
+      window.addEventListener('resize', () => chart.resize());
+    }
+    function axisBase() {
+      return {
+        axisLabel: {color: '#9aa7b8'},
+        axisLine: {lineStyle: {color: '#2a3445'}},
+        splitLine: {lineStyle: {color: '#202938'}}
+      };
+    }
+    function renderCharts() {
+      const outcomes = db.outcomes || {};
+      const cumulative = outcomes.cumulative_pnl || [];
+      makeChart('cumulativePnlChart', {
+        grid: {left: 46, right: 20, top: 24, bottom: 42},
+        tooltip: tip(),
+        xAxis: {...axisBase(), type: 'category', data: cumulative.map(x => fmtTime(x.time))},
+        yAxis: {...axisBase(), type: 'value'},
+        series: [{type: 'line', smooth: true, data: cumulative.map(x => x.pnl), areaStyle: {}, lineStyle: {color: '#32d583'}, itemStyle: {color: '#32d583'}}]
+      }, cumulative, '暂无累计盈亏数据');
+
+      const daily = outcomes.daily_pnl || [];
+      makeChart('dailyPnlChart', {
+        grid: {left: 46, right: 16, top: 24, bottom: 36},
+        tooltip: tip(),
+        xAxis: {...axisBase(), type: 'category', data: daily.map(x => x.date)},
+        yAxis: {...axisBase(), type: 'value'},
+        series: [{type: 'bar', data: daily.map(x => ({value: x.pnl, itemStyle: {color: x.pnl >= 0 ? '#32d583' : '#ff6b6b'}}))}]
+      }, daily, '暂无每日盈亏数据');
+
+      const win = db.kpis && db.kpis.win_rate !== null && db.kpis.win_rate !== undefined ? Number(db.kpis.win_rate) : null;
+      makeChart('winRateChart', {
+        tooltip: {trigger: 'item'},
+        series: [{type: 'pie', radius: ['58%', '78%'], label: {color: '#edf2f7'}, data: [
+          {name: '胜', value: win, itemStyle: {color: '#32d583'}},
+          {name: '负', value: win === null ? null : Math.round((100 - win) * 100) / 100, itemStyle: {color: '#ff6b6b'}}
+        ]}]
+      }, win === null ? [] : [{win}], '暂无胜率数据');
+
+      const rdist = outcomes.r_distribution || [];
+      makeChart('rDistributionChart', {
+        grid: {left: 42, right: 16, top: 24, bottom: 36},
+        tooltip: {trigger: 'axis'},
+        // counts are integers; no decimal formatting needed
+        xAxis: {...axisBase(), type: 'category', data: rdist.map(x => x.bucket)},
+        yAxis: {...axisBase(), type: 'value', minInterval: 1},
+        series: [{type: 'bar', data: rdist.map(x => x.count), itemStyle: {color: '#b58cff'}}]
+      }, rdist.filter(x => x.count), '暂无 R 分布数据');
+
+      const symbol = outcomes.symbol_pnl || [];
+      makeChart('symbolPnlChart', {
+        grid: {left: 90, right: 18, top: 22, bottom: 34},
+        tooltip: tip(),
+        xAxis: {...axisBase(), type: 'value'},
+        yAxis: {...axisBase(), type: 'category', data: symbol.map(x => x.symbol)},
+        series: [{type: 'bar', data: symbol.map(x => ({value: x.pnl, itemStyle: {color: x.pnl >= 0 ? '#32d583' : '#ff6b6b'}}))}]
+      }, symbol, '暂无分币种盈亏数据');
+
+      const intents = db.intents && db.intents.activity || [];
+      makeChart('intentActivityChart', {
+        grid: {left: 42, right: 18, top: 22, bottom: 86},
+        tooltip: {trigger: 'axis'},
+        xAxis: {...axisBase(), axisLabel: {color: '#9aa7b8', rotate: 40, fontSize: 11}, type: 'category', data: intents.map(x => `${x.action}/${x.status}`)},
+        yAxis: {...axisBase(), type: 'value', minInterval: 1},
+        series: [{type: 'bar', data: intents.map(x => x.count), itemStyle: {color: '#67b7ff'}}]
+      }, intents, '暂无意向活动数据');
+    }
+    function renderPositions() {
+      const rows = db.positions || [];
+      const el = document.getElementById('positionsTable');
+      if (!hasRows(rows)) {
+        el.innerHTML = placeholder('暂无持仓敞口数据');
+        return;
+      }
+      el.innerHTML = `<div class="pos-grid">${rows.map(r => {
+        const side = String(r.side || '').toLowerCase();
+        const upnl = r.unrealized_pnl === null || r.unrealized_pnl === undefined ? null : Number(r.unrealized_pnl);
+        return `
+        <article class="card pos-card">
+          <div class="pos-head">
+            <h3>${escapeHtml(r.symbol)}</h3>
+            <span class="badge ${side === 'long' ? 'bullish' : 'bearish'}">${side === 'long' ? '多' : '空'} ${escapeHtml(side)}</span>
+          </div>
+          <div class="pos-rows">
+            <div><span class="label">数量</span><span class="val">${escapeHtml(fmtQty(r.quantity))}</span></div>
+            <div><span class="label">入场价</span><span class="val">${escapeHtml(fmtPrice(r.entry_price))}</span></div>
+            <div><span class="label">标记价</span><span class="val">${escapeHtml(fmtPrice(r.mark_price))}</span></div>
+            <div><span class="label">浮动盈亏</span><span class="val ${upnl === null ? '' : cls(upnl)}">${upnl === null ? '—' : money(upnl)}</span></div>
+          </div>
+          <div class="muted pos-foot">${escapeHtml(r.account_id || '')}</div>
+        </article>`;
+      }).join('')}</div>`;
+    }
+    function renderChannelViews() {
+      const rows = report.channel_views || [];
+      const el = document.getElementById('channelViews');
+      if (!hasRows(rows)) {
+        el.innerHTML = placeholder('暂无频道观点');
+        return;
+      }
+      el.innerHTML = `<div class="grid">${rows.map(v => `
+        <article class="card view-card">
+          <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+            <h3>${escapeHtml(v.channel)}${v.trader ? ' · ' + escapeHtml(v.trader) : ''}</h3>
+            <span class="badge ${escapeHtml(v.stance)}">${escapeHtml(v.stance)}</span>
+          </div>
+          <p>${escapeHtml(v.summary)}</p>
+          <div class="symbols">${(v.symbols || []).map(s => `<span class="symbol">${escapeHtml(s)}</span>`).join('')}</div>
+        </article>`).join('')}</div>`;
+    }
+    function renderGallery() {
+      const rows = report.images || [];
+      const el = document.getElementById('gallery');
+      if (!hasRows(rows)) {
+        el.innerHTML = placeholder('暂无图片');
+        return;
+      }
+      el.innerHTML = `<div class="gallery">${rows.map(img => `
+        <figure>
+          <a href="${escapeHtml(img.url)}" target="_blank" rel="noopener"><img src="${escapeHtml(img.url)}" alt="${escapeHtml(img.caption || 'report image')}"></a>
+          ${img.caption ? `<figcaption class="caption">${escapeHtml(img.caption)}</figcaption>` : ''}
+        </figure>`).join('')}</div>`;
+    }
+    function renderNarrative() {
+      const rows = report.sections_html || [];
+      const el = document.getElementById('narrative');
+      if (!hasRows(rows)) {
+        el.innerHTML = placeholder('暂无叙事内容');
+        return;
+      }
+      el.innerHTML = rows.map(s => `<section><h3>${escapeHtml(s.title)}</h3>${s.html}</section>`).join('');
+    }
+    function renderMissing() {
+      const rows = db.missing_data || [];
+      const el = document.getElementById('missingData');
+      el.innerHTML = hasRows(rows) ? rows.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '<li>无</li>';
+    }
+    renderShell();
+    renderCharts();
+    renderPositions();
+    renderChannelViews();
+    renderGallery();
+    renderNarrative();
+    renderMissing();
+  </script>
+</body>
+</html>
