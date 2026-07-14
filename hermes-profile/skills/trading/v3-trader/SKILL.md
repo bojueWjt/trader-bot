@@ -23,6 +23,7 @@ description: 通过 trader-v3 控制面下单、管理合约仓位、查询交�
 10. 执行结果(成交/拒绝/超时)必须原样反馈给用户,不要美化失败。
 11. **复盘/总结类消息零交易动作(2026-07-14 事故规则)**:消息主体是已实现盈亏回顾(含战绩百分比)、策略复盘、经验教训、行情感想,且没有给出新的带点位的操作指令——一律不产生任何交易动作(不开、不平、不减、不动保护单),回复「🔕 这条是复盘/总结帖,不操作」,只记入上下文。存疑时按复盘处理并请用户确认:宁可漏动作,不可误动作。
 12. **动仓前必验归属(频道纪律,2026-07-14 事故规则)**:处理频道消息时你只代表该频道。任何 close/partial/set-sl/set-tps 之前,必须先确认目标仓位的入场归属:用 `v3_query intents --symbol <symbol>` 找到该仓在场的入场 intent,再 `v3_query intent <id前8位>` 看审计链源头是哪个频道的消息。归属不是本频道 → **不动**,回复「该仓位归属 XX 频道的信号,本频道消息不操作它」。用户口头指令不受此限,但回复必须说明被操作仓位的归属。同一币种同方向若混有多个频道的在场入场(多笔不同来源的入场 intent 都未平),禁止整仓 close——改为按本频道入场数量 partial,或转用户确认。
+13. **管理动作参数纪律(2026-07-14 加固)**:close/partial/set-sl/set-tps/cancel 必须带 --ref(该次操作自己的稳定幂等号,如 close-btc-tg-sig-...-m5026;超时重试必须复用同一个 ref,禁止换 ref 重试)。处理频道消息时,close/partial 还必须带 --channel <本频道id> 和 --entry-ref <目标仓位入场时的 client_ref>;服务端会记录归属校验结果,返回里的 attribution.would_reject=true 说明归属存疑,必须在回复中向用户说明。查不到入场 ref 的仓位(历史仓/手动仓)→ 不动,转用户确认。
 
 ## 查询系统(v3_query.py — 回答任何"现在什么情况"之前先查它)
 
@@ -75,11 +76,14 @@ python3 $V3 open SOLUSDT short --entry-type zone --price-min 145 --price-max 148
 # 信号没给止损 → 必须显式小额 --notional 并说明
 python3 $V3 open BTCUSDT short --notional 300 --reason "XX信号无SL,固定小额"
 
-# 整仓平掉某币种(市价 reduce-only)
-python3 $V3 close BTCUSDT --reason "用户口头指令: 平掉BTC空"
+# 整仓平掉某币种(市价 reduce-only)。管理动作一律要 --ref(本次操作的稳定幂等号,重试必须复用同一个);
+# 处理频道消息时再带 --channel <本频道id> 与 --entry-ref <该仓入场时的 client_ref>(从 v3_query intent 审计链取)
+python3 $V3 close BTCUSDT --reason "用户口头指令: 平掉BTC空" --ref close-btc-verbal-0714
+python3 $V3 close BTCUSDT --reason "C02-舒琴消息3900: 平掉BTC多" --ref close-btc-tg-sig-c1002136478186-m3900 \
+  --channel -1002136478186 --entry-ref tg-sig-c1002136478186-m3856
 
-# 部分平仓(按币的数量)
-python3 $V3 partial SOLUSDT --quantity 0.05 --reason "信号: TP1到,减半"
+# 部分平仓(按币的数量;--ref/--channel/--entry-ref 规则同上)
+python3 $V3 partial SOLUSDT --quantity 0.05 --reason "信号: TP1到,减半" --ref partial-sol-tg-sig-c1002136478186-m3901
 
 # 调整已有仓位的止损(自动撤旧止损、按当前仓位数量重挂,reduce-only)
 python3 $V3 set-sl BTCUSDT --sl 62500 --reason "信号: 止损上移到成本" --ref tg-12346
@@ -92,7 +96,8 @@ python3 $V3 set-sl ETHUSDT --sl 1725 --side long --reason "用户指令: 多单�
 python3 $V3 set-tps BTCUSDT --tp 61500,60800,60000 --reason "信号: 三档止盈" --ref tg-12346
 
 # 撤销单笔系统挂单(只能撤系统下的单,外部/手动单不可撤;订单号用完整35位)
-python3 $V3 cancel WLDUSDT --order B<32位hex><2位序号> --reason "48h超龄撤单" --ref ttl-xxx
+python3 $V3 cancel WLDUSDT --order B<32位hex><2位序号> --reason "48h超龄撤单" --ref ttl-<订单号后8位>
+# cancel 的 --ref 每张订单必须独立(用订单号后缀),复用同一个 ref 会被幂等去重、第二张单撤不掉
 
 # 查某笔订单执行状态 / 查全部持仓与余额
 python3 $V3 status <intent_id>

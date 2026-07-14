@@ -239,10 +239,23 @@ def cmd_intent(args) -> None:
         "FROM trade_intents ti "
         "JOIN risk_decisions rd ON rd.risk_decision_id = ti.risk_decision_id "
         "JOIN hermes_decisions hd ON hd.decision_id = ti.hermes_decision_id "
-        f"WHERE ti.intent_id::text LIKE '{prefix}%'"
+        f"WHERE ti.intent_id::text LIKE '{prefix}%' ORDER BY ti.created_at DESC"
     )
     if not intents:
         die(f"no intent matches {prefix!r}")
+    if len(intents) > 1:
+        candidates = []
+        for item in intents:
+            candidates.append({
+                "intent": str(item["intent_id"])[:8],
+                "created_at": item.get("created_at"),
+                "symbol": item.get("instrument_id"),
+            })
+        print(json.dumps({
+            "error": f"multiple intents match {prefix!r}; pass a longer unique prefix",
+            "candidates": candidates,
+        }, ensure_ascii=False))
+        sys.exit(1)
     it = intents[0]
     full_id = it["intent_id"]
     events = q_json(

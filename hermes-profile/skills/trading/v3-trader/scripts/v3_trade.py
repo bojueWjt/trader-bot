@@ -9,6 +9,7 @@ them. Never call exchange APIs directly.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -144,7 +145,39 @@ def cmd_open(args) -> None:
     _print_order_result(placed, _report(placed["intent_id"], wait=not args.no_wait))
 
 
+def _require_management_ref(args, action: str) -> None:
+    if args.ref:
+        return
+    symbol = re.sub(r"usdt$", "", str(args.symbol).lower())
+    entry_ref = str(getattr(args, "entry_ref", "") or "").strip()
+    suffix = entry_ref
+    if not suffix:
+        channel = str(getattr(args, "channel", "") or "").strip().lstrip("-")
+        if channel:
+            suffix = f"tg-sig-c{channel}-m<message-id>"
+        else:
+            suffix = "<stable-operation-id>"
+    suggestion = f"{action}-{symbol}-{suffix}"
+    print(json.dumps({
+        "error": "--ref is required for management actions; pass a stable operation "
+                 "ref and reuse it for every retry",
+        "suggested_ref": suggestion,
+        "example": f"--ref {suggestion}",
+    }, ensure_ascii=False))
+    sys.exit(1)
+
+
+def _add_attribution_context(payload: dict, args) -> None:
+    channel = str(getattr(args, "channel", "") or "").strip()
+    entry_ref = str(getattr(args, "entry_ref", "") or "").strip()
+    if channel:
+        payload["channel"] = channel
+    if entry_ref:
+        payload["entry_ref"] = entry_ref
+
+
 def cmd_close(args) -> None:
+    _require_management_ref(args, "close")
     payload = {
         "action": "close_position",
         "symbol": args.symbol.upper(),
@@ -154,13 +187,14 @@ def cmd_close(args) -> None:
     }
     if getattr(args, "side", None):
         payload["position_side"] = args.side
-    if args.ref:
-        payload["client_ref"] = args.ref
+    payload["client_ref"] = args.ref
+    _add_attribution_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report(placed["intent_id"], wait=not args.no_wait))
 
 
 def cmd_partial(args) -> None:
+    _require_management_ref(args, "partial")
     payload = {
         "action": "partial_close",
         "symbol": args.symbol.upper(),
@@ -171,8 +205,8 @@ def cmd_partial(args) -> None:
     }
     if getattr(args, "side", None):
         payload["position_side"] = args.side
-    if args.ref:
-        payload["client_ref"] = args.ref
+    payload["client_ref"] = args.ref
+    _add_attribution_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report(placed["intent_id"], wait=not args.no_wait))
 
@@ -217,6 +251,7 @@ def _report_protect(intent_id: str, wait: bool) -> dict:
 
 
 def cmd_set_sl(args) -> None:
+    _require_management_ref(args, "set-sl")
     payload = {
         "action": "move_stop_loss",
         "symbol": args.symbol.upper(),
@@ -227,13 +262,14 @@ def cmd_set_sl(args) -> None:
     }
     if getattr(args, "side", None):
         payload["position_side"] = args.side
-    if args.ref:
-        payload["client_ref"] = args.ref
+    payload["client_ref"] = args.ref
+    _add_attribution_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report_protect(placed["intent_id"], wait=not args.no_wait))
 
 
 def cmd_set_tps(args) -> None:
+    _require_management_ref(args, "set-tps")
     prices = [float(x) for x in args.tp.split(",") if x.strip()]
     if not prices:
         print(json.dumps({"error": "--tp requires at least one price"}))
@@ -261,13 +297,14 @@ def cmd_set_tps(args) -> None:
     }
     if getattr(args, "side", None):
         payload["position_side"] = args.side
-    if args.ref:
-        payload["client_ref"] = args.ref
+    payload["client_ref"] = args.ref
+    _add_attribution_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report_protect(placed["intent_id"], wait=not args.no_wait))
 
 
 def cmd_cancel(args) -> None:
+    _require_management_ref(args, "cancel")
     order_id = str(args.order or "").strip()
     if not (len(order_id) == 35 and order_id.startswith("B")):
         print(json.dumps({"error": "需要完整的 35 位系统订单号(B 开头);"
@@ -281,8 +318,8 @@ def cmd_cancel(args) -> None:
         "reason": args.reason,
         "source": "hermes-agent",
     }
-    if args.ref:
-        payload["client_ref"] = args.ref
+    payload["client_ref"] = args.ref
+    _add_attribution_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report_protect(placed["intent_id"], wait=not args.no_wait))
 
@@ -326,11 +363,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="v3_trade.py", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    def common(p, needs_reason=True):
+    def common(p, needs_reason=True, management=False):
         p.add_argument("--account", default="account-a", choices=["account-a", "account-b"])
         if needs_reason:
             p.add_argument("--reason", required=True, help="audit reason (why this order)")
-        p.add_argument("--ref", default=None, help="idempotency key, e.g. the signal message id")
+        ref_help = "idempotency key, e.g. the signal message id"
+        if management:
+            ref_help = "stable operation ref (required; reuse for retries)"
+        p.add_argument("--ref", default=None, help=ref_help)
+        if management:
+            p.add_argument("--channel", default=None, help="requesting channel id or operator")
+            p.add_argument("--entry-ref", default=None, help="entry signal ref for attribution")
         p.add_argument("--no-wait", action="store_true", help="do not wait for execution result")
 
     p = sub.add_parser("open", help="open a position (long/short)")
@@ -355,7 +398,7 @@ def main() -> None:
     p.add_argument("symbol")
     p.add_argument("--side", choices=["long", "short"], default=None,
                    help="hedge mode: which book to manage when the symbol holds both long and short")
-    common(p)
+    common(p, management=True)
     p.set_defaults(fn=cmd_close)
 
     p = sub.add_parser("partial", help="partially close a position")
@@ -363,7 +406,7 @@ def main() -> None:
     p.add_argument("--side", choices=["long", "short"], default=None,
                    help="hedge mode: which book to manage when the symbol holds both long and short")
     p.add_argument("--quantity", type=float, required=True, help="base quantity to close")
-    common(p)
+    common(p, management=True)
     p.set_defaults(fn=cmd_partial)
 
     p = sub.add_parser("set-sl", help="move/replace the stop loss on an open position")
@@ -371,7 +414,7 @@ def main() -> None:
     p.add_argument("--side", choices=["long", "short"], default=None,
                    help="hedge mode: which book to manage when the symbol holds both long and short")
     p.add_argument("--sl", type=float, required=True, help="new stop loss price")
-    common(p)
+    common(p, management=True)
     p.set_defaults(fn=cmd_set_sl)
 
     p = sub.add_parser("set-tps", help="replace ALL take profits on an open position")
@@ -382,13 +425,13 @@ def main() -> None:
     p.add_argument("--qty", default=None,
                    help="optional per-tier quantities, comma separated; omit to split "
                         "the current position evenly")
-    common(p)
+    common(p, management=True)
     p.set_defaults(fn=cmd_set_tps)
 
     p = sub.add_parser("cancel", help="cancel ONE resting system order by client_order_id")
     p.add_argument("symbol")
     p.add_argument("--order", required=True, help="full 35-char system client_order_id (B + hex + 2 digits)")
-    common(p)
+    common(p, management=True)
     p.set_defaults(fn=cmd_cancel)
 
     p = sub.add_parser("status", help="execution status of an intent")

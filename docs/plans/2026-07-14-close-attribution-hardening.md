@@ -123,7 +123,7 @@ W0、W1 立即（W0 等用户确认后撤单）；W2 次日上（先 warn-only �
 
 ## 分阶段
 
-- **Phase 1（立即，Codex 实现）**：read_api provenance 写入 + 管理动作幂等 v2 + shadow 归属校验与指标 + account/symbol/side 断言 + 响应 attribution 块；v3_trade 增加 `--channel`/`--entry-ref` 可选参数透传；测试（FastAPI TestClient + 假 DB）。部署后 shadow 观察 ≥1 天。
+- **Phase 1（已于 2026-07-14 ~15:3x UTC 部署上线，shadow 模式）**：read_api provenance 写入 + 管理动作幂等 v2 + shadow 归属校验与指标 + account/symbol/side 断言 + 响应 attribution 块；v3_trade 增加 `--channel`/`--entry-ref` 可选参数透传；测试（FastAPI TestClient + 假 DB）。部署后 shadow 观察 ≥1 天。
 - **Phase 2（shadow 数据核验后）**：SKILL 铁律 13（强制 --entry-ref）+ feeder 参数指令 + ATTRIBUTION_MODE=enforce + 频道 close→entry-scoped partial（近似 remaining）。
 - **Phase 3（W3-W5 重构版）**：lot ledger + 保护单 generation + 同步收尾 + reaper（off→observe→enforce）+ channel_ctx 机器事实 DB 化（P1-6/7：flock+原子替换，事实区独立注入）。
 - **W6** 与 **运维事件→日报输入**（2026-07-14 日报 review 发现：日报无法感知事故标注）随 Phase 3 排期。
