@@ -61,6 +61,12 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
 _TERMINAL = {"filled", "rejected", "canceled", "cancelled", "denied", "expired"}
 _TERMINAL_EVENTS = {"orderfilled", "orderrejected", "orderdenied", "ordercanceled",
                     "orderexpired", "positionclosed", "positionopened"}
+_TG_OPEN_REF_RE = re.compile(
+    r"tg-sig-c(?P<channel>\d+)-m(?P<message>\d+)(?:-e\d+)?"
+)
+_OPERATOR_OPEN_REF_RE = re.compile(
+    r"operator(?:-[a-z0-9][a-z0-9._-]*)?"
+)
 
 
 def _report(intent_id: str, wait: bool) -> dict:
@@ -107,12 +113,51 @@ def _print_order_result(placed: dict, status: dict) -> None:
     print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
 
 
-def cmd_open(args) -> None:
-    if not args.ref:
-        print(json.dumps({"error": "--ref is required for open (idempotency): use the signal "
-                                   "message id (tg-<id>) or a stable slug for verbal orders "
-                                   "(e.g. verbal-btc-short-0703)"}, ensure_ascii=False))
+def _require_open_provenance(args) -> str:
+    channel = str(getattr(args, "channel", "") or "").strip()
+    client_ref = str(getattr(args, "ref", "") or "").strip()
+    if not channel:
+        print(json.dumps({
+            "error": "--channel is required for open; pass the Telegram channel id "
+                     "or operator",
+        }, ensure_ascii=False))
         sys.exit(1)
+    if not client_ref:
+        print(json.dumps({
+            "error": "--ref is required for open; use tg-sig-c<channel>-m<message> "
+                     "or operator-<stable-id>",
+        }, ensure_ascii=False))
+        sys.exit(1)
+
+    if channel == "operator":
+        if _OPERATOR_OPEN_REF_RE.fullmatch(client_ref):
+            return channel
+        print(json.dumps({
+            "error": "operator open requires --ref operator or "
+                     "operator-<stable-id>",
+        }, ensure_ascii=False))
+        sys.exit(1)
+
+    normalized_channel = channel.lstrip("-")
+    match = _TG_OPEN_REF_RE.fullmatch(client_ref)
+    if not normalized_channel.isdigit() or match is None:
+        print(json.dumps({
+            "error": "signal open requires --channel <numeric-id> and canonical "
+                     "--ref tg-sig-c<channel>-m<message>",
+        }, ensure_ascii=False))
+        sys.exit(1)
+    if match.group("channel") != normalized_channel:
+        print(json.dumps({
+            "error": "--channel conflicts with the channel encoded in --ref",
+            "channel": channel,
+            "client_ref": client_ref,
+        }, ensure_ascii=False))
+        sys.exit(1)
+    return channel
+
+
+def cmd_open(args) -> None:
+    source_channel = _require_open_provenance(args)
     entry = {"type": args.entry_type}
     if args.price is not None:
         entry["price"] = args.price
@@ -128,6 +173,7 @@ def cmd_open(args) -> None:
         "account_id": args.account,
         "reason": args.reason,
         "source": "hermes-agent",
+        "source_channel": source_channel,
     }
     if args.notional is not None:
         payload["notional_usdt"] = args.notional
@@ -139,8 +185,7 @@ def cmd_open(args) -> None:
         payload["leverage"] = args.leverage
     if args.expire_hours is not None:
         payload["expire_hours"] = args.expire_hours
-    if args.ref:
-        payload["client_ref"] = args.ref
+    payload["client_ref"] = args.ref
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report(placed["intent_id"], wait=not args.no_wait))
 
@@ -391,6 +436,8 @@ def main() -> None:
     p.add_argument("--leverage", type=float, default=None)
     p.add_argument("--expire-hours", type=float, default=48,
                    help="limit/zone 挂单的交易所侧自动过期(GTD)小时数;0 表示不过期(GTC)")
+    p.add_argument("--channel", default=None,
+                   help="source Telegram channel id or operator")
     common(p)
     p.set_defaults(fn=cmd_open)
 
