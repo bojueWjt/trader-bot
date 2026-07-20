@@ -23,3 +23,6 @@ env/
 
 # 编辑器
 *.swp
+
+# Local Git worktrees
+.worktrees/
