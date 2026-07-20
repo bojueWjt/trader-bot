@@ -157,24 +157,48 @@ class ProjectionActorTests(unittest.TestCase):
     def test_projection_lag_updates_health_and_degrades_when_above_threshold(self) -> None:
         sink = _RecordingSink(fail=True)
         health = _RecordingHealth()
+        config = ProjectionConfig(
+            node_id=NODE_ID,
+            account_id=ACCOUNT_ID,
+            lag_degrade_threshold_ms=5,
+        )
         actor = _actor(
             self._tmp_spool(),
             sink=sink,
-            config=ProjectionConfig(
-                node_id=NODE_ID,
-                account_id=ACCOUNT_ID,
-                lag_degrade_threshold_ms=5,
-            ),
+            config=config,
             health=health,
             now=lambda: NOW,
+            mapper=ProjectionEventMapper(
+                config,
+                now=lambda: NOW - timedelta(milliseconds=6),
+            ),
         )
 
         event_id = actor.on_event(
-            _Event("AccountState", ts_event=_ns(NOW - timedelta(milliseconds=6)))
+            _Event("AccountState", ts_event=_ns(NOW - timedelta(days=7)))
         )
 
         self.assertEqual(health.progress[-1], (6, event_id))
         self.assertIn("projection lag 6ms exceeds 5ms", health.failed)
+
+    def test_legacy_replay_without_ts_ingest_records_progress_without_halting(self) -> None:
+        health = _RecordingHealth()
+        actor = _actor(
+            self._tmp_spool(),
+            sink=_RecordingSink(fail=True),
+            health=health,
+            now=lambda: NOW,
+        )
+        event = _LegacyEnvelope(
+            event_id="legacy-position-opened",
+            ts_event=NOW - timedelta(days=7),
+        )
+
+        actor._record_projection_progress(event)  # type: ignore[arg-type]
+
+        self.assertEqual(health.progress, [(7 * 24 * 60 * 60 * 1000, event.event_id)])
+        self.assertEqual(health.failed, [])
+        self.assertEqual(health.ready, 1)
 
     def test_event_mapping_catalog_lists_required_families(self) -> None:
         self.assertIn("OrderFilled", EVENT_MAPPING_CATALOG)
@@ -203,6 +227,7 @@ def _actor(
     config: ProjectionConfig | None = None,
     health: _RecordingHealth | None = None,
     now=lambda: NOW,
+    mapper: ProjectionEventMapper | None = None,
 ) -> ProjectionActor:
     return ProjectionActor(
         config=config or ProjectionConfig(node_id=NODE_ID, account_id=ACCOUNT_ID),
@@ -210,6 +235,7 @@ def _actor(
         spool=spool,
         now=now,
         health=health,
+        mapper=mapper,
     )
 
 
@@ -228,6 +254,12 @@ class _Event:
     @property
     def __class__(self) -> type[Any]:  # type: ignore[override]
         return type(self.class_name, (), {})
+
+
+@dataclass(frozen=True)
+class _LegacyEnvelope:
+    event_id: str
+    ts_event: datetime
 
 
 class _RecordingSink:

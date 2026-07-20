@@ -27,6 +27,11 @@ POSITION_REQUIRED_ACTIONS = frozenset(
 )
 MANAGEMENT_ACTIONS = EXIT_ACTIONS | POSITION_REQUIRED_ACTIONS
 SUPPORTED_TIF = frozenset({"GTC", "IOC", "FOK", "GTD"})
+ACTION_PERMISSION_MATRIX = {
+    "ACTIVE": ENTRY_ACTIONS | MANAGEMENT_ACTIONS,
+    "REDUCING": MANAGEMENT_ACTIONS,
+    "HALTED": MANAGEMENT_ACTIONS,
+}
 
 
 @dataclass(frozen=True)
@@ -141,9 +146,7 @@ def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | M
         return OrderDenied("unsupported_action", action)
 
     trading_state = _enum_value(context.trading_state).upper()
-    if action in ENTRY_ACTIONS and trading_state != "ACTIVE":
-        return OrderDenied("trading_not_active", trading_state)
-    if action in MANAGEMENT_ACTIONS and trading_state not in {"ACTIVE", "REDUCING"}:
+    if not halted_action_allowed(action, trading_state):
         return OrderDenied("trading_not_active", trading_state)
 
     intent_id = getattr(intent, "intent_id")
@@ -197,6 +200,11 @@ def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | M
         max_slippage_bps=_optional_decimal_string(entry_order_plan.get("max_slippage_bps")),
         guard_price=_guard_price(entry_order_plan, context.instrument),
     )
+
+
+def halted_action_allowed(action: str, mode: str) -> bool:
+    allowed_actions = ACTION_PERMISSION_MATRIX.get(str(mode).upper(), frozenset())
+    return action in allowed_actions
 
 
 def _plan_management_intent(

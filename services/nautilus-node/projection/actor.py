@@ -8,6 +8,9 @@ from .event_mapper import ProjectionConfig, ProjectionEventMapper
 from .spool import JsonExecutionSpool
 
 
+LEGACY_REPLAY_MAX_EVENT_AGE_MS = 60 * 60 * 1000
+
+
 class ExecutionEventSink(Protocol):
     def post_events(
         self, node_id: str, events: Sequence[ExecutionEventEnvelopeV1]
@@ -77,10 +80,24 @@ class ProjectionActor:
         return acked
 
     def _record_projection_progress(self, envelope: ExecutionEventEnvelopeV1) -> None:
-        lag_ms = _lag_ms(now=self._now(), ts_event=envelope.ts_event)
+        now = self._now()
+        ts_ingest = getattr(envelope, "ts_ingest", None)
+        lag_timestamp = ts_ingest
+        using_event_time_fallback = lag_timestamp is None
+        if lag_timestamp is None:
+            lag_timestamp = envelope.ts_event
+        lag_ms = _lag_ms(now=now, ts_event=lag_timestamp)
+        old_replay_fallback = (
+            using_event_time_fallback
+            and _lag_ms(now=now, ts_event=envelope.ts_event)
+            > LEGACY_REPLAY_MAX_EVENT_AGE_MS
+        )
         if self._health is not None:
             self._health.record_projection_progress(lag_ms, envelope.event_id)
-            if lag_ms > self.config.lag_degrade_threshold_ms:
+            if (
+                lag_ms > self.config.lag_degrade_threshold_ms
+                and not old_replay_fallback
+            ):
                 self._health.mark_projection_failed(
                     "projection lag "
                     f"{lag_ms}ms exceeds {self.config.lag_degrade_threshold_ms}ms"

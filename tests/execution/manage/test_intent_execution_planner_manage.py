@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from dataclasses import dataclass
@@ -15,7 +16,10 @@ SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 sys.path.insert(0, str(SERVICE_ROOT))
 
 from strategy.intent_execution_planner import (  # noqa: E402
+    ACTION_PERMISSION_MATRIX,
+    ENTRY_ACTIONS,
     InstrumentSpec,
+    MANAGEMENT_ACTIONS,
     ManagementPlan,
     OrderDenied,
     OrderPlan,
@@ -33,6 +37,56 @@ NOW = datetime(2026, 6, 19, 12, tzinfo=timezone.utc)
 
 
 class IntentExecutionPlannerManageTest(unittest.TestCase):
+    def test_node_permission_matrix_matches_canonical_contract(self) -> None:
+        descriptor_path = (
+            REPO_ROOT / "packages" / "contracts" / "v1" / "order_state.v1.json"
+        )
+        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        contract_matrix = descriptor["halted_semantics"]["permission_matrix"]
+        supported_actions = ENTRY_ACTIONS | MANAGEMENT_ACTIONS
+
+        for mode, allowed_actions in ACTION_PERMISSION_MATRIX.items():
+            with self.subTest(mode=mode):
+                expected = {
+                    action
+                    for action in supported_actions
+                    if contract_matrix[mode][action] is True
+                }
+                self.assertEqual(expected, set(allowed_actions))
+
+    def test_halted_allows_partial_close_and_denies_open_position(self) -> None:
+        allowed_management = (
+            ("partial_close", {"type": "market", "quantity": "0.1"}),
+            ("close_position", {"type": "market"}),
+            ("move_stop_loss", {"stop_price": "26000"}),
+            ("move_stop_to_entry", {}),
+            (
+                "replace_take_profits",
+                {"take_profits": [{"quantity": "0.1", "price": "28000"}]},
+            ),
+        )
+        for action, order_plan in allowed_management:
+            with self.subTest(action=action):
+                result = plan_intent_execution(
+                    _intent(action=action, order_plan=order_plan),
+                    _context(trading_state="HALTED"),
+                )
+                self.assertIsInstance(result, ManagementPlan)
+
+        open_result = plan_intent_execution(
+            _intent(
+                action="open_position",
+                target_position_id=None,
+                order_plan={"type": "market", "side": "buy", "quantity": "0.1"},
+            ),
+            _context(trading_state="HALTED", position=None, positions=()),
+        )
+
+        self.assertEqual(
+            open_result,
+            OrderDenied(reason="trading_not_active", detail="HALTED"),
+        )
+
     def test_partial_close_creates_reduce_only_exit_for_target_position(self) -> None:
         intent = _intent(
             action="partial_close",
