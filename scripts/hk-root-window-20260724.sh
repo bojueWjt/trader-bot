@@ -9,6 +9,21 @@ CP=$T/container-patches
 STAMP=20260724
 pause() { read -rp ">>> $1 —— 回车继续，Ctrl-C 中止 <<<"; }
 
+echo "===== 预检：物料完整性（缺任何一个都不开工，避免半途而废）====="
+MISSING=0
+for f in container-patches/intent_execution_planner.py container-patches/event_mapper.py \
+         container-patches/exchange_cancel_adapter.py container-patches/node.py \
+         container-patches/intent_execution_strategy_MERGED.py \
+         control-plane/read_api_MERGED.py control-plane/repository.py control-plane/migrate.py \
+         control-plane/order_reducer.py control-plane/position_reducer.py \
+         control-plane/exchange_state_recorder.py control-plane/order_state.v1.json \
+         scripts/order_lifecycle_monitor.py scripts/hermes_signal_feeder.py \
+         scripts/rebuild_positions_projection.py hk-gen-recreate-patched.py; do
+  [ -f "$D/$f" ] || { echo "缺失: $D/$f"; MISSING=1; }
+done
+[ "$MISSING" -eq 0 ] || { echo "FATAL: 物料不齐，等 Claude 通知齐备后再跑"; exit 1; }
+echo "物料齐备"
+
 echo "===== 阶段0：事故证据抓取（节点自 02:51 UTC 僵死）====="
 mkdir -p $T/incident-$STAMP
 for n in trader-v3-node-a trader-v3-node-b; do
