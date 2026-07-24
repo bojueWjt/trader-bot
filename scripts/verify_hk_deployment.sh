@@ -97,7 +97,7 @@ for pid in $(pgrep -f "app.run_node" | sort -n); do
 done
 echo -e "PIDS\t$pids"
 for pid in $pids; do
-  awk -v pid="$pid" '"'"'$5 ~ /^\/(app|cfg)/ {print "MOUNT\t" pid "\t" $4 "\t" $5}'"'"' \
+  awk -v pid="$pid" '"'"'$4 ~ /^\/srv\/trader-v3\/container-patches\// {print "MOUNT\t" pid "\t" $4 "\t" $5}'"'"' \
     "/proc/$pid/mountinfo" 2>/dev/null
 done
 '
