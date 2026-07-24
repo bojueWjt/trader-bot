@@ -24,6 +24,20 @@ done
 [ "$MISSING" -eq 0 ] || { echo "FATAL: 物料不齐，等 Claude 通知齐备后再跑"; exit 1; }
 echo "物料齐备"
 
+echo "===== 预检：内存余量（2026-07-24 事故根因：redis 3.7GB + 零 swap 把 8G 机器吃穿）====="
+AVAIL_MB=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+echo "MemAvailable: ${AVAIL_MB}MB"
+if [ "$AVAIL_MB" -lt 1500 ]; then
+  echo "内存不足 1.5G，先做容量处置再部署："
+  echo "  docker ps --format '{{.ID}} {{.Names}} {{.Image}}' | grep 70f3eba2  # 认领这个 3.7G 的 redis"
+  echo "  # 若非关键服务：docker stop <name>；若关键：docker update --memory 1g <name> 并排查膨胀"
+  echo "  # 无论如何加 swap 兜底：fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+  read -rp ">>> 处置完成后回车重测，或 Ctrl-C 中止 <<<"
+  AVAIL_MB=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+  echo "MemAvailable: ${AVAIL_MB}MB"
+  [ "$AVAIL_MB" -ge 1000 ] || { echo "FATAL: 仍不足 1G，不部署"; exit 1; }
+fi
+
 echo "===== 阶段0：事故证据抓取（节点自 02:51 UTC 僵死）====="
 mkdir -p $T/incident-$STAMP
 for n in trader-v3-node-a trader-v3-node-b; do
