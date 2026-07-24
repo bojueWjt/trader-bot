@@ -30,7 +30,7 @@ def test_halted_node_alert_is_deduplicated_for_24_hours(monkeypatch):
     module = _load_monitor()
     state = {}
     prompts = []
-    rows = [["node-a", "HALTED", "false", "projection lag exceeded"]]
+    rows = [["node-a", "HALTED", "false", "projection lag exceeded", "1.0"]]
     monkeypatch.setattr(module, "q", lambda sql: rows)
 
     def fake_wake(prompt, name, dry_run):
@@ -75,7 +75,7 @@ def test_readiness_false_node_alerts_even_when_status_is_active(monkeypatch):
     module = _load_monitor()
     state = {}
     prompts = []
-    rows = [["node-b", "ACTIVE", "false", ""]]
+    rows = [["node-b", "ACTIVE", "false", "", "1.0"]]
     monkeypatch.setattr(module, "q", lambda sql: rows)
     monkeypatch.setattr(
         module,
@@ -88,6 +88,46 @@ def test_readiness_false_node_alerts_even_when_status_is_active(monkeypatch):
     assert len(prompts) == 1
     assert "node-b" in prompts[0]
     assert "readiness=false" in prompts[0]
+
+
+def test_stale_heartbeat_alerts_even_when_row_says_healthy(monkeypatch):
+    # 2026-07-24: both nodes hung for 7h; heartbeats froze at 02:51 with
+    # readiness=true left in the table, so value checks saw "healthy" forever.
+    module = _load_monitor()
+    state = {}
+    direct, woken = [], []
+    rows = [["node-a", "ACTIVE", "true", "", str(7 * 3600.0)]]
+    monkeypatch.setattr(module, "q", lambda sql: rows)
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: direct.append(text) or True)
+    monkeypatch.setattr(
+        module, "wake_hermes", lambda prompt, name, dry_run: woken.append(name) or True
+    )
+
+    module.sweep_node_health(state, dry_run=False, now_ts=10_000)
+    module.sweep_node_health(state, dry_run=False, now_ts=10_060)  # dedup window
+
+    assert len(direct) == 1 and "心跳" in direct[0] and "node-a" in direct[0]
+    assert woken == ["nodehalt-stale-node-a"]
+
+    # heartbeat recovers → stale keys cleared, healthy row does not alert
+    rows[0] = ["node-a", "ACTIVE", "true", "", "2.0"]
+    module.sweep_node_health(state, dry_run=False, now_ts=20_000)
+    assert "nodehalt:node-a:heartbeat_stale" not in state
+    assert len(direct) == 1
+
+
+def test_fresh_heartbeat_below_threshold_does_not_alert(monkeypatch):
+    module = _load_monitor()
+    state = {}
+    direct = []
+    rows = [["node-a", "ACTIVE", "true", "", "120.0"]]
+    monkeypatch.setattr(module, "q", lambda sql: rows)
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: direct.append(text) or True)
+    monkeypatch.setattr(module, "wake_hermes", lambda prompt, name, dry_run: True)
+
+    module.sweep_node_health(state, dry_run=False, now_ts=1_000)
+
+    assert direct == [] and not any(k.startswith("nodehalt:") for k in state)
 
 
 def _mirror_row(account_id, positions, open_orders=None, algo_orders=None, age="10"):

@@ -667,16 +667,44 @@ def _duration_cn(seconds: float) -> str:
     return f"{max(0, seconds) / 60:.0f} 分钟"
 
 
+HEARTBEAT_STALE_SECONDS = 300
+
+
 def sweep_node_health(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
     now_ts = now_ts or time.time()
     rows = q(
         "SELECT node_id, status, COALESCE(payload->>'readiness',''), "
-        "COALESCE(payload->>'halt_reason','') "
+        "COALESCE(payload->>'halt_reason',''), "
+        "EXTRACT(EPOCH FROM (now() - GREATEST(last_seen_at, "
+        "COALESCE((payload->>'ts')::timestamptz, last_seen_at)))) "
         "FROM node_heartbeats ORDER BY node_id"
     )
-    for node_id, status_raw, readiness_raw, halt_reason_raw in rows:
+    for node_id, status_raw, readiness_raw, halt_reason_raw, hb_age_raw in rows:
         status = str(status_raw or "").strip().upper()
         readiness_false = _readiness_is_false(readiness_raw)
+        # 2026-07-24 事故：双节点僵死 7 小时，心跳停更但表里残留
+        # readiness=true，值检查永远看到"健康"。冻结的心跳本身就是熔断信号，
+        # 且该场景大脑链路可能同样受损，必须走 LLM 无关的 TG 直发。
+        hb_age = float(hb_age_raw or 0)
+        if hb_age > HEARTBEAT_STALE_SECONDS:
+            stale_key = f"nodehalt:{node_id}:heartbeat_stale"
+            first_key = f"nodehalt-first:{node_id}:heartbeat_stale"
+            state.setdefault(first_key, now_ts)
+            last_alert = float(state.get(stale_key) or 0)
+            if stale_key not in state or now_ts - last_alert >= ALERT_DEDUP_SECONDS:
+                text = (
+                    f"🔴 节点心跳停更告警:{node_id} 心跳已 {_duration_cn(hb_age)} 未更新"
+                    f"(阈值 {HEARTBEAT_STALE_SECONDS}s),节点可能僵死。"
+                    f"表内残留状态 {status or 'UNKNOWN'}/readiness={readiness_raw or 'unknown'} 不可信。"
+                    "请人工核查进程与健康端点;禁止自动 RESUME。"
+                )
+                sent = tg_send_direct(text)
+                wake_hermes(text, name=f"nodehalt-stale-{node_id}", dry_run=dry_run)
+                if (sent or dry_run) and not dry_run:
+                    state[stale_key] = now_ts
+            continue
+        state.pop(f"nodehalt:{node_id}:heartbeat_stale", None)
+        state.pop(f"nodehalt-first:{node_id}:heartbeat_stale", None)
         if status != "HALTED" and not readiness_false:
             _clear_node_alert_state(state, node_id)
             continue
