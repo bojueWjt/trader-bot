@@ -330,15 +330,21 @@ def build_prompt(sig_or_batch: Any) -> str:
     ))
 
 
-def notify_blocked(sig: Any, dry_run: bool) -> None:
+def notify_blocked(sig: Any, dry_run: bool, reason: str | None = None) -> None:
     """A dropped message must never be silent: the user has to know the system
     did NOT act on it (a real Titan BTC signal was silently skipped on 07-04)."""
     try:
         payload = _payload(sig)
+        alert_reason = reason
+        if not alert_reason:
+            alert_reason = (
+                f"连续 {MAX_ATTEMPTS} 次投递失败"
+                "(内容触发安全防护或投递异常),已跳过"
+            )
         prompt = BLOCKED_NOTICE_TEMPLATE.format(
             channel_name=payload.get("source_channel_name") or "unknown",
             message_id=payload.get("source_message_id") or _row_get(sig, "signal_id"),
-            reason=f"连续 {MAX_ATTEMPTS} 次投递失败(内容触发安全防护或投递异常),已跳过",
+            reason=alert_reason,
         )
         run_hermes(sanitize_prompt(prompt), name=f"blocked-{_row_get(sig, 'signal_id')}", dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001 - notification is best-effort
@@ -371,6 +377,96 @@ def run_hermes(prompt: str, name: str, dry_run: bool) -> str | None:
         return None
     log(f"handled via job {job_id}: {(run.stdout or '')[-160:]!r}")
     return job_id
+
+
+def _job_id_from_record(record: Any, name: str) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    record_name = str(record.get("name") or record.get("job_name") or "")
+    if record_name != name:
+        return None
+    job_id = record.get("id")
+    if not job_id:
+        job_id = record.get("job_id")
+    if not job_id:
+        job_id = record.get("jobId")
+    if not job_id:
+        return None
+    return str(job_id)
+
+
+def _find_job_in_json(data: Any, name: str) -> str | None:
+    if isinstance(data, list):
+        for item in data:
+            job_id = _job_id_from_record(item, name)
+            if job_id:
+                return job_id
+        return None
+    if not isinstance(data, dict):
+        return None
+    direct = _job_id_from_record(data, name)
+    if direct:
+        return direct
+    for key in ("jobs", "items", "data", "results"):
+        if key not in data:
+            continue
+        job_id = _find_job_in_json(data.get(key), name)
+        if job_id:
+            return job_id
+    return None
+
+
+def _find_job_in_text(text: str, name: str) -> str | None:
+    name_pattern = re.compile(rf"(?<!\S){re.escape(name)}(?!\S)")
+    for line in str(text or "").splitlines():
+        if not name_pattern.search(line):
+            continue
+        uuid_match = re.search(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}\b",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if uuid_match:
+            return uuid_match.group(0)
+        tokens = [
+            token.strip("│|[](),")
+            for token in line.split()
+            if token.strip("│|[](),")
+        ]
+        for token in tokens:
+            if token == name:
+                continue
+            if re.fullmatch(r"[A-Za-z0-9_-]{6,}", token):
+                return token
+    return None
+
+
+def find_existing_cron_job(name: str) -> str | None | bool:
+    """Return an exact-name Hermes job, None when absent, False on query error."""
+    try:
+        out = subprocess.run(
+            [HERMES_BIN, "cron", "list"],
+            env=HERMES_ENV,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"cron job lookup failed for {name}: {exc!r}")
+        return False
+    if out.returncode != 0:
+        log(
+            f"cron job lookup failed for {name}: rc={out.returncode} "
+            f"stderr={out.stderr[-300:]!r}"
+        )
+        return False
+    stdout = out.stdout or ""
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return _find_job_in_text(stdout, name)
+    return _find_job_in_json(data, name)
 
 
 def _latest_markdown_response(job_id: str) -> str | None:
@@ -438,6 +534,7 @@ def deliver_batch(
     dry_run: bool,
     now_func=time.time,
     sleep_func=time.sleep,
+    existing_job_id: str | None = None,
 ) -> bool:
     if not batch:
         return True
@@ -445,7 +542,11 @@ def deliver_batch(
     first_id = _row_get(batch[0], "signal_id")
     last_id = _row_get(batch[-1], "signal_id")
     name = f"signal-{first_id}" if first_id == last_id else f"signal-{first_id}-{last_id}"
-    job_id = run_hermes(prompt, name=name, dry_run=dry_run)
+    job_id = existing_job_id
+    if job_id:
+        log(f"reusing existing Hermes job {job_id} for {name}")
+    else:
+        job_id = run_hermes(prompt, name=name, dry_run=dry_run)
     if not job_id:
         return False
     if not dry_run:
@@ -455,6 +556,130 @@ def deliver_batch(
             return False
         append_channel_context(batch, response, now=_coerce_now(now_func()))
     return True
+
+
+def _batch_job_name(batch: list[Any]) -> str:
+    first_id = _row_get(batch[0], "signal_id")
+    last_id = _row_get(batch[-1], "signal_id")
+    if first_id == last_id:
+        return f"signal-{first_id}"
+    return f"signal-{first_id}-{last_id}"
+
+
+def _failed_batch_attempt(
+    batch: list[Any],
+    key: str,
+    dry_run: bool,
+    attempts: dict[str, int],
+    retry_after: dict[str, float],
+    timeout_keys: set[str],
+    now_ts: float,
+) -> str:
+    attempt = attempts.get(key, 0) + 1
+    attempts[key] = attempt
+    if attempt < MAX_ATTEMPTS:
+        delay = BRAIN_RETRY_DELAY_SECONDS * attempt
+        retry_after[key] = now_ts + delay
+        log(
+            f"attempt {attempt}/{MAX_ATTEMPTS} failed for {key}; "
+            f"retry after {int(delay)}s"
+        )
+        return "retry"
+    log(f"SKIPPING poison batch starting {key} after {MAX_ATTEMPTS} attempts")
+    reason = (
+        f"连续 {MAX_ATTEMPTS} 次投递失败,已跳过。"
+        "其中发生本地 Hermes 超时；远端 cron job 可能仍在运行，存在双 job 风险。"
+    )
+    if key not in timeout_keys:
+        reason = (
+            f"连续 {MAX_ATTEMPTS} 次投递失败"
+            "(内容触发安全防护或投递异常),已跳过"
+        )
+    for sig in batch:
+        notify_blocked(sig, dry_run=dry_run, reason=reason)
+    attempts.pop(key, None)
+    retry_after.pop(key, None)
+    timeout_keys.discard(key)
+    return "skip"
+
+
+def attempt_batch_delivery(
+    batch: list[Any],
+    dry_run: bool,
+    attempts: dict[str, int],
+    retry_after: dict[str, float],
+    timeout_keys: set[str],
+    now_ts: float | None = None,
+) -> str:
+    """Try one batch and return success, retry, or skip.
+
+    A prior local timeout makes the cron create/run outcome uncertain. The
+    exact signal job name is queried before retrying so an existing remote job
+    is reused. A confirmed absence permits a new dispatch.
+    """
+    if now_ts is None:
+        now_ts = time.time()
+    key = _signal_cursor(batch[0])
+    existing_job_id = None
+    if key in timeout_keys:
+        name = _batch_job_name(batch)
+        lookup = find_existing_cron_job(name)
+        if lookup is False:
+            log(
+                f"retry deferred for {key}: cron job lookup unavailable; "
+                "remote execution state is uncertain and has 双 job 风险"
+            )
+            return _failed_batch_attempt(
+                batch,
+                key,
+                dry_run,
+                attempts,
+                retry_after,
+                timeout_keys,
+                now_ts,
+            )
+        if lookup:
+            existing_job_id = str(lookup)
+        else:
+            log(
+                f"no existing cron job found for {key}; redispatching with "
+                "双 job 风险 because the prior local timeout may have hidden creation"
+            )
+    try:
+        ok = deliver_batch(
+            batch,
+            dry_run=dry_run,
+            existing_job_id=existing_job_id,
+        )
+    except subprocess.TimeoutExpired as exc:
+        timeout_keys.add(key)
+        log(
+            f"hermes invocation timed out for {key}: {exc}; attempt counts as "
+            "failed and remote cron may still be running (双 job 风险)"
+        )
+        return _failed_batch_attempt(
+            batch,
+            key,
+            dry_run,
+            attempts,
+            retry_after,
+            timeout_keys,
+            now_ts,
+        )
+    if not ok:
+        return _failed_batch_attempt(
+            batch,
+            key,
+            dry_run,
+            attempts,
+            retry_after,
+            timeout_keys,
+            now_ts,
+        )
+    attempts.pop(key, None)
+    retry_after.pop(key, None)
+    timeout_keys.discard(key)
+    return "success"
 
 
 def compress_channel_contexts(now_func=time.time) -> None:
@@ -504,6 +729,7 @@ def main() -> None:
     cursor = load_cursor()
     attempts: dict[str, int] = {}
     retry_after: dict[str, float] = {}
+    timeout_keys: set[str] = set()
     log(f"feeder start cursor={cursor!r} dry_run={args.dry_run}")
 
     while True:
@@ -525,18 +751,15 @@ def main() -> None:
                     key = _signal_cursor(batch[0])
                     if time.time() < retry_after.get(key, 0):
                         break  # backoff window after a brain failure
-                    ok = deliver_batch(batch, dry_run=args.dry_run)
-                    if not ok:
-                        attempts[key] = attempts.get(key, 0) + 1
-                        if attempts[key] < MAX_ATTEMPTS:
-                            retry_after[key] = time.time() + BRAIN_RETRY_DELAY_SECONDS * attempts[key]
-                            log(f"attempt {attempts[key]}/{MAX_ATTEMPTS} failed for {key}; "
-                                f"retry after {int(BRAIN_RETRY_DELAY_SECONDS * attempts[key])}s")
-                            break  # retry same batch after the backoff window
-                        log(f"SKIPPING poison batch starting {key} after {MAX_ATTEMPTS} attempts")
-                        for sig in batch:
-                            notify_blocked(sig, dry_run=args.dry_run)
-                    attempts.pop(key, None)
+                    result = attempt_batch_delivery(
+                        batch,
+                        dry_run=args.dry_run,
+                        attempts=attempts,
+                        retry_after=retry_after,
+                        timeout_keys=timeout_keys,
+                    )
+                    if result == "retry":
+                        break
                     cursor = _signal_cursor(batch[-1])
                     if not args.dry_run:
                         save_cursor(cursor)
@@ -545,7 +768,7 @@ def main() -> None:
         except sqlite3.OperationalError as exc:
             log(f"watcher db unavailable: {exc}")
         except subprocess.TimeoutExpired as exc:
-            log(f"hermes invocation timed out: {exc}")
+            log(f"unexpected subprocess timeout outside batch accounting: {exc}")
         except Exception as exc:  # noqa: BLE001 - a poison row must not kill all channels
             log(f"UNEXPECTED feeder error (continuing): {exc!r}")
         if args.once:

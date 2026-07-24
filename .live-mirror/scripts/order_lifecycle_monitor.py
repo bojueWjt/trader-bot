@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Order lifecycle monitor for trader-v3 (hk).
 
-Four read-only sweeps, all actions delegated to Hermes jobs / operator flows —
+Read-only sweeps, all actions delegated to Hermes jobs / operator flows —
 this process NEVER touches the exchange and NEVER cancels anything itself:
 
 1. Entry-order TTL (default 48h): a resting SYSTEM entry order (client id
@@ -24,6 +24,14 @@ this process NEVER touches the exchange and NEVER cancels anything itself:
    2026-07-04 WLD case) -> one summary wake per day per discrepancy set.
 4. Node health: every loop checks node_heartbeats. HALTED nodes and explicit
    readiness=false heartbeats wake one Chinese alert per node+reason per 24h.
+5. Naked positions: fresh exchange_state_mirror positions and both regular/algo
+   orders are checked per (account, symbol, position_side). A valid stop must
+   be STOP-class, face the closing direction, have a positive trigger, and
+   cover the full position quantity.
+6. Pending cancels: OrderPendingCancel events without a terminal result are
+   persisted in state. After the configured timeout, the exchange mirror is
+   checked and a direct Telegram alert reports still-open, disappeared, or
+   filled. This sweep only alerts; it never cancels or retries an order.
 
 State lives in STATE_PATH (atomic JSON). Any exception in a sweep is logged
 and skipped — one bad row must never kill the service (feeder P1-1 lesson).
@@ -32,7 +40,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -48,6 +58,7 @@ MARK_URL = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
 POLL_SECONDS = 15
 TTL_SWEEP_SECONDS = 600
 RECON_SWEEP_SECONDS = 3600
+PENDING_CANCEL_SWEEP_SECONDS = 60
 ORDER_SNAPSHOT_MAX_AGE_SECONDS = 300
 MIRROR_MAX_AGE_SECONDS = 300  # exchange_state_mirror refreshes every ~45s
 ORDER_TTL_HOURS = float(os.environ.get("ORDER_TTL_HOURS", "48"))
@@ -58,6 +69,9 @@ STATE_PRUNE_AGE_SECONDS = 7 * 24 * 3600
 MARK_FAIL_ALERT_THRESHOLD = 20
 NAKED_DEDUP_SECONDS = 24 * 3600
 NAKED_GRACE_SECONDS = 180
+PENDING_CANCEL_TIMEOUT_MINUTES = float(
+    os.environ.get("PENDING_CANCEL_TIMEOUT_MINUTES", "10")
+)
 BRAIN_PROBE_SECONDS = 600
 BRAIN_FAIL_ALERT_AFTER = 2
 HERMES_ENV_FILE = "/srv/hermes/profiles/trader/.env"
@@ -266,24 +280,98 @@ def _boolish(value) -> bool:
     return str(value).strip().lower() in ("true", "t", "1", "yes", "y")
 
 
-def snapshot_stop_loss_symbols(snapshot_orders: list[dict], position_sides: dict[str, str]) -> set[str]:
-    """Symbols whose fresh exchange snapshot contains a stop-like closing order."""
-    out: set[str] = set()
+def _positive_float(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _position_side(value, quantity=None) -> str | None:
+    text = str(value or "").strip().lower()
+    if text in ("long", "buy"):
+        return "long"
+    if text in ("short", "sell"):
+        return "short"
+    if text in ("both", "net", ""):
+        try:
+            amount = float(quantity)
+        except (TypeError, ValueError):
+            return None
+        if amount > 0:
+            return "long"
+        if amount < 0:
+            return "short"
+    return None
+
+
+def _stop_order_type(order: dict) -> bool:
+    order_type = str(
+        order.get("order_type") or order.get("type") or ""
+    ).strip().upper()
+    normalized = re.sub(r"[^A-Z0-9]+", "_", order_type).strip("_")
+    return re.search(r"(^|_)STOP($|_)", normalized) is not None
+
+
+def _stop_trigger_price(order: dict) -> float | None:
+    for key in ("trigger_price", "stop_price", "triggerPrice", "stopPrice"):
+        if key not in order:
+            continue
+        price = _positive_float(order.get(key))
+        if price is not None:
+            return price
+    return None
+
+
+def _order_quantity(order: dict) -> float | None:
+    for key in ("quantity", "orig_qty", "origQty", "amount"):
+        if key not in order:
+            continue
+        quantity = _positive_float(order.get(key))
+        if quantity is not None:
+            return quantity
+    return None
+
+
+def snapshot_stop_loss_symbols(
+    snapshot_orders: list[dict],
+    position_quantities: dict[tuple[str, str, str], float],
+    account_id: str = "",
+) -> set[tuple[str, str, str]]:
+    """Position keys fully covered by valid STOP-class closing orders.
+
+    The historical name is retained for deployment compatibility. The return
+    value now carries the complete (account, symbol, position_side) key.
+    """
+    coverage: dict[tuple[str, str, str], float] = {}
     for order in snapshot_orders:
         symbol = _normalize_symbol(order.get("instrument_id") or order.get("symbol"))
-        if not symbol or symbol not in position_sides:
+        if not symbol or not _stop_order_type(order):
             continue
-        order_type = str(order.get("order_type") or order.get("type") or "").upper()
-        reduce_only = _boolish(order.get("reduce_only"))
-        if not reduce_only and "STOP" not in order_type:
+        if _stop_trigger_price(order) is None:
             continue
-        pos_side = str(position_sides.get(symbol) or "").lower()
+        quantity = _order_quantity(order)
+        if quantity is None:
+            continue
         order_side = _normalize_order_side(order.get("side"))
-        closes_long = pos_side == "long" and order_side in ("short", None)
-        closes_short = pos_side == "short" and order_side in ("long", None)
-        if closes_long or closes_short:
-            out.add(symbol)
-    return out
+        if order_side is None:
+            continue
+        declared_position_side = _position_side(order.get("position_side"))
+        target_side = "long" if order_side == "short" else "short"
+        if declared_position_side and declared_position_side != target_side:
+            continue
+        key = (account_id, symbol, target_side)
+        if key not in position_quantities:
+            continue
+        coverage[key] = coverage.get(key, 0.0) + quantity
+    return {
+        key
+        for key, quantity in position_quantities.items()
+        if coverage.get(key, 0.0) + 1e-12 >= quantity
+    }
 
 
 def _parse_snapshot_orders(raw: str | None) -> list[dict]:
@@ -296,6 +384,45 @@ def _parse_snapshot_orders(raw: str | None) -> list[dict]:
     if not isinstance(data, list):
         return []
     return [row for row in data if isinstance(row, dict)]
+
+
+def _parse_snapshot_payload(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _exchange_state_snapshots() -> dict[str, dict]:
+    """Latest fresh exchange truth keyed by account.
+
+    Stale rows remain present with fresh=False so callers can fail closed
+    without substituting projections or heartbeat snapshots.
+    """
+    snapshots: dict[str, dict] = {}
+    rows = q(
+        "SELECT account_id, EXTRACT(EPOCH FROM (now() - updated_at)), payload::text "
+        "FROM exchange_state_mirror"
+    )
+    for account_id, age_raw, payload_raw in rows:
+        try:
+            age = float(age_raw)
+        except (TypeError, ValueError):
+            age = float("inf")
+        payload = _parse_snapshot_payload(payload_raw)
+        snapshots[account_id] = {
+            "age": age,
+            "fresh": age <= MIRROR_MAX_AGE_SECONDS,
+            "positions": payload.get("positions") or [],
+            "open_orders": payload.get("open_orders") or [],
+            "algo_orders": payload.get("algo_orders") or [],
+        }
+    return snapshots
 
 
 def _heartbeat_open_order_snapshot() -> tuple[list[dict] | None, float | None]:
@@ -794,56 +921,262 @@ def sweep_fill_alerts(state: dict, dry_run: bool, now_ts: float | None = None) -
             log(f"fill sweep row {cid} failed: {exc!r}")
 
 
-def naked_positions(position_symbols: set[str], sl_symbols: set[str],
-                    recent_fill_symbols: set[str], now_ts: float,
-                    state: dict) -> list[str]:
-    """Pure: open positions with NO live stop-loss order (the 2026-07-07 naked
-    ETH incident class). Symbols with a fill in the grace window are skipped —
-    protections may legitimately still be in flight."""
-    out = []
-    for symbol in sorted(position_symbols):
-        if symbol in sl_symbols or symbol in recent_fill_symbols:
+PositionKey = tuple[str, str, str]
+
+
+def naked_positions(position_keys: set[PositionKey], sl_keys: set[PositionKey],
+                    recent_fill_keys: set[PositionKey], now_ts: float,
+                    state: dict) -> list[PositionKey]:
+    """Pure: open exchange positions lacking full live stop-loss coverage."""
+    out: list[PositionKey] = []
+    for account_id, symbol, position_side in sorted(position_keys):
+        position_key = (account_id, symbol, position_side)
+        if position_key in sl_keys or position_key in recent_fill_keys:
             continue
-        key = f"naked:{symbol}"
-        if now_ts - float(state.get(key, 0)) < NAKED_DEDUP_SECONDS:
+        key = f"naked:{account_id}:{symbol}:{position_side}"
+        if key in state and now_ts - float(state.get(key, 0)) < NAKED_DEDUP_SECONDS:
             continue
-        out.append(symbol)
+        out.append(position_key)
     return out
 
 
 def sweep_naked(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
     now_ts = now_ts or time.time()
-    position_sides = {
-        row[0].split("-")[0]: str(row[1] or "").lower()
-        for row in q(
-            "SELECT DISTINCT instrument_id, side::text FROM positions_projection "
-            "WHERE status='open' AND quantity::numeric != 0"
+    snapshots = _exchange_state_snapshots()
+    position_quantities: dict[PositionKey, float] = {}
+    stop_keys: set[PositionKey] = set()
+    for account_id, snapshot in snapshots.items():
+        if not snapshot.get("fresh"):
+            age = float(snapshot.get("age") or 0)
+            log(f"naked sweep: exchange mirror stale for {account_id} ({age:.0f}s), skipping account")
+            continue
+        account_positions: dict[PositionKey, float] = {}
+        for position in snapshot.get("positions") or []:
+            if not isinstance(position, dict):
+                continue
+            symbol = _normalize_symbol(
+                position.get("instrument_id") or position.get("symbol")
+            )
+            raw_quantity = (
+                position.get("position_amt")
+                if "position_amt" in position
+                else position.get("positionAmt")
+            )
+            if raw_quantity is None:
+                raw_quantity = position.get("quantity")
+            try:
+                quantity = abs(float(raw_quantity))
+            except (TypeError, ValueError):
+                continue
+            if not symbol or not math.isfinite(quantity) or quantity <= 0:
+                continue
+            side_value = position.get("position_side")
+            if side_value is None:
+                side_value = position.get("positionSide")
+            position_side = _position_side(side_value, raw_quantity)
+            if position_side is None:
+                continue
+            key = (account_id, symbol, position_side)
+            account_positions[key] = account_positions.get(key, 0.0) + quantity
+        position_quantities.update(account_positions)
+        orders = list(snapshot.get("open_orders") or [])
+        orders.extend(snapshot.get("algo_orders") or [])
+        stop_keys |= snapshot_stop_loss_symbols(
+            orders,
+            account_positions,
+            account_id=account_id,
         )
-    }
-    position_symbols = set(position_sides)
-    if not position_symbols:
+    position_keys = set(position_quantities)
+    if not position_keys:
         return
-    sl_symbols = {o["symbol"] for o in _live_protection_rows() if o.get("is_stop_loss")}
-    snapshot_orders, snapshot_age = _heartbeat_open_order_snapshot()
-    if snapshot_orders is not None:
-        sl_symbols |= snapshot_stop_loss_symbols(snapshot_orders, position_sides)
-    elif snapshot_age is not None and snapshot_age > ORDER_SNAPSHOT_MAX_AGE_SECONDS:
-        log(f"naked sweep: open_orders snapshot stale ({snapshot_age:.0f}s), using system orders only")
-    recent_fill_symbols = {
-        (row[0] or "").split("-")[0]
-        for row in q(
-            "SELECT DISTINCT payload->>'instrument_id' FROM execution_events "
-            f"WHERE event_type='OrderFilled' AND ts_event > now() - interval '{NAKED_GRACE_SECONDS} seconds'"
-        )
-    }
-    for symbol in naked_positions(position_symbols, sl_symbols, recent_fill_symbols, now_ts, state):
+    recent_fill_keys: set[PositionKey] = set()
+    for account_id, instrument_id, side_raw in q(
+        "SELECT DISTINCT account_id, payload->>'instrument_id', "
+        "COALESCE(payload->>'position_side', payload->>'positionSide', '') "
+        "FROM execution_events "
+        f"WHERE event_type='OrderFilled' AND ts_event > now() - interval '{NAKED_GRACE_SECONDS} seconds'"
+    ):
+        symbol = _normalize_symbol(instrument_id)
+        position_side = _position_side(side_raw)
+        if symbol and position_side:
+            recent_fill_keys.add((account_id, symbol, position_side))
+    for account_id, symbol, position_side in naked_positions(
+        position_keys,
+        stop_keys,
+        recent_fill_keys,
+        now_ts,
+        state,
+    ):
         prompt = (
-            f"⚠️ 裸仓检测:{symbol} 有未平仓位但系统里没有任何在场的止损单。"
+            f"⚠️ 裸仓检测:{account_id} 的 {symbol} {position_side} 仓位 "
+            f"{position_quantities[(account_id, symbol, position_side)]:g} "
+            "没有足量且有效的在场 STOP 止损单。"
             f"请立刻查询该品种持仓与挂单,若确认裸仓,按最近相关信号的止损价用 set-sl 补上"
             f"(找不到依据就通知用户手动处理),并用口语化短消息告知用户现状与你的动作。"
         )
-        if wake_hermes(prompt, name=f"naked-{symbol}", dry_run=dry_run) and not dry_run:
-            state[f"naked:{symbol}"] = now_ts
+        name = f"naked-{account_id}-{symbol}-{position_side}"
+        if wake_hermes(prompt, name=name, dry_run=dry_run) and not dry_run:
+            state[f"naked:{account_id}:{symbol}:{position_side}"] = now_ts
+
+
+PENDING_CANCEL_TERMINALS = {
+    "OrderCanceled",
+    "CancelRejected",
+    "OrderCancelRejected",
+    "OrderFilled",
+}
+
+
+def _pending_cancel_rows() -> list[list[str]]:
+    terminal_types = "','".join(sorted(PENDING_CANCEL_TERMINALS))
+    return q(
+        "WITH latest_pending AS ("
+        " SELECT DISTINCT ON (account_id, client_order_id)"
+        " account_id, client_order_id, event_id, ts_event"
+        " FROM execution_events"
+        " WHERE event_type='OrderPendingCancel' AND client_order_id IS NOT NULL"
+        " ORDER BY account_id, client_order_id, ts_event DESC, event_id DESC"
+        ")"
+        " SELECT p.account_id, p.client_order_id, p.event_id,"
+        " EXTRACT(EPOCH FROM p.ts_event),"
+        " COALESCE(("
+        "  SELECT e.event_type FROM execution_events e"
+        "  WHERE e.account_id=p.account_id"
+        "  AND e.client_order_id=p.client_order_id"
+        "  AND e.ts_event >= p.ts_event"
+        f"  AND e.event_type IN ('{terminal_types}')"
+        "  ORDER BY e.ts_event DESC, e.event_id DESC LIMIT 1"
+        " ), '')"
+        " FROM latest_pending p"
+    )
+
+
+def _snapshot_open_order_ids(snapshot: dict) -> set[str]:
+    ids: set[str] = set()
+    orders = list(snapshot.get("open_orders") or [])
+    orders.extend(snapshot.get("algo_orders") or [])
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        cid = str(
+            order.get("client_order_id") or order.get("clientOrderId") or ""
+        )
+        if cid:
+            ids.add(cid)
+    return ids
+
+
+def _pending_cancel_alert_text(
+    account_id: str,
+    client_order_id: str,
+    elapsed_seconds: float,
+    outcome: str,
+) -> str:
+    minutes = elapsed_seconds / 60
+    if outcome == "filled":
+        truth = "撤单竞态中订单已成交"
+    elif outcome == "still_open":
+        truth = "交易所镜像显示订单仍挂着"
+    else:
+        truth = "交易所镜像显示订单已消失，事件流仍缺少撤单终态"
+    return (
+        f"⚠️ 撤单确认超时:{account_id} 订单 {client_order_id} PendingCancel "
+        f"已 {minutes:.1f} 分钟；{truth}。监控仅告警，未撤单、未重试。"
+    )
+
+
+def sweep_pending_cancels(
+    state: dict,
+    dry_run: bool,
+    now_ts: float | None = None,
+) -> None:
+    """Persist and classify cancel requests whose terminal event is missing."""
+    now_ts = now_ts or time.time()
+    timeout_seconds = PENDING_CANCEL_TIMEOUT_MINUTES * 60
+    records: dict[str, dict] = {}
+    for account_id, cid, event_id, pending_raw, terminal_type in _pending_cancel_rows():
+        try:
+            pending_at = float(pending_raw)
+        except (TypeError, ValueError):
+            continue
+        key = f"pendingcancel:{account_id}:{cid}"
+        entry = state.get(key)
+        if not isinstance(entry, dict) or entry.get("event_id") != event_id:
+            entry = {
+                "account_id": account_id,
+                "client_order_id": cid,
+                "event_id": event_id,
+                "pending_at": pending_at,
+            }
+            state[key] = entry
+        else:
+            entry.setdefault("account_id", account_id)
+            entry.setdefault("client_order_id", cid)
+            entry.setdefault("pending_at", pending_at)
+        records[key] = {
+            "entry": entry,
+            "terminal_type": str(terminal_type or ""),
+        }
+
+    for key, value in list(state.items()):
+        if not key.startswith("pendingcancel:") or key in records:
+            continue
+        if not isinstance(value, dict):
+            continue
+        account_id = str(value.get("account_id") or "")
+        cid = str(value.get("client_order_id") or "")
+        if account_id and cid:
+            records[key] = {"entry": value, "terminal_type": ""}
+
+    overdue: list[tuple[str, dict, str]] = []
+    for key, record in records.items():
+        entry = record["entry"]
+        terminal_type = record["terminal_type"]
+        elapsed = now_ts - float(entry.get("pending_at") or now_ts)
+        if terminal_type in ("OrderCanceled", "CancelRejected", "OrderCancelRejected"):
+            state.pop(key, None)
+            continue
+        if terminal_type == "OrderFilled" and elapsed < timeout_seconds:
+            state.pop(key, None)
+            continue
+        if elapsed < timeout_seconds:
+            continue
+        overdue.append((key, entry, terminal_type))
+
+    if not overdue:
+        return
+    try:
+        snapshots = _exchange_state_snapshots()
+    except Exception as exc:  # noqa: BLE001
+        log(f"pending cancel mirror read failed: {exc!r}")
+        return
+    for key, entry, terminal_type in overdue:
+        account_id = str(entry["account_id"])
+        cid = str(entry["client_order_id"])
+        snapshot = snapshots.get(account_id)
+        if not snapshot or not snapshot.get("fresh"):
+            log(f"pending cancel {account_id}/{cid}: fresh exchange mirror unavailable")
+            continue
+        if terminal_type == "OrderFilled":
+            outcome = "filled"
+        elif cid in _snapshot_open_order_ids(snapshot):
+            outcome = "still_open"
+        else:
+            outcome = "disappeared"
+        last_outcome = str(entry.get("last_outcome") or "")
+        last_alert_at = float(entry.get("last_alert_at") or 0)
+        if last_outcome == outcome and now_ts - last_alert_at < ALERT_DEDUP_SECONDS:
+            continue
+        elapsed = now_ts - float(entry["pending_at"])
+        text = _pending_cancel_alert_text(account_id, cid, elapsed, outcome)
+        if dry_run:
+            log(f"DRY-RUN would send pending cancel alert: {text}")
+            continue
+        if tg_send_direct(text):
+            entry["last_outcome"] = outcome
+            entry["last_alert_at"] = now_ts
+            if outcome == "filled":
+                entry["resolved"] = True
 
 
 def sweep_reconcile(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
@@ -904,7 +1237,11 @@ def main() -> None:
     last_ttl = 0.0
     last_recon = 0.0
     last_brain = 0.0
-    log(f"lifecycle monitor start ttl={ORDER_TTL_HOURS}h dry_run={args.dry_run}")
+    last_pending_cancel = 0.0
+    log(
+        f"lifecycle monitor start ttl={ORDER_TTL_HOURS}h "
+        f"pending_cancel={PENDING_CANCEL_TIMEOUT_MINUTES:g}m dry_run={args.dry_run}"
+    )
     while True:
         now_ts = time.time()
         for name, fn, due in (
@@ -912,6 +1249,11 @@ def main() -> None:
             ("price", sweep_price_alerts, True),
             ("fills", sweep_fill_alerts, True),
             ("naked", sweep_naked, True),
+            (
+                "pending-cancel",
+                sweep_pending_cancels,
+                now_ts - last_pending_cancel >= PENDING_CANCEL_SWEEP_SECONDS,
+            ),
             ("brain", sweep_brain, now_ts - last_brain >= BRAIN_PROBE_SECONDS),
             ("ttl", sweep_ttl, now_ts - last_ttl >= TTL_SWEEP_SECONDS),
             ("recon", sweep_reconcile, now_ts - last_recon >= RECON_SWEEP_SECONDS),
@@ -926,6 +1268,8 @@ def main() -> None:
                     last_recon = now_ts
                 elif name == "brain":
                     last_brain = now_ts
+                elif name == "pending-cancel":
+                    last_pending_cancel = now_ts
             except Exception as exc:  # noqa: BLE001
                 log(f"{name} sweep failed (continuing): {exc!r}")
         if not args.dry_run:
