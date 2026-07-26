@@ -72,6 +72,11 @@ NAKED_GRACE_SECONDS = 180
 PENDING_CANCEL_TIMEOUT_MINUTES = float(
     os.environ.get("PENDING_CANCEL_TIMEOUT_MINUTES", "10")
 )
+# 撤单丢失是存量债:2026-07 有 42 张 07-06~07-20 的单永远等不到终态事件
+# (交易所侧早已消失,只是事件流缺终态)。无回看窗时它们每 24h 全体重播一次。
+PENDING_CANCEL_LOOKBACK_HOURS = float(
+    os.environ.get("PENDING_CANCEL_LOOKBACK_HOURS", "48")
+)
 BRAIN_PROBE_SECONDS = 600
 BRAIN_FAIL_ALERT_AFTER = 2
 HERMES_ENV_FILE = "/srv/hermes/profiles/trader/.env"
@@ -1063,6 +1068,7 @@ def _pending_cancel_rows() -> list[list[str]]:
         " account_id, client_order_id, event_id, ts_event"
         " FROM execution_events"
         " WHERE event_type='OrderPendingCancel' AND client_order_id IS NOT NULL"
+        f" AND ts_event > now() - interval '{PENDING_CANCEL_LOOKBACK_HOURS} hours'"
         " ORDER BY account_id, client_order_id, ts_event DESC, event_id DESC"
         ")"
         " SELECT p.account_id, p.client_order_id, p.event_id,"
@@ -1146,21 +1152,35 @@ def sweep_pending_cancels(
             "terminal_type": str(terminal_type or ""),
         }
 
+    lookback_seconds = PENDING_CANCEL_LOOKBACK_HOURS * 3600
     for key, value in list(state.items()):
         if not key.startswith("pendingcancel:") or key in records:
             continue
         if not isinstance(value, dict):
+            state.pop(key, None)
+            continue
+        # 掉出查询结果的条目此前会被无条件复活,于是超出回看窗的存量债
+        # 靠状态文件永生。已判定完毕或已超窗的一律清掉。
+        if value.get("resolved"):
+            state.pop(key, None)
+            continue
+        if now_ts - float(value.get("pending_at") or now_ts) >= lookback_seconds:
+            state.pop(key, None)
             continue
         account_id = str(value.get("account_id") or "")
         cid = str(value.get("client_order_id") or "")
         if account_id and cid:
             records[key] = {"entry": value, "terminal_type": ""}
+        else:
+            state.pop(key, None)
 
     overdue: list[tuple[str, dict, str]] = []
     for key, record in records.items():
         entry = record["entry"]
         terminal_type = record["terminal_type"]
         elapsed = now_ts - float(entry.get("pending_at") or now_ts)
+        if entry.get("resolved"):
+            continue
         if terminal_type in ("OrderCanceled", "CancelRejected", "OrderCancelRejected"):
             state.pop(key, None)
             continue
@@ -1203,7 +1223,9 @@ def sweep_pending_cancels(
         if tg_send_direct(text):
             entry["last_outcome"] = outcome
             entry["last_alert_at"] = now_ts
-            if outcome == "filled":
+            # filled/disappeared 都已尘埃落定(单子不在交易所了),缺的只是事件流终态,
+            # 重播无人可行动。仍挂着的 still_open 才是活风险,保持每日重播。
+            if outcome in ("filled", "disappeared"):
                 entry["resolved"] = True
 
 

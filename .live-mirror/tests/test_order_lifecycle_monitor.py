@@ -388,3 +388,84 @@ def test_pending_cancel_tracking_survives_monitor_restart(monkeypatch, tmp_path)
     assert len(sent) == 1
     assert "已消失" in sent[0]
     assert restarted_state["pendingcancel:account-a:cancel-me"]["event_id"] == "pending-event"
+
+
+def test_pending_cancel_query_limits_lookback_window(monkeypatch):
+    module = _load_monitor()
+    seen = []
+    monkeypatch.setattr(module, "q", lambda sql: seen.append(sql) or [])
+
+    module._pending_cancel_rows()
+
+    assert f"interval '{module.PENDING_CANCEL_LOOKBACK_HOURS} hours'" in seen[0]
+
+
+def test_disappeared_order_alerts_once_and_stops(monkeypatch):
+    """撤单丢失是尘埃落定的存量债,重播无人可行动 (2026-07-25 每晚 42 条刷屏)。"""
+    module = _load_monitor()
+    sent = []
+    mirror = _mirror_row("account-a", [])
+    monkeypatch.setattr(module, "q", _pending_cancel_q(mirror))
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: sent.append(text) or True)
+
+    state = {}
+    module.sweep_pending_cancels(state, dry_run=False, now_ts=701)
+    assert len(sent) == 1
+    assert "已消失" in sent[0]
+
+    # 去重窗过期后仍不得重播
+    module.sweep_pending_cancels(state, dry_run=False, now_ts=701 + module.ALERT_DEDUP_SECONDS + 1)
+
+    assert len(sent) == 1
+
+
+def test_still_open_order_keeps_realerting_after_dedup(monkeypatch):
+    """仍挂在交易所的撤单未确认是活风险,不能被一次性抑制。"""
+    module = _load_monitor()
+    sent = []
+    mirror = _mirror_row(
+        "account-a",
+        [],
+        open_orders=[{"client_order_id": "cancel-me", "symbol": "BTCUSDT"}],
+    )
+    monkeypatch.setattr(module, "q", _pending_cancel_q(mirror))
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: sent.append(text) or True)
+
+    state = {}
+    module.sweep_pending_cancels(state, dry_run=False, now_ts=701)
+    module.sweep_pending_cancels(state, dry_run=False, now_ts=701 + module.ALERT_DEDUP_SECONDS + 1)
+
+    assert len(sent) == 2
+    assert all("仍挂着" in text for text in sent)
+
+
+def test_state_entry_beyond_lookback_is_purged_not_resurrected(monkeypatch):
+    """掉出查询窗的存量条目此前靠状态文件永生,每 24h 全体重播。"""
+    module = _load_monitor()
+    sent = []
+    mirror = _mirror_row("account-a", [])
+
+    def fake_q(sql):
+        if "OrderPendingCancel" in sql:
+            return []  # 已超出回看窗,DB 不再返回
+        if "exchange_state_mirror" in sql:
+            return [mirror]
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(module, "q", fake_q)
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: sent.append(text) or True)
+
+    ancient = module.PENDING_CANCEL_LOOKBACK_HOURS * 3600 + 3600
+    state = {
+        "pendingcancel:account-a:ancient": {
+            "account_id": "account-a",
+            "client_order_id": "ancient",
+            "event_id": "old-event",
+            "pending_at": 1000.0,
+        },
+    }
+
+    module.sweep_pending_cancels(state, dry_run=False, now_ts=1000.0 + ancient)
+
+    assert sent == []
+    assert "pendingcancel:account-a:ancient" not in state
