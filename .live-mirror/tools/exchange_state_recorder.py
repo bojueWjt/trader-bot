@@ -58,7 +58,7 @@ ON CONFLICT (account_id) DO UPDATE
       margin = EXCLUDED.margin,
       available_balance = EXCLUDED.available_balance,
       updated_at = EXCLUDED.updated_at,
-      payload = EXCLUDED.payload
+      payload = COALESCE(accounts_projection.payload, '{}'::jsonb) || EXCLUDED.payload
 """
 
 
@@ -210,6 +210,11 @@ def run_once(conn, base: str) -> None:
             log(f"{account_id}: exchange fetch failed, leaving row stale: {exc}")
             continue
         account = payload["account"]
+        account_payload = {
+            "exchange_account": account,
+            "account_snapshot_source": "binance_fapi_account_v3",
+            "account_snapshot_fetched_at": payload["fetched_at"],
+        }
         try:
             with conn.cursor() as cur:
                 cur.execute(UPSERT_SQL, (account_id, json.dumps(payload)))
@@ -221,7 +226,7 @@ def run_once(conn, base: str) -> None:
                         account["equity"],
                         account["margin"],
                         account["free"],
-                        json.dumps(account),
+                        json.dumps(account_payload),
                     ),
                 )
             conn.commit()

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -579,8 +580,9 @@ def ingest_execution_event(
         writer.insert_execution_event(event)
         hints = event.get("payload") or {}
         ev_id, ts = event["event_id"], event.get("ts_event")
-        if isinstance(hints.get("account"), dict):
-            writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
+        account_hint = _account_projection_hint(event, hints)
+        if account_hint:
+            writer.upsert_account_projection(account_hint)
         if isinstance(hints.get("position"), dict):
             pos_hint = _normalize_position_hint(
                 {**hints["position"], "event_id": ev_id, "ts_event": ts},
@@ -601,6 +603,46 @@ def _cp_paths() -> None:
     for p in (cp, cp / "commands", cp / "security", cp / "db", cp / "risk", cp / "risk_state"):
         if str(p) not in sys.path:
             sys.path.insert(0, str(p))
+
+
+def _first_finite_account_number(payload: dict, *names: str) -> float | None:
+    for name in names:
+        raw = payload.get(name)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            return value
+    return None
+
+
+def _account_projection_hint(event: dict, hints: dict) -> dict | None:
+    account = hints.get("account")
+    if not isinstance(account, dict):
+        return None
+    account_id = event.get("account_id")
+    if not account_id:
+        return None
+    equity = _first_finite_account_number(account, "equity", "balance", "total")
+    margin = _first_finite_account_number(account, "margin", "margin_balance", "locked")
+    available = _first_finite_account_number(account, "available_balance", "free")
+    if equity is None or equity <= 0:
+        return None
+    if margin is None or margin < 0:
+        return None
+    if available is not None and available < 0:
+        return None
+    normalized = dict(account)
+    normalized["account_id"] = account_id
+    normalized["equity"] = equity
+    normalized["margin"] = margin
+    normalized["available_balance"] = available
+    normalized["event_id"] = event.get("event_id")
+    normalized["last_execution_event_at"] = event.get("ts_event")
+    return normalized
 
 
 # operator_commands.command_type (A) -> node CommandType (B)
@@ -891,8 +933,9 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
             with conn.cursor() as sp:
                 sp.execute("SAVEPOINT proj")
             try:
-                if isinstance(hints.get("account"), dict):
-                    writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
+                account_hint = _account_projection_hint(event, hints)
+                if account_hint:
+                    writer.upsert_account_projection(account_hint)
                 if isinstance(hints.get("position"), dict):
                     pos_hint = _normalize_position_hint(
                         {**hints["position"], "event_id": ev_id, "ts_event": ts},
@@ -1817,32 +1860,54 @@ def _operator_caps() -> dict:
 
 
 def _account_equity(account_id: str) -> float | None:
-    """Account equity for sizing. Env override first (accounts_projection is not
-    yet populated by the node's AccountState events — payload arrives empty);
-    falls back to the projection so this self-heals once that gap is fixed."""
+    """Return fresh projected equity, with an env value only for first bootstrap."""
+    max_age_raw = os.environ.get("OPERATOR_EQUITY_MAX_AGE_SECONDS", "180")
+    try:
+        max_age_seconds = max(1.0, float(max_age_raw))
+    except ValueError:
+        max_age_seconds = 180.0
+    if not math.isfinite(max_age_seconds) or max_age_seconds > 3600:
+        max_age_seconds = 180.0
+
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if database_url:
+        try:
+            conn = psycopg2.connect(database_url)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT equity, EXTRACT(EPOCH FROM (now() - updated_at)) "
+                        "FROM accounts_projection WHERE account_id=%s "
+                        "ORDER BY updated_at DESC LIMIT 1",
+                        (account_id,),
+                    )
+                    row = cur.fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return None
+
+        if row:
+            try:
+                equity = float(row[0])
+                age_seconds = float(row[1])
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(equity) or not math.isfinite(age_seconds):
+                return None
+            if equity <= 0 or age_seconds < 0 or age_seconds > max_age_seconds:
+                return None
+            return equity
+
     env_key = "OPERATOR_EQUITY_" + account_id.upper().replace("-", "_")
     raw = os.environ.get(env_key, "").strip()
     if raw:
         try:
-            return float(raw)
+            equity = float(raw)
         except ValueError:
-            pass
-    try:
-        conn = psycopg2.connect(os.environ.get("DATABASE_URL", ""))
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT equity FROM accounts_projection WHERE account_id=%s "
-                    "ORDER BY updated_at DESC LIMIT 1",
-                    (account_id,),
-                )
-                row = cur.fetchone()
-                if row and row[0] and float(row[0]) > 0:
-                    return float(row[0])
-        finally:
-            conn.close()
-    except Exception:
-        pass
+            return None
+        if math.isfinite(equity) and equity > 0:
+            return equity
     return None
 
 

@@ -181,6 +181,8 @@ def test_run_once_upserts_exchange_and_account_projections_in_one_transaction(mo
     assert "last_execution_event_at" not in account_event[1]
     assert "projection_lag_ms" not in account_event[1]
     assert "updated_from_event_id" not in account_event[1]
+    assert "COALESCE(accounts_projection.payload" in account_event[1]
+    assert "|| EXCLUDED.payload" in account_event[1]
     assert account_event[2][:5] == (
         "account-a",
         "USDT",
@@ -188,7 +190,11 @@ def test_run_once_upserts_exchange_and_account_projections_in_one_transaction(mo
         "225.25",
         "1025.25",
     )
-    assert json.loads(account_event[2][5]) == account
+    assert json.loads(account_event[2][5]) == {
+        "exchange_account": account,
+        "account_snapshot_source": "binance_fapi_account_v3",
+        "account_snapshot_fetched_at": "2026-07-29T12:00:00Z",
+    }
 
 
 @pytest.mark.parametrize(
