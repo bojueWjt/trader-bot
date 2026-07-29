@@ -365,6 +365,28 @@ def cmd_set_tps(args) -> None:
     _print_order_result(placed, _report_protect(placed["intent_id"], wait=not args.no_wait))
 
 
+def cmd_disable_tps(args) -> None:
+    _require_management_ref(args, "disable-tps")
+    payload = {
+        "action": "replace_take_profits",
+        "symbol": args.symbol.upper(),
+        "take_profits": [],
+        "disable_take_profits": True,
+        "position_side": args.side,
+        "account_id": args.account,
+        "reason": args.reason,
+        "source": "hermes-agent",
+    }
+    payload["client_ref"] = args.ref
+    _add_attribution_context(payload, args)
+    _add_authorization_context(payload, args)
+    placed = _call("POST", "/v1/operator/orders", payload)
+    _print_order_result(
+        placed,
+        _report_protect(placed["intent_id"], wait=not args.no_wait),
+    )
+
+
 def cmd_cancel(args) -> None:
     _require_management_ref(args, "cancel")
     order_id = str(args.order or "").strip()
@@ -522,6 +544,20 @@ def main() -> None:
                         "the current position evenly")
     common(p, management=True)
     p.set_defaults(fn=cmd_set_tps)
+
+    p = sub.add_parser(
+        "disable-tps",
+        help="disable automatic take profits for one position book",
+    )
+    p.add_argument("symbol")
+    p.add_argument(
+        "--side",
+        choices=["long", "short"],
+        required=True,
+        help="hedge-mode position book receiving the TP tombstone",
+    )
+    common(p, management=True)
+    p.set_defaults(fn=cmd_disable_tps)
 
     p = sub.add_parser("cancel", help="cancel ONE resting system order by client_order_id")
     p.add_argument("symbol")

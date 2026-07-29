@@ -2407,25 +2407,57 @@ def operator_order(
                    "(for example close-btc-tg-sig-c1002136478186-m5026) and reuse "
                    "the same ref for every retry",
         )
+    disable_take_profits = body.get("disable_take_profits") is True
+    if disable_take_profits and action != "replace_take_profits":
+        raise HTTPException(
+            status_code=400,
+            detail="disable_take_profits is only valid for replace_take_profits",
+        )
     if action == "replace_take_profits":
         raw_tps = body.get("take_profits")
-        if not isinstance(raw_tps, list) or not raw_tps:
+        if disable_take_profits:
+            if raw_tps != []:
+                raise HTTPException(
+                    status_code=400,
+                    detail="disable_take_profits requires take_profits=[]",
+                )
+            if not position_side:
+                raise HTTPException(
+                    status_code=400,
+                    detail="disable_take_profits requires position_side",
+                )
+            take_profits = []
+        elif not isinstance(raw_tps, list) or not raw_tps:
             raise HTTPException(
                 status_code=400,
                 detail="replace_take_profits requires take_profits: [{price, quantity}, ...]",
             )
-        take_profits = []
-        for i, item in enumerate(raw_tps):
-            if not isinstance(item, dict):
-                raise HTTPException(
-                    status_code=400,
-                    detail="take_profits entries must be {price, quantity} objects",
-                )
-            take_profits.append({
-                "price": _op_num(item.get("price"), f"take_profits[{i}].price", required=True),
-                "quantity": _op_num(item.get("quantity"), f"take_profits[{i}].quantity", required=True),
-            })
-        _validate_take_profit_direction(symbol, account_id, take_profits, position_side)
+        else:
+            take_profits = []
+            for i, item in enumerate(raw_tps):
+                if not isinstance(item, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="take_profits entries must be {price, quantity} objects",
+                    )
+                take_profits.append({
+                    "price": _op_num(
+                        item.get("price"),
+                        f"take_profits[{i}].price",
+                        required=True,
+                    ),
+                    "quantity": _op_num(
+                        item.get("quantity"),
+                        f"take_profits[{i}].quantity",
+                        required=True,
+                    ),
+                })
+            _validate_take_profit_direction(
+                symbol,
+                account_id,
+                take_profits,
+                position_side,
+            )
     else:
         take_profits = [
             _op_num(tp, "take_profits[]") for tp in (body.get("take_profits") or [])
@@ -2459,6 +2491,8 @@ def operator_order(
             order_plan["stop_loss"] = stop_loss
         else:
             order_plan["take_profits"] = take_profits
+            if disable_take_profits:
+                order_plan["disable_take_profits"] = True
         if position_side:
             order_plan["position_side"] = position_side
     else:
@@ -2490,11 +2524,20 @@ def operator_order(
         raw_channel, has_provenance = _open_source_channel(body, client_ref)
 
     if dry_run:
+        order_plan_preview = {
+            "side": side,
+            "entry": {"type": entry_type},
+            "stop_loss": stop_loss,
+            "take_profits": take_profits,
+        }
+        if position_side:
+            order_plan_preview["position_side"] = position_side
+        if disable_take_profits:
+            order_plan_preview["disable_take_profits"] = True
         return {
             "dry_run": True, "action": action, "symbol": symbol, "account_id": account_id,
             "computed_notional": notional, "checks": checks,
-            "order_plan_preview": {"side": side, "entry": {"type": entry_type},
-                                   "stop_loss": stop_loss, "take_profits": take_profits},
+            "order_plan_preview": order_plan_preview,
         }
 
     database_url = os.environ.get("DATABASE_URL")

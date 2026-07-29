@@ -436,6 +436,86 @@ def test_channel_management_authorization_requires_and_persists_attribution(
     assert _json_value(outbox_params[2])["authorization"] == expected
 
 
+def test_empty_take_profits_without_disable_flag_is_rejected(
+    api_client, auth_headers, fake_db
+):
+    body = _manage_body(
+        action="replace_take_profits",
+        take_profits=[],
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "requires take_profits" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_disable_take_profits_requires_position_side(
+    api_client, auth_headers, fake_db
+):
+    body = _manage_body(
+        action="replace_take_profits",
+        position_side=None,
+        take_profits=[],
+        disable_take_profits=True,
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "position_side" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_explicit_disable_take_profits_persists_tombstone_and_audit(
+    api_client, auth_headers, fake_db
+):
+    body = _manage_body(
+        action="replace_take_profits",
+        take_profits=[],
+        disable_take_profits=True,
+        client_ref="disable-tps-btc-user-request-7001",
+        source_message_id="user-request-7001",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    _, decision_params = _insert(fake_db, "INSERT INTO hermes_decisions")
+    evidence = _json_value(decision_params[17])
+    assert evidence[0]["authorized_by_type"] == "user"
+    assert evidence[0]["source_message_id"] == "user-request-7001"
+    _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
+    order_plan = _json_value(intent_params[6])
+    assert order_plan["take_profits"] == []
+    assert order_plan["disable_take_profits"] is True
+    assert order_plan["position_side"] == "long"
+    _, outbox_params = _insert(fake_db, "INSERT INTO outbox_events")
+    outbox = _json_value(outbox_params[2])
+    assert outbox["authorization"]["source_message_id"] == "user-request-7001"
+
+
+def test_disable_take_profits_dry_run_has_tombstone_and_zero_writes(
+    api_client, auth_headers, fake_db
+):
+    body = _manage_body(
+        action="replace_take_profits",
+        take_profits=[],
+        disable_take_profits=True,
+        dry_run=True,
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    preview = response.json()["order_plan_preview"]
+    assert preview["take_profits"] == []
+    assert preview["disable_take_profits"] is True
+    assert preview["position_side"] == "long"
+    assert not fake_db.executions
+
+
 def test_open_provenance_parses_e2_suffix(api_client, auth_headers, fake_db):
     response = _post(
         api_client,

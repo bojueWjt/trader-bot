@@ -24,6 +24,10 @@ MANAGEMENT_CASES = [
         "replace_take_profits",
     ),
     (
+        ["disable-tps", "BTCUSDT", "--side", "long"],
+        "replace_take_profits",
+    ),
+    (
         ["cancel", "BTCUSDT", "--order", "B" + "a" * 32 + "01"],
         "cancel_order",
     ),
@@ -311,6 +315,90 @@ def test_management_forwards_internal_parent_intent(load_trade_module, monkeypat
     assert payload["source"] == "position-reconciler"
     assert payload["created_by_service"] == "position-reconciler"
     assert payload["parent_intent_id"] == parent_intent_id
+
+
+def test_disable_tps_sends_explicit_tombstone_payload(
+    load_trade_module, monkeypatch
+):
+    module = load_trade_module()
+    calls = []
+
+    def fake_call(method, path, payload=None):
+        calls.append((method, path, payload))
+        if method == "POST":
+            return {"intent_id": "intent-1", "status": "approved", "replay": False}
+        return {
+            "intent": {"status": "approved"},
+            "orders": [],
+            "execution_events": [],
+            "open_positions": [],
+        }
+
+    monkeypatch.setattr(module, "_call", fake_call)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "v3_trade.py",
+            "disable-tps",
+            "BTCUSDT",
+            "--side",
+            "long",
+            "--reason",
+            "manual BTC profit close; keep TP automation disabled",
+            "--ref",
+            "disable-tps-btc-user-request-7001",
+            *USER_AUTH_ARGS,
+            "--no-wait",
+        ],
+    )
+
+    module.main()
+
+    payload = next(payload for method, _, payload in calls if method == "POST")
+    assert payload["action"] == "replace_take_profits"
+    assert payload["symbol"] == "BTCUSDT"
+    assert payload["position_side"] == "long"
+    assert payload["take_profits"] == []
+    assert payload["disable_take_profits"] is True
+    assert payload["authorized_by_type"] == "user"
+    assert payload["account_id"] == "account-a"
+
+
+def test_set_tps_rejects_empty_price_list(
+    load_trade_module, monkeypatch, capsys
+):
+    module = load_trade_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "v3_trade.py",
+            "set-tps",
+            "BTCUSDT",
+            "--tp",
+            "",
+            "--qty",
+            "",
+            "--reason",
+            "test",
+            "--ref",
+            "set-tps-empty-7001",
+            *USER_AUTH_ARGS,
+        ],
+    )
+    monkeypatch.setattr(
+        module,
+        "_call",
+        lambda *args, **kwargs: pytest.fail("empty set-tps request was sent"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert exc.value.code == 1
+    assert "--tp requires at least one price" in output["error"]
 
 
 @pytest.mark.parametrize(("command", "expected_action"), MANAGEMENT_CASES)
