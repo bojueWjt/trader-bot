@@ -60,6 +60,8 @@ class AccountRuntime:
     risk_engine_kwargs: dict[str, Any]
     intent_data_client: Any
     projection_actor: ProjectionActor
+    exchange_state_mirror: Any
+    exchange_cancel_adapter: Any
     strategy_config: Any
     trading_node_config_kwargs: dict[str, Any]
     trading_node: Any = None
@@ -93,6 +95,9 @@ def build_account_runtime(
     risk_engine_kwargs = build_live_risk_engine_kwargs(risk_config)
     intent_data_client = _build_intent_data_client(config, control_plane, lifecycle, route)
     projection_actor = _build_projection_actor(config, control_plane, lifecycle, route)
+    exchange_state_mirror, exchange_cancel_adapter = _build_exchange_cancel_dependencies(
+        config
+    )
     strategy_config = _build_strategy_config(config, lifecycle)
     trading_node_config_kwargs = build_trading_node_kwargs(config)
 
@@ -107,6 +112,8 @@ def build_account_runtime(
         risk_engine_kwargs=risk_engine_kwargs,
         intent_data_client=intent_data_client,
         projection_actor=projection_actor,
+        exchange_state_mirror=exchange_state_mirror,
+        exchange_cancel_adapter=exchange_cancel_adapter,
         strategy_config=strategy_config,
         trading_node_config_kwargs=trading_node_config_kwargs,
     )
@@ -197,6 +204,8 @@ def _component_list(runtime: AccountRuntime) -> tuple[NodeComponent, ...]:
         NodeComponent("binance_adapter"),
         NodeComponent("intent_data_client", runtime.intent_data_client),
         NodeComponent("projection_actor", runtime.projection_actor),
+        NodeComponent("exchange_state_mirror", runtime.exchange_state_mirror),
+        NodeComponent("exchange_cancel_adapter", runtime.exchange_cancel_adapter),
         NodeComponent("intent_execution_strategy", runtime.strategy_config),
         NodeComponent("trading_node_config", runtime.trading_node_config_kwargs),
         NodeComponent("trading_node", runtime.trading_node),
@@ -260,8 +269,7 @@ def _build_risk_limit_config() -> RiskLimitConfig:
     return RiskLimitConfig(
         max_notional_per_order=max_notional,
         max_order_submit_rate=os.environ.get(
-            # zone-ladder submits up to 3 entry + 4 protection orders in one burst;
-            # Nautilus default 1/s throttled tranches 2/3. Binance API allows far more.
+            # Zone ladders and protection orders submit in one bounded burst.
             "NAUTILUS_MAX_ORDER_SUBMIT_RATE", "50/00:00:01"
         ),
         max_order_modify_rate=os.environ.get(
@@ -312,6 +320,34 @@ def _build_projection_actor(
     )
 
 
+def _build_exchange_cancel_dependencies(config: NodeConfig) -> tuple[Any, Any]:
+    from runtime.exchange_cancel_adapter import (
+        BinanceExchangeCancelAdapter,
+        ControlPlaneExchangeStateMirror,
+        SignedBinanceTransport,
+    )
+
+    mirror = ControlPlaneExchangeStateMirror(
+        account_id=config.account_id,
+        node_id=config.node_id,
+        base_url=config.control_plane.base_url,
+        token=config.control_plane.token,
+    )
+    base_url = "https://testnet.binancefuture.com"
+    if config.binance.environment == "live":
+        base_url = "https://fapi.binance.com"
+    transport = SignedBinanceTransport(
+        base_url=base_url,
+        api_key=config.binance.credentials.api_key,
+        api_secret=config.binance.credentials.api_secret,
+    )
+    adapter = BinanceExchangeCancelAdapter(
+        account_id=config.account_id,
+        transport=transport,
+    )
+    return mirror, adapter
+
+
 def _build_strategy_config(config: NodeConfig, lifecycle: Any) -> Any:
     from strategy.intent_execution_strategy import IntentExecutionStrategyConfig
 
@@ -339,6 +375,10 @@ def _build_strategy(runtime: AccountRuntime) -> Any:
     strategy = IntentExecutionStrategy(runtime.strategy_config)
     strategy.set_trading_state_getter(lambda: runtime.lifecycle.trading_state)
     strategy.set_denial_reporter(_build_denial_reporter(runtime))
+    strategy.set_exchange_cancel_adapter(
+        runtime.exchange_cancel_adapter,
+        runtime.exchange_state_mirror,
+    )
     return strategy
 
 
@@ -350,7 +390,10 @@ def _build_denial_reporter(runtime: AccountRuntime) -> Callable[[Any, Any], None
             status = IntentAckStatus.REJECTED
         except ModuleNotFoundError:
             status = "rejected"
-        detail = f"denied:{getattr(denial, 'reason', '')}:{getattr(denial, 'detail', '')}"[:200]
+        detail = (
+            f"denied:{getattr(denial, 'reason', '')}:"
+            f"{getattr(denial, 'detail', '')}"
+        )[:200]
         runtime.control_plane.ack_intent(
             account_id=runtime.config.account_id,
             node_id=runtime.config.node_id,

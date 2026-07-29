@@ -172,3 +172,55 @@ class NodeLifecycle:
         # A silent halt cost 2h of debugging on 2026-07-10: every halt must be
         # loud. print reaches docker logs regardless of logging config.
         print(f"[NodeLifecycle] TRADING HALTED: {reason}", flush=True)
+
+
+class TradingLifecycle:
+    """Small command gate used by command routing and lifecycle matrix tests."""
+
+    _OPENING_ACTIONS = frozenset({"open_position", "add_position"})
+    _MANAGEMENT_ACTIONS = frozenset(
+        {
+            "partial_close",
+            "close_position",
+            "move_stop_loss",
+            "move_stop_to_entry",
+            "replace_take_profits",
+            "cancel",
+            "cancel_all",
+            "close_all",
+        }
+    )
+
+    def __init__(
+        self,
+        initial_state: TradingState | str = TradingState.ACTIVE,
+    ) -> None:
+        self._trading_state = self._coerce_state(initial_state)
+        self._reason = ""
+
+    @property
+    def trading_state(self) -> TradingState:
+        return self._trading_state
+
+    @property
+    def reason(self) -> str:
+        return self._reason
+
+    def apply_operator_state(
+        self,
+        state: TradingState | str,
+        reason: str,
+    ) -> None:
+        self._trading_state = self._coerce_state(state)
+        self._reason = reason
+
+    def action_allowed(self, action: str) -> bool:
+        if self._trading_state is TradingState.ACTIVE:
+            return action in self._OPENING_ACTIONS | self._MANAGEMENT_ACTIONS
+        return action in self._MANAGEMENT_ACTIONS
+
+    @staticmethod
+    def _coerce_state(state: TradingState | str) -> TradingState:
+        if isinstance(state, TradingState):
+            return state
+        return TradingState(str(state))

@@ -111,7 +111,7 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
         self.assertEqual(result.orders[0].trigger_price, "27123.46")
         self.assertTrue(result.orders[0].reduce_only)
 
-    def test_replace_take_profits_cancels_old_tps_and_submits_conditional_tps(self) -> None:
+    def test_replace_take_profits_uses_market_if_touched_triggers(self) -> None:
         intent = _intent(
             action="replace_take_profits",
             target_position_id=POSITION_ID,
@@ -131,11 +131,16 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
         self.assertIsInstance(result, ManagementPlan)
         assert isinstance(result, ManagementPlan)
         self.assertEqual(result.cancel_order_ids, ("old-tp",))
-        self.assertEqual([order.order_type for order in result.orders], ["LIMIT_IF_TOUCHED", "LIMIT_IF_TOUCHED"])
+        self.assertEqual(
+            [order.order_type for order in result.orders],
+            ["MARKET_IF_TOUCHED", "MARKET_IF_TOUCHED"],
+        )
         self.assertEqual([order.quantity for order in result.orders], ["0.100", "0.200"])
-        self.assertEqual(result.orders[0].trigger_price, "28000.11")
-        self.assertEqual(result.orders[0].price, "28000.11")
-        self.assertEqual(result.orders[1].price, "29000.00")
+        self.assertEqual(
+            [order.trigger_price for order in result.orders],
+            ["28000.11", "29000.00"],
+        )
+        self.assertTrue(all(order.price is None for order in result.orders))
         self.assertTrue(all(order.reduce_only for order in result.orders))
         self.assertTrue(all("lifecycle_role=take_profit" in order.tags for order in result.orders))
 
@@ -226,7 +231,7 @@ def _order(client_order_id: str, role: str) -> OrderSnapshot:
     return OrderSnapshot(
         client_order_id=client_order_id,
         instrument_id=INSTRUMENT_ID,
-        order_type="STOP_MARKET" if role == "stop_loss" else "LIMIT_IF_TOUCHED",
+        order_type="STOP_MARKET" if role == "stop_loss" else "MARKET_IF_TOUCHED",
         side="SELL",
         quantity="0.5",
         price=None,
@@ -268,6 +273,16 @@ def _intent(**overrides: Any) -> _Intent:
         "approved_at": NOW - timedelta(seconds=5),
     }
     values.update(overrides)
+    order_plan = dict(values["order_plan"])
+    order_plan.setdefault(
+        "authorization",
+        {
+            "authorized_by_type": "user",
+            "authorized_by_id": "manage-planner-test",
+            "source_message_id": f"manage-planner-test-{intent_id}",
+        },
+    )
+    values["order_plan"] = order_plan
     return _Intent(**values)
 
 

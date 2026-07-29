@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
@@ -21,6 +22,7 @@ from strategy.intent_execution_planner import (
     decode_client_order_id,
     encode_client_order_id,
     plan_intent_execution,
+    _authorization_source,
     _rounded_positive,
 )
 
@@ -213,6 +215,27 @@ class IntentExecutionStrategy(Strategy):
         last_terminal = stash.get("last_protection_terminal_event")
         if not isinstance(last_terminal, dict):
             stash.pop("last_protection_terminal_event", None)
+        entry_tags = tuple(str(tag) for tag in (stash.get("entry_tags") or ()))
+        entry_intent_id = _tag_value(entry_tags, "intent_id")
+        authorization = _authorization_from_tags(entry_tags)
+        if (
+            entry_intent_id == intent_key
+            and _valid_uuid_text(entry_intent_id)
+            and authorization
+        ):
+            protection_parent = authorization["parent_intent_id"]
+            if stash.get("stop_loss") is not None:
+                stash.setdefault(
+                    "stop_loss_parent_intent_id",
+                    protection_parent,
+                )
+            if _take_profit_prices(stash.get("take_profits")):
+                stash.setdefault(
+                    "take_profit_parent_intent_id",
+                    protection_parent,
+                )
+            stash.setdefault("stop_loss_authorization", authorization)
+            stash.setdefault("take_profit_authorization", authorization)
         pending = stash.get("pending_cancel_ids")
         if isinstance(pending, list):
             stash["pending_cancel_ids"] = tuple(str(item) for item in pending)
@@ -232,7 +255,7 @@ class IntentExecutionStrategy(Strategy):
                 denial_reason="protection_revisions_exhausted",
             )
 
-    def _persist_entry_protection_stash(self) -> None:
+    def _persist_entry_protection_stash(self) -> bool:
         path = self._protection_stash_path()
         directory = os.path.dirname(path)
         tmp_path = os.path.join(directory, f".{self._PROTECTION_STASH_FILENAME}.tmp.{id(self)}")
@@ -246,6 +269,7 @@ class IntentExecutionStrategy(Strategy):
             with open(tmp_path, "w") as fh:
                 json.dump(payload, fh, sort_keys=True, separators=(",", ":"), default=str)
             os.replace(tmp_path, path)
+            return True
         except Exception as exc:
             try:
                 if os.path.exists(tmp_path):
@@ -255,6 +279,10 @@ class IntentExecutionStrategy(Strategy):
             log = getattr(self, "log", None)
             if log is not None and hasattr(log, "error"):
                 log.error(f"protection stash persist failed: {exc!r}")
+            self._record_denial(
+                OrderDenied("protection_stash_persist_failed", repr(exc))
+            )
+            return False
 
     def _jsonable_protection_stash_value(self, value: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -352,8 +380,14 @@ class IntentExecutionStrategy(Strategy):
     def _handle_intent(self, intent: Any) -> None:
         raw_action = getattr(intent, "action", "")
         action = str(getattr(raw_action, "value", raw_action))
-        is_cancel_intent = action in {"cancel", "cancel_order"}
-        if is_cancel_intent:
+        needs_exchange_state = action in {
+            "cancel",
+            "cancel_order",
+            "move_stop_loss",
+            "move_stop_to_entry",
+            "replace_take_profits",
+        }
+        if needs_exchange_state:
             self._refresh_exchange_state()
         context = PlannerContext(
             account_id=self.config.account_id,
@@ -364,7 +398,7 @@ class IntentExecutionStrategy(Strategy):
             positions=self._position_snapshots(str(intent.instrument_id)),
             existing_orders=self._order_snapshots(
                 str(intent.instrument_id),
-                include_exchange_mirror=is_cancel_intent,
+                include_exchange_mirror=needs_exchange_state,
             ),
             existing_intent_ids=frozenset(
                 self._processed_intent_ids | self._active_intent_ids(intent.instrument_id)
@@ -384,35 +418,72 @@ class IntentExecutionStrategy(Strategy):
         if isinstance(result, ManagementPlan):
             submitted = self._submit_management_plan(result)
         else:
+            protection_preimage: Optional[dict[str, dict[str, Any]]] = None
+            protection_ready = True
             if action in ("open_position", "add_position"):
-                self._stash_entry_protection(intent, result)
-            submitted = self._submit_order_plan(result)
+                protection_preimage = copy.deepcopy(
+                    self._entry_protection_stash
+                )
+                protection_ready = self._stash_entry_protection(intent, result)
+            if protection_ready:
+                submitted = self._submit_order_plan(result)
+            else:
+                submitted = False
+            if (
+                not submitted
+                and protection_preimage is not None
+            ):
+                self._entry_protection_stash = protection_preimage
+                if protection_ready:
+                    self._persist_entry_protection_stash()
         if submitted:
             self._processed_intent_ids.add(str(result.intent_id))
         else:
-            if not isinstance(result, ManagementPlan):
-                self._entry_protection_stash.pop(str(result.intent_id), None)
-                self._persist_entry_protection_stash()
             denial = self.denials[-1] if self.denials else OrderDenied(
                 "order_submit_failed",
                 str(result.intent_id),
             )
             self._report_denial(intent, denial)
 
-    def _stash_entry_protection(self, intent: Any, plan: OrderPlan) -> None:
+    def _stash_entry_protection(self, intent: Any, plan: OrderPlan) -> bool:
         order_plan = getattr(intent, "order_plan", {}) or {}
         stop_loss = order_plan.get("stop_loss")
         take_profits = order_plan.get("take_profits")
-        if stop_loss is None and not take_profits:
-            return
-        # One protection owner per instrument+side: a newer entry intent (e.g.
-        # add_position) supersedes the older stash — its sync adopts the whole
-        # position via position-scoped ownership, so two stashes would just fight.
+        authorization = _authorization_from_tags(plan.tags)
+        if not authorization:
+            self._record_denial(
+                OrderDenied(
+                    "protection_authorization_missing",
+                    str(plan.intent_id),
+                )
+            )
+            return False
+        source_message_id = authorization["source_message_id"]
+        parent_intent_id = authorization["parent_intent_id"]
+        same_source_owner: Optional[tuple[str, dict[str, Any]]] = None
+        owner_changed = False
         for key, other in tuple(self._entry_protection_stash.items()):
-            if (
-                str(other.get("instrument_id")) == plan.instrument_id
-                and str(other.get("entry_side")) == plan.side
-            ):
+            if str(other.get("instrument_id")) != plan.instrument_id:
+                continue
+            if str(other.get("entry_side")) != plan.side:
+                continue
+            other_authorization = _stash_protection_authorization(other)
+            other_source_message_id = other_authorization.get("source_message_id")
+            if other_source_message_id == source_message_id:
+                same_source_owner = (key, other)
+                continue
+            owner_changed = True
+            self._entry_protection_stash.pop(key, None)
+            self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + key)
+
+        if stop_loss is None and not take_profits:
+            if owner_changed:
+                return self._persist_entry_protection_stash()
+            return True
+
+        if same_source_owner is not None:
+            key, _other = same_source_owner
+            if key != str(plan.intent_id):
                 self._entry_protection_stash.pop(key, None)
                 self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + key)
         # protection_sequence_start=11 for all paths: revisioned protection ids live
@@ -423,13 +494,17 @@ class IntentExecutionStrategy(Strategy):
             "instrument_id": plan.instrument_id,
             "entry_side": plan.side,
             "entry_tags": plan.tags,
+            "stop_loss_parent_intent_id": parent_intent_id,
+            "take_profit_parent_intent_id": parent_intent_id,
+            "stop_loss_authorization": authorization,
+            "take_profit_authorization": authorization,
             "entry_sequence_max": 1,
             "protection_sequence_start": 11,
             "protection_roles": {},
             "tp_consumed": {},
             "pending_cancel_ids": (),
         }
-        self._persist_entry_protection_stash()
+        return self._persist_entry_protection_stash()
 
     def _handle_zone_ladder(
         self,
@@ -444,12 +519,19 @@ class IntentExecutionStrategy(Strategy):
             self._report_denial(intent, plans)
             return
 
-        self._stash_entry_protection(intent, plans[0])
+        protection_preimage = copy.deepcopy(self._entry_protection_stash)
+        if not self._stash_entry_protection(intent, plans[0]):
+            self._entry_protection_stash = protection_preimage
+            self._report_denial(intent, self.denials[-1])
+            return
         stash = self._entry_protection_stash.get(str(plans[0].intent_id))
         if stash is not None:
             stash["entry_sequence_max"] = 9
             stash["protection_sequence_start"] = 11
-            self._persist_entry_protection_stash()
+            if not self._persist_entry_protection_stash():
+                self._entry_protection_stash = protection_preimage
+                self._report_denial(intent, self.denials[-1])
+                return
         submitted = True
         submitted_plans: list[OrderPlan] = []
         for plan in plans:
@@ -481,6 +563,9 @@ class IntentExecutionStrategy(Strategy):
     ) -> tuple[OrderPlan, ...] | OrderDenied:
         if action not in ("open_position", "add_position"):
             return OrderDenied("unsupported_action", action)
+        authorization = _authorization_source(intent)
+        if isinstance(authorization, OrderDenied):
+            return authorization
 
         trading_state = str(getattr(context.trading_state, "value", context.trading_state)).upper()
         if trading_state != "ACTIVE":
@@ -965,6 +1050,9 @@ class IntentExecutionStrategy(Strategy):
         if stash.get("protection_frozen"):
             self._persist_entry_protection_stash()
             return
+        if not self._has_authorized_protection_parent(intent_key, stash):
+            self._persist_entry_protection_stash()
+            return
         instrument_id = str(stash["instrument_id"])
         instrument = self._instrument_spec(instrument_id)
         if instrument is None:
@@ -1045,6 +1133,12 @@ class IntentExecutionStrategy(Strategy):
             instrument,
         )
         if not actions:
+            keep = set(keep_ids)
+            for order in live:
+                client_order_id = str(getattr(order, "client_order_id", ""))
+                if client_order_id in keep or client_order_id not in replace_ids:
+                    continue
+                self._cancel_replaced_protection_order(intent_key, stash, order)
             stash["protection_ids"] = tuple(keep_ids)
             stash["protected_quantity"] = quantity
             stash.pop("sync_retries", None)
@@ -1113,6 +1207,68 @@ class IntentExecutionStrategy(Strategy):
         if len(submitted_ids) != len(plans):
             self._reschedule_protection_sync(intent_key, stash, count_retry=True)
 
+    def _has_authorized_protection_parent(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+    ) -> bool:
+        required: list[tuple[str, str, str]] = []
+        if stash.get("stop_loss") is not None:
+            required.append(
+                (
+                    "stop_loss",
+                    "stop_loss_parent_intent_id",
+                    "stop_loss_authorization",
+                )
+            )
+        tombstone = stash.get("take_profit_tombstone")
+        if tombstone is not None and not _valid_take_profit_tombstone(
+            tombstone,
+            stash.get("take_profit_parent_intent_id"),
+        ):
+            key = ("take_profit_tombstone_invalid", intent_key)
+            if key not in self._reported_protection_denials:
+                self._reported_protection_denials.add(key)
+                self._record_denial(
+                    OrderDenied("take_profit_tombstone_invalid", intent_key)
+                )
+            return False
+        if _valid_take_profit_tombstone(
+            tombstone,
+            stash.get("take_profit_parent_intent_id"),
+        ) or _take_profit_prices(
+            stash.get("take_profits")
+        ):
+            required.append(
+                (
+                    "take_profit",
+                    "take_profit_parent_intent_id",
+                    "take_profit_authorization",
+                )
+            )
+        for role, field, authorization_field in required:
+            parent_intent_id = str(stash.get(field) or "")
+            authorization = stash.get(authorization_field)
+            if (
+                _valid_uuid_text(parent_intent_id)
+                and _authorization_matches_parent(
+                    authorization,
+                    parent_intent_id,
+                )
+            ):
+                continue
+            key = ("protection_parent_intent_missing", f"{intent_key}:{role}")
+            if key not in self._reported_protection_denials:
+                self._reported_protection_denials.add(key)
+                self._record_denial(
+                    OrderDenied(
+                        "protection_parent_intent_missing",
+                        f"{intent_key}:{role}",
+                    )
+                )
+            return False
+        return True
+
     def _protection_replacement_actions(
         self,
         stash: dict[str, Any],
@@ -1123,7 +1279,10 @@ class IntentExecutionStrategy(Strategy):
         desired_stop = next((plan for plan in desired if self._protection_plan_role(plan) == "stop_loss"), None)
         desired_tps = [
             plan for plan in desired
-            if self._protection_plan_role(plan) == "take_profit" and plan.price is not None
+            if (
+                self._protection_plan_role(plan) == "take_profit"
+                and plan.trigger_price is not None
+            )
         ]
         live_stops = [
             order for order in live
@@ -1153,34 +1312,58 @@ class IntentExecutionStrategy(Strategy):
                 actions.append(desired_stop)
                 replace_ids.update(str(getattr(order, "client_order_id", "")) for order in live_stops)
 
-        desired_prices = {str(plan.price) for plan in desired_tps}
+        desired_triggers = {str(plan.trigger_price) for plan in desired_tps}
         for plan in desired_tps:
-            same_price = [
+            same_trigger = [
                 order for order in live_tps
-                if self._protection_order_price(order, instrument) == plan.price
+                if (
+                    self._protection_order_trigger_price(order, instrument)
+                    == plan.trigger_price
+                )
+            ]
+            healthy = [
+                order for order in same_trigger
+                if self._live_order_matches_plan(order, plan, instrument)
             ]
             live_quantity = sum(
                 (
                     Decimal(str(qty))
                     for qty in (
                         self._protection_order_quantity(order, instrument)
-                        for order in same_price
+                        for order in healthy
                     )
                     if qty is not None
                 ),
                 Decimal("0"),
             )
             target = Decimal(str(plan.quantity))
-            increment = Decimal(str(instrument.quantity_increment))
-            if not same_price or live_quantity < target - increment:
+            if not healthy or live_quantity != target:
                 actions.append(plan)
-                replace_ids.update(str(getattr(order, "client_order_id", "")) for order in same_price)
+                replace_ids.update(
+                    str(getattr(order, "client_order_id", ""))
+                    for order in same_trigger
+                )
             else:
-                keep_ids.extend(str(getattr(order, "client_order_id", "")) for order in same_price)
+                keep_ids.extend(
+                    str(getattr(order, "client_order_id", ""))
+                    for order in healthy
+                )
+                healthy_ids = {
+                    str(getattr(order, "client_order_id", ""))
+                    for order in healthy
+                }
+                replace_ids.update(
+                    str(getattr(order, "client_order_id", ""))
+                    for order in same_trigger
+                    if str(getattr(order, "client_order_id", "")) not in healthy_ids
+                )
         replace_ids.update(
             str(getattr(order, "client_order_id", ""))
             for order in live_tps
-            if self._protection_order_price(order, instrument) not in desired_prices
+            if (
+                self._protection_order_trigger_price(order, instrument)
+                not in desired_triggers
+            )
         )
         pending = set(str(cid) for cid in tuple(stash.get("pending_cancel_ids") or ()))
         keep_ids = [cid for cid in keep_ids if cid and cid not in pending]
@@ -1247,9 +1430,14 @@ class IntentExecutionStrategy(Strategy):
         if role is None:
             return
         roles = stash.setdefault("protection_roles", {})
+        tp_price = plan.trigger_price
         roles[client_order_id] = {
             "role": role,
-            "tp_price": str(plan.price) if role == "take_profit" and plan.price is not None else None,
+            "tp_price": (
+                str(tp_price)
+                if role == "take_profit" and tp_price is not None
+                else None
+            ),
             "quantity": str(plan.quantity),
             "submitted_at": self._now().isoformat(),
         }
@@ -1292,7 +1480,7 @@ class IntentExecutionStrategy(Strategy):
             return "take_profit"
         if plan.order_type == "STOP_MARKET":
             return "stop_loss"
-        if plan.order_type in {"LIMIT", "LIMIT_IF_TOUCHED"}:
+        if plan.order_type in {"LIMIT", "LIMIT_IF_TOUCHED", "MARKET_IF_TOUCHED"}:
             return "take_profit"
         return None
 
@@ -1311,13 +1499,24 @@ class IntentExecutionStrategy(Strategy):
         order_type = _enum_name(getattr(order, "order_type", ""))
         if "STOP" in order_type:
             return "stop_loss"
+        if order_type == "MARKET_IF_TOUCHED":
+            return "take_profit"
         if "LIMIT" in order_type:
             return "take_profit"
         return None
 
-    def _protection_order_price(self, order: Any, instrument: InstrumentSpec) -> Optional[str]:
+    def _protection_order_trigger_price(
+        self,
+        order: Any,
+        instrument: InstrumentSpec,
+    ) -> Optional[str]:
+        raw_trigger = getattr(order, "trigger_price", None)
+        if raw_trigger is None:
+            raw_trigger = getattr(order, "stop_price", None)
+        if raw_trigger is None:
+            raw_trigger = getattr(order, "price", None)
         return _round_down_positive(
-            _optional_str(getattr(order, "price", None)),
+            _optional_str(raw_trigger),
             instrument.price_increment,
         )
 
@@ -1376,6 +1575,19 @@ class IntentExecutionStrategy(Strategy):
                 return False
             order_quantity = _round_down_positive(
                 _optional_str(getattr(order, "quantity", getattr(order, "qty", None))),
+                instrument.quantity_increment,
+            )
+            return order_quantity == plan.quantity
+        if plan.order_type == "MARKET_IF_TOUCHED":
+            if order_type != "MARKET_IF_TOUCHED":
+                return False
+            order_trigger = self._protection_order_trigger_price(order, instrument)
+            if order_trigger != plan.trigger_price:
+                return False
+            order_quantity = _round_down_positive(
+                _optional_str(
+                    getattr(order, "quantity", getattr(order, "qty", None))
+                ),
                 instrument.quantity_increment,
             )
             return order_quantity == plan.quantity
@@ -1527,6 +1739,8 @@ class IntentExecutionStrategy(Strategy):
         plans: list[OrderPlan] = []
 
         stop_loss = stash.get("stop_loss")
+        stop_parent_intent_id = str(stash.get("stop_loss_parent_intent_id") or "")
+        stop_authorization = stash.get("stop_loss_authorization")
         if stop_loss is not None:
             trigger_price = _rounded_positive(stop_loss, instrument.price_increment, "stop_loss")
             if isinstance(trigger_price, OrderDenied):
@@ -1539,7 +1753,13 @@ class IntentExecutionStrategy(Strategy):
                             intent_id,
                             sequence=block + 1,
                         ),
-                        tags=_protection_tags(base_tags, "stop_loss", position_id),
+                        tags=_protection_tags(
+                            base_tags,
+                            "stop_loss",
+                            position_id,
+                            parent_intent_id=stop_parent_intent_id,
+                            authorization=stop_authorization,
+                        ),
                         instrument_id=instrument_id,
                         side=exit_side,
                         order_type="STOP_MARKET",
@@ -1551,7 +1771,17 @@ class IntentExecutionStrategy(Strategy):
                     )
                 )
 
-        targets = _take_profit_prices(stash.get("take_profits"))[:8]
+        tombstone = stash.get("take_profit_tombstone")
+        targets: tuple[Any, ...] = ()
+        if not _valid_take_profit_tombstone(
+            tombstone,
+            stash.get("take_profit_parent_intent_id"),
+        ):
+            targets = _take_profit_prices(stash.get("take_profits"))[:8]
+        take_profit_parent_intent_id = str(
+            stash.get("take_profit_parent_intent_id") or ""
+        )
+        take_profit_authorization = stash.get("take_profit_authorization")
         quantities = self._take_profit_remaining_quantities(
             stash,
             targets,
@@ -1561,9 +1791,13 @@ class IntentExecutionStrategy(Strategy):
         for index, (target, target_quantity) in enumerate(zip(targets, quantities), start=1):
             if target_quantity is None:
                 continue
-            price = _rounded_positive(target, instrument.price_increment, f"take_profits[{index - 1}].price")
-            if isinstance(price, OrderDenied):
-                self._record_denial(price)
+            trigger_price = _rounded_positive(
+                target,
+                instrument.price_increment,
+                f"take_profits[{index - 1}].price",
+            )
+            if isinstance(trigger_price, OrderDenied):
+                self._record_denial(trigger_price)
                 continue
             plans.append(
                 OrderPlan(
@@ -1572,14 +1806,22 @@ class IntentExecutionStrategy(Strategy):
                         intent_id,
                         sequence=block + 1 + index,
                     ),
-                    tags=_protection_tags(base_tags, "take_profit", position_id, index=index),
+                    tags=_protection_tags(
+                        base_tags,
+                        "take_profit",
+                        position_id,
+                        index=index,
+                        parent_intent_id=take_profit_parent_intent_id,
+                        authorization=take_profit_authorization,
+                    ),
                     instrument_id=instrument_id,
                     side=exit_side,
-                    order_type="LIMIT",
+                    order_type="MARKET_IF_TOUCHED",
                     quantity=target_quantity,
-                    price=price,
+                    price=None,
                     time_in_force="GTC",
                     reduce_only=True,
+                    trigger_price=trigger_price,
                 )
             )
         return tuple(plans)
@@ -1891,6 +2133,18 @@ class IntentExecutionStrategy(Strategy):
         return PositionId(f"{order.instrument_id}-{book}")
 
     def _submit_management_plan(self, plan: ManagementPlan) -> bool:
+        parent_intent_id = _management_parent_intent_id(plan)
+        if not _authorization_matches_parent(
+            plan.authorization,
+            parent_intent_id,
+        ):
+            self._record_denial(
+                OrderDenied(
+                    "management_authorization_missing",
+                    str(plan.intent_id),
+                )
+            )
+            return False
         if plan.action == CANCEL_ORDER:
             for client_order_id in plan.cancel_order_ids:
                 if not self._cancel_via_exchange_adapter(
@@ -1899,6 +2153,9 @@ class IntentExecutionStrategy(Strategy):
                 ):
                     return False
             return True
+        cancel_order_ids = self._management_cancel_order_ids(plan)
+        if not self._absorb_management_plan(plan):
+            return False
         # Make-before-break: place replacements first, then cancel the superseded
         # orders. If the new stop is rejected by the venue the old one is still
         # standing; the reverse order can leave the position naked. Reduce-only
@@ -1906,11 +2163,79 @@ class IntentExecutionStrategy(Strategy):
         for order_plan in plan.orders:
             if not self._submit_order_plan(order_plan):
                 return False
-        for client_order_id in plan.cancel_order_ids:
-            if not self._cancel_order_by_client_order_id(plan.instrument_id, client_order_id):
+        for client_order_id in cancel_order_ids:
+            if not self._cancel_management_order(
+                plan.instrument_id,
+                client_order_id,
+            ):
                 return False
-        self._absorb_management_plan(plan)
         return True
+
+    def _management_cancel_order_ids(
+        self,
+        plan: ManagementPlan,
+    ) -> tuple[str, ...]:
+        role = ""
+        if str(plan.action) in {"move_stop_loss", "move_stop_to_entry"}:
+            role = "stop_loss"
+        if str(plan.action) == "replace_take_profits":
+            role = "take_profit"
+        ids = {
+            str(client_order_id)
+            for client_order_id in plan.cancel_order_ids
+            if str(client_order_id)
+        }
+        if not role:
+            return tuple(sorted(ids))
+
+        live_ids = {
+            str(getattr(order, "client_order_id", ""))
+            for order in self._cache_orders(plan.instrument_id)
+        }
+        mirror = self._exchange_state_mirror
+        orders_for_instrument = (
+            getattr(mirror, "orders_for_instrument", None) if mirror else None
+        )
+        if callable(orders_for_instrument):
+            live_ids.update(
+                str(getattr(order, "client_order_id", ""))
+                for order in orders_for_instrument(plan.instrument_id)
+            )
+
+        for stash in self._entry_protection_stash.values():
+            if not self._management_plan_targets_stash(plan, stash):
+                continue
+            roles = stash.get("protection_roles")
+            if not isinstance(roles, dict):
+                continue
+            for client_order_id, role_info in roles.items():
+                if not isinstance(role_info, dict):
+                    continue
+                if str(role_info.get("role") or "") != role:
+                    continue
+                client_order_id = str(client_order_id)
+                if client_order_id in live_ids:
+                    ids.add(client_order_id)
+        return tuple(sorted(ids))
+
+    def _cancel_management_order(
+        self,
+        instrument_id: str,
+        client_order_id: str,
+    ) -> bool:
+        for order in self._cache_orders(instrument_id):
+            if str(getattr(order, "client_order_id", "")) != client_order_id:
+                continue
+            try:
+                self.cancel_order(order)  # type: ignore[attr-defined]
+                return True
+            except Exception as exc:
+                self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
+                return False
+        return self._cancel_via_exchange_adapter(
+            instrument_id,
+            client_order_id,
+        )
 
     def _cancel_via_exchange_adapter(
         self,
@@ -1953,23 +2278,26 @@ class IntentExecutionStrategy(Strategy):
             self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
             return False
 
-    def _absorb_management_plan(self, plan: ManagementPlan) -> None:
+    def _absorb_management_plan(self, plan: ManagementPlan) -> bool:
         """Keep entry stashes coherent with operator-managed protections: without
         this, a later entry fill re-places SL/TP at the ORIGINAL signal prices and
         silently undoes an operator's move_stop_loss/replace_take_profits."""
         action = str(plan.action)
         if action not in ("move_stop_loss", "move_stop_to_entry", "replace_take_profits"):
-            return
-        for stash in self._entry_protection_stash.values():
-            if str(stash.get("instrument_id")) != str(plan.instrument_id):
+            return True
+        targeted: list[tuple[str, dict[str, Any]]] = []
+        for intent_key, stash in self._entry_protection_stash.items():
+            if not self._management_plan_targets_stash(plan, stash):
                 continue
-            intent_key = next(
-                (
-                    key for key, candidate in self._entry_protection_stash.items()
-                    if candidate is stash
-                ),
-                "",
-            )
+            targeted.append((intent_key, stash))
+        if not targeted:
+            return True
+        preimage = {
+            intent_key: copy.deepcopy(stash)
+            for intent_key, stash in targeted
+        }
+        for intent_key, stash in targeted:
+            parent_intent_id = _management_parent_intent_id(plan)
             if action in ("move_stop_loss", "move_stop_to_entry"):
                 trigger = next(
                     (op.trigger_price for op in plan.orders if op.trigger_price is not None),
@@ -1977,14 +2305,54 @@ class IntentExecutionStrategy(Strategy):
                 )
                 if trigger is not None:
                     stash["stop_loss"] = trigger
+                    stash["stop_loss_parent_intent_id"] = parent_intent_id
+                    stash["stop_loss_authorization"] = dict(plan.authorization or {})
             else:
-                prices = tuple(op.price for op in plan.orders if op.price is not None)
-                if prices:
-                    stash["take_profits"] = prices
+                triggers = tuple(
+                    op.trigger_price
+                    for op in plan.orders
+                    if op.trigger_price is not None
+                )
+                if triggers:
+                    tombstone = stash.pop("take_profit_tombstone", None)
+                    if isinstance(tombstone, dict):
+                        superseded = dict(tombstone)
+                        superseded["superseded_at"] = self._now().isoformat()
+                        superseded["superseded_by_intent_id"] = str(plan.intent_id)
+                        stash["last_take_profit_tombstone"] = superseded
+                    stash["take_profits"] = triggers
                     stash["take_profit_quantities"] = tuple(
-                        op.quantity for op in plan.orders if op.price is not None
+                        op.quantity
+                        for op in plan.orders
+                        if op.trigger_price is not None
                     )
                     stash["tp_consumed"] = {}
+                    stash["take_profit_parent_intent_id"] = parent_intent_id
+                    stash["take_profit_authorization"] = dict(
+                        plan.authorization or {}
+                    )
+                elif plan.disable_take_profits:
+                    authorization = dict(plan.authorization or {})
+                    tombstone = {
+                        "state": "disabled",
+                        "reason": "authorized_take_profit_disable",
+                        "created_at": self._now().isoformat(),
+                        "parent_intent_id": parent_intent_id,
+                    }
+                    tombstone.update(authorization)
+                    stash["take_profit_tombstone"] = tombstone
+                    stash["take_profit_parent_intent_id"] = parent_intent_id
+                    stash["take_profit_authorization"] = authorization
+                else:
+                    for key, value in preimage.items():
+                        self._entry_protection_stash[key] = value
+                    self._record_denial(
+                        OrderDenied(
+                            "take_profit_disable_flag_required",
+                            str(plan.intent_id),
+                        )
+                    )
+                    return False
             # The operator's orders belong to a different intent id: adopt nothing,
             # but force the next entry-fill sync to rebuild from the updated prices.
             stash.pop("protection_frozen", None)
@@ -1998,7 +2366,35 @@ class IntentExecutionStrategy(Strategy):
                         order_plan,
                     )
             stash["protected_quantity"] = None
-            self._persist_entry_protection_stash()
+        if self._persist_entry_protection_stash():
+            return True
+        for key, value in preimage.items():
+            self._entry_protection_stash[key] = value
+        return False
+
+    def _management_plan_targets_stash(
+        self,
+        plan: ManagementPlan,
+        stash: dict[str, Any],
+    ) -> bool:
+        if str(stash.get("instrument_id")) != str(plan.instrument_id):
+            return False
+        target_side = str(plan.target_position_side or "").upper()
+        if target_side not in {"LONG", "SHORT"}:
+            target_side = _position_book_from_id(plan.target_position_id)
+        if target_side not in {"LONG", "SHORT"}:
+            for order in plan.orders:
+                side = str(order.side).upper()
+                if side == "SELL":
+                    target_side = "LONG"
+                    break
+                if side == "BUY":
+                    target_side = "SHORT"
+                    break
+        if target_side not in {"LONG", "SHORT"}:
+            return False
+        expected_entry_side = "BUY" if target_side == "LONG" else "SELL"
+        return str(stash.get("entry_side") or "").upper() == expected_entry_side
 
     def _cancel_order_by_client_order_id(
         self,
@@ -2023,7 +2419,7 @@ class IntentExecutionStrategy(Strategy):
 
     def _build_nautilus_order(self, plan: OrderPlan, instrument: Any) -> Any:
         # TODO(host-verify): confirm OrderFactory methods and whether market,
-        # stop_market, stop_limit, and limit_if_touched orders accept
+        # stop_market, stop_limit, and market_if_touched orders accept
         # time_in_force/client_order_id/tags/reduce_only directly in Nautilus
         # 1.227.0.
         from nautilus_trader.model.enums import OrderSide, TimeInForce  # type: ignore
@@ -2140,12 +2536,15 @@ def _event_last_qty(event: Any) -> Optional[str]:
 
 def _protection_plan_key(plan: OrderPlan) -> tuple[str, Optional[str]]:
     role = "stop_loss" if plan.order_type == "STOP_MARKET" else "take_profit"
-    return role, str(plan.price) if role == "take_profit" else None
+    return role, str(plan.trigger_price) if role == "take_profit" else None
 
 
 def _price_key(value: Any) -> str:
     if isinstance(value, dict):
-        raw = value.get("price", value.get("trigger_price", value.get("limit_price")))
+        raw = value.get(
+            "trigger_price",
+            value.get("price", value.get("limit_price")),
+        )
     else:
         raw = value
     return str(raw)
@@ -2176,7 +2575,8 @@ def _entry_position_denial(
 
 
 def _entry_tags(intent: Any, action: str) -> tuple[str, ...]:
-    return (
+    authorization = _authorization_source(intent)
+    tags = (
         f"intent_id={getattr(intent, 'intent_id')}",
         f"decision_id={getattr(intent, 'decision_id')}",
         f"risk_decision_id={getattr(intent, 'risk_decision_id')}",
@@ -2184,6 +2584,18 @@ def _entry_tags(intent: Any, action: str) -> tuple[str, ...]:
         f"action={action}",
         f"account_id={getattr(intent, 'account_id')}",
     )
+    if isinstance(authorization, OrderDenied):
+        return tags
+    tags += (
+        f"parent_intent_id={authorization['parent_intent_id']}",
+        f"authorized_by_type={authorization['authorized_by_type']}",
+        f"authorized_by_id={authorization['authorized_by_id']}",
+        f"source_message_id={authorization['source_message_id']}",
+    )
+    channel_id = authorization.get("channel_id")
+    if channel_id:
+        tags += (f"channel_id={channel_id}",)
+    return tags
 
 
 def _book_position_has_external_id(
@@ -2252,7 +2664,10 @@ def _take_profit_prices(raw_targets: Any) -> tuple[Any, ...]:
     prices: list[Any] = []
     for target in raw_targets:
         if isinstance(target, dict):
-            price = target.get("price", target.get("trigger_price", target.get("limit_price")))
+            price = target.get(
+                "trigger_price",
+                target.get("price", target.get("limit_price")),
+            )
         else:
             price = target
         if price is not None:
@@ -2292,6 +2707,8 @@ def _protection_tags(
     lifecycle_role: str,
     position_id: Optional[str],
     *,
+    parent_intent_id: str,
+    authorization: Any,
     index: Optional[int] = None,
 ) -> tuple[str, ...]:
     tags = tuple(
@@ -2299,13 +2716,141 @@ def _protection_tags(
         if not tag.startswith("lifecycle_role=")
         and not tag.startswith("position_id=")
         and not tag.startswith("take_profit_index=")
+        and not tag.startswith("parent_intent_id=")
+        and not tag.startswith("authorized_by_type=")
+        and not tag.startswith("authorized_by_id=")
+        and not tag.startswith("source_message_id=")
+        and not tag.startswith("channel_id=")
     )
-    tags += (f"lifecycle_role={lifecycle_role}",)
+    tags += (
+        f"lifecycle_role={lifecycle_role}",
+        f"parent_intent_id={parent_intent_id}",
+    )
+    source = authorization if isinstance(authorization, dict) else {}
+    for key in (
+        "authorized_by_type",
+        "authorized_by_id",
+        "source_message_id",
+        "channel_id",
+    ):
+        value = source.get(key)
+        if value:
+            tags += (f"{key}={value}",)
     if position_id is not None:
         tags += (f"position_id={position_id}",)
     if index is not None:
         tags += (f"take_profit_index={index}",)
     return tags
+
+
+def _tag_value(tags: Iterable[Any], key: str) -> Optional[str]:
+    prefix = key + "="
+    for tag in tags:
+        text = str(tag)
+        if text.startswith(prefix):
+            value = text.split("=", 1)[1].strip()
+            if value:
+                return value
+    return None
+
+
+def _authorization_from_tags(tags: Iterable[Any]) -> dict[str, str]:
+    source: dict[str, str] = {}
+    for key in (
+        "authorized_by_type",
+        "authorized_by_id",
+        "source_message_id",
+        "channel_id",
+        "decision_id",
+        "risk_decision_id",
+        "idempotency_key",
+    ):
+        value = _tag_value(tags, key)
+        if value:
+            source[key] = value
+    parent_intent_id = _tag_value(tags, "parent_intent_id")
+    if not parent_intent_id:
+        parent_intent_id = _tag_value(tags, "intent_id")
+    if parent_intent_id:
+        source["parent_intent_id"] = parent_intent_id
+    if not _authorization_matches_parent(source, parent_intent_id):
+        return {}
+    return source
+
+
+def _authorization_matches_parent(
+    authorization: Any,
+    parent_intent_id: Any,
+) -> bool:
+    if not isinstance(authorization, dict):
+        return False
+    if str(authorization.get("authorized_by_type") or "") not in {
+        "user",
+        "channel",
+    }:
+        return False
+    if not str(authorization.get("authorized_by_id") or "").strip():
+        return False
+    if not str(authorization.get("source_message_id") or "").strip():
+        return False
+    expected_parent = str(parent_intent_id or "")
+    actual_parent = str(authorization.get("parent_intent_id") or "")
+    if not _valid_uuid_text(expected_parent):
+        return False
+    return actual_parent == expected_parent
+
+
+def _valid_take_profit_tombstone(
+    tombstone: Any,
+    parent_intent_id: Any,
+) -> bool:
+    if not isinstance(tombstone, dict):
+        return False
+    if str(tombstone.get("state") or "") != "disabled":
+        return False
+    expected_parent = str(parent_intent_id or "").strip()
+    actual_parent = str(tombstone.get("parent_intent_id") or "").strip()
+    if not _valid_uuid_text(expected_parent):
+        return False
+    if actual_parent != expected_parent:
+        return False
+    return _authorization_matches_parent(tombstone, expected_parent)
+
+
+def _stash_protection_authorization(stash: dict[str, Any]) -> dict[str, str]:
+    for key in ("take_profit_authorization", "stop_loss_authorization"):
+        authorization = stash.get(key)
+        if not isinstance(authorization, dict):
+            continue
+        parent_intent_id = authorization.get("parent_intent_id")
+        if _authorization_matches_parent(authorization, parent_intent_id):
+            return authorization
+    return _authorization_from_tags(stash.get("entry_tags") or ())
+
+
+def _valid_uuid_text(value: Any) -> bool:
+    try:
+        UUID(str(value))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _management_parent_intent_id(plan: ManagementPlan) -> str:
+    authorization = dict(plan.authorization or {})
+    supplied_parent = str(authorization.get("parent_intent_id") or "").strip()
+    if _valid_uuid_text(supplied_parent):
+        return supplied_parent
+    return str(plan.intent_id)
+
+
+def _position_book_from_id(position_id: Any) -> str:
+    text = str(position_id or "").strip().upper()
+    if text.endswith("-LONG") or text.endswith(":LONG"):
+        return "LONG"
+    if text.endswith("-SHORT") or text.endswith(":SHORT"):
+        return "SHORT"
+    return ""
 
 
 def _approved_intent_data_type(account_id: str) -> Any:

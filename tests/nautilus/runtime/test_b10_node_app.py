@@ -43,6 +43,10 @@ class NodeAppAssemblyTest(unittest.TestCase):
         self.assertEqual(runtime.route.initial_trading_state, "HALTED")
         self.assertEqual(runtime.route.environment, "testnet")
         self.assertEqual(
+            runtime.risk_config.max_order_submit_rate,
+            "50/00:00:01",
+        )
+        self.assertEqual(
             tuple(component.name for component in runtime.components),
             (
                 "config",
@@ -54,6 +58,8 @@ class NodeAppAssemblyTest(unittest.TestCase):
                 "binance_adapter",
                 "intent_data_client",
                 "projection_actor",
+                "exchange_state_mirror",
+                "exchange_cancel_adapter",
                 "intent_execution_strategy",
                 "trading_node_config",
                 "trading_node",
@@ -152,16 +158,25 @@ class NodeAppAssemblyTest(unittest.TestCase):
             [type(strategy).__name__ for strategy in node.trader.strategies],
             ["IntentExecutionStrategy"],
         )
+        strategy = node.trader.strategies[0]
+        self.assertTrue(callable(strategy.denial_reporter))
+        self.assertEqual(
+            strategy.exchange_cancel_dependencies,
+            (
+                runtime.exchange_cancel_adapter,
+                runtime.exchange_state_mirror,
+            ),
+        )
         self.assertEqual(
             [type(actor).__name__ for actor in node.trader.actors],
-            ["IntentPublisherActor", "ExecutionProjectionActor"],
+            ["IntentPublisherActor", "ExecutionProjectionActor", "CommandPollerActor"],
         )
         self.assertEqual(node.config.kwargs["trader_id"], runtime.config.trader_id)
         self.assertNotIn("instance_id", node.config.kwargs)
 
 
 class NautilusActorAdapterTest(unittest.TestCase):
-    def test_intent_publisher_actor_polls_plain_client_and_publishes_custom_data(self) -> None:
+    def test_intent_publisher_actor_polls_plain_client_and_publishes_to_account_topic(self) -> None:
         from app.nautilus_actors import IntentPublisherActor
 
         client = _PlainIntentClient()
@@ -171,13 +186,16 @@ class NautilusActorAdapterTest(unittest.TestCase):
             wait_ms=11,
             custom_data_builder=lambda intent: _CustomData(data_type="intent-type", data=intent),
         )
-        published: list[tuple[Any, Any]] = []
-        actor.publish_data = lambda data_type, data: published.append((data_type, data))  # type: ignore[attr-defined]
+        message_bus = _RecordingMessageBus()
+        actor.msgbus = message_bus
 
         self.assertEqual(actor.poll_once(), 1)
 
         self.assertEqual(client.poll_calls, [(7, 11)])
-        self.assertEqual(published, [("intent-type", "intent-1")])
+        self.assertEqual(
+            message_bus.published,
+            [("intents.account-a", client.intent)],
+        )
 
     def test_projection_actor_forwards_events_and_subscribes_execution_topics(self) -> None:
         from app.nautilus_actors import ExecutionProjectionActor
@@ -239,10 +257,11 @@ class _PlainIntentClient:
     def __init__(self) -> None:
         self._publisher = _AttachablePublisher()
         self.poll_calls: list[tuple[int, int]] = []
+        self.intent = types.SimpleNamespace(account_id="account-a")
 
     def poll_once(self, limit: int = 100, wait_ms: int = 0) -> int:
         self.poll_calls.append((limit, wait_ms))
-        self._publisher.publish("intent-1")
+        self._publisher.publish(self.intent)
         return 1
 
 
@@ -279,9 +298,13 @@ class _PlainProjection:
 class _RecordingMessageBus:
     def __init__(self) -> None:
         self.subscriptions: list[tuple[str, Any]] = []
+        self.published: list[tuple[str, Any]] = []
 
     def subscribe(self, topic: str, handler: Any) -> None:
         self.subscriptions.append((topic, handler))
+
+    def publish(self, topic: str, msg: Any) -> None:
+        self.published.append((topic, msg))
 
 
 @contextmanager
@@ -341,9 +364,17 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
         def __init__(self, config: Any) -> None:
             self.config = config
             self.trading_state_getter: Any = None
+            self.denial_reporter: Any = None
+            self.exchange_cancel_dependencies: Any = None
 
         def set_trading_state_getter(self, getter: Any) -> None:
             self.trading_state_getter = getter
+
+        def set_denial_reporter(self, reporter: Any) -> None:
+            self.denial_reporter = reporter
+
+        def set_exchange_cancel_adapter(self, adapter: Any, mirror: Any) -> None:
+            self.exchange_cancel_dependencies = (adapter, mirror)
 
     data_factory = object()
     exec_factory = object()
@@ -354,6 +385,11 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
     runtime_binance_config = types.ModuleType("runtime.binance_adapter_config")
     runtime_binance_config.build_binance_client_configs = lambda config: (_Config(), _Config())
     _install_module("runtime.binance_adapter_config", runtime_binance_config)
+    runtime_exchange_cancel = types.ModuleType("runtime.exchange_cancel_adapter")
+    runtime_exchange_cancel.BinanceExchangeCancelAdapter = _Config
+    runtime_exchange_cancel.ControlPlaneExchangeStateMirror = _Config
+    runtime_exchange_cancel.SignedBinanceTransport = _Config
+    _install_module("runtime.exchange_cancel_adapter", runtime_exchange_cancel)
     _install_module("strategy", types.ModuleType("strategy"))
     strategy_module = types.ModuleType("strategy.intent_execution_strategy")
     strategy_module.IntentExecutionStrategyConfig = IntentExecutionStrategyConfig

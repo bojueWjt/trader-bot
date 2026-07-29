@@ -255,6 +255,16 @@ def _intent(**overrides: Any) -> _Intent:
         "approved_at": NOW - timedelta(seconds=5),
     }
     values.update(overrides)
+    order_plan = dict(values["order_plan"])
+    order_plan.setdefault(
+        "authorization",
+        {
+            "authorized_by_type": "user",
+            "authorized_by_id": "planner-test",
+            "source_message_id": f"planner-test-{intent_id}",
+        },
+    )
+    values["order_plan"] = order_plan
     return _Intent(**values)
 
 
