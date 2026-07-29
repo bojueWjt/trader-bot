@@ -176,6 +176,28 @@ class NodeAppAssemblyTest(unittest.TestCase):
 
 
 class NautilusActorAdapterTest(unittest.TestCase):
+    def test_bulk_order_command_without_authorization_fails_closed(self) -> None:
+        from app.nautilus_actors import CommandPollerActor
+        from execution_domain.control_plane import (
+            CommandAckStatus,
+            CommandType,
+            NodeCommand,
+        )
+
+        actor = CommandPollerActor(
+            control_plane=object(),
+            lifecycle=types.SimpleNamespace(),
+            node_id="node-a",
+            account_id="account-a",
+        )
+
+        status, error = actor._apply(
+            NodeCommand(command_id="cmd-unauthorized", type=CommandType.CANCEL_ALL)
+        )
+
+        self.assertEqual(status, CommandAckStatus.FAILED)
+        self.assertEqual(error, "authorization_source_required")
+
     def test_intent_publisher_actor_polls_plain_client_and_publishes_to_account_topic(self) -> None:
         from app.nautilus_actors import IntentPublisherActor
 

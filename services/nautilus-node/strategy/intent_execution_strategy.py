@@ -323,6 +323,14 @@ class IntentExecutionStrategy(Strategy):
         """Execute operator cancel_all / close_all. Best-effort per item: a failure on
         one order/position is recorded but does not stop the rest (kill-switch must be
         as complete as possible)."""
+        if not _node_command_has_authorization(cmd):
+            self._record_denial(
+                OrderDenied(
+                    "authorization_source_required",
+                    "node command requires user or channel authorization",
+                )
+            )
+            return
         ctype = getattr(cmd, "type", cmd)
         ctype = str(getattr(ctype, "value", ctype))
         if ctype == "cancel_all":
@@ -2834,6 +2842,29 @@ def _valid_uuid_text(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _node_command_has_authorization(cmd: Any) -> bool:
+    args = getattr(cmd, "args", {})
+    if not isinstance(args, dict):
+        return False
+    authorization = args.get("authorization")
+    if not isinstance(authorization, dict):
+        return False
+    authorized_by_type = str(
+        authorization.get("authorized_by_type") or ""
+    ).strip()
+    authorized_by_id = str(
+        authorization.get("authorized_by_id") or ""
+    ).strip()
+    source_message_id = str(
+        authorization.get("source_message_id") or ""
+    ).strip()
+    return (
+        authorized_by_type in {"user", "channel"}
+        and bool(authorized_by_id)
+        and bool(source_message_id)
+    )
 
 
 def _management_parent_intent_id(plan: ManagementPlan) -> str:

@@ -34,3 +34,16 @@ Mount line added to both recreate scripts:
 
 (The recreate scripts themselves are not committed — they embed account API
 keys.)
+
+## binance_futures_execution.py
+
+Patched copy of Nautilus Trader 1.227.0
+`adapters/binance/futures/execution.py`. Its account bootstrap request used a
+hard-coded 5000 ms receive window. The patch uses the configured
+`recv_window_ms`, matching the common execution client and signed order paths.
+
+Mount it read-only at:
+
+```
+/usr/local/lib/python3.12/site-packages/nautilus_trader/adapters/binance/futures/execution.py
+```

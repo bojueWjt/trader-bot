@@ -81,14 +81,18 @@ def signed_get(base: str, path: str, key: str, sec: str, params: dict | None = N
             payload = json.loads(raw_text)
         except json.JSONDecodeError:
             payload = {}
-        code = payload.get("code", exc.code)
-        message = payload.get("msg", raw_text or exc.reason)
+        code = exc.code
+        message = raw_text or exc.reason
+        if isinstance(payload, dict):
+            code = payload.get("code", exc.code)
+            message = payload.get("msg", message)
         raise RuntimeError(f"Binance API {code}: {message}") from exc
 
 
 def slim_order(o: dict) -> dict:
     return {
         "symbol": o.get("symbol"),
+        "position_side": o.get("positionSide") or o.get("position_side"),
         "side": o.get("side"),
         "type": o.get("type") or o.get("orderType"),
         "quantity": o.get("origQty") or o.get("quantity"),

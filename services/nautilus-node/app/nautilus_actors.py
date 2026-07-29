@@ -416,6 +416,8 @@ class CommandPollerActor(Actor):
             elif cmd.type == CommandType.SET_REDUCING:
                 self._lifecycle.apply_operator_state(TradingState.REDUCING, "operator_command")
             elif cmd.type in (CommandType.CANCEL_ALL, CommandType.CLOSE_ALL):
+                if not _node_command_has_authorization(cmd):
+                    return CommandAckStatus.FAILED, "authorization_source_required"
                 # Only a Strategy may submit/cancel/close on Nautilus, so route the
                 # action to the IntentExecutionStrategy over the msgbus. Returns
                 # ACCEPTED (received + dispatched); the strategy executes best-effort.
@@ -444,3 +446,26 @@ def _first_attr(source: Any, names: tuple[str, ...]) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _node_command_has_authorization(cmd: Any) -> bool:
+    args = getattr(cmd, "args", {})
+    if not isinstance(args, dict):
+        return False
+    authorization = args.get("authorization")
+    if not isinstance(authorization, dict):
+        return False
+    authorized_by_type = str(
+        authorization.get("authorized_by_type") or ""
+    ).strip()
+    authorized_by_id = str(
+        authorization.get("authorized_by_id") or ""
+    ).strip()
+    source_message_id = str(
+        authorization.get("source_message_id") or ""
+    ).strip()
+    return (
+        authorized_by_type in {"user", "channel"}
+        and bool(authorized_by_id)
+        and bool(source_message_id)
+    )

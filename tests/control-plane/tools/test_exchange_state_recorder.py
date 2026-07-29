@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import hmac
 import io
 import sys
 import types
@@ -17,6 +19,21 @@ MODULE_PATH = (
 
 
 class ExchangeStateRecorderTest(unittest.TestCase):
+    def test_slim_order_preserves_hedge_position_side(self) -> None:
+        module = _load_module()
+
+        row = module.slim_order(
+            {
+                "symbol": "MUUSDT",
+                "positionSide": "LONG",
+                "side": "SELL",
+                "type": "STOP_MARKET",
+                "algoId": 770,
+            }
+        )
+
+        self.assertEqual(row["position_side"], "LONG")
+
     def test_signed_get_includes_extended_recv_window(self) -> None:
         module = _load_module()
         response = io.BytesIO(b"{}")
@@ -37,9 +54,18 @@ class ExchangeStateRecorderTest(unittest.TestCase):
         query = module.urllib.parse.parse_qs(
             module.urllib.parse.urlsplit(request.full_url).query
         )
+        unsigned_query, signature = (
+            module.urllib.parse.urlsplit(request.full_url)
+            .query.rsplit("&signature=", 1)
+        )
+        expected_signature = hmac.new(
+            b"api-secret",
+            unsigned_query.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
         self.assertEqual(query["recvWindow"], ["30000"])
         self.assertEqual(query["timestamp"], ["1700000000000"])
-        self.assertIn("signature", query)
+        self.assertEqual(signature, expected_signature)
 
     def test_signed_get_reports_binance_error_code_and_message(self) -> None:
         module = _load_module()
@@ -57,6 +83,28 @@ class ExchangeStateRecorderTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError,
                 r"Binance API -1021: Timestamp .* recvWindow",
+            ):
+                module.signed_get(
+                    "https://fapi.binance.com",
+                    "/fapi/v1/openOrders",
+                    "api-key",
+                    "api-secret",
+                )
+
+    def test_signed_get_preserves_non_object_json_error_body(self) -> None:
+        module = _load_module()
+        error = HTTPError(
+            "https://fapi.binance.com/fapi/v1/openOrders",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'["unexpected", "shape"]'),
+        )
+
+        with patch.object(module.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r'Binance API 400: \["unexpected", "shape"\]',
             ):
                 module.signed_get(
                     "https://fapi.binance.com",

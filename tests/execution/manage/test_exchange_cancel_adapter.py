@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import hmac
 import sys
 import unittest
 from io import BytesIO
@@ -260,9 +262,18 @@ class SignedBinanceTransportTest(unittest.TestCase):
         query = EXCHANGE_CANCEL_ADAPTER.urllib.parse.parse_qs(
             EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(request.full_url).query
         )
+        unsigned_query, signature = (
+            EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(request.full_url)
+            .query.rsplit("&signature=", 1)
+        )
+        expected_signature = hmac.new(
+            b"api-secret",
+            unsigned_query.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
         self.assertEqual(query["recvWindow"], ["30000"])
         self.assertEqual(query["timestamp"], ["1700000000000"])
-        self.assertIn("signature", query)
+        self.assertEqual(signature, expected_signature)
 
 
 class _ScriptedTransport:

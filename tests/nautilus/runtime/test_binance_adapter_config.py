@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import types
 import unittest
@@ -14,12 +15,55 @@ SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 MODULE_PATH = (
     SERVICE_ROOT / "runtime" / "binance_adapter_config.py"
 )
+FUTURES_PATCH_PATH = REPO_ROOT / "container-patches" / "binance_futures_execution.py"
 sys.path.insert(0, str(SERVICE_ROOT))
 
 
-class _CapturedConfig:
-    def __init__(self, **kwargs: object) -> None:
-        self.kwargs = kwargs
+class _CapturedDataConfig:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        api_secret: str,
+        account_type: object,
+        environment: object,
+        instrument_provider: object,
+    ) -> None:
+        self.kwargs = {
+            "api_key": api_key,
+            "api_secret": api_secret,
+            "account_type": account_type,
+            "environment": environment,
+            "instrument_provider": instrument_provider,
+        }
+
+
+class _CapturedExecConfig(_CapturedDataConfig):
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        api_secret: str,
+        account_type: object,
+        environment: object,
+        instrument_provider: object,
+        use_reduce_only: bool,
+        recv_window_ms: int,
+    ) -> None:
+        super().__init__(
+            api_key=api_key,
+            api_secret=api_secret,
+            account_type=account_type,
+            environment=environment,
+            instrument_provider=instrument_provider,
+        )
+        self.kwargs["use_reduce_only"] = use_reduce_only
+        self.kwargs["recv_window_ms"] = recv_window_ms
+
+
+class _CapturedProviderConfig:
+    def __init__(self, *, load_all: bool) -> None:
+        self.kwargs = {"load_all": load_all}
 
 
 class _BinanceAccountType:
@@ -50,6 +94,21 @@ class BinanceAdapterConfigTest(unittest.TestCase):
 
         self.assertEqual(exec_config.kwargs["recv_window_ms"], 30_000)
 
+    def test_futures_account_initialization_uses_configured_recv_window(self) -> None:
+        source = FUTURES_PATCH_PATH.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            source,
+            re.compile(
+                r"query_futures_account_info\(\s*"
+                r"recv_window=str\(self\._recv_window\)\s*\)"
+            ),
+        )
+        self.assertNotIn(
+            "query_futures_account_info(recv_window=str(5000))",
+            source,
+        )
+
 
 def _fake_nautilus_modules() -> dict[str, types.ModuleType]:
     modules: dict[str, types.ModuleType] = {}
@@ -66,9 +125,9 @@ def _fake_nautilus_modules() -> dict[str, types.ModuleType]:
     enums.BinanceAccountType = _BinanceAccountType
     enums.BinanceEnvironment = _BinanceEnvironment
     config = modules["nautilus_trader.adapters.binance.config"]
-    config.BinanceDataClientConfig = _CapturedConfig
-    config.BinanceExecClientConfig = _CapturedConfig
-    config.BinanceInstrumentProviderConfig = _CapturedConfig
+    config.BinanceDataClientConfig = _CapturedDataConfig
+    config.BinanceExecClientConfig = _CapturedExecConfig
+    config.BinanceInstrumentProviderConfig = _CapturedProviderConfig
     return modules
 
 

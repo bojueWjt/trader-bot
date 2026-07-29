@@ -35,6 +35,41 @@ NOW = datetime(2026, 7, 29, 12, 30, tzinfo=timezone.utc)
 
 
 class TakeProfitTombstoneTest(unittest.TestCase):
+    def test_node_cancel_all_requires_user_or_channel_authorization(self) -> None:
+        strategy = _Strategy(
+            Path(tempfile.mkdtemp()),
+            orders=_live_protection_orders(),
+        )
+        strategy.cache = SimpleNamespace(orders_open=lambda: strategy._orders)
+
+        strategy._on_node_command(
+            SimpleNamespace(type="cancel_all", args={})
+        )
+
+        self.assertEqual(strategy.cancelled_client_order_ids, [])
+
+    def test_authorized_node_cancel_all_executes(self) -> None:
+        strategy = _Strategy(
+            Path(tempfile.mkdtemp()),
+            orders=_live_protection_orders(),
+        )
+        strategy.cache = SimpleNamespace(orders_open=lambda: strategy._orders)
+
+        strategy._on_node_command(
+            SimpleNamespace(
+                type="cancel_all",
+                args={
+                    "authorization": {
+                        "authorized_by_type": "user",
+                        "authorized_by_id": "risk_admin",
+                        "source_message_id": "operator-command-42",
+                    }
+                },
+            )
+        )
+
+        self.assertTrue(strategy.cancelled_client_order_ids)
+
     def test_authorized_empty_replace_plans_tp_only_cancellation(self) -> None:
         intent = _intent(
             action="replace_take_profits",
