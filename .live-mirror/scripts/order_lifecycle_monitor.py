@@ -72,8 +72,8 @@ NAKED_GRACE_SECONDS = 180
 PENDING_CANCEL_TIMEOUT_MINUTES = float(
     os.environ.get("PENDING_CANCEL_TIMEOUT_MINUTES", "10")
 )
-# 撤单丢失是存量债:2026-07 有 42 张 07-06~07-20 的单永远等不到终态事件
-# (交易所侧早已消失,只是事件流缺终态)。无回看窗时它们每 24h 全体重播一次。
+# 查询窗口限制每轮扫描量。进入本地台账的未解决撤单会跨越窗口持续保留,
+# 直到终态事件或 fresh 交易所镜像完成判定。
 PENDING_CANCEL_LOOKBACK_HOURS = float(
     os.environ.get("PENDING_CANCEL_LOOKBACK_HOURS", "48")
 )
@@ -790,7 +790,8 @@ def sweep_ttl(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
                 f"订单生命周期管理:系统挂单 {cid}({symbol},挂出已 {float(age_h):.1f} 小时,"
                 f"超过 {ORDER_TTL_HOURS:.0f} 小时有效期)。{stage}。\n"
                 f"撤销命令: python3 /srv/hermes/profiles/trader/skills/trading/v3-trader/scripts/v3_trade.py "
-                f"cancel {symbol} --order {cid} --reason '48h超龄撤单' --ref ttl-{cid[-8:]}\n"
+                f"cancel {symbol} --account {account_id} --order {cid} "
+                f"--reason '48h超龄撤单' --ref ttl-{cid[-8:]}\n"
                 f"最终用口语化短消息(1~3行)告知用户你的决定和依据。"
             )
             if wake_hermes(prompt, name=f"ttl-{cid[-8:]}", dry_run=dry_run) and not dry_run:
@@ -1044,7 +1045,9 @@ def sweep_naked(state: dict, dry_run: bool, now_ts: float | None = None) -> None
             f"⚠️ 裸仓检测:{account_id} 的 {symbol} {position_side} 仓位 "
             f"{position_quantities[(account_id, symbol, position_side)]:g} "
             "没有足量且有效的在场 STOP 止损单。"
-            f"请立刻查询该品种持仓与挂单,若确认裸仓,按最近相关信号的止损价用 set-sl 补上"
+            f"请立刻查询该品种持仓与挂单。若确认裸仓,调用 v3_trade.py "
+            f"set-sl {symbol} --account {account_id} --side {position_side} 时,"
+            f"按最近相关信号的止损价补上"
             f"(找不到依据就通知用户手动处理),并用口语化短消息告知用户现状与你的动作。"
         )
         name = f"naked-{account_id}-{symbol}-{position_side}"
@@ -1152,24 +1155,20 @@ def sweep_pending_cancels(
             "terminal_type": str(terminal_type or ""),
         }
 
-    lookback_seconds = PENDING_CANCEL_LOOKBACK_HOURS * 3600
     for key, value in list(state.items()):
         if not key.startswith("pendingcancel:") or key in records:
             continue
         if not isinstance(value, dict):
             state.pop(key, None)
             continue
-        # 掉出查询结果的条目此前会被无条件复活,于是超出回看窗的存量债
-        # 靠状态文件永生。已判定完毕或已超窗的一律清掉。
         if value.get("resolved"):
-            state.pop(key, None)
-            continue
-        if now_ts - float(value.get("pending_at") or now_ts) >= lookback_seconds:
             state.pop(key, None)
             continue
         account_id = str(value.get("account_id") or "")
         cid = str(value.get("client_order_id") or "")
         if account_id and cid:
+            # DB 查询窗口只负责发现新事件。未解决台账必须持续参与 fresh
+            # 镜像判定,否则 stale/查询失败会让 48h 淘汰时钟静默删除活风险。
             records[key] = {"entry": value, "terminal_type": ""}
         else:
             state.pop(key, None)

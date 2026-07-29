@@ -305,6 +305,85 @@ def test_recent_fill_grace_is_scoped_to_account_symbol_and_position_side():
     ]
 
 
+def test_naked_account_b_prompt_requires_account_and_position_side(monkeypatch):
+    module = _load_monitor()
+    prompts = []
+    mirror = _mirror_row(
+        "account-b",
+        [_position("ETHUSDT", "LONG", "2.5")],
+    )
+
+    def fake_q(sql):
+        if "exchange_state_mirror" in sql:
+            return [mirror]
+        if "OrderFilled" in sql:
+            return []
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(module, "q", fake_q)
+    monkeypatch.setattr(
+        module,
+        "wake_hermes",
+        lambda prompt, name, dry_run: prompts.append(prompt) or True,
+    )
+
+    module.sweep_naked({}, dry_run=False, now_ts=1_000)
+
+    assert len(prompts) == 1
+    assert "set-sl ETHUSDT" in prompts[0]
+    assert "--account account-b" in prompts[0]
+    assert "--side long" in prompts[0]
+
+
+def test_ttl_wake_and_exhausted_prompts_preserve_account_b(monkeypatch):
+    module = _load_monitor()
+    wake_cid = "B" + "a" * 32 + "01"
+    exhausted_cid = "B" + "b" * 32 + "02"
+    prompts = []
+    rows = [
+        [wake_cid, "account-b", "BTCUSDT-PERP", "49"],
+        [exhausted_cid, "account-b", "ETHUSDT-PERP", "97"],
+    ]
+
+    def fake_q(sql):
+        if "FROM orders_projection" in sql:
+            return rows
+        if "FROM trade_intents" in sql:
+            return [
+                [module.intent_uuid_of(wake_cid), "open_position"],
+                [module.intent_uuid_of(exhausted_cid), "open_position"],
+            ]
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(module, "q", fake_q)
+    monkeypatch.setattr(
+        module,
+        "_exchange_open_order_ids",
+        lambda: {"account-b": {wake_cid, exhausted_cid}},
+    )
+    monkeypatch.setattr(
+        module,
+        "wake_hermes",
+        lambda prompt, name, dry_run: prompts.append(prompt) or True,
+    )
+    state = {
+        f"ttl:{exhausted_cid}": {"renewals": 1},
+    }
+
+    module.sweep_ttl(state, dry_run=False, now_ts=1_000)
+
+    assert len(prompts) == 2
+    assert (
+        f"cancel BTCUSDT --account account-b --order {wake_cid}"
+        in prompts[0]
+    )
+    assert (
+        f"cancel ETHUSDT --account account-b --order {exhausted_cid}"
+        in prompts[1]
+    )
+    assert "不可再续" in prompts[1]
+
+
 def _pending_cancel_q(mirror_row, terminal_type=""):
     def fake_q(sql):
         if "OrderPendingCancel" in sql:
@@ -439,15 +518,18 @@ def test_still_open_order_keeps_realerting_after_dedup(monkeypatch):
     assert all("仍挂着" in text for text in sent)
 
 
-def test_state_entry_beyond_lookback_is_purged_not_resurrected(monkeypatch):
-    """掉出查询窗的存量条目此前靠状态文件永生,每 24h 全体重播。"""
+def test_still_open_beyond_lookback_is_retained_and_replayed_daily(monkeypatch):
     module = _load_monitor()
     sent = []
-    mirror = _mirror_row("account-a", [])
+    mirror = _mirror_row(
+        "account-a",
+        [],
+        open_orders=[{"client_order_id": "ancient", "symbol": "BTCUSDT"}],
+    )
 
     def fake_q(sql):
         if "OrderPendingCancel" in sql:
-            return []  # 已超出回看窗,DB 不再返回
+            return []
         if "exchange_state_mirror" in sql:
             return [mirror]
         raise AssertionError(sql)
@@ -455,17 +537,101 @@ def test_state_entry_beyond_lookback_is_purged_not_resurrected(monkeypatch):
     monkeypatch.setattr(module, "q", fake_q)
     monkeypatch.setattr(module, "tg_send_direct", lambda text: sent.append(text) or True)
 
-    ancient = module.PENDING_CANCEL_LOOKBACK_HOURS * 3600 + 3600
+    pending_at = 1_000.0
+    first_replay_at = (
+        pending_at
+        + module.PENDING_CANCEL_LOOKBACK_HOURS * 3600
+        + module.ALERT_DEDUP_SECONDS
+        + 1
+    )
     state = {
         "pendingcancel:account-a:ancient": {
             "account_id": "account-a",
             "client_order_id": "ancient",
             "event_id": "old-event",
-            "pending_at": 1000.0,
+            "pending_at": pending_at,
+            "last_outcome": "still_open",
+            "last_alert_at": first_replay_at - module.ALERT_DEDUP_SECONDS - 1,
         },
     }
 
-    module.sweep_pending_cancels(state, dry_run=False, now_ts=1000.0 + ancient)
+    module.sweep_pending_cancels(state, dry_run=False, now_ts=first_replay_at)
+    module.sweep_pending_cancels(
+        state,
+        dry_run=False,
+        now_ts=first_replay_at + module.ALERT_DEDUP_SECONDS - 1,
+    )
+    module.sweep_pending_cancels(
+        state,
+        dry_run=False,
+        now_ts=first_replay_at + module.ALERT_DEDUP_SECONDS + 1,
+    )
+
+    assert len(sent) == 2
+    assert all("仍挂着" in text for text in sent)
+    assert "pendingcancel:account-a:ancient" in state
+    assert not state["pendingcancel:account-a:ancient"].get("resolved")
+
+
+def test_pending_cancel_beyond_lookback_survives_stale_mirror(monkeypatch):
+    module = _load_monitor()
+    sent = []
+    stale_age = str(module.MIRROR_MAX_AGE_SECONDS + 1)
+    mirror = _mirror_row("account-a", [], age=stale_age)
+
+    def fake_q(sql):
+        if "OrderPendingCancel" in sql:
+            return []
+        if "exchange_state_mirror" in sql:
+            return [mirror]
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(module, "q", fake_q)
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: sent.append(text) or True)
+    key = "pendingcancel:account-a:ancient"
+    entry = {
+        "account_id": "account-a",
+        "client_order_id": "ancient",
+        "event_id": "old-event",
+        "pending_at": 1_000.0,
+        "last_outcome": "still_open",
+        "last_alert_at": 2_000.0,
+    }
+    state = {key: dict(entry)}
+    now_ts = 1_000.0 + module.PENDING_CANCEL_LOOKBACK_HOURS * 3600 + 1
+
+    module.sweep_pending_cancels(state, dry_run=False, now_ts=now_ts)
 
     assert sent == []
-    assert "pendingcancel:account-a:ancient" not in state
+    assert state[key] == entry
+
+
+def test_pending_cancel_beyond_lookback_survives_mirror_query_failure(monkeypatch):
+    module = _load_monitor()
+    sent = []
+
+    def fake_q(sql):
+        if "OrderPendingCancel" in sql:
+            return []
+        if "exchange_state_mirror" in sql:
+            raise RuntimeError("mirror unavailable")
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(module, "q", fake_q)
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: sent.append(text) or True)
+    key = "pendingcancel:account-b:ancient"
+    entry = {
+        "account_id": "account-b",
+        "client_order_id": "ancient",
+        "event_id": "old-event",
+        "pending_at": 1_000.0,
+        "last_outcome": "still_open",
+        "last_alert_at": 2_000.0,
+    }
+    state = {key: dict(entry)}
+    now_ts = 1_000.0 + module.PENDING_CANCEL_LOOKBACK_HOURS * 3600 + 1
+
+    module.sweep_pending_cancels(state, dry_run=False, now_ts=now_ts)
+
+    assert sent == []
+    assert state[key] == entry
