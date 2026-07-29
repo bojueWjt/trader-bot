@@ -753,8 +753,43 @@ PY
     cd "$T/services/report"
     "$T/.venv-report/bin/python" - <<'PY'
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 import report_service
+
+
+def count_raw_mirror_positions(rows):
+    count = 0
+    for account_id, payload, _updated_at in rows:
+        if not isinstance(payload, dict):
+            raise SystemExit(
+                f"exchange mirror payload is invalid: account={account_id}"
+            )
+        raw_positions = payload.get("positions")
+        if not isinstance(raw_positions, list):
+            raise SystemExit(
+                f"exchange mirror positions are invalid: account={account_id}"
+            )
+        for item in raw_positions:
+            if not isinstance(item, dict):
+                raise SystemExit(
+                    f"exchange mirror position is invalid: account={account_id}"
+                )
+            raw_quantity = item.get(
+                "position_amt",
+                item.get("quantity", item.get("qty")),
+            )
+            try:
+                quantity = Decimal(str(raw_quantity))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise SystemExit(
+                    f"exchange mirror quantity is invalid: "
+                    f"account={account_id} value={raw_quantity!r}"
+                ) from exc
+            if quantity != 0:
+                count += 1
+    return count
+
 
 report_date = datetime.now(timezone.utc).date().isoformat()
 for report_type in ("daily", "weekly"):
@@ -804,16 +839,9 @@ for report_type in ("daily", "weekly"):
             )
             mirror_rows = source_cur.fetchall()
             if mirror_rows:
-                source_positions = []
-                for account_id, payload, updated_at in mirror_rows:
-                    source_positions.extend(
-                        report_service.normalize_position_payload(
-                            payload,
-                            account_id,
-                            updated_at,
-                        )
-                    )
-                source_position_count = len(source_positions)
+                source_position_count = count_raw_mirror_positions(
+                    mirror_rows
+                )
             else:
                 source_cur.execute(
                     """

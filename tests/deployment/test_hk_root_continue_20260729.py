@@ -322,6 +322,48 @@ class RootContinue20260729Test(unittest.TestCase):
         self.assertLess(final_node_b, success)
         self.assertIn("Trading remains HALTED", text)
 
+    def test_raw_mirror_position_count_is_independent(self):
+        text = self.script_text()
+        function_start = text.index("def count_raw_mirror_positions(rows):")
+        function_end = text.index("\n\nreport_date =", function_start)
+        function_text = text[function_start:function_end]
+        namespace = {}
+        exec(
+            "from decimal import Decimal, InvalidOperation\n"
+            f"{function_text}",
+            namespace,
+        )
+        count_positions = namespace["count_raw_mirror_positions"]
+        rows = [
+            (
+                "account-a",
+                {
+                    "positions": [
+                        {"position_amt": "1.25"},
+                        {"position_amt": "0"},
+                    ]
+                },
+                "2026-07-29T00:00:00Z",
+            ),
+            (
+                "account-b",
+                {"positions": [{"quantity": "-2"}]},
+                "2026-07-29T00:00:00Z",
+            ),
+        ]
+
+        self.assertEqual(count_positions(rows), 2)
+        with self.assertRaises(SystemExit):
+            count_positions(
+                [
+                    (
+                        "account-a",
+                        {"positions": [{"position_amt": "invalid"}]},
+                        "2026-07-29T00:00:00Z",
+                    )
+                ]
+            )
+
     def test_errors_and_signals_stop_both_nodes(self):
         text = self.script_text()
 
