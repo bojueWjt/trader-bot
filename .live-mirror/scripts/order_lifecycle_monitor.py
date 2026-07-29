@@ -150,6 +150,7 @@ def is_protection_order(client_order_id: str) -> bool:
 
 
 ENTRY_INTENT_ACTIONS = {"open_position", "add_position"}
+AUTHORIZED_BY_TYPES = {"user", "channel"}
 
 
 def ttl_decision(client_order_id: str, age_hours: float, renewals: int,
@@ -179,6 +180,203 @@ def intent_uuid_of(client_order_id: str) -> str | None:
         return None
     h = client_order_id[1:33]
     return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def _intent_authorization(
+    order_plan: dict,
+    current_intent_id: str,
+    account_id: str,
+) -> dict:
+    persisted = order_plan.get("authorization")
+    if not isinstance(persisted, dict):
+        return {}
+    normalized_current_intent_id = str(current_intent_id or "").strip()
+    persisted_parent_intent_id = str(
+        persisted.get("parent_intent_id") or ""
+    ).strip()
+    effective_parent_intent_id = (
+        persisted_parent_intent_id or normalized_current_intent_id
+    )
+    return {
+        "parent_intent_id": effective_parent_intent_id,
+        "current_intent_id": normalized_current_intent_id,
+        "account_id": str(account_id or "").strip(),
+        "source_message_id": str(
+            persisted.get("source_message_id") or ""
+        ).strip(),
+        "authorized_by_type": str(
+            persisted.get("authorized_by_type") or ""
+        ).strip().lower(),
+        "authorized_by_id": str(
+            persisted.get("authorized_by_id") or ""
+        ).strip(),
+    }
+
+
+def _has_complete_authorization(authorization: dict | None) -> bool:
+    if not isinstance(authorization, dict):
+        return False
+    parent_intent_id = str(authorization.get("parent_intent_id") or "").strip()
+    source_message_id = str(authorization.get("source_message_id") or "").strip()
+    authorized_by_id = str(authorization.get("authorized_by_id") or "").strip()
+    authorized_by_type = str(
+        authorization.get("authorized_by_type") or ""
+    ).strip().lower()
+    return bool(
+        parent_intent_id
+        and source_message_id
+        and authorized_by_id
+        and authorized_by_type in AUTHORIZED_BY_TYPES
+    )
+
+
+def _authorization_prompt(authorization: dict) -> str:
+    parent_intent_id = authorization["parent_intent_id"]
+    source_message_id = authorization["source_message_id"]
+    authorized_by_type = authorization["authorized_by_type"]
+    authorized_by_id = authorization["authorized_by_id"]
+    account_id = str(authorization.get("account_id") or "").strip()
+    channel_id = "operator"
+    if authorized_by_type == "channel":
+        channel_id = authorized_by_id
+    return (
+        "\n授权依据:"
+        f" parent_intent_id={parent_intent_id},"
+        f" source_message_id={source_message_id},"
+        f" authorized_by_type={authorized_by_type},"
+        f" authorized_by_id={authorized_by_id}。"
+        "任何订单管理命令必须携带:"
+        f" --account {account_id}"
+        f" --channel {channel_id}"
+        f" --entry-ref {source_message_id}"
+        f" --authorized-by-type {authorized_by_type}"
+        f" --authorized-by-id {authorized_by_id}"
+        f" --source-message-id {source_message_id}"
+        " --created-by-service order-lifecycle-monitor"
+        f" --parent-intent-id {parent_intent_id}。"
+    )
+
+
+def wake_authorized_management(
+    prompt: str,
+    name: str,
+    dry_run: bool,
+    authorization: dict | None,
+) -> bool:
+    """Wake Hermes for an order-writing workflow only with complete provenance."""
+    if not _has_complete_authorization(authorization):
+        log(f"management wake blocked: {name} missing complete authorization")
+        return False
+    return wake_hermes(
+        prompt + _authorization_prompt(authorization),
+        name=name,
+        dry_run=dry_run,
+    )
+
+
+def _send_read_only_alert(
+    state: dict,
+    key: str,
+    text: str,
+    dry_run: bool,
+    now_ts: float,
+) -> bool:
+    last_alert = float(state.get(key) or 0)
+    if last_alert and now_ts - last_alert < ALERT_DEDUP_SECONDS:
+        return False
+    alert = text + " 监控已降级为只读告警，订单管理保持冻结。"
+    if dry_run:
+        log(f"DRY-RUN would send read-only alert: {alert}")
+        return True
+    if not tg_send_direct(alert):
+        return False
+    state[key] = now_ts
+    return True
+
+
+def _load_intent_contexts(intent_ids: set[str]) -> dict[str, dict]:
+    if not intent_ids:
+        return {}
+    placeholders = ",".join(f"'{intent_id}'" for intent_id in sorted(intent_ids))
+    rows = q(
+        "SELECT ti.intent_id::text, ti.action::text, ti.account_id, "
+        "ti.instrument_id, ti.order_plan::text "
+        "FROM trade_intents ti "
+        f"WHERE ti.intent_id::text IN ({placeholders})"
+    )
+    contexts: dict[str, dict] = {}
+    for row in rows:
+        if len(row) < 5:
+            continue
+        (
+            intent_id,
+            action,
+            account_id,
+            instrument_id,
+            plan_raw,
+        ) = row[:5]
+        try:
+            plan = json.loads(plan_raw)
+        except (TypeError, ValueError):
+            plan = {}
+        if not isinstance(plan, dict):
+            plan = {}
+        contexts[intent_id] = {
+            "action": action,
+            "account_id": account_id,
+            "instrument_id": instrument_id,
+            "order_plan": plan,
+            "authorization": _intent_authorization(
+                plan,
+                intent_id,
+                account_id,
+            ),
+        }
+    return contexts
+
+
+def _position_parent_authorizations(
+    position_keys: set[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], dict]:
+    if not position_keys:
+        return {}
+    rows = q(
+        "SELECT ti.intent_id::text, ti.account_id, ti.instrument_id, "
+        "ti.order_plan::text "
+        "FROM trade_intents ti "
+        "WHERE ti.status='approved' "
+        "AND ti.action::text IN ('open_position','add_position') "
+        "ORDER BY ti.approved_at DESC, ti.created_at DESC"
+    )
+    authorizations: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        if len(row) < 4:
+            continue
+        (
+            intent_id,
+            account_id,
+            instrument_id,
+            plan_raw,
+        ) = row[:4]
+        symbol = _normalize_symbol(instrument_id)
+        try:
+            plan = json.loads(plan_raw)
+        except (TypeError, ValueError):
+            plan = {}
+        if not isinstance(plan, dict):
+            plan = {}
+        position_side = _position_side(plan.get("side"))
+        key = (account_id, symbol or "", position_side or "")
+        if key not in position_keys or key in authorizations:
+            continue
+        authorization = _intent_authorization(
+            plan,
+            intent_id,
+            account_id,
+        )
+        if _has_complete_authorization(authorization):
+            authorizations[key] = authorization
+    return authorizations
 
 
 def mark_price(symbol: str, fetch=None) -> float | None:
@@ -752,14 +950,7 @@ def sweep_ttl(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
     )
     exchange_ids = _exchange_open_order_ids()
     uuids = sorted({u for u in (intent_uuid_of(r[0]) for r in rows) if u})
-    actions: dict[str, str] = {}
-    if uuids:
-        placeholders = ",".join(f"'{u}'" for u in uuids)
-        for iid_, act_ in q(
-            f"SELECT intent_id::text, action::text FROM trade_intents "
-            f"WHERE intent_id::text IN ({placeholders})"
-        ):
-            actions[iid_] = act_
+    contexts = _load_intent_contexts(set(uuids))
     for cid, account_id, instrument_id, age_h in rows:
         try:
             live_ids = exchange_ids.get(account_id)
@@ -771,7 +962,8 @@ def sweep_ttl(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
                 continue
             renew_key = f"ttl:{cid}"
             entry = state.get(renew_key) or {}
-            intent_action = actions.get(intent_uuid_of(cid) or "", "")
+            context = contexts.get(intent_uuid_of(cid) or "", {})
+            intent_action = str(context.get("action") or "")
             decision = ttl_decision(cid, float(age_h), int(entry.get("renewals", 0)),
                                     intent_action=intent_action)
             if decision == "skip":
@@ -784,6 +976,20 @@ def sweep_ttl(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
                 if decision != "exhausted" or now_ts - last_wake < EXHAUSTED_REWAKE_SECONDS:
                     continue
             symbol = instrument_id.split("-")[0]
+            authorization = context.get("authorization")
+            if not _has_complete_authorization(authorization):
+                _send_read_only_alert(
+                    state,
+                    f"authalert:ttl:{cid}",
+                    (
+                        f"订单生命周期告警:{account_id} 的 {symbol} 挂单 {cid} "
+                        f"已超出 {ORDER_TTL_HOURS:.0f} 小时有效期，"
+                        "缺少完整用户或频道父授权，需人工确认处理"
+                    ),
+                    dry_run,
+                    now_ts,
+                )
+                continue
             stage = "已续期一次后再次超龄,不可再续,请直接撤销" if decision == "exhausted" else \
                     "默认应撤销;仅当你判断原信号仍有效时可续期一次(在回复里明确说明'续期')"
             prompt = (
@@ -794,7 +1000,12 @@ def sweep_ttl(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
                 f"--reason '48h超龄撤单' --ref ttl-{cid[-8:]}\n"
                 f"最终用口语化短消息(1~3行)告知用户你的决定和依据。"
             )
-            if wake_hermes(prompt, name=f"ttl-{cid[-8:]}", dry_run=dry_run) and not dry_run:
+            if wake_authorized_management(
+                prompt,
+                name=f"ttl-{cid[-8:]}",
+                dry_run=dry_run,
+                authorization=authorization,
+            ) and not dry_run:
                 state[woken_key] = now_ts
                 if decision == "wake":
                     # Hermes may cancel (order disappears) or keep it (= renewal).
@@ -836,33 +1047,25 @@ def protection_level_from_plan(order_plan: dict, action: str, seq: int):
 
 def _live_protection_rows() -> list[dict]:
     rows = q(
-        "SELECT o.client_order_id, o.instrument_id FROM orders_projection o "
+        "SELECT o.client_order_id, o.account_id, o.instrument_id "
+        "FROM orders_projection o "
         "WHERE o.status IN ('accepted','partially_filled')"
     )
     candidates = []
-    for cid, instrument_id in rows:
+    for cid, account_id, instrument_id in rows:
         seq = id_sequence(cid)
         if seq is None:
             continue
-        candidates.append((cid, instrument_id, seq))
+        candidates.append((cid, account_id, instrument_id, seq))
     uuids = sorted({intent_uuid_of(c[0]) for c in candidates if intent_uuid_of(c[0])})
-    plans: dict[str, tuple[str, dict]] = {}
-    if uuids:
-        placeholders = ",".join(f"'{u}'" for u in uuids)
-        for iid_, act_, plan_json in q(
-            f"SELECT intent_id::text, action::text, order_plan::text FROM trade_intents "
-            f"WHERE intent_id::text IN ({placeholders})"
-        ):
-            try:
-                plans[iid_] = (act_, json.loads(plan_json))
-            except ValueError:
-                continue
+    contexts = _load_intent_contexts(set(uuids))
     result = []
-    for cid, instrument_id, seq in candidates:
-        act_plan = plans.get(intent_uuid_of(cid) or "")
-        if act_plan is None:
+    for cid, account_id, instrument_id, seq in candidates:
+        context = contexts.get(intent_uuid_of(cid) or "")
+        if context is None:
             continue
-        action, plan = act_plan
+        action = context["action"]
+        plan = context["order_plan"]
         # protection roles: revision-scheme ids, or management-intent SL/TP ids
         if seq < 11 and action not in ("move_stop_loss", "move_stop_to_entry",
                                        "replace_take_profits"):
@@ -876,9 +1079,11 @@ def _live_protection_rows() -> list[dict]:
         )
         result.append({
             "client_order_id": cid,
+            "account_id": account_id,
             "symbol": instrument_id.split("-")[0],
             "price": price,
             "is_stop_loss": is_sl,
+            "authorization": context.get("authorization"),
         })
     return result
 
@@ -914,14 +1119,32 @@ def sweep_price_alerts(state: dict, dry_run: bool, fetch=None, now_ts: float | N
         for order in symbol_orders:
             for event in alert_events(order, mark, now_ts, state):
                 level_cn = "已接近" if event["level"] == "approach" else "已触及"
+                authorization = order.get("authorization")
+                if not _has_complete_authorization(authorization):
+                    _send_read_only_alert(
+                        state,
+                        f"authalert:{event['key']}",
+                        (
+                            f"价格监控告警:{order.get('account_id') or '?'} 的 {symbol} "
+                            f"现价 {mark}，{level_cn}保护单价位 {order['price']}，"
+                            "该保护单缺少完整用户或频道父授权"
+                        ),
+                        dry_run,
+                        now_ts,
+                    )
+                    continue
                 prompt = (
                     f"价格监控告警:{symbol} 现价 {mark},{level_cn}保护单价位 "
                     f"{order['price']}(订单 {order['client_order_id'][-8:]})。\n"
                     f"请查询该品种当前持仓与挂单状态,按原信号计划判断是否需要订单管理"
                     f"(减仓/移动止损/等待),并用口语化短消息(2~3行)把现状和你的动作告知用户。"
                 )
-                if wake_hermes(prompt, name=f"palert-{order['client_order_id'][-8:]}-{event['level']}",
-                               dry_run=dry_run) and not dry_run:
+                if wake_authorized_management(
+                    prompt,
+                    name=f"palert-{order['client_order_id'][-8:]}-{event['level']}",
+                    dry_run=dry_run,
+                    authorization=authorization,
+                ) and not dry_run:
                     state[event["key"]] = now_ts
 
 
@@ -930,12 +1153,19 @@ def sweep_fill_alerts(state: dict, dry_run: bool, now_ts: float | None = None) -
     notify immediately (per-order dedupe), independent of price polling."""
     now_ts = now_ts or time.time()
     rows = q(
-        "SELECT client_order_id, payload->>'instrument_id', payload->>'last_qty', "
-        "payload->>'last_px' FROM execution_events "
+        "SELECT client_order_id, account_id, payload->>'instrument_id', "
+        "payload->>'last_qty', payload->>'last_px' "
+        "FROM execution_events "
         "WHERE event_type='OrderFilled' AND ts_event > now() - interval '15 minutes' "
         "AND client_order_id IS NOT NULL"
     )
-    for cid, instrument_id, last_qty, last_px in rows:
+    intent_ids = {
+        intent_id
+        for intent_id in (intent_uuid_of(row[0]) for row in rows)
+        if intent_id
+    }
+    contexts = _load_intent_contexts(intent_ids)
+    for cid, account_id, instrument_id, last_qty, last_px in rows:
         try:
             if not is_protection_order(cid):
                 continue
@@ -943,13 +1173,33 @@ def sweep_fill_alerts(state: dict, dry_run: bool, now_ts: float | None = None) -
             if state.get(key):
                 continue
             symbol = (instrument_id or "").split("-")[0] or "?"
+            context = contexts.get(intent_uuid_of(cid) or "", {})
+            authorization = context.get("authorization")
+            if not _has_complete_authorization(authorization):
+                _send_read_only_alert(
+                    state,
+                    f"authalert:{key}",
+                    (
+                        f"保护单成交告警:{account_id} 的 {symbol} 保护单 {cid} "
+                        f"刚成交 {last_qty} @ {last_px}，"
+                        "该保护单缺少完整用户或频道父授权"
+                    ),
+                    dry_run,
+                    now_ts,
+                )
+                continue
             prompt = (
                 f"保护单成交通知:{symbol} 的止损/止盈单(单号 {cid[-8:]})刚成交 "
                 f"{last_qty} @ {last_px}。请查询该品种当前持仓与剩余挂单,"
                 f"判断是否需要后续订单管理(例如剩余仓位的止损上移),"
                 f"并用口语化短消息(2~3行)把成交与现状告知用户。"
             )
-            if wake_hermes(prompt, name=f"pfill-{cid[-8:]}", dry_run=dry_run) and not dry_run:
+            if wake_authorized_management(
+                prompt,
+                name=f"pfill-{cid[-8:]}",
+                dry_run=dry_run,
+                authorization=authorization,
+            ) and not dry_run:
                 state[key] = now_ts
         except Exception as exc:  # noqa: BLE001
             log(f"fill sweep row {cid} failed: {exc!r}")
@@ -1034,13 +1284,30 @@ def sweep_naked(state: dict, dry_run: bool, now_ts: float | None = None) -> None
         position_side = _position_side(side_raw)
         if symbol and position_side:
             recent_fill_keys.add((account_id, symbol, position_side))
-    for account_id, symbol, position_side in naked_positions(
+    naked_keys = naked_positions(
         position_keys,
         stop_keys,
         recent_fill_keys,
         now_ts,
         state,
-    ):
+    )
+    authorizations = _position_parent_authorizations(set(naked_keys))
+    for account_id, symbol, position_side in naked_keys:
+        authorization = authorizations.get((account_id, symbol, position_side))
+        if not _has_complete_authorization(authorization):
+            _send_read_only_alert(
+                state,
+                f"authalert:naked:{account_id}:{symbol}:{position_side}",
+                (
+                    f"裸仓告警:{account_id} 的 {symbol} {position_side} 仓位 "
+                    f"{position_quantities[(account_id, symbol, position_side)]:g} "
+                    "缺少足量有效止损，同时缺少完整用户或频道父授权，"
+                    "需人工核对原始指令与交易所挂单"
+                ),
+                dry_run,
+                now_ts,
+            )
+            continue
         prompt = (
             f"⚠️ 裸仓检测:{account_id} 的 {symbol} {position_side} 仓位 "
             f"{position_quantities[(account_id, symbol, position_side)]:g} "
@@ -1051,7 +1318,12 @@ def sweep_naked(state: dict, dry_run: bool, now_ts: float | None = None) -> None
             f"(找不到依据就通知用户手动处理),并用口语化短消息告知用户现状与你的动作。"
         )
         name = f"naked-{account_id}-{symbol}-{position_side}"
-        if wake_hermes(prompt, name=name, dry_run=dry_run) and not dry_run:
+        if wake_authorized_management(
+            prompt,
+            name=name,
+            dry_run=dry_run,
+            authorization=authorization,
+        ) and not dry_run:
             state[f"naked:{account_id}:{symbol}:{position_side}"] = now_ts
 
 
