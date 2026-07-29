@@ -1684,7 +1684,21 @@ _OPERATOR_MANAGEMENT_ACTIONS = (
     "replace_take_profits",
     "cancel_order",
 )
+_EXECUTABLE_PARENT_ACTIONS = frozenset(
+    {
+        "open_position",
+        "add_position",
+        "partial_close",
+        "close_position",
+        "move_stop_loss",
+        "move_stop_to_entry",
+        "replace_take_profits",
+        "cancel_order",
+    }
+)
 _OPERATOR_ACCOUNTS = ("account-a", "account-b")
+_ORDER_AUTHORIZATION_TYPES = ("user", "channel")
+_INTERNAL_ORDER_SERVICE_RE = re.compile(r"internal|watchdog|reconciler", re.IGNORECASE)
 _TG_SIGNAL_REF_RE = re.compile(
     r"(?:^|-)tg-sig-c(?P<channel>\d+)-m(?P<message>\d+)(?:-e\d+)?(?:$|-)"
 )
@@ -1718,6 +1732,156 @@ def _open_source_channel(body: dict, client_ref: str) -> tuple[str, bool]:
     if ref_channel:
         return str(ref_channel), True
     return "hermes-operator", False
+
+
+def _authorized_parent(
+    database_url: str,
+    parent_intent_id: str,
+    account_id: str,
+    instrument_id: str,
+) -> dict:
+    try:
+        UUID(parent_intent_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="parent_intent_id must be a uuid")
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT account_id, instrument_id, action::text, status::text, order_plan "
+                "FROM trade_intents "
+                "WHERE intent_id::text=%s",
+                (parent_intent_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(
+            status_code=400,
+            detail="parent_intent_id does not reference an authorized trade intent",
+        )
+    (
+        parent_account,
+        parent_instrument,
+        parent_action,
+        parent_status,
+        parent_plan,
+    ) = row
+    if parent_account != account_id:
+        raise HTTPException(
+            status_code=400,
+            detail="parent_intent_id account does not match account_id",
+        )
+    normalized_parent = _attribution_symbol(parent_instrument)
+    normalized_current = _attribution_symbol(instrument_id)
+    if normalized_parent != normalized_current:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"parent_intent_id instrument does not match request instrument "
+                f"{normalized_current}"
+            ),
+        )
+    if str(parent_status or "").lower() != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail="parent_intent_id status is not executable",
+        )
+    if str(parent_action or "").lower() not in _EXECUTABLE_PARENT_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="parent_intent_id action is not executable",
+        )
+    plan = parent_plan or {}
+    parent_authorization = plan.get("authorization")
+    if not isinstance(parent_authorization, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="parent_intent_id has no auditable authorization evidence",
+        )
+    parent_type = str(parent_authorization.get("authorized_by_type") or "").strip()
+    parent_id = str(parent_authorization.get("authorized_by_id") or "").strip()
+    parent_message = str(parent_authorization.get("source_message_id") or "").strip()
+    if parent_type not in _ORDER_AUTHORIZATION_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="parent_intent_id authorization type is invalid",
+        )
+    if not parent_id or not parent_message:
+        raise HTTPException(
+            status_code=400,
+            detail="parent_intent_id authorization evidence is incomplete",
+        )
+    return parent_authorization
+
+
+def _order_authorization(
+    body: dict,
+    database_url: str,
+    account_id: str,
+    instrument_id: str,
+    reason: str,
+    source: str,
+) -> dict:
+    authorized_by_type = str(body.get("authorized_by_type") or "").strip().lower()
+    if authorized_by_type not in _ORDER_AUTHORIZATION_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"authorized_by_type must be one of {list(_ORDER_AUTHORIZATION_TYPES)}",
+        )
+    authorized_by_id = str(body.get("authorized_by_id") or "").strip()
+    if not authorized_by_id:
+        raise HTTPException(status_code=400, detail="authorized_by_id required")
+    source_message_id = str(body.get("source_message_id") or "").strip()
+    if not source_message_id:
+        raise HTTPException(status_code=400, detail="source_message_id required")
+    created_by_service = str(body.get("created_by_service") or "").strip()
+    if not created_by_service:
+        raise HTTPException(status_code=400, detail="created_by_service required")
+    if source != created_by_service:
+        raise HTTPException(
+            status_code=400,
+            detail="source must match created_by_service",
+        )
+
+    parent_intent_id = str(body.get("parent_intent_id") or "").strip()
+    is_internal = _INTERNAL_ORDER_SERVICE_RE.search(created_by_service) is not None
+    if is_internal and not parent_intent_id:
+        raise HTTPException(
+            status_code=400,
+            detail="internal/watchdog/reconciler source requires parent_intent_id",
+        )
+    if parent_intent_id:
+        parent_authorization = _authorized_parent(
+            database_url,
+            parent_intent_id,
+            account_id,
+            instrument_id,
+        )
+        parent_type = str(parent_authorization.get("authorized_by_type") or "").strip()
+        parent_id = str(parent_authorization.get("authorized_by_id") or "").strip()
+        parent_message = str(parent_authorization.get("source_message_id") or "").strip()
+        if (
+            authorized_by_type != parent_type
+            or authorized_by_id != parent_id
+            or source_message_id != parent_message
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="authorization evidence does not match parent_intent_id",
+            )
+
+    return {
+        "authorized_by_type": authorized_by_type,
+        "authorized_by_id": authorized_by_id,
+        "reason": reason,
+        "source_message_id": source_message_id,
+        "created_by_service": created_by_service,
+        "parent_intent_id": parent_intent_id or False,
+    }
 
 
 def _write_attribution_shadow(event: dict) -> None:
@@ -2149,7 +2313,15 @@ def operator_order(
     symbol = str(body.get("symbol") or "").upper().split("-")[0].split(".")[0]
     if not symbol or not symbol.isalnum() or not symbol.endswith("USDT"):
         raise HTTPException(status_code=400, detail="symbol required, e.g. BTCUSDT")
-    account_id = str(body.get("account_id") or os.environ.get("OPERATOR_DEFAULT_ACCOUNT", "account-a"))
+    dry_run = body.get("dry_run") is True
+    explicit_account_id = str(body.get("account_id") or "").strip()
+    if not explicit_account_id and not dry_run:
+        raise HTTPException(status_code=400, detail="account_id is required")
+    account_id = explicit_account_id
+    if not account_id:
+        account_id = str(
+            os.environ.get("OPERATOR_DEFAULT_ACCOUNT", "account-a")
+        ).strip()
     if account_id not in _OPERATOR_ACCOUNTS:
         raise HTTPException(status_code=400, detail=f"account_id must be one of {list(_OPERATOR_ACCOUNTS)}")
     reason = str(body.get("reason") or "").strip()
@@ -2317,7 +2489,7 @@ def operator_order(
     if action == "open_position":
         raw_channel, has_provenance = _open_source_channel(body, client_ref)
 
-    if body.get("dry_run") is True:
+    if dry_run:
         return {
             "dry_run": True, "action": action, "symbol": symbol, "account_id": account_id,
             "computed_notional": notional, "checks": checks,
@@ -2329,9 +2501,55 @@ def operator_order(
     if not database_url:
         raise HTTPException(status_code=503, detail="intent store unavailable")
 
+    authorization_evidence = _order_authorization(
+        body,
+        database_url,
+        account_id,
+        symbol,
+        reason,
+        source,
+    )
+    if (
+        authorization_evidence["authorized_by_type"] == "channel"
+        and action == "open_position"
+    ):
+        if raw_channel != authorization_evidence["authorized_by_id"]:
+            raise HTTPException(
+                status_code=400,
+                detail="channel authorization does not match source channel",
+            )
+        if not has_provenance:
+            raise HTTPException(
+                status_code=400,
+                detail="channel authorization requires source_channel or canonical client_ref",
+            )
+    if (
+        action == "open_position"
+        and raw_channel not in ("hermes-operator", "operator")
+        and authorization_evidence["authorized_by_type"] != "channel"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="channel-sourced order requires authorized_by_type=channel",
+        )
+    if (
+        action in _OPERATOR_MANAGEMENT_ACTIONS
+        and authorization_evidence["authorized_by_type"] == "channel"
+    ):
+        raw_channel = authorization_evidence["authorized_by_id"]
+
     attribution = False
     if action in _OPERATOR_MANAGEMENT_ACTIONS:
         channel = str(body.get("channel") or "").strip()
+        if (
+            channel
+            and channel != "operator"
+            and authorization_evidence["authorized_by_type"] != "channel"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="channel-sourced management requires authorized_by_type=channel",
+            )
         entry_ref = str(body.get("entry_ref") or "").strip()
         attribution_event, hard_error = _resolve_attribution(
             database_url, action, symbol, account_id, channel, entry_ref, position_side
@@ -2345,21 +2563,22 @@ def operator_order(
         }
         if hard_error:
             raise HTTPException(status_code=400, detail=hard_error)
-    elif not has_provenance:
-        _write_attribution_shadow({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "action": action,
-            "symbol": symbol,
-            "account": account_id,
-            "channel": False,
-            "entry_ref": False,
-            "resolution": "none",
-            "owner_channel": False,
-            "channel_match": "unknown",
-            "would_reject": False,
-            "bypass": False,
-            "error": "no_provenance",
-        })
+        if authorization_evidence["authorized_by_type"] == "channel":
+            channel_valid = (
+                channel == authorization_evidence["authorized_by_id"]
+                and attribution_event["resolution"] == "intent"
+                and attribution_event["channel_match"] is True
+                and attribution_event["would_reject"] is False
+            )
+            if not channel_valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail="channel authorization attribution failed",
+                )
+
+    order_plan["authorization"] = authorization_evidence
+    if attribution:
+        order_plan["attribution"] = attribution
 
     now = datetime.now(timezone.utc)
     raw_id, run_id, ctx_id, dec_id, risk_id, intent_id = (str(uuid4()) for _ in range(6))
@@ -2390,6 +2609,7 @@ def operator_order(
                 }
                 if attribution:
                     replay_response["attribution"] = attribution
+                replay_response["authorization"] = authorization_evidence
                 return replay_response
             cur.execute(
                 "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version, "
@@ -2420,7 +2640,7 @@ def operator_order(
                 (dec_id, raw_id, run_id, ctx_id, message_type, action, account_id, symbol, side,
                  entry_type, entry_price, entry_price_min, entry_price_max, stop_loss,
                  Json(take_profits), leverage, valid_until,
-                 Json([{"source": source, "quote": reason}]), source, now),
+                 Json([authorization_evidence]), source, now),
             )
             cur.execute(
                 "INSERT INTO risk_decisions (risk_decision_id, hermes_decision_id, status, account_id, "
@@ -2440,7 +2660,12 @@ def operator_order(
                 "INSERT INTO outbox_events (outbox_event_id, status, aggregate_type, aggregate_id, "
                 "event_type, payload) VALUES (%s,'pending','trade_intent',%s,'trade_intent.approved',%s)",
                 (str(uuid4()), intent_id,
-                 Json({"intent_id": intent_id, "risk_decision_id": risk_id, "source": source})),
+                 Json({
+                     "intent_id": intent_id,
+                     "risk_decision_id": risk_id,
+                     "source": source,
+                     "authorization": authorization_evidence,
+                 })),
             )
         conn.commit()
     finally:
@@ -2457,6 +2682,7 @@ def operator_order(
         "execution_preview": _safe_execution_preview(order_plan, risk_budget, symbol, action),
         "risk_budget": risk_budget,
         "valid_until": valid_until.isoformat(),
+        "authorization": authorization_evidence,
     }
     if attribution:
         response["attribution"] = attribution

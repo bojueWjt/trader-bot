@@ -156,6 +156,18 @@ def _require_open_provenance(args) -> str:
     return channel
 
 
+def _add_authorization_context(payload: dict, args) -> None:
+    created_by_service = str(args.created_by_service).strip()
+    payload["authorized_by_type"] = str(args.authorized_by_type).strip()
+    payload["authorized_by_id"] = str(args.authorized_by_id).strip()
+    payload["source_message_id"] = str(args.source_message_id).strip()
+    payload["created_by_service"] = created_by_service
+    payload["source"] = created_by_service
+    parent_intent_id = str(args.parent_intent_id or "").strip()
+    if parent_intent_id:
+        payload["parent_intent_id"] = parent_intent_id
+
+
 def cmd_open(args) -> None:
     source_channel = _require_open_provenance(args)
     entry = {"type": args.entry_type}
@@ -175,6 +187,7 @@ def cmd_open(args) -> None:
         "source": "hermes-agent",
         "source_channel": source_channel,
     }
+    _add_authorization_context(payload, args)
     if args.notional is not None:
         payload["notional_usdt"] = args.notional
     if args.sl is not None:
@@ -234,6 +247,7 @@ def cmd_close(args) -> None:
         payload["position_side"] = args.side
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
+    _add_authorization_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report(placed["intent_id"], wait=not args.no_wait))
 
@@ -252,6 +266,7 @@ def cmd_partial(args) -> None:
         payload["position_side"] = args.side
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
+    _add_authorization_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report(placed["intent_id"], wait=not args.no_wait))
 
@@ -309,6 +324,7 @@ def cmd_set_sl(args) -> None:
         payload["position_side"] = args.side
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
+    _add_authorization_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report_protect(placed["intent_id"], wait=not args.no_wait))
 
@@ -344,6 +360,7 @@ def cmd_set_tps(args) -> None:
         payload["position_side"] = args.side
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
+    _add_authorization_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report_protect(placed["intent_id"], wait=not args.no_wait))
 
@@ -365,6 +382,7 @@ def cmd_cancel(args) -> None:
     }
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
+    _add_authorization_context(payload, args)
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report_protect(placed["intent_id"], wait=not args.no_wait))
 
@@ -409,9 +427,39 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p, needs_reason=True, management=False):
-        p.add_argument("--account", default="account-a", choices=["account-a", "account-b"])
+        p.add_argument(
+            "--account",
+            required=True,
+            choices=["account-a", "account-b"],
+        )
         if needs_reason:
             p.add_argument("--reason", required=True, help="audit reason (why this order)")
+        p.add_argument(
+            "--authorized-by-type",
+            required=True,
+            choices=["user", "channel"],
+            help="explicit authority behind this order",
+        )
+        p.add_argument(
+            "--authorized-by-id",
+            required=True,
+            help="user/operator identity or channel identifier",
+        )
+        p.add_argument(
+            "--source-message-id",
+            required=True,
+            help="stable id of the authorizing request or channel message",
+        )
+        p.add_argument(
+            "--created-by-service",
+            default="hermes-agent",
+            help="service creating this request",
+        )
+        p.add_argument(
+            "--parent-intent-id",
+            default=None,
+            help="authorized parent intent for internal derived management",
+        )
         ref_help = "idempotency key, e.g. the signal message id"
         if management:
             ref_help = "stable operation ref (required; reuse for retries)"

@@ -30,6 +30,71 @@ MANAGEMENT_CASES = [
 ]
 
 
+CHANNEL_AUTH_ARGS = [
+    "--account",
+    "account-a",
+    "--authorized-by-type",
+    "channel",
+    "--authorized-by-id",
+    "-1002136478186",
+    "--source-message-id",
+    "tg-sig-c1002136478186-m5026",
+]
+
+
+USER_AUTH_ARGS = [
+    "--account",
+    "account-a",
+    "--authorized-by-type",
+    "user",
+    "--authorized-by-id",
+    "balen",
+    "--source-message-id",
+    "operator-request-5026",
+]
+
+
+def test_open_requires_explicit_account_and_does_not_send_request(
+    load_trade_module, monkeypatch, capsys
+):
+    module = load_trade_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "v3_trade.py",
+            "open",
+            "BTCUSDT",
+            "short",
+            "--notional",
+            "100",
+            "--reason",
+            "test",
+            "--ref",
+            "operator-btc-short-5026",
+            "--channel",
+            "operator",
+            "--authorized-by-type",
+            "user",
+            "--authorized-by-id",
+            "balen",
+            "--source-message-id",
+            "operator-request-5026",
+        ],
+    )
+    monkeypatch.setattr(
+        module,
+        "_call",
+        lambda *args, **kwargs: pytest.fail("request sent without account"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+
+    assert exc.value.code == 2
+    assert "--account" in capsys.readouterr().err
+
+
 def test_open_requires_channel_and_does_not_send_request(
     load_trade_module, monkeypatch, capsys
 ):
@@ -48,6 +113,7 @@ def test_open_requires_channel_and_does_not_send_request(
             "test",
             "--ref",
             "tg-sig-c1002136478186-m5026",
+            *CHANNEL_AUTH_ARGS,
         ],
     )
     monkeypatch.setattr(
@@ -96,6 +162,7 @@ def test_open_forwards_canonical_signal_provenance(load_trade_module, monkeypatc
             "tg-sig-c1002136478186-m5026",
             "--channel",
             "-1002136478186",
+            *CHANNEL_AUTH_ARGS,
             "--no-wait",
         ],
     )
@@ -105,6 +172,10 @@ def test_open_forwards_canonical_signal_provenance(load_trade_module, monkeypatc
     payload = next(payload for method, _, payload in calls if method == "POST")
     assert payload["client_ref"] == "tg-sig-c1002136478186-m5026"
     assert payload["source_channel"] == "-1002136478186"
+    assert payload["authorized_by_type"] == "channel"
+    assert payload["authorized_by_id"] == "-1002136478186"
+    assert payload["source_message_id"] == "tg-sig-c1002136478186-m5026"
+    assert payload["created_by_service"] == "hermes-agent"
 
 
 def test_open_rejects_noncanonical_client_ref(load_trade_module, monkeypatch, capsys):
@@ -125,6 +196,7 @@ def test_open_rejects_noncanonical_client_ref(load_trade_module, monkeypatch, ca
             "tg-5026",
             "--channel",
             "-1002136478186",
+            *CHANNEL_AUTH_ARGS,
         ],
     )
     monkeypatch.setattr(
@@ -141,7 +213,7 @@ def test_open_rejects_noncanonical_client_ref(load_trade_module, monkeypatch, ca
     assert "canonical" in output["error"]
 
 
-def test_open_forwards_operator_provenance(load_trade_module, monkeypatch):
+def test_open_forwards_user_provenance(load_trade_module, monkeypatch):
     module = load_trade_module()
     calls = []
 
@@ -173,6 +245,7 @@ def test_open_forwards_operator_provenance(load_trade_module, monkeypatch):
             "operator-btc-short-0719",
             "--channel",
             "operator",
+            *USER_AUTH_ARGS,
             "--no-wait",
         ],
     )
@@ -182,6 +255,62 @@ def test_open_forwards_operator_provenance(load_trade_module, monkeypatch):
     payload = next(payload for method, _, payload in calls if method == "POST")
     assert payload["client_ref"] == "operator-btc-short-0719"
     assert payload["source_channel"] == "operator"
+    assert payload["authorized_by_type"] == "user"
+    assert payload["authorized_by_id"] == "balen"
+    assert payload["source_message_id"] == "operator-request-5026"
+    assert payload["created_by_service"] == "hermes-agent"
+
+
+def test_management_forwards_internal_parent_intent(load_trade_module, monkeypatch):
+    module = load_trade_module()
+    calls = []
+    parent_intent_id = "11111111-1111-1111-1111-111111111111"
+
+    def fake_call(method, path, payload=None):
+        calls.append((method, path, payload))
+        if method == "POST":
+            return {"intent_id": "intent-1", "status": "approved", "replay": False}
+        return {
+            "intent": {"status": "approved"},
+            "orders": [],
+            "execution_events": [],
+            "open_positions": [],
+        }
+
+    monkeypatch.setattr(module, "_call", fake_call)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "v3_trade.py",
+            "close",
+            "BTCUSDT",
+            "--reason",
+            "authorized reconciliation",
+            "--ref",
+            "reconcile-close-5026",
+            "--authorized-by-type",
+            "user",
+            "--authorized-by-id",
+            "balen",
+            "--source-message-id",
+            "operator-request-5026",
+            "--account",
+            "account-a",
+            "--created-by-service",
+            "position-reconciler",
+            "--parent-intent-id",
+            parent_intent_id,
+            "--no-wait",
+        ],
+    )
+
+    module.main()
+
+    payload = next(payload for method, _, payload in calls if method == "POST")
+    assert payload["source"] == "position-reconciler"
+    assert payload["created_by_service"] == "position-reconciler"
+    assert payload["parent_intent_id"] == parent_intent_id
 
 
 @pytest.mark.parametrize(("command", "expected_action"), MANAGEMENT_CASES)
@@ -217,6 +346,7 @@ def test_management_commands_forward_attribution_context(
             "-1002136478186",
             "--entry-ref",
             "tg-sig-c1002136478186-m5026",
+            *CHANNEL_AUTH_ARGS,
             "--no-wait",
         ],
     )
@@ -228,6 +358,10 @@ def test_management_commands_forward_attribution_context(
     assert payload["client_ref"] == "operation-5026"
     assert payload["channel"] == "-1002136478186"
     assert payload["entry_ref"] == "tg-sig-c1002136478186-m5026"
+    assert payload["authorized_by_type"] == "channel"
+    assert payload["authorized_by_id"] == "-1002136478186"
+    assert payload["source_message_id"] == "tg-sig-c1002136478186-m5026"
+    assert payload["created_by_service"] == "hermes-agent"
 
 
 @pytest.mark.parametrize(("command", "expected_slug"), MANAGEMENT_CASES)
@@ -245,6 +379,7 @@ def test_management_commands_require_operation_ref_with_suggestion(
             "test",
             "--entry-ref",
             "tg-sig-c1002136478186-m5026",
+            *CHANNEL_AUTH_ARGS,
         ],
     )
     monkeypatch.setattr(

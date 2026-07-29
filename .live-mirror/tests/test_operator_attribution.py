@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 
@@ -18,6 +18,10 @@ def _open_body(client_ref="tg-sig-c1002136478186-m5026"):
         "account_id": "account-a",
         "reason": "test open",
         "client_ref": client_ref,
+        "authorized_by_type": "channel",
+        "authorized_by_id": "-1002136478186",
+        "source_message_id": client_ref,
+        "created_by_service": "hermes-agent",
     }
 
 
@@ -29,8 +33,19 @@ def _manage_body(**overrides):
         "account_id": "account-a",
         "reason": "test close",
         "client_ref": "close-btc-5026",
+        "authorized_by_type": "user",
+        "authorized_by_id": "balen",
+        "source_message_id": "close-btc-5026",
+        "created_by_service": "hermes-agent",
     }
     body.update(overrides)
+    channel = str(body.get("channel") or "").strip()
+    if channel and channel != "operator":
+        body["authorized_by_type"] = "channel"
+        body["authorized_by_id"] = channel
+        body["source_message_id"] = str(
+            body.get("source_message_id") or "management-message-5026"
+        )
     return body
 
 
@@ -72,6 +87,355 @@ def _raw_insert(fake_db):
     )
 
 
+def _insert(fake_db, prefix):
+    return next(
+        item for item in fake_db.executions
+        if item[0].startswith(prefix)
+    )
+
+
+def _json_value(value):
+    return getattr(value, "adapted", value)
+
+
+def _assert_no_order_writes(fake_db):
+    write_prefixes = (
+        "INSERT INTO raw_messages",
+        "INSERT INTO trade_intents",
+        "INSERT INTO outbox_events",
+    )
+    assert not any(
+        sql.startswith(write_prefixes)
+        for sql, _ in fake_db.executions
+    )
+
+
+def _use_parent_row(monkeypatch, fake_db, row):
+    class ParentCursor:
+        def __init__(self):
+            self.result = row
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            compact = " ".join(sql.split())
+            fake_db.executions.append((compact, params or ()))
+
+        def fetchone(self):
+            return self.result
+
+    class ParentConnection:
+        def cursor(self):
+            return ParentCursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        read_api.psycopg2,
+        "connect",
+        lambda database_url: ParentConnection(),
+    )
+
+
+def test_non_dry_run_requires_explicit_account_before_writes(
+    api_client, auth_headers, fake_db
+):
+    body = _open_body()
+    body.pop("account_id")
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "account_id is required" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_non_dry_run_requires_authorization_evidence_before_writes(
+    api_client, auth_headers, fake_db
+):
+    body = _open_body()
+    for field in (
+        "authorized_by_type",
+        "authorized_by_id",
+        "source_message_id",
+        "created_by_service",
+    ):
+        body.pop(field)
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "authorized_by_type" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_operator_is_not_an_authority_class(
+    api_client, auth_headers, fake_db
+):
+    body = _manage_body(authorized_by_type="operator")
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "['user', 'channel']" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_channel_source_cannot_be_labeled_as_user(
+    api_client, auth_headers, fake_db
+):
+    body = _open_body()
+    body["authorized_by_type"] = "user"
+    body["authorized_by_id"] = "balen"
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "authorized_by_type=channel" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+@pytest.mark.parametrize("created_by_service", ["internal", "watchdog", "reconciler"])
+def test_internal_sources_without_parent_create_zero_order_records(
+    api_client, auth_headers, fake_db, created_by_service
+):
+    body = _manage_body(
+        source=created_by_service,
+        created_by_service=created_by_service,
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "parent_intent_id" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+@pytest.mark.parametrize("created_by_service", ["internal", "watchdog", "reconciler"])
+def test_internal_sources_with_unknown_parent_create_zero_order_records(
+    api_client, auth_headers, fake_db, created_by_service
+):
+    body = _manage_body(
+        source=created_by_service,
+        created_by_service=created_by_service,
+        parent_intent_id="22222222-2222-2222-2222-222222222222",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "authorized trade intent" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_internal_source_rejects_cross_symbol_parent_before_writes(
+    api_client, auth_headers, fake_db, monkeypatch
+):
+    _use_parent_row(
+        monkeypatch,
+        fake_db,
+        (
+            "account-a",
+            "BTCUSDT",
+            "open_position",
+            "approved",
+            {
+                "authorization": {
+                    "authorized_by_type": "user",
+                    "authorized_by_id": "balen",
+                    "source_message_id": "original-user-request",
+                },
+            },
+        ),
+    )
+    body = _manage_body(
+        symbol="MUUSDT",
+        source="position-reconciler",
+        created_by_service="position-reconciler",
+        parent_intent_id="11111111-1111-1111-1111-111111111111",
+        source_message_id="original-user-request",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "instrument does not match" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+@pytest.mark.parametrize(
+    ("parent_action", "parent_status", "expected"),
+    [
+        ("open_position", "rejected", "status is not executable"),
+        ("hold", "approved", "action is not executable"),
+    ],
+)
+def test_internal_source_rejects_non_executable_parent_lineage(
+    api_client,
+    auth_headers,
+    fake_db,
+    monkeypatch,
+    parent_action,
+    parent_status,
+    expected,
+):
+    _use_parent_row(
+        monkeypatch,
+        fake_db,
+        (
+            "account-a",
+            "MUUSDT-PERP.BINANCE",
+            parent_action,
+            parent_status,
+            {
+                "authorization": {
+                    "authorized_by_type": "user",
+                    "authorized_by_id": "balen",
+                    "source_message_id": "original-user-request",
+                },
+            },
+        ),
+    )
+    body = _manage_body(
+        symbol="MUUSDT",
+        source="position-reconciler",
+        created_by_service="position-reconciler",
+        parent_intent_id="11111111-1111-1111-1111-111111111111",
+        source_message_id="original-user-request",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert expected in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_internal_source_requires_parent_authorization_match(
+    api_client, auth_headers, fake_db, monkeypatch
+):
+    monkeypatch.setattr(
+        read_api,
+        "_authorized_parent",
+        lambda *args: {
+            "authorized_by_type": "user",
+            "authorized_by_id": "balen",
+            "source_message_id": "original-user-request",
+        },
+    )
+    body = _manage_body(
+        source="position-reconciler",
+        created_by_service="position-reconciler",
+        parent_intent_id="11111111-1111-1111-1111-111111111111",
+        source_message_id="different-request",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "does not match parent_intent_id" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_internal_source_persists_matching_parent_authorization(
+    api_client, auth_headers, fake_db, monkeypatch
+):
+    parent_intent_id = "11111111-1111-1111-1111-111111111111"
+    monkeypatch.setattr(
+        read_api,
+        "_authorized_parent",
+        lambda *args: {
+            "authorized_by_type": "user",
+            "authorized_by_id": "balen",
+            "source_message_id": "original-user-request",
+        },
+    )
+    body = _manage_body(
+        source="position-reconciler",
+        created_by_service="position-reconciler",
+        parent_intent_id=parent_intent_id,
+        source_message_id="original-user-request",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
+    authorization = _json_value(intent_params[6])["authorization"]
+    assert authorization["authorized_by_type"] == "user"
+    assert authorization["parent_intent_id"] == parent_intent_id
+
+
+def test_user_authorization_is_persisted_in_every_audit_payload(
+    api_client, auth_headers, fake_db
+):
+    body = _open_body("user-btc-long-5026")
+    body.update({
+        "authorized_by_type": "user",
+        "authorized_by_id": "balen",
+        "source_message_id": "codex-request-5026",
+        "created_by_service": "hermes-agent",
+        "source_channel": "operator",
+    })
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    expected = {
+        "authorized_by_type": "user",
+        "authorized_by_id": "balen",
+        "reason": "test open",
+        "source_message_id": "codex-request-5026",
+        "created_by_service": "hermes-agent",
+        "parent_intent_id": False,
+    }
+    _, raw_params = _raw_insert(fake_db)
+    assert raw_params[2] == "user-btc-long-5026"
+    _, decision_params = _insert(fake_db, "INSERT INTO hermes_decisions")
+    assert expected in _json_value(decision_params[17])
+    _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
+    assert _json_value(intent_params[6])["authorization"] == expected
+    _, outbox_params = _insert(fake_db, "INSERT INTO outbox_events")
+    assert _json_value(outbox_params[2])["authorization"] == expected
+
+
+def test_channel_management_authorization_requires_and_persists_attribution(
+    api_client, auth_headers, fake_db
+):
+    entry_ref = "tg-sig-c1002136478186-m5026"
+    _seed_entry(fake_db, entry_ref)
+    body = _manage_body(
+        channel="-1002136478186",
+        entry_ref=entry_ref,
+        source_message_id="tg-msg-6010",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    expected = {
+        "authorized_by_type": "channel",
+        "authorized_by_id": "-1002136478186",
+        "reason": "test close",
+        "source_message_id": "tg-msg-6010",
+        "created_by_service": "hermes-agent",
+        "parent_intent_id": False,
+    }
+    _, raw_params = _raw_insert(fake_db)
+    assert raw_params[1] == "-1002136478186"
+    assert raw_params[2] == "close-btc-5026"
+    _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
+    assert _json_value(intent_params[6])["authorization"] == expected
+    assert _json_value(intent_params[6])["attribution"]["resolution"] == "intent"
+    _, outbox_params = _insert(fake_db, "INSERT INTO outbox_events")
+    assert _json_value(outbox_params[2])["authorization"] == expected
+
+
 def test_open_provenance_parses_e2_suffix(api_client, auth_headers, fake_db):
     response = _post(
         api_client,
@@ -89,6 +453,7 @@ def test_open_provenance_accepts_source_channel_without_ref_parse(
 ):
     body = _open_body("verbal-btc-long-0714")
     body["source_channel"] = "-1002136478186"
+    body["source_message_id"] = "telegram-message-0714"
 
     response = _post(api_client, auth_headers, body)
 
@@ -110,20 +475,16 @@ def test_open_provenance_rejects_conflicting_source_channel(
     assert not any(sql.startswith("INSERT INTO raw_messages") for sql, _ in fake_db.executions)
 
 
-def test_open_without_provenance_keeps_operator_channel_and_logs_counter(
-    api_client, auth_headers, fake_db, tmp_path, monkeypatch
+def test_open_without_authorization_is_rejected_before_writes(
+    api_client, auth_headers, fake_db
 ):
-    log_path = tmp_path / "no-provenance.jsonl"
-    monkeypatch.setenv("ATTRIBUTION_SHADOW_LOG", str(log_path))
+    body = _open_body("verbal-btc-long-0714")
+    body.pop("authorized_by_type")
 
-    response = _post(api_client, auth_headers, _open_body("verbal-btc-long-0714"))
+    response = _post(api_client, auth_headers, body)
 
-    assert response.status_code == 200
-    _, params = _raw_insert(fake_db)
-    assert "hermes-operator" in params
-    event = json.loads(log_path.read_text().strip())
-    assert event["action"] == "open_position"
-    assert event["error"] == "no_provenance"
+    assert response.status_code == 400
+    _assert_no_order_writes(fake_db)
 
 
 @pytest.mark.parametrize(
@@ -179,6 +540,11 @@ def test_management_dry_run_keeps_legacy_no_ref_behavior(
 ):
     body = _manage_body(dry_run=True)
     body.pop("client_ref")
+    body.pop("account_id")
+    body.pop("authorized_by_type")
+    body.pop("authorized_by_id")
+    body.pop("source_message_id")
+    body.pop("created_by_service")
 
     response = _post(api_client, auth_headers, body)
 
@@ -224,7 +590,9 @@ def test_shadow_intent_resolution_recovers_legacy_operator_channel(
     }
 
 
-def test_shadow_ref_parse_only_remains_unproven(api_client, auth_headers):
+def test_shadow_ref_parse_only_remains_unproven(
+    api_client, auth_headers, fake_db
+):
     entry_ref = "tg-sig-c1002136478186-m5026"
 
     response = _post(
@@ -233,26 +601,21 @@ def test_shadow_ref_parse_only_remains_unproven(api_client, auth_headers):
         _manage_body(channel="-1002136478186", entry_ref=entry_ref),
     )
 
-    attribution = response.json()["attribution"]
-    assert attribution["resolution"] == "ref_parse_only"
-    assert attribution["owner_channel"] == "-1002136478186"
-    assert attribution["channel_match"] is True
-    assert attribution["would_reject"] is True
+    assert response.status_code == 400
+    assert "channel authorization attribution failed" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
 
 
-def test_shadow_unresolved_entry_ref(api_client, auth_headers):
+def test_shadow_unresolved_entry_ref(api_client, auth_headers, fake_db):
     response = _post(
         api_client,
         auth_headers,
         _manage_body(channel="-1002136478186", entry_ref="legacy-5026"),
     )
 
-    assert response.json()["attribution"] == {
-        "resolution": "none",
-        "owner_channel": False,
-        "channel_match": "unknown",
-        "would_reject": True,
-    }
+    assert response.status_code == 400
+    assert "channel authorization attribution failed" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
 
 
 def test_shadow_channel_mismatch_would_reject(api_client, auth_headers, fake_db):
@@ -265,12 +628,14 @@ def test_shadow_channel_mismatch_would_reject(api_client, auth_headers, fake_db)
         _manage_body(channel="-1002228497993", entry_ref=entry_ref),
     )
 
-    attribution = response.json()["attribution"]
-    assert attribution["channel_match"] is False
-    assert attribution["would_reject"] is True
+    assert response.status_code == 400
+    assert "channel authorization attribution failed" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
 
 
-def test_shadow_operator_channel_bypasses_rejection(api_client, auth_headers, fake_db):
+def test_direct_user_management_can_reference_operator_channel(
+    api_client, auth_headers, fake_db
+):
     entry_ref = "tg-sig-c1002136478186-m5026"
     _seed_entry(fake_db, entry_ref)
 
@@ -281,6 +646,7 @@ def test_shadow_operator_channel_bypasses_rejection(api_client, auth_headers, fa
     )
 
     attribution = response.json()["attribution"]
+    assert response.json()["authorization"]["authorized_by_type"] == "user"
     assert attribution["channel_match"] is False
     assert attribution["would_reject"] is False
 
@@ -325,7 +691,9 @@ def test_shadow_rejects_pure_entry_identity_mismatch(
     assert expected in event["error"]
 
 
-def test_shadow_side_mismatch_is_observed_only(api_client, auth_headers, fake_db):
+def test_shadow_side_mismatch_rejects_channel_management(
+    api_client, auth_headers, fake_db
+):
     entry_ref = "tg-sig-c1002136478186-m5026"
     _seed_entry(fake_db, entry_ref, side="short")
 
@@ -335,8 +703,9 @@ def test_shadow_side_mismatch_is_observed_only(api_client, auth_headers, fake_db
         _manage_body(channel="-1002136478186", entry_ref=entry_ref),
     )
 
-    assert response.status_code == 200
-    assert response.json()["attribution"]["would_reject"] is True
+    assert response.status_code == 400
+    assert "channel authorization attribution failed" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
 
 
 def test_shadow_log_contains_required_fields(
