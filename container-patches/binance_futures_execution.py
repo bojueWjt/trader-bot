@@ -210,7 +210,13 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
         if self._leverages:
             async with TaskGroup() as tg:
                 leverage_tasks = [
-                    tg.create_task(self._futures_http_account.set_leverage(symbol, leverage))
+                    tg.create_task(
+                        self._futures_http_account.set_leverage(
+                            symbol,
+                            leverage,
+                            recv_window=str(self._recv_window),
+                        )
+                    )
                     for symbol, leverage in self._leverages.items()
                 ]
             for task in leverage_tasks:
@@ -221,7 +227,13 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
             async with TaskGroup() as tg:
                 margin_tasks = [
                     (
-                        tg.create_task(self._futures_http_account.set_margin_type(symbol, type_)),
+                        tg.create_task(
+                            self._futures_http_account.set_margin_type(
+                                symbol,
+                                type_,
+                                recv_window=str(self._recv_window),
+                            )
+                        ),
                         symbol,
                         type_,
                     )
@@ -233,7 +245,9 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
         # Initialize leverage for all symbols using symbolConfig endpoint
         # This ensures leverage is set correctly even for symbols without active positions
         account: MarginAccount = self.get_account()
-        symbol_configs = await self._futures_http_account.query_futures_symbol_config()
+        symbol_configs = await self._futures_http_account.query_futures_symbol_config(
+            recv_window=str(self._recv_window)
+        )
         for config in symbol_configs:
             try:
                 instrument_id: InstrumentId = self._get_cached_instrument_id(config.symbol)
@@ -246,7 +260,9 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
 
     async def _init_dual_side_position(self) -> None:
         binance_futures_dual_side_position: BinanceFuturesDualSidePosition = (
-            await self._futures_http_account.query_futures_hedge_mode()
+            await self._futures_http_account.query_futures_hedge_mode(
+                recv_window=str(self._recv_window)
+            )
         )
         # "true": Hedge Mode; "false": One-way Mode
         self._is_dual_side_position = binance_futures_dual_side_position.dualSidePosition
@@ -264,7 +280,10 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
         reports: list[PositionStatusReport] = []
         # Check Binance for all active positions
         binance_positions: list[BinanceFuturesPositionRisk]
-        binance_positions = await self._futures_http_account.query_futures_position_risk(symbol)
+        binance_positions = await self._futures_http_account.query_futures_position_risk(
+            symbol,
+            recv_window=str(self._recv_window),
+        )
         for position in binance_positions:
             if Decimal(position.positionAmt) == 0:
                 continue  # Flat position
@@ -286,7 +305,10 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
         # Check Binance for all active positions
         active_symbols: set[str] = set()
         binance_positions: list[BinanceFuturesPositionRisk]
-        binance_positions = await self._futures_http_account.query_futures_position_risk(symbol)
+        binance_positions = await self._futures_http_account.query_futures_position_risk(
+            symbol,
+            recv_window=str(self._recv_window),
+        )
         for position in binance_positions:
             if Decimal(position.positionAmt) == 0:
                 continue  # Flat position
@@ -312,6 +334,7 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
             algo_order = await self._futures_http_account.query_algo_order(
                 algo_id=venue_order_id,
                 client_algo_id=client_order_id,
+                recv_window=str(self._recv_window),
             )
         except BinanceError as e:
             self._log.debug(f"Algo order query also failed: {e.message}")
@@ -383,6 +406,7 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
                     start_time=start_ms,
                     end_time=end_ms,
                     limit=1000,
+                    recv_window=str(self._recv_window),
                 )
                 # Deduplicate - open orders may appear in both endpoints
                 for order in response:
@@ -408,7 +432,10 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
         seen_algo_ids: set[int] = set()
 
         # The openAlgoOrders endpoint has no time limit, unlike allAlgoOrders (7-day limit)
-        open_orders = await self._futures_http_account.query_open_algo_orders(symbol)
+        open_orders = await self._futures_http_account.query_open_algo_orders(
+            symbol,
+            recv_window=str(self._recv_window),
+        )
         for order in open_orders:
             algo_orders.append(order)
             seen_algo_ids.add(order.algoId)
@@ -623,6 +650,7 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
                 self._futures_http_account.cancel_multiple_orders,
                 symbol=symbol,
                 client_order_ids=batch_client_order_ids,
+                recv_window=str(self._recv_window),
             )
 
             if not retry_manager.result:

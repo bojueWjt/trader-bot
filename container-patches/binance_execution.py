@@ -411,6 +411,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 binance_order = await self._http_account.query_order(
                     symbol=command.instrument_id.symbol.value,
                     order_id=int(command.venue_order_id.value),
+                    recv_window=str(self._recv_window),
                 )
             else:
                 binance_order = await self._http_account.query_order(
@@ -420,6 +421,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                         if command.client_order_id is not None
                         else None
                     ),
+                    recv_window=str(self._recv_window),
                 )
         except BinanceError as e:
             if _is_no_such_order(e):
@@ -533,7 +535,10 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
         active_symbols = self._get_cache_active_symbols()
         active_symbols.update(await self._get_binance_active_position_symbols(symbol))
-        open_orders = await self._http_account.query_open_orders(symbol)
+        open_orders = await self._http_account.query_open_orders(
+            symbol,
+            recv_window=str(self._recv_window),
+        )
 
         for order in open_orders:
             active_symbols.add(order.symbol)
@@ -569,6 +574,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                     response = await self._http_account.query_all_orders(
                         symbol=active_symbol,
                         limit=1_000,
+                        recv_window=str(self._recv_window),
                     )
                     binance_orders.extend(response)
                 # PATCH 2026-07-10 (hk): futures allOrders omits orders created
@@ -662,6 +668,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                     end_time=(
                         secs_to_millis(command.end.timestamp()) if command.end is not None else None
                     ),
+                    recv_window=str(self._recv_window),
                 )
                 binance_trades.extend(response)
         except BinanceError as e:
@@ -1335,6 +1342,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 side=self._enum_parser.parse_internal_order_side(order.side),
                 quantity=str(command.quantity) if command.quantity else str(order.quantity),
                 price=str(command.price) if command.price else str(order.price),
+                recv_window=str(self._recv_window),
             )
 
             if not retry_manager.result:
@@ -1385,6 +1393,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 [instrument_id],
                 self._http_account.cancel_all_open_orders,
                 symbol=instrument_id.symbol.value,
+                recv_window=str(self._recv_window),
             )
 
             if not retry_manager.result:
@@ -1423,6 +1432,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 [instrument_id],
                 self._http_account.cancel_all_open_algo_orders,  # type: ignore [attr-defined]
                 symbol=instrument_id.symbol.value,
+                recv_window=str(self._recv_window),
             )
 
             if not retry_manager.result:
@@ -1543,6 +1553,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
             response = await self._http_account.cancel_algo_order(  # type: ignore [attr-defined]
                 algo_id=int(venue_order_id.value) if venue_order_id else None,
                 client_algo_id=client_order_id.value if client_order_id else None,
+                recv_window=str(self._recv_window),
             )
             self._log.debug(
                 f"Algo order cancel response: algoId={response.algoId}, "
@@ -1558,6 +1569,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 symbol=instrument_id.symbol.value,
                 order_id=int(venue_order_id.value) if venue_order_id else None,
                 orig_client_order_id=client_order_id.value if client_order_id else None,
+                recv_window=str(self._recv_window),
             )
 
     async def _cancel_orders_for_strategy(

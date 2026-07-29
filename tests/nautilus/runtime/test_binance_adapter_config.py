@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+from collections import Counter
 import importlib.util
 import re
 import sys
@@ -15,7 +17,33 @@ SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 MODULE_PATH = (
     SERVICE_ROOT / "runtime" / "binance_adapter_config.py"
 )
+COMMON_PATCH_PATH = REPO_ROOT / "container-patches" / "binance_execution.py"
 FUTURES_PATCH_PATH = REPO_ROOT / "container-patches" / "binance_futures_execution.py"
+EXPECTED_SIGNED_ACCOUNT_CALLS = Counter(
+    {
+        "binance_execution.py:_http_account.cancel_algo_order": 1,
+        "binance_execution.py:_http_account.cancel_all_open_algo_orders": 1,
+        "binance_execution.py:_http_account.cancel_all_open_orders": 1,
+        "binance_execution.py:_http_account.cancel_order": 1,
+        "binance_execution.py:_http_account.modify_order": 1,
+        "binance_execution.py:_http_account.new_algo_order": 4,
+        "binance_execution.py:_http_account.new_order": 4,
+        "binance_execution.py:_http_account.query_all_orders": 1,
+        "binance_execution.py:_http_account.query_open_orders": 1,
+        "binance_execution.py:_http_account.query_order": 2,
+        "binance_execution.py:_http_account.query_user_trades": 1,
+        "binance_futures_execution.py:_futures_http_account.cancel_multiple_orders": 1,
+        "binance_futures_execution.py:_futures_http_account.query_algo_order": 1,
+        "binance_futures_execution.py:_futures_http_account.query_all_algo_orders": 1,
+        "binance_futures_execution.py:_futures_http_account.query_futures_account_info": 1,
+        "binance_futures_execution.py:_futures_http_account.query_futures_hedge_mode": 1,
+        "binance_futures_execution.py:_futures_http_account.query_futures_position_risk": 2,
+        "binance_futures_execution.py:_futures_http_account.query_futures_symbol_config": 1,
+        "binance_futures_execution.py:_futures_http_account.query_open_algo_orders": 1,
+        "binance_futures_execution.py:_futures_http_account.set_leverage": 1,
+        "binance_futures_execution.py:_futures_http_account.set_margin_type": 1,
+    }
+)
 sys.path.insert(0, str(SERVICE_ROOT))
 
 
@@ -109,6 +137,17 @@ class BinanceAdapterConfigTest(unittest.TestCase):
             source,
         )
 
+    def test_all_signed_account_calls_use_configured_recv_window(self) -> None:
+        calls: Counter[str] = Counter()
+        missing: list[str] = []
+        for patch_path in (COMMON_PATCH_PATH, FUTURES_PATCH_PATH):
+            patch_calls, patch_missing = _signed_account_calls(patch_path)
+            calls.update(patch_calls)
+            missing.extend(patch_missing)
+
+        self.assertEqual(calls, EXPECTED_SIGNED_ACCOUNT_CALLS)
+        self.assertEqual(missing, [])
+
 
 def _fake_nautilus_modules() -> dict[str, types.ModuleType]:
     modules: dict[str, types.ModuleType] = {}
@@ -129,6 +168,77 @@ def _fake_nautilus_modules() -> dict[str, types.ModuleType]:
     config.BinanceExecClientConfig = _CapturedExecConfig
     config.BinanceInstrumentProviderConfig = _CapturedProviderConfig
     return modules
+
+
+def _signed_account_calls(path: Path) -> tuple[Counter[str], list[str]]:
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    calls: Counter[str] = Counter()
+    missing: list[str] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+
+        direct_method = _account_method_name(node.func)
+        if direct_method:
+            label = f"{path.name}:{direct_method}"
+            calls[label] += 1
+            if not _has_configured_recv_window(node):
+                missing.append(f"{label}:{node.lineno}")
+            continue
+
+        for argument in node.args:
+            indirect_method = _account_method_name(argument)
+            if not indirect_method:
+                continue
+            label = f"{path.name}:{indirect_method}"
+            calls[label] += 1
+            if not _has_configured_recv_window(node):
+                missing.append(f"{label}:{node.lineno}")
+
+    return calls, missing
+
+
+def _account_method_name(node: ast.AST) -> str | bool:
+    if not isinstance(node, ast.Attribute):
+        return False
+    owner = node.value
+    if not isinstance(owner, ast.Attribute):
+        return False
+    root = owner.value
+    if not isinstance(root, ast.Name):
+        return False
+    if root.id != "self":
+        return False
+    if owner.attr not in {"_http_account", "_futures_http_account"}:
+        return False
+    return f"{owner.attr}.{node.attr}"
+
+
+def _has_configured_recv_window(node: ast.Call) -> bool:
+    for keyword in node.keywords:
+        if keyword.arg != "recv_window":
+            continue
+        return _is_configured_recv_window(keyword.value)
+    return False
+
+
+def _is_configured_recv_window(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    if not isinstance(node.func, ast.Name):
+        return False
+    if node.func.id != "str":
+        return False
+    if len(node.args) != 1:
+        return False
+    argument = node.args[0]
+    if not isinstance(argument, ast.Attribute):
+        return False
+    if not isinstance(argument.value, ast.Name):
+        return False
+    return argument.value.id == "self" and argument.attr == "_recv_window"
 
 
 def _load_module() -> types.ModuleType:
