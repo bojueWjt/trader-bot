@@ -73,6 +73,12 @@ class RootContinue20260729Test(unittest.TestCase):
             sha_assignment.group(1),
             re.compile(r"[0-9a-f]{64}"),
         )
+        self.assertIn(
+            'BACKUP_ROOT="/srv/trader-v3/backups/'
+            'deploy-20260729T084509Z"',
+            header,
+        )
+        self.assertNotIn("${BACKUP_ROOT:-", header)
 
         sha_guard_start = re.search(
             r'(?m)^\s*\[{1,2}[^\n]*'
@@ -143,6 +149,12 @@ class RootContinue20260729Test(unittest.TestCase):
             text,
         )
         self.assertIn("manifest.txt", text)
+        self.assertIn(
+            "required artifacts missing from staging SHA256SUMS",
+            text,
+        )
+        self.assertIn('hk-root-continue-20260729.sh', text)
+        self.assertIn('hk-rollback-20260729.sh', text)
         inline_verification = (
             "hashlib.sha256" in text
             and "/proc/{pid}/mountinfo" in text
@@ -160,19 +172,14 @@ class RootContinue20260729Test(unittest.TestCase):
     def test_requires_fresh_outcome_watermark_before_timer_start(self):
         text = self.script_text()
 
-        marker_match = re.search(
-            r"(?m)^(OUTCOME_RUN_STARTED_AT|CONTINUE_STARTED_AT)="
-            r'"?\$\(date -u \+%Y-%m-%dT%H:%M:%SZ\)"?$',
-            text,
+        run_started = text.index(
+            "OUTCOME_RUN_STARTED_AT=$(database_marker capture-time)"
         )
-        self.assertIsNotNone(marker_match)
-        marker_name = marker_match.group(1)
-        run_started = marker_match.start()
         manual_start = text.index(
             "systemctl start trader-v3-trade-outcomes.service"
         )
         watermark = text.index(
-            f'database_marker verify-watermark "${marker_name}"'
+            'database_marker verify-watermark "$OUTCOME_RUN_STARTED_AT"'
         )
         outcome_files = text.index("verify_outcome_files", watermark)
         timer_start = text.index(
@@ -191,6 +198,9 @@ class RootContinue20260729Test(unittest.TestCase):
             text,
         )
         self.assertIn("/var/log/trader-v3/trade-outcomes.log", text)
+        self.assertIn('if mode == "capture-time"', text)
+        self.assertIn('cur.execute("SELECT clock_timestamp()")', text)
+        self.assertIn('payload["upserted_count"] <= 0', text)
         self.assertLess(run_started, manual_start)
         self.assertLess(manual_start, watermark)
         self.assertLess(watermark, outcome_files)
@@ -215,6 +225,9 @@ class RootContinue20260729Test(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8090/healthz", text)
         self.assertIn('("daily", "weekly")', text)
         self.assertIn("fetch_report_data", text)
+        self.assertIn("source_trade_count", text)
+        self.assertIn("weekly report has no trade outcomes", text)
+        self.assertIn('("symbol", "quantity", "mark_price", "updated_at")', text)
         self.assertLess(report_check, final_node_a)
         self.assertLess(final_node_a, final_node_b)
         self.assertLess(final_node_b, success)
@@ -237,6 +250,17 @@ class RootContinue20260729Test(unittest.TestCase):
             cleanup_end = text.index("\n}", cleanup_start)
             cleanup = text[cleanup_start:cleanup_end]
             self.assertIn(stop_command, cleanup)
+        self.assertIn("trap - ERR", cleanup)
+        self.assertIn(
+            "systemctl stop trader-v3-trade-outcomes.service",
+            cleanup,
+        )
+        self.assertIn(
+            "flock -n /var/lock/trader-v3-trade-outcomes.lock",
+            cleanup,
+        )
+        self.assertIn("docker inspect --format '{{.State.Running}}'", cleanup)
+        self.assertIn("CLEANUP_CONFIRMED=1", cleanup)
 
 
 if __name__ == "__main__":

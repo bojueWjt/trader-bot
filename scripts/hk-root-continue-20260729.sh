@@ -5,31 +5,82 @@ SCRIPT_DIR=$(
   CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd
 )
 D="${1:-${DEPLOY_DIR:-$SCRIPT_DIR}}"
-BACKUP_ROOT="${2:-${BACKUP_ROOT:-/srv/trader-v3/backups/deploy-20260729T084509Z}}"
-EXPECTED_STAGING_MANIFEST_SHA256="${3:-${EXPECTED_STAGING_MANIFEST_SHA256:-}}"
+BACKUP_ROOT="/srv/trader-v3/backups/deploy-20260729T084509Z"
+EXPECTED_STAGING_MANIFEST_SHA256="${2:-${EXPECTED_STAGING_MANIFEST_SHA256:-}}"
 T="${TRADER_ROOT:-/srv/trader-v3}"
 CP="$T/container-patches"
 NODE_A="${NODE_A:-trader-v3-node-a}"
 NODE_B="${NODE_B:-trader-v3-node-b}"
-CONTINUE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-MUTATION_STARTED=0
-TIMER_MUTATION_STARTED=0
+CLEANUP_CONFIRMED=0
 
 fail_closed_cleanup() {
+  trap - ERR
   set +e
-  if [ "$TIMER_MUTATION_STARTED" -eq 1 ]; then
-    systemctl stop trader-v3-trade-outcomes.timer >/dev/null 2>&1
-    systemctl disable trader-v3-trade-outcomes.timer >/dev/null 2>&1
+  local cleanup_failed=0
+  local lock_clear=0
+  local node_running
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop trader-v3-trade-outcomes.timer >/dev/null 2>&1 \
+      || cleanup_failed=1
+    systemctl disable trader-v3-trade-outcomes.timer >/dev/null 2>&1 \
+      || cleanup_failed=1
+    systemctl stop trader-v3-trade-outcomes.service >/dev/null 2>&1 \
+      || cleanup_failed=1
+  else
+    cleanup_failed=1
   fi
-  docker stop -t 20 "$NODE_A" "$NODE_B" >/dev/null 2>&1
+
+  if command -v flock >/dev/null 2>&1; then
+    for _ in {1..30}; do
+      if flock -n /var/lock/trader-v3-trade-outcomes.lock -c true; then
+        lock_clear=1
+        break
+      fi
+      sleep 1
+    done
+  fi
+  if [ "$lock_clear" -ne 1 ]; then
+    echo "FAIL-CLOSED WARNING: trade outcomes lock remains held" >&2
+    cleanup_failed=1
+  fi
+
+  if command -v docker >/dev/null 2>&1; then
+    docker stop -t 20 "$NODE_A" "$NODE_B" >/dev/null 2>&1
+    for node in "$NODE_A" "$NODE_B"; do
+      node_running=$(
+        docker inspect --format '{{.State.Running}}' "$node" 2>/dev/null
+      )
+      if [ "$node_running" != "false" ]; then
+        echo "FAIL-CLOSED WARNING: $node is not confirmed stopped" >&2
+        cleanup_failed=1
+      fi
+    done
+  else
+    cleanup_failed=1
+  fi
+
+  if [ "$cleanup_failed" -eq 0 ]; then
+    CLEANUP_CONFIRMED=1
+    echo "Fail-closed cleanup verified: outcomes stopped and nodes stopped" >&2
+    return 0
+  fi
+  echo "FAIL-CLOSED CLEANUP INCOMPLETE: manual verification required" >&2
+  return 1
+}
+
+report_fail_closed_state() {
+  if [ "$CLEANUP_CONFIRMED" -eq 1 ]; then
+    echo "Trading remains fail-closed" >&2
+    return
+  fi
+  echo "Fail-closed state requires immediate manual verification" >&2
 }
 
 die() {
   echo "FATAL: $*" >&2
   fail_closed_cleanup
-  if [ "$MUTATION_STARTED" -eq 1 ]; then
-    echo "Nodes are stopped; trading remains fail-closed" >&2
-  fi
+  report_fail_closed_state
   echo "Rollback: sudo bash $D/hk-rollback-20260729.sh $BACKUP_ROOT" >&2
   exit 1
 }
@@ -38,7 +89,8 @@ on_error() {
   local status=$?
   trap - ERR
   fail_closed_cleanup
-  echo "CONTINUATION FAILED: nodes are stopped; trading remains fail-closed" >&2
+  echo "CONTINUATION FAILED" >&2
+  report_fail_closed_state
   echo "Rollback: sudo bash $D/hk-rollback-20260729.sh $BACKUP_ROOT" >&2
   exit "$status"
 }
@@ -48,7 +100,8 @@ on_signal() {
   local signal_name="$2"
   trap - ERR
   fail_closed_cleanup
-  echo "CONTINUATION INTERRUPTED by $signal_name: nodes are stopped" >&2
+  echo "CONTINUATION INTERRUPTED by $signal_name" >&2
+  report_fail_closed_state
   echo "Rollback: sudo bash $D/hk-rollback-20260729.sh $BACKUP_ROOT" >&2
   exit "$status"
 }
@@ -98,7 +151,10 @@ mode = sys.argv[1]
 conn = psycopg2.connect(os.environ["DATABASE_URL"])
 try:
     with conn.cursor() as cur:
-        if mode == "verify-0009":
+        if mode == "capture-time":
+            cur.execute("SELECT clock_timestamp()")
+            print(cur.fetchone()[0].isoformat())
+        elif mode == "verify-0009":
             cur.execute("SELECT to_regclass('public.trade_outcome_job_runs')")
             table_name = cur.fetchone()[0]
             cur.execute(
@@ -627,7 +683,7 @@ for path in (json_path, log_path):
         raise SystemExit(f"outcome output missing or empty: {path}")
     if path.stat().st_mtime <= required_after:
         raise SystemExit(
-            f"outcome output was not refreshed after continuation start: {path}"
+            f"outcome output was not refreshed after the run baseline: {path}"
         )
 
 payload = json.loads(json_path.read_text(encoding="utf-8"))
@@ -644,6 +700,8 @@ if payload["closed_intent_count"] != (
     payload["upserted_count"] + payload["skipped_count"]
 ):
     raise SystemExit(f"outcome JSON counts are inconsistent: {payload}")
+if payload["upserted_count"] <= 0:
+    raise SystemExit(f"outcome run produced no trade outcomes: {payload}")
 
 with log_path.open("rb") as handle:
     handle.seek(max(0, log_path.stat().st_size - 65536))
@@ -723,6 +781,38 @@ for report_type in ("daily", "weekly"):
     positions = data.get("positions")
     if not isinstance(positions, list):
         raise SystemExit(f"{report_type} report positions are invalid")
+    for position in positions:
+        for field in ("symbol", "quantity", "mark_price", "updated_at"):
+            if position.get(field) in (None, ""):
+                raise SystemExit(
+                    f"{report_type} report position field is empty: "
+                    f"{field}={position}"
+                )
+    source_dependencies = report_service.empty_dependency_status()
+    source_conn = report_service.connect_database(
+        None,
+        source_dependencies,
+    )
+    try:
+        with source_conn.cursor() as source_cur:
+            source_cur.execute(
+                """
+                SELECT count(*)::int
+                FROM trade_outcomes
+                WHERE closed_at >= %s AND closed_at < %s
+                """,
+                (window["start"], window["end"]),
+            )
+            source_trade_count = source_cur.fetchone()[0]
+    finally:
+        source_conn.close()
+    if trade_count != source_trade_count:
+        raise SystemExit(
+            f"{report_type} report trade_count mismatch: "
+            f"report={trade_count} source={source_trade_count}"
+        )
+    if report_type == "weekly" and source_trade_count <= 0:
+        raise SystemExit("weekly report has no trade outcomes")
     for dependency_name in (
         "database",
         "trade_outcomes",
@@ -736,7 +826,8 @@ for report_type in ("daily", "weekly"):
             )
     print(
         f"{report_type} report data verified: "
-        f"trades={trade_count} positions={len(positions)}"
+        f"trades={trade_count} source_trades={source_trade_count} "
+        f"positions={len(positions)}"
     )
 PY
   )
@@ -776,11 +867,51 @@ required_staging=(
   manifest.txt
   hk-rollback-20260729.sh
   hk-root-continue-20260729.sh
+  commits.txt
 )
 for relative_path in "${required_staging[@]}"; do
   [ -f "$D/$relative_path" ] \
     || die "missing deployment artifact: $D/$relative_path"
 done
+
+python3 - "$D/SHA256SUMS" "${required_staging[@]:1}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+manifest_path = Path(sys.argv[1])
+required = set(sys.argv[2:])
+listed = set()
+for line_number, raw_line in enumerate(
+    manifest_path.read_text(encoding="utf-8").splitlines(),
+    start=1,
+):
+    match = re.fullmatch(r"([0-9a-f]{64})  ([*]?)(.+)", raw_line)
+    if match is None:
+        raise SystemExit(
+            f"invalid staging checksum line {line_number}: {raw_line!r}"
+        )
+    relative_path = match.group(3)
+    if relative_path.startswith("./"):
+        relative_path = relative_path[2:]
+    path = Path(relative_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise SystemExit(
+            f"unsafe staging checksum path on line {line_number}: "
+            f"{relative_path}"
+        )
+    if relative_path in listed:
+        raise SystemExit(
+            f"duplicate staging checksum entry: {relative_path}"
+        )
+    listed.add(relative_path)
+missing = sorted(required - listed)
+if missing:
+    raise SystemExit(
+        f"required artifacts missing from staging SHA256SUMS: {missing}"
+    )
+print(f"staging checksum membership verified: {len(required)} required files")
+PY
 
 ACTUAL_STAGING_MANIFEST_SHA256=$(
   sha256sum "$D/SHA256SUMS" | awk '{print $1}'
@@ -827,13 +958,15 @@ verify_existing_node_runtime
 load_database_url
 database_marker verify-0009
 
-MUTATION_STARTED=1
 docker start "$NODE_A"
 verify_node_halted 8081
 docker start "$NODE_B"
 verify_node_halted 8082
 verify_runtime_manifest
 
+OUTCOME_RUN_STARTED_AT=$(database_marker capture-time)
+[ -n "$OUTCOME_RUN_STARTED_AT" ] \
+  || die "failed to capture outcome run baseline"
 systemctl start trader-v3-trade-outcomes.service
 SERVICE_RESULT=$(
   systemctl show trader-v3-trade-outcomes.service \
@@ -842,13 +975,12 @@ SERVICE_RESULT=$(
 )
 [ "$SERVICE_RESULT" = "success" ] \
   || die "trade outcomes service result is $SERVICE_RESULT"
-database_marker verify-watermark "$CONTINUE_STARTED_AT"
+database_marker verify-watermark "$OUTCOME_RUN_STARTED_AT"
 verify_outcome_files \
-  "$CONTINUE_STARTED_AT" \
+  "$OUTCOME_RUN_STARTED_AT" \
   /var/log/trader-v3/trade-outcomes-latest.json \
   /var/log/trader-v3/trade-outcomes.log
 
-TIMER_MUTATION_STARTED=1
 install -d -m 0755 /var/lib/systemd/timers
 touch /var/lib/systemd/timers/stamp-trader-v3-trade-outcomes.timer
 chown root:root /var/lib/systemd/timers/stamp-trader-v3-trade-outcomes.timer
@@ -862,8 +994,6 @@ verify_report
 verify_node_halted 8081
 verify_node_halted 8082
 
-MUTATION_STARTED=0
-TIMER_MUTATION_STARTED=0
 echo "CONTINUATION SUCCEEDED"
 echo "Staging: $D"
 echo "Backup: $BACKUP_ROOT"
