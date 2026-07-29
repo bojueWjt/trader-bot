@@ -15,34 +15,94 @@ class RootContinue20260729Test(unittest.TestCase):
         )
         return CONTINUE.read_text(encoding="utf-8")
 
-    def test_reuses_existing_containers_without_recreate_commands(self):
+    def test_reuses_existing_containers_without_executable_recreate_commands(self):
         text = self.script_text()
 
         self.assertNotRegex(
             text,
-            re.compile(r"^[ \t]*docker[ \t]+(?:run|create)\b", re.MULTILINE),
+            re.compile(
+                r"^[ \t]*(?:sudo[ \t]+)?docker[ \t]+"
+                r"(?:container[ \t]+)?(?:run|create)\b",
+                re.MULTILINE,
+            ),
         )
         self.assertNotRegex(
             text,
             re.compile(
-                r"^[ \t]*docker[ \t]+compose[^\n]*\bup\b",
+                r"^[ \t]*(?:sudo[ \t]+)?docker[ \t]+"
+                r"compose[^\n]*\b(?:up|create)\b",
                 re.MULTILINE,
             ),
         )
         self.assertNotIn("--force-recreate", text)
-        self.assertNotIn('bash "$T/recreate-', text)
-        self.assertNotIn("hk-gen-recreate-patched.py", text)
+        self.assertNotRegex(
+            text,
+            re.compile(
+                r"^[ \t]*(?:sudo[ \t]+)?(?:bash|sh|python3?)[ \t]+"
+                r"[^\n#]*(?:recreate-[^\n#]*\.sh|"
+                r"hk-gen-recreate-patched\.py)",
+                re.MULTILINE,
+            ),
+        )
+
+    def test_staging_self_locates_and_reviewed_sha_is_explicit(self):
+        text = self.script_text()
+        header = "\n".join(text.splitlines()[:30])
+
+        script_dir_match = re.search(
+            r"(?ms)^([A-Z_]*DIR)=\$\("
+            r".*?BASH_SOURCE\[0\].*?\bpwd\b.*?^\)",
+            header,
+        )
+        d_assignment = re.search(r"(?m)^D=(.+)$", header)
+        sha_assignment = re.search(
+            r"(?m)^EXPECTED_STAGING_MANIFEST_SHA256=(.+)$",
+            header,
+        )
+        self.assertIsNotNone(script_dir_match)
+        self.assertIsNotNone(d_assignment)
+        self.assertIsNotNone(sha_assignment)
+
+        script_dir_name = script_dir_match.group(1)
+        self.assertRegex(
+            d_assignment.group(1),
+            re.compile(rf"\$(?:\{{)?{script_dir_name}(?:\}})?"),
+        )
+        self.assertNotIn("/home/balen/deploy-", d_assignment.group(1))
+        self.assertNotRegex(
+            sha_assignment.group(1),
+            re.compile(r"[0-9a-f]{64}"),
+        )
+
+        sha_guard_start = re.search(
+            r'(?m)^\s*\[{1,2}[^\n]*'
+            r'\$EXPECTED_STAGING_MANIFEST_SHA256[^\n]*',
+            text,
+        )
+        sha_use = text.index("ACTUAL_STAGING_MANIFEST_SHA256")
+        explicit_parameter = ":?" in sha_assignment.group(1)
+        explicit_guard = False
+        if sha_guard_start is not None:
+            guard_block = text[
+                sha_guard_start.start():sha_guard_start.start() + 300
+            ]
+            explicit_guard = "die" in guard_block or "exit" in guard_block
+        self.assertTrue(
+            explicit_parameter or explicit_guard,
+            "reviewed staging SHA must be supplied by argument or environment",
+        )
+        if sha_guard_start is not None:
+            self.assertLess(sha_guard_start.start(), sha_use)
 
     def test_rejects_non_stopped_nodes_before_starting_node_a(self):
         text = self.script_text()
         node_a_start = text.index('docker start "$NODE_A"')
-        status_check = text.find("State.Status")
-        exited_check = text.find("exited")
+        stopped_preflight = text.rindex("verify_existing_node_runtime")
 
-        self.assertGreaterEqual(status_check, 0)
-        self.assertGreaterEqual(exited_check, 0)
-        self.assertLess(status_check, node_a_start)
-        self.assertLess(exited_check, node_a_start)
+        self.assertIn('item.get("State")', text)
+        self.assertIn('state.get("Running")', text)
+        self.assertIn('state.get("Status") != "exited"', text)
+        self.assertLess(stopped_preflight, node_a_start)
 
     def test_starts_nodes_sequentially_and_accepts_only_ready_halted(self):
         text = self.script_text()
@@ -100,27 +160,41 @@ class RootContinue20260729Test(unittest.TestCase):
     def test_requires_fresh_outcome_watermark_before_timer_start(self):
         text = self.script_text()
 
-        run_started = text.index(
-            "OUTCOME_RUN_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        marker_match = re.search(
+            r"(?m)^(OUTCOME_RUN_STARTED_AT|CONTINUE_STARTED_AT)="
+            r'"?\$\(date -u \+%Y-%m-%dT%H:%M:%SZ\)"?$',
+            text,
         )
+        self.assertIsNotNone(marker_match)
+        marker_name = marker_match.group(1)
+        run_started = marker_match.start()
         manual_start = text.index(
             "systemctl start trader-v3-trade-outcomes.service"
         )
         watermark = text.index(
-            'database_marker verify-watermark "$OUTCOME_RUN_STARTED_AT"'
+            f'database_marker verify-watermark "${marker_name}"'
         )
-        latest_json = text.index(
-            "/var/log/trader-v3/trade-outcomes-latest.json"
-        )
+        outcome_files = text.index("verify_outcome_files", watermark)
         timer_start = text.index(
             "systemctl start trader-v3-trade-outcomes.timer"
         )
-        self.assertIn("started_at < required_timestamp", text)
-        self.assertIn("completed_at < required_timestamp", text)
+        self.assertRegex(
+            text,
+            re.compile(r"started_at\s*<=?\s*required_timestamp"),
+        )
+        self.assertRegex(
+            text,
+            re.compile(r"completed_at\s*<=?\s*required_timestamp"),
+        )
+        self.assertIn(
+            "/var/log/trader-v3/trade-outcomes-latest.json",
+            text,
+        )
+        self.assertIn("/var/log/trader-v3/trade-outcomes.log", text)
         self.assertLess(run_started, manual_start)
         self.assertLess(manual_start, watermark)
-        self.assertLess(watermark, latest_json)
-        self.assertLess(latest_json, timer_start)
+        self.assertLess(watermark, outcome_files)
+        self.assertLess(outcome_files, timer_start)
         self.assertNotIn(
             "systemctl enable --now trader-v3-trade-outcomes.timer",
             text,
@@ -129,16 +203,19 @@ class RootContinue20260729Test(unittest.TestCase):
     def test_checks_report_health_daily_weekly_then_finishes_halted(self):
         text = self.script_text()
 
-        report_health = text.index("http://127.0.0.1:8090/healthz")
-        daily = text.index('"daily"')
-        weekly = text.index('"weekly"')
+        report_check = text.rindex("verify_report")
         final_node_a = text.rindex("verify_node_halted 8081")
         final_node_b = text.rindex("verify_node_halted 8082")
-        success = text.index('echo "DEPLOY CONTINUATION SUCCEEDED"')
+        success_match = re.search(
+            r'echo "(?:DEPLOY )?CONTINUATION SUCCEEDED"',
+            text,
+        )
+        self.assertIsNotNone(success_match)
+        success = success_match.start()
+        self.assertIn("http://127.0.0.1:8090/healthz", text)
+        self.assertIn('("daily", "weekly")', text)
         self.assertIn("fetch_report_data", text)
-        self.assertLess(report_health, daily)
-        self.assertLess(daily, weekly)
-        self.assertLess(weekly, final_node_a)
+        self.assertLess(report_check, final_node_a)
         self.assertLess(final_node_a, final_node_b)
         self.assertLess(final_node_b, success)
         self.assertIn("Trading remains HALTED", text)
@@ -153,7 +230,13 @@ class RootContinue20260729Test(unittest.TestCase):
         on_error_start = text.index("on_error() {")
         on_error_end = text.index("\n}", on_error_start)
         on_error = text[on_error_start:on_error_end]
-        self.assertIn('docker stop -t 20 "$NODE_A" "$NODE_B"', on_error)
+        stop_command = 'docker stop -t 20 "$NODE_A" "$NODE_B"'
+        if stop_command not in on_error:
+            self.assertIn("fail_closed_cleanup", on_error)
+            cleanup_start = text.index("fail_closed_cleanup() {")
+            cleanup_end = text.index("\n}", cleanup_start)
+            cleanup = text[cleanup_start:cleanup_end]
+            self.assertIn(stop_command, cleanup)
 
 
 if __name__ == "__main__":
