@@ -5,6 +5,9 @@ from typing import Any
 from config.node_config import NodeConfig
 
 
+BINANCE_RECV_WINDOW_MS = 30_000
+
+
 def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
     """Build Nautilus Binance data/exec client configs.
 
@@ -55,6 +58,7 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
         # reduce_only (positionSide is used instead). Testnet runs one-way — the tested
         # path — where reduce_only is valid, so keep it there unchanged.
         use_reduce_only=(env_name != "live"),
+        recv_window_ms=BINANCE_RECV_WINDOW_MS,
     )
     return data_config, exec_config
 

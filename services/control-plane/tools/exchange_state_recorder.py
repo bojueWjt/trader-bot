@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError
 
 import psycopg2
 
@@ -32,6 +33,7 @@ ACCOUNTS = {
     "account-a": ("trader-v3-node-a", "BINANCE_ACCOUNT_A"),
     "account-b": ("trader-v3-node-b", "BINANCE_ACCOUNT_B"),
 }
+BINANCE_RECV_WINDOW_MS = 30_000
 
 UPSERT_SQL = """
 INSERT INTO exchange_state_mirror (account_id, payload, updated_at)
@@ -62,14 +64,26 @@ def container_keys(container: str, prefix: str) -> tuple[str, str] | None:
 
 def signed_get(base: str, path: str, key: str, sec: str, params: dict | None = None) -> object:
     q = dict(params or {})
+    q["recvWindow"] = BINANCE_RECV_WINDOW_MS
     q["timestamp"] = int(time.time() * 1000)
     query = urllib.parse.urlencode(q)
     sig = hmac.new(sec.encode(), query.encode(), hashlib.sha256).hexdigest()
     req = urllib.request.Request(
         f"{base}{path}?{query}&signature={sig}", headers={"X-MBX-APIKEY": key}
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.load(resp)
+    except HTTPError as exc:
+        raw = exc.read()
+        raw_text = raw.decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError:
+            payload = {}
+        code = payload.get("code", exc.code)
+        message = payload.get("msg", raw_text or exc.reason)
+        raise RuntimeError(f"Binance API {code}: {message}") from exc
 
 
 def slim_order(o: dict) -> dict:

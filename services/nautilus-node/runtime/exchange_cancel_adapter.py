@@ -24,6 +24,8 @@ _CANCEL_ACTIONS = frozenset({"cancel", "cancel_order"})
 _CANCELED_STATUSES = frozenset({"CANCELED", "CANCELLED"})
 _FILLED_STATUSES = frozenset({"FILLED", "EXECUTED", "TRIGGERED"})
 _ABSENT_ORDER_CODES = frozenset({-2011, -2013})
+DEFAULT_RECV_WINDOW_MS = 30_000
+MAX_RECV_WINDOW_MS = 60_000
 
 
 class ExchangeCancelError(RuntimeError):
@@ -289,16 +291,23 @@ class SignedBinanceTransport:
         api_key: str,
         api_secret: str,
         timeout_seconds: float = 10.0,
+        recv_window_ms: int = DEFAULT_RECV_WINDOW_MS,
         timestamp_ms: Callable[[], int] | None = None,
     ) -> None:
+        if recv_window_ms <= 0 or recv_window_ms > MAX_RECV_WINDOW_MS:
+            raise ValueError(
+                f"recv_window_ms must be between 1 and {MAX_RECV_WINDOW_MS}"
+            )
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._api_secret = api_secret
         self._timeout_seconds = timeout_seconds
+        self._recv_window_ms = recv_window_ms
         self._timestamp_ms = timestamp_ms
 
     def request(self, method: str, path: str, params: dict[str, Any]) -> Any:
         query_params = dict(params)
+        query_params["recvWindow"] = self._recv_window_ms
         if self._timestamp_ms is None:
             timestamp = int(time.time() * 1000)
         else:

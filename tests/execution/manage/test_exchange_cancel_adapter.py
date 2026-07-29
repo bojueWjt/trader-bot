@@ -37,6 +37,7 @@ ControlPlaneExchangeStateMirror = (
     EXCHANGE_CANCEL_ADAPTER.ControlPlaneExchangeStateMirror
 )
 OrderAlreadyFilledError = EXCHANGE_CANCEL_ADAPTER.OrderAlreadyFilledError
+SignedBinanceTransport = EXCHANGE_CANCEL_ADAPTER.SignedBinanceTransport
 WrongAccountError = EXCHANGE_CANCEL_ADAPTER.WrongAccountError
 
 
@@ -232,6 +233,36 @@ class ExchangeStateMirrorTest(unittest.TestCase):
         self.assertEqual(regular.venue_order_id, "42")
         self.assertEqual(algo.order_kind, "algo")
         self.assertEqual(algo.venue_order_id, "9001")
+
+
+class SignedBinanceTransportTest(unittest.TestCase):
+    def test_signed_request_includes_extended_recv_window_in_signature(self) -> None:
+        response = _JsonResponse({"status": "CANCELED"})
+        transport = SignedBinanceTransport(
+            base_url="https://fapi.binance.com",
+            api_key="api-key",
+            api_secret="api-secret",
+            timestamp_ms=lambda: 1_700_000_000_000,
+        )
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            return_value=response,
+        ) as urlopen:
+            transport.request(
+                "DELETE",
+                "/fapi/v1/order",
+                {"symbol": "BTCUSDT", "orderId": "42"},
+            )
+
+        request = urlopen.call_args.args[0]
+        query = EXCHANGE_CANCEL_ADAPTER.urllib.parse.parse_qs(
+            EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(request.full_url).query
+        )
+        self.assertEqual(query["recvWindow"], ["30000"])
+        self.assertEqual(query["timestamp"], ["1700000000000"])
+        self.assertIn("signature", query)
 
 
 class _ScriptedTransport:
