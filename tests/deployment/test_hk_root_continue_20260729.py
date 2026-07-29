@@ -1,10 +1,14 @@
+import os
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 import unittest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTINUE = REPO_ROOT / "scripts" / "hk-root-continue-20260729.sh"
+ROLLBACK = REPO_ROOT / "scripts" / "hk-rollback-20260729.sh"
 
 
 class RootContinue20260729Test(unittest.TestCase):
@@ -14,6 +18,85 @@ class RootContinue20260729Test(unittest.TestCase):
             f"continuation script is missing: {CONTINUE}",
         )
         return CONTINUE.read_text(encoding="utf-8")
+
+    def run_fail_closed_cleanup(
+        self,
+        flock_ok,
+        docker_running,
+        systemctl_ok=True,
+    ):
+        text = self.script_text()
+        function_start = text.index("fail_closed_cleanup() {")
+        function_end = text.index(
+            "\n}\n\nreport_fail_closed_state()",
+            function_start,
+        ) + 3
+        function_text = text[function_start:function_end]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            command_log = temp_path / "commands.log"
+            scripts = {
+                "systemctl": (
+                    "#!/bin/sh\n"
+                    "printf 'systemctl %s\\n' \"$*\" >>\"$COMMAND_LOG\"\n"
+                    "[ \"$SYSTEMCTL_OK\" = 1 ]\n"
+                ),
+                "flock": (
+                    "#!/bin/sh\n"
+                    "printf 'flock %s\\n' \"$*\" >>\"$COMMAND_LOG\"\n"
+                    "[ \"$FLOCK_OK\" = 1 ]\n"
+                ),
+                "docker": (
+                    "#!/bin/sh\n"
+                    "printf 'docker %s\\n' \"$*\" >>\"$COMMAND_LOG\"\n"
+                    "if [ \"$1\" = inspect ]; then\n"
+                    "  printf '%s\\n' \"$DOCKER_RUNNING\"\n"
+                    "fi\n"
+                    "exit 0\n"
+                ),
+                "sleep": "#!/bin/sh\nexit 0\n",
+            }
+            for name, content in scripts.items():
+                path = fake_bin / name
+                path.write_text(content, encoding="utf-8")
+                path.chmod(0o755)
+            harness = temp_path / "cleanup-harness.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -u\n"
+                'NODE_A="node-a"\n'
+                'NODE_B="node-b"\n'
+                "CLEANUP_CONFIRMED=0\n"
+                f"{function_text}\n"
+                "set +e\n"
+                "fail_closed_cleanup\n"
+                "status=$?\n"
+                'printf "status=%s confirmed=%s\\n" '
+                '"$status" "$CLEANUP_CONFIRMED"\n',
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_bin}:{env['PATH']}"
+            env["COMMAND_LOG"] = str(command_log)
+            env["FLOCK_OK"] = "1" if flock_ok else "0"
+            env["DOCKER_RUNNING"] = docker_running
+            env["SYSTEMCTL_OK"] = "1" if systemctl_ok else "0"
+            result = subprocess.run(
+                ["bash", str(harness)],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            log = ""
+            if command_log.exists():
+                log = command_log.read_text(encoding="utf-8")
+            return result, log
 
     def test_reuses_existing_containers_without_executable_recreate_commands(self):
         text = self.script_text()
@@ -79,6 +162,11 @@ class RootContinue20260729Test(unittest.TestCase):
             header,
         )
         self.assertNotIn("${BACKUP_ROOT:-", header)
+        rollback_header = "\n".join(
+            ROLLBACK.read_text(encoding="utf-8").splitlines()[:12]
+        )
+        self.assertIn("BASH_SOURCE[0]", rollback_header)
+        self.assertIn('D="${DEPLOY_DIR:-$SCRIPT_DIR}"', rollback_header)
 
         sha_guard_start = re.search(
             r'(?m)^\s*\[{1,2}[^\n]*'
@@ -226,6 +314,7 @@ class RootContinue20260729Test(unittest.TestCase):
         self.assertIn('("daily", "weekly")', text)
         self.assertIn("fetch_report_data", text)
         self.assertIn("source_trade_count", text)
+        self.assertIn("source_position_count", text)
         self.assertIn("weekly report has no trade outcomes", text)
         self.assertIn('("symbol", "quantity", "mark_price", "updated_at")', text)
         self.assertLess(report_check, final_node_a)
@@ -261,6 +350,37 @@ class RootContinue20260729Test(unittest.TestCase):
         )
         self.assertIn("docker inspect --format '{{.State.Running}}'", cleanup)
         self.assertIn("CLEANUP_CONFIRMED=1", cleanup)
+
+    def test_fail_closed_cleanup_confirms_stopped_state(self):
+        result, log = self.run_fail_closed_cleanup(
+            flock_ok=True,
+            docker_running="false",
+        )
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("status=0 confirmed=1", output)
+        self.assertIn(
+            "systemctl stop trader-v3-trade-outcomes.service",
+            log,
+        )
+        self.assertIn("flock -n /var/lock/trader-v3-trade-outcomes.lock", log)
+        self.assertIn("docker stop -t 20 node-a node-b", log)
+
+    def test_fail_closed_cleanup_rejects_unconfirmed_state(self):
+        result, _ = self.run_fail_closed_cleanup(
+            flock_ok=False,
+            docker_running="true",
+            systemctl_ok=False,
+        )
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("status=1 confirmed=0", output)
+        self.assertIn("trade outcomes lock remains held", output)
+        self.assertIn("node-a is not confirmed stopped", output)
+        self.assertIn("node-b is not confirmed stopped", output)
+        self.assertIn("FAIL-CLOSED CLEANUP INCOMPLETE", output)
 
 
 if __name__ == "__main__":

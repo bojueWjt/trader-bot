@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-D="${DEPLOY_DIR:-/home/balen/deploy-20260729}"
+SCRIPT_DIR=$(
+  CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd
+)
+D="${DEPLOY_DIR:-$SCRIPT_DIR}"
 T="${TRADER_ROOT:-/srv/trader-v3}"
 NODE_A="${NODE_A:-trader-v3-node-a}"
 NODE_B="${NODE_B:-trader-v3-node-b}"

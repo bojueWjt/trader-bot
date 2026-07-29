@@ -797,6 +797,35 @@ for report_type in ("daily", "weekly"):
         with source_conn.cursor() as source_cur:
             source_cur.execute(
                 """
+                SELECT account_id, payload, updated_at
+                FROM exchange_state_mirror
+                ORDER BY account_id
+                """
+            )
+            mirror_rows = source_cur.fetchall()
+            if mirror_rows:
+                source_positions = []
+                for account_id, payload, updated_at in mirror_rows:
+                    source_positions.extend(
+                        report_service.normalize_position_payload(
+                            payload,
+                            account_id,
+                            updated_at,
+                        )
+                    )
+                source_position_count = len(source_positions)
+            else:
+                source_cur.execute(
+                    """
+                    SELECT count(*)::int
+                    FROM positions_projection
+                    WHERE quantity > 0
+                      AND status NOT IN ('closed', 'flat')
+                    """
+                )
+                source_position_count = source_cur.fetchone()[0]
+            source_cur.execute(
+                """
                 SELECT count(*)::int
                 FROM trade_outcomes
                 WHERE closed_at >= %s AND closed_at < %s
@@ -810,6 +839,11 @@ for report_type in ("daily", "weekly"):
         raise SystemExit(
             f"{report_type} report trade_count mismatch: "
             f"report={trade_count} source={source_trade_count}"
+        )
+    if len(positions) != source_position_count:
+        raise SystemExit(
+            f"{report_type} report position count mismatch: "
+            f"report={len(positions)} source={source_position_count}"
         )
     if report_type == "weekly" and source_trade_count <= 0:
         raise SystemExit("weekly report has no trade outcomes")
@@ -827,7 +861,8 @@ for report_type in ("daily", "weekly"):
     print(
         f"{report_type} report data verified: "
         f"trades={trade_count} source_trades={source_trade_count} "
-        f"positions={len(positions)}"
+        f"positions={len(positions)} "
+        f"source_positions={source_position_count}"
     )
 PY
   )
@@ -843,7 +878,7 @@ require_command stat
 require_command systemctl
 id balen >/dev/null 2>&1 || die "service user balen is missing"
 [ -n "$EXPECTED_STAGING_MANIFEST_SHA256" ] \
-  || die "supply the reviewed staging SHA256SUMS digest as argument 3 or EXPECTED_STAGING_MANIFEST_SHA256"
+  || die "supply the reviewed staging SHA256SUMS digest as argument 2 or EXPECTED_STAGING_MANIFEST_SHA256"
 [[ "$EXPECTED_STAGING_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] \
   || die "expected staging manifest SHA256 is invalid"
 
