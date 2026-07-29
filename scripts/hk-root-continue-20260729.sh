@@ -204,13 +204,13 @@ try:
                 )
             cur.execute("SELECT %s::timestamptz", (required_after,))
             required_timestamp = cur.fetchone()[0]
-            if started_at < required_timestamp:
+            if started_at <= required_timestamp:
                 raise SystemExit(
                     f"trade_outcomes start watermark did not advance: "
                     f"required_after={required_timestamp.isoformat()} "
                     f"started_at={started_at.isoformat()}"
                 )
-            if completed_at < required_timestamp:
+            if completed_at <= required_timestamp:
                 raise SystemExit(
                     f"trade_outcomes completion watermark did not advance: "
                     f"required_after={required_timestamp.isoformat()} "
