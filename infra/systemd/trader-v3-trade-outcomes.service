@@ -5,8 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+User=balen
+Group=balen
 WorkingDirectory=/srv/trader-v3
-EnvironmentFile=/srv/trader-v3/.env.v3
+EnvironmentFile=/etc/trader-v3/trade-outcomes.env
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/usr/bin/install -d -m 0750 /var/log/trader-v3
 ExecStartPre=/usr/bin/install -d -m 0750 /var/tmp/hermes-zone-klines

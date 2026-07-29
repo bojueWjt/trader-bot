@@ -9,7 +9,9 @@ TIMER = ROOT / "infra" / "systemd" / "trader-v3-trade-outcomes.timer"
 def test_trade_outcomes_service_uses_environment_secret_and_file_logs():
     text = SERVICE.read_text(encoding="utf-8")
 
-    assert "EnvironmentFile=/srv/trader-v3/.env.v3" in text
+    assert "User=balen" in text
+    assert "Group=balen" in text
+    assert "EnvironmentFile=/etc/trader-v3/trade-outcomes.env" in text
     assert "scripts/analysis/trade_outcomes.py" in text
     assert "Environment=DATABASE_URL=" not in text
     assert "--db-url" not in text
