@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
+import tempfile
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Callable, Iterable, Optional
 from uuid import UUID
@@ -258,7 +259,8 @@ class IntentExecutionStrategy(Strategy):
     def _persist_entry_protection_stash(self) -> bool:
         path = self._protection_stash_path()
         directory = os.path.dirname(path)
-        tmp_path = os.path.join(directory, f".{self._PROTECTION_STASH_FILENAME}.tmp.{id(self)}")
+        tmp_path = ""
+        fd = -1
         try:
             os.makedirs(directory, exist_ok=True)
             payload = {
@@ -266,13 +268,26 @@ class IntentExecutionStrategy(Strategy):
                 for intent_key, value in self._entry_protection_stash.items()
                 if isinstance(value, dict)
             }
-            with open(tmp_path, "w") as fh:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{self._PROTECTION_STASH_FILENAME}.tmp.",
+                dir=directory,
+                text=True,
+            )
+            with os.fdopen(fd, "w") as fh:
+                fd = -1
                 json.dump(payload, fh, sort_keys=True, separators=(",", ":"), default=str)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp_path, path)
             return True
         except Exception as exc:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
-                if os.path.exists(tmp_path):
+                if tmp_path and os.path.exists(tmp_path):
                     os.unlink(tmp_path)
             except OSError:
                 pass

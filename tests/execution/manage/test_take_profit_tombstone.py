@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from dataclasses import dataclass
@@ -35,6 +37,42 @@ NOW = datetime(2026, 7, 29, 12, 30, tzinfo=timezone.utc)
 
 
 class TakeProfitTombstoneTest(unittest.TestCase):
+    def test_concurrent_stash_persists_use_unique_temp_files(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _Strategy(Path(state_dir), orders=[])
+            _seed_entry_stash(strategy)
+            barrier = threading.Barrier(2)
+            real_replace = os.replace
+            results: list[bool] = []
+
+            def racing_replace(source: str, destination: str) -> None:
+                barrier.wait(timeout=5)
+                real_replace(source, destination)
+
+            def persist() -> None:
+                results.append(strategy._persist_entry_protection_stash())
+
+            with patch(
+                "strategy.intent_execution_strategy.os.replace",
+                side_effect=racing_replace,
+            ):
+                threads = [
+                    threading.Thread(target=persist),
+                    threading.Thread(target=persist),
+                ]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(results, [True, True])
+            reloaded = strategy._load_entry_protection_stash()
+            self.assertEqual(
+                set(reloaded),
+                set(strategy._entry_protection_stash),
+            )
+
     def test_node_cancel_all_requires_user_or_channel_authorization(self) -> None:
         strategy = _Strategy(
             Path(tempfile.mkdtemp()),
