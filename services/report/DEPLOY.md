@@ -23,9 +23,13 @@ REPORT_PORT=8090
 REPORT_DIR=/srv/trader-v3/reports
 PUBLIC_BASE=https://hk.balen.wang
 REPORT_TOKEN=<long random token>
+REPORT_OUTCOME_FRESHNESS_HOURS=36
 ```
 
 `python-multipart` is required for `POST /reports/assets`.
+`REPORT_OUTCOME_FRESHNESS_HOURS` controls the maximum age of the latest
+successful `trade_outcomes` job run. Report publication returns HTTP 503 when
+the watermark is missing or stale.
 
 ## systemd
 
@@ -69,4 +73,3 @@ Report URLs include `secrets.token_hex(4)`, so casual guessing is unlikely, but
 the files are public once a URL is shared. Do not put exchange API secrets,
 private keys, raw credentials, or private chat exports in a report. Increase the
 token length in `report_service.py` if reports need stronger unguessability.
-

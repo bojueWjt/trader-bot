@@ -1,4 +1,5 @@
 import importlib.util
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,99 @@ def base_payload():
     }
 
 
+class FakeCursor:
+    def __init__(self, responses=None, failures=None):
+        self.responses = responses or {}
+        self.failures = failures or {}
+        self.executions = []
+        self.current_rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        return False
+
+    def execute(self, sql, params=()):
+        normalized = " ".join(sql.split())
+        key = self.query_key(normalized)
+        self.executions.append((normalized, params))
+        failure = self.failures.get(key)
+        if failure:
+            raise RuntimeError(failure)
+        self.current_rows = self.responses.get(key, [])
+
+    def fetchall(self):
+        return self.current_rows
+
+    @staticmethod
+    def query_key(sql):
+        if "FROM trade_outcome_job_runs" in sql:
+            return "watermark"
+        if "FROM trade_outcomes" in sql:
+            return "trade_outcomes"
+        if "FROM trade_intents" in sql:
+            return "trade_intents"
+        if "FROM exchange_state_mirror" in sql:
+            return "exchange_state_mirror"
+        if "FROM positions_projection" in sql:
+            return "positions_projection"
+        raise AssertionError(f"unexpected query: {sql}")
+
+
+class FakeConnection:
+    def __init__(self, cursor):
+        self.autocommit = False
+        self.fake_cursor = cursor
+        self.closed = False
+
+    def cursor(self, cursor_factory=None):
+        assert cursor_factory is report_service.RealDictCursor
+        return self.fake_cursor
+
+    def close(self):
+        self.closed = True
+
+
+def install_fake_database(monkeypatch, responses=None, failures=None):
+    cursor = FakeCursor(responses=responses, failures=failures)
+    connection = FakeConnection(cursor)
+
+    class FakePsycopg:
+        @staticmethod
+        def connect(dsn):
+            assert dsn == "postgres://example"
+            return connection
+
+    monkeypatch.setattr(report_service, "psycopg2", FakePsycopg())
+    monkeypatch.setattr(report_service, "RealDictCursor", object())
+    return cursor, connection
+
+
+def app_endpoint(app, path, method):
+    for route in app.routes:
+        methods = route.methods or set()
+        if route.path == path and method in methods:
+            return route.endpoint
+    raise AssertionError(f"missing route: {method} {path}")
+
+
+def healthy_dependencies():
+    dependencies = report_service.empty_dependency_status()
+    dependencies["database"] = {"status": "ok", "reason": ""}
+    dependencies["trade_outcomes"].update(
+        {
+            "status": "ok",
+            "reason": "",
+            "completed_at": "2026-07-29T00:00:00+00:00",
+            "age_seconds": 3600,
+            "freshness_threshold_seconds": 129600,
+        }
+    )
+    dependencies["exchange_state_mirror"] = {"status": "ok", "reason": ""}
+    return dependencies
+
+
 def test_render_markdown_supports_paragraphs_bold_and_lists():
     html = report_service.render_markdown("Intro **risk**\n\n- one\n- <two>")
 
@@ -49,18 +143,233 @@ def test_validate_payload_requires_known_type_and_valid_channel_views():
     assert payload["date"] == "2026-07-12"
 
 
-def test_fetch_report_data_degrades_when_psycopg2_connect_fails(monkeypatch):
+def test_fetch_report_data_fails_closed_when_psycopg2_connect_fails(monkeypatch):
     class BrokenPsycopg:
         @staticmethod
         def connect(_dsn):
             raise RuntimeError("database offline")
 
     monkeypatch.setattr(report_service, "psycopg2", BrokenPsycopg())
-    data = report_service.fetch_report_data("daily", "2026-07-12", "postgres://example")
+    dependencies = report_service.empty_dependency_status()
 
-    assert data["missing_data"]
-    assert "database offline" in data["missing_data"][0]
-    assert data["outcomes"]["trades"] == []
+    with pytest.raises(report_service.ReportDependencyError, match="database offline"):
+        report_service.fetch_report_data(
+            "daily",
+            "2026-07-12",
+            "postgres://example",
+            dependency_status=dependencies,
+        )
+
+    assert dependencies["database"]["status"] == "error"
+
+
+def test_fetch_report_data_requires_fixed_success_watermark(monkeypatch):
+    now = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(hours=1)}],
+    }
+    cursor, connection = install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    data = report_service.fetch_report_data(
+        "daily",
+        "2026-07-12",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    watermark_queries = [
+        execution
+        for execution in cursor.executions
+        if "FROM trade_outcome_job_runs" in execution[0]
+    ]
+    assert len(watermark_queries) == 1
+    assert watermark_queries[0][1] == ("trade_outcomes", "succeeded")
+    assert dependencies["trade_outcomes"]["status"] == "ok"
+    assert dependencies["trade_outcomes"]["freshness_threshold_seconds"] == 36 * 60 * 60
+    assert data["kpis"]["trade_count"] == 0
+    assert connection.closed is True
+
+
+def test_fetch_report_data_rejects_stale_watermark(monkeypatch):
+    now = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(hours=37)}],
+    }
+    cursor, connection = install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    with pytest.raises(report_service.ReportDependencyError, match="watermark is stale"):
+        report_service.fetch_report_data(
+            "daily",
+            "2026-07-12",
+            "postgres://example",
+            dependency_status=dependencies,
+            now=now,
+        )
+
+    assert dependencies["trade_outcomes"]["status"] == "stale"
+    assert all("FROM trade_outcomes " not in sql for sql, _params in cursor.executions)
+    assert connection.closed is True
+
+
+def test_fetch_report_data_rejects_missing_watermark(monkeypatch):
+    cursor, connection = install_fake_database(monkeypatch)
+    dependencies = report_service.empty_dependency_status()
+
+    with pytest.raises(report_service.ReportDependencyError, match="no succeeded"):
+        report_service.fetch_report_data(
+            "daily",
+            "2026-07-12",
+            "postgres://example",
+            dependency_status=dependencies,
+        )
+
+    assert dependencies["trade_outcomes"]["status"] == "missing"
+    assert all("FROM trade_outcomes " not in sql for sql, _params in cursor.executions)
+    assert connection.closed is True
+
+
+def test_outcome_freshness_threshold_is_configurable(monkeypatch):
+    now = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    monkeypatch.setenv("REPORT_OUTCOME_FRESHNESS_HOURS", "48")
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(hours=40)}],
+    }
+    install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    report_service.fetch_report_data(
+        "daily",
+        "2026-07-12",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    assert dependencies["trade_outcomes"]["status"] == "ok"
+    assert dependencies["trade_outcomes"]["freshness_threshold_seconds"] == 48 * 60 * 60
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_outcome_freshness_threshold_rejects_invalid_values(monkeypatch, value):
+    monkeypatch.setenv("REPORT_OUTCOME_FRESHNESS_HOURS", value)
+
+    with pytest.raises(report_service.ReportDependencyError, match="positive number"):
+        report_service.outcome_freshness_threshold()
+
+
+def test_exchange_state_mirror_error_enters_missing_data(monkeypatch):
+    now = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(hours=1)}],
+    }
+    failures = {
+        "exchange_state_mirror": "mirror unavailable",
+    }
+    install_fake_database(monkeypatch, responses=responses, failures=failures)
+    dependencies = report_service.empty_dependency_status()
+
+    data = report_service.fetch_report_data(
+        "daily",
+        "2026-07-12",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    assert "exchange_state_mirror: mirror unavailable" in data["missing_data"]
+    assert dependencies["exchange_state_mirror"]["status"] == "error"
+
+
+def test_report_api_records_success_in_health(monkeypatch):
+    dependencies = healthy_dependencies()
+
+    def fake_fetch(_report_type, _report_date, dependency_status=None, **_kwargs):
+        dependency_status.update(dependencies)
+        return report_service.empty_db_data()
+
+    monkeypatch.setattr(report_service, "fetch_report_data", fake_fetch)
+    monkeypatch.setattr(
+        report_service,
+        "write_report",
+        lambda _payload, _data: {
+            "url": "https://hk.balen.wang/reports/report.html",
+            "path": "/tmp/report.html",
+        },
+    )
+    monkeypatch.setattr(report_service, "inspect_dependencies", lambda: dependencies)
+    app = report_service.create_app()
+    create_report = app_endpoint(app, "/reports", "POST")
+    healthz = app_endpoint(app, "/healthz", "GET")
+
+    result = create_report(base_payload())
+    health = healthz()
+
+    assert result["url"] == "https://hk.balen.wang/reports/report.html"
+    assert health["status"] == "ok"
+    assert health["dependencies"]["trade_outcomes"]["status"] == "ok"
+    assert health["last_publication"]["status"] == "succeeded"
+    assert health["last_publication"]["url"] == result["url"]
+
+
+def test_report_api_returns_503_and_records_dependency_failure(monkeypatch):
+    dependencies = healthy_dependencies()
+    dependencies["trade_outcomes"]["status"] = "stale"
+    dependencies["trade_outcomes"]["reason"] = "trade_outcomes watermark is stale"
+
+    def fake_fetch(_report_type, _report_date, dependency_status=None, **_kwargs):
+        dependency_status.update(dependencies)
+        raise report_service.ReportDependencyError(
+            "trade_outcomes",
+            "trade_outcomes watermark is stale",
+        )
+
+    monkeypatch.setattr(report_service, "fetch_report_data", fake_fetch)
+    monkeypatch.setattr(report_service, "inspect_dependencies", lambda: dependencies)
+    app = report_service.create_app()
+    create_report = app_endpoint(app, "/reports", "POST")
+    healthz = app_endpoint(app, "/healthz", "GET")
+
+    with pytest.raises(report_service.HTTPException) as raised:
+        create_report(base_payload())
+
+    health = healthz()
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "report_dependency_unavailable"
+    assert raised.value.detail["dependency"] == "trade_outcomes"
+    assert health["status"] == "unhealthy"
+    assert health["last_publication"]["status"] == "failed"
+    assert health["last_publication"]["reason"] == "trade_outcomes watermark is stale"
+
+
+def test_report_api_returns_500_and_records_write_failure(monkeypatch):
+    dependencies = healthy_dependencies()
+
+    def fake_fetch(_report_type, _report_date, dependency_status=None, **_kwargs):
+        dependency_status.update(dependencies)
+        return report_service.empty_db_data()
+
+    def fail_write(_payload, _data):
+        raise OSError("report directory is read-only")
+
+    monkeypatch.setattr(report_service, "fetch_report_data", fake_fetch)
+    monkeypatch.setattr(report_service, "write_report", fail_write)
+    monkeypatch.setattr(report_service, "inspect_dependencies", lambda: dependencies)
+    app = report_service.create_app()
+    create_report = app_endpoint(app, "/reports", "POST")
+    healthz = app_endpoint(app, "/healthz", "GET")
+
+    with pytest.raises(report_service.HTTPException) as raised:
+        create_report(base_payload())
+
+    health = healthz()
+    assert raised.value.status_code == 500
+    assert raised.value.detail["code"] == "report_publication_failed"
+    assert health["status"] == "degraded"
+    assert health["last_publication"]["error_code"] == "report_publication_failed"
+    assert "read-only" in health["last_publication"]["reason"]
 
 
 def test_html_injection_escapes_script_end():
@@ -102,4 +411,3 @@ def test_json_for_script_never_contains_raw_script_end():
 
     assert "</script>" not in text.lower()
     assert "<\\/script>" in text
-

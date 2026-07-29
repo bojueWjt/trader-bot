@@ -4,14 +4,17 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 import os
 import re
 import secrets
 import shutil
 import sys
+from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 try:
@@ -46,14 +49,29 @@ ASSET_TYPES = {
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
 }
+OUTCOME_JOB_NAME = "trade_outcomes"
+OUTCOME_JOB_STATUS = "succeeded"
+OUTCOME_FRESHNESS_ENV = "REPORT_OUTCOME_FRESHNESS_HOURS"
+DEFAULT_OUTCOME_FRESHNESS_HOURS = 36.0
 
 
 class ReportValidationError(ValueError):
     pass
 
 
+class ReportDependencyError(RuntimeError):
+    def __init__(self, dependency: str, reason: str):
+        self.dependency = dependency
+        self.reason = reason
+        super().__init__(reason)
+
+
 def utc_today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def parse_report_date(value: str) -> date:
@@ -237,6 +255,118 @@ def empty_db_data() -> dict[str, Any]:
     }
 
 
+def empty_dependency_status() -> dict[str, dict[str, Any]]:
+    return {
+        "database": {
+            "status": "unknown",
+            "reason": "",
+        },
+        "trade_outcomes": {
+            "status": "unknown",
+            "reason": "",
+            "job_name": OUTCOME_JOB_NAME,
+            "required_status": OUTCOME_JOB_STATUS,
+            "completed_at": "",
+            "age_seconds": False,
+            "freshness_threshold_seconds": False,
+        },
+        "exchange_state_mirror": {
+            "status": "unknown",
+            "reason": "",
+        },
+    }
+
+
+def service_status(
+    dependencies: dict[str, dict[str, Any]],
+    last_publication: dict[str, Any] | None = None,
+) -> str:
+    database = dependencies.get("database") or {}
+    trade_outcomes = dependencies.get("trade_outcomes") or {}
+    mirror = dependencies.get("exchange_state_mirror") or {}
+    if database.get("status") != "ok":
+        return "unhealthy"
+    if trade_outcomes.get("status") != "ok":
+        return "unhealthy"
+    if mirror.get("status") != "ok":
+        return "degraded"
+    publication = last_publication or {}
+    failure_code = publication.get("error_code")
+    if publication.get("status") == "failed" and failure_code != "invalid_report":
+        return "degraded"
+    return "ok"
+
+
+def initial_health_state() -> dict[str, Any]:
+    dependencies = empty_dependency_status()
+    return {
+        "status": "starting",
+        "checked_at": "",
+        "dependencies": dependencies,
+        "last_publication": {
+            "status": "never",
+            "attempted_at": "",
+            "report_type": "",
+            "report_date": "",
+            "url": "",
+            "error_code": "",
+            "reason": "",
+        },
+    }
+
+
+def outcome_freshness_threshold() -> timedelta:
+    raw_value = os.getenv(OUTCOME_FRESHNESS_ENV, str(DEFAULT_OUTCOME_FRESHNESS_HOURS))
+    try:
+        hours = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        reason = f"{OUTCOME_FRESHNESS_ENV} must be a positive number"
+        raise ReportDependencyError("trade_outcomes", reason) from exc
+    if not math.isfinite(hours) or hours <= 0:
+        reason = f"{OUTCOME_FRESHNESS_ENV} must be a positive number"
+        raise ReportDependencyError("trade_outcomes", reason)
+    return timedelta(hours=hours)
+
+
+def normalize_utc_datetime(value: Any) -> datetime:
+    completed_at = value
+    if isinstance(completed_at, str):
+        normalized = completed_at.replace("Z", "+00:00")
+        try:
+            completed_at = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ReportDependencyError("trade_outcomes", "completed_at is not a valid timestamp") from exc
+    if not isinstance(completed_at, datetime):
+        raise ReportDependencyError("trade_outcomes", "completed_at is missing")
+    if completed_at.tzinfo is None:
+        completed_at = completed_at.replace(tzinfo=timezone.utc)
+    return completed_at.astimezone(timezone.utc)
+
+
+def connect_database(
+    database_url: str | None,
+    dependencies: dict[str, dict[str, Any]],
+) -> Any:
+    dsn = database_url or os.getenv("DATABASE_URL")
+    if not dsn:
+        reason = "DATABASE_URL is not set"
+        dependencies["database"] = {"status": "error", "reason": reason}
+        raise ReportDependencyError("database", reason)
+    if psycopg2 is None:
+        reason = "psycopg2 is not installed"
+        dependencies["database"] = {"status": "error", "reason": reason}
+        raise ReportDependencyError("database", reason)
+    try:
+        conn = psycopg2.connect(dsn)
+    except Exception as exc:
+        reason = f"database connection failed: {exc}"
+        dependencies["database"] = {"status": "error", "reason": reason}
+        raise ReportDependencyError("database", reason) from exc
+    conn.autocommit = True
+    dependencies["database"] = {"status": "ok", "reason": ""}
+    return conn
+
+
 def fetch_all(cursor: Any, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     cursor.execute(sql, params)
     return [dict(row) for row in cursor.fetchall()]
@@ -248,6 +378,90 @@ def safe_query(cursor: Any, sql: str, params: tuple[Any, ...], missing: list[str
     except Exception as exc:
         missing.append(f"{label}: {exc}")
         return []
+
+
+def require_fresh_outcome_watermark(
+    cursor: Any,
+    dependencies: dict[str, dict[str, Any]],
+    now: datetime | None = None,
+) -> datetime:
+    current_time = now or utc_now()
+    try:
+        freshness = outcome_freshness_threshold()
+    except ReportDependencyError as exc:
+        dependencies["trade_outcomes"].update(
+            {
+                "status": "error",
+                "reason": exc.reason,
+            }
+        )
+        raise
+    freshness_seconds = int(freshness.total_seconds())
+    dependencies["trade_outcomes"]["freshness_threshold_seconds"] = freshness_seconds
+    try:
+        rows = fetch_all(
+            cursor,
+            """
+            SELECT completed_at
+            FROM trade_outcome_job_runs
+            WHERE job_name = %s AND status = %s
+            ORDER BY completed_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            (OUTCOME_JOB_NAME, OUTCOME_JOB_STATUS),
+        )
+    except Exception as exc:
+        reason = f"watermark query failed: {exc}"
+        dependencies["trade_outcomes"].update(
+            {
+                "status": "error",
+                "reason": reason,
+            }
+        )
+        raise ReportDependencyError("trade_outcomes", reason) from exc
+    if not rows:
+        reason = "no succeeded trade_outcomes watermark"
+        dependencies["trade_outcomes"].update(
+            {
+                "status": "missing",
+                "reason": reason,
+            }
+        )
+        raise ReportDependencyError("trade_outcomes", reason)
+    try:
+        completed_at = normalize_utc_datetime(rows[0].get("completed_at"))
+    except ReportDependencyError as exc:
+        dependencies["trade_outcomes"].update(
+            {
+                "status": "missing",
+                "reason": exc.reason,
+            }
+        )
+        raise
+    age_seconds = max(0, int((current_time - completed_at).total_seconds()))
+    if current_time - completed_at > freshness:
+        reason = (
+            f"trade_outcomes watermark is stale: completed_at={completed_at.isoformat()}, "
+            f"age_seconds={age_seconds}, threshold_seconds={freshness_seconds}"
+        )
+        dependencies["trade_outcomes"].update(
+            {
+                "status": "stale",
+                "reason": reason,
+                "completed_at": completed_at.isoformat(),
+                "age_seconds": age_seconds,
+            }
+        )
+        raise ReportDependencyError("trade_outcomes", reason)
+    dependencies["trade_outcomes"].update(
+        {
+            "status": "ok",
+            "reason": "",
+            "completed_at": completed_at.isoformat(),
+            "age_seconds": age_seconds,
+        }
+    )
+    return completed_at
 
 
 def bucket_r_values(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -351,39 +565,44 @@ def normalize_position_payload(payload: Any, account_id: str, updated_at: Any) -
     return positions
 
 
-def fetch_report_data(report_type: str, report_date: str, database_url: str | None = None) -> dict[str, Any]:
+def fetch_report_data(
+    report_type: str,
+    report_date: str,
+    database_url: str | None = None,
+    dependency_status: dict[str, dict[str, Any]] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     data = empty_db_data()
+    dependencies = dependency_status
+    if dependencies is None:
+        dependencies = empty_dependency_status()
     start, end = window_bounds(report_type, report_date)
     data["window"] = {"start": start.isoformat(), "end": end.isoformat()}
-    dsn = database_url or os.getenv("DATABASE_URL")
-    if not dsn:
-        data["missing_data"].append("DATABASE_URL is not set")
-        return data
-    if psycopg2 is None:
-        data["missing_data"].append("psycopg2 is not installed")
-        return data
-
-    try:
-        conn = psycopg2.connect(dsn)
-    except Exception as exc:
-        data["missing_data"].append(f"database connection: {exc}")
-        return data
-    conn.autocommit = True
+    conn = connect_database(database_url, dependencies)
 
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            outcome_rows = safe_query(
-                cur,
-                """
-                SELECT closed_at, instrument_id, side, realized_pnl, r_multiple
-                FROM trade_outcomes
-                WHERE closed_at >= %s AND closed_at < %s
-                ORDER BY closed_at ASC
-                """,
-                (start, end),
-                data["missing_data"],
-                "trade_outcomes",
-            )
+            require_fresh_outcome_watermark(cur, dependencies, now=now)
+            try:
+                outcome_rows = fetch_all(
+                    cur,
+                    """
+                    SELECT closed_at, instrument_id, side, realized_pnl, r_multiple
+                    FROM trade_outcomes
+                    WHERE closed_at >= %s AND closed_at < %s
+                    ORDER BY closed_at ASC
+                    """,
+                    (start, end),
+                )
+            except Exception as exc:
+                reason = f"trade_outcomes query failed: {exc}"
+                dependencies["trade_outcomes"].update(
+                    {
+                        "status": "error",
+                        "reason": reason,
+                    }
+                )
+                raise ReportDependencyError("trade_outcomes", reason) from exc
             computed = compute_outcomes(outcome_rows)
             data["kpis"].update(computed["kpis"])
             data["outcomes"].update(computed["outcomes"])
@@ -403,13 +622,23 @@ def fetch_report_data(report_type: str, report_date: str, database_url: str | No
             )
             data["intents"]["activity"] = intent_rows
 
-            mirror_rows = safe_query(
-                cur,
-                "SELECT account_id, payload, updated_at FROM exchange_state_mirror ORDER BY account_id",
-                (),
-                [],
-                "exchange_state_mirror",
-            )
+            try:
+                mirror_rows = fetch_all(
+                    cur,
+                    "SELECT account_id, payload, updated_at FROM exchange_state_mirror ORDER BY account_id",
+                )
+                dependencies["exchange_state_mirror"] = {
+                    "status": "ok",
+                    "reason": "",
+                }
+            except Exception as exc:
+                reason = f"exchange_state_mirror: {exc}"
+                data["missing_data"].append(reason)
+                dependencies["exchange_state_mirror"] = {
+                    "status": "error",
+                    "reason": reason,
+                }
+                mirror_rows = []
             positions = []
             if mirror_rows:
                 for row in mirror_rows:
@@ -433,6 +662,38 @@ def fetch_report_data(report_type: str, report_date: str, database_url: str | No
     finally:
         conn.close()
     return data
+
+
+def inspect_dependencies(
+    database_url: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, dict[str, Any]]:
+    dependencies = empty_dependency_status()
+    try:
+        conn = connect_database(database_url, dependencies)
+    except ReportDependencyError:
+        return dependencies
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            try:
+                require_fresh_outcome_watermark(cur, dependencies, now=now)
+            except ReportDependencyError:
+                pass
+            try:
+                fetch_all(cur, "SELECT 1 AS available FROM exchange_state_mirror LIMIT 1")
+                dependencies["exchange_state_mirror"] = {
+                    "status": "ok",
+                    "reason": "",
+                }
+            except Exception as exc:
+                reason = f"exchange_state_mirror: {exc}"
+                dependencies["exchange_state_mirror"] = {
+                    "status": "error",
+                    "reason": reason,
+                }
+    finally:
+        conn.close()
+    return dependencies
 
 
 def render_report_html(payload: dict[str, Any], db_data: dict[str, Any]) -> str:
@@ -545,6 +806,40 @@ def create_app() -> Any:
         raise RuntimeError("FastAPI is not installed; install services/report/requirements.txt")
 
     app = FastAPI(title="Hermes Report Service", version="1.0")
+    app.state.report_health = initial_health_state()
+    app.state.report_health_lock = Lock()
+
+    def update_dependencies(dependencies: dict[str, dict[str, Any]]) -> None:
+        with app.state.report_health_lock:
+            health = app.state.report_health
+            health["dependencies"] = deepcopy(dependencies)
+            health["status"] = service_status(dependencies, health["last_publication"])
+            health["checked_at"] = utc_now().isoformat()
+
+    def record_publication(
+        status: str,
+        report_type: str,
+        report_date: str,
+        url: str = "",
+        error_code: str = "",
+        reason: str = "",
+    ) -> None:
+        with app.state.report_health_lock:
+            health = app.state.report_health
+            health["last_publication"] = {
+                "status": status,
+                "attempted_at": utc_now().isoformat(),
+                "report_type": report_type,
+                "report_date": report_date,
+                "url": url,
+                "error_code": error_code,
+                "reason": reason,
+            }
+            if error_code != "invalid_report":
+                health["status"] = service_status(
+                    health["dependencies"],
+                    health["last_publication"],
+                )
 
     def require_auth(authorization: str | None = Header(default=None)) -> None:
         token = os.getenv("REPORT_TOKEN")
@@ -555,17 +850,79 @@ def create_app() -> Any:
             raise HTTPException(status_code=401, detail="invalid report token")
 
     @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    def healthz() -> dict[str, Any]:
+        dependencies = inspect_dependencies()
+        update_dependencies(dependencies)
+        with app.state.report_health_lock:
+            return deepcopy(app.state.report_health)
 
     @app.post("/reports", dependencies=[Depends(require_auth)])
     def create_report(body: dict[str, Any]) -> dict[str, str]:
+        report_type = ""
+        report_date = utc_today()
+        if isinstance(body, dict):
+            report_type = str(body.get("type") or "")
+            report_date = str(body.get("date") or report_date)
         try:
             payload = normalize_payload(body)
-            db_data = fetch_report_data(payload["type"], payload["date"])
-            return write_report(payload, db_data)
         except ReportValidationError as exc:
+            record_publication(
+                "failed",
+                report_type,
+                report_date,
+                error_code="invalid_report",
+                reason=str(exc),
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        dependencies = empty_dependency_status()
+        try:
+            db_data = fetch_report_data(
+                payload["type"],
+                payload["date"],
+                dependency_status=dependencies,
+            )
+        except ReportDependencyError as exc:
+            update_dependencies(dependencies)
+            record_publication(
+                "failed",
+                payload["type"],
+                payload["date"],
+                error_code="report_dependency_unavailable",
+                reason=exc.reason,
+            )
+            detail = {
+                "code": "report_dependency_unavailable",
+                "dependency": exc.dependency,
+                "reason": exc.reason,
+            }
+            raise HTTPException(status_code=503, detail=detail) from exc
+        update_dependencies(dependencies)
+        try:
+            result = write_report(payload, db_data)
+            url = result.get("url")
+            if not url:
+                raise RuntimeError("report writer did not return a URL")
+        except Exception as exc:
+            reason = f"report publication failed: {exc}"
+            record_publication(
+                "failed",
+                payload["type"],
+                payload["date"],
+                error_code="report_publication_failed",
+                reason=reason,
+            )
+            detail = {
+                "code": "report_publication_failed",
+                "reason": reason,
+            }
+            raise HTTPException(status_code=500, detail=detail) from exc
+        record_publication(
+            "succeeded",
+            payload["type"],
+            payload["date"],
+            url=url,
+        )
+        return result
 
     @app.post("/reports/assets", dependencies=[Depends(require_auth)])
     async def upload_asset(file: UploadFile = File(...)) -> dict[str, str]:
