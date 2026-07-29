@@ -7,10 +7,9 @@
 #
 # 检查内容（全部在 hk 上只读执行）：
 #   1. 期望清单里每个远端路径的 sha256 与期望值一致；
-#   2. 若文件位于 /srv/trader-v3/container-patches/ 下，则它必须以
-#      bind-mount 源的身份出现在两个 nautilus node 进程的
-#      /proc/PID/mountinfo 中（mountinfo 是挂载是否生效的唯一真相源），
-#      且挂载源文件的 sha256 同样匹配期望值。
+#   2. container-patches 文件必须在清单声明容器目标路径，并以精确的
+#      source + destination 对出现在两个 nautilus node 进程的
+#      /proc/PID/mountinfo 中。
 #
 # 用法：
 #   scripts/verify_hk_deployment.sh manifest.txt
@@ -18,12 +17,16 @@
 #   scripts/verify_hk_deployment.sh - < manifest.txt
 #
 # 清单格式（每行一条，# 开头为注释，空行忽略）：
-#   <sha256> <远端绝对路径>     （即 sha256sum 输出格式）
-#   或 <远端绝对路径> <sha256>  （两列顺序任意，自动识别 64 位十六进制列）
+#   宿主直跑文件：
+#     <sha256> <远端绝对路径>
+#     或 <远端绝对路径> <sha256>
+#   container-patches 文件：
+#     <sha256> <挂载源绝对路径> <容器目标绝对路径>
+#     或 <挂载源绝对路径> <sha256> <容器目标绝对路径>
 #
 # 本地生成清单示例（路径需替换成 hk 上的目标路径）：
-#   sha256sum container-patches/projection_actor.py \
-#     | sed 's#container-patches/#/srv/trader-v3/container-patches/#'
+#   hash=$(sha256sum container-patches/projection_actor.py | awk '{print $1}')
+#   echo "$hash /srv/trader-v3/container-patches/projection_actor.py /app/projection/actor.py"
 #
 # 环境变量：
 #   HK_SSH       ssh 目标，默认 balen@149.104.30.223
@@ -47,24 +50,36 @@ if [ "$manifest_input" != "-" ] && [ ! -r "$manifest_input" ]; then
   echo "ERROR: 清单文件不可读: $manifest_input" >&2; exit 2
 fi
 
-# ---- 解析清单：输出 "sha256<TAB>path" 行 ----
+# ---- 解析清单：输出 "sha256<TAB>path<TAB>mount_destination" 行 ----
 parse_manifest() {
-  local line f1 f2 rest
+  local line f1 f2 f3 rest sha path destination
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     [ -z "${line//[[:space:]]/}" ] && continue
-    read -r f1 f2 rest <<<"$line"
+    read -r f1 f2 f3 rest <<<"$line"
     if [ -n "${rest:-}" ]; then
-      echo "ERROR: 清单行字段数超过 2: $line" >&2; return 2
+      echo "ERROR: 清单行字段数超过 3: $line" >&2; return 2
     fi
     if [[ "$f1" =~ ^[0-9a-fA-F]{64}$ ]] && [[ "$f2" == /* ]]; then
-      printf '%s\t%s\n' "$(tr 'A-F' 'a-f' <<<"$f1")" "$f2"
+      sha="$(tr 'A-F' 'a-f' <<<"$f1")"
+      path="$f2"
     elif [[ "$f2" =~ ^[0-9a-fA-F]{64}$ ]] && [[ "$f1" == /* ]]; then
-      printf '%s\t%s\n' "$(tr 'A-F' 'a-f' <<<"$f2")" "$f1"
+      sha="$(tr 'A-F' 'a-f' <<<"$f2")"
+      path="$f1"
     else
       echo "ERROR: 无法解析清单行（需要 64 位 sha256 + 绝对路径）: $line" >&2
       return 2
     fi
+    destination="${f3:-}"
+    if [[ "$path" == "$PATCH_DIR"/* ]] && [ -z "$destination" ]; then
+      echo "ERROR: container-patches 清单项必须声明容器目标路径: $line" >&2
+      return 2
+    fi
+    if [ -n "$destination" ] && [[ "$destination" != /* ]]; then
+      echo "ERROR: 容器目标路径必须是绝对路径: $line" >&2
+      return 2
+    fi
+    printf '%s\t%s\t%s\n' "$sha" "$path" "$destination"
   done
 }
 
@@ -80,11 +95,11 @@ fi
 # ---- 生成远端只读检查脚本，一次 ssh 完成全部核对 ----
 # 远端输出协议（TSV）：
 #   HASH <path> <actual_sha|MISSING|UNREADABLE>
-#   MOUNT <pid> <src> <dst>          （node 进程 mountinfo 中的挂载对）
+#   MOUNT <pid> <src> <dst>          （node 进程 mountinfo 中的全部挂载对）
 #   PIDS <pid...>                    （发现的 node 进程）
 remote_script='
 export LC_ALL=C
-while IFS=$'"'"'\t'"'"' read -r want path; do
+while IFS=$'"'"'\t'"'"' read -r want path destination; do
   if [ ! -e "$path" ]; then echo -e "HASH\t$path\tMISSING"
   elif [ ! -r "$path" ]; then echo -e "HASH\t$path\tUNREADABLE"
   else echo -e "HASH\t$path\t$(sha256sum "$path" | cut -d" " -f1)"
@@ -97,7 +112,7 @@ for pid in $(pgrep -f "app.run_node" | sort -n); do
 done
 echo -e "PIDS\t$pids"
 for pid in $pids; do
-  awk -v pid="$pid" '"'"'$4 ~ /^\/srv\/trader-v3\/container-patches\// {print "MOUNT\t" pid "\t" $4 "\t" $5}'"'"' \
+  awk -v pid="$pid" '"'"'{print "MOUNT\t" pid "\t" $4 "\t" $5}'"'"' \
     "/proc/$pid/mountinfo" 2>/dev/null
 done
 '
@@ -122,7 +137,7 @@ if [ "$pid_count" -ne 2 ]; then
   fail=1
 fi
 
-while IFS=$'\t' read -r want path; do
+while IFS=$'\t' read -r want path expected_dst; do
   actual="$(awk -F'\t' -v p="$path" '$1=="HASH" && $2==p {print $3; exit}' <<<"$remote_out")"
   if [ -z "$actual" ]; then
     echo "FAIL: $path — 远端未返回结果"; fail=1; continue
@@ -140,16 +155,28 @@ while IFS=$'\t' read -r want path; do
   fi
   echo "OK:   $path — sha256 匹配"
 
-  # container-patches 文件：必须出现在每个 node 进程的 mountinfo 中
-  if [[ "$path" == "$PATCH_DIR"/* ]]; then
+  # 声明了容器目标的文件：source + destination 必须逐节点精确唯一。
+  if [ -n "$expected_dst" ]; then
     for pid in $node_pids; do
-      dst="$(awk -F'\t' -v pid="$pid" -v src="$path" \
-              '$1=="MOUNT" && $2==pid && $3==src {print $4; exit}' <<<"$remote_out")"
-      if [ -z "$dst" ]; then
-        echo "FAIL: $path — 未挂载进 node 进程 pid=${pid} (mountinfo 无此挂载源；文件在磁盘上但容器没在跑它)"
+      exact_count="$(awk -F'\t' -v pid="$pid" -v src="$path" -v dst="$expected_dst" \
+        '$1=="MOUNT" && $2==pid && $3==src && $4==dst {count++} END{print count+0}' \
+        <<<"$remote_out")"
+      source_count="$(awk -F'\t' -v pid="$pid" -v src="$path" \
+        '$1=="MOUNT" && $2==pid && $3==src {count++} END{print count+0}' \
+        <<<"$remote_out")"
+      destination_count="$(awk -F'\t' -v pid="$pid" -v dst="$expected_dst" \
+        '$1=="MOUNT" && $2==pid && $4==dst {count++} END{print count+0}' \
+        <<<"$remote_out")"
+      if [ "$exact_count" -ne 1 ] || [ "$source_count" -ne 1 ] || [ "$destination_count" -ne 1 ]; then
+        actual_destinations="$(awk -F'\t' -v pid="$pid" -v src="$path" \
+          '$1=="MOUNT" && $2==pid && $3==src {print $4}' <<<"$remote_out" \
+          | paste -sd, -)"
+        echo "FAIL: $path — pid=${pid} 挂载对不匹配，期望目标 $expected_dst"
+        echo "      exact=$exact_count source=$source_count destination=$destination_count"
+        echo "      该源实际目标: ${actual_destinations:-无}"
         fail=1
       else
-        echo "OK:   $path — 已挂载 pid=${pid} -> ${dst} (挂载源即该文件，sha256 已核对)"
+        echo "OK:   $path — pid=${pid} 精确挂载 -> ${expected_dst}"
       fi
     done
   fi
@@ -160,5 +187,5 @@ if [ "$fail" -ne 0 ]; then
   echo "结果: FAIL — 存在差异，部署未通过验证门。修复后重跑本脚本。"
   exit 1
 fi
-echo "结果: PASS — 清单内全部文件哈希匹配，container-patches 文件均已挂载进两个 node 进程。"
+echo "结果: PASS — 清单内全部文件哈希匹配，声明的 source + destination 挂载对均已在两个 node 进程生效。"
 exit 0

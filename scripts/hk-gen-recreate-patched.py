@@ -1,84 +1,218 @@
 #!/usr/bin/env python3
-"""Patched gen_recreate for trader-v3 node containers (2026-07-24).
+"""Generate fail-closed recreate scripts for trader-v3 node containers.
 
-原版缺陷：extra 只显式挂 planner+contracts，其余靠继承旧容器 Mounts——
-projection_actor.py 与 binance_execution.py 因此"部署了但从未挂载"，分别
-造成投影幻影仓与孤儿止损（cancel intents died）。本版把 container-patches
-下全部需生效补丁列为显式挂载，不再依赖继承。
+Usage (root):
+  python3 hk-gen-recreate-patched.py trader-v3-node-a BINANCE_EXEC_DST
 
-用法（root）：
-  python3 hk-gen-recreate-patched.py trader-v3-node-a [BINANCE_EXEC_DST]
-BINANCE_EXEC_DST 为容器内 nautilus binance execution 模块路径，先用：
+Discover BINANCE_EXEC_DST from the running image before generation:
   docker exec trader-v3-node-a python -c \
     "import nautilus_trader.adapters.binance.execution as m; print(m.__file__)"
-探明后传入；不传则跳过该挂载并警告。
 """
-import json, subprocess, sys, shlex
 
-name = sys.argv[1]                       # trader-v3-node-a
-binance_dst = sys.argv[2] if len(sys.argv) > 2 else None
-suffix = name.rsplit("-", 1)[-1]         # a / b
-insp = json.loads(subprocess.check_output(["docker", "inspect", name]))[0]
-
-image = insp["Config"]["Image"]
-env = insp["Config"]["Env"]
-cmd = insp["Config"]["Cmd"] or []
-entry = insp["Config"]["Entrypoint"] or []
-net = list(insp["NetworkSettings"]["Networks"].keys())[0]
-restart = insp["HostConfig"]["RestartPolicy"]["Name"] or "unless-stopped"
-mounts = insp["Mounts"]
-
-CP = "/srv/trader-v3/container-patches"
-lines = ["#!/bin/bash", "set -euo pipefail",
-         f"docker rm -f {name} 2>/dev/null || true",
-         f"mkdir -p /srv/trader-v3/node-state/{suffix}"]
-run = ["docker", "run", "-d", "--name", name, f"--network={net}",
-       f"--restart={restart}"]
-for e in env:
-    if e.startswith(("PATH=", "PYTHON", "LANG=", "GPG_KEY", "HOME=")):
-        continue
-    run += ["-e", e]
-
-# 显式补丁挂载优先于继承的旧 Mounts（同 dst 时丢弃旧条目）
-extra = [
-    (f"/srv/trader-v3/node-state/{suffix}", "/state", "rw"),
-    (f"{CP}/intent_execution_planner.py", "/app/strategy/intent_execution_planner.py", "ro"),
-    (f"{CP}/contracts.py", "/app/execution_domain/contracts.py", "ro"),
-    (f"{CP}/projection_actor.py", "/app/projection/actor.py", "ro"),
-    (f"{CP}/event_mapper.py", "/app/projection/event_mapper.py", "ro"),
-    (f"{CP}/intent_execution_strategy.py", "/app/strategy/intent_execution_strategy.py", "ro"),
-    (f"{CP}/exchange_cancel_adapter.py", "/app/runtime/exchange_cancel_adapter.py", "ro"),
-    (f"{CP}/node.py", "/app/app/node.py", "ro"),
-]
-if binance_dst:
-    extra.append((f"{CP}/binance_execution.py", binance_dst, "ro"))
-else:
-    print("WARN: BINANCE_EXEC_DST 未提供，binance_execution.py 本轮仍不挂载！", file=sys.stderr)
-
-explicit_dst = {d for _, d, _ in extra}
-seen_dst = set()
-for m in mounts:
-    dst = m["Destination"]
-    if dst in explicit_dst:
-        continue  # 显式版本覆盖继承版本
-    seen_dst.add(dst)
-    mode = "ro" if not m.get("RW", True) else "rw"
-    run += ["-v", f"{m['Source']}:{dst}:{mode}"]
+import json
 import os
-for src, dst, mode in extra:
-    if not os.path.exists(src):
-        print(f"FATAL: 挂载源不存在 {src}", file=sys.stderr)
-        sys.exit(1)
-    run += ["-v", f"{src}:{dst}:{mode}"]
-run += ["-e", "NODE_STATE_DIR=/state"]
-if entry:
-    run += ["--entrypoint", entry[0]]
-run += [image] + (entry[1:] if len(entry) > 1 else []) + cmd
-lines.append(" ".join(shlex.quote(x) for x in run))
-out = f"/srv/trader-v3/recreate-{name}.sh"
-with open(out, "w") as fh:
-    fh.write("\n".join(lines) + "\n")
-os.chmod(out, 0o700)
-print(f"WROTE {out}")
-print("image:", image, "| net:", net, "| restart:", restart)
-print("mount dsts:", sorted(seen_dst | explicit_dst))
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+
+class DeploymentConfigError(ValueError):
+    pass
+
+
+def parse_args(argv):
+    if len(argv) != 3:
+        raise DeploymentConfigError(
+            "BINANCE_EXEC_DST is required: "
+            "hk-gen-recreate-patched.py CONTAINER BINANCE_EXEC_DST"
+        )
+
+    name = argv[1].strip()
+    binance_dst = argv[2].strip()
+    if not name:
+        raise DeploymentConfigError("container name is empty")
+    if not binance_dst:
+        raise DeploymentConfigError("BINANCE_EXEC_DST is empty")
+    if not binance_dst.startswith("/"):
+        raise DeploymentConfigError("BINANCE_EXEC_DST must be an absolute path")
+    if ":" in binance_dst or "\n" in binance_dst:
+        raise DeploymentConfigError("BINANCE_EXEC_DST contains invalid characters")
+
+    return name, binance_dst
+
+
+def explicit_mounts(trader_root, suffix, binance_dst):
+    patch_dir = trader_root / "container-patches"
+    return [
+        (str(trader_root / "node-state" / suffix), "/state", "rw"),
+        (
+            str(patch_dir / "intent_execution_planner.py"),
+            "/app/strategy/intent_execution_planner.py",
+            "ro",
+        ),
+        (
+            str(patch_dir / "contracts.py"),
+            "/app/execution_domain/contracts.py",
+            "ro",
+        ),
+        (
+            str(patch_dir / "projection_actor.py"),
+            "/app/projection/actor.py",
+            "ro",
+        ),
+        (
+            str(patch_dir / "event_mapper.py"),
+            "/app/projection/event_mapper.py",
+            "ro",
+        ),
+        (
+            str(patch_dir / "intent_execution_strategy.py"),
+            "/app/strategy/intent_execution_strategy.py",
+            "ro",
+        ),
+        (
+            str(patch_dir / "exchange_cancel_adapter.py"),
+            "/app/runtime/exchange_cancel_adapter.py",
+            "ro",
+        ),
+        (str(patch_dir / "node.py"), "/app/app/node.py", "ro"),
+        (str(patch_dir / "binance_execution.py"), binance_dst, "ro"),
+    ]
+
+
+def validate_mount_plan(mounts):
+    sources = {}
+    destinations = {}
+    for source, destination, mode in mounts:
+        if not source.startswith("/") or not destination.startswith("/"):
+            raise DeploymentConfigError(
+                f"mount paths must be absolute: {source} -> {destination}"
+            )
+        if ":" in source or ":" in destination:
+            raise DeploymentConfigError(
+                f"mount paths cannot contain colons: {source} -> {destination}"
+            )
+        if mode not in {"ro", "rw"}:
+            raise DeploymentConfigError(f"invalid mount mode: {mode}")
+        if source in sources:
+            previous = sources[source]
+            raise DeploymentConfigError(
+                f"duplicate mount source: {source} -> {previous}, {destination}"
+            )
+        if destination in destinations:
+            previous = destinations[destination]
+            raise DeploymentConfigError(
+                "duplicate mount destination: "
+                f"{destination} <- {previous}, {source}"
+            )
+        sources[source] = destination
+        destinations[destination] = source
+
+
+def validate_patch_sources(mounts, trader_root):
+    patch_dir = trader_root / "container-patches"
+    prefix = f"{patch_dir}{os.sep}"
+    for source, _, _ in mounts:
+        if not source.startswith(prefix):
+            continue
+        if not Path(source).is_file():
+            raise DeploymentConfigError(f"mount source is missing: {source}")
+
+
+def append_inherited_mounts(run, inherited_mounts, explicit):
+    explicit_sources = {source for source, _, _ in explicit}
+    explicit_destinations = {destination for _, destination, _ in explicit}
+
+    for mount in inherited_mounts:
+        source = mount["Source"]
+        destination = mount["Destination"]
+        if source in explicit_sources or destination in explicit_destinations:
+            continue
+
+        mode = "rw"
+        if not mount.get("RW", True):
+            mode = "ro"
+        run.extend(["-v", f"{source}:{destination}:{mode}"])
+
+
+def generate(name, binance_dst, trader_root):
+    suffix = name.rsplit("-", 1)[-1]
+    mounts = explicit_mounts(trader_root, suffix, binance_dst)
+    validate_mount_plan(mounts)
+    validate_patch_sources(mounts, trader_root)
+
+    inspect_output = subprocess.check_output(["docker", "inspect", name])
+    inspected = json.loads(inspect_output)[0]
+    image = inspected["Config"]["Image"]
+    env = inspected["Config"]["Env"]
+    cmd = inspected["Config"]["Cmd"] or []
+    entrypoint = inspected["Config"]["Entrypoint"] or []
+    networks = inspected["NetworkSettings"]["Networks"]
+    network = list(networks.keys())[0]
+    restart = inspected["HostConfig"]["RestartPolicy"]["Name"]
+    if not restart:
+        restart = "unless-stopped"
+
+    state_dir = trader_root / "node-state" / suffix
+    lines = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        f"docker rm -f {shlex.quote(name)} 2>/dev/null || true",
+        f"mkdir -p {shlex.quote(str(state_dir))}",
+    ]
+    run = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        name,
+        f"--network={network}",
+        f"--restart={restart}",
+    ]
+    for env_value in env:
+        if env_value.startswith(("PATH=", "PYTHON", "LANG=", "GPG_KEY", "HOME=")):
+            continue
+        run.extend(["-e", env_value])
+
+    append_inherited_mounts(run, inspected["Mounts"], mounts)
+    for source, destination, mode in mounts:
+        run.extend(["-v", f"{source}:{destination}:{mode}"])
+
+    run.extend(["-e", "NODE_STATE_DIR=/state"])
+    if entrypoint:
+        run.extend(["--entrypoint", entrypoint[0]])
+    run.append(image)
+    if len(entrypoint) > 1:
+        run.extend(entrypoint[1:])
+    run.extend(cmd)
+    lines.append(" ".join(shlex.quote(value) for value in run))
+
+    output_path = trader_root / f"recreate-{name}.sh"
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    output_path.chmod(0o700)
+
+    print(f"WROTE {output_path}")
+    print(f"image: {image} | net: {network} | restart: {restart}")
+    print("explicit mount pairs:")
+    for source, destination, mode in mounts:
+        print(f"  {source} -> {destination} ({mode})")
+
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv
+
+    try:
+        name, binance_dst = parse_args(argv)
+        trader_root = Path(os.environ.get("TRADER_ROOT", "/srv/trader-v3"))
+        generate(name, binance_dst, trader_root)
+    except DeploymentConfigError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 2
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
