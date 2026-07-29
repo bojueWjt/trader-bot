@@ -33,11 +33,13 @@ BinanceExchangeCancelAdapter = EXCHANGE_CANCEL_ADAPTER.BinanceExchangeCancelAdap
 CancelConfirmationTimeoutError = (
     EXCHANGE_CANCEL_ADAPTER.CancelConfirmationTimeoutError
 )
+CancelStateError = EXCHANGE_CANCEL_ADAPTER.CancelStateError
 CancelIntentRequiredError = EXCHANGE_CANCEL_ADAPTER.CancelIntentRequiredError
 CancelOrderRequest = EXCHANGE_CANCEL_ADAPTER.CancelOrderRequest
 ControlPlaneExchangeStateMirror = (
     EXCHANGE_CANCEL_ADAPTER.ControlPlaneExchangeStateMirror
 )
+ExchangeCancelError = EXCHANGE_CANCEL_ADAPTER.ExchangeCancelError
 OrderAlreadyFilledError = EXCHANGE_CANCEL_ADAPTER.OrderAlreadyFilledError
 SignedBinanceTransport = EXCHANGE_CANCEL_ADAPTER.SignedBinanceTransport
 WrongAccountError = EXCHANGE_CANCEL_ADAPTER.WrongAccountError
@@ -138,6 +140,22 @@ class ExchangeCancelAdapterTest(unittest.TestCase):
 
         self.assertEqual(result.outcome, "already_canceled")
 
+    def test_delete_success_without_terminal_status_fails_closed(self) -> None:
+        transport = _ScriptedTransport(
+            {
+                ("DELETE", "/fapi/v1/order"): [{"status": "CANCELED"}],
+                ("GET", "/fapi/v1/openOrders"): [[]],
+                ("GET", "/fapi/v1/order"): [BinanceApiError(-2013, "Order does not exist")],
+            }
+        )
+        adapter = _adapter(transport)
+
+        with self.assertRaisesRegex(CancelStateError, "terminal status UNKNOWN"):
+            adapter.cancel(
+                "cancel_order",
+                _request(order_kind="regular", venue_order_id="42"),
+            )
+
     def test_wrong_account_is_rejected_before_exchange_request(self) -> None:
         transport = _ScriptedTransport({})
         adapter = _adapter(transport)
@@ -185,6 +203,7 @@ class ExchangeStateMirrorTest(unittest.TestCase):
         response = _JsonResponse(
             {
                 "account_id": ACCOUNT_ID,
+                "stale": False,
                 "payload": {
                     "open_orders": [
                         {
@@ -235,6 +254,55 @@ class ExchangeStateMirrorTest(unittest.TestCase):
         self.assertEqual(regular.venue_order_id, "42")
         self.assertEqual(algo.order_kind, "algo")
         self.assertEqual(algo.venue_order_id, "9001")
+
+    def test_stale_response_invalidates_previous_orders(self) -> None:
+        mirror = _mirror()
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            side_effect=[
+                _mirror_response(stale=False, client_order_id="fresh-order"),
+                _mirror_response(stale=True, client_order_id="stale-order"),
+            ],
+        ):
+            mirror.refresh()
+            self.assertNotEqual(
+                mirror.find_order(
+                    "BTCUSDT-PERP.BINANCE",
+                    "fresh-order",
+                ),
+                False,
+            )
+            with self.assertRaisesRegex(ExchangeCancelError, "stale"):
+                mirror.refresh()
+
+        with self.assertRaisesRegex(ExchangeCancelError, "not fresh"):
+            mirror.find_order("BTCUSDT-PERP.BINANCE", "fresh-order")
+
+    def test_refresh_failure_invalidates_previous_orders(self) -> None:
+        mirror = _mirror()
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            return_value=_mirror_response(
+                stale=False,
+                client_order_id="fresh-order",
+            ),
+        ):
+            mirror.refresh()
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            side_effect=EXCHANGE_CANCEL_ADAPTER.URLError("timeout"),
+        ):
+            with self.assertRaisesRegex(ExchangeCancelError, "refresh failed"):
+                mirror.refresh()
+
+        with self.assertRaisesRegex(ExchangeCancelError, "not fresh"):
+            mirror.orders_for_instrument("BTCUSDT-PERP.BINANCE")
 
 
 class SignedBinanceTransportTest(unittest.TestCase):
@@ -303,6 +371,40 @@ class _JsonResponse:
 
     def read(self):
         return self._body.read()
+
+
+def _mirror() -> ControlPlaneExchangeStateMirror:
+    return ControlPlaneExchangeStateMirror(
+        account_id=ACCOUNT_ID,
+        node_id="node-a",
+        base_url="http://control-plane:8080",
+        token="node-token",
+    )
+
+
+def _mirror_response(*, stale: bool, client_order_id: str) -> _JsonResponse:
+    return _JsonResponse(
+        {
+            "account_id": ACCOUNT_ID,
+            "stale": stale,
+            "updated_at": "2026-07-29T12:00:00+00:00",
+            "payload": {
+                "open_orders": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "position_side": "LONG",
+                        "client_order_id": client_order_id,
+                        "venue_order_id": "42",
+                        "order_id": "42",
+                        "type": "LIMIT",
+                        "side": "SELL",
+                        "quantity": "0.5",
+                    }
+                ],
+                "algo_orders": [],
+            },
+        }
+    )
 
 
 def _adapter(transport: _ScriptedTransport) -> BinanceExchangeCancelAdapter:

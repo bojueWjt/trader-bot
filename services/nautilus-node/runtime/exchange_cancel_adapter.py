@@ -182,15 +182,6 @@ class BinanceExchangeCancelAdapter:
                 outcome=outcome,
                 terminal_status=status,
             )
-        if delete_succeeded and status == "UNKNOWN":
-            return CancelResult(
-                account_id=request.account_id,
-                symbol=request.symbol,
-                position_side=request.position_side,
-                order_kind=request.order_kind,
-                outcome="canceled",
-                terminal_status=status,
-            )
         raise CancelStateError(
             f"order disappeared from open endpoint with terminal status {status}: "
             f"account={request.account_id} symbol={request.symbol} "
@@ -361,9 +352,11 @@ class ControlPlaneExchangeStateMirror:
         self._token = token
         self._timeout_seconds = timeout_seconds
         self._orders: tuple[ExchangeOrderRef, ...] = ()
+        self._fresh = False
         self._lock = threading.Lock()
 
     def refresh(self) -> tuple[ExchangeOrderRef, ...]:
+        self._invalidate()
         query = urllib.parse.urlencode({"account_id": self._account_id})
         request = urllib.request.Request(
             f"{self._base_url}/v1/nodes/{self._node_id}/exchange-state?{query}",
@@ -384,17 +377,22 @@ class ControlPlaneExchangeStateMirror:
             raise WrongAccountError(
                 f"mirror returned account {response_account!r} for {self._account_id!r}"
             )
+        if payload.get("stale") is not False:
+            raise ExchangeCancelError("exchange state mirror is stale")
         exchange_payload = payload.get("payload")
         if not isinstance(exchange_payload, Mapping):
             raise ExchangeCancelError("exchange state mirror payload is missing")
         orders = _parse_exchange_orders(self._account_id, exchange_payload)
         with self._lock:
             self._orders = orders
+            self._fresh = True
         return orders
 
     def orders_for_instrument(self, instrument_id: str) -> tuple[ExchangeOrderRef, ...]:
         target = str(instrument_id)
         with self._lock:
+            if not self._fresh:
+                raise ExchangeCancelError("exchange state mirror is not fresh")
             orders = self._orders
         return tuple(order for order in orders if order.instrument_id == target)
 
@@ -403,6 +401,11 @@ class ControlPlaneExchangeStateMirror:
             if order.client_order_id == client_order_id:
                 return order
         return False
+
+    def _invalidate(self) -> None:
+        with self._lock:
+            self._orders = ()
+            self._fresh = False
 
 
 def _parse_exchange_orders(

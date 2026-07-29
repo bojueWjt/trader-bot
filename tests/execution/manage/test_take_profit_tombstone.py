@@ -281,15 +281,21 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 [],
             )
 
-    def test_tombstone_is_persisted_before_tp_cancel_failure(self) -> None:
+    def test_tombstone_stays_pending_until_exchange_cancel_reaches_terminal_state(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as state_dir:
             state_path = Path(state_dir)
             strategy = _Strategy(
                 state_path,
                 orders=_live_protection_orders(),
-                fail_cancel=True,
             )
             entry_intent_id = _seed_entry_stash(strategy)
+            mirror = _StaticMirror(
+                tuple(_mirror_from_local_order(order) for order in strategy._orders)
+            )
+            adapter = _RecordingCancelAdapter(fail_cancel=True)
+            strategy.set_exchange_cancel_adapter(adapter, mirror)
             disable_intent = _intent(
                 action="replace_take_profits",
                 order_plan={
@@ -303,7 +309,17 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 },
             )
 
-            strategy._handle_intent(disable_intent)
+            runtime_package = ModuleType("runtime")
+            runtime_package.__path__ = []
+            exchange_cancel_module = _load_exchange_cancel_adapter_module()
+            with patch.dict(
+                sys.modules,
+                {
+                    "runtime": runtime_package,
+                    "runtime.exchange_cancel_adapter": exchange_cancel_module,
+                },
+            ):
+                strategy._handle_intent(disable_intent)
 
             restarted = _Strategy(state_path, orders=_live_protection_orders())
             restarted._entry_protection_stash = restarted._load_entry_protection_stash()
@@ -314,14 +330,38 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 tombstone["parent_intent_id"],
                 str(disable_intent.intent_id),
             )
+            self.assertEqual(tombstone["state"], "cancel_pending")
             self.assertEqual(strategy.denials[-1].reason, "order_cancel_failed")
-            restarted._sync_protection(str(entry_intent_id))
-            self.assertEqual(restarted.cancelled_client_order_ids, ["old-tp"])
             self.assertEqual(
-                [order.client_order_id for order in restarted._orders],
-                ["old-stop"],
+                [
+                    plan
+                    for plan in restarted._protection_order_plans(
+                        entry_intent_id,
+                        restarted._entry_protection_stash[str(entry_intent_id)],
+                        restarted._instrument_spec(INSTRUMENT_ID),
+                        _position(),
+                        "0.500",
+                    )
+                    if "lifecycle_role=take_profit" in plan.tags
+                ],
+                [],
             )
-            self.assertEqual(restarted.submitted_plans, [])
+
+            adapter.fail_cancel = False
+            with patch.dict(
+                sys.modules,
+                {
+                    "runtime": runtime_package,
+                    "runtime.exchange_cancel_adapter": exchange_cancel_module,
+                },
+            ):
+                strategy._handle_intent(disable_intent)
+
+            finalized = strategy._entry_protection_stash[str(entry_intent_id)][
+                "take_profit_tombstone"
+            ]
+            self.assertEqual(finalized["state"], "disabled")
+            self.assertIn("completed_at", finalized)
 
     def test_internal_sync_without_parent_intent_records_denial_only(self) -> None:
         with tempfile.TemporaryDirectory() as state_dir:
@@ -959,6 +999,128 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             self.assertEqual(request.client_order_id, system_tp_id)
             self.assertNotEqual(request.client_order_id, external_tp_id)
             self.assertIn("take_profit_tombstone", stash)
+            self.assertEqual(stash["take_profit_tombstone"]["state"], "disabled")
+
+    def test_refresh_failure_rejects_disable_without_reusing_cached_mirror_orders(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _Strategy(Path(state_dir), orders=[])
+            entry_intent_id = _seed_entry_stash(strategy)
+            system_tp_id = "Bba444351b6414c35a1d92f350265cd6443"
+            stash = strategy._entry_protection_stash[str(entry_intent_id)]
+            stash["protection_roles"] = {
+                system_tp_id: {
+                    "role": "take_profit",
+                    "quantity": "0.008",
+                    "tp_price": "65534.4",
+                },
+            }
+            mirror = _StaticMirror(
+                (_mirror_order(system_tp_id),),
+                fail_refresh=True,
+            )
+            adapter = _RecordingCancelAdapter()
+            strategy.set_exchange_cancel_adapter(adapter, mirror)
+
+            strategy._handle_intent(
+                _intent(
+                    action="replace_take_profits",
+                    order_plan={
+                        "take_profits": [],
+                        "disable_take_profits": True,
+                        "authorization": _authorization(
+                            "user",
+                            "balen",
+                            "stale-mirror-disable",
+                        ),
+                    },
+                )
+            )
+
+            self.assertEqual(adapter.calls, [])
+            self.assertNotIn("take_profit_tombstone", stash)
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "exchange_state_refresh_failed",
+            )
+
+    def test_fresh_mirror_absence_excludes_stale_local_tp_from_cancel_decision(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _Strategy(
+                Path(state_dir),
+                orders=_live_protection_orders(),
+            )
+            entry_intent_id = _seed_entry_stash(strategy)
+            adapter = _RecordingCancelAdapter()
+            strategy.set_exchange_cancel_adapter(adapter, _StaticMirror(()))
+
+            strategy._handle_intent(
+                _intent(
+                    action="replace_take_profits",
+                    order_plan={
+                        "take_profits": [],
+                        "disable_take_profits": True,
+                        "authorization": _authorization(
+                            "user",
+                            "balen",
+                            "fresh-mirror-no-live-tp",
+                        ),
+                    },
+                )
+            )
+
+            stash = strategy._entry_protection_stash[str(entry_intent_id)]
+            self.assertEqual(adapter.calls, [])
+            self.assertEqual(
+                stash["take_profit_tombstone"]["state"],
+                "disabled",
+            )
+
+    def test_unconfirmed_exchange_cancel_keeps_tombstone_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _Strategy(Path(state_dir), orders=[])
+            entry_intent_id = _seed_entry_stash(strategy)
+            system_tp_id = "Bba444351b6414c35a1d92f350265cd6443"
+            stash = strategy._entry_protection_stash[str(entry_intent_id)]
+            stash["protection_roles"] = {
+                system_tp_id: {
+                    "role": "take_profit",
+                    "quantity": "0.008",
+                    "tp_price": "65534.4",
+                },
+            }
+            adapter = _RecordingCancelAdapter(terminal_status="UNKNOWN")
+            strategy.set_exchange_cancel_adapter(
+                adapter,
+                _StaticMirror((_mirror_order(system_tp_id),)),
+            )
+
+            strategy._handle_intent(
+                _intent(
+                    action="replace_take_profits",
+                    order_plan={
+                        "take_profits": [],
+                        "disable_take_profits": True,
+                        "authorization": _authorization(
+                            "user",
+                            "balen",
+                            "unconfirmed-cancel",
+                        ),
+                    },
+                )
+            )
+
+            self.assertEqual(
+                stash["take_profit_tombstone"]["state"],
+                "cancel_pending",
+            )
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "order_cancel_unconfirmed",
+            )
 
 
 class _Strategy(IntentExecutionStrategy):
@@ -980,6 +1142,11 @@ class _Strategy(IntentExecutionStrategy):
                 trading_state="ACTIVE",
             )
         )
+        _install_exchange_cancel_test_module()
+        mirror = _StaticMirror(
+            tuple(_mirror_from_local_order(order) for order in self._orders)
+        )
+        self.set_exchange_cancel_adapter(_StrategyCancelAdapter(self), mirror)
 
     def _protection_stash_path(self) -> str:
         return str(self._state_dir / self._PROTECTION_STASH_FILENAME)
@@ -1040,12 +1207,20 @@ class _Strategy(IntentExecutionStrategy):
 
 
 class _StaticMirror:
-    def __init__(self, orders: tuple[Any, ...]) -> None:
+    def __init__(
+        self,
+        orders: tuple[Any, ...],
+        *,
+        fail_refresh: bool = False,
+    ) -> None:
         self._orders = orders
+        self._fail_refresh = fail_refresh
         self.refresh_count = 0
 
     def refresh(self) -> tuple[Any, ...]:
         self.refresh_count += 1
+        if self._fail_refresh:
+            raise RuntimeError("mirror refresh failed")
         return self._orders
 
     def orders_for_instrument(self, instrument_id: str) -> tuple[Any, ...]:
@@ -1063,12 +1238,57 @@ class _StaticMirror:
 
 
 class _RecordingCancelAdapter:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        fail_cancel: bool = False,
+        terminal_status: str = "CANCELED",
+    ) -> None:
         self.calls: list[tuple[str, Any]] = []
+        self.fail_cancel = fail_cancel
+        self.terminal_status = terminal_status
 
     def cancel(self, action: str, request: Any) -> Any:
         self.calls.append((action, request))
-        return SimpleNamespace(outcome="canceled")
+        if self.fail_cancel:
+            raise RuntimeError("cancel rejected")
+        return SimpleNamespace(
+            outcome="canceled",
+            terminal_status=self.terminal_status,
+        )
+
+
+class _StrategyCancelAdapter:
+    def __init__(self, strategy: _Strategy) -> None:
+        self._strategy = strategy
+
+    def cancel(self, _action: str, request: Any) -> Any:
+        if self._strategy._fail_cancel:
+            raise RuntimeError("cancel rejected")
+        client_order_id = str(request.client_order_id)
+        self._strategy.cancelled_client_order_ids.append(client_order_id)
+        self._strategy._orders = [
+            order
+            for order in self._strategy._orders
+            if str(order.client_order_id) != client_order_id
+        ]
+        mirror = self._strategy._exchange_state_mirror
+        if hasattr(mirror, "_orders"):
+            mirror._orders = tuple(
+                order
+                for order in mirror._orders
+                if str(order.client_order_id) != client_order_id
+            )
+        return SimpleNamespace(outcome="canceled", terminal_status="CANCELED")
+
+
+def _install_exchange_cancel_test_module() -> None:
+    runtime_package = ModuleType("runtime")
+    runtime_package.__path__ = []
+    sys.modules["runtime"] = runtime_package
+    sys.modules["runtime.exchange_cancel_adapter"] = (
+        _load_exchange_cancel_adapter_module()
+    )
 
 
 def _load_exchange_cancel_adapter_module() -> ModuleType:
@@ -1172,6 +1392,30 @@ def _mirror_order(client_order_id: str) -> Any:
         price="65534.4",
         trigger_price="0",
         tags=(),
+    )
+
+
+def _mirror_from_local_order(order: Any) -> Any:
+    tags = tuple(str(tag) for tag in (getattr(order, "tags", ()) or ()))
+    position_side = "LONG"
+    for tag in tags:
+        if tag.startswith("position_id=") and tag.upper().endswith("-SHORT"):
+            position_side = "SHORT"
+            break
+    return SimpleNamespace(
+        account_id=ACCOUNT_ID,
+        symbol="BTCUSDT",
+        position_side=position_side,
+        order_kind="regular",
+        venue_order_id=str(getattr(order, "client_order_id", "")),
+        client_order_id=str(getattr(order, "client_order_id", "")),
+        instrument_id=str(getattr(order, "instrument_id", INSTRUMENT_ID)),
+        order_type=str(getattr(order, "order_type", "")),
+        side=str(getattr(order, "side", "")),
+        quantity=str(getattr(order, "quantity", "")),
+        price=getattr(order, "price", None),
+        trigger_price=getattr(order, "trigger_price", None),
+        tags=tags,
     )
 
 

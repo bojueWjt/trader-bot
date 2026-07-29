@@ -309,6 +309,10 @@ class _HarnessStrategy(IntentExecutionStrategy):
         self.cancelled_client_order_ids: list[str] = []
         self.submitted_plans = []
         self._fail_cancel = fail_cancel
+        self.set_exchange_cancel_adapter(
+            False,
+            _FreshMirror(tuple(self._orders)),
+        )
 
     def _now(self):
         return NOW
@@ -340,6 +344,27 @@ class _HarnessStrategy(IntentExecutionStrategy):
         if self._fail_cancel:
             raise RuntimeError("cancel rejected")
         self.cancelled_client_order_ids.append(str(order.client_order_id))
+
+
+class _FreshMirror:
+    def __init__(self, orders: tuple[Any, ...]) -> None:
+        self._orders = orders
+
+    def refresh(self) -> tuple[Any, ...]:
+        return self._orders
+
+    def orders_for_instrument(self, instrument_id: str) -> tuple[Any, ...]:
+        return tuple(
+            order
+            for order in self._orders
+            if str(getattr(order, "instrument_id", "")) == str(instrument_id)
+        )
+
+    def find_order(self, instrument_id: str, client_order_id: str) -> Any:
+        for order in self.orders_for_instrument(instrument_id):
+            if str(getattr(order, "client_order_id", "")) == str(client_order_id):
+                return order
+        return False
 
 
 def _position(position_id: str = POSITION_ID):

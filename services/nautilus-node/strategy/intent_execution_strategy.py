@@ -395,8 +395,13 @@ class IntentExecutionStrategy(Strategy):
             "move_stop_to_entry",
             "replace_take_profits",
         }
-        if needs_exchange_state:
-            self._refresh_exchange_state()
+        if needs_exchange_state and not self._refresh_exchange_state():
+            denial = self.denials[-1] if self.denials else OrderDenied(
+                "exchange_state_refresh_failed",
+                str(intent.intent_id),
+            )
+            self._report_denial(intent, denial)
+            return
         context = PlannerContext(
             account_id=self.config.account_id,
             trading_state=self._trading_state(),
@@ -2162,8 +2167,28 @@ class IntentExecutionStrategy(Strategy):
                     return False
             return True
         cancel_order_ids = self._management_cancel_order_ids(plan)
-        if not self._absorb_management_plan(plan):
+        if cancel_order_ids is None:
             return False
+        disabling_take_profits = (
+            str(plan.action) == "replace_take_profits"
+            and plan.disable_take_profits
+        )
+        tombstone_state = "disabled"
+        if disabling_take_profits:
+            tombstone_state = "cancel_pending"
+        if not self._absorb_management_plan(
+            plan,
+            take_profit_tombstone_state=tombstone_state,
+        ):
+            return False
+        if disabling_take_profits:
+            for client_order_id in cancel_order_ids:
+                if not self._cancel_via_exchange_adapter(
+                    plan.instrument_id,
+                    client_order_id,
+                ):
+                    return False
+            return self._finalize_take_profit_disable(plan)
         # Make-before-break: place replacements first, then cancel the superseded
         # orders. If the new stop is rejected by the venue the old one is still
         # standing; the reverse order can leave the position naked. Reduce-only
@@ -2182,7 +2207,7 @@ class IntentExecutionStrategy(Strategy):
     def _management_cancel_order_ids(
         self,
         plan: ManagementPlan,
-    ) -> tuple[str, ...]:
+    ) -> Optional[tuple[str, ...]]:
         role = ""
         if str(plan.action) in {"move_stop_loss", "move_stop_to_entry"}:
             role = "stop_loss"
@@ -2200,15 +2225,29 @@ class IntentExecutionStrategy(Strategy):
             str(getattr(order, "client_order_id", ""))
             for order in self._cache_orders(plan.instrument_id)
         }
+        mirror_live_ids: set[str] = set()
         mirror = self._exchange_state_mirror
         orders_for_instrument = (
             getattr(mirror, "orders_for_instrument", None) if mirror else None
         )
         if callable(orders_for_instrument):
-            live_ids.update(
+            try:
+                mirror_orders = orders_for_instrument(plan.instrument_id)
+            except Exception as exc:
+                self._record_denial(
+                    OrderDenied("exchange_state_refresh_failed", repr(exc))
+                )
+                return None
+            mirror_live_ids.update(
                 str(getattr(order, "client_order_id", ""))
-                for order in orders_for_instrument(plan.instrument_id)
+                for order in mirror_orders
             )
+            live_ids.update(mirror_live_ids)
+        if plan.disable_take_profits:
+            ids.intersection_update(mirror_live_ids)
+        authoritative_live_ids = live_ids
+        if plan.disable_take_profits:
+            authoritative_live_ids = mirror_live_ids
 
         for stash in self._entry_protection_stash.values():
             if not self._management_plan_targets_stash(plan, stash):
@@ -2222,7 +2261,7 @@ class IntentExecutionStrategy(Strategy):
                 if str(role_info.get("role") or "") != role:
                     continue
                 client_order_id = str(client_order_id)
-                if client_order_id in live_ids:
+                if client_order_id in authoritative_live_ids:
                     ids.add(client_order_id)
         return tuple(sorted(ids))
 
@@ -2259,7 +2298,13 @@ class IntentExecutionStrategy(Strategy):
         if not callable(find_order):
             self._record_denial(OrderDenied("order_cancel_not_found", client_order_id))
             return False
-        order = find_order(instrument_id, client_order_id)
+        try:
+            order = find_order(instrument_id, client_order_id)
+        except Exception as exc:
+            self._record_denial(
+                OrderDenied("exchange_state_refresh_failed", repr(exc))
+            )
+            return False
         if not order:
             self._record_denial(OrderDenied("order_cancel_not_found", client_order_id))
             return False
@@ -2277,7 +2322,18 @@ class IntentExecutionStrategy(Strategy):
             client_order_id=client_order_id,
         )
         try:
-            self._exchange_cancel_adapter.cancel("cancel_order", request)
+            result = self._exchange_cancel_adapter.cancel("cancel_order", request)
+            terminal_status = str(
+                getattr(result, "terminal_status", "")
+            ).upper()
+            if terminal_status not in {"CANCELED", "CANCELLED"}:
+                self._record_denial(
+                    OrderDenied(
+                        "order_cancel_unconfirmed",
+                        f"{client_order_id}:{terminal_status or 'UNKNOWN'}",
+                    )
+                )
+                return False
             return True
         except OrderAlreadyFilledError as exc:
             self._record_denial(OrderDenied("order_already_filled", str(exc)))
@@ -2286,7 +2342,12 @@ class IntentExecutionStrategy(Strategy):
             self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
             return False
 
-    def _absorb_management_plan(self, plan: ManagementPlan) -> bool:
+    def _absorb_management_plan(
+        self,
+        plan: ManagementPlan,
+        *,
+        take_profit_tombstone_state: str = "disabled",
+    ) -> bool:
         """Keep entry stashes coherent with operator-managed protections: without
         this, a later entry fill re-places SL/TP at the ORIGINAL signal prices and
         silently undoes an operator's move_stop_loss/replace_take_profits."""
@@ -2342,7 +2403,7 @@ class IntentExecutionStrategy(Strategy):
                 elif plan.disable_take_profits:
                     authorization = dict(plan.authorization or {})
                     tombstone = {
-                        "state": "disabled",
+                        "state": take_profit_tombstone_state,
                         "reason": "authorized_take_profit_disable",
                         "created_at": self._now().isoformat(),
                         "parent_intent_id": parent_intent_id,
@@ -2374,6 +2435,39 @@ class IntentExecutionStrategy(Strategy):
                         order_plan,
                     )
             stash["protected_quantity"] = None
+        if self._persist_entry_protection_stash():
+            return True
+        for key, value in preimage.items():
+            self._entry_protection_stash[key] = value
+        return False
+
+    def _finalize_take_profit_disable(self, plan: ManagementPlan) -> bool:
+        targeted: list[tuple[str, dict[str, Any]]] = []
+        for intent_key, stash in self._entry_protection_stash.items():
+            if self._management_plan_targets_stash(plan, stash):
+                targeted.append((intent_key, stash))
+        if not targeted:
+            return True
+        preimage = {
+            intent_key: copy.deepcopy(stash)
+            for intent_key, stash in targeted
+        }
+        parent_intent_id = _management_parent_intent_id(plan)
+        tombstones: list[dict[str, Any]] = []
+        for _intent_key, stash in targeted:
+            tombstone = stash.get("take_profit_tombstone")
+            if not _valid_take_profit_tombstone(tombstone, parent_intent_id):
+                self._record_denial(
+                    OrderDenied(
+                        "take_profit_tombstone_invalid",
+                        str(plan.intent_id),
+                    )
+                )
+                return False
+            tombstones.append(tombstone)
+        for tombstone in tombstones:
+            tombstone["state"] = "disabled"
+            tombstone["completed_at"] = self._now().isoformat()
         if self._persist_entry_protection_stash():
             return True
         for key, value in preimage.items():
@@ -2814,7 +2908,10 @@ def _valid_take_profit_tombstone(
 ) -> bool:
     if not isinstance(tombstone, dict):
         return False
-    if str(tombstone.get("state") or "") != "disabled":
+    if str(tombstone.get("state") or "") not in {
+        "cancel_pending",
+        "disabled",
+    }:
         return False
     expected_parent = str(parent_intent_id or "").strip()
     actual_parent = str(tombstone.get("parent_intent_id") or "").strip()
