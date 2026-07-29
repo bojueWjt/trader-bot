@@ -57,7 +57,11 @@ class GenRecreatePatchedTest(unittest.TestCase):
             {
                 "Config": {
                     "Image": "trader-node:test",
-                    "Env": ["ACCOUNT_ID=account_a", "PATH=/usr/bin"],
+                    "Env": [
+                        "ACCOUNT_ID=account_a",
+                        "NAUTILUS_INITIAL_TRADING_STATE=ACTIVE",
+                        "PATH=/usr/bin",
+                    ],
                     "Cmd": ["python", "-m", "app.run_node"],
                     "Entrypoint": None,
                 },
@@ -110,6 +114,16 @@ class GenRecreatePatchedTest(unittest.TestCase):
                 mounts.append(tokens[index + 1])
         return mounts
 
+    def generated_environment(self):
+        recreate = self.trader_root / "recreate-trader-v3-node-a.sh"
+        command = recreate.read_text(encoding="utf-8").splitlines()[-1]
+        tokens = shlex.split(command)
+        environment = []
+        for index, token in enumerate(tokens):
+            if token == "-e":
+                environment.append(tokens[index + 1])
+        return environment
+
     def test_missing_binance_destination_fails_before_docker_inspect(self):
         result = self.run_script("trader-v3-node-a")
 
@@ -149,6 +163,17 @@ class GenRecreatePatchedTest(unittest.TestCase):
             "/legacy/projection_actor.py:/app/projection/actor.py:ro",
             mounts,
         )
+
+    def test_generated_container_always_starts_halted(self):
+        result = self.run_script("trader-v3-node-a", BINANCE_DST)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        environment = self.generated_environment()
+        self.assertEqual(
+            environment.count("NAUTILUS_INITIAL_TRADING_STATE=HALTED"),
+            1,
+        )
+        self.assertNotIn("NAUTILUS_INITIAL_TRADING_STATE=ACTIVE", environment)
 
     def test_binance_destination_cannot_replace_another_patch(self):
         result = self.run_script(

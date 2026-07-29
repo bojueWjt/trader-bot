@@ -173,6 +173,9 @@ def generate(name, binance_dst, trader_root):
     for env_value in env:
         if env_value.startswith(("PATH=", "PYTHON", "LANG=", "GPG_KEY", "HOME=")):
             continue
+        env_name = env_value.split("=", 1)[0]
+        if env_name == "NAUTILUS_INITIAL_TRADING_STATE":
+            continue
         run.extend(["-e", env_value])
 
     append_inherited_mounts(run, inspected["Mounts"], mounts)
@@ -180,6 +183,7 @@ def generate(name, binance_dst, trader_root):
         run.extend(["-v", f"{source}:{destination}:{mode}"])
 
     run.extend(["-e", "NODE_STATE_DIR=/state"])
+    run.extend(["-e", "NAUTILUS_INITIAL_TRADING_STATE=HALTED"])
     if entrypoint:
         run.extend(["--entrypoint", entrypoint[0]])
     run.append(image)
