@@ -70,6 +70,16 @@ def explicit_mounts(trader_root, suffix, binance_dst, binance_futures_dst):
             "ro",
         ),
         (
+            str(patch_dir / "control_plane.py"),
+            "/app/execution_domain/control_plane.py",
+            "ro",
+        ),
+        (
+            str(patch_dir / "http_client.py"),
+            "/app/execution_domain/http_client.py",
+            "ro",
+        ),
+        (
             str(patch_dir / "projection_actor.py"),
             "/app/projection/actor.py",
             "ro",

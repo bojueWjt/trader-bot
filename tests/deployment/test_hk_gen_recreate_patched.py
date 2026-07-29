@@ -12,6 +12,8 @@ SCRIPT = REPO_ROOT / "scripts" / "hk-gen-recreate-patched.py"
 PATCH_FILES = (
     "intent_execution_planner.py",
     "contracts.py",
+    "control_plane.py",
+    "http_client.py",
     "projection_actor.py",
     "event_mapper.py",
     "intent_execution_strategy.py",
@@ -152,6 +154,10 @@ class GenRecreatePatchedTest(unittest.TestCase):
             f"{self.patch_dir}/intent_execution_planner.py:"
             "/app/strategy/intent_execution_planner.py:ro",
             f"{self.patch_dir}/contracts.py:/app/execution_domain/contracts.py:ro",
+            f"{self.patch_dir}/control_plane.py:"
+            "/app/execution_domain/control_plane.py:ro",
+            f"{self.patch_dir}/http_client.py:"
+            "/app/execution_domain/http_client.py:ro",
             f"{self.patch_dir}/projection_actor.py:/app/projection/actor.py:ro",
             f"{self.patch_dir}/event_mapper.py:/app/projection/event_mapper.py:ro",
             f"{self.patch_dir}/intent_execution_strategy.py:"
