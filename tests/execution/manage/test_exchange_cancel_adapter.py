@@ -243,9 +243,12 @@ class ExchangeStateMirrorTest(unittest.TestCase):
             EXCHANGE_CANCEL_ADAPTER.urllib.request,
             "urlopen",
             return_value=response,
-        ):
+        ) as urlopen:
             mirror.refresh()
 
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("X-node-id"), "node-a")
+        self.assertEqual(request.get_header("X-account-id"), ACCOUNT_ID)
         regular = mirror.find_order("BTCUSDT-PERP.BINANCE", "regular-client")
         algo = mirror.find_order("BTCUSDT-PERP.BINANCE", "algo-client")
         self.assertNotEqual(regular, False)

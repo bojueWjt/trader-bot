@@ -209,12 +209,14 @@ def _write_trade_intent(
         return existing["intent_id"]
 
     intent = decision["intent"]
+    authorization = _raw_message_authorization(cur, row)
     order_plan = {
         "side": intent.get("side"),
         "entry": intent.get("entry"),
         "stop_loss": intent.get("stop_loss"),
         "take_profits": intent.get("take_profits", []),
         "leverage": intent.get("leverage"),
+        "authorization": authorization,
     }
     intent_id = str(uuid4())
     cur.execute(
@@ -242,9 +244,59 @@ def _write_trade_intent(
         INSERT INTO outbox_events (outbox_event_id, status, aggregate_type, aggregate_id, event_type, payload)
         VALUES (%s, 'pending', 'trade_intent', %s, 'trade_intent.approved', %s)
         """,
-        (str(uuid4()), intent_id, Json({"intent_id": intent_id, "risk_decision_id": risk_decision_id})),
+        (
+            str(uuid4()),
+            intent_id,
+            Json(
+                {
+                    "intent_id": intent_id,
+                    "risk_decision_id": risk_decision_id,
+                    "authorization": authorization,
+                }
+            ),
+        ),
     )
     return intent_id
+
+
+def _raw_message_authorization(cur, row: dict[str, Any]) -> dict[str, Any]:
+    cur.execute(
+        """
+        SELECT source, channel_id, source_message_id, author_id
+        FROM raw_messages
+        WHERE id = %s
+        """,
+        (str(row["raw_message_id"]),),
+    )
+    raw_message = cur.fetchone()
+    if raw_message is None:
+        raise GatewayError("raw message authorization source missing")
+
+    source = str(raw_message["source"] or "").strip().lower()
+    channel_id = str(raw_message["channel_id"] or "").strip()
+    source_message_id = str(raw_message["source_message_id"] or "").strip()
+    author_id = str(raw_message["author_id"] or "").strip()
+    if not source_message_id:
+        raise GatewayError("raw message source_message_id missing")
+
+    user_source = source in {"user", "operator", "manual"}
+    authorized_by_type = "user" if user_source else "channel"
+    authorized_by_id = channel_id
+    if user_source:
+        authorized_by_id = author_id or channel_id
+    if not authorized_by_id:
+        raise GatewayError("raw message authorization identity missing")
+
+    authorization = {
+        "authorized_by_type": authorized_by_type,
+        "authorized_by_id": authorized_by_id,
+        "source_message_id": source_message_id,
+        "created_by_service": "decision-gateway",
+        "parent_intent_id": False,
+    }
+    if authorized_by_type == "channel":
+        authorization["channel_id"] = channel_id
+    return authorization
 
 
 def _projection_is_stale(cur, threshold_ms: int = 60_000) -> bool:

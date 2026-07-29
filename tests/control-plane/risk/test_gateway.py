@@ -28,13 +28,19 @@ def seed_decision(
     target_account_id="acct-1",
     ambiguous=False,
     model_provider="hermes",
+    raw_source="telegram",
+    channel_id="signals",
+    source_message_id=None,
+    author_id=None,
 ):
     raw_id, run_id, ctx_id, dec_id = (str(uuid4()) for _ in range(4))
+    source_message_id = source_message_id or f"m-{raw_id}"
     with transaction(conn), conn.cursor() as cur:
         cur.execute(
             "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version,"
-            " source_received_at, content_hash) VALUES (%s,'telegram','signals',%s,'v1',now(),'h')",
-            (raw_id, f"m-{raw_id}"),
+            " source_received_at, author_id, content_hash)"
+            " VALUES (%s,%s,%s,%s,'v1',now(),%s,'h')",
+            (raw_id, raw_source, channel_id, source_message_id, author_id),
         )
         cur.execute(
             "INSERT INTO message_processing_runs (processing_run_id, raw_message_id, status)"
@@ -86,7 +92,11 @@ def test_no_pending_returns_none(db_conn):
 
 
 def test_approved_decision_writes_risk_decision_intent_and_outbox(db_conn):
-    dec_id = seed_decision(db_conn)
+    dec_id = seed_decision(
+        db_conn,
+        channel_id="-1002136478186",
+        source_message_id="tg-msg-5026",
+    )
     seed_risk_state(db_conn)
     result = gateway.process_one_decision(db_conn, policy=POLICY)
 
@@ -96,12 +106,57 @@ def test_approved_decision_writes_risk_decision_intent_and_outbox(db_conn):
     rd = _one(db_conn, "SELECT status, account_id, instrument_id FROM risk_decisions WHERE hermes_decision_id=%s", (dec_id,))
     assert rd == ("approved", "acct-1", "BTCUSDT")
 
-    ti = _one(db_conn, "SELECT status, action::text, account_id, idempotency_key FROM trade_intents WHERE hermes_decision_id=%s", (dec_id,))
+    ti = _one(
+        db_conn,
+        "SELECT status, action::text, account_id, idempotency_key, order_plan "
+        "FROM trade_intents WHERE hermes_decision_id=%s",
+        (dec_id,),
+    )
     assert ti[0] == "approved" and ti[1] == "open_position" and ti[2] == "acct-1"
     assert len(ti[3]) == 64  # sha256 hex
+    assert ti[4]["authorization"] == {
+        "authorized_by_type": "channel",
+        "authorized_by_id": "-1002136478186",
+        "source_message_id": "tg-msg-5026",
+        "created_by_service": "decision-gateway",
+        "parent_intent_id": False,
+        "channel_id": "-1002136478186",
+    }
 
-    ob = _one(db_conn, "SELECT count(*) FROM outbox_events WHERE aggregate_type='trade_intent' AND aggregate_id=%s", (result["intent_id"],))
-    assert ob[0] == 1
+    ob = _one(
+        db_conn,
+        "SELECT payload FROM outbox_events "
+        "WHERE aggregate_type='trade_intent' AND aggregate_id=%s",
+        (result["intent_id"],),
+    )
+    assert ob[0]["authorization"] == ti[4]["authorization"]
+
+
+def test_user_raw_message_builds_user_authorization(db_conn):
+    dec_id = seed_decision(
+        db_conn,
+        raw_source="user",
+        channel_id="operator",
+        source_message_id="user-request-7001",
+        author_id="balen",
+    )
+    seed_risk_state(db_conn)
+
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "approved"
+    row = _one(
+        db_conn,
+        "SELECT order_plan FROM trade_intents WHERE hermes_decision_id=%s",
+        (dec_id,),
+    )
+    assert row[0]["authorization"] == {
+        "authorized_by_type": "user",
+        "authorized_by_id": "balen",
+        "source_message_id": "user-request-7001",
+        "created_by_service": "decision-gateway",
+        "parent_intent_id": False,
+    }
 
 
 def test_idempotent_second_pass_makes_no_duplicate(db_conn):

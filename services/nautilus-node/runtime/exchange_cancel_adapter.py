@@ -363,6 +363,8 @@ class ControlPlaneExchangeStateMirror:
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self._token}",
+                "X-Node-Id": self._node_id,
+                "X-Account-Id": self._account_id,
             },
             method="GET",
         )

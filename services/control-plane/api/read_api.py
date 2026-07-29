@@ -125,14 +125,105 @@ async def v1_stream(authorization: str | None = Header(default=None)):
     )
 
 
-def require_node(authorization: str | None) -> None:
-    # nautilus_node auth is fail-closed and least-privilege (intent pull + ack only).
-    expected = os.environ.get("NAUTILUS_NODE_TOKEN", "").strip()
-    if not expected:
-        raise HTTPException(status_code=503, detail="node auth not configured")
-    token = authorization[len("Bearer "):].strip() if (authorization or "").startswith("Bearer ") else ""
-    if token != expected:
+def _node_auth_bindings() -> dict[str, dict[str, str]] | bool:
+    raw = os.environ.get("NAUTILUS_NODE_AUTH_JSON", "").strip()
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="node auth binding config is invalid",
+        ) from exc
+    if not isinstance(payload, dict) or not payload:
+        raise HTTPException(
+            status_code=503,
+            detail="node auth binding config is empty",
+        )
+
+    bindings: dict[str, dict[str, str]] = {}
+    token_owners: dict[str, str] = {}
+    for raw_node_id, raw_binding in payload.items():
+        node_id = str(raw_node_id or "").strip()
+        if not node_id or not isinstance(raw_binding, dict):
+            raise HTTPException(
+                status_code=503,
+                detail="node auth binding entry is invalid",
+            )
+        account_id = str(raw_binding.get("account_id") or "").strip()
+        token = str(raw_binding.get("token") or "").strip()
+        if not account_id or not token:
+            raise HTTPException(
+                status_code=503,
+                detail="node auth binding identity is incomplete",
+            )
+        previous_owner = token_owners.get(token)
+        if previous_owner:
+            raise HTTPException(
+                status_code=503,
+                detail="node auth tokens must be unique",
+            )
+        token_owners[token] = node_id
+        bindings[node_id] = {
+            "account_id": account_id,
+            "token": token,
+        }
+    return bindings
+
+
+def _node_bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="node bearer token required")
+    token = authorization[len("Bearer "):].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="node bearer token required")
+    return token
+
+
+def require_node(
+    authorization: str | None,
+    *,
+    node_id: str | None = None,
+    account_id: str | None = None,
+    x_node_id: str | None = None,
+    x_account_id: str | None = None,
+) -> str | bool:
+    token = _node_bearer_token(authorization)
+    bindings = _node_auth_bindings()
+    if bindings is False:
+        expected = os.environ.get("NAUTILUS_NODE_TOKEN", "").strip()
+        if not expected:
+            raise HTTPException(status_code=503, detail="node auth not configured")
+        if token != expected:
+            raise HTTPException(status_code=401, detail="node token required")
+        if node_id and x_node_id and node_id != x_node_id:
+            raise HTTPException(status_code=403, detail="node identity mismatch")
+        if account_id and x_account_id and account_id != x_account_id:
+            raise HTTPException(status_code=403, detail="node account mismatch")
+        return account_id or False
+
+    requested_node_id = str(node_id or "").strip()
+    header_node_id = str(x_node_id or "").strip()
+    requested_account_id = str(account_id or "").strip()
+    header_account_id = str(x_account_id or "").strip()
+    if not requested_node_id or not header_node_id:
+        raise HTTPException(status_code=403, detail="node identity is required")
+    if requested_node_id != header_node_id:
+        raise HTTPException(status_code=403, detail="node identity mismatch")
+    binding = bindings.get(requested_node_id)
+    if not binding:
+        raise HTTPException(status_code=403, detail="unknown node identity")
+    if token != binding["token"]:
         raise HTTPException(status_code=401, detail="node token required")
+    bound_account_id = binding["account_id"]
+    if not requested_account_id or not header_account_id:
+        raise HTTPException(status_code=403, detail="node account is required")
+    if requested_account_id != header_account_id:
+        raise HTTPException(status_code=403, detail="node account mismatch")
+    if requested_account_id != bound_account_id:
+        raise HTTPException(status_code=403, detail="node account mismatch")
+    return bound_account_id
 
 
 def _nautilus_instrument_id(instr: str | None) -> str | None:
@@ -176,6 +267,11 @@ _MANAGEMENT_ACTIONS = frozenset(
         "cancel_order",
     }
 )
+_EXECUTION_ORDER_PLAN_METADATA = (
+    "authorization",
+    "attribution",
+    "disable_take_profits",
+)
 
 # zone-ladder v1 已定参数，改动须过再校准。
 _ZONE_LADDER_TRANCHES = (
@@ -185,6 +281,13 @@ _ZONE_LADDER_TRANCHES = (
 )
 _ZONE_LADDER_MIN_WIDTH_FRACTION = Decimal("0.0015")
 _ZONE_LADDER_QTY_QUANTUM = Decimal("0.000000000001")
+
+
+def _preserve_execution_order_plan_metadata(source: dict, target: dict) -> dict:
+    for field in _EXECUTION_ORDER_PLAN_METADATA:
+        if field in source:
+            target[field] = source[field]
+    return target
 
 
 def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
@@ -233,7 +336,7 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
         # (2026-07-12 ETH short SL incident, intent 15748ddd).
         if op.get("position_side") is not None:
             out["position_side"] = op.get("position_side")
-        return out
+        return _preserve_execution_order_plan_metadata(op, out)
 
     entry_type = raw_entry_type or "market"
     if entry_type == "none":
@@ -313,7 +416,7 @@ def _single_execution_order_plan(
         out["leverage"] = op.get("leverage")
     if op.get("expire_hours") is not None and entry_type in ("limit", "zone"):
         out["expire_hours"] = op.get("expire_hours")
-    return out
+    return _preserve_execution_order_plan_metadata(op, out)
 
 
 def _zone_ladder_order_plan(
@@ -413,7 +516,7 @@ def _zone_ladder_order_plan(
     }
     if op.get("leverage") is not None:
         out["leverage"] = op.get("leverage")
-    return out
+    return _preserve_execution_order_plan_metadata(op, out)
 
 
 def _positive_decimal_or_none(value) -> Decimal | None:
@@ -449,10 +552,18 @@ def node_intents(
     after: str | None = None,
     limit: int = 50,
     authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
 ):
     """A↔B seam: a node pulls approved ApprovedTradeIntentV1 for its account, cursor-based
     (durable, restart-safe). Only this account's approved intents are returned."""
-    require_node(authorization)
+    require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="intent store unavailable")
@@ -574,10 +685,25 @@ def ingest_execution_event(
     node_id: str,
     body: dict = Body(default={}),
     authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
 ):
     """A↔B seam: a node pushes an ExecutionEventEnvelopeV1; idempotent by event_id.
     Projection hints embedded in payload.{account,position,order} update the read model."""
-    require_node(authorization)
+    account_id = str(body.get("account_id") or "").strip()
+    require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
+    event_node_id = str(body.get("node_id") or "").strip()
+    if event_node_id and event_node_id != node_id:
+        raise HTTPException(
+            status_code=403,
+            detail="execution event node mismatch",
+        )
     if not body.get("event_id") or not body.get("event_type"):
         raise HTTPException(status_code=400, detail="event_id and event_type required")
     database_url = os.environ.get("DATABASE_URL")
@@ -669,9 +795,18 @@ _NODE_ACK_STATUS_MAP = {"accepted": "acked", "completed": "acked", "failed": "fa
 
 @app.post("/v1/nodes/{node_id}/intents/{intent_id}/ack")
 def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
-                    authorization: str | None = Header(default=None)):
+                    authorization: str | None = Header(default=None),
+                    x_node_id: str | None = Header(default=None),
+                    x_account_id: str | None = Header(default=None)):
     """A<->B seam: node acks an intent (received/accepted/executed/rejected/...)."""
-    require_node(authorization)
+    account_id = str(body.get("account_id") or "").strip()
+    require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
@@ -686,16 +821,18 @@ def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE trade_intents SET status=%s "
-                    "WHERE intent_id=%s AND status='approved' RETURNING status::text",
-                    (status, intent_id),
+                    "WHERE intent_id=%s AND account_id=%s AND status='approved' "
+                    "RETURNING status::text",
+                    (status, intent_id, account_id),
                 )
                 row = cur.fetchone()
                 if row is not None:
                     intent_status = row[0]
                 else:
                     cur.execute(
-                        "SELECT status::text FROM trade_intents WHERE intent_id=%s",
-                        (intent_id,),
+                        "SELECT status::text FROM trade_intents "
+                        "WHERE intent_id=%s AND account_id=%s",
+                        (intent_id, account_id),
                     )
                     row = cur.fetchone()
                     intent_status = row[0] if row is not None else None
@@ -921,9 +1058,18 @@ def _derive_projection_from_event(writer, ev: dict) -> None:
 
 @app.post("/v1/nodes/{node_id}/execution-events")
 def post_node_events(node_id: str, body: dict = Body(default={}),
-                     authorization: str | None = Header(default=None)):
+                     authorization: str | None = Header(default=None),
+                     x_node_id: str | None = Header(default=None),
+                     x_account_id: str | None = Header(default=None)):
     """A<->B seam: node pushes a batch of ExecutionEventEnvelopeV1; idempotent by event_id."""
-    require_node(authorization)
+    account_id = str(body.get("account_id") or "").strip()
+    require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
@@ -937,6 +1083,17 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
         for ev in body.get("events", []):
             if not ev.get("event_id"):
                 continue
+            if str(ev.get("account_id") or "").strip() != account_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="execution event account mismatch",
+                )
+            event_node_id = str(ev.get("node_id") or "").strip()
+            if event_node_id and event_node_id != node_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="execution event node mismatch",
+                )
             # Persist the raw event first (idempotent, outside the savepoint) so it is
             # always durable even if projection derivation fails on a malformed payload.
             event = {**ev, "node_id": ev.get("node_id") or node_id}
@@ -973,9 +1130,18 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
 
 @app.post("/v1/nodes/{node_id}/heartbeat")
 def node_heartbeat(node_id: str, body: dict = Body(default={}),
-                   authorization: str | None = Header(default=None)):
+                   authorization: str | None = Header(default=None),
+                   x_node_id: str | None = Header(default=None),
+                   x_account_id: str | None = Header(default=None)):
     """A<->B seam: node liveness + readiness; feeds snapshot freshness/missing_nodes."""
-    require_node(authorization)
+    account_id = str(body.get("account_id") or "").strip()
+    bound_account_id = require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
@@ -989,7 +1155,7 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                 "VALUES (%s,%s,%s,%s,%s, now()) "
                 "ON CONFLICT (node_id) DO UPDATE SET account_id=COALESCE(EXCLUDED.account_id, node_heartbeats.account_id), "
                 "status=EXCLUDED.status, version=EXCLUDED.version, payload=EXCLUDED.payload, last_seen_at=now()",
-                (node_id, body.get("account_id"), str(body.get("trading_state") or "UNKNOWN"),
+                (node_id, bound_account_id, str(body.get("trading_state") or "UNKNOWN"),
                  body.get("version"),
                  Json({k: body.get(k) for k in
                        ("readiness", "projection_lag_ms", "reconciliation_state", "last_event_id", "ts",
@@ -1002,10 +1168,22 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
 
 
 @app.get("/v1/nodes/{node_id}/commands")
-def node_commands(node_id: str, after: str | None = None,
-                  authorization: str | None = Header(default=None)):
+def node_commands(
+    node_id: str,
+    account_id: str,
+    after: str | None = None,
+    authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
+):
     """A<->B seam: node polls its pending operator commands (kill-switch path)."""
-    require_node(authorization)
+    bound_account_id = require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
@@ -1019,20 +1197,37 @@ def node_commands(node_id: str, after: str | None = None,
                 (node_id,),
             )
             rows = cur.fetchall()
-        return {"commands": [
-            {"command_id": r[0], "type": _NODE_COMMAND_TYPE_MAP.get(r[1], r[1].lower()),
-             "args": r[2] or {}, "issued_at": r[3].isoformat() if r[3] else None}
-            for r in rows
-        ]}
+        commands = []
+        for row in rows:
+            args = dict(row[2] or {})
+            args["account_id"] = bound_account_id
+            commands.append(
+                {
+                    "command_id": row[0],
+                    "type": _NODE_COMMAND_TYPE_MAP.get(row[1], row[1].lower()),
+                    "args": args,
+                    "issued_at": row[3].isoformat() if row[3] else None,
+                }
+            )
+        return {"commands": commands}
     finally:
         conn.close()
 
 
 @app.post("/v1/nodes/{node_id}/commands/{command_id}/ack")
 def ack_node_command(node_id: str, command_id: str, body: dict = Body(default={}),
-                     authorization: str | None = Header(default=None)):
+                     authorization: str | None = Header(default=None),
+                     x_node_id: str | None = Header(default=None),
+                     x_account_id: str | None = Header(default=None)):
     """A<->B seam: node acks an operator command; recomputes the command's rollup."""
-    require_node(authorization)
+    account_id = str(body.get("account_id") or "").strip()
+    require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
@@ -1049,9 +1244,21 @@ def ack_node_command(node_id: str, command_id: str, body: dict = Body(default={}
 
 
 @app.get("/v1/accounts/{account_id}")
-def account_generated_at(account_id: str, authorization: str | None = Header(default=None)):
+def account_generated_at(
+    account_id: str,
+    node_id: str,
+    authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
+):
     """A<->B seam: node reads the snapshot freshness (generated_at) for its account."""
-    require_node(authorization)
+    require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
@@ -1068,24 +1275,23 @@ def node_exchange_state(
     node_id: str,
     account_id: str,
     authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
 ):
     """Return one account's read-only venue mirror for node reconciliation."""
-    require_node(authorization)
+    require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
     conn = psycopg2.connect(database_url)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT account_id FROM node_heartbeats WHERE node_id=%s",
-                (node_id,),
-            )
-            node_row = cur.fetchone()
-            if node_row is not None:
-                bound_account = node_row["account_id"]
-                if bound_account and bound_account != account_id:
-                    raise HTTPException(status_code=403, detail="node account mismatch")
             cur.execute(
                 "SELECT to_regclass('public.exchange_state_mirror') IS NOT NULL AS present"
             )
