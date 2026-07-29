@@ -569,31 +569,26 @@ def ingest_execution_event(
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="projection store unavailable")
-    _cp = _HERE.parent
-    for _p in (_cp, _cp / "db"):
-        if str(_p) not in sys.path:
-            sys.path.insert(0, str(_p))
+    _cp_paths()
     from repository import ProjectionWriter
 
     conn = psycopg2.connect(database_url)
     try:
         writer = ProjectionWriter(conn)
-        writer.insert_execution_event({**body, "node_id": body.get("node_id") or node_id})
-        hints = body.get("payload") or {}
-        ev_id, ts = body["event_id"], body.get("ts_event")
+        event = {**body, "node_id": body.get("node_id") or node_id}
+        writer.insert_execution_event(event)
+        hints = event.get("payload") or {}
+        ev_id, ts = event["event_id"], event.get("ts_event")
         if isinstance(hints.get("account"), dict):
             writer.upsert_account_projection({**hints["account"], "event_id": ev_id})
         if isinstance(hints.get("position"), dict):
             pos_hint = _normalize_position_hint(
                 {**hints["position"], "event_id": ev_id, "ts_event": ts},
-                body.get("event_type"),
+                event.get("event_type"),
             )
             if pos_hint is not None:
                 writer.upsert_position_projection(pos_hint)
-        if isinstance(hints.get("order"), dict):
-            order_hint = _normalize_order_hint({**hints["order"], "event_id": ev_id, "ts_event": ts})
-            if order_hint is not None:
-                writer.upsert_order_projection(order_hint)
+        _derive_projection_from_event(writer, event)
         conn.commit()
         return {"ingested": ev_id, "status": "ok"}
     finally:
@@ -825,22 +820,48 @@ def _order_projection_from_event(ev: dict) -> dict | None:
 
 
 def _derive_projection_from_event(writer, ev: dict) -> None:
-    """C-06: derive read-model projections from the node's raw (flat-payload)
-    execution events. Raises on DB error so the caller's SAVEPOINT can roll back
-    just this event instead of poisoning the whole batch transaction."""
+    """Derive guarded read-model projections from one raw execution event."""
     et = str(ev.get("event_type") or "")
-    p = ev.get("payload") or {}
-    acct = ev.get("account_id")
-    ev_id, ts = ev.get("event_id"), ev.get("ts_event")
-    if not acct:
+    payload = ev.get("payload") or {}
+    if not ev.get("account_id"):
         return
     position_hint = _position_projection_from_event(ev)
     if position_hint is not None:
         writer.upsert_position_projection(position_hint)
         return
-    order_hint = _order_projection_from_event(ev)
-    if order_hint is not None:
-        writer.upsert_order_projection(order_hint)
+    if not et.startswith("Order"):
+        return
+
+    order_payload = dict(payload)
+    nested_order = payload.get("order")
+    if isinstance(nested_order, dict):
+        order_payload.update(nested_order)
+    client_order_id = ev.get("client_order_id") or order_payload.get("client_order_id")
+    venue_order_id = ev.get("venue_order_id") or order_payload.get("venue_order_id")
+    if not client_order_id and not venue_order_id:
+        return
+
+    side = _order_side(order_payload.get("side") or order_payload.get("order_side"))
+    if side is not None:
+        order_payload["side"] = side
+    if order_payload.get("order_type") is not None:
+        order_payload["order_type"] = str(order_payload.get("order_type"))
+    if "reduce_only" in order_payload:
+        order_payload["reduce_only"] = _bool(order_payload.get("reduce_only"))
+
+    from order_management.order_reducer import OrderProjectionReducer
+
+    reducer_event = {
+        **ev,
+        "client_order_id": client_order_id,
+        "venue_order_id": venue_order_id,
+        "payload": order_payload,
+    }
+    OrderProjectionReducer().apply_event(
+        writer.conn,
+        reducer_event,
+        manage_transaction=False,
+    )
 
 
 @app.post("/v1/nodes/{node_id}/execution-events")
@@ -863,9 +884,10 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
                 continue
             # Persist the raw event first (idempotent, outside the savepoint) so it is
             # always durable even if projection derivation fails on a malformed payload.
-            writer.insert_execution_event({**ev, "node_id": ev.get("node_id") or node_id})
-            hints = ev.get("payload") or {}
-            ev_id, ts = ev["event_id"], ev.get("ts_event")
+            event = {**ev, "node_id": ev.get("node_id") or node_id}
+            writer.insert_execution_event(event)
+            hints = event.get("payload") or {}
+            ev_id, ts = event["event_id"], event.get("ts_event")
             with conn.cursor() as sp:
                 sp.execute("SAVEPOINT proj")
             try:
@@ -874,15 +896,11 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
                 if isinstance(hints.get("position"), dict):
                     pos_hint = _normalize_position_hint(
                         {**hints["position"], "event_id": ev_id, "ts_event": ts},
-                        ev.get("event_type"),
+                        event.get("event_type"),
                     )
                     if pos_hint is not None:
                         writer.upsert_position_projection(pos_hint)
-                if isinstance(hints.get("order"), dict):
-                    order_hint = _normalize_order_hint({**hints["order"], "event_id": ev_id, "ts_event": ts})
-                    if order_hint is not None:
-                        writer.upsert_order_projection(order_hint)
-                _derive_projection_from_event(writer, ev)
+                _derive_projection_from_event(writer, event)
                 with conn.cursor() as sp:
                     sp.execute("RELEASE SAVEPOINT proj")
             except Exception:
@@ -985,6 +1003,48 @@ def account_generated_at(account_id: str, authorization: str | None = Header(def
     try:
         snap = build_system_snapshot(conn)
         return {"account_id": account_id, "generated_at": snap.get("generated_at")}
+    finally:
+        conn.close()
+
+
+@app.get("/v1/nodes/{node_id}/exchange-state")
+def node_exchange_state(
+    node_id: str,
+    account_id: str,
+    authorization: str | None = Header(default=None),
+):
+    """Return one account's read-only venue mirror for node reconciliation."""
+    require_node(authorization)
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT account_id FROM node_heartbeats WHERE node_id=%s",
+                (node_id,),
+            )
+            node_row = cur.fetchone()
+            if node_row is not None:
+                bound_account = node_row["account_id"]
+                if bound_account and bound_account != account_id:
+                    raise HTTPException(status_code=403, detail="node account mismatch")
+            cur.execute(
+                "SELECT to_regclass('public.exchange_state_mirror') IS NOT NULL AS present"
+            )
+            if not cur.fetchone()["present"]:
+                raise HTTPException(status_code=503, detail="exchange state mirror unavailable")
+            cur.execute(
+                "SELECT account_id, payload, updated_at, "
+                "(now() - updated_at) > interval '180 seconds' AS stale "
+                "FROM exchange_state_mirror WHERE account_id=%s",
+                (account_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="exchange state mirror missing")
+        return dict(row)
     finally:
         conn.close()
 
@@ -1930,6 +1990,59 @@ def _validate_stop_direction(symbol: str, account_id: str, stop_loss: float,
         )
 
 
+def _validate_take_profit_direction(symbol: str, account_id: str, take_profits: list,
+                                    position_side: str | None = None) -> None:
+    """A take-profit too close to or through the mark can execute immediately and
+    cascade reduce-only exits. Soft check: skipped when the position or mark price
+    cannot be resolved. position_side (long|short) narrows hedge-mode books."""
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        return
+    side = None
+    try:
+        conn = psycopg2.connect(database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT side FROM positions_projection WHERE account_id=%s "
+                    "AND instrument_id LIKE %s AND status='open' AND quantity::numeric != 0",
+                    (account_id, symbol + "%"),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        if position_side:
+            rows = [r for r in rows if str(r[0]).lower() == position_side]
+        if len(rows) != 1:
+            return  # none/ambiguous: let the node planner decide
+        side = str(rows[0][0]).lower()
+    except Exception:
+        return
+    mark = _binance_mark_price(symbol)
+    if not mark:
+        return
+    if side == "long":
+        min_price = mark * 1.001
+        for tp in take_profits:
+            price = float(tp["price"])
+            if price <= min_price:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"take_profit {price} is not at least 0.1% beyond mark "
+                           f"{mark} for a long position",
+                )
+    if side == "short":
+        max_price = mark * 0.999
+        for tp in take_profits:
+            price = float(tp["price"])
+            if price >= max_price:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"take_profit {price} is not at least 0.1% beyond mark "
+                           f"{mark} for a short position",
+                )
+
+
 def _safe_execution_preview(order_plan, risk_budget, symbol, action):
     """The intent row is committed before the response is built: a preview failure
     must never turn a successfully-placed intent into an HTTP error."""
@@ -2075,6 +2188,7 @@ def operator_order(
                 "price": _op_num(item.get("price"), f"take_profits[{i}].price", required=True),
                 "quantity": _op_num(item.get("quantity"), f"take_profits[{i}].quantity", required=True),
             })
+        _validate_take_profit_direction(symbol, account_id, take_profits, position_side)
     else:
         take_profits = [
             _op_num(tp, "take_profits[]") for tp in (body.get("take_profits") or [])
