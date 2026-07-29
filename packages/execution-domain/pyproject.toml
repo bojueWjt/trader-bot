@@ -1,0 +1,24 @@
+[project]
+name = "execution-domain"
+version = "0.1.0"
+description = "Window B typed contracts (contracts-v1 view) and control-plane client interface for the Nautilus execution layer."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "jsonschema>=4.22",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["execution_domain"]
+
+[tool.pytest.ini_options]
+testpaths = ["../../tests/nautilus", "../../tests/execution"]

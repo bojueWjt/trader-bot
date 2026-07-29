@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts-v1/ExecutionEventEnvelopeV1",
+  "title": "ExecutionEventEnvelopeV1",
+  "description": "Frozen contract (PLAN v3.0 §3.3). Outbound from window B: produced by the Projection Actor for each Nautilus order/position/account event and delivered to the control-plane. event_id is the idempotency key; duplicate WS events and reconciliation replays must not double-apply.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "node_id",
+    "account_id",
+    "event_type",
+    "ts_event",
+    "ts_ingest",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable, unique, deterministic per source event. Used as the projection idempotency key."
+    },
+    "node_id": { "type": "string", "minLength": 1 },
+    "account_id": { "type": "string", "minLength": 1 },
+    "intent_id": { "type": ["string", "null"], "format": "uuid" },
+    "client_order_id": { "type": ["string", "null"] },
+    "venue_order_id": { "type": ["string", "null"] },
+    "trade_id": { "type": ["string", "null"] },
+    "event_type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Nautilus-derived event type, e.g. OrderSubmitted, OrderAccepted, OrderFilled, OrderCanceled, OrderRejected, OrderExpired, PositionOpened, PositionChanged, PositionClosed, AccountState."
+    },
+    "ts_event": { "type": "string", "format": "date-time" },
+    "ts_ingest": { "type": "string", "format": "date-time" },
+    "payload": {
+      "type": "object",
+      "description": "Controlled summary of the original Nautilus event (no exchange secrets)."
+    }
+  }
+}

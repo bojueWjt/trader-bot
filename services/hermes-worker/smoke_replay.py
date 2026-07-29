@@ -119,7 +119,17 @@ class _LiveSnapshotProvider:  # pragma: no cover - real env only
         self._conn = conn
 
     def current(self):
-        raise RuntimeError("live SystemSnapshotV1 provider is wired by A-09 control-plane API")
+        # C-04 wiring: the real SystemSnapshotV1 from the deployed control-plane
+        # projection (A-09). Built from PostgreSQL — never a fixture.
+        import sys
+        from pathlib import Path
+
+        cp_api = Path(__file__).resolve().parents[1] / "control-plane" / "api"
+        if str(cp_api) not in sys.path:
+            sys.path.insert(0, str(cp_api))
+        from snapshot import build_system_snapshot
+
+        return build_system_snapshot(self._conn)
 
 
 if __name__ == "__main__":

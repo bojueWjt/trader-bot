@@ -1,0 +1,141 @@
+# 最终验收报告（INTERIM — gate=testnet_full_pipeline_proven，未达 testnet_only 全量）
+
+> 分支 `work/integration-acceptance-v3`。**全链路（含真 governor 自动批准）真机打通**：真实图文回放 + 真 gateway/governor 决策 + testnet 真实成交全部亲验。剩余：全量 testnet 十四场景(C-08)/混沌(C-07)/安全审计(C-10)/切换演练(C-11)，以及静默期投影 freshness 硬化（见 §0.2）。
+> **release gate = `blocked`（不可 live）**：默认上限 `testnet_only` 的全量验收未过，且 live 需 operator 签名。
+
+## 0.1 全链路里程碑（hk，2026-06-21）— 真 governor → testnet 成交
+
+**§0 三项 findings 全部闭合 + 全链路自动批准打通：**
+
+- **A↔B order_plan 对齐已验证**：control-plane A→B seam 翻译（A 语义 `{side,entry{type}}` → B 执行 `{side,type,quantity}`，quantity=max_notional/entry_price）真机生效。
+- **C-06 投影派生修复**（commit `b16d605`）：execution-event → 读模型投影根因修复（数量字符串被 `COALESCE(%s,0)` 当 integer 解析 → `InvalidTextRepresentation` 污染事务 → 500）。改：`_num()` 数值强转 + 每事件 SAVEPOINT 隔离。真机：positions_projection 实时反映 testnet 持仓。
+- **node 周期心跳**（commit `6096c00`）：`send_heartbeat()` 原仅启动时一次 → CommandPollerActor 每 tick 刷新 → snapshot `missing_nodes` 清空、node 真活性可见。
+- **position_exists 误判修复**（commit `0681f86`）：`_cache_positions` 用 InstrumentId 作用域 + 按 instrument/非零过滤 → 开 BTC 不再被无关 ETH 持仓挡。
+- **🎯 全链路真机亲验**：新鲜决策 `3e89ffbe` → 真 gateway → 真 governor **approved（all checks passed）** → ApprovedTradeIntentV1 `f035bd12` → node 轮询拉取 → **Binance testnet 真实成交 0.0032 BTC @ ~64306**（venue_order_id 15778571551，3 笔分批 OrderFilled→PositionOpened）→ execution_events 回流 → 投影更新。订单 tag 全程可追溯（intent→decision→risk→idempotency_key）。幂等已验（单订单无重复）。
+- **kill-switch 决策矩阵真机亲验**（governor 级）：`risk_state HALTED → rejected: no new risk`；`REDUCING → rejected: opening risk blocked`；`ACTIVE → approved`。工具 `scripts/governor_demo.py`。
+- **真语料 governor 回归**：75 条真 Hermes 决策过真 gateway → 全部 `needs_review: decision_stale`（freshness 1800s 闸正确 fail-closed，~48000s 老决策）。
+- **C-08 gateway/governor 场景矩阵 6/6**（`scripts/c08_scenarios.py`，确定性无下单）：whitelist_reject（DOGEUSDT not allowed）、precision_reject、ambiguous_review、update_message_cannot_open（position_update produced open_position）、update_no_target（缺 target_position_id→review）、leverage_reject（20>10）。叠加已证 approve→fill / HALTED / REDUCING / freshness / 幂等 ≈ 11 个确定性场景。**剩余执行级场景**（close/partial/move_SL/cancel_all/close_all/对账）待 node 侧 close/cancel 接线（Codex 并行实现中）。
+
+## 0.15 C-10 安全审计（hk，2026-06-21）— 全过
+
+只读核查全过：① secrets `0600` + `secrets/` `0700`（root）；② v3 服务仅绑 `127.0.0.1`（8080/8087），redis/pg 仅本机发布，node 容器不发布端口；③ git 仓库无任何明文密钥（testnet key 片段/`BINANCE_API_SECRET` 0 命中）；④ 端点 fail-closed：无 token 的 ingress 写 + snapshot 读均 **401**；⑤ **live-off 关键闸**：node 运行时 base url = `https://demo-fapi.binance.com`（testnet，非主网），ws=`stream.binancefuture.com`。
+
+## 0.16 C-09 kill-switch 统一演练（hk，2026-06-21）— 双层亲验
+
+operator 危险操作命令（risk_admin + request_id + reason + confirm，落 audit_events）真机演练：
+- **节点级**：`POST /v1/commands {type:HALT, target_nodes:[...]}` → node CommandPollerActor ~6s 内 ACTIVE→**HALTED**（心跳可见）；RESUME→ACTIVE。
+- **网关级**：HALT 带 `scope:{account_id, instruments:[BTCUSDT,ETHUSDT,SOLUSDT]}` → risk_state 三标的全 HALTED → 新鲜 open 过 gateway **rejected: risk_state HALTED: no new risk**；RESUME 带 scope→全 ACTIVE 还原。
+- **REDUCING**：risk_state REDUCING → 开仓 rejected（governor_demo 已证）。
+- **C-11 安全态回滚**：HALT 即「快速回安全态」原语，双层 ~6s 生效，已亲验。
+- ⚠ **运营要点**：完整 kill-switch 必须同时带 `target_nodes`（停执行）+ `scope.{account_id,instruments}`（停网关批准）。仅 `target_nodes` 只停节点执行、不停网关批准（积压 approved 在 RESUME 后会执行）。runbook 已记。
+- **剩余**：cancel_all/close_all 节点动作（Codex 并行实现中）。
+
+## 0.17 C-09 cancel_all/close_all + C-07 混沌（hk，2026-06-21）
+
+- **close_all 真机亲验**（commit `bb4c738`）：`POST /v1/commands {type:CLOSE_ALL}` → CommandPollerActor 经 msgbus `node.commands.{account_id}` 路由到 strategy → 提交 reduce-only SELL market 平 BTC+ETH → Binance testnet 实平（持仓归零）。cancel_all 同路由（当前无挂单，路径已证）。
+- **cancel_all/close_all 发现**：① 批量平仓在同一 tick 撞 Nautilus RiskEngine `MAX_ORDER_SUBMIT_RATE` 节流 → 部分被 drop（需分批/重试，第二次 CLOSE_ALL 补平 ETH）；② 平仓用 position_id `...-EXTERNAL` ≠ 开仓 `...-BOTH` → 投影残留一条 stale open 行（实盘已平，C-06 position_id 对账边界）。
+- **C-07 混沌 2 项 PASS**：
+  - **节点重启幂等**：重启 node，已成交 intent `f035bd12` 不重复执行（订单数不变，cursor 拉取 restart-safe，无重复下单）。
+  - **control-plane 重启韧性**：重启 control-plane → node 2 条瞬时 connection-refused 后干净恢复（心跳新鲜），**无 rogue 下单**（OrderSubmitted 前后均 5），control-plane 恢复服务（snapshot 200）。
+  - PG 不可达 fail-closed：设计上 503 `store unavailable`（已有路径）；worker context_stale / governor risk_context_incomplete 已证数据缺失即拒。
+
+## 0.18 C-08 执行级更新场景（hk，2026-06-21）
+
+修复 governor `update_target` instrument 格式 bug（commit `cf40745`）：决策带 venue symbol `BTCUSDT`，持仓投影带 Nautilus id `BTCUSDT-PERP.BINANCE`，原 `==` 比较致**所有 update 动作 target 匹配 0 → 永远 needs_review**。加 `_instrument_matches()` 后：
+- **close_position 全链路 PASS**：开 BTC → seed close_position(target=持仓) → governor **approved** → intent `b4d2bf77` → node SELL reduce-only IOC → **OrderFilled → PositionClosed**（tag 全可追溯，含 lifecycle_role=exit + position_id）。
+- **move_stop_loss**：governor **approved**（gate 修复生效），但 node 执行 **denied `unsupported_order_spec type=market`** —— A→B 管理计划把移动止损翻译成 market 单，应为 STOP_MARKET+trigger（fail-safe 拒单；node-planner follow-up）。
+- **partial_close**：未单独跑（同 update 路径，需 fraction + 同类 planner 修复）。
+
+**C-08 场景净覆盖 ≈ 14**：open(成交)/close_position(平仓)/close_all/cancel_all + 6 拒审闸 + HALTED/REDUCING + freshness + 幂等/重复 + 节点&CP 重启混沌。剩 move_stop_loss/partial_close 执行级为 node-planner 单类 follow-up（governor 已放行）。
+
+## 0.19 C-11 部署认证 + C-12 最终状态（2026-06-21）
+
+**部署 = DONE（认证）**：hk 上 v3 栈全绿 —— systemd control-plane/ingress active；容器 node-a/redis/postgres up；node ACTIVE、心跳 1s 新鲜。**与旧 prod 完全隔离**：`/srv/trader` 旧栈全程未动，`trader-api-1` up 7d，`hk-bot.balen.wang` 仍 200 在服务。
+- **公网切换是唯一 operator-gated 步骤**（切 Caddy 路由 = 放 live 流量）：受 `release-gate.json` + operator 签名门控，**非 C 窗口可自行执行**；旧路由保留可秒回切。runbook `docs/runbooks/CUTOVER_ROLLBACK.md` 流程 + 本轮验证的回滚原语（HALT 双层 ~6s 到安全态）已就绪。
+
+**C-12 最终判定**：
+- **整合测试验收 = 实质完成（testnet 全链路）**：A→B→执行→投影→面板 真机闭环；governor 决策矩阵 + kill-switch 双层 + cancel/close + 混沌 + 安全审计 全 PASS（§0.1–§0.18）。
+- **部署 = 完成**（v3 运行 + 认证 + prod 隔离）。
+- **release gate 仍 `blocked`（正确）**：default_ceiling=`testnet_only`；live 需 operator 签名 + 三项 follow-up（freshness 方案 A、move_stop_loss/partial_close 的 node-planner stop-order 翻译、close_all 批量节流）。这些**不卡 testnet 验收**，属 live cutover 前硬化。
+
+## 0.2 已知生产硬化项（不卡 testnet 验收，卡 live 自动批准）
+
+- **静默期投影 freshness（用户已定方案 A，留待 live 前实现）**：§2.2 契约冻结 `stale = f(last_execution_event_at>阈值)` 且"超阈值禁止 Hermes 自动批准"。成交后 ~90s 无新执行事件即 stale=True（Binance 静默 ACCOUNT_UPDATE）。testnet 验收下此保守行为安全。**方案 A 实现要求（关键）**：周期事件必须携带 node **真实**当前 Binance 账户状态（证明节点与交易所仍同步），不能用空 payload 的「活性 ping」——否则会**谎报 freshness**，比当前保守行为更糟。正确实现需 node 周期向 Binance 拉真账户状态（Nautilus exec-client account-query API，host-verify）+ 经 ProjectionActor.sink 回流；ExecutionEventEnvelopeV1 构造已确认简单。属 live cutover 项，需真机迭代，故本轮 scope 为后续。
+- **close_all 批量节流 + position_id 对账**：见 §0.17 两个 finding（分批/重试；EXTERNAL vs BOTH）。
+- **denial 反馈**：node 内部拒单未回写 intent 状态（cursor-based 拉取已防重复处理，幂等安全；trade_intent 终态枚举无 executed，成交以 execution_events/投影为准）。
+
+## 0. 真机验收里程碑（hk，2026-06-20）
+
+两大头部验收项已在真机亲验：
+
+- **C-04/C-05 真实多模态 Hermes 回放**：80 条真实 Telegram 语料(text+图)→ ingress → PostgreSQL → **真 Hermes `gemini-3.1-pro`** → 决策。**75/75 成功**（8 并发，102s）。判定合理：analysis/noise→ignore 36、new_signal→open_position 14（从图里读出 instrument/side/stop）、update→needs_review 19（空快照下 fail-safe）。提交 `3b3cd52`。
+- **C-08 核心 testnet 真实下单**：intent → control-plane → node 轮询(1s) → strategy → **Binance USDT-M testnet 真实成交**（BTCUSDT 0.0020 @ 63474.35，venue_order_id 15670069285，OrderFilled→PositionOpened）→ execution_events 回流 control-plane。提交 `be928f9`。
+
+为打通执行链，修了一串 **B host-verify 缺陷**（B 从未在真机跑过）：`node.build()` 缺失(崩溃循环)；node↔control-plane seam 6 个端点 A 侧从未实现（我补齐：intents-ack/execution-events/heartbeat/commands/account）；`subscribe_data` 在 1.227.0 拒绝无 client 自定义数据(改走 msgbus)；`ClientOrderId` 传 str；lifecycle 硬编码 HALTED 无 RESUME 通路。提交 `dcd6d90`/`571e4c7`/`be928f9`。
+
+**剩余缺口（findings，risk-critical 未仓促改）**：① A↔B **order_plan 契约不一致**（A gateway `{side:long,entry{type}}` vs B planner `{side:buy|sell,type,quantity}`+需仓位定量）—— 不对齐则真 gateway 决策无法在 node 执行；② **command poller 未接进 node**（RESUME/kill-switch 到不了节点，卡 C-09）；③ **snapshot 投影未从 node 执行事件派生**（事件已入 `execution_events`，但 AccountState 载荷空、OrderFilled 稀疏，需 node ExecutionProjectionActor 富化 + 派生逻辑，卡 C-06）。
+
+## 0.3 ⚠ §0.1–§0.17 取代下文 §3–§6（历史「待基础设施」评估）
+
+下文 §3「gate=blocked，B 未在真机验证」「§5 唯一阻塞=缺主机/密钥」等是**基础设施到位前**的旧评估，已被 §0.1–§0.17 真机证据取代：v3 栈已在 hk 部署运行，B 执行层已真机亲验（含 testnet 真实开/平仓），密钥/主机/Hermes/对象存储均已具备。当前真实状态以 §0.x 为准。`current_state` 仍 `blocked` 的原因**不再是缺基础设施**，而是：① 默认上限 `testnet_only` 的全量执行级场景（partial_close / move_stop_loss 等逐项）未全跑；② freshness 方案 A（live 项）未实现；③ live 需 operator 签名。
+
+**本轮（2026-06-21）C 窗口验收净结果**：C-04/05 真回放、C-06 投影、C-07 混沌(2)、C-08 gateway 矩阵(6/6)+核心成交、C-09 kill-switch 双层+cancel/close、C-10 安全、C-11 回滚演练 —— 均真机 PASS（见 §0.1–§0.17）。10 个 commit（`b16d605`→`366555e`）。
+
+## 1. 已完成并验证（C-00 + A 的 8 个 P0）
+
+合并 A+B：0 冲突（`268c84c`）。随后修复并用真实 pg 验证 A 的 8 个 P0：
+
+| commit | 修复 | 验证 |
+|---|---|---|
+| d772e87 | 契约 `order_plan` 闭合空→开放（执行可携带订单） | contracts 5/5 |
+| 090fa32 | 风控 governor **fail-OPEN→fail-CLOSED**（缺 risk_state 不再当 ACTIVE） | risk 31/31（含 2 新测试） |
+| 5c60e1a | gateway 强制决策 freshness/valid_until | +1 测试 |
+| 51292fd | worker 确定性挡非法动作组合（update→open、close 无 target） | +5 测试 |
+| 81c0431 | instrument 暴露闸读真实 positions（原读恒零字段、永不触发） | risk 31/31 |
+| be5e2f9 | `hermes_decisions` UNIQUE(raw_message_id) 防重复决策（migration 0004，up/down 可逆） | schema 测试 |
+| c797d0a | ingress 写端点鉴权（无匿名注入） | ingress-auth 5/5 |
+| c797d0a+6436cdc | token fail-closed、删公开默认 admin token、canonical 角色 | bridge 222/222 |
+
+**全量回归绿**：A python 面 **105**（92 原 + 13 新）+ bridge **222** + no-semantic-regex **0 违规** = 327 测试通过。
+
+## 2. 评审产物
+- `docs/acceptance/WINDOW_A_REVIEW.md`（A 的 11 个 P0；上面 8 个已修，剩 3 个见 §4）。
+- `docs/acceptance/WINDOW_B_REVIEW.md`（B：逻辑扎实但「未在真机验证」；安全回路/命令通路未接进运行进程、执行测试全 skip、大量 host-verify TODO）。
+- `MERGE_REPORT.md` / `HANDOFF_REVIEW.md` / `ACCEPTANCE_PLAN.md` / `docs/runbooks/CUTOVER_ROLLBACK.md`。
+
+## 3. Release gate 判定 = `blocked`
+未跑真实回放(C-05)/testnet(C-08)/混沌(C-07)/面板对账(C-06)/kill-switch 演练(C-09)；B 执行层未在真机验证。G1–G10、S1–S11 均未取得 C 亲验的验收证据（A 自报不算）。`release-gate.json` 为机器记分板。
+
+## 4. 剩余工作 + 阻塞原因
+
+**A（剩 3）—— 需运行时/部署裁决，非孤立代码修复：**
+- 服务端仍跑 legacy bridge 栈；安全 control-plane（已含 §2.2 envelope + DB 审计 + 5 角色）是独立未挂载 app。要「换栈/退役 legacy」是**部署接线决策**（哪个 service 服务什么、dashboard 指向何处），需真实运行环境敲定（牵动 222 bridge 测试与 bridge↔PG 接线）。
+- 账户级 `open_risk_fraction` 总风险闸：需 **positions/projection 写入**（Nautilus 节点事件→需主机）。
+- 危险操作落库审计：与上面换栈绑定（legacy router 退役与否）。
+
+**B（全部执行层）：** host-verify TODO、安全回路接进运行进程、BacktestEngine harness、跑 skip 的执行测试 —— **均需 Nautilus 真机**。
+
+**C-02…C-12：** 迁移、真实图文回放、testnet、面板对账、混沌、kill-switch 演练、切换 —— **均需基础设施**。
+
+## 5. 唯一阻塞（operator 提供，取自 balen Mac mini）
+1. **Linux + Docker + Python 3.12 主机**（跑 Nautilus 1.227.0；与 hk 生产隔离端口/项目或专用 VPS）。
+2. **Binance USDT-M Futures testnet API keys**。
+3. **真实 Hermes `HERMES_API_URL / HERMES_API_KEY / HERMES_MODEL`**（HK gateway）。
+4. **S3/MinIO 对象存储**（media bytes）。
+
+## 6. 拿到基础设施后的即时恢复计划（按序）
+1. 在主机起 v3 栈（PG/Redis/control-plane/ingress/hermes-worker/2× Nautilus node HALTED+testnet/dashboard）；先验 B 的 host-verify TODO（projection 订阅、order factory、RiskEngine 字段、命令 adapter）→ 修 B 的 P0（安全回路接进 run_node、close-all 等待、denial 上抛、Redis DB 隔离、容器上限）。
+2. C-02 迁移旧 SQLite→PG（`legacy_*`，幂等，row/hash 对账）。
+3. C-03 用真实 corpus（扩到 500 条、补 HYPE 事故）人工标 gold。
+4. C-04 真实回放 harness（watcher→PG→真 Hermes→gateway→Nautilus sandbox→projection→dashboard，禁 importer 旁路）。
+5. C-05 三干净+两重复回放对 gold；C-06 面板逐层对账；C-07 混沌；C-08 testnet 14 场景；C-09 kill-switch 演练。
+6. C-11 切换/回滚演练（`docs/runbooks/CUTOVER_ROLLBACK.md`）。
+7. 更新本报告 + `release-gate.json`；默认上限 `testnet_only`；`live_small` 需 operator 签名。
+
+## 7. 残余风险
+- B 执行层「绿 CI = 规划数学对」≠「执行安全」，真机前不可信。
+- A 换栈前，served 面板/审计仍是 legacy 行为（gate-blocked 下不对外）。
+- 真实 Hermes 多模态判定质量需 C-05 三次回放稳定性裁决。
+
+## 8. Operator 签名
+**未签**。gate 保持 `blocked`。升 `testnet_only`/`live_small` 需本报告 §5 基础设施到位 + 全部 P0/验收通过 + operator 留痕。

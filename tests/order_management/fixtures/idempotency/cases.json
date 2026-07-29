@@ -1,0 +1,22 @@
+{
+  "intent_keys": [
+    {
+      "decision_id": "22222222-2222-4222-8222-222222222222",
+      "action": "open_position",
+      "instrument": "BTCUSDT",
+      "account": "acct-1",
+      "expected": "49679d0ff4d076332e659ede24e3ff5214c2cfa8e3ba390e63a4d807ece239c1"
+    },
+    {
+      "decision_id": "33333333-3333-4333-8333-333333333333",
+      "action": "close_position",
+      "instrument": "BTCUSDT-PERP.BINANCE",
+      "account": "acct-main",
+      "expected": "bf2ca61313b6d70e4b1dac5c1ae75537557860565aba01a9692989aea0954fd1"
+    }
+  ],
+  "invalid_request_ids": [
+    "",
+    "   "
+  ]
+}

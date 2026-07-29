@@ -1,0 +1,6 @@
+{
+  "domain": "order",
+  "from": "planned",
+  "to": "pending_submit",
+  "trigger": "plan_committed"
+}

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes-nautilus/contracts/corpus-manifest.schema.json",
+  "title": "ReplayCorpusManifest",
+  "description": "Manifest for the real text+image replay corpus (PLAN C.4). Validation must also assert the minimum category counts below.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["corpus_id", "created_at", "messages", "category_counts", "privacy"],
+  "properties": {
+    "corpus_id": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "source_export_hash": {"type": "string", "description": "Hash of the original Telegram export the corpus was derived from."},
+    "messages": {
+      "type": "array",
+      "minItems": 80,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["corpus_seq", "source", "channel_id", "source_message_id", "source_version", "source_received_at", "text_present", "media"],
+        "properties": {
+          "corpus_seq": {"type": "integer", "minimum": 0, "description": "Preserves original chronological order."},
+          "source": {"type": "string"},
+          "channel_id": {"type": "string"},
+          "source_message_id": {"type": "string"},
+          "source_version": {"type": "integer", "minimum": 0, "description": "Edit version; original received_at is never overwritten."},
+          "source_received_at": {"type": "string", "format": "date-time"},
+          "reply_to_message_id": {"type": ["string", "null"]},
+          "edit_of_message_id": {"type": ["string", "null"]},
+          "text_present": {"type": "boolean"},
+          "content_hash": {"type": "string"},
+          "media": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sha256", "mime", "object_key"],
+              "properties": {
+                "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "mime": {"type": "string"},
+                "object_key": {"type": "string"},
+                "width": {"type": ["integer", "null"]},
+                "height": {"type": ["integer", "null"]}
+              }
+            }
+          },
+          "incident_tag": {"type": ["string", "null"], "enum": ["HYPE_no_order", "INJ_mis_open", null]}
+        }
+      }
+    },
+    "category_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Required minimums per PLAN C.4. Validator asserts each >= its floor.",
+      "required": ["total", "new_signal", "position_or_close_update", "analysis_promo_noise", "ambiguous_conflict_incomplete", "with_image"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 80},
+        "new_signal": {"type": "integer", "minimum": 20},
+        "position_or_close_update": {"type": "integer", "minimum": 20},
+        "analysis_promo_noise": {"type": "integer", "minimum": 20},
+        "ambiguous_conflict_incomplete": {"type": "integer", "minimum": 20},
+        "with_image": {"type": "integer", "minimum": 30}
+      }
+    },
+    "required_incidents": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Both known incidents must be present in the corpus.",
+      "required": ["HYPE_no_order", "INJ_mis_open"],
+      "properties": {
+        "HYPE_no_order": {"type": "boolean", "const": true},
+        "INJ_mis_open": {"type": "boolean", "const": true}
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["redaction_report", "trade_semantics_preserved"],
+      "properties": {
+        "redaction_report": {"type": "string", "description": "Path to privacy-redaction-report.md."},
+        "trade_semantics_preserved": {"type": "boolean", "const": true, "description": "Only secrets/PII removed; trade semantics never rewritten."}
+      }
+    }
+  }
+}

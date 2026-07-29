@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes-nautilus/contracts/gold-label.schema.json",
+  "title": "GoldLabel",
+  "description": "One human-reviewed gold label for one real Telegram message in the replay corpus (PLAN C.4). One JSON object per line in gold-labels.jsonl.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "message_ref", "message_type", "expected_action", "expected_gate",
+    "reviewer", "reviewed_at"
+  ],
+  "properties": {
+    "message_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Stable pointer back to the corpus message; mirrors corpus-manifest provenance.",
+      "required": ["source", "channel_id", "source_message_id", "source_version"],
+      "properties": {
+        "source": {"type": "string"},
+        "channel_id": {"type": "string"},
+        "source_message_id": {"type": "string"},
+        "source_version": {"type": "integer", "minimum": 0},
+        "corpus_seq": {"type": "integer", "minimum": 0, "description": "Original ordering index in the corpus."}
+      }
+    },
+    "message_type": {
+      "type": "string",
+      "enum": ["new_signal", "position_update", "close_update", "analysis", "noise", "ambiguous"]
+    },
+    "expected_action": {
+      "type": "string",
+      "enum": [
+        "open_position", "add_position", "partial_close", "close_position",
+        "move_stop_loss", "move_stop_to_entry", "replace_take_profits",
+        "hold", "ignore", "needs_review"
+      ]
+    },
+    "expected_gate": {
+      "type": "string",
+      "enum": ["executable", "needs_review", "ignore"],
+      "description": "The final decision-gateway outcome a correct system must reach."
+    },
+    "instrument": {"type": ["string", "null"], "description": "Expected instrument symbol, or null when not applicable."},
+    "side": {"type": ["string", "null"], "enum": ["long", "short", null]},
+    "entry": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "enum": ["market", "limit", "zone", "none"]},
+        "price": {"type": ["number", "null"]},
+        "price_min": {"type": ["number", "null"]},
+        "price_max": {"type": ["number", "null"]}
+      }
+    },
+    "stop_loss": {"type": ["number", "null"]},
+    "take_profits": {"type": "array", "items": {"type": "number"}},
+    "leverage": {"type": ["number", "null"]},
+    "target_position": {
+      "type": ["string", "null"],
+      "description": "For update/close/move actions: the unique real position this must reference, or null."
+    },
+    "review_reason": {
+      "type": ["string", "null"],
+      "description": "Required (non-null) whenever expected_gate=needs_review: why a correct system must NOT auto-execute."
+    },
+    "incident_tag": {
+      "type": ["string", "null"],
+      "enum": ["HYPE_no_order", "INJ_mis_open", null],
+      "description": "Marks the two mandatory regression incidents from PLAN C.4."
+    },
+    "reviewer": {"type": "string"},
+    "reviewed_at": {"type": "string", "format": "date-time"},
+    "notes": {"type": "string"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"expected_gate": {"const": "needs_review"}}},
+      "then": {"required": ["review_reason"], "properties": {"review_reason": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"expected_action": {"enum": ["partial_close", "close_position", "move_stop_loss", "move_stop_to_entry"]}}, "required": ["expected_action"]},
+      "then": {"description": "Update/close/move actions must reference a unique target_position OR be needs_review.",
+        "anyOf": [
+          {"properties": {"target_position": {"type": "string", "minLength": 1}}, "required": ["target_position"]},
+          {"properties": {"expected_gate": {"const": "needs_review"}}}
+        ]}
+    }
+  ]
+}

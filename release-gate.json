@@ -1,0 +1,340 @@
+{
+  "schema_version": "1.0",
+  "program": "hermes-nautilus-migration",
+  "plan_version": "v3.0",
+  "contract_version": "contracts-v1",
+  "window": "C",
+  "gate_states_allowed": [
+    "blocked",
+    "shadow_only",
+    "testnet_only",
+    "live_readonly",
+    "live_small"
+  ],
+  "current_state": "blocked",
+  "default_ceiling": "testnet_only",
+  "rule": "Any failing global_release_condition OR any unmet safety_metric forces current_state=blocked. Window C may not exceed default_ceiling. live_readonly/live_small require operator_signoff.",
+  "evaluated_at": "2026-06-21T03:00:00Z",
+  "evaluated_commit": "46bf90fae97b16123ad3815f358202e10d6c4e5c",
+  "operator_signoff": {
+    "required_for": [
+      "live_readonly",
+      "live_small"
+    ],
+    "present": false,
+    "operator": null,
+    "signed_at": null,
+    "reason": null,
+    "preconditions_for_live_small": [
+      "all P0/P1 defects closed",
+      "corpus report passed",
+      "testnet report passed",
+      "kill-switch drill passed",
+      "rollback drill passed",
+      "exchange key has no withdrawal permission and is IP-whitelisted",
+      "first stage limited to small size, low leverage, limited instruments",
+      "initial node state HALTED, manual activation only"
+    ]
+  },
+  "order_management": {
+    "plan": "docs/order-management/PLAN.md v1.0",
+    "ledger": "docs/order-management/taskList.json",
+    "state": "blocked",
+    "ceiling": "testnet_only",
+    "evaluated_at": "2026-06-21T14:55:02Z",
+    "evaluated_commit": "cc3759d50713ca638bff068b1137414d2093062a",
+    "rule": "Order-management reaches testnet_only when OM-G1..OM-G9 pass. live_readonly/live_small additionally require OM-G-testnet + OM-G-chaos passed AND operator_signoff. Any unmet/blocked gate keeps order_management.state=blocked. Window scope: feature branch work/order-management-v3 (merges into work/integration-acceptance-v3).",
+    "gates": [
+      {
+        "id": "OM-G1",
+        "status": "passed",
+        "milestone": "OM0",
+        "commit": "1169e05",
+        "evidence": "frozen state machines/identifiers/idempotency + 0005 migration; tests/order_management 54 green; live 0005 up/down/up additive",
+        "reports": [
+          "docs/order-management/STATE_MACHINES.md"
+        ],
+        "text": "Order/intent/position/command contracts + DB + idempotency frozen."
+      },
+      {
+        "id": "OM-G2",
+        "status": "passed",
+        "milestone": "OM1",
+        "commit": "337e9e3",
+        "evidence": "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "text": "Settings service: versioned, RBAC, audit, effective resolution, node ACK."
+      },
+      {
+        "id": "OM-G3",
+        "status": "passed",
+        "milestone": "OM2",
+        "commit": "a642860",
+        "evidence": "frozen-descriptor reducers; live illegal-transition->finding; freshness fail-closed",
+        "text": "Projections + freshness fail-closed + protection watchdog + reconciliation."
+      },
+      {
+        "id": "OM-G4",
+        "status": "passed",
+        "milestone": "OM3",
+        "commit": "2fb4671",
+        "evidence": "PLAN §9.1 sizing; concurrent reservations cannot over-allocate (live)",
+        "text": "Dynamic money management: sizing/exposure/loss-limits/risk reservations."
+      },
+      {
+        "id": "OM-G5",
+        "status": "passed",
+        "milestone": "OM4",
+        "commit": "a60dc68",
+        "evidence": "28 exec tests incl. live SKIP-LOCKED no-double-claim; gateway approval no regression",
+        "text": "Entry execution lifecycle: durable jobs, planner, guards, terminal writeback, restart recovery."
+      },
+      {
+        "id": "OM-G6",
+        "status": "passed",
+        "milestone": "OM5",
+        "commit": "b323942",
+        "evidence": "163 tests; move_stop emits STOP+trigger; close_position exchange-qty + reconcile",
+        "text": "Protection/exits: stop install, TP ladder, move-stop, breakeven, trailing, partial/full close."
+      },
+      {
+        "id": "OM-G7",
+        "status": "passed",
+        "milestone": "OM6",
+        "commit": "517a583",
+        "evidence": "189 tests; cancel_all/close_all completed only after venue verify; HALTED permission matrix",
+        "text": "Emergency command orchestrator with mandatory venue verification."
+      },
+      {
+        "id": "OM-G8",
+        "status": "passed",
+        "milestone": "OM7+OM8-07",
+        "commit": "7321030",
+        "evidence": "22 vitest + 15 Playwright e2e green (host chromium)",
+        "text": "Settings panel + order center complete with E2E coverage."
+      },
+      {
+        "id": "OM-G9",
+        "status": "passed",
+        "milestone": "OM8-01/02/03/04/08",
+        "commit": "1546cf0",
+        "evidence": "235 tests + 6 security tests; trace correlation; secret redaction",
+        "reports": [
+          "docs/acceptance/ORDER_MANAGEMENT_SECURITY_REPORT.md"
+        ],
+        "text": "Observability + comprehensive tests + simulated venue + security audit."
+      },
+      {
+        "id": "OM-G-testnet",
+        "status": "blocked",
+        "milestone": "OM8-05",
+        "blocker": "execution requires Binance testnet creds (BINANCE_TESTNET_API_KEY/SECRET) + running system",
+        "evidence": "harness ready: scripts/order_management_acceptance.py (--list=22, --dry-run offline ok)",
+        "reports": [
+          "docs/acceptance/ORDER_MANAGEMENT_TESTNET_REPORT.md"
+        ],
+        "text": "Binance testnet 22-scenario fixed matrix (PLAN §15.3) all passed."
+      },
+      {
+        "id": "OM-G-chaos",
+        "status": "blocked",
+        "milestone": "OM8-06",
+        "blocker": "execution requires chaos infra (node/CP/PG/Redis restart, network/WS/DB fault)",
+        "evidence": "harness ready: scripts/order_management_chaos.py (--list/--dry-run offline ok)",
+        "reports": [
+          "docs/acceptance/ORDER_MANAGEMENT_CHAOS_REPORT.md"
+        ],
+        "text": "Chaos/restart/disconnect/WS-reconnect/DB-fault acceptance passed."
+      },
+      {
+        "id": "OM-G-rollout",
+        "status": "blocked",
+        "milestone": "OM8-10",
+        "blocker": "requires operator signoff + release-gate approval; staged shadow->testnet->live-readonly->live-small",
+        "reports": [
+          "docs/runbooks/ORDER_MANAGEMENT_OPERATIONS.md",
+          "docs/runbooks/ORDER_MANAGEMENT_ROLLBACK.md"
+        ],
+        "text": "Staged rollout with operator signoff before live; old prod path untouched."
+      }
+    ],
+    "operator_signoff": {
+      "required_for": [
+        "live_readonly",
+        "live_small"
+      ],
+      "present": false,
+      "operator": null,
+      "signed_at": null
+    }
+  },
+  "global_release_conditions": [
+    {
+      "id": "G1",
+      "status": "pending",
+      "verified_by": "C-10",
+      "evidence": null,
+      "text": "Code search shows no production `raw message -> regex parser -> approved` path."
+    },
+    {
+      "id": "G2",
+      "status": "pending",
+      "verified_by": "C-07",
+      "evidence": null,
+      "text": "When Hermes is unavailable, the number of new-risk commands is 0."
+    },
+    {
+      "id": "G3",
+      "status": "pending",
+      "verified_by": "C-06",
+      "evidence": null,
+      "text": "No FakeAdapter, fixture fallback, or hard-coded account values exist in the Dashboard production build."
+    },
+    {
+      "id": "G4",
+      "status": "pending",
+      "verified_by": "C-06",
+      "evidence": null,
+      "text": "Dashboard and Hermes snapshot call only the control-plane API; the API reads only PostgreSQL projections."
+    },
+    {
+      "id": "G5",
+      "status": "pending",
+      "verified_by": "C-09",
+      "evidence": null,
+      "text": "Every execution node can independently enter HALTED and REDUCING and write back acknowledgement."
+    },
+    {
+      "id": "G6",
+      "status": "pending",
+      "verified_by": "C-08",
+      "evidence": null,
+      "text": "The two accounts' intent, order, position, Redis key, and client order ID never cross."
+    },
+    {
+      "id": "G7",
+      "status": "pending",
+      "verified_by": "C-05",
+      "evidence": null,
+      "text": "After replaying duplicate messages, edited messages, WS reconnects, and reconciliation there are no duplicate orders or duplicate fill projections."
+    },
+    {
+      "id": "G8",
+      "status": "pending",
+      "verified_by": "C-05",
+      "evidence": null,
+      "text": "Real multimodal (text+image) replay acceptance fully passes."
+    },
+    {
+      "id": "G9",
+      "status": "pending",
+      "verified_by": "C-08",
+      "evidence": null,
+      "text": "Binance testnet fully covers: open, partial fill, cancel, stop-loss, scaled take-profit, move-to-breakeven, partial close, full close, restart+reconciliation."
+    },
+    {
+      "id": "G10",
+      "status": "pending",
+      "verified_by": "C-10",
+      "evidence": null,
+      "text": "Security check confirms: no test-token fallback, no anonymous watcher write endpoint, no plaintext exchange secrets in the DB, no default live credentials."
+    }
+  ],
+  "safety_metrics": [
+    {
+      "id": "S1",
+      "status": "pending",
+      "target": 0,
+      "measured": null,
+      "verified_by": "C-05",
+      "text": "Executable intents not originating from Hermes."
+    },
+    {
+      "id": "S2",
+      "status": "pending",
+      "target": 0,
+      "measured": null,
+      "verified_by": "C-05",
+      "text": "New-risk orders wrongly produced by update/noise/analysis/ambiguous messages."
+    },
+    {
+      "id": "S3",
+      "status": "pending",
+      "target": 0,
+      "measured": null,
+      "verified_by": "C-07",
+      "text": "New-risk orders created when images are missing, image parsing failed, or context is stale."
+    },
+    {
+      "id": "S4",
+      "status": "pending",
+      "target": 0,
+      "measured": null,
+      "verified_by": "C-05",
+      "text": "Duplicate orders caused by duplicate message/decision/intent."
+    },
+    {
+      "id": "S5",
+      "status": "pending",
+      "target": 0,
+      "measured": null,
+      "verified_by": "C-08",
+      "text": "Two-account mis-routing."
+    },
+    {
+      "id": "S6",
+      "status": "pending",
+      "target": 0,
+      "measured": null,
+      "verified_by": "C-05",
+      "text": "Executable gold labels whose final action/instrument/side disagree with Hermes+Gateway (uncertainty must be needs_review)."
+    },
+    {
+      "id": "S7",
+      "status": "pending",
+      "target": "100%",
+      "measured": null,
+      "verified_by": "C-05",
+      "text": "Trace completeness across all execution events."
+    },
+    {
+      "id": "S8",
+      "status": "pending",
+      "target": 0,
+      "measured": null,
+      "verified_by": "C-06",
+      "text": "Dashboard fixture/fake data hits."
+    },
+    {
+      "id": "S9",
+      "status": "pending",
+      "target": "100%",
+      "measured": null,
+      "verified_by": "C-06",
+      "text": "Field consistency of Dashboard against projections."
+    },
+    {
+      "id": "S10",
+      "status": "pending",
+      "target": "100%",
+      "measured": null,
+      "verified_by": "C-09",
+      "text": "Kill-switch acknowledgement completeness across all nodes."
+    },
+    {
+      "id": "S11",
+      "status": "pending",
+      "target": 0,
+      "measured": null,
+      "verified_by": "C-07",
+      "text": "Automatic new-risk when a node is unreachable or a projection is stale."
+    }
+  ],
+  "blocking_summary": "Merge done + 8 of A's P0s fixed & unit-verified (327 tests green). Still blocked: B execution layer unverified on a real Nautilus host; real replay/testnet/chaos/dashboard-recon acceptance not run; A's served-stack swap + projection-fed risk pending runtime. No condition has C-verified acceptance evidence yet.",
+  "notes": [
+    "This file is the single machine-readable scoreboard for the release gate.",
+    "Each global condition and safety metric is flipped to passed ONLY with reproducible command + output/report path + commit SHA recorded in `evidence`.",
+    "Hermes text wording may vary across the 3 clean replays, but safety classification/action/key trade fields must be stable; unstable samples go to human review and do NOT count as pass.",
+    "2026-06-20T10:02:33Z: C-00 merge + C fixes (order_plan, governor fail-closed, freshness, worker guard, instrument-exposure-from-positions, hermes_decisions UNIQUE, ingress auth, token fail-closed). See docs/acceptance/FINAL_ACCEPTANCE_REPORT.md. Gate stays blocked pending infra + acceptance runs.",
+    "2026-06-21T14:55:02Z: OM8-09 added the order_management gate section. OM0-OM7 + OM8-01/02/03/04/07/08 passed with reproducible tests + commit SHAs; OM-G-testnet/chaos/rollout (OM8-05/06/10) are blocked on operator/infra with ready-to-run harnesses + runbooks. order_management.state stays blocked and ceiling stays testnet_only until testnet+chaos pass and operator signs off. evaluated_commit=cc3759d50713ca638bff068b1137414d2093062a (feature branch work/order-management-v3 head before this doc commit)."
+  ]
+}

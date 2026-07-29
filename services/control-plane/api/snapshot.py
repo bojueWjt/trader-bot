@@ -37,6 +37,30 @@ def build_system_snapshot(
         accounts = _rows(cur, "SELECT * FROM accounts_projection ORDER BY account_id")
         orders = _rows(cur, "SELECT * FROM orders_projection ORDER BY updated_at DESC LIMIT %s", (limit,))
         positions = _rows(cur, "SELECT * FROM positions_projection ORDER BY updated_at DESC LIMIT %s", (limit,))
+        # price_feed_status arrives with migration 0005; deployments still on 0004
+        # (hk live as of 2026-07) must keep serving snapshots with an empty list.
+        cur.execute("SELECT to_regclass('public.price_feed_status') IS NOT NULL AS present")
+        if cur.fetchone()["present"]:
+            market_prices = _rows(
+                cur,
+                "SELECT account_id, venue_symbol, source, mark_price, last_price, bid_price, ask_price, "
+                "last_event_at, stale FROM price_feed_status ORDER BY account_id, venue_symbol, source",
+            )
+        else:
+            market_prices = []
+        # exchange_state_mirror arrives with migration 0007 (read-only truth of
+        # positions/orders/algo orders polled from the venue); older deployments
+        # keep serving snapshots without it.
+        cur.execute("SELECT to_regclass('public.exchange_state_mirror') IS NOT NULL AS present")
+        if cur.fetchone()["present"]:
+            exchange_state = _rows(
+                cur,
+                "SELECT account_id, payload, updated_at, "
+                "(now() - updated_at) > interval '180 seconds' AS stale "
+                "FROM exchange_state_mirror ORDER BY account_id",
+            )
+        else:
+            exchange_state = []
         recent_messages = _rows(
             cur,
             "SELECT id, channel_id, source_received_at, message_text FROM raw_messages "
@@ -95,6 +119,8 @@ def build_system_snapshot(
             "balances": {"equity": equity, "margin": margin},
             "orders": _jsonify(orders),
             "positions": _jsonify(positions),
+            "market_prices": _jsonify(market_prices),
+            "exchange_state": _jsonify(exchange_state),
             "recent_messages": _jsonify(recent_messages),
             "hermes_decisions": _jsonify(hermes_decisions),
             "risk_decisions": _jsonify(risk_decisions),

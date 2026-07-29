@@ -64,6 +64,17 @@ def seed_decision(
     return dec_id
 
 
+def seed_risk_state(conn, account_id="acct-1", instrument="BTCUSDT", mode="ACTIVE"):
+    with transaction(conn), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO risk_state (risk_state_id, account_id, instrument_id, state) "
+            "VALUES (%s, %s, %s, jsonb_build_object('mode', %s::text)) "
+            "ON CONFLICT (account_id, instrument_id) DO UPDATE "
+            "SET state = jsonb_set(coalesce(risk_state.state, '{}'::jsonb), '{mode}', to_jsonb(%s::text))",
+            (str(uuid4()), account_id, instrument, mode, mode),
+        )
+
+
 def _one(conn, sql, params=()):
     with conn.cursor() as cur:
         cur.execute(sql, params)
@@ -76,6 +87,7 @@ def test_no_pending_returns_none(db_conn):
 
 def test_approved_decision_writes_risk_decision_intent_and_outbox(db_conn):
     dec_id = seed_decision(db_conn)
+    seed_risk_state(db_conn)
     result = gateway.process_one_decision(db_conn, policy=POLICY)
 
     assert result["status"] == "approved"
@@ -94,6 +106,7 @@ def test_approved_decision_writes_risk_decision_intent_and_outbox(db_conn):
 
 def test_idempotent_second_pass_makes_no_duplicate(db_conn):
     seed_decision(db_conn)
+    seed_risk_state(db_conn)
     first = gateway.process_one_decision(db_conn, policy=POLICY)
     second = gateway.process_one_decision(db_conn, policy=POLICY)
 
@@ -105,11 +118,36 @@ def test_idempotent_second_pass_makes_no_duplicate(db_conn):
 
 def test_bad_geometry_rejected_without_intent(db_conn):
     seed_decision(db_conn, side="long", entry_price=100.0, stop_loss=105.0, take_profits=(110.0,))
+    seed_risk_state(db_conn)
     result = gateway.process_one_decision(db_conn, policy=POLICY)
 
     assert result["status"] == "rejected"
     assert result["intent_id"] is None
     assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+
+
+def test_missing_risk_state_fails_closed_to_needs_review(db_conn):
+    # No risk_state row -> the governor must NOT treat the account as ACTIVE.
+    # Fail closed: needs_review, no intent (this was a fail-OPEN approval before).
+    seed_decision(db_conn)
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+    assert result["status"] == "needs_review"
+    assert result["intent_id"] is None
+    assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+
+
+def test_stale_decision_fails_closed_to_needs_review(db_conn):
+    # A decision older than the freshness window must not auto-execute.
+    dec_id = seed_decision(db_conn)
+    seed_risk_state(db_conn)
+    with transaction(db_conn), db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE hermes_decisions SET created_at = now() - interval '2 hours' WHERE decision_id=%s",
+            (dec_id,),
+        )
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+    assert result["status"] == "needs_review"
+    assert result["intent_id"] is None
 
 
 def test_ambiguous_needs_review_without_intent(db_conn):

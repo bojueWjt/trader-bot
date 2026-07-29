@@ -1,0 +1,116 @@
+name: trader-bot-nautilus-multi-account
+
+services:
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - nautilus-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  nautilus-node-account-a:
+    image: ${NAUTILUS_NODE_IMAGE:-trader-bot/nautilus-node:b10-20260619}
+    entrypoint: ["/app/bin/run-nautilus-node"]
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_CONFIG_PATH: /app/config/account-a.sandbox.json
+      NAUTILUS_SPOOL_ROOT: /var/lib/nautilus-node/spool
+      NAUTILUS_HEALTH_URL: http://127.0.0.1:8081
+      NAUTILUS_NODE_READINESS_CMD: python -m app.healthcheck readiness
+      NAUTILUS_NODE_LIVENESS_CMD: python -m app.healthcheck liveness
+      BINANCE_ACCOUNT_A_API_KEY:
+      BINANCE_ACCOUNT_A_API_SECRET:
+      CONTROL_PLANE_ACCOUNT_A_TOKEN:
+    secrets:
+      - source: binance_account_a_api_key
+        target: binance_account_a_api_key
+      - source: binance_account_a_api_secret
+        target: binance_account_a_api_secret
+      - source: control_plane_account_a_token
+        target: control_plane_account_a_token
+    configs:
+      - source: account_a_sandbox_config
+        target: /app/config/account-a.sandbox.json
+    volumes:
+      - account-a-spool:/var/lib/nautilus-node/spool/account-a
+    networks:
+      - nautilus-internal
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck", "readiness"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  nautilus-node-account-b:
+    image: ${NAUTILUS_NODE_IMAGE:-trader-bot/nautilus-node:b10-20260619}
+    entrypoint: ["/app/bin/run-nautilus-node"]
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_CONFIG_PATH: /app/config/account-b.sandbox.json
+      NAUTILUS_SPOOL_ROOT: /var/lib/nautilus-node/spool
+      NAUTILUS_HEALTH_URL: http://127.0.0.1:8081
+      NAUTILUS_NODE_READINESS_CMD: python -m app.healthcheck readiness
+      NAUTILUS_NODE_LIVENESS_CMD: python -m app.healthcheck liveness
+      BINANCE_ACCOUNT_B_API_KEY:
+      BINANCE_ACCOUNT_B_API_SECRET:
+      CONTROL_PLANE_ACCOUNT_B_TOKEN:
+    secrets:
+      - source: binance_account_b_api_key
+        target: binance_account_b_api_key
+      - source: binance_account_b_api_secret
+        target: binance_account_b_api_secret
+      - source: control_plane_account_b_token
+        target: control_plane_account_b_token
+    configs:
+      - source: account_b_sandbox_config
+        target: /app/config/account-b.sandbox.json
+    volumes:
+      - account-b-spool:/var/lib/nautilus-node/spool/account-b
+    networks:
+      - nautilus-internal
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck", "readiness"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+networks:
+  nautilus-internal:
+    internal: true
+
+volumes:
+  redis-data:
+  account-a-spool:
+  account-b-spool:
+
+configs:
+  account_a_sandbox_config:
+    file: ./config/account-a.sandbox.json
+  account_b_sandbox_config:
+    file: ./config/account-b.sandbox.json
+
+secrets:
+  binance_account_a_api_key:
+    file: ${BINANCE_ACCOUNT_A_API_KEY_FILE:-./secrets/binance_account_a_api_key}
+  binance_account_a_api_secret:
+    file: ${BINANCE_ACCOUNT_A_API_SECRET_FILE:-./secrets/binance_account_a_api_secret}
+  control_plane_account_a_token:
+    file: ${CONTROL_PLANE_ACCOUNT_A_TOKEN_FILE:-./secrets/control_plane_account_a_token}
+  binance_account_b_api_key:
+    file: ${BINANCE_ACCOUNT_B_API_KEY_FILE:-./secrets/binance_account_b_api_key}
+  binance_account_b_api_secret:
+    file: ${BINANCE_ACCOUNT_B_API_SECRET_FILE:-./secrets/binance_account_b_api_secret}
+  control_plane_account_b_token:
+    file: ${CONTROL_PLANE_ACCOUNT_B_TOKEN_FILE:-./secrets/control_plane_account_b_token}

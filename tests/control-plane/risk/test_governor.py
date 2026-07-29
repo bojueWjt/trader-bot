@@ -45,7 +45,18 @@ def make_decision(
 
 
 def ev(decision, *, positions=None, risk_state=None, policy=POLICY):
-    return governor.evaluate(decision, positions=positions or [], risk_state=risk_state or {}, policy=policy)
+    # Default to an explicit ACTIVE risk context so geometry/leverage/update tests
+    # reach those checks. Tests that pass risk_state (HALTED/REDUCING/exposure/{})
+    # override this. A missing context now fails closed (risk_context_incomplete).
+    if risk_state is None:
+        risk_state = {"mode": "ACTIVE"}
+    return governor.evaluate(decision, positions=positions or [], risk_state=risk_state, policy=policy)
+
+
+def test_missing_risk_state_fails_closed():
+    out = ev(make_decision(), risk_state={})  # no mode -> incomplete -> no new risk
+    assert out.status == "needs_review"
+    assert "risk_context_incomplete" in out.reason
 
 
 # --- non-actionable ---------------------------------------------------------------
@@ -152,8 +163,11 @@ def test_reducing_blocks_opening():
 
 
 def test_instrument_exposure_cap_rejects():
-    out = ev(make_decision(), risk_state={"exposure_notional": 100_000.0, "mode": "ACTIVE"})
+    # exposure now comes from the live positions projection, not a risk_state counter.
+    positions = [{"account_id": "acct-1", "instrument_id": "BTCUSDT", "notional": 100_000.0}]
+    out = ev(make_decision(), positions=positions, risk_state={"mode": "ACTIVE"})
     assert out.status == "rejected"
+    assert "instrument" in out.reason or "notional" in out.reason
 
 
 def test_account_unresolved_needs_review():

@@ -34,8 +34,8 @@ def reset_runtime_state() -> None:
 
 def _user(authorization: str | None, x_request_id: str | None = None) -> dict:
     try:
-        observer_token = os.environ.get("SYSTEM_OBSERVER_API_TOKEN", "test-system-observer-token")
-        if authorization == f"Bearer {observer_token}":
+        observer_token = os.environ.get("SYSTEM_OBSERVER_API_TOKEN", "").strip()
+        if observer_token and authorization == f"Bearer {observer_token}":
             return require_user({"actor_id": "system-observer", "role": "system_observer"})
         return require_bearer_user(authorization)
     except HTTPException as exc:

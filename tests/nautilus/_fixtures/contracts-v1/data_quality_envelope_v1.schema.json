@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts-v1/DataQualityEnvelopeV1",
+  "title": "DataQualityEnvelopeV1",
+  "description": "Frozen contract (PLAN v3.0 §2.2). Every Dashboard/snapshot response from the control-plane MUST carry these fields. No fixture/fake fallback: when there is no real data, return real empty state with stale/unavailable markers. Above the freshness threshold, stale MUST be true and Hermes auto-approval of new risk is forbidden.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "data_source",
+    "snapshot_id",
+    "generated_at",
+    "last_execution_event_at",
+    "projection_lag_ms",
+    "stale",
+    "missing_nodes",
+    "reconciliation_state"
+  ],
+  "properties": {
+    "data_source": {
+      "type": "string",
+      "description": "Origin of the read model, e.g. 'postgres_projection'. Never 'fixture' or 'fake' in production.",
+      "examples": ["postgres_projection"]
+    },
+    "snapshot_id": { "type": "string", "format": "uuid" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "last_execution_event_at": { "type": ["string", "null"], "format": "date-time" },
+    "projection_lag_ms": { "type": "integer", "minimum": 0 },
+    "stale": { "type": "boolean" },
+    "missing_nodes": { "type": "array", "items": { "type": "string" } },
+    "reconciliation_state": {
+      "type": "string",
+      "enum": ["healthy", "degraded", "failed"]
+    }
+  }
+}

@@ -28,7 +28,7 @@ export function normalizePath(path: string): string {
     return "/dashboard";
   }
 
-  if (/^\/(dashboard|orders|review|risk|reports|reports\/daily\/\d{4}-\d{2}-\d{2})$/.test(path)) {
+  if (/^\/(dashboard|orders|review|risk|reports|settings|settings\/orders|reports\/daily\/\d{4}-\d{2}-\d{2})$/.test(path)) {
     return path;
   }
 

@@ -1,104 +1,185 @@
-import {
-  DataSourceState,
-  DashboardOverview,
-  DailyReport,
-  EventLog,
-  ExposureBucket,
-  Kpi,
-  Position,
-  RiskOverview,
-  SafetyState,
-  getMockDashboardOverview,
-  getMockDailyReport,
-  getMockRiskOverview
-} from "../data/mockData";
 import { formatCurrency, formatPercent } from "./format";
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_BASE || "";
 export const AUTH_TOKEN_STORAGE_KEY = "hermes.auth.token";
+export const AUTH_ROLE_STORAGE_KEY = "hermes.auth.role";
 
-function apiUrl(path: string): string {
-  if (!apiBaseUrl) {
-    return path;
-  }
+export type Severity = "info" | "warning" | "critical";
 
-  return `${apiBaseUrl}${path}`;
-}
-
-export function isAuthDisabled(): boolean {
-  return import.meta.env.VITE_AUTH_DISABLED === "true";
-}
-
-export function getStoredAuthToken(): string {
-  if (isAuthDisabled()) {
-    return "";
-  }
-
-  const token = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "";
-  if (!token) {
-    return "";
-  }
-
-  if (!storedTokenIsValid(token)) {
-    clearAuthToken();
-    return "";
-  }
-
-  return token;
-}
-
-export function storeAuthToken(token: string): void {
-  localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
-  sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-}
-
-export function clearAuthToken(): void {
-  localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-  sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-}
-
-export type LoginResult = {
-  token: string;
-  role: string;
+export type DataSourceState = {
+  data_source: string;
+  snapshot_id: string;
+  generated_at: string;
+  last_execution_event_at: string | null;
+  projection_lag_ms: number;
+  stale: boolean;
+  missing_nodes: string[];
+  reconciliation_state: "healthy" | "degraded" | "failed";
+  source: string;
+  status: string;
+  reason: string;
+  degraded: boolean;
+  raw: Record<string, unknown>;
 };
 
-export async function login(username: string, password: string): Promise<LoginResult | false> {
-  try {
-    const response = await fetch(apiUrl("/api/auth/login"), {
-      body: JSON.stringify({ username, password }),
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json"
-      },
-      method: "POST"
-    });
+export type Kpi = {
+  label: string;
+  value: string;
+  delta: string;
+  tone: "good" | "warning" | "danger" | "muted";
+};
 
-    if (!response.ok) {
-      return false;
-    }
+export type BotStatus = {
+  name: string;
+  status: string;
+  pairCount: number;
+  openTrades: number;
+  lastHeartbeat: string;
+};
 
-    const payload = asRecord(await response.json());
-    const token = asString(payload.access_token, "");
-    if (!token) {
-      return false;
-    }
+export type RiskLamp = {
+  label: string;
+  status: string;
+  detail: string;
+};
 
-    return {
-      token,
-      role: asString(payload.role, "")
-    };
-  } catch {
-    return false;
-  }
-}
+export type SafetyState = {
+  modeLabel: string;
+  dataFreshness: string;
+  operatorLane: string;
+  lastSync: string;
+  riskState: string;
+};
 
-export function dashboardStreamUrl(): string {
-  return apiUrl("/api/dashboard/stream");
-}
+export type ExposureBucket = {
+  label: string;
+  value: string;
+  detail: string;
+  usagePct: number;
+  status: string;
+};
 
-export type OrderCenterPosition = {
+export type EventLog = {
+  id: string;
+  time: string;
+  severity: Severity;
+  source: string;
+  message: string;
+};
+
+export type Position = {
   id: string;
   pair: string;
+  side: "long" | "short";
+  leverage: number;
+  entry: number;
+  mark: number;
+  pnl: number;
+  pnlPercent: number;
+  size: number;
+  stopLoss: number | false;
+  takeProfit: number | false;
+  rMultiple: number;
+  signalId: string;
+  freqtradeTradeId: string;
+  rawSignal: string;
+  structuredSignal: Record<string, unknown>;
+  orders: Record<string, unknown>[];
+  fills: Record<string, unknown>[];
+  auditTimeline: Record<string, unknown>[];
+  anomaly: string | false;
+};
+
+export type DashboardOverview = {
+  account: {
+    equity: number;
+    available: number;
+    marginUsed: number;
+    dailyPnl: number;
+  };
+  safety: SafetyState;
+  exposure: ExposureBucket[];
+  kpis: Kpi[];
+  bots: BotStatus[];
+  riskLamps: RiskLamp[];
+  events: EventLog[];
+  positions: Position[];
+  dataSource: DataSourceState;
+};
+
+export type RiskMetric = {
+  label: string;
+  value: string;
+  limit: string;
+  status: string;
+};
+
+export type PairLock = {
+  pair: string;
+  reason: string;
+  until: string;
+  owner: string;
+};
+
+export type RiskOverview = {
+  metrics: RiskMetric[];
+  blockingReasons: string[];
+  pairLocks: PairLock[];
+  dataSource: DataSourceState;
+};
+
+export type FreshnessSignalKey = "market_data" | "account_data" | "execution_event" | "projection" | "reconciliation";
+
+export type FreshnessSignal = {
+  available: boolean;
+  current: string;
+  key: FreshnessSignalKey;
+  label: string;
+  observedAt: string;
+  stale: boolean;
+  status: string;
+  valueMs: number | null;
+};
+
+export type SystemHealthSnapshot = {
+  dataSource: DataSourceState;
+  empty: boolean;
+  raw: Record<string, unknown>;
+  signals: FreshnessSignal[];
+};
+
+export type DailyReport = {
+  date: string;
+  account: {
+    equity: number;
+    netPnl: number;
+    maxDrawdown: number;
+    volume: number;
+  };
+  performance: {
+    trades: number;
+    winRate: number;
+    profitFactor: number;
+    avgR: number;
+  };
+  funnel: {
+    scanned: number;
+    signaled: number;
+    entered: number;
+    closed: number;
+  };
+  riskEvents: EventLog[];
+  positions: Position[];
+  dataSource: DataSourceState;
+};
+
+export type OrderCenterPosition = {
+  accountId: string;
+  executionJobId: string;
+  id: string;
+  instrument: string;
+  pair: string;
+  protectionStatus: string;
   side: string;
   amount: number;
   stakeAmount: number;
@@ -108,12 +189,31 @@ export type OrderCenterPosition = {
   pnlPct: number;
   leverage: number;
   openDate: string;
+  signalId: string;
   status: string;
+  stopLoss: number | false;
+  takeProfit: number | false;
+};
+
+export type OrderCenterEvent = {
+  id: string;
+  message: string;
+  status: string;
+  time: string;
+  type: string;
 };
 
 export type OrderCenterOrder = {
+  accountId: string;
   id: string;
+  executionJobId: string;
+  events: OrderCenterEvent[];
+  instrument: string;
+  intentId: string;
   pair: string;
+  positionId: string;
+  protectionStatus: string;
+  role: string;
   side: string;
   type: string;
   status: string;
@@ -126,7 +226,9 @@ export type OrderCenterOrder = {
 };
 
 export type OrderCenterTrade = {
+  accountId: string;
   id: string;
+  instrument: string;
   pair: string;
   side: string;
   status: string;
@@ -159,6 +261,11 @@ export type OrderCenterData = {
   dataSource: DataSourceState;
 };
 
+export type SignalReviewMediaItem = {
+  index: number;
+  mimeType: string;
+};
+
 export type SignalReviewItem = {
   signalId: string;
   pair: string;
@@ -181,11 +288,6 @@ export type SignalReviewItem = {
   };
 };
 
-export type SignalReviewMediaItem = {
-  index: number;
-  mimeType: string;
-};
-
 export type SignalReviewProposal = {
   proposalId: string;
   type: string;
@@ -194,12 +296,7 @@ export type SignalReviewProposal = {
   detail: string;
   proposedAction: string;
   status: string;
-  classification: {
-    conclusion: string;
-    confidence: string;
-    reasonCodes: string[];
-    proposalTypes: string[];
-  };
+  classification: SignalReviewItem["classification"];
 };
 
 export type SignalReviewData = {
@@ -208,7 +305,312 @@ export type SignalReviewData = {
   dataSource: DataSourceState;
 };
 
-async function getJson(path: string): Promise<unknown> {
+export type CommandResult = {
+  commandId: string;
+  complete: boolean;
+  pendingNodes: string[];
+  acknowledgedNodes: string[];
+  failedNodes: string[];
+  statusText: string;
+};
+
+type JsonResult = {
+  payload: Record<string, unknown>;
+  quality: DataSourceState;
+};
+
+export type LoginResult = {
+  token: string;
+  role: string;
+};
+
+export type AuthRole = "viewer" | "operator" | "risk_admin" | string;
+
+export type OrderSettingsScope = "global" | "account" | "instrument";
+
+export type OrderSettingScalar = boolean | number | string;
+
+export type OrderSettingsValues = Record<string, Record<string, OrderSettingScalar>>;
+
+export type OrderManagementSettings = {
+  dataSource: DataSourceState;
+  empty: boolean;
+  raw: Record<string, unknown>;
+  scope: OrderSettingsScope;
+  scopeKey: string;
+  settings: OrderSettingsValues;
+  version: number | null;
+};
+
+export type EffectiveOrderSetting = {
+  applyMode: string;
+  inherited: boolean;
+  sourceScope: string;
+  value: OrderSettingScalar | "";
+};
+
+export type EffectiveOrderSettings = {
+  dataSource: DataSourceState;
+  empty: boolean;
+  raw: Record<string, unknown>;
+  settings: Record<string, Record<string, EffectiveOrderSetting>>;
+};
+
+export type OrderSettingsScopeParams = {
+  scope: OrderSettingsScope;
+  scopeKey?: string;
+};
+
+export type OrderSettingsValidationResult = {
+  diff: SettingsDiffEntry[];
+  errors: string[];
+  impact: string[];
+  raw: Record<string, unknown>;
+  valid: boolean;
+};
+
+export type SettingsDiffEntry = {
+  after: string;
+  before: string;
+  category: string;
+  effective: string;
+  key: string;
+  label: string;
+};
+
+export type OrderSettingsPatchRequest = {
+  expected_version: number | null;
+  reason: string;
+  request_id: string;
+  scope: OrderSettingsScope;
+  scope_key: string;
+  settings: OrderSettingsValues;
+  confirm?: boolean;
+  operator_signoff?: string;
+};
+
+export type OrderSettingsPatchResult = {
+  conflict: boolean;
+  currentVersion: number | null;
+  errors: string[];
+  ok: boolean;
+  raw: Record<string, unknown>;
+  status: number;
+  version: number | null;
+};
+
+export type SettingsVersionRecord = {
+  author: string;
+  desiredVersion: number | null;
+  diff: SettingsDiffEntry[];
+  effectiveVersion: number | null;
+  nodeId: string;
+  reason: string;
+  settings: OrderSettingsValues;
+  timestamp: string;
+  version: number | null;
+};
+
+export type SettingsVersionsResult = {
+  dataSource: DataSourceState;
+  raw: Record<string, unknown>;
+  versions: SettingsVersionRecord[];
+};
+
+function apiUrl(path: string): string {
+  if (!apiBaseUrl) {
+    return path;
+  }
+
+  return `${apiBaseUrl}${path}`;
+}
+
+export function isAuthDisabled(): boolean {
+  return import.meta.env.VITE_AUTH_DISABLED === "true";
+}
+
+export function getStoredAuthToken(): string {
+  if (isAuthDisabled()) {
+    return "";
+  }
+
+  const token = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "";
+  if (!token) {
+    return "";
+  }
+
+  if (!storedTokenIsValid(token)) {
+    clearAuthToken();
+    return "";
+  }
+
+  return token;
+}
+
+export function getStoredAuthRole(): AuthRole {
+  if (isAuthDisabled()) {
+    return "risk_admin";
+  }
+
+  const storedRole = localStorage.getItem(AUTH_ROLE_STORAGE_KEY) || sessionStorage.getItem(AUTH_ROLE_STORAGE_KEY) || "";
+  if (storedRole) {
+    return storedRole;
+  }
+
+  const token = getStoredAuthToken();
+  if (!token) {
+    return "operator";
+  }
+
+  const payload = tokenPayload(token);
+  const role = payload ? firstString([payload.role, payload.auth_role, payload.user_role], "") : "";
+  if (role) {
+    return role;
+  }
+
+  const roles = payload ? asStringArray(payload.roles) : [];
+  if (roles.includes("viewer")) {
+    return "viewer";
+  }
+  if (roles.includes("risk_admin")) {
+    return "risk_admin";
+  }
+  if (roles.includes("operator")) {
+    return "operator";
+  }
+
+  return "operator";
+}
+
+export function storeAuthToken(token: string, role = ""): void {
+  localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+  sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  if (role) {
+    localStorage.setItem(AUTH_ROLE_STORAGE_KEY, role);
+    sessionStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+  } else {
+    localStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+    sessionStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+  }
+}
+
+export function clearAuthToken(): void {
+  localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  localStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+  sessionStorage.removeItem(AUTH_ROLE_STORAGE_KEY);
+}
+
+export async function login(username: string, password: string): Promise<LoginResult | false> {
+  try {
+    const response = await fetch(apiUrl("/api/auth/login"), {
+      body: JSON.stringify({ username, password }),
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      method: "POST"
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const payload = asRecord(await response.json());
+    const token = asString(payload.access_token, "");
+    if (!token) {
+      return false;
+    }
+
+    return {
+      token,
+      role: asString(payload.role, "")
+    };
+  } catch {
+    return false;
+  }
+}
+
+export function dashboardStreamUrl(): string {
+  return apiUrl("/v1/stream");
+}
+
+export function emptyQuality(reason = "not loaded"): DataSourceState {
+  const raw: Pick<
+    DataSourceState,
+    | "data_source"
+    | "generated_at"
+    | "last_execution_event_at"
+    | "missing_nodes"
+    | "projection_lag_ms"
+    | "reconciliation_state"
+    | "snapshot_id"
+    | "stale"
+  > = {
+    data_source: "control_plane",
+    generated_at: "",
+    last_execution_event_at: null,
+    missing_nodes: [],
+    projection_lag_ms: 0,
+    reconciliation_state: "degraded",
+    snapshot_id: "",
+    stale: true
+  };
+
+  return qualityFromRecord(raw, reason);
+}
+
+export function getEmptyDashboardOverview(reason = "loading"): DashboardOverview {
+  return dashboardFromParts(emptyQuality(reason), {}, [], [], [], [], [], {});
+}
+
+export function getEmptyRiskOverview(reason = "loading"): RiskOverview {
+  return riskFromPayload({}, emptyQuality(reason));
+}
+
+export function getEmptySystemHealthSnapshot(reason = "loading"): SystemHealthSnapshot {
+  return {
+    dataSource: emptyQuality(reason),
+    empty: true,
+    raw: {},
+    signals: emptyFreshnessSignals()
+  };
+}
+
+export function getEmptyDailyReport(date: string, reason = "loading"): DailyReport {
+  return reportFromPayload({}, date, emptyQuality(reason));
+}
+
+export function getEmptyOrderCenter(reason = "loading"): OrderCenterData {
+  return orderCenterFromPayloads({}, {}, {}, emptyQuality(reason));
+}
+
+export function getEmptySignalReview(reason = "loading"): SignalReviewData {
+  return signalReviewFromPayloads({}, {}, emptyQuality(reason));
+}
+
+export function getEmptyOrderManagementSettings(reason = "loading"): OrderManagementSettings {
+  return {
+    dataSource: emptyQuality(reason),
+    empty: true,
+    raw: {},
+    scope: "global",
+    scopeKey: "",
+    settings: {},
+    version: null
+  };
+}
+
+export function getEmptyEffectiveSettings(reason = "loading"): EffectiveOrderSettings {
+  return {
+    dataSource: emptyQuality(reason),
+    empty: true,
+    raw: {},
+    settings: {}
+  };
+}
+
+async function getJson(path: string): Promise<JsonResult> {
   try {
     const response = await fetch(apiUrl(path), {
       headers: requestHeaders({
@@ -217,22 +619,17 @@ async function getJson(path: string): Promise<unknown> {
     });
 
     if (!response.ok) {
-      return false;
+      return { payload: {}, quality: unavailableQuality(path) };
     }
 
-    const payload = await response.json();
-
-    if (!payload) {
-      return false;
-    }
-
-    return payload;
+    const payload = asRecord(await response.json());
+    return { payload, quality: qualityFromRecord(payload, "") };
   } catch {
-    return false;
+    return { payload: {}, quality: unavailableQuality(path) };
   }
 }
 
-async function postJson(path: string, body: Record<string, unknown>): Promise<unknown> {
+async function sendJson(path: string, method: "PATCH" | "POST", body: Record<string, unknown>): Promise<unknown> {
   try {
     const response = await fetch(apiUrl(path), {
       body: JSON.stringify(body),
@@ -240,19 +637,44 @@ async function postJson(path: string, body: Record<string, unknown>): Promise<un
         Accept: "application/json",
         "Content-Type": "application/json"
       }),
-      method: "POST"
+      method
     });
 
     if (!response.ok) {
       return false;
     }
 
-    const payload = await response.json();
-    if (!payload) {
-      return false;
-    }
+    return await response.json();
+  } catch {
+    return false;
+  }
+}
 
-    return payload;
+async function postJson(path: string, body: Record<string, unknown>): Promise<unknown> {
+  return sendJson(path, "POST", body);
+}
+
+async function patchJson(path: string, body: Record<string, unknown>): Promise<unknown> {
+  return sendJson(path, "PATCH", body);
+}
+
+async function patchJsonDetailed(path: string, body: Record<string, unknown>): Promise<{ ok: boolean; payload: Record<string, unknown>; status: number } | false> {
+  try {
+    const response = await fetch(apiUrl(path), {
+      body: JSON.stringify(body),
+      headers: requestHeaders({
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      }),
+      method: "PATCH"
+    });
+    const payload = asRecord(await response.json().catch(() => ({})));
+
+    return {
+      ok: response.ok,
+      payload,
+      status: response.status
+    };
   } catch {
     return false;
   }
@@ -312,21 +734,26 @@ function storedTokenIsValid(token: string): boolean {
     return true;
   }
 
-  try {
-    const payload = JSON.parse(base64UrlDecode(segments[1])) as Record<string, unknown>;
-    const exp = payload.exp;
-    if (typeof exp !== "number") {
-      return false;
-    }
+  const payload = tokenPayload(token);
+  const exp = payload ? payload.exp : undefined;
+  return typeof exp === "number" && exp > Math.floor(Date.now() / 1000);
+}
 
-    return exp > Math.floor(Date.now() / 1000);
+function tokenPayload(token: string): Record<string, unknown> | false {
+  const segments = token.split(".");
+  if (segments.length !== 3) {
+    return false;
+  }
+
+  try {
+    return asRecord(JSON.parse(base64UrlDecode(segments[1])));
   } catch {
     return false;
   }
 }
 
 function base64UrlDecode(value: string): string {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
   const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
   return atob(`${normalized}${padding}`);
 }
@@ -339,6 +766,18 @@ function asRecord(value: unknown): Record<string, unknown> {
   return {};
 }
 
+function asJsonRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === "string" && value.trim()) {
+    try {
+      return asRecord(JSON.parse(value));
+    } catch {
+      return {};
+    }
+  }
+
+  return asRecord(value);
+}
+
 function asArray(value: unknown): unknown[] {
   if (Array.isArray(value)) {
     return value;
@@ -347,7 +786,11 @@ function asArray(value: unknown): unknown[] {
   return [];
 }
 
-function asNumber(value: unknown, fallback: number): number {
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  return asArray(value).map((item) => asRecord(item));
+}
+
+function asNumber(value: unknown, fallback = 0): number {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
   }
@@ -362,66 +805,7 @@ function asNumber(value: unknown, fallback: number): number {
   return fallback;
 }
 
-function asRecordArray(value: unknown): Record<string, unknown>[] {
-  return asArray(value).map((item) => asRecord(item));
-}
-
-function asString(value: unknown, fallback: string): string {
-  if (typeof value === "string" && value.length > 0) {
-    return value;
-  }
-
-  return fallback;
-}
-
-function statusIsFailure(status: string): boolean {
-  if (/failed|unavailable|error|rejected/i.test(status)) {
-    return true;
-  }
-
-  return false;
-}
-
-function actionAccepted(payload: unknown): boolean {
-  if (payload === false) {
-    return false;
-  }
-
-  const result = asRecord(payload);
-  const status = asString(result.status, "");
-  if (status && statusIsFailure(status)) {
-    return false;
-  }
-
-  const nestedResult = asRecord(result.result);
-  const nestedStatus = asString(nestedResult.status, "");
-  if (nestedStatus && statusIsFailure(nestedStatus)) {
-    return false;
-  }
-
-  return true;
-}
-
-function closeAllAccepted(payload: unknown): boolean {
-  if (!actionAccepted(payload)) {
-    return false;
-  }
-
-  const result = asRecord(payload);
-  if (result.enabled !== true) {
-    return false;
-  }
-
-  const closeAll = asRecord(result.close_all_result);
-  const closeAllStatus = asString(closeAll.status, "");
-  if (closeAllStatus && statusIsFailure(closeAllStatus)) {
-    return false;
-  }
-
-  return true;
-}
-
-function asDisplayString(value: unknown, fallback: string): string {
+function asString(value: unknown, fallback = ""): string {
   if (typeof value === "string" && value.length > 0) {
     return value;
   }
@@ -431,6 +815,10 @@ function asDisplayString(value: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function asStringArray(value: unknown): string[] {
+  return asArray(value).map((item) => asString(item, "")).filter(Boolean);
 }
 
 function firstNumber(values: unknown[], fallback = 0): number {
@@ -444,9 +832,9 @@ function firstNumber(values: unknown[], fallback = 0): number {
   return fallback;
 }
 
-function firstString(values: unknown[], fallback: string): string {
+function firstString(values: unknown[], fallback = ""): string {
   for (const value of values) {
-    const normalized = asDisplayString(value, "");
+    const normalized = asString(value, "");
     if (normalized) {
       return normalized;
     }
@@ -455,681 +843,1121 @@ function firstString(values: unknown[], fallback: string): string {
   return fallback;
 }
 
-function extractRecordArray(payload: unknown, keys: string[]): Record<string, unknown>[] {
-  if (Array.isArray(payload)) {
-    return payload.map((item) => asRecord(item));
+function qualityFromRecord(payload: Record<string, unknown>, reason: string): DataSourceState {
+  const reconciliation = asString(payload.reconciliation_state, "degraded");
+  const reconciliationState = reconciliation === "healthy" || reconciliation === "failed" ? reconciliation : "degraded";
+  const stale = payload.stale === true;
+  const source = asString(payload.data_source, "control_plane");
+  const status = stale ? "stale" : reconciliationState;
+  const raw: Pick<
+    DataSourceState,
+    | "data_source"
+    | "generated_at"
+    | "last_execution_event_at"
+    | "missing_nodes"
+    | "projection_lag_ms"
+    | "reconciliation_state"
+    | "snapshot_id"
+    | "stale"
+  > = {
+    data_source: source,
+    generated_at: asString(payload.generated_at, ""),
+    last_execution_event_at: typeof payload.last_execution_event_at === "string" ? payload.last_execution_event_at : null,
+    missing_nodes: asStringArray(payload.missing_nodes),
+    projection_lag_ms: Math.max(0, Math.round(asNumber(payload.projection_lag_ms, 0))),
+    reconciliation_state: reconciliationState,
+    snapshot_id: asString(payload.snapshot_id, ""),
+    stale
+  };
+
+  return {
+    ...raw,
+    source,
+    status,
+    reason,
+    degraded: stale || reconciliationState !== "healthy" || raw.missing_nodes.length > 0,
+    raw
+  };
+}
+
+function unavailableQuality(path: string): DataSourceState {
+  const raw = {
+    data_source: "control_plane",
+    generated_at: "",
+    last_execution_event_at: null,
+    missing_nodes: [],
+    projection_lag_ms: 0,
+    reconciliation_state: "failed",
+    snapshot_id: "",
+    stale: true
+  };
+
+  return qualityFromRecord(raw, `${path} unavailable`);
+}
+
+function combineQuality(items: DataSourceState[]): DataSourceState {
+  const first = items[0] || emptyQuality("no reads");
+  const missingNodes = Array.from(new Set(items.flatMap((item) => item.missing_nodes)));
+  const stale = items.some((item) => item.stale);
+  let reconciliationState: DataSourceState["reconciliation_state"] = "healthy";
+  if (items.some((item) => item.reconciliation_state === "failed")) {
+    reconciliationState = "failed";
+  } else if (items.some((item) => item.reconciliation_state === "degraded")) {
+    reconciliationState = "degraded";
   }
 
-  const record = asRecord(payload);
+  return qualityFromRecord(
+    {
+      data_source: first.data_source,
+      generated_at: first.generated_at,
+      last_execution_event_at: first.last_execution_event_at,
+      missing_nodes: missingNodes,
+      projection_lag_ms: Math.max(...items.map((item) => item.projection_lag_ms), 0),
+      reconciliation_state: reconciliationState,
+      snapshot_id: first.snapshot_id,
+      stale
+    },
+    items.map((item) => item.reason).filter(Boolean).join("; ")
+  );
+}
+
+function getRows(payload: Record<string, unknown>, keys: string[]): Record<string, unknown>[] {
   for (const key of keys) {
-    const value = record[key];
+    const value = payload[key];
     if (Array.isArray(value)) {
       return value.map((item) => asRecord(item));
     }
   }
 
-  const result = record.result;
-  if (result) {
-    return extractRecordArray(result, keys);
-  }
-
-  const data = record.data;
-  if (data) {
-    return extractRecordArray(data, keys);
+  const data = asRecord(payload.data);
+  for (const key of keys) {
+    const value = data[key];
+    if (Array.isArray(value)) {
+      return value.map((item) => asRecord(item));
+    }
   }
 
   return [];
 }
 
-function dataSourceFromApi(value: Record<string, unknown>): DataSourceState {
-  const source = asString(value.data_source, "provider");
-  const status = asString(value.status, "ok");
-  const reason = asString(value.status_reason, "");
-  let degraded = false;
-
-  if (/degraded|demo/i.test(status)) {
-    degraded = true;
-  }
-  if (/demo/i.test(source)) {
-    degraded = true;
-  }
-
-  return {
-    source,
-    status,
-    reason,
-    degraded
-  };
-}
-
-function safetyFromApi(value: Record<string, unknown>): SafetyState {
-  const runMode = asString(value.run_mode, "dry_run");
-  const riskState = asString(value.risk_state, "normal");
-  const source = asString(value.data_source, "provider");
-  const status = asString(value.status, "ok");
-  const reason = asString(value.status_reason, "");
-  let modeLabel = "DRY-RUN LOCKED";
-
-  if (/live/i.test(runMode)) {
-    modeLabel = "LIVE READONLY";
-  }
-
-  let dataFreshness = `${source} ${status}`;
-  if (reason) {
-    dataFreshness = `${dataFreshness} ${reason}`;
-  }
+function dashboardFromParts(
+  quality: DataSourceState,
+  accountPayload: Record<string, unknown>,
+  nodes: Record<string, unknown>[],
+  orders: Record<string, unknown>[],
+  positionsPayload: Record<string, unknown>[],
+  trades: Record<string, unknown>[],
+  messages: Record<string, unknown>[],
+  riskPayload: Record<string, unknown>
+): DashboardOverview {
+  const account = getRows(accountPayload, ["accounts"])[0] || asRecord(accountPayload.account);
+  const equity = firstNumber([account.equity, account.balance, account.total_equity]);
+  const available = firstNumber([account.available, account.free_balance, account.cash]);
+  const marginUsed = firstNumber([account.margin_used, account.initial_margin]);
+  const dailyPnl = firstNumber([account.realized_pnl_today, account.daily_pnl]);
+  const openPnl = positionsPayload.reduce((total, position) => total + firstNumber([position.pnl, position.unrealized_pnl]), 0);
+  const openOrders = orders.length;
+  const riskState = firstString([riskPayload.risk_state, riskPayload.state], quality.reconciliation_state);
+  const positions = positionsPayload.map(positionFromApi);
+  const todaySignals = messages.length;
+  const todayExecutions = trades.length;
 
   return {
-    modeLabel,
-    dataFreshness,
-    operatorLane: "Manual approval",
-    lastSync: "API latest",
-    riskState
-  };
-}
-
-function exposureFromApi(value: Record<string, unknown>): ExposureBucket[] {
-  const equity = asNumber(value.equity, 0);
-  const marginUsed = asNumber(value.margin_used, 0);
-  const freeBalance = asNumber(value.free_balance, 0);
-  const todaySignals = asNumber(value.today_signal_count, 0);
-  const todayExecutions = asNumber(value.today_execution_count, asNumber(value.today_executed_count, 0));
-  let marginUsagePct = 0;
-  let signalExecutionPct = 0;
-
-  if (equity > 0) {
-    marginUsagePct = Math.min(100, Math.max(0, (marginUsed / equity) * 100));
-  }
-
-  if (todaySignals > 0) {
-    signalExecutionPct = Math.min(100, Math.max(0, (todayExecutions / todaySignals) * 100));
-  }
-
-  return [
-    {
-      label: "Exposure usage",
-      value: formatPercent(marginUsagePct),
-      detail: `${formatCurrency(marginUsed)} margin / ${formatCurrency(freeBalance)} free`,
-      usagePct: marginUsagePct,
-      status: marginUsagePct >= 80 ? "critical" : "normal"
-    },
-    {
-      label: "Signal execution",
-      value: formatPercent(signalExecutionPct),
-      detail: `${todayExecutions} executed / ${todaySignals} signals`,
-      usagePct: signalExecutionPct,
-      status: "normal"
-    },
-    {
-      label: "Freshness health",
-      value: asString(value.status, "ok"),
-      detail: asString(value.status_reason, "provider"),
-      usagePct: 100,
-      status: asString(value.status, "ok")
-    }
-  ];
-}
-
-function eventMessageFromApi(event: Record<string, unknown>): string {
-  const explicit = asString(event.message, "");
-  if (explicit) {
-    return explicit;
-  }
-
-  const eventType = asDisplayString(event.event_type, asDisplayString(event.type, ""));
-  const signalId = asDisplayString(event.signal_id, "");
-  const tradeId = asDisplayString(event.trade_id, "");
-  const botId = asDisplayString(event.bot_id, "");
-
-  if (eventType && signalId && tradeId && botId) {
-    return `${eventType}: ${signalId} / trade ${tradeId} / ${botId}`;
-  }
-
-  if (eventType && signalId) {
-    return `${eventType}: ${signalId}`;
-  }
-
-  if (eventType) {
-    return eventType;
-  }
-
-  return "Signal dashboard event";
-}
-
-function eventFromApi(value: unknown, index: number): EventLog {
-  const event = asRecord(value);
-  const kind = asString(event.event_kind, "");
-  let severity: EventLog["severity"] = "info";
-  if (kind === "risk") {
-    severity = "warning";
-  }
-
-  return {
-    id: asString(event.event_id, `api-event-${index}`),
-    time: asString(event.timestamp, "--").slice(11, 19),
-    severity,
-    source: asString(event.event_kind, asString(event.type, "API")),
-    message: eventMessageFromApi(event)
-  };
-}
-
-function dedupeEventPayloads(values: unknown[]): unknown[] {
-  const seen = new Set<string>();
-  const deduped: unknown[] = [];
-
-  values.forEach((value, index) => {
-    const event = asRecord(value);
-    const eventId = asDisplayString(event.event_id, "");
-    let key = eventId;
-    if (!key) {
-      const eventType = asDisplayString(event.event_type, asDisplayString(event.type, ""));
-      const signalId = asDisplayString(event.signal_id, "");
-      const timestamp = asDisplayString(event.timestamp, asDisplayString(event.occurred_at, ""));
-      key = `${eventType}:${signalId}:${timestamp}:${index}`;
-    }
-
-    if (seen.has(key)) {
-      return;
-    }
-
-    seen.add(key);
-    deduped.push(value);
-  });
-
-  return deduped;
-}
-
-function positionFromApi(value: unknown, index: number): Position {
-  const trade = asRecord(value);
-  const side = asString(trade.side, "long").toLowerCase();
-  let normalizedSide: "long" | "short" = "long";
-
-  if (side === "short") {
-    normalizedSide = "short";
-  }
-
-  const stopLoss = asNumber(trade.stop_loss_price, 0);
-  const takeProfit = asNumber(trade.next_take_profit_price, 0);
-  let anomaly: string | false = false;
-  if (stopLoss <= 0) {
-    anomaly = "No SL";
-  }
-
-  const structuredSignal = asRecord(trade.structured_signal);
-
-  return {
-    id: asString(trade.trade_id, `api-trade-${index}`),
-    pair: asString(trade.pair, "UNKNOWN/USDT"),
-    side: normalizedSide,
-    leverage: asNumber(trade.leverage, 1),
-    entry: asNumber(trade.entry_rate, 0),
-    mark: asNumber(trade.current_rate, 0),
-    pnl: asNumber(trade.pnl, 0),
-    pnlPercent: 0,
-    size: asNumber(trade.size, 0),
-    stopLoss: stopLoss > 0 ? stopLoss : false,
-    takeProfit: takeProfit > 0 ? takeProfit : false,
-    rMultiple: asNumber(trade.r_multiple, 0),
-    signalId: asString(trade.signal_id, ""),
-    freqtradeTradeId: asString(trade.trade_id, `api-trade-${index}`),
-    rawSignal: asString(trade.raw_text, ""),
-    structuredSignal,
-    orders: asRecordArray(trade.orders),
-    fills: asRecordArray(trade.fills),
-    auditTimeline: asRecordArray(trade.audit_timeline),
-    anomaly
-  };
-}
-
-function dashboardFromApi(
-  overviewPayload: unknown,
-  tradesPayload: unknown,
-  auditEventsPayload: unknown
-): DashboardOverview | false {
-  const overview = asRecord(overviewPayload);
-  if (!Object.prototype.hasOwnProperty.call(overview, "bot_status")) {
-    return false;
-  }
-
-  const equity = asNumber(overview.equity, 0);
-  const freeBalance = asNumber(overview.free_balance, 0);
-  const marginUsed = asNumber(overview.margin_used, 0);
-  const dailyPnl = asNumber(overview.realized_pnl_today, 0);
-  const unrealizedPnl = asNumber(overview.unrealized_pnl, 0);
-  const openTrades = asNumber(overview.open_trade_count, 0);
-  const openOrders = asNumber(overview.open_order_count, 0);
-  const todaySignals = asNumber(overview.today_signal_count, 0);
-  const todayExecutions = asNumber(overview.today_execution_count, asNumber(overview.today_executed_count, 0));
-  const riskState = asString(overview.risk_state, "normal");
-  const kpis: Kpi[] = [
-    { label: "Equity", value: formatCurrency(equity), delta: `${openTrades} open trades`, tone: "good" },
-    { label: "Open PnL", value: formatCurrency(unrealizedPnl), delta: `${openOrders} open orders`, tone: "good" },
-    { label: "Margin Used", value: formatCurrency(marginUsed), delta: `${formatCurrency(freeBalance)} free`, tone: "warning" },
-    { label: "Today Signals", value: `${todaySignals}`, delta: `${todayExecutions} executed`, tone: "muted" }
-  ];
-  const positions = asArray(tradesPayload).map(positionFromApi);
-  const auditEvents = asArray(auditEventsPayload);
-  let events = asArray(overview.recent_events);
-  if (auditEvents.length > 0) {
-    events = auditEvents;
-  }
-
-  return {
-    dataSource: dataSourceFromApi(overview),
-    safety: safetyFromApi(overview),
-    exposure: exposureFromApi(overview),
     account: {
+      available,
+      dailyPnl,
       equity,
-      available: freeBalance,
-      marginUsed,
-      dailyPnl
+      marginUsed
     },
-    kpis,
-    bots: [
-      {
-        name: "Hermes SignalStrategy",
-        status: `${asString(overview.bot_status, "unknown")} / ${asString(overview.run_mode, "unknown")}`,
-        pairCount: positions.length,
-        openTrades,
-        lastHeartbeat: "API"
-      }
+    bots: nodes.map((node, index) => ({
+      lastHeartbeat: firstString([node.last_heartbeat_at, node.heartbeat_at], "--"),
+      name: firstString([node.name, node.node_id, node.id], `node-${index + 1}`),
+      openTrades: firstNumber([node.open_position_count], positions.length),
+      pairCount: firstNumber([node.instrument_count, node.pair_count]),
+      status: `${firstString([node.trading_state, node.status], "unknown")} / ${firstString([node.readiness], "unknown")}`
+    })),
+    dataSource: quality,
+    events: eventRows(messages, trades, orders).slice(0, 20),
+    exposure: exposureFromValues(equity, marginUsed, available, todaySignals, todayExecutions, quality),
+    kpis: [
+      { label: "Equity", value: formatCurrency(equity), delta: `${positions.length} open positions`, tone: quality.stale ? "warning" : "good" },
+      { label: "Open PnL", value: formatCurrency(openPnl), delta: `${openOrders} open orders`, tone: openPnl >= 0 ? "good" : "danger" },
+      { label: "Margin Used", value: formatCurrency(marginUsed), delta: `${formatCurrency(available)} available`, tone: "warning" },
+      { label: "Messages", value: `${todaySignals}`, delta: `${todayExecutions} trades`, tone: "muted" }
     ],
+    positions,
     riskLamps: [
       { label: "Risk State", status: riskState, detail: riskState },
-      { label: "Signal Funnel", status: "normal", detail: `${todayExecutions}/${todaySignals} executed` }
+      { label: "Reconciliation", status: quality.reconciliation_state, detail: `stale=${String(quality.stale)}` }
     ],
-    events: dedupeEventPayloads(events).slice(0, 20).map(eventFromApi),
-    positions
+    safety: {
+      dataFreshness: `${quality.data_source} ${quality.status}`,
+      lastSync: quality.generated_at || "unavailable",
+      modeLabel: firstString([riskPayload.run_mode], "CONTROL-PLANE"),
+      operatorLane: "Risk admin approval",
+      riskState
+    }
   };
 }
 
-function riskFromApi(payload: unknown): RiskOverview | false {
-  const risk = asRecord(payload);
-  if (!Object.prototype.hasOwnProperty.call(risk, "single_trade_risk_usage_pct")) {
-    return false;
-  }
-
-  const blockingReasons = asArray(risk.blocking_reasons).map((item) => asString(item, ""));
-  return {
-    metrics: [
-      { label: "单笔风险", value: formatPercent(asNumber(risk.single_trade_risk_usage_pct, 0)), limit: "100%", status: "tracked" },
-      { label: "总风险", value: formatPercent(asNumber(risk.total_open_risk_usage_pct, 0)), limit: "100%", status: "tracked" },
-      { label: "日亏损", value: formatPercent(asNumber(risk.daily_loss_usage_pct, 0)), limit: "100%", status: "tracked" },
-      { label: "无 SL", value: `${asNumber(risk.no_sl_trade_count, 0)}`, limit: "0", status: "critical" },
-      { label: "高杠杆", value: `${asNumber(risk.high_leverage_trade_count, 0)}`, limit: "0", status: "warning" }
-    ],
-    blockingReasons,
-    pairLocks: asArray(risk.pair_locks).map((item) => {
-      const lock = asRecord(item);
-      return {
-        pair: asString(lock.pair, "UNKNOWN/USDT"),
-        reason: asString(lock.reason, asString(lock.source, "risk rule")),
-        until: asString(lock.expires_at, "--"),
-        owner: asString(lock.owner, "Risk Guard")
-      };
-    })
-  };
+function exposureFromValues(
+  equity: number,
+  marginUsed: number,
+  available: number,
+  signalCount: number,
+  executionCount: number,
+  quality: DataSourceState
+): ExposureBucket[] {
+  const marginUsagePct = equity > 0 ? Math.min(100, Math.max(0, (marginUsed / equity) * 100)) : 0;
+  const signalExecutionPct = signalCount > 0 ? Math.min(100, Math.max(0, (executionCount / signalCount) * 100)) : 0;
+  return [
+    {
+      detail: `${formatCurrency(marginUsed)} margin / ${formatCurrency(available)} available`,
+      label: "Exposure usage",
+      status: marginUsagePct >= 80 ? "critical" : "normal",
+      usagePct: marginUsagePct,
+      value: formatPercent(marginUsagePct)
+    },
+    {
+      detail: `${executionCount} trades / ${signalCount} messages`,
+      label: "Message execution",
+      status: "normal",
+      usagePct: signalExecutionPct,
+      value: formatPercent(signalExecutionPct)
+    },
+    {
+      detail: `missing_nodes=${quality.missing_nodes.length}`,
+      label: "Projection health",
+      status: quality.reconciliation_state,
+      usagePct: quality.stale ? 0 : 100,
+      value: quality.status
+    }
+  ];
 }
 
-function reportFromApi(payload: unknown, date: string): DailyReport | false {
-  const report = asRecord(payload);
-  if (!Object.prototype.hasOwnProperty.call(report, "snapshot_id")) {
-    return false;
-  }
+function eventRows(
+  messages: Record<string, unknown>[],
+  trades: Record<string, unknown>[],
+  orders: Record<string, unknown>[]
+): EventLog[] {
+  const rows = messages.length > 0 ? messages : [...trades, ...orders];
+  return rows.map((row, index) => ({
+    id: firstString([row.event_id, row.message_id, row.trade_id, row.order_id, row.id], `event-${index}`),
+    message: firstString([row.summary, row.message, row.raw_message, row.status], "control-plane event"),
+    severity: row.severity === "critical" || row.severity === "warning" ? row.severity : "info",
+    source: firstString([row.source, row.event_type, row.type], "control-plane"),
+    time: firstString([row.generated_at, row.created_at, row.timestamp, row.occurred_at], "--").slice(11, 19) || "--"
+  }));
+}
 
-  const account = asRecord(report.account);
-  const trades = asRecord(report.trades);
-  const signals = asRecord(report.signals);
-  const riskEvents = asRecord(report.risk_events);
-  const openPositions = asRecord(report.open_positions);
-  const closedTrades = asNumber(trades.closed_today_count, asNumber(trades.closed_count, 0));
-  const wins = asNumber(trades.win_count, 0);
-  let winRate = 0;
-
-  if (closedTrades > 0) {
-    winRate = (wins / closedTrades) * 100;
-  }
+function positionFromApi(value: Record<string, unknown>, index: number): Position {
+  const side = firstString([value.side, value.position_side], "long").toLowerCase();
+  const normalizedSide = side === "short" || side === "sell" ? "short" : "long";
+  const stopLoss = firstNumber([value.stop_loss, value.stop_loss_price], Number.NaN);
+  const takeProfit = firstNumber([value.take_profit, value.next_take_profit_price], Number.NaN);
+  const positionId = firstString([value.position_id, value.trade_id, value.id], `position-${index}`);
 
   return {
-    date,
-    account: {
-      equity: asNumber(account.equity, 0),
-      netPnl: asNumber(account.realized_pnl_today, 0) + asNumber(account.unrealized_pnl, 0),
-      maxDrawdown: asNumber(account.max_drawdown_pct, 0),
-      volume: asNumber(openPositions.notional, 0)
-    },
-    performance: {
-      trades: closedTrades,
-      winRate,
-      profitFactor: asNumber(trades.profit_factor, 0),
-      avgR: asNumber(trades.avg_r, 0)
-    },
-    funnel: {
-      scanned: asNumber(signals.received_count, 0),
-      signaled: asNumber(signals.accepted_count, 0) + asNumber(signals.rejected_count, 0),
-      entered: asNumber(signals.executed_count, asNumber(signals.accepted_count, 0)),
-      closed: closedTrades
-    },
-    riskEvents: [
-      {
-        id: "api-risk-events",
-        time: "--",
-        severity: "warning",
-        source: "Risk",
-        message: `${asNumber(riskEvents.count, 0)} risk events, ${asNumber(riskEvents.blocking_count, 0)} blocking`
-      }
-    ],
-    positions: getMockDailyReport(date).positions
+    anomaly: Number.isFinite(stopLoss) && stopLoss > 0 ? false : "Missing SL",
+    auditTimeline: asRecordArray(value.audit_timeline),
+    entry: firstNumber([value.entry_price, value.entry_rate, value.open_rate]),
+    fills: asRecordArray(value.fills),
+    freqtradeTradeId: firstString([value.trade_id, value.venue_position_id], positionId),
+    id: positionId,
+    leverage: firstNumber([value.leverage], 1),
+    mark: firstNumber([value.mark_price, value.current_rate, value.current_price]),
+    orders: asRecordArray(value.orders),
+    pair: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    pnl: firstNumber([value.unrealized_pnl, value.pnl]),
+    pnlPercent: firstNumber([value.pnl_pct, value.profit_pct]),
+    rMultiple: firstNumber([value.r_multiple]),
+    rawSignal: firstString([value.raw_signal, value.raw_text]),
+    side: normalizedSide,
+    signalId: firstString([value.signal_id, value.intent_id]),
+    size: firstNumber([value.size, value.amount, value.quantity]),
+    stopLoss: Number.isFinite(stopLoss) && stopLoss > 0 ? stopLoss : false,
+    structuredSignal: asRecord(value.structured_signal),
+    takeProfit: Number.isFinite(takeProfit) && takeProfit > 0 ? takeProfit : false
   };
 }
 
 function orderPositionFromApi(value: Record<string, unknown>, index: number): OrderCenterPosition {
-  const isShort = value.is_short === true || /short|sell/i.test(asDisplayString(value.side, ""));
-  const entry = firstNumber([value.open_rate, value.entry_rate, value.entry_price, value.open_price]);
-  const current = firstNumber([value.current_rate, value.mark_price, value.current_price, value.close_rate], entry);
-  const pnl = firstNumber([
-    value.profit_abs,
-    value.current_profit_abs,
-    value.realized_profit,
-    value.unrealized_profit,
-    value.pnl,
-    value.close_profit_abs
-  ]);
-  const pnlPct = firstNumber([value.profit_pct, value.profit_ratio, value.close_profit_pct, value.pnl_pct]);
-  const tradeId = firstString([value.trade_id, value.id], `position-${index}`);
-
+  const side = firstString([value.side, value.position_side], "long").toLowerCase();
+  const entry = firstNumber([value.entry_price, value.entry_rate, value.open_rate]);
+  const stopLoss = firstNumber([value.stop_loss, value.stop_loss_price], Number.NaN);
+  const takeProfit = firstNumber([value.take_profit, value.take_profit_price, value.next_take_profit_price], Number.NaN);
+  const positionId = firstString([value.position_id, value.trade_id, value.id], `position-${index}`);
   return {
-    id: tradeId,
-    pair: firstString([value.pair, value.symbol], "UNKNOWN/USDT"),
-    side: isShort ? "short" : "long",
-    amount: firstNumber([value.amount, value.contracts, value.size]),
-    stakeAmount: firstNumber([value.stake_amount, value.stake_amount_filled, value.notional]),
+    accountId: firstString([value.account_id, value.account, value.exchange_account_id]),
+    amount: firstNumber([value.amount, value.size, value.quantity]),
+    current: firstNumber([value.mark_price, value.current_rate, value.current_price], entry),
     entry,
-    current,
-    pnl,
-    pnlPct,
+    executionJobId: firstString([value.execution_job_id, value.job_id]),
+    id: positionId,
+    instrument: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
     leverage: firstNumber([value.leverage], 1),
-    openDate: firstString([value.open_date, value.open_timestamp, value.created_at], "--"),
-    status: firstString([value.status], "open")
+    openDate: firstString([value.opened_at, value.created_at, value.open_date], "--"),
+    pair: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    pnl: firstNumber([value.unrealized_pnl, value.pnl]),
+    pnlPct: firstNumber([value.pnl_pct, value.profit_pct]),
+    protectionStatus: firstString(
+      [value.protection_status, value.protection_state],
+      Number.isFinite(stopLoss) && stopLoss > 0 ? "protected" : "missing"
+    ),
+    signalId: firstString([value.signal_id, value.intent_id]),
+    side: side === "short" || side === "sell" ? "short" : "long",
+    stakeAmount: firstNumber([value.notional, value.stake_amount]),
+    status: firstString([value.status], "open"),
+    stopLoss: Number.isFinite(stopLoss) && stopLoss > 0 ? stopLoss : false,
+    takeProfit: Number.isFinite(takeProfit) && takeProfit > 0 ? takeProfit : false
   };
 }
 
-function isPendingOrder(order: Record<string, unknown>): boolean {
-  const status = firstString([order.status, order.order_status], "");
-  if (/closed|filled|canceled|cancelled|expired|rejected/i.test(status)) {
-    return false;
-  }
-
-  if (/open|pending|new|partially/i.test(status)) {
-    return true;
-  }
-
-  const remaining = firstNumber([order.remaining, order.remaining_amount], 0);
-  return remaining > 0;
-}
-
-function orderFromApi(order: Record<string, unknown>, trade: Record<string, unknown>, index: number): OrderCenterOrder {
-  const amount = firstNumber([order.amount, order.order_amount, order.safe_amount]);
-  const filled = firstNumber([order.filled, order.filled_amount], 0);
-  const remaining = firstNumber([order.remaining, order.remaining_amount], Math.max(0, amount - filled));
-  const tradeId = firstString([trade.trade_id, trade.id, order.trade_id], "");
-
+function orderFromApi(value: Record<string, unknown>, index: number): OrderCenterOrder {
+  const amount = firstNumber([value.amount, value.quantity, value.order_amount]);
+  const filled = firstNumber([value.filled, value.filled_amount], 0);
+  const orderId = firstString([value.order_id, value.venue_order_id, value.id], `order-${index}`);
   return {
-    id: firstString([order.order_id, order.id, order.ft_order_id], `order-${index}`),
-    pair: firstString([order.pair, trade.pair, trade.symbol], "UNKNOWN/USDT"),
-    side: firstString([order.side, order.ft_order_side], "--"),
-    type: firstString([order.type, order.order_type], "--"),
-    status: firstString([order.status, order.order_status], "pending"),
-    price: firstNumber([order.price, order.safe_price, order.average, order.ft_price]),
+    accountId: firstString([value.account_id, value.account, value.exchange_account_id]),
     amount,
+    createdAt: firstString([value.created_at, value.submitted_at], "--"),
+    events: orderEventsFromApi(value),
+    executionJobId: firstString([value.execution_job_id, value.job_id]),
     filled,
-    remaining,
-    createdAt: firstString([order.order_date, order.order_timestamp, order.created_at], "--"),
-    tradeId
+    id: orderId,
+    instrument: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    intentId: firstString([value.intent_id, value.signal_id, value.client_order_id]),
+    pair: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    positionId: firstString([value.position_id, value.trade_id]),
+    price: firstNumber([value.price, value.limit_price, value.average_price]),
+    protectionStatus: firstString([value.protection_status, value.protection_state], "unknown"),
+    remaining: firstNumber([value.remaining, value.remaining_amount], Math.max(0, amount - filled)),
+    role: firstString([value.role, value.order_role], "entry"),
+    side: firstString([value.side], "--"),
+    status: firstString([value.status], "--"),
+    tradeId: firstString([value.trade_id, value.position_id]),
+    type: firstString([value.order_type, value.type], "--")
   };
 }
 
 function tradeFromApi(value: Record<string, unknown>, index: number): OrderCenterTrade {
-  const isOpen = value.is_open === true || !firstString([value.close_date, value.close_timestamp], "");
-  const isShort = value.is_short === true || /short|sell/i.test(asDisplayString(value.side, ""));
-  const orders = asRecordArray(value.orders);
-
+  const side = firstString([value.side, value.position_side], "long").toLowerCase();
   return {
+    accountId: firstString([value.account_id, value.account, value.exchange_account_id]),
+    amount: firstNumber([value.amount, value.size, value.quantity]),
+    closeDate: firstString([value.closed_at, value.close_date], "--"),
+    closeRate: firstNumber([value.close_price, value.close_rate, value.exit_rate]),
     id: firstString([value.trade_id, value.id], `trade-${index}`),
-    pair: firstString([value.pair, value.symbol], "UNKNOWN/USDT"),
-    side: isShort ? "short" : "long",
-    status: isOpen ? "open" : firstString([value.exit_reason, value.status], "closed"),
-    openRate: firstNumber([value.open_rate, value.entry_rate, value.open_price]),
-    closeRate: firstNumber([value.close_rate, value.exit_rate, value.close_price]),
-    amount: firstNumber([value.amount, value.contracts, value.size]),
-    pnl: firstNumber([value.close_profit_abs, value.profit_abs, value.realized_profit, value.pnl]),
-    pnlPct: firstNumber([value.close_profit_pct, value.profit_pct, value.profit_ratio, value.pnl_pct]),
-    openDate: firstString([value.open_date, value.open_timestamp, value.created_at], "--"),
-    closeDate: firstString([value.close_date, value.close_timestamp, value.closed_at], "--"),
-    ordersCount: orders.length
+    instrument: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    openDate: firstString([value.opened_at, value.created_at, value.open_date], "--"),
+    openRate: firstNumber([value.open_price, value.entry_price, value.open_rate]),
+    ordersCount: asRecordArray(value.orders).length,
+    pair: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    pnl: firstNumber([value.realized_pnl, value.pnl, value.close_profit_abs]),
+    pnlPct: firstNumber([value.pnl_pct, value.profit_pct]),
+    side: side === "short" || side === "sell" ? "short" : "long",
+    status: firstString([value.status], "closed")
   };
 }
 
-function orderCenterFromApi(statusPayload: unknown, positionsPayload: unknown, tradesPayload: unknown): OrderCenterData {
-  const statusPositions = extractRecordArray(statusPayload, ["trades", "open_trades", "status"]);
-  const positionRows = extractRecordArray(positionsPayload, ["positions"]);
-  const tradeRows = extractRecordArray(tradesPayload, ["trades"]);
-  const positionSource = positionRows.length > 0 ? positionRows : statusPositions;
-  const history = tradeRows.map(tradeFromApi);
-  const positions = positionSource.map(orderPositionFromApi);
-  const directOrders = extractRecordArray(statusPayload, ["open_orders", "orders"]);
-  const tradeOrders = [...statusPositions, ...tradeRows].flatMap((trade) =>
-    asRecordArray(trade.orders).map((order) => ({ order, trade }))
-  );
-  const orders = [
-    ...directOrders.map((order, index) => orderFromApi(order, {}, index)),
-    ...tradeOrders
-      .filter(({ order }) => isPendingOrder(order))
-      .map(({ order, trade }, index) => orderFromApi(order, trade, directOrders.length + index))
-  ];
-  const realizedPnl = history
-    .filter((trade) => trade.status !== "open")
-    .reduce((total, trade) => total + trade.pnl, 0);
+function orderEventsFromApi(value: Record<string, unknown>): OrderCenterEvent[] {
+  return asRecordArray(value.events ?? value.audit_timeline ?? value.timeline).map((event, index) => ({
+    id: firstString([event.event_id, event.id], `event-${index}`),
+    message: firstString([event.message, event.summary, event.detail, event.status], "order event"),
+    status: firstString([event.status], "--"),
+    time: firstString([event.occurred_at, event.generated_at, event.created_at, event.timestamp], "--"),
+    type: firstString([event.event_type, event.type], "event")
+  }));
+}
+
+function orderCenterFromPayloads(
+  positionsPayload: Record<string, unknown>,
+  ordersPayload: Record<string, unknown>,
+  tradesPayload: Record<string, unknown>,
+  quality: DataSourceState
+): OrderCenterData {
+  const positions = getRows(positionsPayload, ["positions"]).map(orderPositionFromApi);
+  const orders = getRows(ordersPayload, ["orders"]).map(orderFromApi);
+  const history = getRows(tradesPayload, ["trades"]).map(tradeFromApi);
+  const realizedPnl = history.reduce((total, trade) => total + trade.pnl, 0);
   const openPnl = positions.reduce((total, position) => total + position.pnl, 0);
-  const available = statusPayload !== false || positionsPayload !== false || tradesPayload !== false;
 
   return {
-    positions,
-    orders,
+    dataSource: quality,
     history,
+    orders,
+    positions,
     summary: {
-      realizedPnl,
+      historyCount: history.length,
+      lossCount: history.filter((trade) => trade.pnl < 0).length,
       openPnl,
-      totalPnl: realizedPnl + openPnl,
       openPositionCount: positions.length,
       pendingOrderCount: orders.length,
-      historyCount: history.length,
-      winCount: history.filter((trade) => trade.pnl > 0).length,
-      lossCount: history.filter((trade) => trade.pnl < 0).length
-    },
-    dataSource: {
-      source: "freqtrade",
-      status: available ? "readonly" : "unavailable",
-      reason: available ? "proxy" : "proxy unavailable",
-      degraded: !available
+      realizedPnl,
+      totalPnl: realizedPnl + openPnl,
+      winCount: history.filter((trade) => trade.pnl > 0).length
     }
   };
 }
 
-function signalClassificationFromApi(value: unknown): SignalReviewItem["classification"] {
-  const classification = asRecord(value);
+function riskFromPayload(payload: Record<string, unknown>, quality: DataSourceState): RiskOverview {
   return {
-    conclusion: asString(classification.conclusion, "needs_review"),
-    confidence: asString(classification.confidence, "unknown"),
-    reasonCodes: asArray(classification.reason_codes).map((item) => asDisplayString(item, "")).filter(Boolean),
-    proposalTypes: asArray(classification.proposal_types).map((item) => asDisplayString(item, "")).filter(Boolean)
-  };
-}
-
-function signalMediaFromApi(value: unknown): SignalReviewMediaItem[] {
-  const metadata = asRecord(value);
-  return asRecordArray(metadata.items)
-    .map((item) => ({
-      index: asNumber(item.index, -1),
-      mimeType: asString(item.mime_type, "")
+    blockingReasons: asStringArray(payload.blocking_reasons),
+    dataSource: quality,
+    metrics: [
+      { label: "单笔风险", limit: "100%", status: "tracked", value: formatPercent(asNumber(payload.single_trade_risk_usage_pct)) },
+      { label: "总风险", limit: "100%", status: "tracked", value: formatPercent(asNumber(payload.total_open_risk_usage_pct)) },
+      { label: "日亏损", limit: "100%", status: "tracked", value: formatPercent(asNumber(payload.daily_loss_usage_pct)) },
+      { label: "无 SL", limit: "0", status: asNumber(payload.no_sl_trade_count) > 0 ? "critical" : "normal", value: `${asNumber(payload.no_sl_trade_count)}` },
+      { label: "高杠杆", limit: "0", status: asNumber(payload.high_leverage_trade_count) > 0 ? "warning" : "normal", value: `${asNumber(payload.high_leverage_trade_count)}` }
+    ],
+    pairLocks: getRows(payload, ["pair_locks"]).map((lock) => ({
+      owner: firstString([lock.owner], "Risk Guard"),
+      pair: firstString([lock.instrument_symbol, lock.pair], "UNAVAILABLE"),
+      reason: firstString([lock.reason, lock.source], "risk rule"),
+      until: firstString([lock.expires_at, lock.until], "--")
     }))
-    .filter((item) => item.index >= 0 && item.mimeType.startsWith("image/"));
-}
-
-function signalReviewItemFromApi(value: unknown, index: number): SignalReviewItem {
-  const signal = asRecord(value);
-  const entry = asRecord(signal.entry);
-  const leverage = asRecord(signal.leverage);
-  const takeProfits = asRecordArray(signal.take_profits)
-    .map((takeProfit) => asNumber(takeProfit.price, Number.NaN))
-    .filter((price) => Number.isFinite(price));
-  const reasonCodes = asArray(signal.review_reason_codes).map((item) => asDisplayString(item, "")).filter(Boolean);
-
-  return {
-    signalId: asString(signal.signal_id, `signal-${index}`),
-    pair: asString(signal.pair_freqtrade, asString(signal.pair_raw, "UNKNOWN/USDT")),
-    side: asString(signal.side, "long"),
-    status: asString(signal.status, "needs_review"),
-    receivedAt: asString(signal.received_at, "--"),
-    rawText: asString(signal.raw_text, ""),
-    reasonCodes,
-    entryMode: asString(entry.mode, "cmp"),
-    entryPrice: asNumber(entry.primary_price, 0),
-    stopLoss: asNumber(signal.stop_loss, 0),
-    takeProfits,
-    leverage: `${asNumber(leverage.selected, asNumber(leverage.min, 0))}x`,
-    media: signalMediaFromApi(signal.media_metadata),
-    classification: signalClassificationFromApi(signal.classification)
   };
 }
 
-function signalReviewProposalFromApi(value: unknown, index: number): SignalReviewProposal {
-  const proposal = asRecord(value);
+function systemHealthFromPayload(payload: Record<string, unknown>, quality: DataSourceState): SystemHealthSnapshot {
+  if (Object.keys(payload).length === 0) {
+    return {
+      dataSource: quality,
+      empty: true,
+      raw: payload,
+      signals: emptyFreshnessSignals()
+    };
+  }
+
   return {
-    proposalId: asString(proposal.proposal_id, `proposal-${index}`),
-    type: asString(proposal.type, "approve_request"),
-    signalId: asString(proposal.signal_id, ""),
-    title: asString(proposal.title, asString(proposal.type, "Proposal")),
-    detail: asString(proposal.detail, ""),
-    proposedAction: asString(proposal.proposed_action, asString(proposal.type, "review")),
-    status: asString(proposal.status, "open"),
-    classification: signalClassificationFromApi(proposal.classification)
+    dataSource: quality,
+    empty: false,
+    raw: payload,
+    signals: freshnessSignalsFromPayload(payload, quality)
   };
 }
 
-function signalReviewFromApi(payload: unknown): SignalReviewData {
-  const review = asRecord(payload);
-  const available = payload !== false;
+function emptyFreshnessSignals(): FreshnessSignal[] {
+  return [
+    unavailableFreshnessSignal("market_data", "Market data"),
+    unavailableFreshnessSignal("account_data", "Account data"),
+    unavailableFreshnessSignal("execution_event", "Execution event"),
+    unavailableFreshnessSignal("projection", "Projection"),
+    unavailableFreshnessSignal("reconciliation", "Reconciliation")
+  ];
+}
+
+function unavailableFreshnessSignal(key: FreshnessSignalKey, label: string): FreshnessSignal {
   return {
-    signals: asArray(review.signals).map(signalReviewItemFromApi),
-    proposals: asArray(review.proposals).map(signalReviewProposalFromApi),
-    dataSource: {
-      source: "signals",
-      status: available ? "ready" : "unavailable",
-      reason: available ? "review queue" : "review queue unavailable",
-      degraded: !available
+    available: false,
+    current: "unavailable",
+    key,
+    label,
+    observedAt: "",
+    stale: false,
+    status: "unavailable",
+    valueMs: null
+  };
+}
+
+function freshnessSignalsFromPayload(payload: Record<string, unknown>, quality: DataSourceState): FreshnessSignal[] {
+  const data = asRecord(payload.data);
+  const nodeHealth = asRecordArray(data.node_health);
+  const nodePayloads = nodeHealth.map((node) => asJsonRecord(node.payload));
+  const signalSources = [payload, data, ...nodeHealth, ...nodePayloads];
+  const marketData = timestampSignal(
+    "market_data",
+    "Market data",
+    signalSources,
+    ["market_data_last_seen_at", "market_data_at", "market_data_ts", "last_market_data_at"],
+    ["market_data_stale", "stale_market"]
+  );
+  const accountData = timestampSignal(
+    "account_data",
+    "Account data",
+    signalSources,
+    ["account_data_last_seen_at", "account_data_at", "account_data_ts", "last_account_data_at"],
+    ["account_data_stale", "stale_account"]
+  );
+  const executionEvent = timestampSignal(
+    "execution_event",
+    "Execution event",
+    signalSources,
+    ["last_execution_event_at", "execution_event_last_seen_at", "execution_event_at", "last_event_at"],
+    ["execution_event_stale", "stale_execution_event"]
+  );
+  const projectionLag = firstNumber(
+    [quality.projection_lag_ms, payload.projection_lag_ms, ...nodePayloads.map((nodePayload) => nodePayload.projection_lag_ms)],
+    Number.NaN
+  );
+  const reconciliationStatus = quality.reconciliation_state;
+
+  return [
+    marketData,
+    accountData,
+    {
+      ...executionEvent,
+      observedAt: executionEvent.observedAt || quality.last_execution_event_at || "",
+      current: executionEvent.current !== "unavailable"
+        ? executionEvent.current
+        : quality.last_execution_event_at || "unavailable",
+      available: executionEvent.available || Boolean(quality.last_execution_event_at)
+    },
+    {
+      available: Number.isFinite(projectionLag),
+      current: Number.isFinite(projectionLag) ? `${Math.round(projectionLag)} ms` : "unavailable",
+      key: "projection",
+      label: "Projection",
+      observedAt: quality.generated_at,
+      stale: quality.stale,
+      status: Number.isFinite(projectionLag) ? "tracked" : "unavailable",
+      valueMs: Number.isFinite(projectionLag) ? Math.round(projectionLag) : null
+    },
+    {
+      available: true,
+      current: reconciliationStatus,
+      key: "reconciliation",
+      label: "Reconciliation",
+      observedAt: firstPayloadString(signalSources, ["reconciliation_verified_at", "last_reconciliation_at"]),
+      stale: reconciliationStatus !== "healthy",
+      status: reconciliationStatus,
+      valueMs: null
     }
+  ];
+}
+
+function timestampSignal(
+  key: FreshnessSignalKey,
+  label: string,
+  sources: Record<string, unknown>[],
+  timestampKeys: string[],
+  staleKeys: string[]
+): FreshnessSignal {
+  const observedAt = firstPayloadString(sources, timestampKeys);
+  const explicitStale = firstPayloadBoolean(sources, staleKeys);
+
+  if (!observedAt) {
+    return {
+      ...unavailableFreshnessSignal(key, label),
+      stale: explicitStale === true
+    };
+  }
+
+  return {
+    available: true,
+    current: observedAt,
+    key,
+    label,
+    observedAt,
+    stale: explicitStale === true,
+    status: explicitStale === true ? "stale" : "tracked",
+    valueMs: null
   };
+}
+
+function firstPayloadString(sources: Record<string, unknown>[], keys: string[]): string {
+  for (const source of sources) {
+    const value = firstString(keys.map((key) => source[key]), "");
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function firstPayloadBoolean(sources: Record<string, unknown>[], keys: string[]): boolean | null {
+  for (const source of sources) {
+    for (const key of keys) {
+      if (typeof source[key] === "boolean") {
+        return source[key] as boolean;
+      }
+    }
+  }
+
+  return null;
+}
+
+function reportFromPayload(payload: Record<string, unknown>, date: string, quality: DataSourceState): DailyReport {
+  const account = asRecord(payload.account);
+  const trades = asRecord(payload.trades);
+  const signals = asRecord(payload.signals);
+  const riskEvents = asRecord(payload.risk_events);
+  const openPositions = asRecord(payload.open_positions);
+  const closedTrades = firstNumber([trades.closed_today_count, trades.closed_count]);
+  const wins = asNumber(trades.win_count);
+
+  return {
+    account: {
+      equity: asNumber(account.equity),
+      maxDrawdown: asNumber(account.max_drawdown_pct),
+      netPnl: asNumber(account.realized_pnl_today) + asNumber(account.unrealized_pnl),
+      volume: asNumber(openPositions.notional)
+    },
+    dataSource: quality,
+    date,
+    funnel: {
+      closed: closedTrades,
+      entered: firstNumber([signals.executed_count, signals.accepted_count]),
+      scanned: asNumber(signals.received_count),
+      signaled: asNumber(signals.accepted_count) + asNumber(signals.rejected_count)
+    },
+    performance: {
+      avgR: asNumber(trades.avg_r),
+      profitFactor: asNumber(trades.profit_factor),
+      trades: closedTrades,
+      winRate: closedTrades > 0 ? (wins / closedTrades) * 100 : 0
+    },
+    positions: getRows(payload, ["positions", "open_positions"]).map(positionFromApi),
+    riskEvents: [
+      {
+        id: "risk-events",
+        message: `${asNumber(riskEvents.count)} risk events, ${asNumber(riskEvents.blocking_count)} blocking`,
+        severity: asNumber(riskEvents.blocking_count) > 0 ? "warning" : "info",
+        source: "Risk",
+        time: "--"
+      }
+    ]
+  };
+}
+
+function signalClassificationFromApi(value: Record<string, unknown>): SignalReviewItem["classification"] {
+  return {
+    confidence: asString(value.confidence, "unknown"),
+    conclusion: firstString([value.conclusion, value.action, value.message_type], "needs_review"),
+    proposalTypes: asStringArray(value.proposal_types),
+    reasonCodes: asStringArray(value.reason_codes)
+  };
+}
+
+function signalReviewFromPayloads(
+  decisionsPayload: Record<string, unknown>,
+  messagesPayload: Record<string, unknown>,
+  quality: DataSourceState
+): SignalReviewData {
+  const messages = getRows(messagesPayload, ["messages"]);
+  const decisions = getRows(decisionsPayload, ["decisions"]);
+  const signals = decisions.map((decision, index) => {
+    const intent = asRecord(decision.intent);
+    const entry = asRecord(intent.entry);
+    const classification = asRecord(decision.classification);
+    const message = messages.find((item) => asString(item.decision_id) === asString(decision.decision_id)) || {};
+    return {
+      classification: signalClassificationFromApi(classification),
+      entryMode: asString(entry.type, "none"),
+      entryPrice: asNumber(entry.price),
+      leverage: `${asNumber(intent.leverage)}x`,
+      media: getRows(message, ["media"]).map((item, mediaIndex) => ({
+        index: asNumber(item.index, mediaIndex),
+        mimeType: asString(item.mime_type)
+      })),
+      pair: asString(intent.instrument_symbol, "UNAVAILABLE"),
+      rawText: firstString([message.raw_text, message.raw_message]),
+      reasonCodes: asStringArray(classification.ambiguity_reasons),
+      receivedAt: firstString([message.received_at, decision.created_at], "--"),
+      side: asString(intent.side, "--"),
+      signalId: firstString([decision.decision_id, decision.raw_message_id], `decision-${index}`),
+      status: asString(classification.action, "needs_review"),
+      stopLoss: asNumber(intent.stop_loss),
+      takeProfits: asArray(intent.take_profits).map((item) => asNumber(item, Number.NaN)).filter(Number.isFinite)
+    };
+  });
+
+  return {
+    dataSource: quality,
+    proposals: [],
+    signals
+  };
+}
+
+function orderSettingsFromPayload(
+  payload: Record<string, unknown>,
+  quality: DataSourceState,
+  fallbackScope: OrderSettingsScopeParams
+): OrderManagementSettings {
+  const data = asRecord(payload.data);
+  const source = Object.keys(asRecord(payload.settings)).length > 0 || payload.version !== undefined || payload.settings_version !== undefined
+    ? payload
+    : data;
+  const version = firstNumber([source.version, source.settings_version], Number.NaN);
+  const settings = orderSettingsValuesFromRecord(source.settings);
+  const scope = normalizeOrderSettingsScope(asString(source.scope, fallbackScope.scope));
+  const scopeKey = firstString([source.scope_key, source.scopeKey, fallbackScope.scopeKey], "");
+
+  return {
+    dataSource: quality,
+    empty: Object.keys(settings).length === 0 && !Number.isFinite(version),
+    raw: payload,
+    scope,
+    scopeKey,
+    settings,
+    version: Number.isFinite(version) ? version : null
+  };
+}
+
+function effectiveOrderSettingsFromPayload(payload: Record<string, unknown>, quality: DataSourceState): EffectiveOrderSettings {
+  const data = asRecord(payload.data);
+  const source = Object.keys(asRecord(payload.settings)).length > 0 ? payload : data;
+  const settings = effectiveSettingsValuesFromRecord(source.settings);
+
+  return {
+    dataSource: quality,
+    empty: Object.keys(settings).length === 0,
+    raw: payload,
+    settings
+  };
+}
+
+function orderSettingsValuesFromRecord(value: unknown): OrderSettingsValues {
+  const categories = asRecord(value);
+  const result: OrderSettingsValues = {};
+
+  Object.entries(categories).forEach(([categoryKey, categoryValue]) => {
+    const fields = asRecord(categoryValue);
+    const parsedFields: Record<string, OrderSettingScalar> = {};
+
+    Object.entries(fields).forEach(([fieldKey, fieldValue]) => {
+      const scalar = orderSettingScalar(fieldValue);
+      if (scalar !== undefined) {
+        parsedFields[fieldKey] = scalar;
+      }
+    });
+
+    if (Object.keys(parsedFields).length > 0) {
+      result[categoryKey] = parsedFields;
+    }
+  });
+
+  return result;
+}
+
+function effectiveSettingsValuesFromRecord(value: unknown): Record<string, Record<string, EffectiveOrderSetting>> {
+  const categories = asRecord(value);
+  const result: Record<string, Record<string, EffectiveOrderSetting>> = {};
+
+  Object.entries(categories).forEach(([categoryKey, categoryValue]) => {
+    const fields = asRecord(categoryValue);
+    const parsedFields: Record<string, EffectiveOrderSetting> = {};
+
+    Object.entries(fields).forEach(([fieldKey, fieldValue]) => {
+      const fieldRecord = asRecord(fieldValue);
+      const rawValue = Object.keys(fieldRecord).length > 0 ? fieldRecord.value : fieldValue;
+      const scalar = orderSettingScalar(rawValue);
+      if (scalar === undefined) {
+        return;
+      }
+
+      parsedFields[fieldKey] = {
+        applyMode: asString(fieldRecord.apply_mode, "hot_reload"),
+        inherited: fieldRecord.inherited === true,
+        sourceScope: asString(fieldRecord.source_scope, "default"),
+        value: scalar
+      };
+    });
+
+    if (Object.keys(parsedFields).length > 0) {
+      result[categoryKey] = parsedFields;
+    }
+  });
+
+  return result;
+}
+
+function orderSettingScalar(value: unknown): OrderSettingScalar | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return undefined;
+}
+
+function normalizeOrderSettingsScope(value: string): OrderSettingsScope {
+  if (value === "account" || value === "instrument") {
+    return value;
+  }
+
+  return "global";
+}
+
+function orderSettingsPath(params: OrderSettingsScopeParams): string {
+  const scopeKey = params.scopeKey || "";
+  return `/v1/order-management/settings?scope=${encodeURIComponent(params.scope)}&scope_key=${encodeURIComponent(scopeKey)}`;
+}
+
+function effectiveOrderSettingsPath(params: OrderSettingsScopeParams): string {
+  const accountId = params.scope === "account" ? params.scopeKey || "" : "";
+  const instrumentId = params.scope === "instrument" ? params.scopeKey || "" : "";
+  return `/v1/order-management/settings/effective?account_id=${encodeURIComponent(accountId)}&instrument_id=${encodeURIComponent(instrumentId)}`;
+}
+
+function settingsVersionsPath(params: OrderSettingsScopeParams): string {
+  const scopeKey = params.scopeKey || "";
+  return `/v1/order-management/settings/versions?scope=${encodeURIComponent(params.scope)}&scope_key=${encodeURIComponent(scopeKey)}`;
+}
+
+function validationErrorsFromPayload(payload: Record<string, unknown>): string[] {
+  const rawErrors = [...asArray(payload.errors), ...asArray(payload.messages), ...asArray(payload.detail)];
+  return rawErrors
+    .map((error) => {
+      if (typeof error === "string") {
+        return error;
+      }
+
+      const record = asRecord(error);
+      return firstString([record.message, record.msg, record.detail, record.reason], "");
+    })
+    .filter(Boolean);
+}
+
+function settingsDiffFromUnknown(value: unknown): SettingsDiffEntry[] {
+  if (Array.isArray(value)) {
+    return value.map(settingsDiffEntryFromRecord);
+  }
+
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) {
+    return [];
+  }
+
+  return Object.entries(record).flatMap(([key, rawChange]) => {
+    const change = asRecord(rawChange);
+    return settingsDiffEntryFromRecord({
+      ...change,
+      key: firstString([change.key], key)
+    });
+  });
+}
+
+function settingsDiffEntryFromRecord(value: unknown): SettingsDiffEntry {
+  const record = asRecord(value);
+  const rawKey = firstString([record.key, record.path, record.field], "");
+  const [categoryFromKey, fieldFromKey] = rawKey.includes(".") ? rawKey.split(".", 2) : ["", rawKey];
+  const category = firstString([record.category, record.section], categoryFromKey);
+  const key = firstString([record.setting, record.name], fieldFromKey || rawKey);
+  const label = firstString([record.label, record.title], key || rawKey || "setting");
+
+  return {
+    after: stringifySettingValue(record.after ?? record.next ?? record.to),
+    before: stringifySettingValue(record.before ?? record.previous ?? record.from),
+    category,
+    effective: stringifySettingValue(record.effective ?? record.effective_after ?? record.resolved),
+    key,
+    label
+  };
+}
+
+function settingsImpactFromPayload(payload: Record<string, unknown>): string[] {
+  const rawImpact = payload.impact ?? payload.impacts ?? payload.impact_summary;
+  if (Array.isArray(rawImpact)) {
+    return rawImpact.map(stringifySettingValue).filter((item) => item !== "");
+  }
+
+  if (typeof rawImpact === "string") {
+    return rawImpact ? [rawImpact] : [];
+  }
+
+  const impactRecord = asRecord(rawImpact);
+  if (Object.keys(impactRecord).length > 0) {
+    return Object.entries(impactRecord).map(([key, value]) => `${key}: ${stringifySettingValue(value)}`);
+  }
+
+  return [];
+}
+
+function stringifySettingValue(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function settingsVersionsFromPayload(payload: Record<string, unknown>, quality: DataSourceState): SettingsVersionsResult {
+  const data = asRecord(payload.data);
+  const rows = getRows(payload, ["versions", "items", "history"]);
+  const sourceRows = rows.length > 0 ? rows : getRows(data, ["versions", "items", "history"]);
+
+  return {
+    dataSource: quality,
+    raw: payload,
+    versions: sourceRows.map(settingsVersionFromRecord)
+  };
+}
+
+function settingsVersionFromRecord(record: Record<string, unknown>): SettingsVersionRecord {
+  const version = firstNumber([record.version, record.settings_version], Number.NaN);
+  const desiredVersion = firstNumber([record.desired_version, record.desiredVersion], Number.NaN);
+  const effectiveVersion = firstNumber([record.effective_version, record.effectiveVersion, record.applied_version], Number.NaN);
+  const snapshot = asRecord(record.snapshot);
+  const settingsSource = Object.keys(asRecord(record.settings)).length > 0 ? record.settings : snapshot.settings;
+
+  return {
+    author: firstString([record.author, record.created_by, record.operator, record.user], "unknown"),
+    desiredVersion: Number.isFinite(desiredVersion) ? desiredVersion : null,
+    diff: settingsDiffFromUnknown(record.diff ?? record.changes),
+    effectiveVersion: Number.isFinite(effectiveVersion) ? effectiveVersion : null,
+    nodeId: firstString([record.node_id, record.nodeId, record.node, record.name], ""),
+    reason: firstString([record.reason, record.audit_reason, record.comment], "No reason provided"),
+    settings: orderSettingsValuesFromRecord(settingsSource),
+    timestamp: firstString([record.created_at, record.timestamp, record.applied_at, record.updated_at], ""),
+    version: Number.isFinite(version) ? version : null
+  };
+}
+
+function commandResultFromPayload(payload: unknown): CommandResult {
+  if (payload === false) {
+    return {
+      acknowledgedNodes: [],
+      commandId: "",
+      complete: false,
+      failedNodes: [],
+      pendingNodes: [],
+      statusText: "Command request failed"
+    };
+  }
+
+  const result = asRecord(payload);
+  const targetNodes = asStringArray(result.target_nodes);
+  const acks = asRecordArray(result.acks);
+  const acknowledgedNodes = acks
+    .filter((ack) => {
+      const status = asString(ack.status).toLowerCase();
+      return status === "acked" || status === "accepted" || status === "completed" || status === "succeeded";
+    })
+    .map((ack) => asString(ack.node_id))
+    .filter(Boolean);
+  const failedNodes = acks
+    .filter((ack) => {
+      const status = asString(ack.status).toLowerCase();
+      return status === "failed" || status === "rejected" || status === "error";
+    })
+    .map((ack) => asString(ack.node_id))
+    .filter(Boolean);
+  const pendingNodes = targetNodes.filter((node) => !acknowledgedNodes.includes(node) && !failedNodes.includes(node));
+  const complete = targetNodes.length > 0 ? pendingNodes.length === 0 && failedNodes.length === 0 : asString(result.status) === "completed";
+  let statusText = "Command completed";
+
+  if (failedNodes.length > 0) {
+    statusText = `Command failed on ${failedNodes.length} node${failedNodes.length === 1 ? "" : "s"}: ${failedNodes.join(", ")}`;
+  } else if (!complete && pendingNodes.length > 0) {
+    statusText = `Waiting for ${pendingNodes.length} node ack: ${pendingNodes.join(", ")}`;
+  } else if (!complete) {
+    statusText = "Command pending";
+  }
+
+  return {
+    acknowledgedNodes,
+    commandId: asString(result.command_id),
+    complete,
+    failedNodes,
+    pendingNodes,
+    statusText
+  };
+}
+
+async function issueCommand(type: string, args: Record<string, unknown>): Promise<CommandResult> {
+  const payload = await postJson("/v1/commands", {
+    args,
+    type
+  });
+  return commandResultFromPayload(payload);
 }
 
 export async function fetchDashboardOverview(): Promise<DashboardOverview> {
-  const fallback = getMockDashboardOverview();
-  const overviewPayload = await getJson("/api/dashboard/overview");
-  const tradesPayload = await getJson("/api/dashboard/open-trades");
-  const auditEventsPayload = await getJson("/api/dashboard/events");
-  const adapted = dashboardFromApi(overviewPayload, tradesPayload, auditEventsPayload);
-  if (adapted) {
-    return adapted;
-  }
+  const [accounts, nodes, orders, positions, trades, messages, risk] = await Promise.all([
+    getJson("/v1/accounts"),
+    getJson("/v1/nodes"),
+    getJson("/v1/orders?status=open"),
+    getJson("/v1/positions"),
+    getJson("/v1/trades"),
+    getJson("/v1/messages?limit=20"),
+    getJson("/v1/risk/state")
+  ]);
+  const quality = combineQuality([accounts.quality, nodes.quality, orders.quality, positions.quality, trades.quality, messages.quality, risk.quality]);
 
-  return fallback;
+  return dashboardFromParts(
+    quality,
+    accounts.payload,
+    getRows(nodes.payload, ["nodes"]),
+    getRows(orders.payload, ["orders"]),
+    getRows(positions.payload, ["positions"]),
+    getRows(trades.payload, ["trades"]),
+    getRows(messages.payload, ["messages"]),
+    risk.payload
+  );
 }
 
 export async function fetchOrderCenter(): Promise<OrderCenterData> {
-  const statusPayload = await getJson("/api/freqtrade/status");
-  const positionsPayload = await getJson("/api/freqtrade/positions");
-  const tradesPayload = await getJson("/api/freqtrade/trades?limit=100");
-  return orderCenterFromApi(statusPayload, positionsPayload, tradesPayload);
+  const [positions, orders, trades] = await Promise.all([
+    getJson("/v1/positions"),
+    getJson("/v1/orders"),
+    getJson("/v1/trades")
+  ]);
+  const quality = combineQuality([positions.quality, orders.quality, trades.quality]);
+  return orderCenterFromPayloads(positions.payload, orders.payload, trades.payload, quality);
 }
 
 export async function fetchSignalReview(): Promise<SignalReviewData> {
-  const payload = await getJson("/api/signals/review/queue");
-  return signalReviewFromApi(payload);
+  const [decisions, messages] = await Promise.all([
+    getJson("/v1/risk/decisions?limit=500"),
+    getJson("/v1/messages?status=needs_review&limit=500")
+  ]);
+  return signalReviewFromPayloads(decisions.payload, messages.payload, combineQuality([decisions.quality, messages.quality]));
 }
 
 export async function fetchSignalMediaBlob(signalId: string, index: number): Promise<Blob | false> {
-  return getBlob(`/api/signals/${encodeURIComponent(signalId)}/media/${index}`);
+  return getBlob(`/v1/messages/${encodeURIComponent(signalId)}/media/${index}`);
 }
 
 export async function approveReviewSignal(signalId: string, reason: string): Promise<boolean> {
-  const payload = await postJson(`/api/signals/review/${encodeURIComponent(signalId)}/approve`, {
-    reason
-  });
-  return actionAccepted(payload);
+  const payload = await postJson(`/v1/risk/decisions/${encodeURIComponent(signalId)}/approve`, { reason });
+  return payload !== false;
 }
 
 export async function rejectReviewSignal(signalId: string, reason: string): Promise<boolean> {
-  const payload = await postJson(`/api/signals/review/${encodeURIComponent(signalId)}/reject`, {
-    reason
-  });
-  return actionAccepted(payload);
+  const payload = await postJson(`/v1/risk/decisions/${encodeURIComponent(signalId)}/reject`, { reason });
+  return payload !== false;
 }
 
 export async function approveReviewProposal(proposalId: string, reason: string): Promise<boolean> {
-  const payload = await postJson(`/api/signals/review/proposals/${encodeURIComponent(proposalId)}/approve`, {
-    reason
-  });
-  return actionAccepted(payload);
+  const payload = await postJson(`/v1/risk/decisions/${encodeURIComponent(proposalId)}/approve`, { reason });
+  return payload !== false;
 }
 
 export async function rejectReviewProposal(proposalId: string, reason: string): Promise<boolean> {
-  const payload = await postJson(`/api/signals/review/proposals/${encodeURIComponent(proposalId)}/reject`, {
-    reason
-  });
-  return actionAccepted(payload);
+  const payload = await postJson(`/v1/risk/decisions/${encodeURIComponent(proposalId)}/reject`, { reason });
+  return payload !== false;
 }
 
 export async function fetchRiskOverview(): Promise<RiskOverview> {
-  const payload = await getJson("/api/risk/overview");
-  const adapted = riskFromApi(payload);
-  if (adapted) {
-    return adapted;
-  }
+  const risk = await getJson("/v1/risk/state");
+  return riskFromPayload(risk.payload, risk.quality);
+}
 
-  return getMockRiskOverview();
+export async function fetchSystemHealthSnapshot(): Promise<SystemHealthSnapshot> {
+  const snapshot = await getJson("/api/system/snapshot");
+  return systemHealthFromPayload(snapshot.payload, snapshot.quality);
 }
 
 export async function fetchDailyReport(date: string): Promise<DailyReport> {
-  const payload = await getJson(`/api/reports/daily/${date}`);
-  const adapted = reportFromApi(payload, date);
-  if (adapted) {
-    return adapted;
-  }
-
-  return getMockDailyReport(date);
+  const report = await getJson(`/v1/reports/daily/${date}`);
+  return reportFromPayload(report.payload, date, report.quality);
 }
 
-export async function activateKillSwitch(
-  reason: string,
-  closeAll: boolean,
-  confirmationPhrase: string
-): Promise<boolean> {
-  const payload = await postJson("/api/risk/kill-switch", {
+export async function fetchOrderManagementSettings(params: OrderSettingsScopeParams): Promise<OrderManagementSettings> {
+  const result = await getJson(orderSettingsPath(params));
+  return orderSettingsFromPayload(result.payload, result.quality, params);
+}
+
+export async function fetchEffectiveSettings(params: OrderSettingsScopeParams): Promise<EffectiveOrderSettings> {
+  const result = await getJson(effectiveOrderSettingsPath(params));
+  return effectiveOrderSettingsFromPayload(result.payload, result.quality);
+}
+
+export async function fetchSettingsVersions(params: OrderSettingsScopeParams): Promise<SettingsVersionsResult> {
+  const result = await getJson(settingsVersionsPath(params));
+  return settingsVersionsFromPayload(result.payload, result.quality);
+}
+
+export async function validateSettings(settings: OrderSettingsValues): Promise<OrderSettingsValidationResult> {
+  const payload = await postJson("/v1/order-management/settings/validate", { settings });
+  if (payload === false) {
+    return {
+      diff: [],
+      errors: ["Settings validation request failed"],
+      impact: [],
+      raw: {},
+      valid: false
+    };
+  }
+
+  const result = asRecord(payload);
+  const errors = validationErrorsFromPayload(result);
+  const valid = typeof result.valid === "boolean" ? result.valid : result.ok === true || errors.length === 0;
+
+  return {
+    diff: settingsDiffFromUnknown(result.diff ?? result.changes),
+    errors,
+    impact: settingsImpactFromPayload(result),
+    raw: result,
+    valid
+  };
+}
+
+export async function patchSettings(request: OrderSettingsPatchRequest): Promise<OrderSettingsPatchResult> {
+  const response = await patchJsonDetailed("/v1/order-management/settings", request);
+  if (response === false) {
+    return {
+      conflict: false,
+      currentVersion: null,
+      errors: ["Settings save request failed"],
+      ok: false,
+      raw: {},
+      status: 0,
+      version: null
+    };
+  }
+
+  const result = response.payload;
+  const errors = validationErrorsFromPayload(result);
+  const currentVersion = firstNumber([result.current_version, result.currentVersion, result.expected_version], Number.NaN);
+  const version = firstNumber([result.version, result.settings_version], Number.NaN);
+  const ok = response.ok && (typeof result.ok === "boolean" ? result.ok : errors.length === 0);
+
+  return {
+    conflict: response.status === 409,
+    currentVersion: Number.isFinite(currentVersion) ? currentVersion : null,
+    errors,
+    ok,
+    raw: result,
+    status: response.status,
+    version: Number.isFinite(version) ? version : null
+  };
+}
+
+export async function activateKillSwitch(reason: string, closeAll: boolean, confirmationPhrase: string): Promise<CommandResult> {
+  return issueCommand("halt", {
     close_all: closeAll,
     confirmation_phrase: confirmationPhrase,
     reason
   });
-  const result = asRecord(payload);
-  return closeAllAccepted(result);
 }
 
-export async function closePosition(tradeId: string, reason: string, signalId: string): Promise<boolean> {
-  const payload = await postJson("/api/dashboard/actions/close-trade", {
+export async function closePosition(tradeId: string, reason: string, signalId: string): Promise<CommandResult> {
+  return issueCommand("close_all", {
+    position_id: tradeId,
     reason,
-    signal_id: signalId,
-    trade_id: tradeId
+    scope: "position",
+    signal_id: signalId
   });
-  return actionAccepted(payload);
+}
+
+export async function cancelOrder(orderId: string, reason: string): Promise<CommandResult> {
+  return issueCommand("cancel_order", {
+    order_id: orderId,
+    reason
+  });
 }
 
 export async function partialClosePosition(
@@ -1137,14 +1965,14 @@ export async function partialClosePosition(
   amount: number,
   reason: string,
   signalId: string
-): Promise<boolean> {
-  const payload = await postJson("/api/dashboard/actions/close-trade", {
+): Promise<CommandResult> {
+  return issueCommand("close_all", {
     amount,
+    position_id: tradeId,
     reason,
-    signal_id: signalId,
-    trade_id: tradeId
+    scope: "position_partial",
+    signal_id: signalId
   });
-  return actionAccepted(payload);
 }
 
 export async function moveStopLoss(
@@ -1152,49 +1980,42 @@ export async function moveStopLoss(
   stopLossPrice: number,
   reason: string,
   signalId: string
-): Promise<boolean> {
-  const payload = await postJson("/api/dashboard/actions/move-stoploss", {
+): Promise<CommandResult> {
+  return issueCommand("move_stop_loss", {
+    position_id: tradeId,
     reason,
     signal_id: signalId,
-    stop_loss_price: stopLossPrice,
-    trade_id: tradeId
+    stop_loss_price: stopLossPrice
   });
-  return actionAccepted(payload);
 }
 
-export async function pauseBot(reason: string): Promise<boolean> {
-  const payload = await postJson("/api/dashboard/actions/pause-bot", {
-    reason
-  });
-  return actionAccepted(payload);
+export async function pauseBot(reason: string): Promise<CommandResult> {
+  return issueCommand("halt", { reason });
 }
 
-export async function resumeBot(reason: string): Promise<boolean> {
-  const payload = await postJson("/api/dashboard/actions/resume-bot", {
-    reason
-  });
-  return actionAccepted(payload);
+export async function resumeBot(reason: string): Promise<CommandResult> {
+  return issueCommand("resume", { reason });
 }
 
-export async function lockPair(pair: string, reason: string): Promise<boolean> {
-  const payload = await postJson("/api/dashboard/actions/lock-pair", {
-    pair,
-    reason
+export async function lockPair(pair: string, reason: string): Promise<CommandResult> {
+  return issueCommand("set_reducing", {
+    instrument_symbol: pair,
+    reason,
+    scope: "instrument"
   });
-  return actionAccepted(payload);
 }
 
 export async function fetchDailyReportMarkdown(date: string): Promise<string | false> {
-  return getText(`/api/reports/daily/${date}/markdown`);
+  return getText(`/v1/reports/daily/${date}/markdown`);
 }
 
 export async function fetchDailyReportVersions(date: string): Promise<Record<string, unknown>[]> {
-  const payload = await getJson(`/api/reports/daily/${date}/versions`);
-  return asRecordArray(payload);
+  const result = await getJson(`/v1/reports/daily/${date}/versions`);
+  return getRows(result.payload, ["versions"]);
 }
 
 export async function fetchDailyReportTelegramPreview(date: string): Promise<string | false> {
-  const payload = await postJson(`/api/reports/daily/${date}/telegram-preview`, {});
+  const payload = await postJson(`/v1/reports/daily/${date}/telegram-preview`, {});
   const result = asRecord(payload);
   const text = asString(result.text, "");
   if (!text) {
@@ -1205,11 +2026,9 @@ export async function fetchDailyReportTelegramPreview(date: string): Promise<str
 }
 
 export async function createDailyReportSnapshot(date: string): Promise<Record<string, unknown> | false> {
-  const payload = await postJson("/api/reports/daily/snapshot", {
-    date
-  });
+  const payload = await postJson("/v1/reports/daily/snapshot", { date });
   const result = asRecord(payload);
-  if (!Object.prototype.hasOwnProperty.call(result, "snapshot_id")) {
+  if (!asString(result.snapshot_id)) {
     return false;
   }
 

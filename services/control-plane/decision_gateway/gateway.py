@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from psycopg2.extensions import connection as PsycopgConnection
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 for _p in (
+    str(_REPO_ROOT / "services" / "control-plane"),
     str(_REPO_ROOT / "services" / "control-plane" / "db"),
     str(_REPO_ROOT / "services" / "control-plane" / "risk"),
 ):
@@ -30,6 +32,7 @@ for _p in (
 
 import governor  # noqa: E402
 from connection import transaction  # noqa: E402
+from order_management.execution_jobs import create_execution_job_for_approved_intent  # noqa: E402
 from policy import RiskPolicy  # noqa: E402
 
 SCHEMA_PATH = _REPO_ROOT / "packages" / "contracts" / "v1" / "hermes_decision.v1.json"
@@ -92,6 +95,15 @@ def process_one_decision(
                     ),
                 )
 
+            stale = _freshness_problem(row, decision, policy)
+            if stale:
+                return _write_outcome(
+                    cur, row, governor.RiskDecision(
+                        "needs_review", None, row["instrument_symbol"], {},
+                        stale, [{"name": "freshness", "passed": False}],
+                    ),
+                )
+
             account_id = decision["intent"].get("target_account_id") or policy.default_account_id
             positions = _load_positions(cur, account_id) if account_id else []
             risk_state = (
@@ -103,7 +115,41 @@ def process_one_decision(
             outcome = governor.evaluate(
                 decision, positions=positions, risk_state=risk_state, policy=policy
             )
+            # Contract §2.2: never AUTO-approve new risk on a stale projection. The signal
+            # is already classified + recorded (never dropped); a stale-context approval is
+            # held for human review instead of auto-executing. This moves the staleness gate
+            # from "drop the message" (wrong) to "hold the approval" (correct).
+            if outcome.status == "approved" and _projection_is_stale(cur):
+                outcome.status = "needs_review"
+                outcome.reason = "context_stale: approval held pending fresh projection"
+                outcome.checks = list(outcome.checks) + [
+                    {"name": "context_freshness", "passed": False}
+                ]
             return _write_outcome(cur, row, outcome, decision=decision, policy=policy)
+
+
+def _freshness_problem(row: dict[str, Any], decision: dict[str, Any], policy: RiskPolicy) -> str | None:
+    """Stale-context guard: a decision created too long ago, or already past its
+    valid_until, must not produce new risk (fail closed -> needs_review)."""
+    now = datetime.now(timezone.utc)
+    created = row.get("created_at")
+    if isinstance(created, datetime):
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age = (now - created).total_seconds()
+        if age > policy.freshness_seconds:
+            return f"decision_stale: age {int(age)}s > freshness {policy.freshness_seconds}s"
+    valid_until = (decision.get("intent") or {}).get("valid_until")
+    if valid_until:
+        try:
+            vu = datetime.fromisoformat(str(valid_until).replace("Z", "+00:00"))
+        except ValueError:
+            return f"decision_valid_until_unparseable: {valid_until}"
+        if vu.tzinfo is None:
+            vu = vu.replace(tzinfo=timezone.utc)
+        if now > vu:
+            return f"decision_expired: valid_until {valid_until} passed"
+    return None
 
 
 def _write_outcome(
@@ -141,6 +187,12 @@ def _write_outcome(
         result["intent_id"] = _write_trade_intent(
             cur, row, outcome, decision, policy, risk_decision_id
         )
+        if result["intent_id"] is not None:
+            create_execution_job_for_approved_intent(
+                cur.connection,
+                result["intent_id"],
+                manage_transaction=False,
+            )
     return result
 
 
@@ -193,6 +245,20 @@ def _write_trade_intent(
         (str(uuid4()), intent_id, Json({"intent_id": intent_id, "risk_decision_id": risk_decision_id})),
     )
     return intent_id
+
+
+def _projection_is_stale(cur, threshold_ms: int = 60_000) -> bool:
+    """Freshness for auto-approval = the execution projection is CURRENT, which a live node
+    proves by HEARTBEATING — not by having traded recently. A quiet (no new fills) period
+    must not block new risk while the node is connected and pushing events, otherwise every
+    actionable signal during a calm market is held forever (auto-trading deadlock). Fail
+    closed: stale when no node has heartbeat within the threshold (node down / no node)."""
+    cur.execute("SELECT max(last_seen_at) AS t FROM node_heartbeats")
+    row = cur.fetchone()
+    last = row["t"] if row else None
+    if last is None:
+        return True
+    return (datetime.now(timezone.utc) - last).total_seconds() * 1000 > threshold_ms
 
 
 def _idempotency_key(row, outcome) -> str:

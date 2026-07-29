@@ -1,0 +1,2487 @@
+{
+  "schema_version": "1.0",
+  "project": "hermes-trader-order-management",
+  "created_at": "2026-06-21T00:00:00-07:00",
+  "source_spec": "docs/order-management/PLAN.md v1.0",
+  "base_branch": "work/integration-acceptance-v3",
+  "target_branch": "work/order-management-plan-v1",
+  "release_ceiling": "testnet_only",
+  "status_values": [
+    "todo",
+    "in_progress",
+    "blocked",
+    "needs_review",
+    "done"
+  ],
+  "complexity_values": [
+    "S",
+    "M",
+    "L"
+  ],
+  "priority_values": [
+    "P0",
+    "P1",
+    "P2",
+    "P0/P1"
+  ],
+  "executor_values": [
+    "codex",
+    "server_ops",
+    "operator"
+  ],
+  "iron_rules": [
+    "交易所是执行现实真相源，PostgreSQL 是应用查询与审计真相源",
+    "Nautilus node 是唯一订单提交、修改、撤销和平仓执行者",
+    "行情、账户、投影或对账 stale 时新增风险必须为 0",
+    "HALTED 阻止新增风险但必须允许撤单与减仓",
+    "所有设置版本化、可验证、可审计、可回滚",
+    "所有跨服务命令必须幂等并有终态 ACK",
+    "保护单缺失时不得继续增加风险",
+    "live 需要 release gate 与 operator signoff"
+  ],
+  "rules": [
+    "每个 done 任务必须附 evidence：命令、输出/报告路径、commit SHA",
+    "所有验收脚本失败必须返回非零",
+    "生产 Dashboard 不允许 fixture/fake fallback",
+    "测试与 live 设置必须分离，默认 testnet/HALTED",
+    "修改相同 owned_paths 的任务不得并行",
+    "高危配置变更、close_all 与 rollback 需 reason/request_id/confirm"
+  ],
+  "milestones": [
+    {
+      "id": "OM0",
+      "title": "契约、状态机、规范化标识与数据库基础",
+      "priority": "P0",
+      "complexity": "L",
+      "depends_on": []
+    },
+    {
+      "id": "OM1",
+      "title": "设置服务、版本、覆盖层级、审计与运行时应用",
+      "priority": "P0",
+      "complexity": "L",
+      "depends_on": [
+        "OM0"
+      ]
+    },
+    {
+      "id": "OM2",
+      "title": "订单/仓位/账户投影、价格监控、freshness 与对账",
+      "priority": "P0",
+      "complexity": "L",
+      "depends_on": [
+        "OM0"
+      ]
+    },
+    {
+      "id": "OM3",
+      "title": "动态资金管理、仓位计算、敞口与风险预留",
+      "priority": "P0",
+      "complexity": "L",
+      "depends_on": [
+        "OM0",
+        "OM1",
+        "OM2"
+      ]
+    },
+    {
+      "id": "OM4",
+      "title": "入场订单完整生命周期、部分成交、超时与重挂",
+      "priority": "P0",
+      "complexity": "L",
+      "depends_on": [
+        "OM0",
+        "OM1",
+        "OM2",
+        "OM3"
+      ]
+    },
+    {
+      "id": "OM5",
+      "title": "保护单、止盈止损、移动止损与退出管理",
+      "priority": "P0",
+      "complexity": "L",
+      "depends_on": [
+        "OM2",
+        "OM3",
+        "OM4"
+      ]
+    },
+    {
+      "id": "OM6",
+      "title": "紧急命令、批处理、恢复、最终核验与 ACK",
+      "priority": "P0",
+      "complexity": "L",
+      "depends_on": [
+        "OM2",
+        "OM4",
+        "OM5"
+      ]
+    },
+    {
+      "id": "OM7",
+      "title": "完整设置面板与增强订单中心",
+      "priority": "P1",
+      "complexity": "L",
+      "depends_on": [
+        "OM1",
+        "OM2",
+        "OM3",
+        "OM4",
+        "OM5",
+        "OM6"
+      ]
+    },
+    {
+      "id": "OM8",
+      "title": "可观测性、安全、全量测试、testnet 验收与放量",
+      "priority": "P0/P1",
+      "complexity": "L",
+      "depends_on": [
+        "OM1",
+        "OM2",
+        "OM3",
+        "OM4",
+        "OM5",
+        "OM6",
+        "OM7"
+      ]
+    }
+  ],
+  "settings_panel": {
+    "route": "/settings/orders",
+    "scope_resolution": [
+      "system_default",
+      "global",
+      "account",
+      "instrument"
+    ],
+    "tabs": [
+      {
+        "id": "general",
+        "title": "General",
+        "fields": [
+          "enabled",
+          "execution_mode",
+          "allowed_instruments",
+          "default_account_id",
+          "max_concurrent_execution_jobs",
+          "intent_ttl_seconds",
+          "idempotency_retention_days",
+          "default_command_timeout_seconds"
+        ]
+      },
+      {
+        "id": "entry_orders",
+        "title": "Entry Orders",
+        "fields": [
+          "default_order_type",
+          "time_in_force",
+          "post_only",
+          "max_slippage_bps",
+          "limit_offset_bps",
+          "unfilled_timeout_seconds",
+          "reprice_interval_seconds",
+          "max_reprices",
+          "max_submit_retries",
+          "retry_backoff_seconds",
+          "partial_fill_policy",
+          "minimum_fill_ratio",
+          "partial_fill_timeout_seconds",
+          "market_conversion_max_slippage_bps"
+        ]
+      },
+      {
+        "id": "protection_exits",
+        "title": "Protection & Exits",
+        "fields": [
+          "require_stop_loss",
+          "stop_order_type",
+          "stop_trigger_basis",
+          "protection_install_timeout_seconds",
+          "take_profit_ladder",
+          "breakeven_enabled",
+          "breakeven_trigger_r",
+          "breakeven_offset_bps",
+          "trailing_stop_enabled",
+          "trailing_activation_r",
+          "trailing_callback_rate",
+          "partial_close_default_fraction",
+          "protection_repair_policy"
+        ]
+      },
+      {
+        "id": "money_risk",
+        "title": "Money & Risk",
+        "fields": [
+          "sizing_mode",
+          "fixed_notional",
+          "equity_fraction",
+          "risk_per_trade_pct",
+          "max_notional_per_order",
+          "max_leverage",
+          "max_open_positions",
+          "max_instrument_exposure",
+          "max_correlated_exposure",
+          "max_total_risk_pct",
+          "minimum_free_margin_pct",
+          "reserve_balance_pct",
+          "daily_loss_limit_pct",
+          "max_drawdown_pct",
+          "loss_cooldown_minutes",
+          "risk_reservation_ttl_seconds"
+        ]
+      },
+      {
+        "id": "price_monitor",
+        "title": "Price Monitor",
+        "fields": [
+          "price_sources",
+          "market_data_stale_seconds",
+          "account_data_stale_seconds",
+          "execution_event_stale_seconds",
+          "projection_lag_seconds",
+          "evaluation_interval_ms",
+          "max_price_deviation_bps",
+          "disconnect_action",
+          "account_refresh_interval_seconds",
+          "protection_watchdog_interval_seconds",
+          "recovery_grace_seconds"
+        ]
+      },
+      {
+        "id": "reconciliation",
+        "title": "Reconciliation & Recovery",
+        "fields": [
+          "startup_reconciliation_required",
+          "reconciliation_interval_seconds",
+          "orphan_order_policy",
+          "external_position_policy",
+          "drift_policy",
+          "auto_adopt_enabled",
+          "retry_limit",
+          "retry_backoff_seconds",
+          "restart_recovery_mode"
+        ]
+      },
+      {
+        "id": "emergency",
+        "title": "Emergency Commands",
+        "fields": [
+          "cancel_batch_size",
+          "close_batch_size",
+          "inter_order_delay_ms",
+          "command_max_retries",
+          "verify_timeout_seconds",
+          "close_all_final_state",
+          "allow_reduce_while_halted",
+          "command_retention_days"
+        ]
+      },
+      {
+        "id": "notifications",
+        "title": "Notifications",
+        "fields": [
+          "order_events",
+          "partial_fill",
+          "protection_missing",
+          "stale_data",
+          "reconciliation_drift",
+          "daily_loss",
+          "drawdown",
+          "emergency_command_results",
+          "severity_routing"
+        ]
+      },
+      {
+        "id": "advanced",
+        "title": "Advanced",
+        "fields": [
+          "outbox_batch_size",
+          "spool_max_items",
+          "spool_max_age_seconds",
+          "reducer_replay_window_hours",
+          "event_retention_days",
+          "diagnostics_bundle_enabled",
+          "import_export_enabled"
+        ]
+      }
+    ],
+    "required_behaviors": [
+      "show_inherited_override_effective_values",
+      "server_side_validation",
+      "before_after_diff",
+      "impact_preview",
+      "reason_required",
+      "expected_version_optimistic_lock",
+      "desired_effective_version_status",
+      "version_history_and_rollback",
+      "hot_reload_vs_restart_required",
+      "rbac_and_danger_confirmation",
+      "audit_event_link",
+      "no_secret_fields"
+    ]
+  },
+  "release_gates": [
+    {
+      "id": "G-OM-1",
+      "text": "订单、仓位、保护单状态机可重放且无非法静默转换",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-2",
+      "text": "无保护 open position 数量为 0",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-3",
+      "text": "duplicate intent/event 导致的重复订单为 0",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-4",
+      "text": "stale market/account/projection/reconciliation 下新增风险为 0",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-5",
+      "text": "cancel_all/close_all 有交易所最终核验和终态 ACK",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-6",
+      "text": "动态仓位、敞口、日亏损和回撤限制均可解释并生效",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-7",
+      "text": "设置 desired/effective 版本一致，所有变更可审计和回滚",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-8",
+      "text": "Binance testnet 22 项矩阵、chaos、安全和 Dashboard E2E 全过",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-9",
+      "text": "两账户 intent/order/position/config 无串线",
+      "status": "pending"
+    },
+    {
+      "id": "G-OM-10",
+      "text": "live 仍由 release gate 与 operator signoff 阻止自动放开",
+      "status": "pending"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "OM0-01",
+      "milestone": "OM0",
+      "title": "冻结 Order/Intent/Position/Command 状态机与转换表",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [],
+      "owned_paths": [
+        "packages/contracts/v1/order_state.v1.json",
+        "docs/order-management/STATE_MACHINES.md"
+      ],
+      "acceptance": [
+        "所有合法与非法转换被显式定义",
+        "终态、重试态、unknown/lost 语义明确",
+        "HALTED 允许减仓与撤单的语义写入契约"
+      ],
+      "evidence": [
+        "commit: a3bc5d5",
+        "test: tests/order_management/test_state_machines_v1.py — 11 passed (.venv-integration pytest)",
+        "artifacts: packages/contracts/v1/order_state.v1.json, docs/order-management/STATE_MACHINES.md",
+        "reconciled: trade_intent_status enum, ORDER/POSITION event catalogs, operator_command terminals, risk_state VALID_MODES"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM0-02",
+      "milestone": "OM0",
+      "title": "统一 account_id、instrument_id、position_id 与 venue symbol 规范化",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-01"
+      ],
+      "owned_paths": [
+        "packages/execution-domain/execution_domain/identifiers.py",
+        "services/control-plane/order_management/identifiers.py"
+      ],
+      "acceptance": [
+        "BTCUSDT 与 BTCUSDT-PERP.BINANCE 可确定性映射",
+        "EXTERNAL/BOTH position identity 有统一 canonical key",
+        "全链路不再用裸字符串精确比较判断同一币种"
+      ],
+      "evidence": [
+        "commit: 1169e05",
+        "test: tests/order_management/test_identifiers.py pass; existing risk/gateway/commands 31 passed (governor._instrument_matches delegates to instruments_match)",
+        "BTCUSDT==BTCUSDT-PERP.BINANCE canonical; PositionKey netting/hedge"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM0-03",
+      "milestone": "OM0",
+      "title": "扩展 ApprovedTradeIntentV1 的订单管理字段",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-01",
+        "OM0-02"
+      ],
+      "owned_paths": [
+        "packages/contracts/v1/approved_trade_intent.v1.json",
+        "packages/execution-domain/execution_domain/contracts.py"
+      ],
+      "acceptance": [
+        "支持 quantity/fraction、TIF、slippage、partial-fill、stop/TP/trailing 参数",
+        "管理动作与入场动作字段互斥验证",
+        "旧 v1 intent 有显式兼容/迁移策略"
+      ],
+      "evidence": [
+        "commit: 1169e05",
+        "test: tests/order_management/test_intent_fields.py pass; tests/contracts/test_contracts_v1.py 5 passed (snapshot refreshed)",
+        "optional execution/protection/sizing additive; order_plan stays open; legacy intents valid; management-vs-entry mutual exclusion in pydantic"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM0-04",
+      "milestone": "OM0",
+      "title": "建立订单管理数据库迁移与唯一约束",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-01",
+        "OM0-02"
+      ],
+      "owned_paths": [
+        "services/control-plane/db/migrations/*order_management*.sql"
+      ],
+      "acceptance": [
+        "建立 execution_jobs/orders_projection/order_events/order_links/protective_orders/risk_reservations/settings/reconciliation 表",
+        "event_id 与 account+idempotency_key 唯一",
+        "迁移可重复验证且不破坏现有数据"
+      ],
+      "evidence": [
+        "commit: 1169e05",
+        "live DB postgresql:///om_v3_om0: migrate up 0001..0005 clean; isolated 0005 down keeps baseline intent_id + audit_events table, drops 11 new tables + new cols; re-up clean; up idempotent 2x",
+        "test: tests/order_management/test_migration_0005.py pass",
+        "audit_events enhanced additively (ALTER, not CREATE); fixed Codex dead-no-op + my own down data-loss bug"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM0-05",
+      "milestone": "OM0",
+      "title": "定义跨服务幂等键、request_id 与 outbox 语义",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-01",
+        "OM0-04"
+      ],
+      "owned_paths": [
+        "packages/execution-domain/execution_domain/idempotency.py",
+        "services/control-plane/order_management/outbox.py"
+      ],
+      "acceptance": [
+        "同 intent 重放不生成第二张订单",
+        "网络超时后重试不会造成未知重复提交",
+        "所有写命令可通过 request_id 查询最终结果"
+      ],
+      "evidence": [
+        "commit: 1169e05",
+        "test: tests/order_management/test_idempotency.py pass",
+        "intent_idempotency_key mirrors decision_gateway sha256; deterministic outbox id ON CONFLICT DO NOTHING; query-by-request_id"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM0-06",
+      "milestone": "OM0",
+      "title": "建立订单管理固定 fixtures、schema 与 contract test 基线",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-03",
+        "OM0-04",
+        "OM0-05"
+      ],
+      "owned_paths": [
+        "tests/order_management/contracts/**",
+        "tests/order_management/fixtures/**"
+      ],
+      "acceptance": [
+        "所有契约有正反 fixture",
+        "CI 校验 JSON Schema 与 Python/TypeScript 类型一致",
+        "非法组合在进入执行层前被拒绝"
+      ],
+      "evidence": [
+        "commit: 1169e05",
+        "test: tests/order_management/ + tests/contracts -> 54 passed",
+        "JSON-Schema<->pydantic round-trip; illegal combos rejected pre-execution"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM1-01",
+      "milestone": "OM1",
+      "title": "定义 OrderManagementSettings schema 与安全默认值",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-03"
+      ],
+      "owned_paths": [
+        "packages/contracts/v1/order_management_settings.v1.json",
+        "services/control-plane/settings/schema.py"
+      ],
+      "acceptance": [
+        "覆盖 General/Entry/Protection/Money/Price/Reconciliation/Emergency/Notifications/Advanced",
+        "每个字段有类型、范围、单位、默认值和 apply_mode",
+        "默认值为 HALTED/testnet/fail-closed"
+      ],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "order_management_settings.v1.json 9 categories, out of snapshot gate, fail-closed defaults, 9 freshness fields == OM2 contract"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM1-02",
+      "milestone": "OM1",
+      "title": "实现全局→账户→币种覆盖与 effective settings 解析",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM1-01",
+        "OM0-04"
+      ],
+      "owned_paths": [
+        "services/control-plane/settings/resolver.py"
+      ],
+      "acceptance": [
+        "字段返回最终值与来源 scope",
+        "覆盖规则确定性且有单测",
+        "删除 override 后恢复继承值"
+      ],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "resolver global<account<instrument; source_scope; delete restores inheritance (verified live: global=(7,global)/account=(9,account))"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM1-03",
+      "milestone": "OM1",
+      "title": "实现设置读取、验证、PATCH 与 effective API",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM1-01",
+        "OM1-02"
+      ],
+      "owned_paths": [
+        "services/control-plane/settings/router.py",
+        "services/control-plane/settings/service.py"
+      ],
+      "acceptance": [
+        "支持 GET/validate/PATCH/effective",
+        "PATCH 必须携带 expected_version 与 reason",
+        "无效或冲突返回结构化错误且不落库"
+      ],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "GET/validate/PATCH(expected_version+reason)/effective; stale version rejected, no partial write"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM1-04",
+      "milestone": "OM1",
+      "title": "实现设置版本历史、diff、导出与回滚",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM1-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/settings/versioning.py"
+      ],
+      "acceptance": [
+        "每次发布生成不可变版本",
+        "可查看任意版本 diff",
+        "rollback 生成新版本而非篡改历史"
+      ],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "immutable versions/diff/rollback->new version (live [3,2,1]); finding: v0/defaults rollback unsupported"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM1-05",
+      "milestone": "OM1",
+      "title": "实现 settings.changed outbox、节点应用与 desired/effective ACK",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM1-03",
+        "OM0-05"
+      ],
+      "owned_paths": [
+        "services/control-plane/settings/publisher.py",
+        "services/nautilus-node/runtime/settings_consumer.py"
+      ],
+      "acceptance": [
+        "节点只应用通过 schema 的版本",
+        "Dashboard 可见 desired/effective version",
+        "应用失败保留旧版本并告警"
+      ],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "settings.changed outbox + settings_consumer + desired/effective"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM1-06",
+      "milestone": "OM1",
+      "title": "区分 hot reload 与 restart-required 配置",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM1-05"
+      ],
+      "owned_paths": [
+        "services/control-plane/settings/apply_plan.py"
+      ],
+      "acceptance": [
+        "每个字段标注 apply_mode",
+        "restart-required 只生成计划，不自动重启 live 节点",
+        "hot reload 有 ACK 与超时"
+      ],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "apply_plan hot_reload vs restart_required; no live auto-restart"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM1-07",
+      "milestone": "OM1",
+      "title": "设置 RBAC、高危确认与审计事件",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM1-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/settings/permissions.py",
+        "services/control-plane/audit/**"
+      ],
+      "acceptance": [
+        "viewer/operator/risk_admin 权限矩阵有测试",
+        "放宽 live 风险需要 confirm+operator_signoff",
+        "审计含 before/after/reason/request_id/actor"
+      ],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "RBAC viewer/operator/risk_admin; live-risk confirm+operator_signoff; audit actor/action/before/after/reason/request_id"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM1-08",
+      "milestone": "OM1",
+      "title": "设置导入/导出与 secrets 排除",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM1-04",
+        "OM1-07"
+      ],
+      "owned_paths": [
+        "services/control-plane/settings/import_export.py"
+      ],
+      "acceptance": [
+        "导出不包含 API key/token/secret",
+        "导入先 validate 再发布",
+        "环境不匹配或风险放宽有显式警告"
+      ],
+      "evidence": [
+        "commit: 337e9e3",
+        "75 tests + live om_v3_om1 round-trip (patch/conflict/resolver/rollback/audit/outbox)",
+        "import/export; secrets excluded"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM2-01",
+      "milestone": "OM2",
+      "title": "完善 execution event mapper 与稳定 event identity",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-02",
+        "OM0-04"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/projection/event_mapper.py"
+      ],
+      "acceptance": [
+        "Order/Position/Account 全部需要事件映射",
+        "重复事件稳定生成同 event_id",
+        "数值使用 Decimal-safe JSON 表示"
+      ],
+      "evidence": [
+        "commit: a642860 (merge 7a61bca)",
+        "test: tests/order_management/projections/test_event_mapper.py",
+        "Decimal-safe payloads; stable event_id dedup"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM2-02",
+      "milestone": "OM2",
+      "title": "实现订单投影 reducer 与非法转换 anomaly",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-01",
+        "OM2-01"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/order_reducer.py"
+      ],
+      "acceptance": [
+        "支持 accepted/working/partial/filled/cancelled/rejected/expired/lost",
+        "乱序和重复事件可重放",
+        "非法倒退记录 finding 而不静默覆盖"
+      ],
+      "evidence": [
+        "commit: a642860",
+        "test: test_order_reducer.py + live replay om_v3_om2",
+        "driven by FROZEN order_state.v1.json (state_descriptor); illegal transition -> reconciliation finding, no silent overwrite; replay/out-of-order/dup safe"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM2-03",
+      "milestone": "OM2",
+      "title": "修复仓位与账户投影的 canonical identity 与闭仓归并",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-02",
+        "OM2-01"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/position_reducer.py",
+        "services/control-plane/order_management/account_reducer.py"
+      ],
+      "acceptance": [
+        "EXTERNAL/BOTH 不再产生残留假开仓",
+        "余额/free/margin/equity 可查询",
+        "position close 后保护单关联可清理"
+      ],
+      "evidence": [
+        "commit: a642860",
+        "test: test_position_account_reducers.py",
+        "canonical PositionKey/identifiers; no phantom EXTERNAL/BOTH; close merge; protection cleanup; balances queryable"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM2-04",
+      "milestone": "OM2",
+      "title": "接入 mark/last/book ticker 实时价格源",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-01"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/market_data/**"
+      ],
+      "acceptance": [
+        "订阅 mark price、last 与 best bid/ask",
+        "按账户/币种输出价格状态事件",
+        "断流与重连有状态和指标"
+      ],
+      "evidence": [
+        "commit: a642860",
+        "test: test_market_data.py",
+        "mark/last/book price_feed; disconnect/reconnect status+metrics (WS mocked)"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM2-05",
+      "milestone": "OM2",
+      "title": "实现 market/account/execution/projection freshness 模型",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-03",
+        "OM2-04",
+        "OM1-01"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/freshness.py"
+      ],
+      "acceptance": [
+        "五类 freshness 独立记录",
+        "空 heartbeat 不更新数据 freshness",
+        "任一关键数据 stale 时新增风险为 0"
+      ],
+      "evidence": [
+        "commit: a642860",
+        "test: test_freshness.py (empty-heartbeat-no-advance; stale->new-risk=0, reduce allowed via HALTED matrix)",
+        "5 freshness timestamps; fail-closed"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM2-06",
+      "milestone": "OM2",
+      "title": "实现保护单 watchdog 与缺失保护 finding",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-02",
+        "OM2-03",
+        "OM2-05"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/protection_watchdog.py"
+      ],
+      "acceptance": [
+        "比较实际仓位、预期保护与交易所工作订单",
+        "无保护仓位在阈值内被发现",
+        "策略可选择 repair/REDUCING/HALT"
+      ],
+      "evidence": [
+        "commit: a642860",
+        "test: test_protection_watchdog.py",
+        "actual vs expected vs venue; missing-protection finding; repair/REDUCING/HALT policy"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM2-07",
+      "milestone": "OM2",
+      "title": "实现启动与周期 reconciliation",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-02",
+        "OM2-03",
+        "OM2-05"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/reconciliation.py"
+      ],
+      "acceptance": [
+        "节点 ACTIVE 前必须启动对账成功",
+        "周期对账覆盖 orders/positions/account",
+        "每次运行保存结果与差异"
+      ],
+      "evidence": [
+        "commit: a642860",
+        "test: test_reconciliation.py",
+        "startup gate before ACTIVE; periodic orders/positions/account; persists runs+findings"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM2-08",
+      "milestone": "OM2",
+      "title": "实现 orphan order、external position 与 drift 策略",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-07",
+        "OM1-01"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/drift_policy.py"
+      ],
+      "acceptance": [
+        "adopt/cancel/review/halt 策略可配置",
+        "自动 adopt 仅限安全白名单场景",
+        "无法唯一解释时保持 HALTED/needs_review"
+      ],
+      "evidence": [
+        "commit: a642860",
+        "test: test_drift_policy.py",
+        "adopt/cancel/review/halt; auto-adopt whitelist-only; unresolved->HALTED/needs_review"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM3-01",
+      "milestone": "OM3",
+      "title": "建立实时 account equity/free margin/risk budget 模型",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-03",
+        "OM2-05"
+      ],
+      "owned_paths": [
+        "services/control-plane/risk/account_budget.py"
+      ],
+      "acceptance": [
+        "权益、可用保证金、保证金率有 freshness",
+        "stale account 不允许新增风险",
+        "多账户预算完全隔离"
+      ],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "account_budget equity/free-margin/margin-ratio; freshness-gated stale->no new risk; multi-account isolated"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM3-02",
+      "milestone": "OM3",
+      "title": "实现 fixed-risk 动态仓位计算",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM3-01",
+        "OM1-01",
+        "OM0-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/risk/position_sizing.py"
+      ],
+      "acceptance": [
+        "基于 equity×risk% 与止损距离算 quantity",
+        "按 instrument increment 向下取整",
+        "缺止损或数量小于交易所最小值时 fail-closed"
+      ],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "position_sizing PLAN §9.1 formula; floor_to_increment; fail-closed no-stop/below-min"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM3-03",
+      "milestone": "OM3",
+      "title": "修复 instrument/关联组/总敞口计算",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-02",
+        "OM3-01"
+      ],
+      "owned_paths": [
+        "services/control-plane/risk/exposure.py",
+        "services/control-plane/risk/governor.py"
+      ],
+      "acceptance": [
+        "使用 canonical instrument 比较",
+        "检查 existing + proposed 而非只检查 existing",
+        "关联组与总风险在多账户下正确"
+      ],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "exposure+governor canonical keys; checks EXISTING+PROPOSED; correlated/total"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM3-04",
+      "milestone": "OM3",
+      "title": "实现 daily loss、max drawdown 与 loss cooldown",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM3-01",
+        "OM1-01"
+      ],
+      "owned_paths": [
+        "services/control-plane/risk/loss_limits.py"
+      ],
+      "acceptance": [
+        "按 UTC/配置时区重置日预算",
+        "达到阈值自动 REDUCING/HALT",
+        "冷却结束不自动 ACTIVE，需策略/人工确认"
+      ],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "loss_limits daily reset; threshold->REDUCING/HALT; cooldown needs explicit confirm"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM3-05",
+      "milestone": "OM3",
+      "title": "实现 leverage、margin、min-notional 与交易所 filter 校验",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-04",
+        "OM3-02"
+      ],
+      "owned_paths": [
+        "services/control-plane/risk/exchange_filters.py"
+      ],
+      "acceptance": [
+        "使用交易所 instrument metadata",
+        "杠杆与保证金不足在提交前拒绝",
+        "校验结果进入 risk explain"
+      ],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "exchange_filters min-notional/lot/leverage; reject pre-submit; feeds explain"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM3-06",
+      "milestone": "OM3",
+      "title": "实现风险资金 reservation 与 TTL",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-04",
+        "OM0-05",
+        "OM3-02",
+        "OM3-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/risk/reservations.py"
+      ],
+      "acceptance": [
+        "并发意图不会超分配风险预算",
+        "失败/取消/过期释放 reservation",
+        "成交后转为 live exposure，重启后可修复"
+      ],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "reservations+TTL; concurrent cannot over-allocate (live: held(700)/rejected); release on fail/cancel/expire; restart recover"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM3-07",
+      "milestone": "OM3",
+      "title": "扩展 risk-explain API 显示计算过程与剩余额度",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM3-02",
+        "OM3-03",
+        "OM3-04",
+        "OM3-05",
+        "OM3-06"
+      ],
+      "owned_paths": [
+        "services/control-plane/risk/explain.py"
+      ],
+      "acceptance": [
+        "返回输入 equity/stop distance/limit/最终 quantity",
+        "说明每个 cap 的剩余额度",
+        "不暴露 secrets"
+      ],
+      "evidence": [
+        "commit: 2fb4671",
+        "DB om_v3_om3: 21 risk tests + 144 combined; fixed config-collision + 2 non-deterministic test bugs during acceptance",
+        "risk explain inputs/final qty/remaining headroom; no secrets"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM4-01",
+      "milestone": "OM4",
+      "title": "实现 durable execution job/outbox 与 worker claim",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-04",
+        "OM0-05",
+        "OM3-06"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/execution_jobs.py"
+      ],
+      "acceptance": [
+        "批准 intent 事务内生成 job+outbox",
+        "多 worker SKIP LOCKED 不重复 claim",
+        "job 有 retry/terminal 状态"
+      ],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "execution_jobs: job+outbox in approval txn (gateway additive); FOR UPDATE SKIP LOCKED no double-claim (live verified)"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM4-02",
+      "milestone": "OM4",
+      "title": "完善 market/limit/zone 入场 planner",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-03",
+        "OM3-02",
+        "OM3-05",
+        "OM4-01"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/strategy/intent_execution_planner.py"
+      ],
+      "acceptance": [
+        "三种入场模式均生成合法 Nautilus order",
+        "zone 边界确定性",
+        "数量/价格/TIF 全部来自有效设置和批准 intent"
+      ],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "intent_execution_planner market/limit/zone; deterministic zone; qty/price/TIF from intent+settings"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM4-03",
+      "milestone": "OM4",
+      "title": "实现滑点、价差与价格偏离 guard",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-04",
+        "OM2-05",
+        "OM4-02"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/strategy/price_guard.py"
+      ],
+      "acceptance": [
+        "market/limit 提交前读取 fresh reference",
+        "超过 bps 限制拒绝并回写",
+        "重试不得绕过 guard"
+      ],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "price_guard fresh ref pre-submit; reject >max_slippage_bps; retry re-checks (no bypass)"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM4-04",
+      "milestone": "OM4",
+      "title": "实现未成交超时、撤单确认与有限重挂",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-02",
+        "OM4-02",
+        "OM4-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/unfilled_manager.py"
+      ],
+      "acceptance": [
+        "超时后先确认 cancel 终态再重挂",
+        "max_reprices 达到后进入明确终态",
+        "每次重挂 parent/child 可追溯"
+      ],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "unfilled_manager confirm cancel terminal before reprice; max_reprices terminal; parent/child traceable"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM4-05",
+      "milestone": "OM4",
+      "title": "实现部分成交策略",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-02",
+        "OM4-04"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/partial_fill.py"
+      ],
+      "acceptance": [
+        "支持 keep/cancel/convert/abort-reduce",
+        "剩余数量按 increment 计算",
+        "market conversion 有独立滑点上限"
+      ],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "partial_fill keep/cancel/convert/abort-reduce; remainder by increment; market-conversion own slippage cap"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM4-06",
+      "milestone": "OM4",
+      "title": "建立执行错误分类、重试与退避策略",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM4-01",
+        "OM4-02"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/errors.py",
+        "services/nautilus-node/strategy/retry_policy.py"
+      ],
+      "acceptance": [
+        "区分 retryable/permanent/unknown",
+        "unknown 不自动重复提交",
+        "重试次数与退避可设置且有指标"
+      ],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "errors+retry_policy retryable/permanent/UNKNOWN; unknown->reconcile (never blind resubmit); backoff+metrics"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM4-07",
+      "milestone": "OM4",
+      "title": "把 node denial/reject/fill 终态回写 intent 与 job",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-02",
+        "OM4-01",
+        "OM4-06"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/intent_status.py"
+      ],
+      "acceptance": [
+        "denial 不再只存在节点内存",
+        "intent 可区分 denied/rejected/failed/completed",
+        "Dashboard 时间线可见 detail"
+      ],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "intent_status denial/reject/fill terminal writeback; denied/rejected/failed/completed distinguishable"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM4-08",
+      "milestone": "OM4",
+      "title": "实现节点/控制面重启后的入场恢复与幂等",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-07",
+        "OM4-01",
+        "OM4-07"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/recovery.py",
+        "services/nautilus-node/persistence/**"
+      ],
+      "acceptance": [
+        "已接受订单重启后不重复提交",
+        "unknown job 先对账再决定",
+        "cursor/spool/job 状态可恢复"
+      ],
+      "evidence": [
+        "commit: a60dc68",
+        "DB om_v3_om4: execution 28 passed (live SKIP LOCKED) + 172 combined; gateway approval no regression",
+        "recovery: accepted not resubmitted; unknown reconciled first; idempotent restart"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM5-01",
+      "milestone": "OM5",
+      "title": "实现成交后强制安装 stop loss 的保护事务",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-06",
+        "OM4-07"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/protection_manager.py",
+        "services/nautilus-node/strategy/protection.py"
+      ],
+      "acceptance": [
+        "开仓成交后在阈值内提交 stop",
+        "保护失败进入 REDUCING/HALT 并告警",
+        "保护数量与实际持仓一致"
+      ],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "protection_manager+protection: post-fill stop within threshold; failure->REDUCING/HALT+alert; qty==position"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM5-02",
+      "milestone": "OM5",
+      "title": "实现分批 take-profit ladder",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM5-01"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/strategy/take_profit.py"
+      ],
+      "acceptance": [
+        "多级数量总和不超过仓位",
+        "每级 order role 与 position 可追溯",
+        "部分成交后正确更新剩余保护"
+      ],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "take_profit ladder sum<=position; roles via order_links; recompute after partial"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM5-03",
+      "milestone": "OM5",
+      "title": "修复 move_stop_loss 与 move_stop_to_entry 翻译",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-03",
+        "OM5-01"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/strategy/intent_execution_planner.py"
+      ],
+      "acceptance": [
+        "生成 STOP_MARKET/STOP_LIMIT + trigger，不再生成普通 market",
+        "先建新保护再安全撤旧单或使用交易所支持的 replace",
+        "testnet move stop 成功"
+      ],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "planner move_stop->STOP_MARKET/STOP_LIMIT+trigger (never plain market); new-before-cancel"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM5-04",
+      "milestone": "OM5",
+      "title": "实现 breakeven 自动规则",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-04",
+        "OM5-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/breakeven.py"
+      ],
+      "acceptance": [
+        "按 R/价格触发且只执行一次",
+        "offset 与费用保护可设置",
+        "行情 stale 时不应用侧误触发"
+      ],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "breakeven R/price once; offset+fee_buffer; stale-safe (price_stale guard)"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM5-05",
+      "milestone": "OM5",
+      "title": "实现 trailing stop",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM2-04",
+        "OM2-05",
+        "OM5-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/trailing_stop.py",
+        "services/nautilus-node/strategy/trailing_stop.py"
+      ],
+      "acceptance": [
+        "原生 trailing 优先",
+        "应用侧 trailing 有 update rate limit",
+        "断流时 fail-safe 且不放宽 stop"
+      ],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "trailing native preferred; app-side rate-limited; never_loosen on disconnect"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM5-06",
+      "milestone": "OM5",
+      "title": "实现 partial_close",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-03",
+        "OM2-03",
+        "OM4-07"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/strategy/intent_execution_planner.py",
+        "services/control-plane/order_management/exits.py"
+      ],
+      "acceptance": [
+        "支持 fraction 或 quantity",
+        "reduce-only 且不超过实际仓位",
+        "完成后重算 stop/TP 数量"
+      ],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "exits.partial_close reduce-only<=position; recompute stop/TP"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM5-07",
+      "milestone": "OM5",
+      "title": "实现 close_position 与保护单清理",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM5-01",
+        "OM5-06"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/exits.py"
+      ],
+      "acceptance": [
+        "按交易所实际 quantity 全平",
+        "flat 后撤残余 stop/TP",
+        "最终对账通过才 completed"
+      ],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "exits.close_position exchange actual qty; cancel residual; completed only after reconcile"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM5-08",
+      "milestone": "OM5",
+      "title": "实现保护单重启恢复与自动修复",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-07",
+        "OM5-01",
+        "OM5-02",
+        "OM5-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/protection_recovery.py"
+      ],
+      "acceptance": [
+        "重启后发现缺失/重复保护",
+        "修复动作幂等",
+        "无法安全修复时保持 REDUCING/HALT"
+      ],
+      "evidence": [
+        "commit: b323942",
+        "DB om_v3_om5: tests/order_management/ 163 passed, no test bugs/regression",
+        "protection_recovery restart missing/dup; idempotent; unsafe->REDUCING/HALT"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM6-01",
+      "milestone": "OM6",
+      "title": "建立持久化 command orchestrator 与终态状态机",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-04",
+        "OM0-05",
+        "OM4-07"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/commands.py"
+      ],
+      "acceptance": [
+        "requested→running→verifying→terminal",
+        "命令重放返回同一结果",
+        "accepted 不等于 completed"
+      ],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "commands orchestrator FSM requested->accepted->running->verifying->terminal; replay idempotent on request_id; accepted!=completed; node_command_runs"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM6-02",
+      "milestone": "OM6",
+      "title": "完善 cancel_all 批处理、节流、重试与最终核验",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM6-01",
+        "OM2-07"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/commands/cancel_all.py"
+      ],
+      "acceptance": [
+        "按设置 batch/delay 执行",
+        "每张订单有结果",
+        "交易所无工作订单后才 completed"
+      ],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "cancel_all batch+delay+retry; per-order result; completed only after venue no-working-orders verify"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM6-03",
+      "milestone": "OM6",
+      "title": "完善 close_all reduce-only 批处理与最终 flat 核验",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM6-01",
+        "OM5-07"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/commands/close_all.py"
+      ],
+      "acceptance": [
+        "不再因同 tick rate limit 丢单",
+        "部分失败自动有限重试",
+        "所有目标仓位交易所 flat 后才 completed"
+      ],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "close_all reduce-only via injectable close_one; no same-tick drops; bounded retry; completed only after all targets flat"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM6-04",
+      "milestone": "OM6",
+      "title": "修正 HALTED/REDUCING 对开仓与减仓动作的语义",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-01",
+        "OM3-03"
+      ],
+      "owned_paths": [
+        "services/control-plane/risk/governor.py",
+        "services/nautilus-node/runtime/lifecycle.py"
+      ],
+      "acceptance": [
+        "HALTED 阻止 open/add",
+        "HALTED 仍允许 cancel/partial/full close",
+        "REDUCING 只允许风险下降动作"
+      ],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "governor consults FROZEN halted_action_allowed matrix; HALTED blocks open/add allows cancel/partial/full close; REDUCING risk-reducing only; gateway/governor tests pass"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM6-05",
+      "milestone": "OM6",
+      "title": "实现 strategy 执行结果回传 command orchestrator",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM6-01",
+        "OM6-02",
+        "OM6-03"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/app/nautilus_actors.py",
+        "services/nautilus-node/commands/result_sink.py"
+      ],
+      "acceptance": [
+        "msgbus dispatch 后有 running/completed/failed 回传",
+        "错误和每项结果可查询",
+        "ACK 失败可重试且幂等"
+      ],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "result_sink + nautilus_actors writeback running/completed/failed; idempotent ACK retry"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM6-06",
+      "milestone": "OM6",
+      "title": "处理 position identity 与外部持仓平仓边界",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-02",
+        "OM2-03",
+        "OM6-03"
+      ],
+      "owned_paths": [
+        "services/nautilus-node/commands/position_identity.py"
+      ],
+      "acceptance": [
+        "EXTERNAL/BOTH 可归并到同一交易所仓位",
+        "投影不残留假 open 行",
+        "close_all testnet 后 DB 与交易所均 flat"
+      ],
+      "evidence": [
+        "commit: 517a583",
+        "DB om_v3_om6: 189 passed (commands + gateway + governor, no regression)",
+        "position_identity EXTERNAL/BOTH merge; no phantom open"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-01",
+      "milestone": "OM7",
+      "title": "新增 /settings/orders 路由、导航与页面框架",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM1-03"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/pages/settings/OrderSettingsPage.tsx",
+        "bridge/apps/dashboard/src/App.tsx"
+      ],
+      "acceptance": [
+        "Sidebar 有 Settings",
+        "支持 loading/error/empty/readonly 状态",
+        "不使用生产 fixture fallback"
+      ],
+      "evidence": [
+        "commit: 115813c",
+        "tsc build + 10 vitest pass (3 new + 7 existing, no regression); getEmpty* no fixture fallback",
+        "/settings/orders route + sidebar nav additive in App.tsx; loading/error/empty/readonly(viewer) states; api.ts settings client"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-02",
+      "milestone": "OM7",
+      "title": "实现 scope selector 与继承/覆盖/生效值展示",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM1-02",
+        "OM7-01"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/components/settings/ScopeSelector.tsx"
+      ],
+      "acceptance": [
+        "global/account/instrument 可切换",
+        "字段显示 inherited/source/effective",
+        "清除 override 可恢复继承"
+      ],
+      "evidence": [
+        "commit: 115813c",
+        "tsc build + 10 vitest pass (3 new + 7 existing, no regression); getEmpty* no fixture fallback",
+        "ScopeSelector global/account/instrument; inherited/source/effective; clear-override restores inheritance"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-03",
+      "milestone": "OM7",
+      "title": "实现 General 与 Entry Orders 设置 tab",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM1-01",
+        "OM7-01",
+        "OM7-02"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/pages/settings/tabs/GeneralTab.tsx",
+        "bridge/apps/dashboard/src/pages/settings/tabs/EntryOrdersTab.tsx"
+      ],
+      "acceptance": [
+        "覆盖 PLAN 中全部 General/Entry 字段",
+        "范围/单位/帮助文本完整",
+        "字段联动与禁用条件正确"
+      ],
+      "evidence": [
+        "commit: 115813c",
+        "tsc build + 10 vitest pass (3 new + 7 existing, no regression); getEmpty* no fixture fallback",
+        "General+Entry tabs schema-driven (orderSettingsDescriptor); unit/range/help; interlock/disable"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-04",
+      "milestone": "OM7",
+      "title": "实现 Protection & Exits 设置 tab 与 TP ladder 编辑器",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM5-01",
+        "OM5-02",
+        "OM5-03",
+        "OM7-02"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/pages/settings/tabs/ProtectionTab.tsx"
+      ],
+      "acceptance": [
+        "支持 stop/TP/breakeven/trailing/partial close",
+        "TP fraction 总和实时校验",
+        "危险组合无法保存"
+      ],
+      "evidence": [
+        "commit: 640fd7a",
+        "tsc + 18 vitest pass (no regression)",
+        "ProtectionTab stop/TP ladder/breakeven/trailing/partial-close; real-time TP fraction-sum; dangerous combos block save"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-05",
+      "milestone": "OM7",
+      "title": "实现 Money & Risk 设置 tab",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM3-07",
+        "OM7-02"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/pages/settings/tabs/MoneyRiskTab.tsx"
+      ],
+      "acceptance": [
+        "覆盖 sizing/exposure/margin/loss/drawdown/reservation",
+        "展示当前占用与变更后预估",
+        "放宽 live 风险突出高危提示"
+      ],
+      "evidence": [
+        "commit: 3efba95",
+        "tsc build + 13 vitest pass (no regression)",
+        "MoneyRiskTab sizing/exposure/margin/loss/drawdown/reservation; live-risk relaxation prominent confirm in OrderSettingsPage save flow (detectLiveRiskRelaxation + confirm:true)"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-06",
+      "milestone": "OM7",
+      "title": "实现 Price Monitor 与 Reconciliation 设置 tab",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM2-05",
+        "OM2-07",
+        "OM7-02"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/pages/settings/tabs/MonitoringTab.tsx"
+      ],
+      "acceptance": [
+        "展示 freshness 实况与阈值",
+        "支持 drift/orphan/external 策略",
+        "当前 unhealthy 状态不可被 UI 隐藏"
+      ],
+      "evidence": [
+        "commit: 3efba95",
+        "tsc build + 13 vitest pass (no regression)",
+        "MonitoringTab price_monitor freshness thresholds + reconciliation drift/orphan/external; live freshness signals surfaced (FreshnessSignal), unhealthy not hidden"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-07",
+      "milestone": "OM7",
+      "title": "实现 Emergency、Notifications 与 Advanced 设置 tab",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM6-01",
+        "OM7-02"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/pages/settings/tabs/EmergencyTab.tsx",
+        "bridge/apps/dashboard/src/pages/settings/tabs/NotificationsTab.tsx",
+        "bridge/apps/dashboard/src/pages/settings/tabs/AdvancedTab.tsx"
+      ],
+      "acceptance": [
+        "批处理/重试/timeout 字段完整",
+        "通知事件与严重级别可配置",
+        "Advanced 明确标识高风险"
+      ],
+      "evidence": [
+        "commit: 640fd7a",
+        "tsc + 18 vitest pass (no regression)",
+        "Emergency/Notifications/Advanced tabs; batch/retry/timeout; per-event severity; Advanced HIGH RISK flag"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-08",
+      "milestone": "OM7",
+      "title": "实现服务器端 validate、diff、impact 与保存冲突处理",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM1-03",
+        "OM1-04",
+        "OM7-03",
+        "OM7-04",
+        "OM7-05",
+        "OM7-06",
+        "OM7-07"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/components/settings/SaveReviewDialog.tsx"
+      ],
+      "acceptance": [
+        "保存前展示 before/after/effective diff",
+        "必须填写 reason",
+        "expected_version 冲突可刷新/重放而不覆盖"
+      ],
+      "evidence": [
+        "commit: 6fce861",
+        "npm build + 22 vitest pass (incl. isolation); 2 real failures caught+fixed in acceptance",
+        "SaveReviewDialog before/after/effective diff; reason required; 409 conflict refresh/replay no overwrite"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-09",
+      "milestone": "OM7",
+      "title": "实现版本历史、desired/effective 状态与 rollback UI",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM1-04",
+        "OM1-05",
+        "OM7-08"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/pages/settings/SettingsHistory.tsx"
+      ],
+      "acceptance": [
+        "可查看版本作者/时间/reason/diff",
+        "节点未应用时显著告警",
+        "rollback 走同样验证与确认流程"
+      ],
+      "evidence": [
+        "commit: 6fce861",
+        "npm build + 22 vitest pass (incl. isolation); 2 real failures caught+fixed in acceptance",
+        "SettingsHistory versions author/time/reason/diff; desired!=effective drift warning; rollback through review"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-10",
+      "milestone": "OM7",
+      "title": "实现设置权限、live 高危确认与审计查看",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM1-07",
+        "OM7-08"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/components/settings/DangerConfirmDialog.tsx"
+      ],
+      "acceptance": [
+        "viewer 无写控件",
+        "risk_admin 权限由 API 决定",
+        "高危确认不可仅靠前端"
+      ],
+      "evidence": [
+        "commit: 6fce861",
+        "npm build + 22 vitest pass (incl. isolation); 2 real failures caught+fixed in acceptance",
+        "DangerConfirmDialog viewer no write controls; risk_admin from API; danger confirm+operator_signoff backend-enforced"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-11",
+      "milestone": "OM7",
+      "title": "增强 Orders 页面：过滤、详情、时间线、保护状态与人工动作",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM2-02",
+        "OM2-06",
+        "OM4-07",
+        "OM5-07",
+        "OM6-01"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/pages/orders/**"
+      ],
+      "acceptance": [
+        "可按 account/instrument/status/role/时间筛选",
+        "详情展示 intent→job→order→event→position 链",
+        "人工 cancel/move-stop/partial-close/close 有确认与结果"
+      ],
+      "evidence": [
+        "commit: 640fd7a",
+        "tsc + 18 vitest pass (no regression)",
+        "OrdersPage filter account/instrument/status/role/time; intent->job->order->event->position timeline; manual cancel/move-stop/partial-close/close with confirm+result"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM7-12",
+      "milestone": "OM7",
+      "title": "设置面板与订单中心的可访问性、响应式与 E2E 选择器",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM7-01",
+        "OM7-11"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/src/styles.css",
+        "bridge/apps/dashboard/e2e/**"
+      ],
+      "acceptance": [
+        "键盘可完成核心流程",
+        "错误摘要和 ARIA 标签完整",
+        "桌面与窄屏无阻断"
+      ],
+      "evidence": [
+        "commit: 6fce861",
+        "npm build + 22 vitest pass (incl. isolation); 2 real failures caught+fixed in acceptance",
+        "a11y ARIA/keyboard/error-summary/focus + responsive + Playwright e2e specs + data-testid selectors"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM8-01",
+      "milestone": "OM8",
+      "title": "增加订单管理指标、structured logs 与 trace correlation",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-02",
+        "OM4-07",
+        "OM6-01"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/metrics.py",
+        "services/nautilus-node/observability/**"
+      ],
+      "acceptance": [
+        "intent/job/order/event/command 共用 trace IDs",
+        "关键延迟和失败率可监控",
+        "日志不含 secrets"
+      ],
+      "evidence": [
+        "commit: 177e6b2",
+        "DB om_v3_om8: 205 passed",
+        "metrics.py + nautilus observability tracing/metrics/logs; trace-id correlation intent->job->order->event->command (inject_trace_context additive); latency/failure metrics; structured logs redact secrets (verified test)"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM8-02",
+      "milestone": "OM8",
+      "title": "实现 Critical/High/Medium 通知与去重",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM2-06",
+        "OM2-07",
+        "OM3-04",
+        "OM6-03",
+        "OM7-07"
+      ],
+      "owned_paths": [
+        "services/control-plane/order_management/alerts.py"
+      ],
+      "acceptance": [
+        "无保护、stale、drift、close_all 失败必告警",
+        "告警有 dedupe/cooldown",
+        "恢复事件可见"
+      ],
+      "evidence": [
+        "commit: 9eb6226",
+        "DB om_v3_om8b: 229 passed",
+        "alerts.py severity Critical/High/Medium; must-alert no-protection/stale/drift/close_all-fail; dedupe+cooldown; recovery events; notification outbox routing"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM8-03",
+      "milestone": "OM8",
+      "title": "完成状态机、设置、资金管理与幂等单元/契约测试",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM0-06",
+        "OM1-08",
+        "OM3-07",
+        "OM4-08",
+        "OM5-08",
+        "OM6-06"
+      ],
+      "owned_paths": [
+        "tests/order_management/unit/**",
+        "tests/order_management/contracts/**"
+      ],
+      "acceptance": [
+        "P0 模块分支覆盖关键异常路径",
+        "重复/乱序/精度/冲突均有用例",
+        "测试不依赖外部网络"
+      ],
+      "evidence": [
+        "commit: 177e6b2",
+        "DB om_v3_om8: 205 passed",
+        "unit/** branch coverage of P0 exception paths (illegal transitions, settings conflict, sizing fail-closed, idempotency replay, dup/out-of-order/precision, over-allocation, empty-heartbeat) + JSON-Schema<->pydantic + descriptor consistency; deterministic, no network"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM8-04",
+      "milestone": "OM8",
+      "title": "构建模拟交易所集成测试矩阵",
+      "executor": "codex",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM8-03"
+      ],
+      "owned_paths": [
+        "tests/order_management/simulated_venue/**"
+      ],
+      "acceptance": [
+        "覆盖 market/limit/partial/cancel/stop/TP/restart/timeout",
+        "可注入 accept-unknown 与乱序事件",
+        "失败返回非零"
+      ],
+      "evidence": [
+        "commit: 9eb6226",
+        "DB om_v3_om8b: 229 passed",
+        "simulated_venue FakeVenue + injectable faults (accept-then-unknown/out-of-order/dup/timeout) + scenario matrix market/limit/partial/cancel/stop/TP/move/close/cancel_all/close_all/restart; failures non-zero"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM8-05",
+      "milestone": "OM8",
+      "title": "执行 Binance testnet 22 项固定验收矩阵",
+      "executor": "server_ops",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "blocked",
+      "dependencies": [
+        "OM8-04"
+      ],
+      "owned_paths": [
+        "scripts/order_management_acceptance.py",
+        "docs/acceptance/ORDER_MANAGEMENT_TESTNET_REPORT.md"
+      ],
+      "acceptance": [
+        "PLAN §15.3 的 22 项全部有证据",
+        "每项记录订单 ID、事件链、最终交易所状态",
+        "失败项不得被报告为通过"
+      ],
+      "evidence": [
+        "artifact commit: 1546cf0",
+        "scripts/order_management_acceptance.py --list=22 (§15.3) + --dry-run OK offline; TESTNET_REPORT template",
+        "BLOCKED on operator: live run needs Binance testnet creds (BINANCE_TESTNET_API_KEY/SECRET) + running system. Run: python scripts/order_management_acceptance.py (records order IDs/event chain/exchange status; failures non-zero)"
+      ],
+      "blocker": "execution requires operator/infra (Binance testnet creds / chaos env / operator signoff); artifacts ready",
+      "notes": []
+    },
+    {
+      "id": "OM8-06",
+      "milestone": "OM8",
+      "title": "执行 chaos、重启、断网、WS reconnect 与数据库故障验收",
+      "executor": "server_ops",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "blocked",
+      "dependencies": [
+        "OM8-05"
+      ],
+      "owned_paths": [
+        "scripts/order_management_chaos.py",
+        "docs/acceptance/ORDER_MANAGEMENT_CHAOS_REPORT.md"
+      ],
+      "acceptance": [
+        "节点/CP/PG/Redis 重启不重复下单",
+        "stale 时新增风险为 0",
+        "恢复后先对账再 ACTIVE"
+      ],
+      "evidence": [
+        "artifact commit: 1546cf0",
+        "scripts/order_management_chaos.py --list/--dry-run OK offline; CHAOS_REPORT template",
+        "BLOCKED on infra: live run needs node/CP/PG/Redis restart + network/WS/DB fault injection environment"
+      ],
+      "blocker": "execution requires operator/infra (Binance testnet creds / chaos env / operator signoff); artifacts ready",
+      "notes": []
+    },
+    {
+      "id": "OM8-07",
+      "milestone": "OM8",
+      "title": "完成设置面板与订单中心 Playwright E2E",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P1",
+      "status": "done",
+      "dependencies": [
+        "OM7-12",
+        "OM8-03"
+      ],
+      "owned_paths": [
+        "bridge/apps/dashboard/e2e/order-settings.spec.ts",
+        "bridge/apps/dashboard/e2e/order-center.spec.ts"
+      ],
+      "acceptance": [
+        "覆盖全部 tab、scope、validate、save、conflict、history、rollback、RBAC",
+        "危险操作有确认",
+        "E2E 失败返回非零"
+      ],
+      "evidence": [
+        "commit: 7321030",
+        "host-run chromium: npm run build + playwright test -> 15 passed; vitest 22 passed",
+        "order-settings + order-center specs (page.route mocked): all tabs/scope/validate/save/conflict/history/rollback/RBAC/danger-confirm + order timeline/manual actions; failing e2e non-zero"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM8-08",
+      "milestone": "OM8",
+      "title": "安全审计：RBAC、token、secrets、输入校验与审计完整性",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM1-07",
+        "OM7-10",
+        "OM8-03"
+      ],
+      "owned_paths": [
+        "docs/acceptance/ORDER_MANAGEMENT_SECURITY_REPORT.md"
+      ],
+      "acceptance": [
+        "无匿名写端点",
+        "无 secret 回显/入库/导出",
+        "高危操作审计与 request_id 100% 完整"
+      ],
+      "evidence": [
+        "commit: 1546cf0",
+        "DB om_v3_om8: tests/order_management/security/ 6 passed",
+        "SECURITY_REPORT control matrix: no anonymous/viewer writes (router require_settings_actor + RBAC), no secret echo/store/export, request_id+audit 100% on dangerous ops — each control mapped to enforcing code + test"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM8-09",
+      "milestone": "OM8",
+      "title": "更新 release-gate.json 与机器可读 evidence",
+      "executor": "codex",
+      "complexity": "M",
+      "priority": "P0",
+      "status": "done",
+      "dependencies": [
+        "OM8-05",
+        "OM8-06",
+        "OM8-07",
+        "OM8-08"
+      ],
+      "owned_paths": [
+        "release-gate.json"
+      ],
+      "acceptance": [
+        "所有订单管理 gate 关联报告路径与 commit SHA",
+        "未满足条件保持 blocked/testnet_only",
+        "evaluated_commit 等于分支头"
+      ],
+      "evidence": [
+        "release-gate.json order_management section: 12 gates (9 passed w/ commit SHAs, 3 blocked OM8-05/06/10)",
+        "evaluated_commit=cc3759d (branch head); state=blocked; ceiling=testnet_only; window-C gate untouched",
+        "unmet gates (testnet/chaos/rollout) keep state blocked per acceptance"
+      ],
+      "blocker": null,
+      "notes": []
+    },
+    {
+      "id": "OM8-10",
+      "milestone": "OM8",
+      "title": "完成 runbook、shadow/testnet/live-readonly/live-small 分阶段放量",
+      "executor": "operator",
+      "complexity": "L",
+      "priority": "P0",
+      "status": "blocked",
+      "dependencies": [
+        "OM8-09"
+      ],
+      "owned_paths": [
+        "docs/runbooks/ORDER_MANAGEMENT_OPERATIONS.md",
+        "docs/runbooks/ORDER_MANAGEMENT_ROLLBACK.md"
+      ],
+      "acceptance": [
+        "HALT/cancel_all/close_all/rollback 步骤可复现",
+        "live 前有 operator signoff",
+        "旧 prod 路径不被无意修改"
+      ],
+      "evidence": [
+        "artifact commit: 1546cf0",
+        "docs/runbooks/ORDER_MANAGEMENT_OPERATIONS.md + ROLLBACK.md (HALT/cancel_all/close_all/rollback steps; shadow->testnet->live-readonly->live-small)",
+        "BLOCKED on operator: staged live rollout requires explicit operator signoff + release-gate approval; old prod path untouched"
+      ],
+      "blocker": "execution requires operator/infra (Binance testnet creds / chaos env / operator signoff); artifacts ready",
+      "notes": []
+    }
+  ]
+}
