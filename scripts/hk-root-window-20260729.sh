@@ -512,6 +512,41 @@ raise SystemExit(f"node {port} did not become ready and HALTED: {last_error}")
 PY
 }
 
+wait_for_controlplane_http() {
+  local url="http://127.0.0.1:8080/openapi.json"
+  local max_attempts=30
+  local retry_delay_seconds=2
+  local attempt
+  local curl_error
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    curl_error=""
+    if curl_error=$(
+      curl \
+        -fsS \
+        --connect-timeout 1 \
+        --max-time 5 \
+        "$url" \
+        --output /dev/null \
+        2>&1
+    ); then
+      echo "Control plane HTTP ready: $url (attempt $attempt/$max_attempts)"
+      return
+    fi
+
+    echo \
+      "Waiting for control plane HTTP: attempt $attempt/$max_attempts failed: ${curl_error:-unknown curl error}" \
+      >&2
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      echo "Retrying control plane HTTP in ${retry_delay_seconds}s" >&2
+      sleep "$retry_delay_seconds"
+    fi
+  done
+
+  die \
+    "control plane HTTP did not become ready after $max_attempts attempts: $url; last error: ${curl_error:-unknown curl error}"
+}
+
 [ "$(id -u)" -eq 0 ] || die "run as root with sudo"
 require_command docker
 require_command systemctl
@@ -778,7 +813,7 @@ for unit in \
   trader-v3-lifecycle-monitor; do
   systemctl is-active --quiet "$unit" || die "$unit failed to start"
 done
-curl -fsS --max-time 10 http://127.0.0.1:8080/openapi.json >/dev/null
+wait_for_controlplane_http
 
 docker start "$NODE_A"
 verify_node_halted 8081
