@@ -1,0 +1,10 @@
+[Unit]
+Description=Trader v3: run trade outcome metrics daily
+
+[Timer]
+OnCalendar=*-*-* 00:30:00 UTC
+Persistent=true
+Unit=trader-v3-trade-outcomes.service
+
+[Install]
+WantedBy=timers.target
