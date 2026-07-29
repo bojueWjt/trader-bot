@@ -18,10 +18,15 @@ PATCH_FILES = (
     "exchange_cancel_adapter.py",
     "node.py",
     "binance_execution.py",
+    "binance_futures_execution.py",
 )
 BINANCE_DST = (
     "/usr/local/lib/python3.12/site-packages/"
     "nautilus_trader/adapters/binance/execution.py"
+)
+BINANCE_FUTURES_DST = (
+    "/usr/local/lib/python3.12/site-packages/"
+    "nautilus_trader/adapters/binance/futures/execution.py"
 )
 
 
@@ -135,7 +140,11 @@ class GenRecreatePatchedTest(unittest.TestCase):
         )
 
     def test_generated_mounts_use_each_canonical_source_destination_pair_once(self):
-        result = self.run_script("trader-v3-node-a", BINANCE_DST)
+        result = self.run_script(
+            "trader-v3-node-a",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         mounts = self.generated_mounts()
@@ -151,6 +160,8 @@ class GenRecreatePatchedTest(unittest.TestCase):
             "/app/runtime/exchange_cancel_adapter.py:ro",
             f"{self.patch_dir}/node.py:/app/app/node.py:ro",
             f"{self.patch_dir}/binance_execution.py:{BINANCE_DST}:ro",
+            f"{self.patch_dir}/binance_futures_execution.py:"
+            f"{BINANCE_FUTURES_DST}:ro",
         }
         self.assertTrue(expected.issubset(set(mounts)))
         for mount in expected:
@@ -165,7 +176,11 @@ class GenRecreatePatchedTest(unittest.TestCase):
         )
 
     def test_generated_container_always_starts_halted(self):
-        result = self.run_script("trader-v3-node-a", BINANCE_DST)
+        result = self.run_script(
+            "trader-v3-node-a",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         environment = self.generated_environment()
@@ -179,6 +194,7 @@ class GenRecreatePatchedTest(unittest.TestCase):
         result = self.run_script(
             "trader-v3-node-a",
             "/app/projection/actor.py",
+            BINANCE_FUTURES_DST,
         )
 
         self.assertEqual(result.returncode, 2)

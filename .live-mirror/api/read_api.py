@@ -533,7 +533,7 @@ def issue_operator_command(
     from audit import dangerous_operation_payload, record_audit_event
 
     target_nodes = body.get("target_nodes") or []
-    scope = body.get("scope") or {}
+    scope = _operator_command_scope(body, request_id, reason)
     conn = psycopg2.connect(database_url)
     try:
         result = issue_command(
@@ -554,6 +554,19 @@ def issue_operator_command(
         return result
     finally:
         conn.close()
+
+
+def _operator_command_scope(body: dict, request_id: str, reason: str) -> dict:
+    scope = dict(body.get("scope") or {})
+    scope["authorization"] = {
+        "authorized_by_type": "user",
+        "authorized_by_id": "risk_admin",
+        "source_message_id": request_id,
+        "created_by_service": "control-plane",
+    }
+    scope["request_id"] = request_id
+    scope["reason"] = reason
+    return scope
 
 
 @app.post("/v1/nodes/{node_id}/events")

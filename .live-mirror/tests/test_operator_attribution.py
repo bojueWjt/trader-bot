@@ -110,6 +110,23 @@ def _assert_no_order_writes(fake_db):
     )
 
 
+def test_operator_command_scope_persists_user_authorization() -> None:
+    scope = read_api._operator_command_scope(
+        {"scope": {"account_id": "account-a"}},
+        "operator-request-42",
+        "user requested cancel all",
+    )
+
+    assert scope["authorization"] == {
+        "authorized_by_type": "user",
+        "authorized_by_id": "risk_admin",
+        "source_message_id": "operator-request-42",
+        "created_by_service": "control-plane",
+    }
+    assert scope["request_id"] == "operator-request-42"
+    assert scope["reason"] == "user requested cancel all"
+
+
 def _use_parent_row(monkeypatch, fake_db, row):
     class ParentCursor:
         def __init__(self):

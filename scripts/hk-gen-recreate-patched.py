@@ -2,7 +2,8 @@
 """Generate fail-closed recreate scripts for trader-v3 node containers.
 
 Usage (root):
-  python3 hk-gen-recreate-patched.py trader-v3-node-a BINANCE_EXEC_DST
+  python3 hk-gen-recreate-patched.py \
+    trader-v3-node-a BINANCE_EXEC_DST BINANCE_FUTURES_EXEC_DST
 
 Discover BINANCE_EXEC_DST from the running image before generation:
   docker exec trader-v3-node-a python -c \
@@ -22,14 +23,16 @@ class DeploymentConfigError(ValueError):
 
 
 def parse_args(argv):
-    if len(argv) != 3:
+    if len(argv) != 4:
         raise DeploymentConfigError(
-            "BINANCE_EXEC_DST is required: "
-            "hk-gen-recreate-patched.py CONTAINER BINANCE_EXEC_DST"
+            "BINANCE_EXEC_DST and BINANCE_FUTURES_EXEC_DST are required: "
+            "hk-gen-recreate-patched.py CONTAINER "
+            "BINANCE_EXEC_DST BINANCE_FUTURES_EXEC_DST"
         )
 
     name = argv[1].strip()
     binance_dst = argv[2].strip()
+    binance_futures_dst = argv[3].strip()
     if not name:
         raise DeploymentConfigError("container name is empty")
     if not binance_dst:
@@ -38,11 +41,21 @@ def parse_args(argv):
         raise DeploymentConfigError("BINANCE_EXEC_DST must be an absolute path")
     if ":" in binance_dst or "\n" in binance_dst:
         raise DeploymentConfigError("BINANCE_EXEC_DST contains invalid characters")
+    if not binance_futures_dst:
+        raise DeploymentConfigError("BINANCE_FUTURES_EXEC_DST is empty")
+    if not binance_futures_dst.startswith("/"):
+        raise DeploymentConfigError(
+            "BINANCE_FUTURES_EXEC_DST must be an absolute path"
+        )
+    if ":" in binance_futures_dst or "\n" in binance_futures_dst:
+        raise DeploymentConfigError(
+            "BINANCE_FUTURES_EXEC_DST contains invalid characters"
+        )
 
-    return name, binance_dst
+    return name, binance_dst, binance_futures_dst
 
 
-def explicit_mounts(trader_root, suffix, binance_dst):
+def explicit_mounts(trader_root, suffix, binance_dst, binance_futures_dst):
     patch_dir = trader_root / "container-patches"
     return [
         (str(trader_root / "node-state" / suffix), "/state", "rw"),
@@ -78,6 +91,11 @@ def explicit_mounts(trader_root, suffix, binance_dst):
         ),
         (str(patch_dir / "node.py"), "/app/app/node.py", "ro"),
         (str(patch_dir / "binance_execution.py"), binance_dst, "ro"),
+        (
+            str(patch_dir / "binance_futures_execution.py"),
+            binance_futures_dst,
+            "ro",
+        ),
     ]
 
 
@@ -136,9 +154,14 @@ def append_inherited_mounts(run, inherited_mounts, explicit):
         run.extend(["-v", f"{source}:{destination}:{mode}"])
 
 
-def generate(name, binance_dst, trader_root):
+def generate(name, binance_dst, binance_futures_dst, trader_root):
     suffix = name.rsplit("-", 1)[-1]
-    mounts = explicit_mounts(trader_root, suffix, binance_dst)
+    mounts = explicit_mounts(
+        trader_root,
+        suffix,
+        binance_dst,
+        binance_futures_dst,
+    )
     validate_mount_plan(mounts)
     validate_patch_sources(mounts, trader_root)
 
@@ -208,9 +231,9 @@ def main(argv=None):
         argv = sys.argv
 
     try:
-        name, binance_dst = parse_args(argv)
+        name, binance_dst, binance_futures_dst = parse_args(argv)
         trader_root = Path(os.environ.get("TRADER_ROOT", "/srv/trader-v3"))
-        generate(name, binance_dst, trader_root)
+        generate(name, binance_dst, binance_futures_dst, trader_root)
     except DeploymentConfigError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         return 2
