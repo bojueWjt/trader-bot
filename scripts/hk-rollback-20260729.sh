@@ -25,7 +25,21 @@ on_error() {
   echo "ROLLBACK FAILED: nodes are stopped" >&2
   exit "$status"
 }
-trap on_error ERR INT TERM
+
+on_signal() {
+  local status="$1"
+  local signal_name="$2"
+  if [ "$MUTATION_STARTED" -eq 1 ]; then
+    docker stop -t 20 "$NODE_A" "$NODE_B" >/dev/null 2>&1 || true
+  fi
+  echo "ROLLBACK INTERRUPTED by $signal_name: nodes are stopped" >&2
+  exit "$status"
+}
+
+trap on_error ERR
+trap 'on_signal 129 HUP' HUP
+trap 'on_signal 130 INT' INT
+trap 'on_signal 143 TERM' TERM
 
 load_database_url() {
   DATABASE_URL=$(
@@ -81,9 +95,64 @@ PY
 [ "$(id -u)" -eq 0 ] || die "run as root with sudo"
 [ -n "$BACKUP_ROOT" ] || die "usage: $0 BACKUP_ROOT"
 [ -r "$BACKUP_ROOT/index.tsv" ] || die "backup index missing"
+[ -r "$BACKUP_ROOT/BACKUP_SHA256SUMS" ] || die "backup checksum manifest missing"
+[ -r "$D/SHA256SUMS" ] || die "deployment checksum manifest missing"
 
 exec 9>/var/lock/trader-v3-deploy-20260729.lock
 flock -n 9 || die "another trader-v3 deployment is running"
+
+(cd "$D" && sha256sum -c SHA256SUMS)
+(cd "$BACKUP_ROOT" && sha256sum -c BACKUP_SHA256SUMS)
+python3 - "$BACKUP_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+backup_root = Path(sys.argv[1])
+required = [
+    "index.tsv",
+    "preexisting-0009",
+    "timer-enabled-state",
+    "timer-active-state",
+    "trader.dump",
+    "outcomes-and-migrations.dump",
+    "trade-outcomes-data.sql",
+]
+for relative_path in required:
+    path = backup_root / relative_path
+    if not path.is_file():
+        raise SystemExit(f"required backup input missing: {path}")
+
+preexisting = (backup_root / "preexisting-0009").read_text(
+    encoding="utf-8"
+).strip()
+if preexisting not in {"0", "1"}:
+    raise SystemExit(f"invalid preexisting-0009 marker: {preexisting}")
+if preexisting == "1":
+    job_data = backup_root / "trade-outcome-job-runs-data.sql"
+    if not job_data.is_file():
+        raise SystemExit(f"required backup input missing: {job_data}")
+
+seen = set()
+for raw_line in (backup_root / "index.tsv").read_text(
+    encoding="utf-8"
+).splitlines():
+    fields = raw_line.split("\t", 1)
+    if len(fields) != 2:
+        raise SystemExit(f"invalid backup index line: {raw_line!r}")
+    state, path_text = fields
+    if state not in {"present", "absent"}:
+        raise SystemExit(f"invalid backup state: {state}")
+    if not path_text.startswith("/"):
+        raise SystemExit(f"backup path is not absolute: {path_text}")
+    if path_text in seen:
+        raise SystemExit(f"duplicate backup path: {path_text}")
+    seen.add(path_text)
+    if state == "present":
+        backup_path = backup_root / "files" / path_text.lstrip("/")
+        if not backup_path.exists():
+            raise SystemExit(f"indexed backup file missing: {backup_path}")
+print("rollback backup inventory verified")
+PY
 
 docker inspect "$NODE_A" "$NODE_B" >/dev/null
 python3 - "$NODE_A" "$NODE_B" "$T/container-patches/node.py" <<'PY'

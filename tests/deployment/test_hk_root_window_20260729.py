@@ -71,6 +71,10 @@ class RootWindow20260729Test(unittest.TestCase):
             'database_marker verify-watermark "$OUTCOME_RUN_STARTED_AT"',
             text,
         )
+        backup_start = text.index(
+            "exec pg_dump -Fc"
+        )
+        self.assertLess(old_timer_stop, backup_start)
 
     def test_outcome_service_uses_dedicated_environment_file(self):
         text = DEPLOY.read_text(encoding="utf-8")
@@ -90,6 +94,14 @@ class RootWindow20260729Test(unittest.TestCase):
             '|| die "backup path already exists: $BACKUP_ROOT"',
             text,
         )
+        self.assertIn("BACKUP_SHA256SUMS", text)
+
+    def test_deploy_signals_fail_closed_with_fixed_statuses(self):
+        text = DEPLOY.read_text(encoding="utf-8")
+
+        self.assertIn("trap 'on_signal 129 HUP' HUP", text)
+        self.assertIn("trap 'on_signal 130 INT' INT", text)
+        self.assertIn("trap 'on_signal 143 TERM' TERM", text)
 
     def test_rollback_restarts_existing_containers(self):
         text = ROLLBACK.read_text(encoding="utf-8")
@@ -98,9 +110,17 @@ class RootWindow20260729Test(unittest.TestCase):
         self.assertIn('docker start "$NODE_A"', text)
         self.assertIn('docker start "$NODE_B"', text)
         self.assertNotIn("hk-gen-recreate-patched.py", text)
-        self.assertIn("trap on_error ERR INT TERM", text)
+        self.assertIn("trap on_error ERR", text)
+        self.assertIn("trap 'on_signal 129 HUP' HUP", text)
+        self.assertIn("trap 'on_signal 130 INT' INT", text)
+        self.assertIn("trap 'on_signal 143 TERM' TERM", text)
         self.assertIn("TRUNCATE TABLE public.trade_outcomes", text)
         self.assertIn("pg_restore --list", DEPLOY.read_text(encoding="utf-8"))
+        checksum_check = text.index(
+            "(cd \"$BACKUP_ROOT\" && sha256sum -c BACKUP_SHA256SUMS)"
+        )
+        mutation_start = text.index("MUTATION_STARTED=1")
+        self.assertLess(checksum_check, mutation_start)
 
 
 if __name__ == "__main__":

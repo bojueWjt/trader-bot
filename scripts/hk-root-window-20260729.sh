@@ -30,7 +30,24 @@ on_error() {
   echo "Rollback: sudo bash $D/hk-rollback-20260729.sh $BACKUP_ROOT" >&2
   exit "$status"
 }
+
+on_signal() {
+  local status="$1"
+  local signal_name="$2"
+  if [ "$MUTATION_STARTED" -eq 1 ]; then
+    docker stop -t 20 "$NODE_A" "$NODE_B" >/dev/null 2>&1 || true
+  fi
+  echo "DEPLOY INTERRUPTED by $signal_name: nodes are stopped or HALTED" >&2
+  if [ -r "$BACKUP_ROOT/index.tsv" ]; then
+    echo "Rollback: sudo bash $D/hk-rollback-20260729.sh $BACKUP_ROOT" >&2
+  fi
+  exit "$status"
+}
+
 trap on_error ERR
+trap 'on_signal 129 HUP' HUP
+trap 'on_signal 130 INT' INT
+trap 'on_signal 143 TERM' TERM
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command missing: $1"
@@ -579,6 +596,27 @@ systemctl is-enabled trader-v3-trade-outcomes.timer \
 systemctl is-active trader-v3-trade-outcomes.timer \
   >"$BACKUP_ROOT/timer-active-state" 2>&1 || true
 
+MUTATION_STARTED=1
+systemctl stop trader-v3-trade-outcomes.timer >/dev/null 2>&1 || true
+systemctl stop trader-v3-trade-outcomes.service >/dev/null 2>&1 || true
+rm -f /etc/cron.d/trader-v3-trade-outcomes
+if systemctl is-active --quiet trader-v3-trade-outcomes.timer; then
+  die "trade outcomes timer is still active"
+fi
+if systemctl is-active --quiet trader-v3-trade-outcomes.service; then
+  die "trade outcomes service is still active"
+fi
+OUTCOME_LOCK_CLEAR=0
+for _ in $(seq 1 60); do
+  if flock -n /var/lock/trader-v3-trade-outcomes.lock -c true; then
+    OUTCOME_LOCK_CLEAR=1
+    break
+  fi
+  sleep 2
+done
+[ "$OUTCOME_LOCK_CLEAR" -eq 1 ] \
+  || die "trade outcomes lock remains held after scheduler isolation"
+
 load_database_url
 database_marker has-0009 >"$BACKUP_ROOT/preexisting-0009"
 
@@ -655,12 +693,18 @@ chmod 0600 "$BACKUP_ROOT/"*.dump.list
   fi
   sha256sum -c SHA256SUMS
 )
+(
+  cd "$BACKUP_ROOT"
+  find . -type f ! -name BACKUP_SHA256SUMS -print \
+    | LC_ALL=C sort \
+    | while IFS= read -r file; do
+        sha256sum "$file"
+      done \
+    >BACKUP_SHA256SUMS
+  sha256sum -c BACKUP_SHA256SUMS
+)
 echo "Backup complete: $BACKUP_ROOT"
 
-MUTATION_STARTED=1
-systemctl stop trader-v3-trade-outcomes.timer >/dev/null 2>&1 || true
-systemctl stop trader-v3-trade-outcomes.service >/dev/null 2>&1 || true
-rm -f /etc/cron.d/trader-v3-trade-outcomes
 docker stop -t 30 "$NODE_A" "$NODE_B"
 
 install -m 0644 "$D/host/read_api.py" \
