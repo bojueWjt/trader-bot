@@ -183,12 +183,13 @@ node 容器本身由 docker 管理（`docker-abc78a7b….scope`），不是 syst
 
 ### 标准流程（每次部署后必跑）
 
-1. 部署者在本地对**每个改动文件**算 sha256，写成清单（`sha256sum` 输出格式，路径换成 hk 上的目标绝对路径）：
+1. 部署者在本地对**每个改动文件**算 sha256。宿主直跑文件使用两列
+   `sha256 + hk 绝对路径`；`container-patches/` 文件必须再加第三列容器目标路径：
 
    ```
    # manifest.txt
-   23c3c08e…b625a8 /srv/trader-v3/container-patches/projection_actor.py
-   7eb91d67…c94c   /srv/trader-v3/intent_execution_strategy.py.fixed
+   23c3c08e…b625a8 /srv/trader-v3/container-patches/projection_actor.py /app/projection/actor.py
+   7eb91d67…c94c   /srv/trader-v3/services/control-plane/api/read_api.py
    ```
 
 2. 跑验证门：
@@ -200,8 +201,8 @@ node 容器本身由 docker 管理（`docker-abc78a7b….scope`），不是 syst
    ```
 
 3. 判定：
-   - 退出码 0 = 清单内文件哈希全部匹配，且 container-patches/ 下的文件全部出现在**两个** node 进程的 mountinfo 中 → 部署通过。
-   - 退出码 1 = 打印每条差异（缺文件 / 哈希不符 / 未挂载）→ 部署未生效，禁止收工。
+   - 退出码 0 = 清单内文件哈希全部匹配，且声明的 source + destination 挂载对在**两个** node 进程中精确唯一 → 部署通过。
+   - 退出码 1 = 打印每条差异（缺文件 / 哈希不符 / source 或 destination 不匹配）→ 部署未生效，禁止收工。
    - 退出码 2 = 用法或 ssh 连接错误。
 
 4. 补充人工核对（脚本覆盖不到的）：宿主机直跑脚本改动后，确认对应 systemd 服务已重启（进程启动时间 > 文件 mtime，`ps -o lstart -p <pid>`）；容器内非挂载路径的改动（docker cp / 镜像）本脚本无法验证，一律**禁止**用这两种方式部署。

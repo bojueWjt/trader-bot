@@ -53,8 +53,14 @@
 ## 4. 验证门用法
 
 ```bash
-# 生成期望清单（本地哈希 + 远端路径），示例：
+# 宿主直跑文件：sha256 + hk 目标路径
 sha256sum <本地文件> | awk '{print $1"  <hk目标路径>"}' > /tmp/manifest.txt
+
+# container-patches 文件：必须追加容器目标路径
+hash=$(sha256sum container-patches/projection_actor.py | awk '{print $1}')
+echo "$hash /srv/trader-v3/container-patches/projection_actor.py /app/projection/actor.py" \
+  >> /tmp/manifest.txt
+
 bash scripts/verify_hk_deployment.sh /tmp/manifest.txt   # 非零退出=有差异，逐条列出
 ```
 
