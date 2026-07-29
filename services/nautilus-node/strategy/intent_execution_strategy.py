@@ -4,11 +4,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Callable, Iterable, Optional
 from uuid import UUID
 
 from strategy.intent_execution_planner import (
+    CANCEL_ORDER,
     InstrumentSpec,
     ManagementPlan,
     OrderDenied,
@@ -77,6 +79,11 @@ class IntentExecutionStrategy(Strategy):
         self._trading_state_getter: Optional[Callable[[], Any]] = None
         self._denial_reporter: Optional[Callable[[Any, OrderDenied], None]] = None
         self._entry_protection_stash: dict[str, dict[str, Any]] = {}
+        self._quick_fill_windows: dict[str, list[datetime]] = {}
+        self._orphan_cancel_attempts: dict[str, int] = {}
+        self._reported_protection_denials: set[tuple[str, str]] = set()
+        self._exchange_cancel_adapter: Any = False
+        self._exchange_state_mirror: Any = False
 
     def set_trading_state_getter(self, getter: Optional[Callable[[], Any]]) -> None:
         """Inject the node's live trading-state source. Kept out of the serializable
@@ -87,6 +94,10 @@ class IntentExecutionStrategy(Strategy):
         """Inject best-effort denial reporting without making StrategyConfig carry
         non-serializable runtime clients."""
         self._denial_reporter = reporter
+
+    def set_exchange_cancel_adapter(self, adapter: Any, mirror: Any) -> None:
+        self._exchange_cancel_adapter = adapter
+        self._exchange_state_mirror = mirror
 
     def on_start(self) -> None:
         # C-08 host-verify fix: subscribe_data(data_type) is rejected for clientless
@@ -105,10 +116,53 @@ class IntentExecutionStrategy(Strategy):
         )
         self._entry_protection_stash = self._load_entry_protection_stash()
         self._schedule_startup_protection_syncs()
+        self._refresh_exchange_state()
+        self._register_exchange_state_timer()
+
+    def _register_exchange_state_timer(self) -> None:
+        clock = getattr(self, "clock", None)
+        set_timer = getattr(clock, "set_timer", None) if clock is not None else None
+        if not callable(set_timer):
+            return
+        interval = timedelta(seconds=45)
+        try:
+            set_timer(
+                name="exchange-state.reconcile",
+                interval=interval,
+                callback=self._on_exchange_state_timer,
+            )
+            return
+        except TypeError:
+            pass
+        set_timer("exchange-state.reconcile", interval, self._on_exchange_state_timer)
+
+    def _on_exchange_state_timer(self, *_args: Any, **_kwargs: Any) -> None:
+        self._refresh_exchange_state()
+
+    def _refresh_exchange_state(self) -> bool:
+        mirror = self._exchange_state_mirror
+        if not mirror:
+            return False
+        refresh = getattr(mirror, "refresh", None)
+        if not callable(refresh):
+            return False
+        try:
+            refresh()
+            return True
+        except Exception as exc:
+            self._record_denial(OrderDenied("exchange_state_refresh_failed", repr(exc)))
+            return False
 
     _PROTECTION_STASH_FILENAME = "protection_stash.json"
+    _PROTECTION_TERMINAL_EVENT_LIMIT = 32
     _PROTECTION_STASH_TUPLE_FIELDS = frozenset(
-        {"take_profits", "entry_tags", "protection_ids", "take_profit_quantities"}
+        {
+            "take_profits",
+            "entry_tags",
+            "protection_ids",
+            "take_profit_quantities",
+            "pending_cancel_ids",
+        }
     )
     _PROTECTION_STASH_TRANSIENT_FIELDS = frozenset(
         {"sync_scheduled", "inline_sync_running", "sync_retries"}
@@ -140,8 +194,43 @@ class IntentExecutionStrategy(Strategy):
                     clean[str(key)] = tuple(item)
                 else:
                     clean[str(key)] = item
+            self._normalize_protection_stash(str(intent_key), clean)
             loaded[str(intent_key)] = clean
         return loaded
+
+    def _normalize_protection_stash(self, intent_key: str, stash: dict[str, Any]) -> None:
+        roles = stash.get("protection_roles")
+        stash["protection_roles"] = roles if isinstance(roles, dict) else {}
+        consumed = stash.get("tp_consumed")
+        stash["tp_consumed"] = consumed if isinstance(consumed, dict) else {}
+        terminal_events = stash.get("protection_terminal_events")
+        if isinstance(terminal_events, list):
+            stash["protection_terminal_events"] = terminal_events[
+                -self._PROTECTION_TERMINAL_EVENT_LIMIT:
+            ]
+        else:
+            stash["protection_terminal_events"] = []
+        last_terminal = stash.get("last_protection_terminal_event")
+        if not isinstance(last_terminal, dict):
+            stash.pop("last_protection_terminal_event", None)
+        pending = stash.get("pending_cancel_ids")
+        if isinstance(pending, list):
+            stash["pending_cancel_ids"] = tuple(str(item) for item in pending)
+        elif isinstance(pending, tuple):
+            stash["pending_cancel_ids"] = tuple(str(item) for item in pending)
+        else:
+            stash["pending_cancel_ids"] = ()
+        try:
+            revision = int(stash.get("protection_revision", -1))
+        except (TypeError, ValueError):
+            revision = -1
+        if revision >= self._PROTECTION_MAX_REVISION and not stash.get("protection_frozen"):
+            self._freeze_protection(
+                intent_key,
+                stash,
+                "revisions_exhausted",
+                denial_reason="protection_revisions_exhausted",
+            )
 
     def _persist_entry_protection_stash(self) -> None:
         path = self._protection_stash_path()
@@ -261,7 +350,11 @@ class IntentExecutionStrategy(Strategy):
         self._handle_intent(intent)
 
     def _handle_intent(self, intent: Any) -> None:
-        action = str(getattr(getattr(intent, "action", ""), "value", getattr(intent, "action", "")))
+        raw_action = getattr(intent, "action", "")
+        action = str(getattr(raw_action, "value", raw_action))
+        is_cancel_intent = action in {"cancel", "cancel_order"}
+        if is_cancel_intent:
+            self._refresh_exchange_state()
         context = PlannerContext(
             account_id=self.config.account_id,
             trading_state=self._trading_state(),
@@ -269,7 +362,10 @@ class IntentExecutionStrategy(Strategy):
             instrument=self._instrument_spec(str(intent.instrument_id)),
             position=self._position_snapshot(str(intent.instrument_id)),
             positions=self._position_snapshots(str(intent.instrument_id)),
-            existing_orders=self._order_snapshots(str(intent.instrument_id)),
+            existing_orders=self._order_snapshots(
+                str(intent.instrument_id),
+                include_exchange_mirror=is_cancel_intent,
+            ),
             existing_intent_ids=frozenset(
                 self._processed_intent_ids | self._active_intent_ids(intent.instrument_id)
             ),
@@ -329,6 +425,9 @@ class IntentExecutionStrategy(Strategy):
             "entry_tags": plan.tags,
             "entry_sequence_max": 1,
             "protection_sequence_start": 11,
+            "protection_roles": {},
+            "tp_consumed": {},
+            "pending_cancel_ids": (),
         }
         self._persist_entry_protection_stash()
 
@@ -495,6 +594,20 @@ class IntentExecutionStrategy(Strategy):
         client_order_id = _event_client_order_id(event)
         if client_order_id is None:
             return
+        instrument_id = _event_instrument_id(event)
+        protection_match = self._protection_role_for_order(client_order_id, instrument_id)
+        if protection_match is not None:
+            intent_key, stash, role_info = protection_match
+            if role_info.get("role") == "take_profit":
+                qty = _event_last_qty(event)
+                price = role_info.get("tp_price")
+                if qty is not None and price is not None:
+                    self._add_tp_consumed(stash, str(price), qty)
+            self._record_quick_protection_fill(intent_key, stash, role_info)
+            self._persist_entry_protection_stash()
+            if not stash.get("protection_frozen"):
+                self._schedule_protection_sync(intent_key)
+            return
         try:
             trace = decode_client_order_id(client_order_id)
         except ValueError:
@@ -515,7 +628,112 @@ class IntentExecutionStrategy(Strategy):
                     if str(other.get("instrument_id")) == instrument_id:
                         self._schedule_protection_sync(key)
 
+    def _protection_role_for_order(
+        self,
+        client_order_id: str,
+        instrument_id: Optional[str],
+    ) -> Optional[tuple[str, dict[str, Any], dict[str, Any]]]:
+        for intent_key, stash in self._entry_protection_stash.items():
+            if instrument_id is not None and str(stash.get("instrument_id")) != str(instrument_id):
+                continue
+            roles = stash.get("protection_roles")
+            if isinstance(roles, dict):
+                role_info = roles.get(client_order_id)
+                if isinstance(role_info, dict):
+                    return intent_key, stash, role_info
+            if client_order_id in tuple(stash.get("protection_ids") or ()):
+                role_info = self._legacy_protection_role_info(client_order_id, stash)
+                if role_info is not None:
+                    return intent_key, stash, role_info
+        return None
+
+    def _legacy_protection_role_info(
+        self,
+        client_order_id: str,
+        stash: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        try:
+            trace = decode_client_order_id(client_order_id)
+        except ValueError:
+            return None
+        if trace.sequence < int(stash.get("protection_sequence_start", 11)):
+            return None
+        offset = trace.sequence % 10
+        if offset == 1:
+            return {
+                "role": "stop_loss",
+                "tp_price": None,
+                "quantity": str(stash.get("protected_quantity") or ""),
+                "submitted_at": "",
+            }
+        index = offset - 2
+        targets = _take_profit_prices(stash.get("take_profits"))
+        quantities = stash.get("take_profit_quantities")
+        if 0 <= index < len(targets):
+            quantity = ""
+            if isinstance(quantities, (list, tuple)) and index < len(quantities):
+                quantity = str(quantities[index])
+            return {
+                "role": "take_profit",
+                "tp_price": _price_key(targets[index]),
+                "quantity": quantity,
+                "submitted_at": "",
+            }
+        return None
+
+    def _add_tp_consumed(self, stash: dict[str, Any], price: str, quantity: str) -> None:
+        consumed = stash.setdefault("tp_consumed", {})
+        try:
+            total = Decimal(str(consumed.get(price, "0"))) + Decimal(str(quantity))
+        except (InvalidOperation, ValueError, TypeError):
+            total = Decimal(str(quantity))
+        consumed[price] = format(total, "f")
+
+    def _record_quick_protection_fill(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+        role_info: dict[str, Any],
+    ) -> None:
+        submitted_at_raw = role_info.get("submitted_at")
+        try:
+            submitted_at = _aware_datetime(datetime.fromisoformat(str(submitted_at_raw)))
+        except (TypeError, ValueError):
+            return
+        now = self._now()
+        if now - submitted_at > timedelta(seconds=30):
+            return
+        window = [
+            item for item in self._quick_fill_windows.get(intent_key, [])
+            if now - item <= timedelta(seconds=120)
+        ]
+        window.append(now)
+        self._quick_fill_windows[intent_key] = window
+        if len(window) >= 2:
+            self._freeze_protection(
+                intent_key,
+                stash,
+                "cascade",
+                denial_reason="protection_cascade_frozen",
+            )
+
+    def _freeze_protection(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+        reason: str,
+        *,
+        denial_reason: str,
+    ) -> None:
+        stash["protection_frozen"] = reason
+        key = (denial_reason, intent_key)
+        if key not in self._reported_protection_denials:
+            self._reported_protection_denials.add(key)
+            self._record_denial(OrderDenied(denial_reason, intent_key))
+        self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
+
     def on_stop(self) -> None:
+        self._cancel_clock_timer("exchange-state.reconcile")
         for intent_key in tuple(self._entry_protection_stash):
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
 
@@ -544,9 +762,54 @@ class IntentExecutionStrategy(Strategy):
     def on_order_expired(self, event: Any) -> None:
         self._on_protection_order_terminal(event, count_retry=True)
 
+    def on_order_cancel_rejected(self, event: Any) -> None:
+        client_order_id = _event_client_order_id(event)
+        instrument_id = _event_instrument_id(event)
+        if client_order_id is None:
+            return
+        for intent_key, stash in self._entry_protection_stash.items():
+            if instrument_id is not None and str(stash.get("instrument_id")) != str(instrument_id):
+                continue
+            pending = tuple(stash.get("pending_cancel_ids") or ())
+            if client_order_id not in pending:
+                continue
+            live_ids = {
+                str(getattr(order, "client_order_id", ""))
+                for order in self._live_protection_orders(
+                    str(stash.get("instrument_id")),
+                    intent_key,
+                    int(stash.get("protection_sequence_start", 11)),
+                )
+            }
+            if client_order_id not in live_ids:
+                self._remove_pending_cancel_id(stash, client_order_id)
+                self._persist_entry_protection_stash()
+            return
+
     def _on_protection_order_terminal(self, event: Any, count_retry: bool = True) -> None:
         client_order_id = _event_client_order_id(event)
         if client_order_id is None:
+            return
+        for stash in self._entry_protection_stash.values():
+            if client_order_id in tuple(stash.get("pending_cancel_ids") or ()):
+                self._remove_pending_cancel_id(stash, client_order_id)
+                self._persist_entry_protection_stash()
+                return
+        role_match = self._protection_role_for_order(
+            client_order_id,
+            _event_instrument_id(event),
+        )
+        if role_match is not None:
+            intent_key, stash, role_info = role_match
+            self._record_protection_terminal_event(
+                event,
+                stash,
+                client_order_id,
+                role_info,
+            )
+            stash["protected_quantity"] = None
+            self._persist_entry_protection_stash()
+            self._reschedule_protection_sync(intent_key, stash, count_retry=count_retry)
             return
         try:
             trace = decode_client_order_id(client_order_id)
@@ -573,10 +836,69 @@ class IntentExecutionStrategy(Strategy):
             and client_order_id not in tuple(stash.get("protection_ids") or ())
         ):
             return
+        self._record_protection_terminal_event(
+            event,
+            stash,
+            client_order_id,
+            self._legacy_protection_role_info(client_order_id, stash),
+        )
         if client_order_id in tuple(stash.get("protection_ids") or ()):
             stash["protected_quantity"] = None  # current/adopted revision lost a leg
-            self._persist_entry_protection_stash()
+        self._persist_entry_protection_stash()
         self._reschedule_protection_sync(intent_key, stash, count_retry=count_retry)
+
+    def _record_protection_terminal_event(
+        self,
+        event: Any,
+        stash: dict[str, Any],
+        client_order_id: str,
+        role_info: Optional[dict[str, Any]],
+    ) -> None:
+        reason = _event_text_field(event, "reason", "message", "detail", "error")
+        error_code = _event_text_field(
+            event,
+            "error_code",
+            "reject_code",
+            "code",
+        )
+        if error_code is None and reason is not None:
+            code_match = re.search(r"(?<!\d)-\d{3,5}(?!\d)", reason)
+            if code_match is not None:
+                error_code = code_match.group(0)
+        instrument_id = _event_instrument_id(event)
+        if instrument_id is None:
+            instrument_id = str(stash.get("instrument_id") or "")
+        terminal = {
+            "event_type": _event_type_name(event),
+            "reason": reason,
+            "error_code": error_code,
+            "client_order_id": client_order_id,
+            "instrument_id": instrument_id,
+            "role": role_info.get("role") if isinstance(role_info, dict) else None,
+            "tp_price": role_info.get("tp_price") if isinstance(role_info, dict) else None,
+            "protection_revision": int(stash.get("protection_revision", -1)),
+            "ts_event": _event_text_field(
+                event,
+                "ts_event",
+                "timestamp",
+                "event_time",
+            ),
+            "observed_at": self._now().isoformat(),
+        }
+        history = stash.get("protection_terminal_events")
+        if not isinstance(history, list):
+            history = []
+        history.append(terminal)
+        stash["protection_terminal_events"] = history[
+            -self._PROTECTION_TERMINAL_EVENT_LIMIT:
+        ]
+        stash["last_protection_terminal_event"] = terminal
+        log = getattr(self, "log", None)
+        if log is not None and hasattr(log, "error"):
+            log.error(
+                "ProtectionOrderTerminal "
+                + json.dumps(terminal, sort_keys=True, separators=(",", ":"))
+            )
 
     def _on_protection_sync_alert(self, event: Any) -> None:
         name = str(getattr(event, "name", ""))
@@ -586,6 +908,8 @@ class IntentExecutionStrategy(Strategy):
     def _schedule_protection_sync(self, intent_key: str, delay_seconds: Optional[float] = None) -> None:
         stash = self._entry_protection_stash.get(intent_key)
         if stash is None:
+            return
+        if stash.get("protection_frozen"):
             return
         # A pending timer already guarantees a sync within the debounce window;
         # re-arming it on every fill would let a steady nibble postpone protection
@@ -637,6 +961,10 @@ class IntentExecutionStrategy(Strategy):
         if stash is None:
             return
         stash.pop("sync_scheduled", None)
+        self._normalize_protection_stash(intent_key, stash)
+        if stash.get("protection_frozen"):
+            self._persist_entry_protection_stash()
+            return
         instrument_id = str(stash["instrument_id"])
         instrument = self._instrument_spec(instrument_id)
         if instrument is None:
@@ -676,22 +1004,11 @@ class IntentExecutionStrategy(Strategy):
             self._reschedule_protection_sync(intent_key, stash, count_retry=True)
             return
 
-        # Converged: sized for the current position AND every order of the current
-        # revision is still alive (a lost leg — rejected SL, user-cancelled TP —
-        # fails this check and forces a re-place).
-        current_ids = tuple(stash.get("protection_ids") or ())
-        live_ids = {str(getattr(order, "client_order_id", "")) for order in live}
-        if (
-            stash.get("protected_quantity") == quantity
-            and current_ids
-            and all(cid in live_ids for cid in current_ids)
-        ):
-            stash.pop("sync_retries", None)
-            return
-
         if inflight:
             self._reschedule_protection_sync(intent_key, stash, count_retry=True)
             return
+
+        self._retry_pending_protection_cancels(intent_key, stash, live)
 
         plans_for_adoption = self._protection_order_plans(
             UUID(intent_key),
@@ -709,24 +1026,55 @@ class IntentExecutionStrategy(Strategy):
         if adopted_ids is not None:
             stash["protection_ids"] = adopted_ids
             stash["protected_quantity"] = quantity
+            for client_order_id, plan in zip(adopted_ids, plans_for_adoption):
+                self._register_protection_role(
+                    intent_key,
+                    stash,
+                    client_order_id,
+                    plan,
+                )
             stash.pop("sync_retries", None)
+            self._persist_entry_protection_stash()
+            return
+
+        desired = plans_for_adoption
+        actions, keep_ids, replace_ids = self._protection_replacement_actions(
+            stash,
+            live,
+            desired,
+            instrument,
+        )
+        if not actions:
+            stash["protection_ids"] = tuple(keep_ids)
+            stash["protected_quantity"] = quantity
+            stash.pop("sync_retries", None)
+            self._prune_protection_roles(intent_key, stash)
             self._persist_entry_protection_stash()
             return
 
         revision = int(stash.get("protection_revision", -1)) + 1
         if revision > self._PROTECTION_MAX_REVISION:
-            # Make-before-break below means the previous revision is still live;
-            # keep it rather than churn further. Loud denial for the operator.
-            self._record_denial(OrderDenied("protection_revisions_exhausted", intent_key))
+            self._freeze_protection(
+                intent_key,
+                stash,
+                "revisions_exhausted",
+                denial_reason="protection_revisions_exhausted",
+            )
+            self._persist_entry_protection_stash()
             return
 
-        plans = self._protection_order_plans(
+        revision_plans = self._protection_order_plans(
             UUID(intent_key),
             stash,
             instrument,
             position,
             quantity,
             revision=revision,
+        )
+        action_keys = {_protection_plan_key(plan) for plan in actions}
+        plans = tuple(
+            plan for plan in revision_plans
+            if _protection_plan_key(plan) in action_keys
         )
         if not plans:
             return
@@ -740,24 +1088,244 @@ class IntentExecutionStrategy(Strategy):
         for plan in plans:
             if self._submit_order_plan(plan):
                 submitted_ids.append(plan.client_order_id)
+                self._register_protection_role(intent_key, stash, plan.client_order_id, plan)
         if not submitted_ids:
             stash["protected_quantity"] = None
             self._persist_entry_protection_stash()
             self._reschedule_protection_sync(intent_key, stash, count_retry=True)
             return
-        keep = set(submitted_ids)
+        keep = set(keep_ids) | set(submitted_ids)
         for order in live:
-            if str(getattr(order, "client_order_id", "")) in keep:
+            oid = str(getattr(order, "client_order_id", ""))
+            if oid in keep or oid not in replace_ids:
                 continue
-            self._cancel_order_object(order)
-        stash["protection_ids"] = tuple(submitted_ids)
+            self._cancel_replaced_protection_order(intent_key, stash, order)
+        stash["protection_ids"] = tuple(
+            cid for cid in tuple(keep_ids) + tuple(submitted_ids)
+            if cid
+        )
         if len(submitted_ids) == len(plans):
             stash["protected_quantity"] = quantity
         else:
             stash["protected_quantity"] = None
+        self._prune_protection_roles(intent_key, stash)
         self._persist_entry_protection_stash()
         if len(submitted_ids) != len(plans):
             self._reschedule_protection_sync(intent_key, stash, count_retry=True)
+
+    def _protection_replacement_actions(
+        self,
+        stash: dict[str, Any],
+        live: tuple[Any, ...],
+        desired: tuple[OrderPlan, ...],
+        instrument: InstrumentSpec,
+    ) -> tuple[tuple[OrderPlan, ...], tuple[str, ...], set[str]]:
+        desired_stop = next((plan for plan in desired if self._protection_plan_role(plan) == "stop_loss"), None)
+        desired_tps = [
+            plan for plan in desired
+            if self._protection_plan_role(plan) == "take_profit" and plan.price is not None
+        ]
+        live_stops = [
+            order for order in live
+            if self._protection_order_role(stash, order) == "stop_loss"
+        ]
+        live_tps = [
+            order for order in live
+            if self._protection_order_role(stash, order) == "take_profit"
+        ]
+
+        actions: list[OrderPlan] = []
+        keep_ids: list[str] = []
+        replace_ids: set[str] = set()
+        if desired_stop is not None:
+            healthy_stops = [
+                order for order in live_stops
+                if self._live_order_matches_plan(order, desired_stop, instrument)
+            ]
+            if healthy_stops:
+                keep_ids.extend(str(getattr(order, "client_order_id", "")) for order in healthy_stops)
+                replace_ids.update(
+                    str(getattr(order, "client_order_id", ""))
+                    for order in live_stops
+                    if order not in healthy_stops
+                )
+            else:
+                actions.append(desired_stop)
+                replace_ids.update(str(getattr(order, "client_order_id", "")) for order in live_stops)
+
+        desired_prices = {str(plan.price) for plan in desired_tps}
+        for plan in desired_tps:
+            same_price = [
+                order for order in live_tps
+                if self._protection_order_price(order, instrument) == plan.price
+            ]
+            live_quantity = sum(
+                (
+                    Decimal(str(qty))
+                    for qty in (
+                        self._protection_order_quantity(order, instrument)
+                        for order in same_price
+                    )
+                    if qty is not None
+                ),
+                Decimal("0"),
+            )
+            target = Decimal(str(plan.quantity))
+            increment = Decimal(str(instrument.quantity_increment))
+            if not same_price or live_quantity < target - increment:
+                actions.append(plan)
+                replace_ids.update(str(getattr(order, "client_order_id", "")) for order in same_price)
+            else:
+                keep_ids.extend(str(getattr(order, "client_order_id", "")) for order in same_price)
+        replace_ids.update(
+            str(getattr(order, "client_order_id", ""))
+            for order in live_tps
+            if self._protection_order_price(order, instrument) not in desired_prices
+        )
+        pending = set(str(cid) for cid in tuple(stash.get("pending_cancel_ids") or ()))
+        keep_ids = [cid for cid in keep_ids if cid and cid not in pending]
+        replace_ids = {cid for cid in replace_ids if cid and cid not in keep_ids}
+        return tuple(actions), tuple(dict.fromkeys(keep_ids)), replace_ids
+
+    def _retry_pending_protection_cancels(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+        live: tuple[Any, ...],
+    ) -> None:
+        live_by_id = {str(getattr(order, "client_order_id", "")): order for order in live}
+        for client_order_id in tuple(stash.get("pending_cancel_ids") or ()):
+            order = live_by_id.get(str(client_order_id))
+            if order is None:
+                self._remove_pending_cancel_id(stash, str(client_order_id))
+                continue
+            self._attempt_pending_cancel(intent_key, order)
+
+    def _cancel_replaced_protection_order(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+        order: Any,
+    ) -> None:
+        client_order_id = str(getattr(order, "client_order_id", ""))
+        if not client_order_id:
+            return
+        pending = tuple(stash.get("pending_cancel_ids") or ())
+        if client_order_id in pending:
+            return
+        stash["pending_cancel_ids"] = pending + (client_order_id,)
+        self._attempt_pending_cancel(intent_key, order)
+
+    def _attempt_pending_cancel(self, intent_key: str, order: Any) -> None:
+        client_order_id = str(getattr(order, "client_order_id", ""))
+        attempts = self._orphan_cancel_attempts.get(client_order_id, 0) + 1
+        self._orphan_cancel_attempts[client_order_id] = attempts
+        if attempts > 5:
+            key = ("protection_orphan_order", client_order_id)
+            if key not in self._reported_protection_denials:
+                self._reported_protection_denials.add(key)
+                self._record_denial(OrderDenied("protection_orphan_order", client_order_id))
+            return
+        self._cancel_order_object(order)
+
+    def _remove_pending_cancel_id(self, stash: dict[str, Any], client_order_id: str) -> None:
+        stash["pending_cancel_ids"] = tuple(
+            cid for cid in tuple(stash.get("pending_cancel_ids") or ())
+            if str(cid) != client_order_id
+        )
+
+    def _register_protection_role(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+        client_order_id: str,
+        plan: OrderPlan,
+    ) -> None:
+        if not client_order_id:
+            return
+        role = self._protection_plan_role(plan)
+        if role is None:
+            return
+        roles = stash.setdefault("protection_roles", {})
+        roles[client_order_id] = {
+            "role": role,
+            "tp_price": str(plan.price) if role == "take_profit" and plan.price is not None else None,
+            "quantity": str(plan.quantity),
+            "submitted_at": self._now().isoformat(),
+        }
+        self._prune_protection_roles(intent_key, stash)
+
+    def _prune_protection_roles(self, intent_key: str, stash: dict[str, Any]) -> None:
+        roles = stash.get("protection_roles")
+        if not isinstance(roles, dict):
+            stash["protection_roles"] = {}
+            return
+        try:
+            current_revision = int(stash.get("protection_revision", -1))
+        except (TypeError, ValueError):
+            current_revision = -1
+        min_revision = current_revision - 1
+        protected = set(str(cid) for cid in tuple(stash.get("protection_ids") or ()))
+        pending = set(str(cid) for cid in tuple(stash.get("pending_cancel_ids") or ()))
+        kept: dict[str, Any] = {}
+        for client_order_id, role_info in roles.items():
+            cid = str(client_order_id)
+            keep = cid in protected or cid in pending
+            try:
+                trace = decode_client_order_id(cid)
+                if str(trace.intent_id) != intent_key:
+                    keep = True
+                else:
+                    revision = (trace.sequence // 10) - 1
+                    keep = keep or revision >= min_revision
+            except ValueError:
+                keep = True
+            if keep:
+                kept[cid] = role_info
+        stash["protection_roles"] = kept
+
+    def _protection_plan_role(self, plan: OrderPlan) -> Optional[str]:
+        tags = {str(tag) for tag in (plan.tags or ())}
+        if "lifecycle_role=stop_loss" in tags:
+            return "stop_loss"
+        if "lifecycle_role=take_profit" in tags:
+            return "take_profit"
+        if plan.order_type == "STOP_MARKET":
+            return "stop_loss"
+        if plan.order_type in {"LIMIT", "LIMIT_IF_TOUCHED"}:
+            return "take_profit"
+        return None
+
+    def _protection_order_role(self, stash: dict[str, Any], order: Any) -> Optional[str]:
+        client_order_id = str(getattr(order, "client_order_id", ""))
+        roles = stash.get("protection_roles")
+        if isinstance(roles, dict):
+            role_info = roles.get(client_order_id)
+            if isinstance(role_info, dict) and role_info.get("role") is not None:
+                return str(role_info.get("role"))
+        tags = {str(tag) for tag in (getattr(order, "tags", ()) or ())}
+        if "lifecycle_role=stop_loss" in tags:
+            return "stop_loss"
+        if "lifecycle_role=take_profit" in tags:
+            return "take_profit"
+        order_type = _enum_name(getattr(order, "order_type", ""))
+        if "STOP" in order_type:
+            return "stop_loss"
+        if "LIMIT" in order_type:
+            return "take_profit"
+        return None
+
+    def _protection_order_price(self, order: Any, instrument: InstrumentSpec) -> Optional[str]:
+        return _round_down_positive(
+            _optional_str(getattr(order, "price", None)),
+            instrument.price_increment,
+        )
+
+    def _protection_order_quantity(self, order: Any, instrument: InstrumentSpec) -> Optional[str]:
+        return _round_down_positive(
+            _optional_str(getattr(order, "quantity", getattr(order, "qty", None))),
+            instrument.quantity_increment,
+        )
 
     def _adopt_matching_live_protections(
         self,
@@ -984,10 +1552,10 @@ class IntentExecutionStrategy(Strategy):
                 )
 
         targets = _take_profit_prices(stash.get("take_profits"))[:8]
-        quantities = _absorbed_or_split_quantities(
-            stash.get("take_profit_quantities"),
+        quantities = self._take_profit_remaining_quantities(
+            stash,
+            targets,
             quantity,
-            len(targets),
             instrument.quantity_increment,
         )
         for index, (target, target_quantity) in enumerate(zip(targets, quantities), start=1):
@@ -1015,6 +1583,44 @@ class IntentExecutionStrategy(Strategy):
                 )
             )
         return tuple(plans)
+
+    def _take_profit_remaining_quantities(
+        self,
+        stash: dict[str, Any],
+        targets: tuple[Any, ...],
+        quantity: str,
+        increment: str,
+    ) -> tuple[Optional[str], ...]:
+        consumed = stash.get("tp_consumed")
+        consumed_by_price = consumed if isinstance(consumed, dict) else {}
+        absorbed = stash.get("take_profit_quantities")
+        if isinstance(absorbed, (list, tuple)) and len(absorbed) == len(targets):
+            result: list[Optional[str]] = []
+            for target, target_quantity in zip(targets, absorbed):
+                price_key = _price_key(target)
+                try:
+                    remaining = Decimal(str(target_quantity)) - Decimal(
+                        str(consumed_by_price.get(price_key, "0"))
+                    )
+                except (InvalidOperation, ValueError, TypeError):
+                    result.append(None)
+                    continue
+                result.append(_round_down_positive(remaining, increment))
+            return tuple(result)
+
+        unconsumed_indexes: list[int] = []
+        for index, target in enumerate(targets):
+            try:
+                consumed_quantity = Decimal(str(consumed_by_price.get(_price_key(target), "0")))
+            except (InvalidOperation, ValueError, TypeError):
+                consumed_quantity = Decimal("0")
+            if consumed_quantity <= 0:
+                unconsumed_indexes.append(index)
+        split = _split_take_profit_quantities(quantity, len(unconsumed_indexes), increment)
+        result = [None for _ in targets]
+        for index, target_quantity in zip(unconsumed_indexes, split):
+            result[index] = target_quantity
+        return tuple(result)
 
     def _trading_state(self) -> str:
         if self._trading_state_getter is not None:
@@ -1075,27 +1681,51 @@ class IntentExecutionStrategy(Strategy):
             entry_price=_position_entry_price(position),
         )
 
-    def _order_snapshots(self, instrument_id: str) -> tuple[OrderSnapshot, ...]:
-        snapshots: list[OrderSnapshot] = []
+    def _order_snapshots(
+        self,
+        instrument_id: str,
+        *,
+        include_exchange_mirror: bool = False,
+    ) -> tuple[OrderSnapshot, ...]:
+        snapshots: dict[str, OrderSnapshot] = {}
         for order in self._cache_orders(instrument_id):
             client_order_id = getattr(order, "client_order_id", None)
             if client_order_id is None:
                 continue
-            snapshots.append(
-                OrderSnapshot(
-                    client_order_id=str(client_order_id),
-                    instrument_id=str(getattr(order, "instrument_id", instrument_id)),
-                    order_type=_enum_name(getattr(order, "order_type", "")),
-                    side=_enum_name(getattr(order, "side", getattr(order, "order_side", ""))),
-                    quantity=str(getattr(order, "quantity", getattr(order, "qty", ""))),
-                    price=_optional_str(getattr(order, "price", None)),
-                    trigger_price=_optional_str(
-                        getattr(order, "trigger_price", getattr(order, "stop_price", None))
-                    ),
-                    tags=tuple(str(tag) for tag in (getattr(order, "tags", ()) or ())),
-                )
+            snapshot = OrderSnapshot(
+                client_order_id=str(client_order_id),
+                instrument_id=str(getattr(order, "instrument_id", instrument_id)),
+                order_type=_enum_name(getattr(order, "order_type", "")),
+                side=_enum_name(getattr(order, "side", getattr(order, "order_side", ""))),
+                quantity=str(getattr(order, "quantity", getattr(order, "qty", ""))),
+                price=_optional_str(getattr(order, "price", None)),
+                trigger_price=_optional_str(
+                    getattr(order, "trigger_price", getattr(order, "stop_price", None))
+                ),
+                tags=tuple(str(tag) for tag in (getattr(order, "tags", ()) or ())),
             )
-        return tuple(snapshots)
+            snapshots[snapshot.client_order_id] = snapshot
+        mirror = self._exchange_state_mirror if include_exchange_mirror else False
+        mirror_orders: Iterable[Any] = ()
+        if mirror:
+            orders_for_instrument = getattr(mirror, "orders_for_instrument", None)
+            if callable(orders_for_instrument):
+                mirror_orders = orders_for_instrument(instrument_id)
+        for order in mirror_orders:
+            client_order_id = str(getattr(order, "client_order_id", ""))
+            if not client_order_id or client_order_id in snapshots:
+                continue
+            snapshots[client_order_id] = OrderSnapshot(
+                client_order_id=client_order_id,
+                instrument_id=str(getattr(order, "instrument_id", instrument_id)),
+                order_type=_enum_name(getattr(order, "order_type", "")),
+                side=_enum_name(getattr(order, "side", "")),
+                quantity=str(getattr(order, "quantity", "")),
+                price=_optional_str(getattr(order, "price", None)),
+                trigger_price=_optional_str(getattr(order, "trigger_price", None)),
+                tags=tuple(str(tag) for tag in (getattr(order, "tags", ()) or ())),
+            )
+        return tuple(snapshots.values())
 
     def _active_intent_ids(self, instrument_id: Any) -> set[str]:
         ids: set[str] = set()
@@ -1261,6 +1891,14 @@ class IntentExecutionStrategy(Strategy):
         return PositionId(f"{order.instrument_id}-{book}")
 
     def _submit_management_plan(self, plan: ManagementPlan) -> bool:
+        if plan.action == CANCEL_ORDER:
+            for client_order_id in plan.cancel_order_ids:
+                if not self._cancel_via_exchange_adapter(
+                    plan.instrument_id,
+                    client_order_id,
+                ):
+                    return False
+            return True
         # Make-before-break: place replacements first, then cancel the superseded
         # orders. If the new stop is rejected by the venue the old one is still
         # standing; the reverse order can leave the position naked. Reduce-only
@@ -1274,6 +1912,47 @@ class IntentExecutionStrategy(Strategy):
         self._absorb_management_plan(plan)
         return True
 
+    def _cancel_via_exchange_adapter(
+        self,
+        instrument_id: str,
+        client_order_id: str,
+    ) -> bool:
+        if not self._exchange_cancel_adapter or not self._exchange_state_mirror:
+            self._record_denial(
+                OrderDenied("exchange_cancel_adapter_unavailable", client_order_id)
+            )
+            return False
+        find_order = getattr(self._exchange_state_mirror, "find_order", None)
+        if not callable(find_order):
+            self._record_denial(OrderDenied("order_cancel_not_found", client_order_id))
+            return False
+        order = find_order(instrument_id, client_order_id)
+        if not order:
+            self._record_denial(OrderDenied("order_cancel_not_found", client_order_id))
+            return False
+        from runtime.exchange_cancel_adapter import (
+            CancelOrderRequest,
+            OrderAlreadyFilledError,
+        )
+
+        request = CancelOrderRequest(
+            account_id=str(getattr(order, "account_id", "")),
+            symbol=str(getattr(order, "symbol", "")),
+            position_side=str(getattr(order, "position_side", "")),
+            order_kind=str(getattr(order, "order_kind", "")),
+            venue_order_id=_optional_str(getattr(order, "venue_order_id", None)),
+            client_order_id=client_order_id,
+        )
+        try:
+            self._exchange_cancel_adapter.cancel("cancel_order", request)
+            return True
+        except OrderAlreadyFilledError as exc:
+            self._record_denial(OrderDenied("order_already_filled", str(exc)))
+            return False
+        except Exception as exc:
+            self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
+            return False
+
     def _absorb_management_plan(self, plan: ManagementPlan) -> None:
         """Keep entry stashes coherent with operator-managed protections: without
         this, a later entry fill re-places SL/TP at the ORIGINAL signal prices and
@@ -1284,6 +1963,13 @@ class IntentExecutionStrategy(Strategy):
         for stash in self._entry_protection_stash.values():
             if str(stash.get("instrument_id")) != str(plan.instrument_id):
                 continue
+            intent_key = next(
+                (
+                    key for key, candidate in self._entry_protection_stash.items()
+                    if candidate is stash
+                ),
+                "",
+            )
             if action in ("move_stop_loss", "move_stop_to_entry"):
                 trigger = next(
                     (op.trigger_price for op in plan.orders if op.trigger_price is not None),
@@ -1298,8 +1984,19 @@ class IntentExecutionStrategy(Strategy):
                     stash["take_profit_quantities"] = tuple(
                         op.quantity for op in plan.orders if op.price is not None
                     )
+                    stash["tp_consumed"] = {}
             # The operator's orders belong to a different intent id: adopt nothing,
             # but force the next entry-fill sync to rebuild from the updated prices.
+            stash.pop("protection_frozen", None)
+            if intent_key:
+                self._quick_fill_windows.pop(intent_key, None)
+                for order_plan in plan.orders:
+                    self._register_protection_role(
+                        intent_key,
+                        stash,
+                        order_plan.client_order_id,
+                        order_plan,
+                    )
             stash["protected_quantity"] = None
             self._persist_entry_protection_stash()
 
@@ -1408,6 +2105,50 @@ def _event_instrument_id(event: Any) -> Optional[str]:
         if value is not None:
             return str(value)
     return None
+
+
+def _event_type_name(event: Any) -> str:
+    value = getattr(event, "event_type", getattr(event, "type", None))
+    if value is not None:
+        text = str(getattr(value, "value", value))
+        if text:
+            return text
+    return event.__class__.__name__
+
+
+def _event_text_field(event: Any, *names: str) -> Optional[str]:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        for name in names:
+            value = getattr(holder, name, None)
+            if value is not None:
+                return str(getattr(value, "value", value))
+    return None
+
+
+def _event_last_qty(event: Any) -> Optional[str]:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        for name in ("last_qty", "last_quantity", "quantity", "filled_qty", "filled_quantity"):
+            value = getattr(holder, name, None)
+            if value is not None:
+                return str(value)
+    return None
+
+
+def _protection_plan_key(plan: OrderPlan) -> tuple[str, Optional[str]]:
+    role = "stop_loss" if plan.order_type == "STOP_MARKET" else "take_profit"
+    return role, str(plan.price) if role == "take_profit" else None
+
+
+def _price_key(value: Any) -> str:
+    if isinstance(value, dict):
+        raw = value.get("price", value.get("trigger_price", value.get("limit_price")))
+    else:
+        raw = value
+    return str(raw)
 
 
 def _aware_datetime(value: datetime) -> datetime:
