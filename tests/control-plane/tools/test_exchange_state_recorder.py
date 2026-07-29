@@ -19,6 +19,16 @@ MODULE_PATH = (
 
 
 class ExchangeStateRecorderTest(unittest.TestCase):
+    def test_live_mirror_matches_deployment_source(self) -> None:
+        mirror_path = (
+            REPO_ROOT / ".live-mirror" / "tools" / "exchange_state_recorder.py"
+        )
+
+        self.assertEqual(
+            mirror_path.read_bytes(),
+            MODULE_PATH.read_bytes(),
+        )
+
     def test_slim_order_preserves_hedge_position_side(self) -> None:
         module = _load_module()
 

@@ -4,10 +4,10 @@ Why this exists: orders_projection is event-sourced and drifts whenever a node
 misses events (freeze/restart windows), and Binance USDT-M migrated conditional
 orders (STOP_MARKET / TAKE_PROFIT) to the algo-order system on 2025-12-09 —
 they are invisible to /fapi/v1/openOrders and to the projections. This recorder
-polls the exchange directly (read-only, signed GET only) and upserts one row
-per account into exchange_state_mirror so SystemSnapshotV1 can expose the
-truth. It never touches the trading path; on any error it logs and skips the
-cycle, letting the row go stale (staleness is computed by the snapshot reader).
+polls the exchange directly (read-only, signed GET only) and atomically upserts
+exchange_state_mirror plus accounts_projection for each account. It never
+touches the trading path; on any exchange error it logs and skips the cycle,
+letting the existing rows go stale.
 
 API keys are read from the running node containers' env (single source of
 truth; survives key rotation via the recreate scripts).
@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from decimal import Decimal, InvalidOperation
 from urllib.error import HTTPError
 
 import psycopg2
@@ -40,6 +41,26 @@ INSERT INTO exchange_state_mirror (account_id, payload, updated_at)
 VALUES (%s, %s::jsonb, now())
 ON CONFLICT (account_id) DO UPDATE
   SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at
+"""
+
+ACCOUNT_UPSERT_SQL = """
+INSERT INTO accounts_projection (
+    account_id,
+    currency,
+    equity,
+    margin,
+    available_balance,
+    updated_at,
+    payload
+)
+VALUES (%s, %s, %s, %s, %s, now(), %s::jsonb)
+ON CONFLICT (account_id) DO UPDATE
+  SET currency = EXCLUDED.currency,
+      equity = EXCLUDED.equity,
+      margin = EXCLUDED.margin,
+      available_balance = EXCLUDED.available_balance,
+      updated_at = EXCLUDED.updated_at,
+      payload = COALESCE(accounts_projection.payload, '{}'::jsonb) || EXCLUDED.payload
 """
 
 
@@ -89,10 +110,13 @@ def signed_get(base: str, path: str, key: str, sec: str, params: dict | None = N
         raise RuntimeError(f"Binance API {code}: {message}") from exc
 
 
-def slim_order(o: dict) -> dict:
+def slim_order(o: dict, order_kind: str = "regular") -> dict:
+    venue_order_id = o.get("orderId")
+    if order_kind == "algo":
+        venue_order_id = o.get("algoId")
     return {
         "symbol": o.get("symbol"),
-        "position_side": o.get("positionSide") or o.get("position_side"),
+        "position_side": o.get("positionSide"),
         "side": o.get("side"),
         "type": o.get("type") or o.get("orderType"),
         "quantity": o.get("origQty") or o.get("quantity"),
@@ -100,6 +124,9 @@ def slim_order(o: dict) -> dict:
         "trigger_price": o.get("stopPrice") or o.get("triggerPrice"),
         "reduce_only": o.get("reduceOnly"),
         "client_order_id": o.get("clientOrderId") or o.get("clientAlgoId"),
+        "order_kind": order_kind,
+        "venue_order_id": venue_order_id,
+        # Retained for dashboard compatibility. Consumers must route by order_kind.
         "order_id": o.get("orderId") or o.get("algoId"),
     }
 
@@ -127,19 +154,59 @@ def protections(positions: list[dict], algo: list[dict], regular: list[dict]) ->
     return out
 
 
+def canonical_account_summary(account_info: dict) -> dict:
+    equity = _required_decimal(account_info, "totalMarginBalance")
+    margin = _required_decimal(account_info, "totalInitialMargin")
+    available = _required_decimal(account_info, "availableBalance")
+    if equity <= 0:
+        raise ValueError("totalMarginBalance must be positive")
+    if margin < 0:
+        raise ValueError("totalInitialMargin must be non-negative")
+    if available < 0:
+        raise ValueError("availableBalance must be non-negative")
+    return {
+        "currency": "USDT",
+        "equity": str(equity),
+        "margin": str(margin),
+        "free": str(available),
+    }
+
+
+def _required_decimal(payload: dict, field: str) -> Decimal:
+    raw = payload.get(field)
+    if raw is None or raw == "":
+        raise ValueError(f"{field} missing from account information")
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{field} is invalid") from exc
+    if not value.is_finite():
+        raise ValueError(f"{field} must be finite")
+    return value
+
+
 def snapshot_account(base: str, key: str, sec: str) -> dict:
+    account_info = signed_get(base, "/fapi/v3/account", key, sec)
+    if not isinstance(account_info, dict):
+        raise TypeError("account information response must be an object")
+    account = canonical_account_summary(account_info)
     positions = [p for p in signed_get(base, "/fapi/v2/positionRisk", key, sec)
                  if float(p.get("positionAmt") or 0) != 0]
-    regular = [slim_order(o) for o in signed_get(base, "/fapi/v1/openOrders", key, sec)]
+    regular = [
+        slim_order(o, "regular")
+        for o in signed_get(base, "/fapi/v1/openOrders", key, sec)
+    ]
     algo_raw = signed_get(base, "/fapi/v1/openAlgoOrders", key, sec)
     algo_rows = algo_raw.get("orders", algo_raw) if isinstance(algo_raw, dict) else algo_raw
-    algo = [slim_order(o) for o in algo_rows]
+    algo = [slim_order(o, "algo") for o in algo_rows]
     return {
         "source": "binance_fapi",
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "account": account,
         "positions": [
             {"symbol": p["symbol"], "position_amt": p["positionAmt"],
-             "entry_price": p.get("entryPrice"), "unrealized_pnl": p.get("unRealizedProfit"),
+             "entry_price": p.get("entryPrice"), "mark_price": p.get("markPrice"),
+             "unrealized_pnl": p.get("unRealizedProfit"),
              "position_side": p.get("positionSide")}
             for p in positions
         ],
@@ -159,9 +226,30 @@ def run_once(conn, base: str) -> None:
         except Exception as exc:  # noqa: BLE001 - stale row is the failure signal
             log(f"{account_id}: exchange fetch failed, leaving row stale: {exc}")
             continue
-        with conn.cursor() as cur:
-            cur.execute(UPSERT_SQL, (account_id, json.dumps(payload)))
-        conn.commit()
+        account = payload["account"]
+        account_payload = {
+            "exchange_account": account,
+            "account_snapshot_source": "binance_fapi_account_v3",
+            "account_snapshot_fetched_at": payload["fetched_at"],
+        }
+        try:
+            with conn.cursor() as cur:
+                cur.execute(UPSERT_SQL, (account_id, json.dumps(payload)))
+                cur.execute(
+                    ACCOUNT_UPSERT_SQL,
+                    (
+                        account_id,
+                        account["currency"],
+                        account["equity"],
+                        account["margin"],
+                        account["free"],
+                        json.dumps(account_payload),
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def main() -> None:
@@ -183,7 +271,7 @@ def main() -> None:
             log(f"db error, reconnecting: {exc}")
             try:
                 conn.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110
                 pass
             time.sleep(5)
             conn = psycopg2.connect(args.db_url)
