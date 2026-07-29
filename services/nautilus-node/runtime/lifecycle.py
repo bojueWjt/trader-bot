@@ -99,6 +99,7 @@ class NodeLifecycle:
 
     def build_heartbeat(self) -> Heartbeat:
         return Heartbeat(
+            account_id=self.config.account_id,
             ts=self._clock.now(),
             trading_state=self._trading_state,
             readiness=self.readiness.ready,

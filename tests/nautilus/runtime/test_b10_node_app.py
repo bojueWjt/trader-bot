@@ -198,6 +198,38 @@ class NautilusActorAdapterTest(unittest.TestCase):
         self.assertEqual(status, CommandAckStatus.FAILED)
         self.assertEqual(error, "authorization_source_required")
 
+    def test_bulk_order_command_for_another_account_fails_closed(self) -> None:
+        from app.nautilus_actors import CommandPollerActor
+        from execution_domain.control_plane import (
+            CommandAckStatus,
+            CommandType,
+            NodeCommand,
+        )
+
+        actor = CommandPollerActor(
+            control_plane=object(),
+            lifecycle=types.SimpleNamespace(),
+            node_id="node-a",
+            account_id="account-a",
+        )
+        command = NodeCommand(
+            command_id="cmd-cross-account",
+            type=CommandType.CANCEL_ALL,
+            args={
+                "account_id": "account-b",
+                "authorization": {
+                    "authorized_by_type": "user",
+                    "authorized_by_id": "balen",
+                    "source_message_id": "request-42",
+                },
+            },
+        )
+
+        status, error = actor._apply(command)
+
+        self.assertEqual(status, CommandAckStatus.FAILED)
+        self.assertEqual(error, "command_account_mismatch")
+
     def test_intent_publisher_actor_polls_plain_client_and_publishes_to_account_topic(self) -> None:
         from app.nautilus_actors import IntentPublisherActor
 

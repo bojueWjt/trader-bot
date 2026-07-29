@@ -220,6 +220,7 @@ def _build_control_plane_client(config: NodeConfig) -> Any:
             base_url=config.control_plane.base_url,
             token=config.control_plane.token,
             node_id=config.node_id,
+            account_id=config.account_id,
         )
     except ModuleNotFoundError:
         return _UnavailableControlPlaneClient()

@@ -348,8 +348,12 @@ class CommandPollerActor(Actor):
         _init_actor_base(self)
         self._control_plane = control_plane
         self._lifecycle = lifecycle
-        self._node_id = node_id
-        self._account_id = account_id
+        self._node_id = str(node_id or "").strip()
+        self._account_id = str(account_id or "").strip()
+        if not self._node_id:
+            raise ValueError("command poller node_id is required")
+        if not self._account_id:
+            raise ValueError("command poller account_id is required")
         self._poll_interval_seconds = poll_interval_seconds
         self._timer_name = timer_name
 
@@ -418,6 +422,11 @@ class CommandPollerActor(Actor):
             elif cmd.type in (CommandType.CANCEL_ALL, CommandType.CLOSE_ALL):
                 if not _node_command_has_authorization(cmd):
                     return CommandAckStatus.FAILED, "authorization_source_required"
+                command_account_id = _node_command_account_id(cmd)
+                if not command_account_id:
+                    return CommandAckStatus.FAILED, "command_account_required"
+                if command_account_id != self._account_id:
+                    return CommandAckStatus.FAILED, "command_account_mismatch"
                 # Only a Strategy may submit/cancel/close on Nautilus, so route the
                 # action to the IntentExecutionStrategy over the msgbus. Returns
                 # ACCEPTED (received + dispatched); the strategy executes best-effort.
@@ -469,3 +478,10 @@ def _node_command_has_authorization(cmd: Any) -> bool:
         and bool(authorized_by_id)
         and bool(source_message_id)
     )
+
+
+def _node_command_account_id(cmd: Any) -> str:
+    args = getattr(cmd, "args", {})
+    if not isinstance(args, dict):
+        return ""
+    return str(args.get("account_id") or "").strip()

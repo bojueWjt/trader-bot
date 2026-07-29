@@ -26,6 +26,10 @@ class ControlPlaneHttpError(RuntimeError):
     pass
 
 
+class ControlPlaneIdentityError(ControlPlaneHttpError):
+    pass
+
+
 class HttpControlPlaneClient(ControlPlaneClient):
     """HTTP implementation of the window-B control-plane seam."""
 
@@ -34,11 +38,13 @@ class HttpControlPlaneClient(ControlPlaneClient):
         base_url: str,
         token: str,
         node_id: str,
+        account_id: str,
         timeout_seconds: float = 5.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
-        self._node_id = node_id
+        self._node_id = _required_identity(node_id, "node_id")
+        self._account_id = _required_identity(account_id, "account_id")
         self._timeout_seconds = timeout_seconds
 
     def fetch_intents(
@@ -48,6 +54,7 @@ class HttpControlPlaneClient(ControlPlaneClient):
         limit: int,
         wait_ms: int = 0,
     ) -> IntentBatch:
+        self._require_account_id(account_id)
         query = {
             "account_id": account_id,
             "limit": str(limit),
@@ -75,6 +82,8 @@ class HttpControlPlaneClient(ControlPlaneClient):
         status: IntentAckStatus,
         detail: Optional[str] = None,
     ) -> None:
+        self._require_node_id(node_id)
+        self._require_account_id(account_id)
         body: dict[str, Any] = {"account_id": account_id, "status": status.value}
         if detail is not None:
             body["detail"] = detail
@@ -88,14 +97,23 @@ class HttpControlPlaneClient(ControlPlaneClient):
     def post_events(
         self, node_id: str, events: Sequence[ExecutionEventEnvelopeV1]
     ) -> list[str]:
+        self._require_node_id(node_id)
+        for event in events:
+            self._require_node_id(event.node_id)
+            self._require_account_id(event.account_id)
         payload = self._request_json(
             "POST",
             f"/v1/nodes/{node_id}/execution-events",
-            {"events": [_model_dump_jsonable(event) for event in events]},
+            {
+                "account_id": self._account_id,
+                "events": [_model_dump_jsonable(event) for event in events],
+            },
         )
         return [str(event_id) for event_id in payload.get("acked_event_ids", [])]
 
     def heartbeat(self, node_id: str, hb: Heartbeat) -> None:
+        self._require_node_id(node_id)
+        self._require_account_id(hb.account_id)
         self._request_json(
             "POST",
             f"/v1/nodes/{node_id}/heartbeat",
@@ -104,8 +122,12 @@ class HttpControlPlaneClient(ControlPlaneClient):
         )
 
     def poll_commands(self, node_id: str, after: Optional[str]) -> list[NodeCommand]:
-        query = urlencode({"after": after}) if after is not None else ""
-        suffix = f"?{query}" if query else ""
+        self._require_node_id(node_id)
+        query_values = {"account_id": self._account_id}
+        if after is not None:
+            query_values["after"] = after
+        query = urlencode(query_values)
+        suffix = f"?{query}"
         payload = self._request_json("GET", f"/v1/nodes/{node_id}/commands{suffix}")
         return [
             NodeCommand(
@@ -125,7 +147,11 @@ class HttpControlPlaneClient(ControlPlaneClient):
         result: Optional[dict[str, Any]] = None,
         error: Optional[str] = None,
     ) -> None:
-        body: dict[str, Any] = {"status": status.value}
+        self._require_node_id(node_id)
+        body: dict[str, Any] = {
+            "account_id": self._account_id,
+            "status": status.value,
+        }
         if result is not None:
             body["result"] = result
         if error is not None:
@@ -138,9 +164,29 @@ class HttpControlPlaneClient(ControlPlaneClient):
         )
 
     def latest_snapshot_generated_at(self, account_id: str) -> Optional[datetime]:
-        payload = self._request_json("GET", f"/v1/accounts/{account_id}")
+        self._require_account_id(account_id)
+        query = urlencode({"node_id": self._node_id})
+        payload = self._request_json(
+            "GET",
+            f"/v1/accounts/{account_id}?{query}",
+        )
         generated_at = payload.get("generated_at")
         return _parse_datetime(generated_at)
+
+    def _require_node_id(self, node_id: str) -> None:
+        candidate = _required_identity(node_id, "node_id")
+        if candidate != self._node_id:
+            raise ControlPlaneIdentityError(
+                f"node_id mismatch: bound={self._node_id!r} requested={candidate!r}"
+            )
+
+    def _require_account_id(self, account_id: str) -> None:
+        candidate = _required_identity(account_id, "account_id")
+        if candidate != self._account_id:
+            raise ControlPlaneIdentityError(
+                "account_id mismatch: "
+                f"bound={self._account_id!r} requested={candidate!r}"
+            )
 
     def _request_json(
         self,
@@ -153,6 +199,8 @@ class HttpControlPlaneClient(ControlPlaneClient):
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self._token}",
+            "X-Node-Id": self._node_id,
+            "X-Account-Id": self._account_id,
         }
         if body is not None:
             data = json.dumps(body).encode("utf-8")
@@ -187,6 +235,13 @@ def _heartbeat_dump(hb: Heartbeat) -> dict[str, Any]:
     payload["trading_state"] = hb.trading_state.value
     payload["reconciliation_state"] = hb.reconciliation_state.value
     return payload
+
+
+def _required_identity(value: str, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ControlPlaneIdentityError(f"{field_name} is required")
+    return normalized
 
 
 def _model_dump_jsonable(model: ExecutionEventEnvelopeV1) -> dict[str, Any]:

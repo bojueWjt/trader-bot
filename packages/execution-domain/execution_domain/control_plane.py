@@ -92,12 +92,17 @@ class NodeCommand:
 
 @dataclass(frozen=True)
 class Heartbeat:
+    account_id: str
     ts: datetime
     trading_state: TradingState
     readiness: bool
     projection_lag_ms: int
     reconciliation_state: ReconciliationState
     last_event_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not str(self.account_id).strip():
+            raise ValueError("heartbeat account_id is required")
 
 
 @runtime_checkable

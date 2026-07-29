@@ -83,6 +83,17 @@ def test_startup_is_halted_and_readiness_requires_all_dependencies(
     assert lifecycle.trading_state is TradingState.HALTED
 
 
+def test_heartbeat_carries_the_runtime_account_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+
+    heartbeat = lifecycle.build_heartbeat()
+
+    assert heartbeat.account_id == config.account_id
+
+
 def test_control_plane_loss_and_stale_snapshot_auto_halt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
