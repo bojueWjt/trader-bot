@@ -89,6 +89,46 @@ def test_readiness_false_node_alerts_even_when_status_is_active(monkeypatch):
     assert "readiness=false" in prompts[0]
 
 
+def test_operator_halt_with_healthy_readiness_does_not_raise_fault_alert(monkeypatch):
+    module = _load_monitor()
+    state = {
+        "nodehalt:node-a:old fault": 100,
+        "nodehalt-first:node-a:old fault": 50,
+    }
+    prompts = []
+    rows = [["node-a", "HALTED", "true", "", "1.0", "HALT"]]
+    monkeypatch.setattr(module, "q", lambda sql: rows)
+    monkeypatch.setattr(
+        module,
+        "wake_hermes",
+        lambda prompt, name, dry_run: prompts.append(prompt) or True,
+    )
+
+    module.sweep_node_health(state, dry_run=False, now_ts=2_000)
+
+    assert prompts == []
+    assert not any(key.startswith("nodehalt:node-a:") for key in state)
+    assert not any(key.startswith("nodehalt-first:node-a:") for key in state)
+
+
+def test_operator_halt_still_alerts_when_readiness_is_false(monkeypatch):
+    module = _load_monitor()
+    state = {}
+    prompts = []
+    rows = [["node-a", "HALTED", "false", "", "1.0", "HALT"]]
+    monkeypatch.setattr(module, "q", lambda sql: rows)
+    monkeypatch.setattr(
+        module,
+        "wake_hermes",
+        lambda prompt, name, dry_run: prompts.append(prompt) or True,
+    )
+
+    module.sweep_node_health(state, dry_run=False, now_ts=2_000)
+
+    assert len(prompts) == 1
+    assert "readiness=false" in prompts[0]
+
+
 def test_stale_heartbeat_alerts_even_when_row_says_healthy(monkeypatch):
     # 2026-07-24: both nodes hung for 7h; heartbeats froze at 02:51 with
     # readiness=true left in the table, so value checks saw "healthy" forever.

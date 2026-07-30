@@ -879,10 +879,17 @@ def sweep_node_health(state: dict, dry_run: bool, now_ts: float | None = None) -
         "SELECT node_id, status, COALESCE(payload->>'readiness',''), "
         "COALESCE(payload->>'halt_reason',''), "
         "EXTRACT(EPOCH FROM (now() - GREATEST(last_seen_at, "
-        "COALESCE((payload->>'ts')::timestamptz, last_seen_at)))) "
+        "COALESCE((payload->>'ts')::timestamptz, last_seen_at)))), "
+        "COALESCE((SELECT oc.command_type FROM operator_commands oc "
+        "JOIN command_node_acks cna ON cna.command_id=oc.command_id "
+        "WHERE cna.node_id=node_heartbeats.node_id AND cna.status='acked' "
+        "AND oc.command_type IN ('HALT','RESUME','REDUCE') "
+        "ORDER BY cna.ack_at DESC NULLS LAST, oc.created_at DESC LIMIT 1),'') "
         "FROM node_heartbeats ORDER BY node_id"
     )
-    for node_id, status_raw, readiness_raw, halt_reason_raw, hb_age_raw in rows:
+    for row in rows:
+        node_id, status_raw, readiness_raw, halt_reason_raw, hb_age_raw = row[:5]
+        latest_lifecycle_command = str(row[5] if len(row) > 5 else "").strip().upper()
         status = str(status_raw or "").strip().upper()
         readiness_false = _readiness_is_false(readiness_raw)
         # 2026-07-24 事故：双节点僵死 7 小时，心跳停更但表里残留
@@ -908,11 +915,23 @@ def sweep_node_health(state: dict, dry_run: bool, now_ts: float | None = None) -
             continue
         state.pop(f"nodehalt:{node_id}:heartbeat_stale", None)
         state.pop(f"nodehalt-first:{node_id}:heartbeat_stale", None)
+        halt_reason = str(halt_reason_raw or "").strip()
+        if (
+            status == "HALTED"
+            and not readiness_false
+            and (
+                halt_reason.lower() == "operator_command"
+                or latest_lifecycle_command == "HALT"
+            )
+        ):
+            # An acknowledged operator HALT is an expected control action. The
+            # command path owns its audit trail; node health alerts cover faults.
+            _clear_node_alert_state(state, node_id)
+            continue
         if status != "HALTED" and not readiness_false:
             _clear_node_alert_state(state, node_id)
             continue
 
-        halt_reason = str(halt_reason_raw or "").strip()
         reason = halt_reason
         if not reason:
             reason = "HALTED" if status == "HALTED" else "readiness=false"

@@ -28,6 +28,7 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -318,19 +319,37 @@ def cmd_nodes(args) -> None:
                     h = json.loads(resp.read().decode())
                 b["local_health"] = {"trading_state": h.get("trading_state"),
                                      "halt_reason": h.get("halt_reason"), "ready": h.get("ready")}
+            except urllib.error.HTTPError as exc:
+                try:
+                    h = json.loads(exc.read().decode())
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    b["local_health"] = {"error": str(exc)[:120]}
+                else:
+                    b["local_health"] = {
+                        "trading_state": h.get("trading_state"),
+                        "halt_reason": h.get("halt_reason"),
+                        "ready": h.get("ready"),
+                        "http_status": exc.code,
+                    }
             except Exception as exc:  # noqa: BLE001
                 b["local_health"] = {"error": str(exc)[:120]}
     commands = q_json(
-        "SELECT command_type, status, created_at FROM operator_commands ORDER BY created_at DESC LIMIT 5"
+        "SELECT command_type, status, reason, created_at, completed_at "
+        "FROM operator_commands ORDER BY created_at DESC LIMIT 5"
     )
     warnings = []
     for b in beats:
         if b["age_seconds"] > 120:
             warnings.append(f"{b['node_id']} 心跳已停 {int(b['age_seconds'])}s — 节点可能僵死")
         lh = b.get("local_health") or {}
-        if lh.get("halt_reason"):
+        local_state = str(lh.get("trading_state") or b.get("status") or "").upper()
+        if local_state == "HALTED" and lh.get("halt_reason"):
             warnings.append(f"{b['node_id']} HALTED 原因: {lh['halt_reason']}")
-    out = {"nodes": beats, "recent_operator_commands": commands}
+    out = {
+        "nodes": beats,
+        "operator_command_history": commands,
+        "operator_command_history_note": "审计历史，不代表当前节点状态；当前状态以 nodes 为准",
+    }
     if warnings:
         out["warnings"] = warnings
     emit(out)
