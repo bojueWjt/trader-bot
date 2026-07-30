@@ -211,6 +211,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                     order_plan={
                         "take_profits": [],
                         "disable_take_profits": True,
+                        "position_side": "long",
                         "authorization": _authorization(
                             "user",
                             "balen",
@@ -1039,7 +1040,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             self.assertIn("take_profit_tombstone", stash)
             self.assertEqual(stash["take_profit_tombstone"]["state"], "disabled")
 
-    def test_refresh_failure_rejects_disable_without_reusing_cached_mirror_orders(
+    def test_refresh_failure_persists_disable_and_retries_after_mirror_recovers(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as state_dir:
@@ -1077,10 +1078,38 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             )
 
             self.assertEqual(adapter.calls, [])
-            self.assertNotIn("take_profit_tombstone", stash)
+            tombstone = stash["take_profit_tombstone"]
+            self.assertEqual(tombstone["state"], "cancel_pending")
             self.assertEqual(
                 strategy.denials[-1].reason,
                 "exchange_state_refresh_failed",
+            )
+            strategy.submitted_plans.clear()
+            strategy._sync_protection(str(entry_intent_id))
+            self.assertEqual(
+                [
+                    plan
+                    for plan in strategy.submitted_plans
+                    if "lifecycle_role=take_profit" in plan.tags
+                ],
+                [],
+            )
+
+            mirror._fail_refresh = False
+            restarted = _Strategy(Path(state_dir), orders=[])
+            restarted._entry_protection_stash = (
+                restarted._load_entry_protection_stash()
+            )
+            restarted.set_exchange_cancel_adapter(adapter, mirror)
+            restarted._on_exchange_state_timer()
+
+            self.assertEqual(len(adapter.calls), 1)
+            restarted_stash = restarted._entry_protection_stash[
+                str(entry_intent_id)
+            ]
+            self.assertEqual(
+                restarted_stash["take_profit_tombstone"]["state"],
+                "disabled",
             )
 
     def test_fresh_mirror_absence_excludes_stale_local_tp_from_cancel_decision(

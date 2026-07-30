@@ -18,7 +18,10 @@ PATCH_FILES = (
     "event_mapper.py",
     "intent_execution_strategy.py",
     "exchange_cancel_adapter.py",
+    "lifecycle.py",
+    "binance_adapter_config.py",
     "node.py",
+    "nautilus_actors.py",
     "binance_execution.py",
     "binance_futures_execution.py",
 )
@@ -83,6 +86,21 @@ class GenRecreatePatchedTest(unittest.TestCase):
                     {
                         "Source": "/legacy/projection_actor.py",
                         "Destination": "/app/projection/actor.py",
+                        "RW": False,
+                    },
+                    {
+                        "Source": "/legacy/lifecycle.py.fixed",
+                        "Destination": "/app/runtime/lifecycle.py",
+                        "RW": False,
+                    },
+                    {
+                        "Source": "/legacy/nautilus_actors.py.fixed",
+                        "Destination": "/app/app/nautilus_actors.py",
+                        "RW": False,
+                    },
+                    {
+                        "Source": "/legacy/binance_adapter_config.py.fixed",
+                        "Destination": "/app/runtime/binance_adapter_config.py",
                         "RW": False,
                     },
                     {
@@ -164,7 +182,12 @@ class GenRecreatePatchedTest(unittest.TestCase):
             "/app/strategy/intent_execution_strategy.py:ro",
             f"{self.patch_dir}/exchange_cancel_adapter.py:"
             "/app/runtime/exchange_cancel_adapter.py:ro",
+            f"{self.patch_dir}/lifecycle.py:/app/runtime/lifecycle.py:ro",
+            f"{self.patch_dir}/binance_adapter_config.py:"
+            "/app/runtime/binance_adapter_config.py:ro",
             f"{self.patch_dir}/node.py:/app/app/node.py:ro",
+            f"{self.patch_dir}/nautilus_actors.py:"
+            "/app/app/nautilus_actors.py:ro",
             f"{self.patch_dir}/binance_execution.py:{BINANCE_DST}:ro",
             f"{self.patch_dir}/binance_futures_execution.py:"
             f"{BINANCE_FUTURES_DST}:ro",
@@ -180,6 +203,33 @@ class GenRecreatePatchedTest(unittest.TestCase):
             "/legacy/projection_actor.py:/app/projection/actor.py:ro",
             mounts,
         )
+        self.assertNotIn(
+            "/legacy/lifecycle.py.fixed:/app/runtime/lifecycle.py:ro",
+            mounts,
+        )
+        self.assertNotIn(
+            "/legacy/nautilus_actors.py.fixed:/app/app/nautilus_actors.py:ro",
+            mounts,
+        )
+        self.assertNotIn(
+            "/legacy/binance_adapter_config.py.fixed:"
+            "/app/runtime/binance_adapter_config.py:ro",
+            mounts,
+        )
+
+    def test_missing_lifecycle_patch_fails_before_docker_inspect(self):
+        (self.patch_dir / "lifecycle.py").unlink()
+
+        result = self.run_script(
+            "trader-v3-node-a",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("mount source is missing", result.stderr)
+        self.assertIn("lifecycle.py", result.stderr)
+        self.assertFalse(self.docker_called.exists())
 
     def test_generated_container_always_starts_halted(self):
         result = self.run_script(

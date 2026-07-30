@@ -124,6 +124,9 @@ class FakeCursor:
         if compact.startswith(
             "SELECT intent_id::text, status::text, valid_until "
             "FROM trade_intents WHERE idempotency_key=%s"
+        ) or compact.startswith(
+            "SELECT intent_id::text, status::text, valid_until, order_plan "
+            "FROM trade_intents WHERE idempotency_key=%s"
         ):
             self.result = self.db.intents_by_idem.get(params[0], False)
             return
@@ -140,7 +143,13 @@ class FakeCursor:
             intent_id = params[0]
             valid_until = params[-2]
             idem = params[-1]
-            self.db.intents_by_idem[idem] = (intent_id, "approved", valid_until)
+            order_plan = getattr(params[6], "adapted", params[6])
+            self.db.intents_by_idem[idem] = (
+                intent_id,
+                "approved",
+                valid_until,
+                order_plan,
+            )
 
     def fetchone(self):
         return self.result

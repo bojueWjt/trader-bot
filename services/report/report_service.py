@@ -53,6 +53,8 @@ OUTCOME_JOB_NAME = "trade_outcomes"
 OUTCOME_JOB_STATUS = "succeeded"
 OUTCOME_FRESHNESS_ENV = "REPORT_OUTCOME_FRESHNESS_HOURS"
 DEFAULT_OUTCOME_FRESHNESS_HOURS = 36.0
+EXCHANGE_MIRROR_FRESHNESS_ENV = "REPORT_EXCHANGE_MIRROR_FRESHNESS_SECONDS"
+DEFAULT_EXCHANGE_MIRROR_FRESHNESS_SECONDS = 180.0
 
 
 class ReportValidationError(ValueError):
@@ -273,6 +275,9 @@ def empty_dependency_status() -> dict[str, dict[str, Any]]:
         "exchange_state_mirror": {
             "status": "unknown",
             "reason": "",
+            "updated_at": "",
+            "age_seconds": False,
+            "freshness_threshold_seconds": False,
         },
     }
 
@@ -328,6 +333,22 @@ def outcome_freshness_threshold() -> timedelta:
     return timedelta(hours=hours)
 
 
+def exchange_mirror_freshness_threshold() -> timedelta:
+    raw_value = os.getenv(
+        EXCHANGE_MIRROR_FRESHNESS_ENV,
+        str(DEFAULT_EXCHANGE_MIRROR_FRESHNESS_SECONDS),
+    )
+    try:
+        seconds = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        reason = f"{EXCHANGE_MIRROR_FRESHNESS_ENV} must be a positive number"
+        raise ReportDependencyError("exchange_state_mirror", reason) from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        reason = f"{EXCHANGE_MIRROR_FRESHNESS_ENV} must be a positive number"
+        raise ReportDependencyError("exchange_state_mirror", reason)
+    return timedelta(seconds=seconds)
+
+
 def normalize_utc_datetime(value: Any) -> datetime:
     completed_at = value
     if isinstance(completed_at, str):
@@ -341,6 +362,105 @@ def normalize_utc_datetime(value: Any) -> datetime:
     if completed_at.tzinfo is None:
         completed_at = completed_at.replace(tzinfo=timezone.utc)
     return completed_at.astimezone(timezone.utc)
+
+
+def normalize_exchange_mirror_updated_at(value: Any) -> datetime:
+    updated_at = value
+    if isinstance(updated_at, str):
+        normalized = updated_at.replace("Z", "+00:00")
+        try:
+            updated_at = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            reason = "updated_at is not a valid timestamp"
+            raise ReportDependencyError("exchange_state_mirror", reason) from exc
+    if not isinstance(updated_at, datetime):
+        reason = "updated_at is missing"
+        raise ReportDependencyError("exchange_state_mirror", reason)
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    return updated_at.astimezone(timezone.utc)
+
+
+def exchange_mirror_rows_are_fresh(
+    rows: list[dict[str, Any]],
+    dependencies: dict[str, dict[str, Any]],
+    now: datetime | None = None,
+) -> bool:
+    current_time = now or utc_now()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    current_time = current_time.astimezone(timezone.utc)
+    dependency = dependencies["exchange_state_mirror"]
+    try:
+        freshness = exchange_mirror_freshness_threshold()
+    except ReportDependencyError as exc:
+        dependency.update(
+            {
+                "status": "error",
+                "reason": exc.reason,
+            }
+        )
+        return False
+    freshness_seconds = int(freshness.total_seconds())
+    dependency["freshness_threshold_seconds"] = freshness_seconds
+    if not rows:
+        dependency.update(
+            {
+                "status": "missing",
+                "reason": "exchange_state_mirror has no account snapshots",
+                "updated_at": "",
+                "age_seconds": False,
+            }
+        )
+        return False
+
+    oldest_account_id = ""
+    oldest_updated_at = current_time
+    for row in rows:
+        account_id = str(row.get("account_id") or "unknown")
+        try:
+            updated_at = normalize_exchange_mirror_updated_at(row.get("updated_at"))
+        except ReportDependencyError as exc:
+            reason = f"exchange_state_mirror {exc.reason}: account_id={account_id}"
+            dependency.update(
+                {
+                    "status": "missing",
+                    "reason": reason,
+                    "updated_at": "",
+                    "age_seconds": False,
+                }
+            )
+            return False
+        if not oldest_account_id or updated_at < oldest_updated_at:
+            oldest_account_id = account_id
+            oldest_updated_at = updated_at
+
+    age_seconds = max(0, int((current_time - oldest_updated_at).total_seconds()))
+    if current_time - oldest_updated_at > freshness:
+        reason = (
+            f"exchange_state_mirror is stale: account_id={oldest_account_id}, "
+            f"updated_at={oldest_updated_at.isoformat()}, age_seconds={age_seconds}, "
+            f"threshold_seconds={freshness_seconds}"
+        )
+        dependency.update(
+            {
+                "status": "stale",
+                "reason": reason,
+                "updated_at": oldest_updated_at.isoformat(),
+                "age_seconds": age_seconds,
+            }
+        )
+        return False
+
+    dependency.update(
+        {
+            "status": "ok",
+            "reason": "",
+            "updated_at": oldest_updated_at.isoformat(),
+            "age_seconds": age_seconds,
+        }
+    )
+    return True
 
 
 def connect_database(
@@ -627,10 +747,13 @@ def fetch_report_data(
                     cur,
                     "SELECT account_id, payload, updated_at FROM exchange_state_mirror ORDER BY account_id",
                 )
-                dependencies["exchange_state_mirror"] = {
-                    "status": "ok",
-                    "reason": "",
-                }
+                mirror_fresh = exchange_mirror_rows_are_fresh(
+                    mirror_rows,
+                    dependencies,
+                    now=now,
+                )
+                if not mirror_fresh:
+                    data["missing_data"].append(dependencies["exchange_state_mirror"]["reason"])
             except Exception as exc:
                 reason = f"exchange_state_mirror: {exc}"
                 data["missing_data"].append(reason)
@@ -639,25 +762,11 @@ def fetch_report_data(
                     "reason": reason,
                 }
                 mirror_rows = []
+                mirror_fresh = False
             positions = []
-            if mirror_rows:
+            if mirror_rows and mirror_fresh:
                 for row in mirror_rows:
                     positions.extend(normalize_position_payload(row.get("payload"), row.get("account_id"), row.get("updated_at")))
-            else:
-                positions = safe_query(
-                    cur,
-                    """
-                    SELECT account_id, instrument_id AS symbol, side::text AS side, quantity,
-                           avg_entry_price AS entry_price, mark_price, unrealized_pnl, updated_at,
-                           'positions_projection' AS source
-                    FROM positions_projection
-                    WHERE quantity > 0 AND status NOT IN ('closed', 'flat')
-                    ORDER BY account_id, instrument_id
-                    """,
-                    (),
-                    data["missing_data"],
-                    "positions_projection",
-                )
             data["positions"] = positions
     finally:
         conn.close()
@@ -680,11 +789,15 @@ def inspect_dependencies(
             except ReportDependencyError:
                 pass
             try:
-                fetch_all(cur, "SELECT 1 AS available FROM exchange_state_mirror LIMIT 1")
-                dependencies["exchange_state_mirror"] = {
-                    "status": "ok",
-                    "reason": "",
-                }
+                mirror_rows = fetch_all(
+                    cur,
+                    "SELECT account_id, updated_at FROM exchange_state_mirror ORDER BY account_id",
+                )
+                exchange_mirror_rows_are_fresh(
+                    mirror_rows,
+                    dependencies,
+                    now=now,
+                )
             except Exception as exc:
                 reason = f"exchange_state_mirror: {exc}"
                 dependencies["exchange_state_mirror"] = {

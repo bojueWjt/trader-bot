@@ -36,10 +36,18 @@ def _token() -> str:
 
 
 def _call(method: str, path: str, payload: dict | None = None) -> dict:
+    headers = {
+        "Authorization": "Bearer " + _token(),
+        "Content-Type": "application/json",
+    }
+    if payload is not None:
+        request_id = str(payload.get("source_message_id") or "").strip()
+        if request_id:
+            headers["X-Request-Id"] = request_id
     req = urllib.request.Request(
         BASE + path,
         method=method,
-        headers={"Authorization": "Bearer " + _token(), "Content-Type": "application/json"},
+        headers=headers,
         data=json.dumps(payload).encode() if payload is not None else None,
     )
     try:

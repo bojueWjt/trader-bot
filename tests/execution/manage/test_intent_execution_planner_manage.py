@@ -22,6 +22,7 @@ from strategy.intent_execution_planner import (  # noqa: E402
     OrderSnapshot,
     PlannerContext,
     PositionSnapshot,
+    encode_client_order_id,
     plan_intent_execution,
 )
 
@@ -160,8 +161,8 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
                 intent,
                 _context(
                     positions=(
-                        _position(position_id="P-1"),
-                        _position(position_id="P-2"),
+                        _position(position_id="P-LONG", side="LONG"),
+                        _position(position_id="P-SHORT", side="SHORT"),
                     )
                 ),
             ),
@@ -177,6 +178,221 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
                 _context(),
             ),
             OrderDenied(reason="position_required", detail="missing"),
+        )
+
+    def test_management_selects_position_from_order_plan_position_side(self) -> None:
+        long_position = _position(position_id="P-LONG", side="LONG")
+        short_position = _position(position_id="P-SHORT", side="SHORT")
+        intent = _intent(
+            action="close_position",
+            target_position_id=None,
+            order_plan={"type": "market", "position_side": "short"},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                position=long_position,
+                positions=(long_position, short_position),
+            ),
+        )
+
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.target_position_id, "P-SHORT")
+        self.assertEqual(result.target_position_side, "SHORT")
+        self.assertEqual(result.orders[0].side, "BUY")
+
+    def test_management_without_position_side_uses_exact_target_position_id(self) -> None:
+        long_position = _position(position_id="P-LONG", side="LONG")
+        short_position = _position(position_id="P-SHORT", side="SHORT")
+        intent = _intent(
+            action="close_position",
+            target_position_id="P-SHORT",
+            order_plan={"type": "market"},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                position=long_position,
+                positions=(long_position, short_position),
+            ),
+        )
+
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.target_position_id, "P-SHORT")
+        self.assertEqual(result.target_position_side, "SHORT")
+        self.assertEqual(result.orders[0].side, "BUY")
+
+    def test_management_without_position_side_uses_single_live_position(self) -> None:
+        intent = _intent(
+            action="close_position",
+            target_position_id=None,
+            order_plan={"type": "market"},
+        )
+
+        result = plan_intent_execution(intent, _context())
+
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.target_position_id, POSITION_ID)
+        self.assertEqual(result.target_position_side, "LONG")
+        self.assertEqual(result.orders[0].side, "SELL")
+
+    def test_management_fails_closed_when_target_position_conflicts_with_position_side(self) -> None:
+        short_position = _position(position_id="P-SHORT", side="SHORT")
+        intent = _intent(
+            action="close_position",
+            target_position_id="P-SHORT",
+            order_plan={"type": "market", "position_side": "long"},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(position=short_position, positions=(short_position,)),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(
+                reason="position_side_mismatch",
+                detail="requested=LONG,actual=SHORT",
+            ),
+        )
+
+    def test_management_fails_closed_when_requested_position_side_has_no_position(self) -> None:
+        short_position = _position(position_id="P-SHORT", side="SHORT")
+        intent = _intent(
+            action="close_position",
+            target_position_id=None,
+            order_plan={"type": "market", "position_side": "long"},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(position=short_position, positions=(short_position,)),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="position_required", detail=f"{INSTRUMENT_ID}:LONG"),
+        )
+
+    def test_cancel_order_requires_account_instrument_and_intent_owned_live_order(self) -> None:
+        owner_intent_id = uuid4()
+        target = encode_client_order_id(owner_intent_id)
+        intent = _intent(
+            action="cancel_order",
+            target_position_id=None,
+            order_plan={"cancel_client_order_id": target},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                existing_orders=(_owned_order(target, owner_intent_id),),
+                existing_intent_ids=frozenset({str(owner_intent_id)}),
+            ),
+        )
+
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.cancel_order_ids, (target,))
+
+    def test_cancel_order_rejects_system_format_order_without_order_ownership_tags(self) -> None:
+        owner_intent_id = uuid4()
+        target = encode_client_order_id(owner_intent_id)
+        intent = _intent(
+            action="cancel_order",
+            target_position_id=None,
+            order_plan={"cancel_client_order_id": target},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                existing_orders=(_order(target, "stop_loss"),),
+                existing_intent_ids=frozenset({str(owner_intent_id)}),
+            ),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="order_ownership_unverified", detail=target),
+        )
+
+    def test_cancel_order_rejects_order_owned_by_another_account(self) -> None:
+        owner_intent_id = uuid4()
+        target = encode_client_order_id(owner_intent_id)
+        intent = _intent(
+            action="cancel_order",
+            target_position_id=None,
+            order_plan={"cancel_client_order_id": target},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                existing_orders=(
+                    _owned_order(
+                        target,
+                        owner_intent_id,
+                        account_id="account-b",
+                    ),
+                ),
+                existing_intent_ids=frozenset({str(owner_intent_id)}),
+            ),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="order_ownership_unverified", detail=target),
+        )
+
+    def test_cancel_order_rejects_order_without_known_owner_intent(self) -> None:
+        owner_intent_id = uuid4()
+        target = encode_client_order_id(owner_intent_id)
+        intent = _intent(
+            action="cancel_order",
+            target_position_id=None,
+            order_plan={"cancel_client_order_id": target},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                existing_orders=(_owned_order(target, owner_intent_id),),
+                existing_intent_ids=frozenset(),
+            ),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="order_ownership_unverified", detail=target),
+        )
+
+    def test_cancel_order_rejects_order_with_conflicting_intent_tag(self) -> None:
+        owner_intent_id = uuid4()
+        target = encode_client_order_id(owner_intent_id)
+        intent = _intent(
+            action="cancel_order",
+            target_position_id=None,
+            order_plan={"cancel_client_order_id": target},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                existing_orders=(_owned_order(target, uuid4()),),
+                existing_intent_ids=frozenset({str(owner_intent_id)}),
+            ),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="order_ownership_unverified", detail=target),
         )
 
     def test_management_quantity_cannot_exceed_position(self) -> None:
@@ -237,6 +453,29 @@ def _order(client_order_id: str, role: str) -> OrderSnapshot:
         price=None,
         trigger_price="26000",
         tags=(f"position_id={POSITION_ID}", f"lifecycle_role={role}"),
+    )
+
+
+def _owned_order(
+    client_order_id: str,
+    intent_id: UUID,
+    *,
+    account_id: str = ACCOUNT_ID,
+) -> OrderSnapshot:
+    return OrderSnapshot(
+        client_order_id=client_order_id,
+        instrument_id=INSTRUMENT_ID,
+        order_type="STOP_MARKET",
+        side="SELL",
+        quantity="0.5",
+        price=None,
+        trigger_price="26000",
+        tags=(
+            f"account_id={account_id}",
+            f"intent_id={intent_id}",
+            f"position_id={POSITION_ID}",
+            "lifecycle_role=stop_loss",
+        ),
     )
 
 

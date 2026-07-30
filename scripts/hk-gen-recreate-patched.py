@@ -22,6 +22,22 @@ class DeploymentConfigError(ValueError):
     pass
 
 
+PATCH_MOUNT_TARGETS = (
+    ("intent_execution_planner.py", "/app/strategy/intent_execution_planner.py"),
+    ("contracts.py", "/app/execution_domain/contracts.py"),
+    ("control_plane.py", "/app/execution_domain/control_plane.py"),
+    ("http_client.py", "/app/execution_domain/http_client.py"),
+    ("projection_actor.py", "/app/projection/actor.py"),
+    ("event_mapper.py", "/app/projection/event_mapper.py"),
+    ("intent_execution_strategy.py", "/app/strategy/intent_execution_strategy.py"),
+    ("exchange_cancel_adapter.py", "/app/runtime/exchange_cancel_adapter.py"),
+    ("lifecycle.py", "/app/runtime/lifecycle.py"),
+    ("binance_adapter_config.py", "/app/runtime/binance_adapter_config.py"),
+    ("node.py", "/app/app/node.py"),
+    ("nautilus_actors.py", "/app/app/nautilus_actors.py"),
+)
+
+
 def parse_args(argv):
     if len(argv) != 4:
         raise DeploymentConfigError(
@@ -57,56 +73,22 @@ def parse_args(argv):
 
 def explicit_mounts(trader_root, suffix, binance_dst, binance_futures_dst):
     patch_dir = trader_root / "container-patches"
-    return [
+    mounts = [
         (str(trader_root / "node-state" / suffix), "/state", "rw"),
-        (
-            str(patch_dir / "intent_execution_planner.py"),
-            "/app/strategy/intent_execution_planner.py",
-            "ro",
-        ),
-        (
-            str(patch_dir / "contracts.py"),
-            "/app/execution_domain/contracts.py",
-            "ro",
-        ),
-        (
-            str(patch_dir / "control_plane.py"),
-            "/app/execution_domain/control_plane.py",
-            "ro",
-        ),
-        (
-            str(patch_dir / "http_client.py"),
-            "/app/execution_domain/http_client.py",
-            "ro",
-        ),
-        (
-            str(patch_dir / "projection_actor.py"),
-            "/app/projection/actor.py",
-            "ro",
-        ),
-        (
-            str(patch_dir / "event_mapper.py"),
-            "/app/projection/event_mapper.py",
-            "ro",
-        ),
-        (
-            str(patch_dir / "intent_execution_strategy.py"),
-            "/app/strategy/intent_execution_strategy.py",
-            "ro",
-        ),
-        (
-            str(patch_dir / "exchange_cancel_adapter.py"),
-            "/app/runtime/exchange_cancel_adapter.py",
-            "ro",
-        ),
-        (str(patch_dir / "node.py"), "/app/app/node.py", "ro"),
-        (str(patch_dir / "binance_execution.py"), binance_dst, "ro"),
-        (
-            str(patch_dir / "binance_futures_execution.py"),
-            binance_futures_dst,
-            "ro",
-        ),
     ]
+    for filename, destination in PATCH_MOUNT_TARGETS:
+        mounts.append((str(patch_dir / filename), destination, "ro"))
+    mounts.extend(
+        [
+            (str(patch_dir / "binance_execution.py"), binance_dst, "ro"),
+            (
+                str(patch_dir / "binance_futures_execution.py"),
+                binance_futures_dst,
+                "ro",
+            ),
+        ]
+    )
+    return mounts
 
 
 def validate_mount_plan(mounts):

@@ -2044,28 +2044,13 @@ def _order_authorization(
     instrument_id: str,
     reason: str,
     source: str,
+    authenticated_actor_id: str,
+    request_id: str,
 ) -> dict:
     authorized_by_type = str(body.get("authorized_by_type") or "").strip().lower()
-    if authorized_by_type not in _ORDER_AUTHORIZATION_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"authorized_by_type must be one of {list(_ORDER_AUTHORIZATION_TYPES)}",
-        )
     authorized_by_id = str(body.get("authorized_by_id") or "").strip()
-    if not authorized_by_id:
-        raise HTTPException(status_code=400, detail="authorized_by_id required")
     source_message_id = str(body.get("source_message_id") or "").strip()
-    if not source_message_id:
-        raise HTTPException(status_code=400, detail="source_message_id required")
     created_by_service = str(body.get("created_by_service") or "").strip()
-    if not created_by_service:
-        raise HTTPException(status_code=400, detail="created_by_service required")
-    if source != created_by_service:
-        raise HTTPException(
-            status_code=400,
-            detail="source must match created_by_service",
-        )
-
     parent_intent_id = str(body.get("parent_intent_id") or "").strip()
     is_internal = _INTERNAL_ORDER_SERVICE_RE.search(created_by_service) is not None
     if is_internal and not parent_intent_id:
@@ -2074,6 +2059,13 @@ def _order_authorization(
             detail="internal/watchdog/reconciler source requires parent_intent_id",
         )
     if parent_intent_id:
+        if not created_by_service:
+            raise HTTPException(status_code=400, detail="created_by_service required")
+        if source != created_by_service:
+            raise HTTPException(
+                status_code=400,
+                detail="source must match created_by_service",
+            )
         parent_authorization = _authorized_parent(
             database_url,
             parent_intent_id,
@@ -2092,15 +2084,68 @@ def _order_authorization(
                 status_code=400,
                 detail="authorization evidence does not match parent_intent_id",
             )
+        return {
+            "authorized_by_type": parent_type,
+            "authorized_by_id": parent_id,
+            "reason": reason,
+            "source_message_id": parent_message,
+            "created_by_service": created_by_service,
+            "parent_intent_id": parent_intent_id,
+        }
 
+    if authorized_by_type == "channel":
+        if not authorized_by_id:
+            raise HTTPException(status_code=400, detail="authorized_by_id required")
+        if not source_message_id:
+            raise HTTPException(status_code=400, detail="source_message_id required")
+        if not created_by_service:
+            raise HTTPException(status_code=400, detail="created_by_service required")
+        if source != created_by_service:
+            raise HTTPException(
+                status_code=400,
+                detail="source must match created_by_service",
+            )
+        return {
+            "authorized_by_type": "channel",
+            "authorized_by_id": authorized_by_id,
+            "reason": reason,
+            "source_message_id": source_message_id,
+            "created_by_service": created_by_service,
+            "parent_intent_id": False,
+        }
+
+    if authorized_by_type and authorized_by_type != "user":
+        raise HTTPException(
+            status_code=400,
+            detail=f"authorized_by_type must be one of {list(_ORDER_AUTHORIZATION_TYPES)}",
+        )
+    if not request_id:
+        raise HTTPException(
+            status_code=400,
+            detail="authenticated user order requires X-Request-Id or client_ref",
+        )
     return {
-        "authorized_by_type": authorized_by_type,
-        "authorized_by_id": authorized_by_id,
+        "authorized_by_type": "user",
+        "authorized_by_id": authenticated_actor_id,
         "reason": reason,
-        "source_message_id": source_message_id,
-        "created_by_service": created_by_service,
-        "parent_intent_id": parent_intent_id or False,
+        "source_message_id": request_id,
+        "created_by_service": "control-plane",
+        "parent_intent_id": False,
     }
+
+
+def _canonical_order_request(body: dict, authorization: dict) -> dict:
+    canonical = dict(body)
+    canonical.update(
+        {
+            "authorized_by_type": authorization["authorized_by_type"],
+            "authorized_by_id": authorization["authorized_by_id"],
+            "source_message_id": authorization["source_message_id"],
+            "created_by_service": authorization["created_by_service"],
+            "source": authorization["created_by_service"],
+        }
+    )
+    return canonical
 
 
 def _write_attribution_shadow(event: dict) -> None:
@@ -2518,6 +2563,7 @@ def _op_num(value, field: str, required: bool = False):
 def operator_order(
     body: dict = Body(default={}),
     authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
 ):
     from datetime import timedelta
     from psycopg2.extras import Json
@@ -2609,8 +2655,7 @@ def operator_order(
         if stop_loss is None:
             raise HTTPException(status_code=400, detail="move_stop_loss requires stop_loss")
         _validate_stop_direction(symbol, account_id, stop_loss, position_side)
-    if action == "open_position" and not client_ref \
-            and body.get("dry_run") is not True:
+    if action == "open_position" and not client_ref:
         # The caller is an LLM: a timeout-retry without an idempotency key would
         # double the position (hedge mode never blocks a second open).
         raise HTTPException(
@@ -2618,8 +2663,7 @@ def operator_order(
             detail="open_position requires client_ref (idempotency key): use the "
                    "signal message id, or a stable slug for verbal orders",
         )
-    if action in _OPERATOR_MANAGEMENT_ACTIONS and not client_ref \
-            and body.get("dry_run") is not True:
+    if action in _OPERATOR_MANAGEMENT_ACTIONS and not client_ref:
         raise HTTPException(
             status_code=400,
             detail=f"{action} requires client_ref: pass a stable operation ref "
@@ -2742,27 +2786,11 @@ def operator_order(
     if action == "open_position":
         raw_channel, has_provenance = _open_source_channel(body, client_ref)
 
-    if dry_run:
-        order_plan_preview = {
-            "side": side,
-            "entry": {"type": entry_type},
-            "stop_loss": stop_loss,
-            "take_profits": take_profits,
-        }
-        if position_side:
-            order_plan_preview["position_side"] = position_side
-        if disable_take_profits:
-            order_plan_preview["disable_take_profits"] = True
-        return {
-            "dry_run": True, "action": action, "symbol": symbol, "account_id": account_id,
-            "computed_notional": notional, "checks": checks,
-            "order_plan_preview": order_plan_preview,
-        }
-
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="intent store unavailable")
 
+    request_id = str(x_request_id or client_ref or "").strip()
     authorization_evidence = _order_authorization(
         body,
         database_url,
@@ -2770,6 +2798,8 @@ def operator_order(
         symbol,
         reason,
         source,
+        role,
+        request_id,
     )
     if (
         authorization_evidence["authorized_by_type"] == "channel"
@@ -2816,7 +2846,8 @@ def operator_order(
         attribution_event, hard_error = _resolve_attribution(
             database_url, action, symbol, account_id, channel, entry_ref, position_side
         )
-        _write_attribution_shadow(attribution_event)
+        if not dry_run:
+            _write_attribution_shadow(attribution_event)
         attribution = {
             "resolution": attribution_event["resolution"],
             "owner_channel": attribution_event["owner_channel"],
@@ -2841,6 +2872,21 @@ def operator_order(
     order_plan["authorization"] = authorization_evidence
     if attribution:
         order_plan["attribution"] = attribution
+    canonical_request = _canonical_order_request(body, authorization_evidence)
+
+    if dry_run:
+        order_plan_preview = dict(order_plan)
+        return {
+            "dry_run": True,
+            "action": action,
+            "symbol": symbol,
+            "account_id": account_id,
+            "computed_notional": notional,
+            "checks": checks,
+            "order_plan_preview": order_plan_preview,
+            "authorization": authorization_evidence,
+            "attribution": attribution,
+        }
 
     now = datetime.now(timezone.utc)
     raw_id, run_id, ctx_id, dec_id, risk_id, intent_id = (str(uuid4()) for _ in range(6))
@@ -2860,26 +2906,49 @@ def operator_order(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT intent_id::text, status::text, valid_until FROM trade_intents WHERE idempotency_key=%s",
+                "SELECT intent_id::text, status::text, valid_until, order_plan "
+                "FROM trade_intents WHERE idempotency_key=%s",
                 (idem,),
             )
             existing = cur.fetchone()
             if existing:
+                existing_plan = existing[3] or {}
+                persisted_authorization = existing_plan.get("authorization")
+                if persisted_authorization != authorization_evidence:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="idempotency key authorization evidence mismatch",
+                    )
                 replay_response = {
                     "intent_id": existing[0], "status": existing[1], "replay": True,
                     "valid_until": existing[2].isoformat() if existing[2] else None,
                 }
                 if attribution:
                     replay_response["attribution"] = attribution
-                replay_response["authorization"] = authorization_evidence
+                replay_response["authorization"] = persisted_authorization
                 return replay_response
             cur.execute(
                 "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version, "
-                "source_received_at, content_hash, message_text) "
-                "VALUES (%s,'operator',%s,%s,'v1',%s,%s,%s)",
-                (raw_id, raw_channel, client_ref or f"operator-{raw_id}", now,
-                 hashlib.sha256(f"{raw_id}|{json.dumps(body, sort_keys=True, default=str)}".encode()).hexdigest(),
-                 f"[{source}] {action} {symbol}: {reason}"),
+                "source_received_at, author_id, content_hash, message_text, raw_payload) "
+                "VALUES (%s,'operator',%s,%s,'v1',%s,%s,%s,%s,%s)",
+                (
+                    raw_id,
+                    raw_channel,
+                    client_ref,
+                    now,
+                    authorization_evidence["authorized_by_id"],
+                    hashlib.sha256(
+                        f"{raw_id}|{json.dumps(canonical_request, sort_keys=True, default=str)}".encode()
+                    ).hexdigest(),
+                    f"[{authorization_evidence['created_by_service']}] "
+                    f"{action} {symbol}: {reason}",
+                    Json(
+                        {
+                            "authorization": authorization_evidence,
+                            "operator_request": canonical_request,
+                        }
+                    ),
+                ),
             )
             cur.execute(
                 "INSERT INTO message_processing_runs (processing_run_id, raw_message_id, status) "
@@ -2889,7 +2958,7 @@ def operator_order(
             cur.execute(
                 "INSERT INTO context_snapshots (context_snapshot_id, raw_message_id, snapshot_type, "
                 "context_version, snapshot) VALUES (%s,%s,'system','v1',%s)",
-                (ctx_id, raw_id, Json({"operator_request": body})),
+                (ctx_id, raw_id, Json({"operator_request": canonical_request})),
             )
             cur.execute(
                 "INSERT INTO hermes_decisions (decision_id, raw_message_id, processing_run_id, "
@@ -2902,7 +2971,9 @@ def operator_order(
                 (dec_id, raw_id, run_id, ctx_id, message_type, action, account_id, symbol, side,
                  entry_type, entry_price, entry_price_min, entry_price_max, stop_loss,
                  Json(take_profits), leverage, valid_until,
-                 Json([authorization_evidence]), source, now),
+                 Json([authorization_evidence]),
+                 authorization_evidence["created_by_service"],
+                 now),
             )
             cur.execute(
                 "INSERT INTO risk_decisions (risk_decision_id, hermes_decision_id, status, account_id, "
@@ -2919,13 +2990,37 @@ def operator_order(
                  Json(risk_budget), body.get("target_position_id"), valid_until, idem),
             )
             cur.execute(
+                "INSERT INTO audit_events (audit_event_id, event_type, aggregate_type, "
+                "aggregate_id, actor, raw_message_id, hermes_decision_id, "
+                "risk_decision_id, intent_id, payload) "
+                "VALUES (%s,'operator_order','trade_intent',%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    str(uuid4()),
+                    intent_id,
+                    authorization_evidence["authorized_by_id"],
+                    raw_id,
+                    dec_id,
+                    risk_id,
+                    intent_id,
+                    Json(
+                        {
+                            "authorization": authorization_evidence,
+                            "action": action,
+                            "account_id": account_id,
+                            "instrument_id": symbol,
+                            "client_ref": client_ref,
+                        }
+                    ),
+                ),
+            )
+            cur.execute(
                 "INSERT INTO outbox_events (outbox_event_id, status, aggregate_type, aggregate_id, "
                 "event_type, payload) VALUES (%s,'pending','trade_intent',%s,'trade_intent.approved',%s)",
                 (str(uuid4()), intent_id,
                  Json({
                      "intent_id": intent_id,
                      "risk_decision_id": risk_id,
-                     "source": source,
+                     "source": authorization_evidence["created_by_service"],
                      "authorization": authorization_evidence,
                  })),
             )

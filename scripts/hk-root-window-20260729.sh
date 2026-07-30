@@ -10,6 +10,24 @@ MEMINFO_PATH="${MEMINFO_PATH:-/proc/meminfo}"
 NODE_A="${NODE_A:-trader-v3-node-a}"
 NODE_B="${NODE_B:-trader-v3-node-b}"
 MUTATION_STARTED=0
+BINANCE_EXEC_DST="${BINANCE_EXEC_DST:-/usr/local/lib/python3.12/site-packages/nautilus_trader/adapters/binance/execution.py}"
+BINANCE_FUTURES_EXEC_DST="${BINANCE_FUTURES_EXEC_DST:-/usr/local/lib/python3.12/site-packages/nautilus_trader/adapters/binance/futures/execution.py}"
+NODE_PATCH_MOUNTS=(
+  "intent_execution_planner.py=/app/strategy/intent_execution_planner.py"
+  "contracts.py=/app/execution_domain/contracts.py"
+  "control_plane.py=/app/execution_domain/control_plane.py"
+  "http_client.py=/app/execution_domain/http_client.py"
+  "projection_actor.py=/app/projection/actor.py"
+  "event_mapper.py=/app/projection/event_mapper.py"
+  "intent_execution_strategy.py=/app/strategy/intent_execution_strategy.py"
+  "exchange_cancel_adapter.py=/app/runtime/exchange_cancel_adapter.py"
+  "lifecycle.py=/app/runtime/lifecycle.py"
+  "binance_adapter_config.py=/app/runtime/binance_adapter_config.py"
+  "node.py=/app/app/node.py"
+  "nautilus_actors.py=/app/app/nautilus_actors.py"
+  "binance_execution.py=$BINANCE_EXEC_DST"
+  "binance_futures_execution.py=$BINANCE_FUTURES_EXEC_DST"
+)
 
 die() {
   echo "FATAL: $*" >&2
@@ -433,20 +451,22 @@ PY
 }
 
 verify_existing_node_runtime() {
-  python3 - "$NODE_A" "$NODE_B" "$CP" <<'PY'
+  python3 - \
+    "$NODE_A" \
+    "$NODE_B" \
+    "$CP" \
+    "${NODE_PATCH_MOUNTS[@]}" <<'PY'
 import json
+from pathlib import Path
 import subprocess
 import sys
 
 node_names = sys.argv[1:3]
-patch_dir = sys.argv[3]
-expected = {
-    f"{patch_dir}/event_mapper.py": "/app/projection/event_mapper.py",
-    f"{patch_dir}/intent_execution_strategy.py": (
-        "/app/strategy/intent_execution_strategy.py"
-    ),
-    f"{patch_dir}/node.py": "/app/app/node.py",
-}
+patch_dir = Path(sys.argv[3])
+expected = {}
+for mount_spec in sys.argv[4:]:
+    filename, destination = mount_spec.split("=", 1)
+    expected[str(patch_dir / filename)] = destination
 inspected = json.loads(
     subprocess.check_output(["docker", "inspect", *node_names])
 )
@@ -472,17 +492,24 @@ for item in inspected:
             raise SystemExit(
                 f"{name} has no explicit HALTED env and node.py lacks safe default"
             )
-    pairs = {
-        mount.get("Source"): mount.get("Destination")
-        for mount in item.get("Mounts") or []
-    }
+    mounts = item.get("Mounts") or []
     for source, destination in expected.items():
-        if pairs.get(source) != destination:
+        matches = [
+            mount
+            for mount in mounts
+            if mount.get("Source") == source
+            and mount.get("Destination") == destination
+        ]
+        if len(matches) != 1:
             raise SystemExit(
-                f"{name} mount mismatch: {source} -> {pairs.get(source)}, "
-                f"expected {destination}"
+                f"{name} mount mismatch: {source} -> {destination}; "
+                f"matches={len(matches)}"
             )
-    print(f"{name} runtime config preserves HALTED restart and target mounts")
+        if matches[0].get("RW"):
+            raise SystemExit(
+                f"{name} patch mount is writable: {source} -> {destination}"
+            )
+    print(f"{name} runtime config preserves HALTED restart and full patch mounts")
 PY
 }
 
@@ -568,8 +595,6 @@ required=(
   host/trade_outcomes.py
   db/0009_trade_outcome_job_runs.up.sql
   db/0009_trade_outcome_job_runs.down.sql
-  container/event_mapper.py
-  container/intent_execution_strategy.py
   systemd/trader-v3-trade-outcomes.service
   systemd/trader-v3-trade-outcomes.timer
   tools/hk-gen-recreate-patched.py
@@ -577,6 +602,9 @@ required=(
   manifest.txt
   hk-rollback-20260729.sh
 )
+for mount_spec in "${NODE_PATCH_MOUNTS[@]}"; do
+  required+=("container/${mount_spec%%=*}")
+done
 for relative_path in "${required[@]}"; do
   [ -f "$D/$relative_path" ] || die "missing deployment artifact: $D/$relative_path"
 done
@@ -608,8 +636,6 @@ targets=(
   "$T/scripts/.order_lifecycle_state.json"
   "$T/db/migrations/0009_trade_outcome_job_runs.up.sql"
   "$T/db/migrations/0009_trade_outcome_job_runs.down.sql"
-  "$CP/event_mapper.py"
-  "$CP/intent_execution_strategy.py"
   "$T/gen_recreate_patched.py"
   "$T/scripts/verify_hk_deployment.sh"
   "$T/recreate-$NODE_A.sh"
@@ -620,6 +646,9 @@ targets=(
   "/etc/cron.d/trader-v3-trade-outcomes"
   "/var/lib/systemd/timers/stamp-trader-v3-trade-outcomes.timer"
 )
+for mount_spec in "${NODE_PATCH_MOUNTS[@]}"; do
+  targets+=("$CP/${mount_spec%%=*}")
+done
 for target in "${targets[@]}"; do
   backup_path "$target"
 done
@@ -756,10 +785,12 @@ install -m 0644 "$D/db/0009_trade_outcome_job_runs.up.sql" \
   "$T/db/migrations/0009_trade_outcome_job_runs.up.sql"
 install -m 0644 "$D/db/0009_trade_outcome_job_runs.down.sql" \
   "$T/db/migrations/0009_trade_outcome_job_runs.down.sql"
-install -m 0644 "$D/container/event_mapper.py" \
-  "$CP/event_mapper.py"
-install -m 0644 "$D/container/intent_execution_strategy.py" \
-  "$CP/intent_execution_strategy.py"
+for mount_spec in "${NODE_PATCH_MOUNTS[@]}"; do
+  patch_filename="${mount_spec%%=*}"
+  install -m 0644 \
+    "$D/container/$patch_filename" \
+    "$CP/$patch_filename"
+done
 install -m 0755 "$D/tools/hk-gen-recreate-patched.py" \
   "$T/gen_recreate_patched.py"
 install -m 0755 "$D/tools/verify_hk_deployment.sh" \
@@ -820,13 +851,21 @@ verify_node_halted 8081
 docker start "$NODE_B"
 verify_node_halted 8082
 
-python3 - "$D/manifest.txt" <<'PY'
+python3 - \
+  "$D/manifest.txt" \
+  "$CP" \
+  "${NODE_PATCH_MOUNTS[@]}" <<'PY'
 from pathlib import Path
 import hashlib
 import os
 import sys
 
 manifest_path = Path(sys.argv[1])
+patch_dir = Path(sys.argv[2])
+required_mounts = set()
+for mount_spec in sys.argv[3:]:
+    filename, destination = mount_spec.split("=", 1)
+    required_mounts.add((str(patch_dir / filename), destination))
 node_pids = []
 for pid_text in os.listdir("/proc"):
     if not pid_text.isdigit():
@@ -840,19 +879,33 @@ for pid_text in os.listdir("/proc"):
 if len(node_pids) != 2:
     raise SystemExit(f"expected two node processes, found {node_pids}")
 
+manifest_entries = []
+seen_mounts = set()
 for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
     line = raw_line.strip()
     if not line or line.startswith("#"):
         continue
     fields = line.split()
+    if len(fields) not in {2, 3}:
+        raise SystemExit(f"invalid manifest entry: {raw_line}")
     expected_hash, source = fields[:2]
+    destination = ""
+    if len(fields) == 3:
+        destination = fields[2]
+        seen_mounts.add((source, destination))
+    manifest_entries.append((expected_hash, source, destination))
+
+missing_mounts = required_mounts - seen_mounts
+if missing_mounts:
+    raise SystemExit(f"deployment manifest lacks required mounts: {missing_mounts}")
+
+for expected_hash, source, destination in manifest_entries:
     digest = hashlib.sha256(Path(source).read_bytes()).hexdigest()
     if digest != expected_hash:
         raise SystemExit(f"hash mismatch: {source}")
-    if len(fields) == 2:
+    if not destination:
         print(f"hash verified: {source}")
         continue
-    destination = fields[2]
     for pid in node_pids:
         pairs = []
         mountinfo = Path(f"/proc/{pid}/mountinfo").read_text(

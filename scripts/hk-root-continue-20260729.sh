@@ -12,6 +12,24 @@ CP="$T/container-patches"
 NODE_A="${NODE_A:-trader-v3-node-a}"
 NODE_B="${NODE_B:-trader-v3-node-b}"
 CLEANUP_CONFIRMED=0
+BINANCE_EXEC_DST="${BINANCE_EXEC_DST:-/usr/local/lib/python3.12/site-packages/nautilus_trader/adapters/binance/execution.py}"
+BINANCE_FUTURES_EXEC_DST="${BINANCE_FUTURES_EXEC_DST:-/usr/local/lib/python3.12/site-packages/nautilus_trader/adapters/binance/futures/execution.py}"
+NODE_PATCH_MOUNTS=(
+  "intent_execution_planner.py=/app/strategy/intent_execution_planner.py"
+  "contracts.py=/app/execution_domain/contracts.py"
+  "control_plane.py=/app/execution_domain/control_plane.py"
+  "http_client.py=/app/execution_domain/http_client.py"
+  "projection_actor.py=/app/projection/actor.py"
+  "event_mapper.py=/app/projection/event_mapper.py"
+  "intent_execution_strategy.py=/app/strategy/intent_execution_strategy.py"
+  "exchange_cancel_adapter.py=/app/runtime/exchange_cancel_adapter.py"
+  "lifecycle.py=/app/runtime/lifecycle.py"
+  "binance_adapter_config.py=/app/runtime/binance_adapter_config.py"
+  "node.py=/app/app/node.py"
+  "nautilus_actors.py=/app/app/nautilus_actors.py"
+  "binance_execution.py=$BINANCE_EXEC_DST"
+  "binance_futures_execution.py=$BINANCE_FUTURES_EXEC_DST"
+)
 
 fail_closed_cleanup() {
   trap - ERR
@@ -358,7 +376,10 @@ PY
 }
 
 verify_target_hashes() {
-  python3 - "$D" "$T" <<'PY'
+  python3 - \
+    "$D" \
+    "$T" \
+    "${NODE_PATCH_MOUNTS[@]}" <<'PY'
 from pathlib import Path
 import hashlib
 import sys
@@ -382,11 +403,7 @@ target_pairs = [
         "db/0009_trade_outcome_job_runs.down.sql",
         trader_root / "db/migrations/0009_trade_outcome_job_runs.down.sql",
     ),
-    ("container/event_mapper.py", trader_root / "container-patches/event_mapper.py"),
-    (
-        "container/intent_execution_strategy.py",
-        trader_root / "container-patches/intent_execution_strategy.py",
-    ),
+    ("tools/hk-gen-recreate-patched.py", trader_root / "gen_recreate_patched.py"),
     (
         "tools/verify_hk_deployment.sh",
         trader_root / "scripts/verify_hk_deployment.sh",
@@ -400,6 +417,14 @@ target_pairs = [
         Path("/etc/systemd/system/trader-v3-trade-outcomes.timer"),
     ),
 ]
+for mount_spec in sys.argv[3:]:
+    filename, _ = mount_spec.split("=", 1)
+    target_pairs.append(
+        (
+            f"container/{filename}",
+            trader_root / "container-patches" / filename,
+        )
+    )
 
 for relative_source, target in target_pairs:
     source = deploy_dir / relative_source
@@ -419,21 +444,22 @@ PY
 }
 
 verify_existing_node_runtime() {
-  python3 - "$NODE_A" "$NODE_B" "$CP" <<'PY'
+  python3 - \
+    "$NODE_A" \
+    "$NODE_B" \
+    "$CP" \
+    "${NODE_PATCH_MOUNTS[@]}" <<'PY'
 import json
 from pathlib import Path
 import subprocess
 import sys
 
 node_names = sys.argv[1:3]
-patch_dir = sys.argv[3]
-expected = {
-    f"{patch_dir}/event_mapper.py": "/app/projection/event_mapper.py",
-    f"{patch_dir}/intent_execution_strategy.py": (
-        "/app/strategy/intent_execution_strategy.py"
-    ),
-    f"{patch_dir}/node.py": "/app/app/node.py",
-}
+patch_dir = Path(sys.argv[3])
+expected = {}
+for mount_spec in sys.argv[4:]:
+    filename, destination = mount_spec.split("=", 1)
+    expected[str(patch_dir / filename)] = destination
 inspected = json.loads(
     subprocess.check_output(["docker", "inspect", *node_names])
 )
@@ -514,7 +540,12 @@ PY
 }
 
 verify_runtime_manifest() {
-  python3 - "$D/manifest.txt" "$NODE_A" "$NODE_B" "$CP" <<'PY'
+  python3 - \
+    "$D/manifest.txt" \
+    "$NODE_A" \
+    "$NODE_B" \
+    "$CP" \
+    "${NODE_PATCH_MOUNTS[@]}" <<'PY'
 from pathlib import Path
 import hashlib
 import json
@@ -524,17 +555,11 @@ import sys
 
 manifest_path = Path(sys.argv[1])
 node_names = sys.argv[2:4]
-patch_dir = sys.argv[4]
-required_mounts = {
-    (
-        f"{patch_dir}/event_mapper.py",
-        "/app/projection/event_mapper.py",
-    ),
-    (
-        f"{patch_dir}/intent_execution_strategy.py",
-        "/app/strategy/intent_execution_strategy.py",
-    ),
-}
+patch_dir = Path(sys.argv[4])
+required_mounts = set()
+for mount_spec in sys.argv[5:]:
+    filename, destination = mount_spec.split("=", 1)
+    required_mounts.add((str(patch_dir / filename), destination))
 inspected = json.loads(
     subprocess.check_output(["docker", "inspect", *node_names])
 )
@@ -922,16 +947,18 @@ required_staging=(
   host/trade_outcomes.py
   db/0009_trade_outcome_job_runs.up.sql
   db/0009_trade_outcome_job_runs.down.sql
-  container/event_mapper.py
-  container/intent_execution_strategy.py
   systemd/trader-v3-trade-outcomes.service
   systemd/trader-v3-trade-outcomes.timer
+  tools/hk-gen-recreate-patched.py
   tools/verify_hk_deployment.sh
   manifest.txt
   hk-rollback-20260729.sh
   hk-root-continue-20260729.sh
   commits.txt
 )
+for mount_spec in "${NODE_PATCH_MOUNTS[@]}"; do
+  required_staging+=("container/${mount_spec%%=*}")
+done
 for relative_path in "${required_staging[@]}"; do
   [ -f "$D/$relative_path" ] \
     || die "missing deployment artifact: $D/$relative_path"

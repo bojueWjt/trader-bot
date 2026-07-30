@@ -49,8 +49,11 @@ def _manage_body(**overrides):
     return body
 
 
-def _post(api_client, auth_headers, body):
-    return api_client.post("/v1/operator/orders", headers=auth_headers, json=body)
+def _post(api_client, auth_headers, body, request_id=None):
+    headers = dict(auth_headers)
+    if request_id:
+        headers["X-Request-Id"] = request_id
+    return api_client.post("/v1/operator/orders", headers=headers, json=body)
 
 
 def _old_idem(account, entry_ref):
@@ -394,31 +397,41 @@ def test_user_authorization_is_persisted_in_every_audit_payload(
     body = _open_body("user-btc-long-5026")
     body.update({
         "authorized_by_type": "user",
-        "authorized_by_id": "balen",
-        "source_message_id": "codex-request-5026",
-        "created_by_service": "hermes-agent",
+        "authorized_by_id": "forged-user",
+        "source_message_id": "forged-request",
+        "created_by_service": "forged-service",
         "source_channel": "operator",
     })
 
-    response = _post(api_client, auth_headers, body)
+    response = _post(
+        api_client,
+        auth_headers,
+        body,
+        request_id="codex-request-5026",
+    )
 
     assert response.status_code == 200
     expected = {
         "authorized_by_type": "user",
-        "authorized_by_id": "balen",
+        "authorized_by_id": "risk_admin",
         "reason": "test open",
         "source_message_id": "codex-request-5026",
-        "created_by_service": "hermes-agent",
+        "created_by_service": "control-plane",
         "parent_intent_id": False,
     }
     _, raw_params = _raw_insert(fake_db)
     assert raw_params[2] == "user-btc-long-5026"
+    assert raw_params[4] == "risk_admin"
+    assert _json_value(raw_params[7])["authorization"] == expected
     _, decision_params = _insert(fake_db, "INSERT INTO hermes_decisions")
     assert expected in _json_value(decision_params[17])
     _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
     assert _json_value(intent_params[6])["authorization"] == expected
     _, outbox_params = _insert(fake_db, "INSERT INTO outbox_events")
     assert _json_value(outbox_params[2])["authorization"] == expected
+    _, audit_params = _insert(fake_db, "INSERT INTO audit_events")
+    assert audit_params[2] == "risk_admin"
+    assert _json_value(audit_params[7])["authorization"] == expected
 
 
 def test_channel_management_authorization_requires_and_persists_attribution(
@@ -496,7 +509,12 @@ def test_explicit_disable_take_profits_persists_tombstone_and_audit(
         source_message_id="user-request-7001",
     )
 
-    response = _post(api_client, auth_headers, body)
+    response = _post(
+        api_client,
+        auth_headers,
+        body,
+        request_id="user-request-7001",
+    )
 
     assert response.status_code == 200
     _, decision_params = _insert(fake_db, "INSERT INTO hermes_decisions")
@@ -530,7 +548,30 @@ def test_disable_take_profits_dry_run_has_tombstone_and_zero_writes(
     assert preview["take_profits"] == []
     assert preview["disable_take_profits"] is True
     assert preview["position_side"] == "long"
+    assert response.json()["authorization"] == {
+        "authorized_by_type": "user",
+        "authorized_by_id": "risk_admin",
+        "reason": "test close",
+        "source_message_id": "close-btc-5026",
+        "created_by_service": "control-plane",
+        "parent_intent_id": False,
+    }
     assert not fake_db.executions
+
+
+def test_channel_dry_run_cannot_be_labeled_as_user(
+    api_client, auth_headers, fake_db
+):
+    body = _open_body()
+    body["dry_run"] = True
+    body["authorized_by_type"] = "user"
+    body["authorized_by_id"] = "balen"
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "authorized_by_type=channel" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
 
 
 def test_open_provenance_parses_e2_suffix(api_client, auth_headers, fake_db):
@@ -572,16 +613,26 @@ def test_open_provenance_rejects_conflicting_source_channel(
     assert not any(sql.startswith("INSERT INTO raw_messages") for sql, _ in fake_db.executions)
 
 
-def test_open_without_authorization_is_rejected_before_writes(
+def test_direct_user_open_derives_authorization_from_risk_admin(
     api_client, auth_headers, fake_db
 ):
     body = _open_body("verbal-btc-long-0714")
     body.pop("authorized_by_type")
+    body.pop("authorized_by_id")
+    body.pop("source_message_id")
+    body.pop("created_by_service")
 
     response = _post(api_client, auth_headers, body)
 
-    assert response.status_code == 400
-    _assert_no_order_writes(fake_db)
+    assert response.status_code == 200
+    assert response.json()["authorization"] == {
+        "authorized_by_type": "user",
+        "authorized_by_id": "risk_admin",
+        "reason": "test open",
+        "source_message_id": "verbal-btc-long-0714",
+        "created_by_service": "control-plane",
+        "parent_intent_id": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -632,7 +683,33 @@ def test_management_idempotency_v2_replays_existing_intent(
     assert len(log_lines) == 2
 
 
-def test_management_dry_run_keeps_legacy_no_ref_behavior(
+def test_management_idempotency_rejects_authorization_evidence_change(
+    api_client, auth_headers, fake_db
+):
+    body = _manage_body()
+    first = _post(
+        api_client,
+        auth_headers,
+        body,
+        request_id="operator-request-original",
+    )
+    second = _post(
+        api_client,
+        auth_headers,
+        body,
+        request_id="operator-request-forged",
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert "authorization evidence mismatch" in second.json()["detail"]
+    assert sum(
+        sql.startswith("INSERT INTO raw_messages")
+        for sql, _params in fake_db.executions
+    ) == 1
+
+
+def test_management_dry_run_requires_stable_request_ref(
     api_client, auth_headers, fake_db
 ):
     body = _manage_body(dry_run=True)
@@ -645,8 +722,8 @@ def test_management_dry_run_keeps_legacy_no_ref_behavior(
 
     response = _post(api_client, auth_headers, body)
 
-    assert response.status_code == 200
-    assert response.json()["dry_run"] is True
+    assert response.status_code == 400
+    assert "stable operation ref" in response.json()["detail"]
     assert not fake_db.executions
 
 

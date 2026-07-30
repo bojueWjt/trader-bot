@@ -223,13 +223,18 @@ def _plan_cancel_order_intent(
     target = str(order_plan.get("cancel_client_order_id") or "").strip()
     if not target:
         return OrderDenied("unsupported_order_spec", "cancel_client_order_id")
-    live_ids = {
-        order.client_order_id
+    matches = tuple(
+        order
         for order in context.existing_orders
-        if order.instrument_id == instrument_id
-    }
-    if target not in live_ids:
+        if order.instrument_id == instrument_id and order.client_order_id == target
+    )
+    if len(matches) == 0:
         return OrderDenied("order_not_found", target)
+    if len(matches) > 1:
+        return OrderDenied("order_not_unique", target)
+    ownership_denial = _validate_cancel_order_ownership(matches[0], context)
+    if ownership_denial is not None:
+        return ownership_denial
     authorization = _authorization_source(intent)
     if isinstance(authorization, OrderDenied):
         return authorization
@@ -610,6 +615,10 @@ def _select_target_position(
     context: PlannerContext,
     instrument_id: str,
 ) -> PositionSnapshot | OrderDenied:
+    order_plan = getattr(intent, "order_plan", {}) or {}
+    requested_side = str(order_plan.get("position_side") or "").strip().upper()
+    if requested_side and requested_side not in {"LONG", "SHORT"}:
+        return OrderDenied("unsupported_order_spec", "position_side")
     positions = tuple(
         position
         for position in _context_positions(context)
@@ -622,12 +631,32 @@ def _select_target_position(
             return OrderDenied("position_required", str(target_position_id))
         if len(matches) > 1:
             return OrderDenied("position_not_unique", str(target_position_id))
-        return matches[0]
-    if len(positions) == 0:
-        return OrderDenied("position_required", instrument_id)
-    if len(positions) > 1:
-        return OrderDenied("position_not_unique", instrument_id)
-    return positions[0]
+        selected = matches[0]
+        if requested_side:
+            actual_side = str(selected.side).upper()
+            if actual_side != requested_side:
+                return OrderDenied(
+                    "position_side_mismatch",
+                    f"requested={requested_side},actual={actual_side}",
+                )
+        return selected
+    if not requested_side:
+        if len(positions) == 0:
+            return OrderDenied("position_required", instrument_id)
+        if len(positions) > 1:
+            return OrderDenied("position_not_unique", instrument_id)
+        return positions[0]
+    side_matches = tuple(
+        position
+        for position in positions
+        if str(position.side).upper() == requested_side
+    )
+    side_detail = f"{instrument_id}:{requested_side}"
+    if len(side_matches) == 0:
+        return OrderDenied("position_required", side_detail)
+    if len(side_matches) > 1:
+        return OrderDenied("position_not_unique", side_detail)
+    return side_matches[0]
 
 
 def _context_positions(context: PlannerContext) -> tuple[PositionSnapshot, ...]:
@@ -670,6 +699,40 @@ def _matching_lifecycle_order_ids(
             continue
         result.append(order.client_order_id)
     return tuple(result)
+
+
+def _validate_cancel_order_ownership(
+    order: OrderSnapshot,
+    context: PlannerContext,
+) -> Optional[OrderDenied]:
+    target = order.client_order_id
+    try:
+        trace = decode_client_order_id(target)
+    except ValueError:
+        return OrderDenied("order_ownership_unverified", target)
+    owner_intent_id = str(trace.intent_id)
+    if owner_intent_id not in context.existing_intent_ids:
+        return OrderDenied("order_ownership_unverified", target)
+    account_ids = _tag_values(order.tags, "account_id")
+    if account_ids != {context.account_id}:
+        return OrderDenied("order_ownership_unverified", target)
+    intent_ids = _tag_values(order.tags, "intent_id")
+    if intent_ids != {owner_intent_id}:
+        return OrderDenied("order_ownership_unverified", target)
+    return None
+
+
+def _tag_values(tags: tuple[str, ...], key: str) -> set[str]:
+    prefix = f"{key}="
+    values: set[str] = set()
+    for tag in tags:
+        text = str(tag)
+        if not text.startswith(prefix):
+            continue
+        value = text.split("=", 1)[1].strip()
+        if value:
+            values.add(value)
+    return values
 
 
 def _position_detail(position: PositionSnapshot, instrument_id: str) -> str:

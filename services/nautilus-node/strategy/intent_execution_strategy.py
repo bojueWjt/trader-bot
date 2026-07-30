@@ -119,7 +119,8 @@ class IntentExecutionStrategy(Strategy):
         )
         self._entry_protection_stash = self._load_entry_protection_stash()
         self._schedule_startup_protection_syncs()
-        self._refresh_exchange_state()
+        if self._refresh_exchange_state():
+            self._retry_pending_take_profit_disables()
         self._register_exchange_state_timer()
 
     def _register_exchange_state_timer(self) -> None:
@@ -140,7 +141,8 @@ class IntentExecutionStrategy(Strategy):
         set_timer("exchange-state.reconcile", interval, self._on_exchange_state_timer)
 
     def _on_exchange_state_timer(self, *_args: Any, **_kwargs: Any) -> None:
-        self._refresh_exchange_state()
+        if self._refresh_exchange_state():
+            self._retry_pending_take_profit_disables()
 
     def _refresh_exchange_state(self) -> bool:
         mirror = self._exchange_state_mirror
@@ -403,6 +405,12 @@ class IntentExecutionStrategy(Strategy):
     def _handle_intent(self, intent: Any) -> None:
         raw_action = getattr(intent, "action", "")
         action = str(getattr(raw_action, "value", raw_action))
+        raw_order_plan = getattr(intent, "order_plan", {}) or {}
+        disabling_take_profits = (
+            action == "replace_take_profits"
+            and raw_order_plan.get("disable_take_profits") is True
+            and not raw_order_plan.get("take_profits")
+        )
         needs_exchange_state = action in {
             "cancel",
             "cancel_order",
@@ -410,7 +418,14 @@ class IntentExecutionStrategy(Strategy):
             "move_stop_to_entry",
             "replace_take_profits",
         }
-        if needs_exchange_state and not self._refresh_exchange_state():
+        exchange_state_ready = False
+        if needs_exchange_state and not disabling_take_profits:
+            exchange_state_ready = self._refresh_exchange_state()
+        if (
+            needs_exchange_state
+            and not disabling_take_profits
+            and not exchange_state_ready
+        ):
             denial = self.denials[-1] if self.denials else OrderDenied(
                 "exchange_state_refresh_failed",
                 str(intent.intent_id),
@@ -426,13 +441,12 @@ class IntentExecutionStrategy(Strategy):
             positions=self._position_snapshots(str(intent.instrument_id)),
             existing_orders=self._order_snapshots(
                 str(intent.instrument_id),
-                include_exchange_mirror=needs_exchange_state,
+                include_exchange_mirror=exchange_state_ready,
             ),
             existing_intent_ids=frozenset(
                 self._processed_intent_ids | self._active_intent_ids(intent.instrument_id)
             ),
         )
-        raw_order_plan = getattr(intent, "order_plan", {}) or {}
         if str(raw_order_plan.get("type", "")).lower() == "zone_ladder":
             self._handle_zone_ladder(intent, raw_order_plan, context, action)
             return
@@ -2181,22 +2195,26 @@ class IntentExecutionStrategy(Strategy):
                 ):
                     return False
             return True
-        cancel_order_ids = self._management_cancel_order_ids(plan)
-        if cancel_order_ids is None:
-            return False
         disabling_take_profits = (
             str(plan.action) == "replace_take_profits"
             and plan.disable_take_profits
         )
-        tombstone_state = "disabled"
         if disabling_take_profits:
-            tombstone_state = "cancel_pending"
-        if not self._absorb_management_plan(
-            plan,
-            take_profit_tombstone_state=tombstone_state,
-        ):
-            return False
-        if disabling_take_profits:
+            if not self._absorb_management_plan(
+                plan,
+                take_profit_tombstone_state="cancel_pending",
+            ):
+                return False
+            if not self._refresh_exchange_state():
+                return False
+            cancel_order_ids = self._management_cancel_order_ids(plan)
+            if cancel_order_ids is None:
+                return False
+            if not self._set_take_profit_disable_pending_ids(
+                plan,
+                cancel_order_ids,
+            ):
+                return False
             for client_order_id in cancel_order_ids:
                 if not self._cancel_via_exchange_adapter(
                     plan.instrument_id,
@@ -2204,6 +2222,11 @@ class IntentExecutionStrategy(Strategy):
                 ):
                     return False
             return self._finalize_take_profit_disable(plan)
+        cancel_order_ids = self._management_cancel_order_ids(plan)
+        if cancel_order_ids is None:
+            return False
+        if not self._absorb_management_plan(plan):
+            return False
         # Make-before-break: place replacements first, then cancel the superseded
         # orders. If the new stop is rejected by the venue the old one is still
         # standing; the reverse order can leave the position naked. Reduce-only
@@ -2456,6 +2479,116 @@ class IntentExecutionStrategy(Strategy):
             self._entry_protection_stash[key] = value
         return False
 
+    def _set_take_profit_disable_pending_ids(
+        self,
+        plan: ManagementPlan,
+        cancel_order_ids: tuple[str, ...],
+    ) -> bool:
+        targeted = [
+            (intent_key, stash)
+            for intent_key, stash in self._entry_protection_stash.items()
+            if self._management_plan_targets_stash(plan, stash)
+        ]
+        if not targeted:
+            return True
+        preimage = {
+            intent_key: copy.deepcopy(stash)
+            for intent_key, stash in targeted
+        }
+        parent_intent_id = _management_parent_intent_id(plan)
+        pending_ids = sorted(
+            {
+                str(client_order_id)
+                for client_order_id in cancel_order_ids
+                if str(client_order_id)
+            }
+        )
+        for _intent_key, stash in targeted:
+            tombstone = stash.get("take_profit_tombstone")
+            if not _valid_take_profit_tombstone(
+                tombstone,
+                parent_intent_id,
+            ):
+                self._record_denial(
+                    OrderDenied(
+                        "take_profit_tombstone_invalid",
+                        str(plan.intent_id),
+                    )
+                )
+                return False
+            tombstone["pending_cancel_ids"] = pending_ids
+        if self._persist_entry_protection_stash():
+            return True
+        for key, value in preimage.items():
+            self._entry_protection_stash[key] = value
+        return False
+
+    def _retry_pending_take_profit_disables(self) -> None:
+        mirror = self._exchange_state_mirror
+        orders_for_instrument = (
+            getattr(mirror, "orders_for_instrument", None) if mirror else None
+        )
+        if not callable(orders_for_instrument):
+            return
+        for intent_key, stash in self._entry_protection_stash.items():
+            tombstone = stash.get("take_profit_tombstone")
+            parent_intent_id = stash.get("take_profit_parent_intent_id")
+            if (
+                not _valid_take_profit_tombstone(
+                    tombstone,
+                    parent_intent_id,
+                )
+                or str(tombstone.get("state") or "") != "cancel_pending"
+            ):
+                continue
+            instrument_id = str(stash.get("instrument_id") or "")
+            if not instrument_id:
+                continue
+            try:
+                mirror_orders = tuple(orders_for_instrument(instrument_id))
+            except Exception as exc:
+                self._record_denial(
+                    OrderDenied("exchange_state_refresh_failed", repr(exc))
+                )
+                continue
+            live_by_id = {
+                str(getattr(order, "client_order_id", "")): order
+                for order in mirror_orders
+                if str(getattr(order, "client_order_id", ""))
+            }
+            pending_ids = {
+                str(client_order_id)
+                for client_order_id in tombstone.get("pending_cancel_ids", [])
+                if str(client_order_id)
+            }
+            roles = stash.get("protection_roles")
+            if isinstance(roles, dict):
+                for client_order_id, role_info in roles.items():
+                    if not isinstance(role_info, dict):
+                        continue
+                    if str(role_info.get("role") or "") != "take_profit":
+                        continue
+                    client_order_id = str(client_order_id)
+                    if client_order_id in live_by_id:
+                        pending_ids.add(client_order_id)
+            tombstone["pending_cancel_ids"] = sorted(pending_ids)
+            if not self._persist_entry_protection_stash():
+                continue
+            for client_order_id in sorted(tuple(pending_ids)):
+                if client_order_id not in live_by_id:
+                    pending_ids.discard(client_order_id)
+                    continue
+                if self._cancel_via_exchange_adapter(
+                    instrument_id,
+                    client_order_id,
+                ):
+                    pending_ids.discard(client_order_id)
+            tombstone["pending_cancel_ids"] = sorted(pending_ids)
+            if not pending_ids:
+                tombstone["state"] = "disabled"
+                tombstone["completed_at"] = self._now().isoformat()
+            self._persist_entry_protection_stash()
+
     def _finalize_take_profit_disable(self, plan: ManagementPlan) -> bool:
         targeted: list[tuple[str, dict[str, Any]]] = []
         for intent_key, stash in self._entry_protection_stash.items():
@@ -2483,6 +2616,7 @@ class IntentExecutionStrategy(Strategy):
         for tombstone in tombstones:
             tombstone["state"] = "disabled"
             tombstone["completed_at"] = self._now().isoformat()
+            tombstone["pending_cancel_ids"] = []
         if self._persist_entry_protection_stash():
             return True
         for key, value in preimage.items():

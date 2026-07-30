@@ -283,6 +283,189 @@ def test_exchange_state_mirror_error_enters_missing_data(monkeypatch):
     assert dependencies["exchange_state_mirror"]["status"] == "error"
 
 
+def test_empty_exchange_state_mirror_fails_closed(monkeypatch):
+    now = datetime(2026, 7, 30, 2, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(hours=1)}],
+        "positions_projection": [
+            {
+                "account_id": "account-a",
+                "symbol": "BTCUSDT",
+                "quantity": "1",
+            }
+        ],
+    }
+    cursor, _connection = install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    data = report_service.fetch_report_data(
+        "daily",
+        "2026-07-30",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    mirror = dependencies["exchange_state_mirror"]
+    assert mirror["status"] == "missing"
+    assert mirror["reason"] == "exchange_state_mirror has no account snapshots"
+    assert mirror["reason"] in data["missing_data"]
+    assert data["positions"] == []
+    assert all(
+        "FROM positions_projection" not in sql
+        for sql, _params in cursor.executions
+    )
+
+
+def test_fetch_report_data_excludes_stale_exchange_state_mirror(monkeypatch):
+    now = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(hours=1)}],
+        "exchange_state_mirror": [
+            {
+                "account_id": "account-a",
+                "payload": {
+                    "positions": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "position_side": "LONG",
+                            "position_amt": "1",
+                            "entry_price": "3600",
+                            "mark_price": "3800",
+                        }
+                    ]
+                },
+                "updated_at": now - timedelta(seconds=60),
+            },
+            {
+                "account_id": "account-b",
+                "payload": {
+                    "positions": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "position_side": "LONG",
+                            "position_amt": "0.25",
+                            "entry_price": "110000",
+                            "mark_price": "118000",
+                        }
+                    ]
+                },
+                "updated_at": now - timedelta(seconds=181),
+            }
+        ],
+        "positions_projection": [
+            {
+                "account_id": "account-b",
+                "symbol": "BTCUSDT",
+                "mark_price": "117000",
+            }
+        ],
+    }
+    cursor, _connection = install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    data = report_service.fetch_report_data(
+        "daily",
+        "2026-07-12",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    mirror = dependencies["exchange_state_mirror"]
+    assert mirror["status"] == "stale"
+    assert mirror["freshness_threshold_seconds"] == 180
+    assert "account-b" in mirror["reason"]
+    assert "age_seconds=181" in mirror["reason"]
+    assert mirror["reason"] in data["missing_data"]
+    assert data["positions"] == []
+    assert all("FROM positions_projection" not in sql for sql, _params in cursor.executions)
+
+
+def test_fetch_report_data_keeps_fresh_exchange_state_mirror(monkeypatch):
+    now = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    updated_at = (now - timedelta(seconds=179)).isoformat().replace("+00:00", "Z")
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(hours=1)}],
+        "exchange_state_mirror": [
+            {
+                "account_id": "account-a",
+                "payload": {
+                    "positions": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "position_side": "LONG",
+                            "position_amt": "0.25",
+                            "entry_price": "110000",
+                            "mark_price": "118000",
+                        }
+                    ]
+                },
+                "updated_at": updated_at,
+            }
+        ],
+    }
+    install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    data = report_service.fetch_report_data(
+        "daily",
+        "2026-07-12",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    mirror = dependencies["exchange_state_mirror"]
+    assert mirror["status"] == "ok"
+    assert mirror["age_seconds"] == 179
+    assert mirror["freshness_threshold_seconds"] == 180
+    assert data["missing_data"] == []
+    assert data["positions"] == [
+        {
+            "account_id": "account-a",
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "quantity": "0.25",
+            "entry_price": "110000",
+            "mark_price": "118000",
+            "unrealized_pnl": None,
+            "updated_at": updated_at,
+            "source": "exchange_state_mirror",
+        }
+    ]
+
+
+def test_inspect_dependencies_marks_stale_exchange_state_mirror(monkeypatch):
+    now = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(hours=1)}],
+        "exchange_state_mirror": [
+            {
+                "account_id": "account-b",
+                "updated_at": now - timedelta(seconds=181),
+            }
+        ],
+    }
+    cursor, connection = install_fake_database(monkeypatch, responses=responses)
+
+    dependencies = report_service.inspect_dependencies(
+        "postgres://example",
+        now=now,
+    )
+
+    mirror = dependencies["exchange_state_mirror"]
+    assert mirror["status"] == "stale"
+    assert mirror["freshness_threshold_seconds"] == 180
+    assert "account-b" in mirror["reason"]
+    assert report_service.service_status(dependencies) == "degraded"
+    assert any(
+        "SELECT account_id, updated_at FROM exchange_state_mirror" in sql
+        for sql, _params in cursor.executions
+    )
+    assert connection.closed is True
+
+
 def test_report_api_records_success_in_health(monkeypatch):
     dependencies = healthy_dependencies()
 
