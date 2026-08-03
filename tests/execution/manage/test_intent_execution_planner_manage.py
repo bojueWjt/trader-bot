@@ -301,7 +301,7 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
         assert isinstance(result, ManagementPlan)
         self.assertEqual(result.cancel_order_ids, (target,))
 
-    def test_cancel_order_rejects_system_format_order_without_order_ownership_tags(self) -> None:
+    def test_cancel_order_accepts_durable_system_id_when_snapshot_tags_are_missing(self) -> None:
         owner_intent_id = uuid4()
         target = encode_client_order_id(owner_intent_id)
         intent = _intent(
@@ -314,14 +314,13 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
             intent,
             _context(
                 existing_orders=(_order(target, "stop_loss"),),
-                existing_intent_ids=frozenset({str(owner_intent_id)}),
+                existing_intent_ids=frozenset(),
             ),
         )
 
-        self.assertEqual(
-            result,
-            OrderDenied(reason="order_ownership_unverified", detail=target),
-        )
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.cancel_order_ids, (target,))
 
     def test_cancel_order_rejects_order_owned_by_another_account(self) -> None:
         owner_intent_id = uuid4()
@@ -351,7 +350,7 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
             OrderDenied(reason="order_ownership_unverified", detail=target),
         )
 
-    def test_cancel_order_rejects_order_without_known_owner_intent(self) -> None:
+    def test_cancel_order_accepts_matching_tags_without_processed_intent_history(self) -> None:
         owner_intent_id = uuid4()
         target = encode_client_order_id(owner_intent_id)
         intent = _intent(
@@ -368,10 +367,9 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(
-            result,
-            OrderDenied(reason="order_ownership_unverified", detail=target),
-        )
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.cancel_order_ids, (target,))
 
     def test_cancel_order_rejects_order_with_conflicting_intent_tag(self) -> None:
         owner_intent_id = uuid4()

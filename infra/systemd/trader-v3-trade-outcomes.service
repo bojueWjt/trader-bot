@@ -10,8 +10,8 @@ Group=balen
 WorkingDirectory=/srv/trader-v3
 EnvironmentFile=/etc/trader-v3/trade-outcomes.env
 Environment=PYTHONUNBUFFERED=1
-ExecStartPre=/usr/bin/install -d -m 0750 /var/log/trader-v3
-ExecStartPre=/usr/bin/install -d -m 0750 /var/tmp/hermes-zone-klines
+ExecStartPre=+/usr/bin/install -d -m 0750 /var/log/trader-v3
+ExecStartPre=+/usr/bin/install -d -m 0750 /var/tmp/hermes-zone-klines
 ExecStart=/usr/bin/flock -n /var/lock/trader-v3-trade-outcomes.lock /srv/trader-v3/.venv-cp/bin/python /srv/trader-v3/scripts/analysis/trade_outcomes.py --cache-dir /var/tmp/hermes-zone-klines --output /var/log/trader-v3/trade-outcomes-latest.json
 StandardOutput=append:/var/log/trader-v3/trade-outcomes.log
 StandardError=append:/var/log/trader-v3/trade-outcomes.log

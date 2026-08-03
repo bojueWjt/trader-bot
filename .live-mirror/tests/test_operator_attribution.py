@@ -415,7 +415,7 @@ def test_user_authorization_is_persisted_in_every_audit_payload(
         "authorized_by_type": "user",
         "authorized_by_id": "risk_admin",
         "reason": "test open",
-        "source_message_id": "codex-request-5026",
+        "source_message_id": "user-btc-long-5026",
         "created_by_service": "control-plane",
         "parent_intent_id": False,
     }
@@ -520,7 +520,7 @@ def test_explicit_disable_take_profits_persists_tombstone_and_audit(
     _, decision_params = _insert(fake_db, "INSERT INTO hermes_decisions")
     evidence = _json_value(decision_params[17])
     assert evidence[0]["authorized_by_type"] == "user"
-    assert evidence[0]["source_message_id"] == "user-request-7001"
+    assert evidence[0]["source_message_id"] == "disable-tps-btc-user-request-7001"
     _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
     order_plan = _json_value(intent_params[6])
     assert order_plan["take_profits"] == []
@@ -528,7 +528,10 @@ def test_explicit_disable_take_profits_persists_tombstone_and_audit(
     assert order_plan["position_side"] == "long"
     _, outbox_params = _insert(fake_db, "INSERT INTO outbox_events")
     outbox = _json_value(outbox_params[2])
-    assert outbox["authorization"]["source_message_id"] == "user-request-7001"
+    assert (
+        outbox["authorization"]["source_message_id"]
+        == "disable-tps-btc-user-request-7001"
+    )
 
 
 def test_disable_take_profits_dry_run_has_tombstone_and_zero_writes(
@@ -683,7 +686,7 @@ def test_management_idempotency_v2_replays_existing_intent(
     assert len(log_lines) == 2
 
 
-def test_management_idempotency_rejects_authorization_evidence_change(
+def test_management_idempotency_replays_when_request_id_changes(
     api_client, auth_headers, fake_db
 ):
     body = _manage_body()
@@ -699,6 +702,30 @@ def test_management_idempotency_rejects_authorization_evidence_change(
         body,
         request_id="operator-request-forged",
     )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["replay"] is True
+    assert second.json()["intent_id"] == first.json()["intent_id"]
+    assert (
+        second.json()["authorization"]["source_message_id"]
+        == body["client_ref"]
+    )
+    assert sum(
+        sql.startswith("INSERT INTO raw_messages")
+        for sql, _params in fake_db.executions
+    ) == 1
+
+
+def test_channel_idempotency_rejects_stable_authorization_evidence_change(
+    api_client, auth_headers, fake_db
+):
+    body = _open_body()
+    first = _post(api_client, auth_headers, body)
+    changed = dict(body)
+    changed["source_message_id"] = "different-channel-message"
+
+    second = _post(api_client, auth_headers, changed)
 
     assert first.status_code == 200
     assert second.status_code == 409

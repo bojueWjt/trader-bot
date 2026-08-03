@@ -5,9 +5,11 @@ import os
 import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
+from uuid import UUID
 
 from config.node_config import NodeConfig, load_node_config
 from persistence.nautilus_config import (
@@ -376,6 +378,9 @@ def _build_strategy(runtime: AccountRuntime) -> Any:
     strategy = IntentExecutionStrategy(runtime.strategy_config)
     strategy.set_trading_state_getter(lambda: runtime.lifecycle.trading_state)
     strategy.set_denial_reporter(_build_denial_reporter(runtime))
+    strategy.set_protection_event_reporter(
+        _build_protection_event_reporter(runtime)
+    )
     strategy.set_exchange_cancel_adapter(
         runtime.exchange_cancel_adapter,
         runtime.exchange_state_mirror,
@@ -402,6 +407,54 @@ def _build_denial_reporter(runtime: AccountRuntime) -> Callable[[Any, Any], None
             status=status,
             detail=detail,
         )
+
+    return report
+
+
+def _build_protection_event_reporter(
+    runtime: AccountRuntime,
+) -> Callable[[dict[str, Any]], bool]:
+    def report(event: dict[str, Any]) -> bool:
+        from projection.contracts import ExecutionEventEnvelopeV1
+
+        event_type = str(event["event_type"])
+        event_key = str(event["event_key"])
+        material = json.dumps(
+            {
+                "account_id": runtime.config.account_id,
+                "node_id": runtime.config.node_id,
+                "event_type": event_type,
+                "event_key": event_key,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        event_id = "strategy-" + sha256(material.encode("utf-8")).hexdigest()
+        ts_event = event.get("ts_event")
+        if not isinstance(ts_event, datetime):
+            ts_event = datetime.now(timezone.utc)
+        if ts_event.tzinfo is None:
+            ts_event = ts_event.replace(tzinfo=timezone.utc)
+        payload = dict(event.get("payload") or {})
+        payload["event_key"] = event_key
+        payload["instrument_id"] = str(event.get("instrument_id") or "")
+        intent_id = UUID(str(event["intent_id"]))
+        envelope = ExecutionEventEnvelopeV1(
+            event_id=event_id,
+            node_id=runtime.config.node_id,
+            account_id=runtime.config.account_id,
+            intent_id=intent_id,
+            client_order_id=event.get("client_order_id"),
+            event_type=event_type,
+            ts_event=ts_event,
+            ts_ingest=datetime.now(timezone.utc),
+            payload=payload,
+        )
+        acked = runtime.control_plane.post_events(
+            runtime.config.node_id,
+            [envelope],
+        )
+        return event_id in {str(item) for item in acked}
 
     return report
 

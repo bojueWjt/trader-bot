@@ -160,6 +160,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
         )
         strategy = node.trader.strategies[0]
         self.assertTrue(callable(strategy.denial_reporter))
+        self.assertTrue(callable(strategy.protection_event_reporter))
         self.assertEqual(
             strategy.exchange_cancel_dependencies,
             (
@@ -419,6 +420,7 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
             self.config = config
             self.trading_state_getter: Any = None
             self.denial_reporter: Any = None
+            self.protection_event_reporter: Any = None
             self.exchange_cancel_dependencies: Any = None
 
         def set_trading_state_getter(self, getter: Any) -> None:
@@ -426,6 +428,9 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
 
         def set_denial_reporter(self, reporter: Any) -> None:
             self.denial_reporter = reporter
+
+        def set_protection_event_reporter(self, reporter: Any) -> None:
+            self.protection_event_reporter = reporter
 
         def set_exchange_cancel_adapter(self, adapter: Any, mirror: Any) -> None:
             self.exchange_cancel_dependencies = (adapter, mirror)

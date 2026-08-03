@@ -20,6 +20,15 @@ def test_trade_outcomes_service_uses_environment_secret_and_file_logs():
     assert "StandardOutput=append:/var/log/trader-v3/trade-outcomes.log" in text
     assert "StandardError=append:/var/log/trader-v3/trade-outcomes.log" in text
     assert "/usr/bin/flock -n /var/lock/trader-v3-trade-outcomes.lock" in text
+    assert (
+        "ExecStartPre=+/usr/bin/install -d -m 0750 /var/log/trader-v3"
+        in text
+    )
+    assert (
+        "ExecStartPre=+/usr/bin/install -d -m 0750 "
+        "/var/tmp/hermes-zone-klines"
+        in text
+    )
 
 
 def test_trade_outcomes_timer_runs_daily_and_catches_missed_runs():

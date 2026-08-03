@@ -111,11 +111,136 @@ class StrategyShellTest(unittest.TestCase):
                 strategy.scheduled_delays,
                 [strategy._PROTECTION_SYNC_DELAY_S],
             )
+            self.assertEqual(strategy.submitted_plans, [])
             persisted = strategy.persisted_before_schedule
             persisted_terminal = persisted[str(intent_id)][
                 "last_protection_terminal_event"
             ]
             self.assertEqual(persisted_terminal, terminal)
+
+    def test_mit_immediate_trigger_rejection_submits_reduce_only_market_once(self) -> None:
+        intent_id = uuid4()
+        source_client_order_id = encode_client_order_id(intent_id, sequence=22)
+        tags = (
+            f"intent_id={intent_id}",
+            "lifecycle_role=take_profit",
+            "position_id=ATOMUSDT-PERP.BINANCE-LONG",
+        )
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _ProtectionTerminalStrategy(Path(state_dir))
+            reported_events: list[dict] = []
+            strategy.set_protection_event_reporter(
+                lambda event: reported_events.append(event) is None or True
+            )
+            strategy._entry_protection_stash[str(intent_id)] = {
+                "instrument_id": "ATOMUSDT-PERP.BINANCE",
+                "entry_side": "BUY",
+                "entry_tags": tags,
+                "take_profits": ({"price": "6.75"},),
+                "take_profit_quantities": ("144.17",),
+                "tp_consumed": {},
+                "protection_sequence_start": 11,
+                "protection_revision": 2,
+                "protection_ids": (source_client_order_id,),
+                "protection_roles": {
+                    source_client_order_id: {
+                        "role": "take_profit",
+                        "tp_price": "6.75",
+                        "quantity": "144.17",
+                        "submitted_at": "",
+                        "order_type": "MARKET_IF_TOUCHED",
+                        "side": "SELL",
+                        "tags": tags,
+                    }
+                },
+                "pending_cancel_ids": (),
+            }
+            event = SimpleNamespace(
+                event_type="OrderRejected",
+                client_order_id=source_client_order_id,
+                instrument_id="ATOMUSDT-PERP.BINANCE",
+                order_type="MARKET_IF_TOUCHED",
+                side="SELL",
+                tags=tags,
+                reason="Order would immediately trigger. (-2021)",
+            )
+
+            strategy.on_order_rejected(event)
+            strategy.on_order_rejected(event)
+
+            self.assertEqual(len(strategy.submitted_plans), 1)
+            fallback_plan = strategy.submitted_plans[0]
+            self.assertEqual(fallback_plan.order_type, "MARKET")
+            self.assertEqual(fallback_plan.quantity, "144.17")
+            self.assertEqual(fallback_plan.side, "SELL")
+            self.assertTrue(fallback_plan.reduce_only)
+            self.assertEqual(fallback_plan.tags, tags)
+            self.assertTrue(fallback_plan.client_order_id.startswith("M"))
+            self.assertEqual(
+                fallback_plan.client_order_id[1:],
+                source_client_order_id[1:],
+            )
+            self.assertEqual(strategy.scheduled_delays, [])
+            self.assertEqual(len(reported_events), 1)
+            self.assertEqual(
+                reported_events[0]["event_type"],
+                "TakeProfitImmediateMarketFallback",
+            )
+            remaining = strategy._take_profit_remaining_quantities(
+                strategy._entry_protection_stash[str(intent_id)],
+                ({"price": "6.75"},),
+                "144.17",
+                "0.01",
+            )
+            self.assertEqual(remaining, (None,))
+
+            strategy.on_order_filled(
+                SimpleNamespace(
+                    client_order_id=fallback_plan.client_order_id,
+                    instrument_id="ATOMUSDT-PERP.BINANCE",
+                    last_qty="144.17",
+                )
+            )
+
+            stash = strategy._entry_protection_stash[str(intent_id)]
+            fallback_state = stash["tp_market_fallbacks"][
+                fallback_plan.client_order_id
+            ]
+            self.assertEqual(fallback_state["status"], "filled")
+            self.assertEqual(fallback_state["remaining_quantity"], "0")
+            self.assertEqual(stash["tp_consumed"]["6.75"], "144.17")
+
+    def test_revisions_exhausted_emits_one_protection_frozen_event(self) -> None:
+        intent_id = uuid4()
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+            )
+        )
+        reported_events: list[dict] = []
+        strategy.set_protection_event_reporter(
+            lambda event: reported_events.append(event) is None or True
+        )
+        stash = {
+            "instrument_id": "ATOMUSDT-PERP.BINANCE",
+            "protection_revision": strategy._PROTECTION_MAX_REVISION,
+        }
+
+        strategy._normalize_protection_stash(str(intent_id), stash)
+        strategy._normalize_protection_stash(str(intent_id), stash)
+
+        self.assertEqual(stash["protection_frozen"], "revisions_exhausted")
+        self.assertEqual(
+            stash["protection_freeze_denial_reason"],
+            "protection_revisions_exhausted",
+        )
+        self.assertEqual(len(reported_events), 1)
+        self.assertEqual(reported_events[0]["event_type"], "ProtectionFrozen")
+        self.assertEqual(
+            reported_events[0]["payload"]["reason"],
+            "revisions_exhausted",
+        )
 
 
 class _ProtectionTerminalStrategy(IntentExecutionStrategy):
@@ -123,6 +248,7 @@ class _ProtectionTerminalStrategy(IntentExecutionStrategy):
         self._state_dir = state_dir
         self.scheduled_delays: list[float | None] = []
         self.persisted_before_schedule: dict = {}
+        self.submitted_plans: list = []
         super().__init__(
             IntentExecutionStrategyConfig(account_id="account-a", trading_state="ACTIVE")
         )
@@ -141,6 +267,10 @@ class _ProtectionTerminalStrategy(IntentExecutionStrategy):
         with open(self._protection_stash_path(), "r") as fh:
             self.persisted_before_schedule = json.load(fh)
         self.scheduled_delays.append(delay_seconds)
+
+    def _submit_order_plan(self, plan) -> bool:
+        self.submitted_plans.append(plan)
+        return True
 
 
 if __name__ == "__main__":

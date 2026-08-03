@@ -711,13 +711,15 @@ def _validate_cancel_order_ownership(
     except ValueError:
         return OrderDenied("order_ownership_unverified", target)
     owner_intent_id = str(trace.intent_id)
-    if owner_intent_id not in context.existing_intent_ids:
-        return OrderDenied("order_ownership_unverified", target)
+    # Exchange snapshots can lose Nautilus tags and the node's processed-intent
+    # set across restarts. The reversible B+UUID id remains durable ownership.
+    if not order.tags:
+        return None
     account_ids = _tag_values(order.tags, "account_id")
-    if account_ids != {context.account_id}:
+    if account_ids and account_ids != {context.account_id}:
         return OrderDenied("order_ownership_unverified", target)
     intent_ids = _tag_values(order.tags, "intent_id")
-    if intent_ids != {owner_intent_id}:
+    if intent_ids and intent_ids != {owner_intent_id}:
         return OrderDenied("order_ownership_unverified", target)
     return None
 

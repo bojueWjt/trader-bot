@@ -81,6 +81,9 @@ class IntentExecutionStrategy(Strategy):
         self.denials: list[OrderDenied] = []
         self._trading_state_getter: Optional[Callable[[], Any]] = None
         self._denial_reporter: Optional[Callable[[Any, OrderDenied], None]] = None
+        self._protection_event_reporter: Optional[
+            Callable[[dict[str, Any]], bool]
+        ] = None
         self._entry_protection_stash: dict[str, dict[str, Any]] = {}
         self._quick_fill_windows: dict[str, list[datetime]] = {}
         self._orphan_cancel_attempts: dict[str, int] = {}
@@ -97,6 +100,12 @@ class IntentExecutionStrategy(Strategy):
         """Inject best-effort denial reporting without making StrategyConfig carry
         non-serializable runtime clients."""
         self._denial_reporter = reporter
+
+    def set_protection_event_reporter(
+        self,
+        reporter: Optional[Callable[[dict[str, Any]], bool]],
+    ) -> None:
+        self._protection_event_reporter = reporter
 
     def set_exchange_cancel_adapter(self, adapter: Any, mirror: Any) -> None:
         self._exchange_cancel_adapter = adapter
@@ -208,6 +217,10 @@ class IntentExecutionStrategy(Strategy):
         stash["protection_roles"] = roles if isinstance(roles, dict) else {}
         consumed = stash.get("tp_consumed")
         stash["tp_consumed"] = consumed if isinstance(consumed, dict) else {}
+        fallbacks = stash.get("tp_market_fallbacks")
+        stash["tp_market_fallbacks"] = (
+            fallbacks if isinstance(fallbacks, dict) else {}
+        )
         terminal_events = stash.get("protection_terminal_events")
         if isinstance(terminal_events, list):
             stash["protection_terminal_events"] = terminal_events[
@@ -257,6 +270,9 @@ class IntentExecutionStrategy(Strategy):
                 "revisions_exhausted",
                 denial_reason="protection_revisions_exhausted",
             )
+        if stash.get("protection_frozen"):
+            self._report_protection_freeze_event(intent_key, stash)
+        self._retry_pending_tp_market_fallback_events(intent_key, stash)
 
     def _persist_entry_protection_stash(self) -> bool:
         path = self._protection_stash_path()
@@ -730,6 +746,11 @@ class IntentExecutionStrategy(Strategy):
                 price = role_info.get("tp_price")
                 if qty is not None and price is not None:
                     self._add_tp_consumed(stash, str(price), qty)
+                    self._consume_tp_market_fallback(
+                        stash,
+                        client_order_id,
+                        qty,
+                    )
             self._record_quick_protection_fill(intent_key, stash, role_info)
             self._persist_entry_protection_stash()
             if not stash.get("protection_frozen"):
@@ -853,11 +874,88 @@ class IntentExecutionStrategy(Strategy):
         denial_reason: str,
     ) -> None:
         stash["protection_frozen"] = reason
+        stash["protection_freeze_denial_reason"] = denial_reason
         key = (denial_reason, intent_key)
         if key not in self._reported_protection_denials:
             self._reported_protection_denials.add(key)
             self._record_denial(OrderDenied(denial_reason, intent_key))
+        self._report_protection_freeze_event(intent_key, stash)
         self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
+
+    def _report_protection_freeze_event(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+    ) -> None:
+        reason = str(stash.get("protection_frozen") or "")
+        if not reason:
+            return
+        denial_reason = str(
+            stash.get("protection_freeze_denial_reason")
+            or f"protection_{reason}_frozen"
+        )
+        event_key = f"{intent_key}:{reason}:{denial_reason}"
+        if stash.get("protection_alert_sent") == event_key:
+            return
+        sent = self._report_protection_event(
+            intent_key,
+            stash,
+            event_type="ProtectionFrozen",
+            event_key=event_key,
+            payload={
+                "reason": reason,
+                "denial_reason": denial_reason,
+                "protection_revision": int(
+                    stash.get("protection_revision", -1)
+                ),
+            },
+        )
+        if sent:
+            stash["protection_alert_sent"] = event_key
+
+    def _report_protection_event(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+        *,
+        event_type: str,
+        event_key: str,
+        payload: dict[str, Any],
+        client_order_id: Optional[str] = None,
+    ) -> bool:
+        event = {
+            "event_type": event_type,
+            "event_key": event_key,
+            "intent_id": intent_key,
+            "client_order_id": client_order_id,
+            "instrument_id": str(stash.get("instrument_id") or ""),
+            "ts_event": self._now(),
+            "payload": payload,
+        }
+        log = getattr(self, "log", None)
+        if log is not None and hasattr(log, "error"):
+            log.error(
+                event_type
+                + " "
+                + json.dumps(
+                    event,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+        reporter = self._protection_event_reporter
+        if reporter is None:
+            return False
+        try:
+            return bool(reporter(event))
+        except Exception as exc:
+            if log is not None and hasattr(log, "error"):
+                log.error(
+                    f"{event_type} reporter failed event_key={event_key} "
+                    f"error={exc!r}"
+                )
+            return False
 
     def on_stop(self) -> None:
         self._cancel_clock_timer("exchange-state.reconcile")
@@ -934,6 +1032,36 @@ class IntentExecutionStrategy(Strategy):
                 client_order_id,
                 role_info,
             )
+            if self._is_immediate_trigger_mit_rejection(
+                event,
+                stash,
+                client_order_id,
+                role_info,
+            ):
+                self._submit_immediate_tp_market_fallback(
+                    event,
+                    intent_key,
+                    stash,
+                    client_order_id,
+                    role_info,
+                )
+                self._persist_entry_protection_stash()
+                return
+            if role_info.get("market_fallback"):
+                fallback = stash.get("tp_market_fallbacks")
+                if isinstance(fallback, dict):
+                    state = fallback.get(client_order_id)
+                    if isinstance(state, dict):
+                        state["status"] = "failed"
+                        state["failed_at"] = self._now().isoformat()
+                self._freeze_protection(
+                    intent_key,
+                    stash,
+                    "market_fallback_failed",
+                    denial_reason="take_profit_market_fallback_failed",
+                )
+                self._persist_entry_protection_stash()
+                return
             stash["protected_quantity"] = None
             self._persist_entry_protection_stash()
             self._reschedule_protection_sync(intent_key, stash, count_retry=count_retry)
@@ -1026,6 +1154,286 @@ class IntentExecutionStrategy(Strategy):
                 "ProtectionOrderTerminal "
                 + json.dumps(terminal, sort_keys=True, separators=(",", ":"))
             )
+
+    def _is_immediate_trigger_mit_rejection(
+        self,
+        event: Any,
+        stash: dict[str, Any],
+        client_order_id: str,
+        role_info: dict[str, Any],
+    ) -> bool:
+        if role_info.get("role") != "take_profit":
+            return False
+        order_type = str(role_info.get("order_type") or "")
+        if not order_type:
+            order_type = _event_order_type(event) or ""
+        if not order_type:
+            instrument_id = _event_instrument_id(event)
+            if instrument_id is None:
+                instrument_id = str(stash.get("instrument_id") or "")
+            for order in self._cache_orders_all(instrument_id):
+                if str(getattr(order, "client_order_id", "")) != client_order_id:
+                    continue
+                order_type = _enum_name(getattr(order, "order_type", ""))
+                break
+        if _enum_name(order_type) != "MARKET_IF_TOUCHED":
+            return False
+        reason = _event_text_field(event, "reason", "message", "detail", "error")
+        error_code = _event_text_field(
+            event,
+            "error_code",
+            "reject_code",
+            "code",
+        )
+        text = " ".join(
+            value for value in (error_code, reason) if value
+        ).lower()
+        return "-2021" in text or "would immediately trigger" in text
+
+    def _submit_immediate_tp_market_fallback(
+        self,
+        event: Any,
+        intent_key: str,
+        stash: dict[str, Any],
+        source_client_order_id: str,
+        role_info: dict[str, Any],
+    ) -> bool:
+        fallback_id = _market_fallback_client_order_id(source_client_order_id)
+        fallbacks = stash.setdefault("tp_market_fallbacks", {})
+        existing = fallbacks.get(fallback_id)
+        if isinstance(existing, dict):
+            return True
+        quantity = str(
+            role_info.get("quantity")
+            or _event_last_qty(event)
+            or ""
+        )
+        try:
+            valid_quantity = Decimal(quantity) > 0
+        except (InvalidOperation, ValueError):
+            valid_quantity = False
+        if not valid_quantity:
+            self._freeze_protection(
+                intent_key,
+                stash,
+                "market_fallback_invalid_quantity",
+                denial_reason="take_profit_market_fallback_invalid_quantity",
+            )
+            return False
+        tags = self._tp_market_fallback_tags(
+            event,
+            stash,
+            role_info,
+        )
+        side = str(role_info.get("side") or _event_order_side(event) or "")
+        if side not in {"BUY", "SELL"}:
+            side = "SELL" if str(stash.get("entry_side")) == "BUY" else "BUY"
+        tp_price = str(role_info.get("tp_price") or "")
+        event_key = f"{intent_key}:{source_client_order_id}:{fallback_id}"
+        state = {
+            "source_client_order_id": source_client_order_id,
+            "client_order_id": fallback_id,
+            "tp_price": tp_price,
+            "quantity": quantity,
+            "remaining_quantity": quantity,
+            "side": side,
+            "tags": tags,
+            "status": "submitting",
+            "created_at": self._now().isoformat(),
+            "event_key": event_key,
+            "event_sent": False,
+        }
+        fallbacks[fallback_id] = state
+        if not self._persist_entry_protection_stash():
+            self._freeze_protection(
+                intent_key,
+                stash,
+                "market_fallback_state_persist_failed",
+                denial_reason="take_profit_market_fallback_state_persist_failed",
+            )
+            return False
+        plan = OrderPlan(
+            intent_id=UUID(intent_key),
+            client_order_id=fallback_id,
+            tags=tags,
+            instrument_id=str(stash.get("instrument_id") or ""),
+            side=side,
+            order_type="MARKET",
+            quantity=quantity,
+            price=None,
+            time_in_force="GTC",
+            reduce_only=True,
+        )
+        if not self._submit_order_plan(plan):
+            state["status"] = "failed"
+            state["failed_at"] = self._now().isoformat()
+            self._freeze_protection(
+                intent_key,
+                stash,
+                "market_fallback_submit_failed",
+                denial_reason="take_profit_market_fallback_submit_failed",
+            )
+            return False
+        state["status"] = "submitted"
+        state["submitted_at"] = self._now().isoformat()
+        protection_ids = tuple(
+            cid
+            for cid in tuple(stash.get("protection_ids") or ())
+            if str(cid) != source_client_order_id
+        )
+        stash["protection_ids"] = protection_ids + (fallback_id,)
+        self._register_protection_role(
+            intent_key,
+            stash,
+            fallback_id,
+            plan,
+            tp_price=tp_price,
+            market_fallback=True,
+            source_client_order_id=source_client_order_id,
+        )
+        terminal = stash.get("last_protection_terminal_event")
+        payload = {
+            "source_client_order_id": source_client_order_id,
+            "fallback_client_order_id": fallback_id,
+            "quantity": quantity,
+            "tp_price": tp_price,
+            "reason": (
+                terminal.get("reason")
+                if isinstance(terminal, dict)
+                else None
+            ),
+            "error_code": (
+                terminal.get("error_code")
+                if isinstance(terminal, dict)
+                else None
+            ),
+            "reduce_only": True,
+        }
+        state["event_sent"] = self._report_protection_event(
+            intent_key,
+            stash,
+            event_type="TakeProfitImmediateMarketFallback",
+            event_key=event_key,
+            client_order_id=fallback_id,
+            payload=payload,
+        )
+        return True
+
+    def _tp_market_fallback_tags(
+        self,
+        event: Any,
+        stash: dict[str, Any],
+        role_info: dict[str, Any],
+    ) -> tuple[str, ...]:
+        for holder in (event, getattr(event, "order", None)):
+            if holder is None:
+                continue
+            tags = tuple(str(tag) for tag in (getattr(holder, "tags", ()) or ()))
+            if tags:
+                return tags
+        saved_tags = role_info.get("tags")
+        if isinstance(saved_tags, (list, tuple)) and saved_tags:
+            return tuple(str(tag) for tag in saved_tags)
+        authorization = stash.get("take_profit_authorization")
+        parent_intent_id = str(stash.get("take_profit_parent_intent_id") or "")
+        position_id = _tag_value(stash.get("entry_tags") or (), "position_id")
+        return _protection_tags(
+            tuple(stash.get("entry_tags") or ()),
+            "take_profit",
+            position_id,
+            parent_intent_id=parent_intent_id,
+            authorization=authorization,
+        )
+
+    def _retry_pending_tp_market_fallback_events(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+    ) -> None:
+        fallbacks = stash.get("tp_market_fallbacks")
+        if not isinstance(fallbacks, dict):
+            return
+        for fallback_id, state in fallbacks.items():
+            if not isinstance(state, dict) or state.get("event_sent"):
+                continue
+            if state.get("status") not in {"submitted", "filled"}:
+                continue
+            event_key = str(
+                state.get("event_key")
+                or f"{intent_key}:{state.get('source_client_order_id')}:{fallback_id}"
+            )
+            payload = {
+                "source_client_order_id": state.get("source_client_order_id"),
+                "fallback_client_order_id": fallback_id,
+                "quantity": state.get("quantity"),
+                "tp_price": state.get("tp_price"),
+                "reduce_only": True,
+            }
+            state["event_sent"] = self._report_protection_event(
+                intent_key,
+                stash,
+                event_type="TakeProfitImmediateMarketFallback",
+                event_key=event_key,
+                client_order_id=str(fallback_id),
+                payload=payload,
+            )
+
+    def _consume_tp_market_fallback(
+        self,
+        stash: dict[str, Any],
+        client_order_id: str,
+        quantity: str,
+    ) -> None:
+        fallbacks = stash.get("tp_market_fallbacks")
+        if not isinstance(fallbacks, dict):
+            return
+        state = fallbacks.get(client_order_id)
+        if not isinstance(state, dict):
+            return
+        try:
+            remaining = Decimal(str(state.get("remaining_quantity") or "0"))
+            remaining -= Decimal(str(quantity))
+        except (InvalidOperation, ValueError):
+            remaining = Decimal("0")
+        if remaining <= 0:
+            state["remaining_quantity"] = "0"
+            state["status"] = "filled"
+            state["filled_at"] = self._now().isoformat()
+            return
+        state["remaining_quantity"] = format(remaining, "f")
+
+    def _pending_tp_market_fallback_quantity(
+        self,
+        stash: dict[str, Any],
+        tp_price: str,
+    ) -> Decimal:
+        fallbacks = stash.get("tp_market_fallbacks")
+        if not isinstance(fallbacks, dict):
+            return Decimal("0")
+        total = Decimal("0")
+        for state in fallbacks.values():
+            if not isinstance(state, dict):
+                continue
+            if str(state.get("tp_price") or "") != tp_price:
+                continue
+            if state.get("status") not in {"submitting", "submitted"}:
+                continue
+            try:
+                total += Decimal(str(state.get("remaining_quantity") or "0"))
+            except (InvalidOperation, ValueError):
+                continue
+        return total
+
+    def _has_pending_tp_market_fallback(self, stash: dict[str, Any]) -> bool:
+        fallbacks = stash.get("tp_market_fallbacks")
+        if not isinstance(fallbacks, dict):
+            return False
+        return any(
+            isinstance(state, dict)
+            and state.get("status") in {"submitting", "submitted"}
+            and str(state.get("remaining_quantity") or "0") != "0"
+            for state in fallbacks.values()
+        )
 
     def _on_protection_sync_alert(self, event: Any) -> None:
         name = str(getattr(event, "name", ""))
@@ -1124,6 +1532,10 @@ class IntentExecutionStrategy(Strategy):
             self._entry_protection_stash.pop(intent_key, None)
             self._persist_entry_protection_stash()
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
+            return
+
+        if self._has_pending_tp_market_fallback(stash):
+            self._reschedule_protection_sync(intent_key, stash, count_retry=True)
             return
 
         quantity = _round_down_positive(
@@ -1379,7 +1791,8 @@ class IntentExecutionStrategy(Strategy):
                 Decimal("0"),
             )
             target = Decimal(str(plan.quantity))
-            if not healthy or live_quantity != target:
+            increment = Decimal(str(instrument.quantity_increment))
+            if not healthy or live_quantity < target - increment:
                 actions.append(plan)
                 replace_ids.update(
                     str(getattr(order, "client_order_id", ""))
@@ -1465,6 +1878,10 @@ class IntentExecutionStrategy(Strategy):
         stash: dict[str, Any],
         client_order_id: str,
         plan: OrderPlan,
+        *,
+        tp_price: Optional[str] = None,
+        market_fallback: bool = False,
+        source_client_order_id: Optional[str] = None,
     ) -> None:
         if not client_order_id:
             return
@@ -1472,16 +1889,23 @@ class IntentExecutionStrategy(Strategy):
         if role is None:
             return
         roles = stash.setdefault("protection_roles", {})
-        tp_price = plan.trigger_price
+        role_tp_price = plan.trigger_price
+        if tp_price is not None:
+            role_tp_price = tp_price
         roles[client_order_id] = {
             "role": role,
             "tp_price": (
-                str(tp_price)
-                if role == "take_profit" and tp_price is not None
+                str(role_tp_price)
+                if role == "take_profit" and role_tp_price is not None
                 else None
             ),
             "quantity": str(plan.quantity),
             "submitted_at": self._now().isoformat(),
+            "order_type": plan.order_type,
+            "side": plan.side,
+            "tags": tuple(plan.tags),
+            "market_fallback": market_fallback,
+            "source_client_order_id": source_client_order_id,
         }
         self._prune_protection_roles(intent_key, stash)
 
@@ -1626,13 +2050,11 @@ class IntentExecutionStrategy(Strategy):
             order_trigger = self._protection_order_trigger_price(order, instrument)
             if order_trigger != plan.trigger_price:
                 return False
-            order_quantity = _round_down_positive(
-                _optional_str(
-                    getattr(order, "quantity", getattr(order, "qty", None))
-                ),
+            return _decimal_abs_lte(
+                _optional_str(getattr(order, "quantity", getattr(order, "qty", None))),
+                plan.quantity,
                 instrument.quantity_increment,
             )
-            return order_quantity == plan.quantity
         if plan.order_type == "LIMIT":
             if "LIMIT" not in order_type or "STOP" in order_type:
                 return False
@@ -1886,6 +2308,10 @@ class IntentExecutionStrategy(Strategy):
                     remaining = Decimal(str(target_quantity)) - Decimal(
                         str(consumed_by_price.get(price_key, "0"))
                     )
+                    remaining -= self._pending_tp_market_fallback_quantity(
+                        stash,
+                        price_key,
+                    )
                 except (InvalidOperation, ValueError, TypeError):
                     result.append(None)
                     continue
@@ -1898,6 +2324,10 @@ class IntentExecutionStrategy(Strategy):
                 consumed_quantity = Decimal(str(consumed_by_price.get(_price_key(target), "0")))
             except (InvalidOperation, ValueError, TypeError):
                 consumed_quantity = Decimal("0")
+            consumed_quantity += self._pending_tp_market_fallback_quantity(
+                stash,
+                _price_key(target),
+            )
             if consumed_quantity <= 0:
                 unconsumed_indexes.append(index)
         split = _split_take_profit_quantities(quantity, len(unconsumed_indexes), increment)
@@ -2754,6 +3184,26 @@ def _event_instrument_id(event: Any) -> Optional[str]:
     return None
 
 
+def _event_order_type(event: Any) -> Optional[str]:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        value = getattr(holder, "order_type", None)
+        if value is not None:
+            return _enum_name(value)
+    return None
+
+
+def _event_order_side(event: Any) -> Optional[str]:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        value = getattr(holder, "side", getattr(holder, "order_side", None))
+        if value is not None:
+            return _enum_name(value)
+    return None
+
+
 def _event_type_name(event: Any) -> str:
     value = getattr(event, "event_type", getattr(event, "type", None))
     if value is not None:
@@ -2783,6 +3233,13 @@ def _event_last_qty(event: Any) -> Optional[str]:
             if value is not None:
                 return str(value)
     return None
+
+
+def _market_fallback_client_order_id(source_client_order_id: str) -> str:
+    source = str(source_client_order_id)
+    if source.startswith("B"):
+        return "M" + source[1:]
+    return ("M" + source)[-36:]
 
 
 def _protection_plan_key(plan: OrderPlan) -> tuple[str, Optional[str]]:

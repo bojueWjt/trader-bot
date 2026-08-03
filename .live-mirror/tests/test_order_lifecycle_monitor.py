@@ -96,7 +96,7 @@ def test_operator_halt_with_healthy_readiness_does_not_raise_fault_alert(monkeyp
         "nodehalt-first:node-a:old fault": 50,
     }
     prompts = []
-    rows = [["node-a", "HALTED", "true", "", "1.0", "HALT"]]
+    rows = [["node-a", "HALTED", "true", "", "1.0", "HALT", "60"]]
     monkeypatch.setattr(module, "q", lambda sql: rows)
     monkeypatch.setattr(
         module,
@@ -109,6 +109,31 @@ def test_operator_halt_with_healthy_readiness_does_not_raise_fault_alert(monkeyp
     assert prompts == []
     assert not any(key.startswith("nodehalt:node-a:") for key in state)
     assert not any(key.startswith("nodehalt-first:node-a:") for key in state)
+
+
+def test_stale_operator_halt_command_no_longer_suppresses_fault_alert(monkeypatch):
+    module = _load_monitor()
+    prompts = []
+    rows = [[
+        "node-a",
+        "HALTED",
+        "true",
+        "operator_command",
+        "1.0",
+        "HALT",
+        str(module.OPERATOR_HALT_SUPPRESS_SECONDS + 1),
+    ]]
+    monkeypatch.setattr(module, "q", lambda sql: rows)
+    monkeypatch.setattr(
+        module,
+        "wake_hermes",
+        lambda prompt, name, dry_run: prompts.append(prompt) or True,
+    )
+
+    module.sweep_node_health({}, dry_run=False, now_ts=2_000)
+
+    assert len(prompts) == 1
+    assert "operator_command" in prompts[0]
 
 
 def test_operator_halt_still_alerts_when_readiness_is_false(monkeypatch):
@@ -167,6 +192,184 @@ def test_fresh_heartbeat_below_threshold_does_not_alert(monkeypatch):
     module.sweep_node_health(state, dry_run=False, now_ts=1_000)
 
     assert direct == [] and not any(k.startswith("nodehalt:") for k in state)
+
+
+def test_approved_intent_without_ack_or_execution_progress_alerts_once(monkeypatch):
+    module = _load_monitor()
+    alerts = []
+    rows = [[
+        "11111111-1111-1111-1111-111111111111",
+        "account-a",
+        "BTCUSDT",
+        "cancel_order",
+        "601",
+    ]]
+    monkeypatch.setattr(module, "q", lambda sql: rows)
+    monkeypatch.setattr(
+        module,
+        "tg_send_direct",
+        lambda text: alerts.append(text) or True,
+    )
+    state = {}
+
+    module.sweep_intent_stalls(state, dry_run=False, now_ts=10_000)
+    module.sweep_intent_stalls(state, dry_run=False, now_ts=10_060)
+
+    assert len(alerts) == 1
+    assert "Intent 消费停滞" in alerts[0]
+    assert "cancel_order" in alerts[0]
+    assert state["intentstall:11111111-1111-1111-1111-111111111111"] == 10_000
+
+
+def test_intent_stall_sweep_is_quiet_when_query_has_no_backlog(monkeypatch):
+    module = _load_monitor()
+    alerts = []
+    captured = []
+
+    def fake_q(sql):
+        captured.append(sql)
+        return []
+
+    monkeypatch.setattr(module, "q", fake_q)
+    monkeypatch.setattr(
+        module,
+        "tg_send_direct",
+        lambda text: alerts.append(text) or True,
+    )
+
+    module.sweep_intent_stalls({}, dry_run=False, now_ts=10_000)
+
+    assert alerts == []
+    assert "intent_ack.%" in captured[0]
+    assert "execution_events" in captured[0]
+
+
+def test_protection_frozen_execution_event_alerts_once(monkeypatch):
+    module = _load_monitor()
+    alerts = []
+    payload = {
+        "instrument_id": "ETHUSDT-PERP.BINANCE",
+        "reason": "revisions_exhausted",
+        "protection_revision": 8,
+    }
+    rows = [[
+        "strategy-event-1",
+        "account-a",
+        "11111111-1111-1111-1111-111111111111",
+        "",
+        json.dumps(payload),
+    ]]
+    monkeypatch.setattr(module, "q", lambda sql: rows)
+    monkeypatch.setattr(
+        module,
+        "tg_send_direct",
+        lambda text: alerts.append(text) or True,
+    )
+    state = {}
+
+    module.sweep_protection_events(state, dry_run=False, now_ts=10_000)
+    module.sweep_protection_events(state, dry_run=False, now_ts=10_060)
+
+    assert len(alerts) == 1
+    assert "保护单冻结" in alerts[0]
+    assert "revisions_exhausted" in alerts[0]
+    assert state["protectionfreeze:strategy-event-1"] == 10_000
+
+
+def test_protection_event_sweep_is_quiet_without_frozen_events(monkeypatch):
+    module = _load_monitor()
+    alerts = []
+    monkeypatch.setattr(module, "q", lambda sql: [])
+    monkeypatch.setattr(
+        module,
+        "tg_send_direct",
+        lambda text: alerts.append(text) or True,
+    )
+
+    module.sweep_protection_events({}, dry_run=False, now_ts=10_000)
+
+    assert alerts == []
+
+
+def test_missing_daily_report_alerts_after_grace_window_once(monkeypatch):
+    module = _load_monitor()
+    alerts = []
+    now_ts = module.datetime(
+        2026,
+        8,
+        3,
+        15,
+        3,
+        tzinfo=module.timezone.utc,
+    ).timestamp()
+    monkeypatch.setattr(
+        module,
+        "_daily_report_file_exists",
+        lambda report_date: False,
+    )
+    monkeypatch.setattr(
+        module,
+        "_report_health",
+        lambda: {
+            "last_publication": {
+                "status": "succeeded",
+                "report_type": "daily",
+                "report_date": "2026-08-02",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "tg_send_direct",
+        lambda text: alerts.append(text) or True,
+    )
+    state = {}
+
+    module.sweep_daily_report(state, dry_run=False, now_ts=now_ts)
+    module.sweep_daily_report(state, dry_run=False, now_ts=now_ts + 60)
+
+    assert len(alerts) == 1
+    assert "日报缺失" in alerts[0]
+    assert "2026-08-03" in alerts[0]
+    assert state["dailyreport:2026-08-03"] == now_ts
+
+
+def test_current_daily_health_publication_suppresses_missing_report_alert(monkeypatch):
+    module = _load_monitor()
+    alerts = []
+    now_ts = module.datetime(
+        2026,
+        8,
+        3,
+        15,
+        3,
+        tzinfo=module.timezone.utc,
+    ).timestamp()
+    monkeypatch.setattr(
+        module,
+        "_daily_report_file_exists",
+        lambda report_date: False,
+    )
+    monkeypatch.setattr(
+        module,
+        "_report_health",
+        lambda: {
+            "last_publication": {
+                "status": "succeeded",
+                "report_type": "daily",
+                "report_date": "2026-08-03",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "tg_send_direct",
+        lambda text: alerts.append(text) or True,
+    )
+
+    module.sweep_daily_report({}, dry_run=False, now_ts=now_ts)
+
+    assert alerts == []
 
 
 def _mirror_row(account_id, positions, open_orders=None, algo_orders=None, age="10"):
@@ -375,6 +578,44 @@ def test_position_parent_lookup_ignores_legacy_operator_raw_message(monkeypatch)
 
     assert authorizations == {}
     assert "raw_messages" not in seen[0]
+    assert "interval '30 days'" in seen[0]
+
+
+def test_load_intent_contexts_accepts_uuid_and_hex_and_drops_invalid_sql(monkeypatch):
+    module = _load_monitor()
+    captured = []
+
+    def fake_q(sql):
+        captured.append(sql)
+        return []
+
+    monkeypatch.setattr(module, "q", fake_q)
+
+    module._load_intent_contexts({
+        "11111111-1111-1111-1111-111111111111",
+        "22222222222222222222222222222222",
+        "bad'); DROP TABLE trade_intents; --",
+    })
+
+    assert len(captured) == 1
+    assert "11111111-1111-1111-1111-111111111111" in captured[0]
+    assert "22222222-2222-2222-2222-222222222222" in captured[0]
+    assert "DROP TABLE" not in captured[0]
+
+
+def test_load_intent_contexts_skips_query_when_all_ids_are_invalid(monkeypatch):
+    module = _load_monitor()
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "q",
+        lambda sql: calls.append(sql) or [],
+    )
+
+    contexts = module._load_intent_contexts({"bad-id", "' OR true --"})
+
+    assert contexts == {}
+    assert calls == []
 
 
 def test_reduce_only_take_profit_is_not_stop_loss():
@@ -608,6 +849,59 @@ def test_mu_naked_without_parent_authorization_only_alerts(monkeypatch):
     assert " cancel " not in alerts[0]
     assert "naked:account-a:MUUSDT:long" not in state
     assert state["authalert:naked:account-a:MUUSDT:long"] == 1_000
+
+
+def test_naked_authorization_backoff_skips_parent_lookup(monkeypatch):
+    module = _load_monitor()
+    mirror = _mirror_row(
+        "account-a",
+        [_position("MUUSDT", "LONG", "150")],
+    )
+    queries = []
+
+    def fake_q(sql):
+        queries.append(sql)
+        if "exchange_state_mirror" in sql:
+            return [mirror]
+        if "OrderFilled" in sql:
+            return []
+        if "FROM trade_intents ti" in sql:
+            raise AssertionError("authorization lookup must honor authalert backoff")
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(module, "q", fake_q)
+    monkeypatch.setattr(
+        module,
+        "tg_send_direct",
+        lambda text: (_ for _ in ()).throw(
+            AssertionError("deduplicated auth alert must stay quiet")
+        ),
+    )
+    state = {
+        "authalert:naked:account-a:MUUSDT:long": 900,
+    }
+
+    module.sweep_naked(state, dry_run=False, now_ts=1_000)
+
+    assert not any("FROM trade_intents ti" in sql for sql in queries)
+
+
+def test_prune_state_removes_expired_authalert_prefix():
+    module = _load_monitor()
+    state = {
+        "authalert:naked:account-a:MUUSDT:long": 100,
+        "authalert:naked:account-a:BTCUSDT:long": 9_900,
+    }
+
+    module.prune_state(
+        state,
+        live_ids=set(),
+        now_ts=10_000,
+        max_age=1_000,
+    )
+
+    assert "authalert:naked:account-a:MUUSDT:long" not in state
+    assert "authalert:naked:account-a:BTCUSDT:long" in state
 
 
 def test_price_remediation_without_parent_authorization_only_alerts(monkeypatch):

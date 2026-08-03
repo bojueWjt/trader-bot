@@ -48,6 +48,7 @@ import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
+from uuid import UUID
 
 import hermes_signal_feeder as feeder  # run_hermes + channel context helpers
 
@@ -59,6 +60,7 @@ POLL_SECONDS = 15
 TTL_SWEEP_SECONDS = 600
 RECON_SWEEP_SECONDS = 3600
 PENDING_CANCEL_SWEEP_SECONDS = 60
+INTENT_STALL_SECONDS = float(os.environ.get("INTENT_STALL_SECONDS", "300"))
 ORDER_SNAPSHOT_MAX_AGE_SECONDS = 300
 MIRROR_MAX_AGE_SECONDS = 300  # exchange_state_mirror refreshes every ~45s
 ORDER_TTL_HOURS = float(os.environ.get("ORDER_TTL_HOURS", "48"))
@@ -69,6 +71,15 @@ STATE_PRUNE_AGE_SECONDS = 7 * 24 * 3600
 MARK_FAIL_ALERT_THRESHOLD = 20
 NAKED_DEDUP_SECONDS = 24 * 3600
 NAKED_GRACE_SECONDS = 180
+OPERATOR_HALT_SUPPRESS_SECONDS = 24 * 3600
+REPORT_DIR = os.environ.get("REPORT_DIR", "/srv/trader-v3/reports")
+REPORT_HEALTH_URL = os.environ.get(
+    "REPORT_HEALTH_URL",
+    "http://127.0.0.1:8090/healthz",
+)
+DAILY_REPORT_EXPECTED_HOUR_UTC = 13
+DAILY_REPORT_EXPECTED_MINUTE_UTC = 32
+DAILY_REPORT_GRACE_SECONDS = 90 * 60
 PENDING_CANCEL_TIMEOUT_MINUTES = float(
     os.environ.get("PENDING_CANCEL_TIMEOUT_MINUTES", "10")
 )
@@ -294,10 +305,53 @@ def _send_read_only_alert(
     return True
 
 
+def _send_deduplicated_alert(
+    state: dict,
+    key: str,
+    text: str,
+    dry_run: bool,
+    now_ts: float,
+) -> bool:
+    last_alert = float(state.get(key) or 0)
+    if last_alert and now_ts - last_alert < ALERT_DEDUP_SECONDS:
+        return False
+    if dry_run:
+        log(f"DRY-RUN would send alert: {text}")
+        return True
+    if not tg_send_direct(text):
+        return False
+    state[key] = now_ts
+    return True
+
+
+_CANONICAL_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_UUID_HEX_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def _normalize_intent_id(value: str) -> str | None:
+    text = str(value or "").strip()
+    if not _CANONICAL_UUID_RE.fullmatch(text) and not _UUID_HEX_RE.fullmatch(text):
+        return None
+    try:
+        return str(UUID(text))
+    except ValueError:
+        return None
+
+
 def _load_intent_contexts(intent_ids: set[str]) -> dict[str, dict]:
-    if not intent_ids:
+    normalized_ids = {
+        normalized
+        for normalized in (_normalize_intent_id(value) for value in intent_ids)
+        if normalized
+    }
+    if not normalized_ids:
         return {}
-    placeholders = ",".join(f"'{intent_id}'" for intent_id in sorted(intent_ids))
+    placeholders = ",".join(
+        f"'{intent_id}'" for intent_id in sorted(normalized_ids)
+    )
     rows = q(
         "SELECT ti.intent_id::text, ti.action::text, ti.account_id, "
         "ti.instrument_id, ti.order_plan::text "
@@ -346,6 +400,7 @@ def _position_parent_authorizations(
         "FROM trade_intents ti "
         "WHERE ti.status='approved' "
         "AND ti.action::text IN ('open_position','add_position') "
+        "AND ti.approved_at > now() - interval '30 days' "
         "ORDER BY ti.approved_at DESC, ti.created_at DESC"
     )
     authorizations: dict[tuple[str, str, str], dict] = {}
@@ -723,7 +778,16 @@ def prune_state(state: dict, live_ids: set[str], now_ts: float,
     max_age = STATE_PRUNE_AGE_SECONDS if max_age is None else max_age
     for key in list(state):
         parts = key.split(":")
-        if parts[0] not in ("alert", "fill", "recon", "ttlwake"):
+        if parts[0] not in (
+            "alert",
+            "authalert",
+            "dailyreport",
+            "fill",
+            "intentstall",
+            "protectionfreeze",
+            "recon",
+            "ttlwake",
+        ):
             continue
         cid = parts[1] if len(parts) > 1 else ""
         if cid in live_ids:
@@ -885,11 +949,23 @@ def sweep_node_health(state: dict, dry_run: bool, now_ts: float | None = None) -
         "WHERE cna.node_id=node_heartbeats.node_id AND cna.status='acked' "
         "AND oc.command_type IN ('HALT','RESUME','REDUCE') "
         "ORDER BY cna.ack_at DESC NULLS LAST, oc.created_at DESC LIMIT 1),'') "
+        ", COALESCE((SELECT EXTRACT(EPOCH FROM (now() - "
+        "COALESCE(cna.ack_at, oc.created_at))) FROM operator_commands oc "
+        "JOIN command_node_acks cna ON cna.command_id=oc.command_id "
+        "WHERE cna.node_id=node_heartbeats.node_id AND cna.status='acked' "
+        "AND oc.command_type IN ('HALT','RESUME','REDUCE') "
+        "ORDER BY cna.ack_at DESC NULLS LAST, oc.created_at DESC LIMIT 1),-1) "
         "FROM node_heartbeats ORDER BY node_id"
     )
     for row in rows:
         node_id, status_raw, readiness_raw, halt_reason_raw, hb_age_raw = row[:5]
         latest_lifecycle_command = str(row[5] if len(row) > 5 else "").strip().upper()
+        try:
+            latest_lifecycle_command_age = float(
+                row[6] if len(row) > 6 else -1
+            )
+        except (TypeError, ValueError):
+            latest_lifecycle_command_age = -1
         status = str(status_raw or "").strip().upper()
         readiness_false = _readiness_is_false(readiness_raw)
         # 2026-07-24 事故：双节点僵死 7 小时，心跳停更但表里残留
@@ -919,10 +995,8 @@ def sweep_node_health(state: dict, dry_run: bool, now_ts: float | None = None) -
         if (
             status == "HALTED"
             and not readiness_false
-            and (
-                halt_reason.lower() == "operator_command"
-                or latest_lifecycle_command == "HALT"
-            )
+            and latest_lifecycle_command == "HALT"
+            and 0 <= latest_lifecycle_command_age <= OPERATOR_HALT_SUPPRESS_SECONDS
         ):
             # An acknowledged operator HALT is an expected control action. The
             # command path owns its audit trail; node health alerts cover faults.
@@ -958,6 +1032,174 @@ def sweep_node_health(state: dict, dry_run: bool, now_ts: float | None = None) -
             dry_run=dry_run,
         ) and not dry_run:
             state[alert_key] = now_ts
+
+
+def sweep_intent_stalls(
+    state: dict,
+    dry_run: bool,
+    now_ts: float | None = None,
+) -> None:
+    now_ts = now_ts or time.time()
+    rows = q(
+        "SELECT ti.intent_id::text, ti.account_id, ti.instrument_id, "
+        "ti.action::text, EXTRACT(EPOCH FROM (now() - ti.approved_at)) "
+        "FROM trade_intents ti "
+        "WHERE ti.status='approved' "
+        f"AND ti.approved_at <= now() - interval '{INTENT_STALL_SECONDS} seconds' "
+        "AND NOT EXISTS ("
+        " SELECT 1 FROM audit_events ae "
+        " WHERE (ae.intent_id=ti.intent_id OR ("
+        " ae.aggregate_type='trade_intent' "
+        " AND ae.aggregate_id=ti.intent_id::text)) "
+        " AND ae.event_type LIKE 'intent_ack.%'"
+        ") "
+        "AND NOT EXISTS ("
+        " SELECT 1 FROM execution_events ee WHERE ee.intent_id=ti.intent_id"
+        ") "
+        "ORDER BY ti.approved_at"
+    )
+    for intent_id, account_id, instrument_id, action, age_raw in rows:
+        try:
+            age_seconds = float(age_raw)
+        except (TypeError, ValueError):
+            age_seconds = INTENT_STALL_SECONDS
+        text = (
+            f"🔴 Intent 消费停滞:{account_id} {instrument_id} {action} "
+            f"intent={intent_id} 已 approved {_duration_cn(age_seconds)}，"
+            "仍无 intent_ack 或 execution event 推进。"
+            "请检查 node intent consumer、最近异常和队列游标。"
+        )
+        _send_deduplicated_alert(
+            state,
+            f"intentstall:{intent_id}",
+            text,
+            dry_run,
+            now_ts,
+        )
+
+
+def sweep_protection_events(
+    state: dict,
+    dry_run: bool,
+    now_ts: float | None = None,
+) -> None:
+    now_ts = now_ts or time.time()
+    rows = q(
+        "SELECT event_id, account_id, COALESCE(intent_id::text,''), "
+        "COALESCE(client_order_id,''), payload::text "
+        "FROM execution_events "
+        "WHERE event_type='ProtectionFrozen' "
+        "AND ts_event > now() - interval '7 days' "
+        "ORDER BY ts_event"
+    )
+    for event_id, account_id, intent_id, client_order_id, payload_raw in rows:
+        try:
+            payload = json.loads(payload_raw)
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        reason = str(
+            payload.get("reason")
+            or payload.get("denial_reason")
+            or "unknown"
+        )
+        instrument_id = str(payload.get("instrument_id") or "?")
+        text = (
+            f"🔴 保护单冻结:{account_id} {instrument_id} intent={intent_id or '?'} "
+            f"reason={reason} revision={payload.get('protection_revision', '?')}。"
+            "自动保护重同步已停止，请人工核对持仓和交易所保护单。"
+        )
+        if client_order_id:
+            text += f" client_order_id={client_order_id}。"
+        _send_deduplicated_alert(
+            state,
+            f"protectionfreeze:{event_id}",
+            text,
+            dry_run,
+            now_ts,
+        )
+
+
+def _daily_report_file_exists(
+    report_date: str,
+    report_dir: str = REPORT_DIR,
+) -> bool:
+    prefix = f"{report_date}-daily-"
+    try:
+        with os.scandir(report_dir) as entries:
+            return any(
+                entry.is_file()
+                and entry.name.startswith(prefix)
+                and entry.name.endswith(".html")
+                for entry in entries
+            )
+    except OSError:
+        return False
+
+
+def _report_health() -> dict:
+    try:
+        with urllib.request.urlopen(REPORT_HEALTH_URL, timeout=8) as response:
+            payload = json.loads(response.read())
+    except Exception as exc:  # noqa: BLE001
+        log(f"report health read failed: {exc!r}")
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _health_has_daily_publication(health: dict, report_date: str) -> bool:
+    publication = health.get("last_publication")
+    if not isinstance(publication, dict):
+        return False
+    return (
+        publication.get("status") == "succeeded"
+        and publication.get("report_type") == "daily"
+        and publication.get("report_date") == report_date
+    )
+
+
+def sweep_daily_report(
+    state: dict,
+    dry_run: bool,
+    now_ts: float | None = None,
+) -> None:
+    now_ts = now_ts or time.time()
+    now_utc = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+    expected = now_utc.replace(
+        hour=DAILY_REPORT_EXPECTED_HOUR_UTC,
+        minute=DAILY_REPORT_EXPECTED_MINUTE_UTC,
+        second=0,
+        microsecond=0,
+    )
+    if now_utc.timestamp() < expected.timestamp() + DAILY_REPORT_GRACE_SECONDS:
+        return
+    report_date = now_utc.date().isoformat()
+    if _daily_report_file_exists(report_date):
+        state.pop(f"dailyreport:{report_date}", None)
+        return
+    health = _report_health()
+    if _health_has_daily_publication(health, report_date):
+        state.pop(f"dailyreport:{report_date}", None)
+        return
+    publication = health.get("last_publication")
+    if not isinstance(publication, dict):
+        publication = {}
+    text = (
+        f"🔴 日报缺失:{report_date} 的 daily report 在预期生成点 "
+        f"{DAILY_REPORT_EXPECTED_HOUR_UTC:02d}:"
+        f"{DAILY_REPORT_EXPECTED_MINUTE_UTC:02d} UTC 后 90 分钟仍未出现。"
+        f"healthz last_publication={publication.get('status', 'unavailable')}/"
+        f"{publication.get('report_date', '')}。"
+        "请检查日报调度、report service 和 publication 错误。"
+    )
+    _send_deduplicated_alert(
+        state,
+        f"dailyreport:{report_date}",
+        text,
+        dry_run,
+        now_ts,
+    )
 
 
 def sweep_ttl(state: dict, dry_run: bool, now_ts: float | None = None) -> None:
@@ -1310,8 +1552,19 @@ def sweep_naked(state: dict, dry_run: bool, now_ts: float | None = None) -> None
         now_ts,
         state,
     )
-    authorizations = _position_parent_authorizations(set(naked_keys))
+    authorization_lookup_keys: set[PositionKey] = set()
+    for key in naked_keys:
+        alert_key = f"authalert:naked:{key[0]}:{key[1]}:{key[2]}"
+        if alert_key in state:
+            last_alert = float(state.get(alert_key) or 0)
+            if now_ts - last_alert < ALERT_DEDUP_SECONDS:
+                continue
+        authorization_lookup_keys.add(key)
+    authorizations = _position_parent_authorizations(authorization_lookup_keys)
     for account_id, symbol, position_side in naked_keys:
+        position_key = (account_id, symbol, position_side)
+        if position_key not in authorization_lookup_keys:
+            continue
         authorization = authorizations.get((account_id, symbol, position_side))
         if not _has_complete_authorization(authorization):
             _send_read_only_alert(
@@ -1586,6 +1839,9 @@ def main() -> None:
         now_ts = time.time()
         for name, fn, due in (
             ("nodes", sweep_node_health, True),
+            ("intent-stalls", sweep_intent_stalls, True),
+            ("protection-events", sweep_protection_events, True),
+            ("daily-report", sweep_daily_report, True),
             ("price", sweep_price_alerts, True),
             ("fills", sweep_fill_alerts, True),
             ("naked", sweep_naked, True),

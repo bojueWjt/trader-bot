@@ -2046,6 +2046,7 @@ def _order_authorization(
     source: str,
     authenticated_actor_id: str,
     request_id: str,
+    client_ref: str,
 ) -> dict:
     authorized_by_type = str(body.get("authorized_by_type") or "").strip().lower()
     authorized_by_id = str(body.get("authorized_by_id") or "").strip()
@@ -2128,9 +2129,28 @@ def _order_authorization(
         "authorized_by_type": "user",
         "authorized_by_id": authenticated_actor_id,
         "reason": reason,
-        "source_message_id": request_id,
+        "source_message_id": client_ref or request_id,
         "created_by_service": "control-plane",
         "parent_intent_id": False,
+    }
+
+
+_AUTHORIZATION_REPLAY_FIELDS = (
+    "authorized_by_type",
+    "authorized_by_id",
+    "source_message_id",
+    "created_by_service",
+    "parent_intent_id",
+    "reason",
+)
+
+
+def _stable_authorization_evidence(authorization: object) -> dict:
+    if not isinstance(authorization, dict):
+        return {}
+    return {
+        field: authorization.get(field)
+        for field in _AUTHORIZATION_REPLAY_FIELDS
     }
 
 
@@ -2800,6 +2820,7 @@ def operator_order(
         source,
         role,
         request_id,
+        client_ref,
     )
     if (
         authorization_evidence["authorized_by_type"] == "channel"
@@ -2914,7 +2935,10 @@ def operator_order(
             if existing:
                 existing_plan = existing[3] or {}
                 persisted_authorization = existing_plan.get("authorization")
-                if persisted_authorization != authorization_evidence:
+                if (
+                    _stable_authorization_evidence(persisted_authorization)
+                    != _stable_authorization_evidence(authorization_evidence)
+                ):
                     raise HTTPException(
                         status_code=409,
                         detail="idempotency key authorization evidence mismatch",

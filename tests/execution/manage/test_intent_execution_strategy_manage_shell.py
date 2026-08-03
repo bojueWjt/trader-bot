@@ -216,7 +216,7 @@ class StrategyManageShellTest(unittest.TestCase):
             "28000.11",
         )
 
-    def test_live_mit_quantity_one_step_short_requires_replacement(self) -> None:
+    def test_live_mit_quantity_one_step_short_is_kept_within_tolerance(self) -> None:
         strategy = _HarnessStrategy()
         intent_id = uuid4()
         stash = _protection_stash()
@@ -234,6 +234,39 @@ class StrategyManageShellTest(unittest.TestCase):
                 "tp-live-short",
                 "MARKET_IF_TOUCHED",
                 "0.199",
+                "28000.11",
+            ),
+        )
+
+        actions, keep_ids, replace_ids = strategy._protection_replacement_actions(
+            stash,
+            live,
+            (tp_plan,),
+            instrument,
+        )
+
+        self.assertEqual(actions, ())
+        self.assertEqual(keep_ids, ("tp-live-short",))
+        self.assertEqual(replace_ids, set())
+
+    def test_live_mit_quantity_two_steps_short_requires_replacement(self) -> None:
+        strategy = _HarnessStrategy()
+        intent_id = uuid4()
+        stash = _protection_stash()
+        instrument = _instrument_spec()
+        plans = strategy._protection_order_plans(
+            intent_id,
+            stash,
+            instrument,
+            _position(),
+            "0.500",
+        )
+        tp_plan = plans[1]
+        live = (
+            _live_order(
+                "tp-live-short",
+                "MARKET_IF_TOUCHED",
+                "0.198",
                 "28000.11",
             ),
         )
