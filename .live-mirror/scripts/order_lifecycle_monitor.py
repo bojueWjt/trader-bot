@@ -1046,6 +1046,11 @@ def sweep_intent_stalls(
         "FROM trade_intents ti "
         "WHERE ti.status='approved' "
         f"AND ti.approved_at <= now() - interval '{INTENT_STALL_SECONDS} seconds' "
+        # 回看窗:只报活跃事故,不翻历史债(07-26 撤单刷屏教训;2026-08-03 部署首轮
+        # 曾对 18 条遗留 approved intent 一次性开火)。过 valid_until 的 intent
+        # 自然失效,无消费者也不是事故。
+        "AND ti.approved_at > now() - interval '24 hours' "
+        "AND (ti.valid_until IS NULL OR ti.valid_until > now()) "
         "AND NOT EXISTS ("
         " SELECT 1 FROM audit_events ae "
         " WHERE (ae.intent_id=ti.intent_id OR ("
@@ -1089,7 +1094,7 @@ def sweep_protection_events(
         "COALESCE(client_order_id,''), payload::text "
         "FROM execution_events "
         "WHERE event_type='ProtectionFrozen' "
-        "AND ts_event > now() - interval '7 days' "
+        "AND ts_event > now() - interval '24 hours' "
         "ORDER BY ts_event"
     )
     for event_id, account_id, intent_id, client_order_id, payload_raw in rows:

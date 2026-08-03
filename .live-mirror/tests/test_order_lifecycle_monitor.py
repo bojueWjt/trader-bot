@@ -244,6 +244,32 @@ def test_intent_stall_sweep_is_quiet_when_query_has_no_backlog(monkeypatch):
     assert "execution_events" in captured[0]
 
 
+def test_intent_stall_query_excludes_legacy_and_expired_intents(monkeypatch):
+    """2026-08-03 deploy fired 18 alerts for legacy approved intents: the stall
+    sweep must only look back 24h and skip naturally expired intents."""
+    module = _load_monitor()
+    captured = []
+    monkeypatch.setattr(module, "q", lambda sql: captured.append(sql) or [])
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: True)
+
+    module.sweep_intent_stalls({}, dry_run=False, now_ts=10_000)
+
+    assert "approved_at > now() - interval '24 hours'" in captured[0]
+    assert "valid_until IS NULL OR ti.valid_until > now()" in captured[0]
+
+
+def test_protection_freeze_query_only_looks_back_one_day(monkeypatch):
+    module = _load_monitor()
+    captured = []
+    monkeypatch.setattr(module, "q", lambda sql: captured.append(sql) or [])
+    monkeypatch.setattr(module, "tg_send_direct", lambda text: True)
+
+    module.sweep_protection_events({}, dry_run=False, now_ts=10_000)
+
+    assert "interval '24 hours'" in captured[0]
+    assert "interval '7 days'" not in captured[0]
+
+
 def test_protection_frozen_execution_event_alerts_once(monkeypatch):
     module = _load_monitor()
     alerts = []
