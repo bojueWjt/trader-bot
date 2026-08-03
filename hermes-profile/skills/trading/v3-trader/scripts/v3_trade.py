@@ -176,6 +176,40 @@ def _add_authorization_context(payload: dict, args) -> None:
         payload["parent_intent_id"] = parent_intent_id
 
 
+_ENTRY_OFFSET_PCT = "0.001"
+
+
+def _apply_entry_offset(entry: dict, side: str) -> str:
+    """Fuzzy-wording entry concession (user convention): shift entry prices
+    0.1% toward easier fill — long up, short down. Exact Decimal math; tick
+    rounding stays downstream in the planner. Returns the audit suffix."""
+    from decimal import Decimal
+
+    pct = Decimal(_ENTRY_OFFSET_PCT)
+    factor = (Decimal("1") + pct) if side == "long" else (Decimal("1") - pct)
+    raw_parts = []
+    for key, raw_key in (
+        ("price", "price_raw"),
+        ("price_min", "price_min_raw"),
+        ("price_max", "price_max_raw"),
+    ):
+        value = entry.get(key)
+        if value is None:
+            continue
+        raw = Decimal(str(value))
+        entry[raw_key] = float(raw)
+        entry[key] = float(raw * factor)
+        raw_parts.append(f"{key}={value:g}")
+    if not raw_parts:
+        print(json.dumps({
+            "error": "--entry-offset requires a limit price or zone bounds "
+                     "(market entry has no price to shift)",
+        }, ensure_ascii=False))
+        sys.exit(1)
+    entry["offset_pct"] = float(pct)
+    return f"；按用户约定：入场模糊点位让利0.1%（原值 {', '.join(raw_parts)}）"
+
+
 def cmd_open(args) -> None:
     source_channel = _require_open_provenance(args)
     entry = {"type": args.entry_type}
@@ -185,13 +219,16 @@ def cmd_open(args) -> None:
         entry["price_min"] = args.price_min
     if args.price_max is not None:
         entry["price_max"] = args.price_max
+    reason = args.reason
+    if getattr(args, "entry_offset", False):
+        reason = reason + _apply_entry_offset(entry, args.side)
     payload = {
         "action": "open_position",
         "symbol": args.symbol.upper(),
         "side": args.side,
         "entry": entry,
         "account_id": args.account,
-        "reason": args.reason,
+        "reason": reason,
         "source": "hermes-agent",
         "source_channel": source_channel,
     }
@@ -509,6 +546,10 @@ def main() -> None:
     p.add_argument("--price", type=float, default=None)
     p.add_argument("--price-min", type=float, default=None)
     p.add_argument("--price-max", type=float, default=None)
+    p.add_argument("--entry-offset", action="store_true",
+                   help="signal wording is fuzzy (附近/左右/约): shift entry "
+                        "prices 0.1%% toward fill (long up / short down). "
+                        "Precise signal prices must NOT use this flag.")
     p.add_argument("--sl", type=float, default=None, help="stop loss price")
     p.add_argument("--tp", default=None, help="take profit price(s), comma separated")
     p.add_argument("--leverage", type=float, default=None)

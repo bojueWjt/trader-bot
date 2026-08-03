@@ -483,3 +483,113 @@ def test_management_commands_require_operation_ref_with_suggestion(
     assert exc.value.code == 1
     assert "--ref is required" in output["error"]
     assert output["suggested_ref"].endswith("tg-sig-c1002136478186-m5026")
+
+
+def _fake_open_call(calls):
+    def fake_call(method, path, payload=None):
+        calls.append((method, path, payload))
+        if method == "POST":
+            return {"intent_id": "intent-1", "status": "approved", "replay": False}
+        return {
+            "intent": {"status": "approved"},
+            "orders": [],
+            "execution_events": [],
+            "open_positions": [],
+        }
+    return fake_call
+
+
+def _open_argv(*extra):
+    return [
+        "v3_trade.py",
+        "open",
+        "ETHUSDT",
+        *extra,
+        "--reason",
+        "test",
+        "--ref",
+        "tg-sig-c1002136478186-m5026",
+        "--channel",
+        "-1002136478186",
+        *CHANNEL_AUTH_ARGS,
+        "--no-wait",
+    ]
+
+
+def test_open_entry_offset_shifts_fuzzy_zone_long(load_trade_module, monkeypatch):
+    module = load_trade_module()
+    calls = []
+    monkeypatch.setattr(module, "_call", _fake_open_call(calls))
+    monkeypatch.setattr(sys, "argv", _open_argv(
+        "long", "--entry-type", "zone",
+        "--price-min", "1806", "--price-max", "1826",
+        "--sl", "1787.82", "--entry-offset",
+    ))
+
+    module.main()
+
+    payload = next(p for m, _, p in calls if m == "POST")
+    entry = payload["entry"]
+    assert entry["price_min"] == 1807.806
+    assert entry["price_max"] == 1827.826
+    assert entry["price_min_raw"] == 1806.0
+    assert entry["price_max_raw"] == 1826.0
+    assert entry["offset_pct"] == 0.001
+    assert "入场模糊点位让利0.1%" in payload["reason"]
+    assert "price_min=1806" in payload["reason"]
+
+
+def test_open_entry_offset_shifts_fuzzy_limit_short(load_trade_module, monkeypatch):
+    module = load_trade_module()
+    calls = []
+    monkeypatch.setattr(module, "_call", _fake_open_call(calls))
+    monkeypatch.setattr(sys, "argv", _open_argv(
+        "short", "--entry-type", "limit",
+        "--price", "100", "--sl", "104", "--entry-offset",
+    ))
+
+    module.main()
+
+    payload = next(p for m, _, p in calls if m == "POST")
+    entry = payload["entry"]
+    assert entry["price"] == 99.9
+    assert entry["price_raw"] == 100.0
+    assert entry["offset_pct"] == 0.001
+    assert "入场模糊点位让利0.1%" in payload["reason"]
+
+
+def test_open_without_entry_offset_keeps_exact_prices(load_trade_module, monkeypatch):
+    module = load_trade_module()
+    calls = []
+    monkeypatch.setattr(module, "_call", _fake_open_call(calls))
+    monkeypatch.setattr(sys, "argv", _open_argv(
+        "long", "--entry-type", "zone",
+        "--price-min", "1806", "--price-max", "1826", "--sl", "1787.82",
+    ))
+
+    module.main()
+
+    payload = next(p for m, _, p in calls if m == "POST")
+    entry = payload["entry"]
+    assert entry["price_min"] == 1806.0
+    assert entry["price_max"] == 1826.0
+    assert "offset_pct" not in entry
+    assert "price_min_raw" not in entry
+    assert payload["reason"] == "test"
+
+
+def test_open_entry_offset_requires_price(load_trade_module, monkeypatch, capsys):
+    module = load_trade_module()
+    calls = []
+    monkeypatch.setattr(module, "_call", _fake_open_call(calls))
+    monkeypatch.setattr(sys, "argv", _open_argv(
+        "long", "--entry-type", "market", "--entry-offset",
+    ))
+
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+
+    assert exc.value.code == 1
+    output = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "--entry-offset requires" in output["error"]
+    assert not [c for c in calls if c[0] == "POST"]
