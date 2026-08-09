@@ -49,6 +49,20 @@ def test_deploy_script_is_control_plane_first() -> None:
     assert patch_install < recreate
 
 
+def test_deploy_script_installs_and_probes_live_trade_contract() -> None:
+    text = _text()
+
+    assert "scripts/account_a_live_trade_executor.py" in text
+    assert "scripts/account_a_live_trade_http_adapter.py" in text
+    assert 'expected_mode = "0755"' in text
+    assert 'install -D -m "$install_mode"' in text
+    assert '"source_evidence"' in text
+    assert 'environment.get("NAUTILUS_NODE_AUTH_JSON"' in text
+    assert "/v1/nodes/{node_id}/exchange-state?{query}" in text
+    assert "opening execution evidence authority is invalid" in text
+    assert "source-specific opening evidence is missing" in text
+
+
 def test_deploy_script_keeps_lock_backup_and_precise_rollback() -> None:
     text = _text()
 

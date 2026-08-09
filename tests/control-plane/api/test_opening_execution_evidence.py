@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -119,6 +119,23 @@ def test_exchange_state_returns_account_scoped_historical_opening_evidence(
     assert evidence[REJECTED_CLIENT_ORDER_ID]["state"] == "definitively_absent"
     assert evidence[AMBIGUOUS_CLIENT_ORDER_ID]["state"] == "unknown"
     assert evidence[HISTORY_CLIENT_ORDER_ID]["state"] == "confirmed_executed"
+    history_proofs = evidence[HISTORY_CLIENT_ORDER_ID][
+        "source_evidence"
+    ]
+    assert history_proofs == [
+        {
+            "account_id": ACCOUNT_ID,
+            "client_order_id": HISTORY_CLIENT_ORDER_ID,
+            "state": "confirmed_executed",
+            "order_status": "FILLED",
+            "instrument_id": "BTCUSDT-PERP.BINANCE",
+            "venue_order_id": "venue-history",
+            "filled_quantity": "0.02",
+            "source": "exchange_state.recent_order_history",
+            "observed_at": now.isoformat(),
+            "reason": "fresh_exchange_order_history_match",
+        }
+    ]
     assert evidence[EXCHANGE_REJECTED_CLIENT_ORDER_ID][
         "state"
     ] == "definitively_absent"
@@ -219,10 +236,85 @@ def test_targeted_miss_is_definitively_absent_after_complete_history_search(
             "venue_order_id": None,
             "filled_quantity": None,
             "sources": ["exchange_state.history_enrichment"],
+            "source_evidence": [
+                {
+                    "account_id": ACCOUNT_ID,
+                    "client_order_id": ABSENT_CLIENT_ORDER_ID,
+                    "state": "definitively_absent",
+                    "order_status": None,
+                    "instrument_id": "BTCUSDT-PERP.BINANCE",
+                    "venue_order_id": None,
+                    "filled_quantity": None,
+                    "source": "exchange_state.history_enrichment",
+                    "observed_at": now.isoformat(),
+                    "reason": (
+                        "fresh_complete_exchange_history_has_no_record"
+                    ),
+                }
+            ],
             "observed_at": now.isoformat(),
             "reason": "fresh_complete_exchange_history_has_no_record",
         }
     ]
+
+
+def test_merged_evidence_preserves_source_specific_fill_quantities(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    projection_at = now + timedelta(microseconds=1)
+    projection_row = _projection_row(
+        account_id=ACCOUNT_ID,
+        client_order_id=HISTORY_CLIENT_ORDER_ID,
+        status="filled",
+        filled_quantity="0.1",
+        venue_order_id="venue-history",
+    )
+    projection_row["ts_event"] = projection_at
+    projection_row["updated_at"] = projection_at
+    conn = _FakeConnection(
+        mirror_row={
+            "account_id": ACCOUNT_ID,
+            "updated_at": now,
+            "stale": False,
+            "payload": {
+                "fetched_at": now.isoformat(),
+                "open_orders": [],
+                "algo_orders": [],
+                "recent_order_history": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "client_order_id": HISTORY_CLIENT_ORDER_ID,
+                        "venue_order_id": "venue-history",
+                        "status": "FILLED",
+                        "executed_quantity": "0.05",
+                    }
+                ],
+                "recent_algo_order_history": [],
+            },
+        },
+        projection_rows=[projection_row],
+        event_rows=[],
+    )
+    _configure(monkeypatch, conn)
+
+    response = _client().get(
+        f"/v1/nodes/{NODE_ID}/exchange-state",
+        params=_evidence_params(HISTORY_CLIENT_ORDER_ID),
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    item = response.json()["opening_execution_evidence"]["items"][0]
+    assert item["filled_quantity"] == "0.1"
+    quantities_by_source = {
+        proof["source"]: proof["filled_quantity"]
+        for proof in item["source_evidence"]
+    }
+    assert quantities_by_source == {
+        "exchange_state.recent_order_history": "0.05",
+        "orders_projection": "0.1",
+    }
 
 
 def test_targeted_miss_stays_unknown_when_one_history_lane_is_incomplete(

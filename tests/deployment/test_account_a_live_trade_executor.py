@@ -191,6 +191,8 @@ class FakeAdapter:
         post_halt_final_fetched_at: datetime | None = None,
         final_enrichment_degraded: bool = False,
         final_warnings: Sequence[str] | None = None,
+        close_enrichment_degraded: bool = False,
+        close_warnings: Sequence[str] | None = None,
         open_fill_attempts: Sequence[bool] | None = None,
         operation_lock: executor.LiveOperationLock | None = None,
     ) -> None:
@@ -229,6 +231,8 @@ class FakeAdapter:
         self.post_halt_final_fetched_at = post_halt_final_fetched_at
         self.final_enrichment_degraded = final_enrichment_degraded
         self.final_warnings = tuple(final_warnings or ())
+        self.close_enrichment_degraded = close_enrichment_degraded
+        self.close_warnings = tuple(close_warnings or ())
         self.open_fill_attempts = tuple(open_fill_attempts or ())
         self.operation_lock = operation_lock
         self.calls: list[str] = []
@@ -416,7 +420,7 @@ class FakeAdapter:
         if error is not None:
             self.close_error_after_effect = None
             raise error
-        return self._ack(
+        payload = self._ack(
             "close",
             client_order_id=(
                 self.authorization.close_client_order_id
@@ -425,6 +429,11 @@ class FakeAdapter:
             intent_id=self.authorization.close_intent_id,
             side_effect_id=request["side_effect_id"],
         )
+        payload["enrichment_degraded"] = (
+            self.close_enrichment_degraded
+        )
+        payload["warnings"] = list(self.close_warnings)
+        return payload
 
     def final_snapshot(
         self,
@@ -1909,6 +1918,44 @@ def test_financial_enrichment_failure_degrades_without_blocking_flat_proof(
         "FINANCIAL_PROOF_DEGRADED" in reason
         for reason in result.degraded_reasons
     )
+
+
+def test_close_enrichment_degradation_is_retained_in_execution_audit(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    warning = (
+        "close operator projection degraded: "
+        "filled quantity differs from exchange history"
+    )
+    adapter = FakeAdapter(
+        authorization,
+        close_enrichment_degraded=True,
+        close_warnings=(warning,),
+    )
+    evidence_path = tmp_path / "close-enrichment-degraded.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        f"CLOSE_ENRICHMENT_DEGRADED: {warning}" == reason
+        for reason in result.degraded_reasons
+    )
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    close_event = next(
+        event
+        for event in evidence["events"]
+        if event["event_type"] == "reduce_only_close_confirmed"
+    )
+    assert close_event["payload"]["enrichment_warnings"] == [warning]
 
 
 def test_resume_timeout_recovers_as_degraded_with_bounded_retry(

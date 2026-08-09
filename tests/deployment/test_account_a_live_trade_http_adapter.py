@@ -57,6 +57,8 @@ class Scenario:
         self.exchange_state = _exchange_state()
         self.exchange_states: list[dict[str, Any]] = []
         self.node_snapshot = _node_snapshot()
+        self.refresh_exchange_mirror_on_close = True
+        self.refresh_exchange_evidence_on_close = True
 
     def handle(
         self,
@@ -88,15 +90,23 @@ class Scenario:
             assert isinstance(body, dict)
             if body["action"] == "partial_close":
                 observed_at = datetime.now(timezone.utc).isoformat()
-                self.exchange_state["updated_at"] = observed_at
-                exchange_payload = self.exchange_state["payload"]
-                exchange_payload["fetched_at"] = observed_at
-                evidence = self.exchange_state[
-                    "opening_execution_evidence"
-                ]
-                items = evidence["items"]
-                for item in items:
-                    item["observed_at"] = observed_at
+                if self.refresh_exchange_mirror_on_close:
+                    self.exchange_state["updated_at"] = observed_at
+                    exchange_payload = self.exchange_state["payload"]
+                    exchange_payload["fetched_at"] = observed_at
+                if self.refresh_exchange_evidence_on_close:
+                    evidence = self.exchange_state[
+                        "opening_execution_evidence"
+                    ]
+                    items = evidence["items"]
+                    for item in items:
+                        item["observed_at"] = observed_at
+                        source_evidence = item.get("source_evidence")
+                        if not isinstance(source_evidence, list):
+                            continue
+                        for proof in source_evidence:
+                            if isinstance(proof, dict):
+                                proof["observed_at"] = observed_at
             return 200, {
                 "intent_id": body["intent_id"],
                 "status": "approved",
@@ -353,6 +363,56 @@ def test_observe_returns_soft_failure_when_mirror_remains_stale(
     assert "remained stale" in payload["reason"]
 
 
+@pytest.mark.parametrize(
+    ("authoritative", "observed_before_dispatch"),
+    [
+        (False, False),
+        (True, True),
+    ],
+)
+def test_observe_rejects_non_authoritative_or_pre_dispatch_absence(
+    tmp_path: Path,
+    authoritative: bool,
+    observed_before_dispatch: bool,
+) -> None:
+    not_before = datetime.now(timezone.utc) - timedelta(seconds=1)
+    observed_at = datetime.now(timezone.utc)
+    if observed_before_dispatch:
+        observed_at = not_before - timedelta(seconds=1)
+    scenario = Scenario()
+    status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0",
+        average_fill_price="0",
+    )
+    status["orders"][0]["status"] = "EXPIRED"
+    status["execution_events"] = []
+    scenario.operator_statuses[OPEN_INTENT_ID] = status
+    scenario.exchange_state = _exchange_state(
+        fetched_at=datetime.now(timezone.utc),
+        client_order_id=OPEN_CLIENT_ORDER_ID,
+        evidence_state="definitively_absent",
+        evidence_observed_at=observed_at,
+        evidence_authoritative=authoritative,
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "observe",
+            _request(
+                open_client_order_id=OPEN_CLIENT_ORDER_ID,
+                exchange_not_before=not_before.isoformat(),
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["open_status"] == "EXPIRED"
+    assert payload["filled_quantity"] == "0"
+    assert payload["exchange_evidence_state"] == "unknown"
+
+
 def test_observe_surfaces_frozen_node_loss_monitor_as_unhealthy(
     tmp_path: Path,
 ) -> None:
@@ -552,7 +612,7 @@ def test_close_posts_exact_reduce_only_and_waits_for_exchange_flat(
     assert operator_request["body"]["position_side"] == "long"
 
 
-def test_close_requires_exact_fill_projection_even_when_exchange_is_flat(
+def test_close_requires_exact_exchange_history_fill_when_flat(
     tmp_path: Path,
 ) -> None:
     scenario = Scenario()
@@ -563,6 +623,94 @@ def test_close_requires_exact_fill_projection_even_when_exchange_is_flat(
     )
     scenario.exchange_state = _exchange_state(
         client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_filled_quantity="0",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+            ),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "ACCOUNT_A_LIVE_TRADE_ACTION_TIMEOUT_SECONDS": "0.01",
+                "ACCOUNT_A_LIVE_TRADE_POLL_INTERVAL_SECONDS": "0",
+            },
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "exchange history evidence has no CLOSE fill" in (
+        completed.stderr
+    )
+
+
+def test_close_uses_causal_exchange_history_when_projection_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    observed_at = datetime.now(timezone.utc)
+    scenario = Scenario()
+    scenario.forced_responses[
+        ("GET", f"/v1/operator/orders/{CLOSE_INTENT_ID}")
+    ] = (503, {"detail": "projection unavailable"})
+    scenario.exchange_state = _exchange_state(
+        fetched_at=observed_at,
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_state="confirmed_executed",
+        evidence_observed_at=observed_at,
+        evidence_filled_quantity="0.1",
+        evidence_sources=("exchange_state.recent_order_history",),
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+                exchange_not_before=(
+                    observed_at - timedelta(seconds=1)
+                ).isoformat(),
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["accepted"] is True
+    assert payload["filled_quantity"] == "0.1"
+    assert payload["close_proof_source"] == "exchange_history"
+    assert payload["enrichment_degraded"] is True
+    assert "HTTP_503" in payload["warnings"][0]
+
+
+def test_close_uses_exchange_history_when_projection_quantity_conflicts(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.05",
+        average_fill_price="100.5",
+    )
+    scenario.exchange_state = _exchange_state(
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_filled_quantity="0.1",
     )
 
     with FakeControlPlane(scenario) as server:
@@ -582,31 +730,24 @@ def test_close_requires_exact_fill_projection_even_when_exchange_is_flat(
             server.url,
         )
 
-    assert completed.returncode == 1
-    assert payload == {}
-    assert "exact CLOSE unproven" in completed.stderr
+    assert completed.returncode == 0, completed.stderr
+    assert payload["close_proof_source"] == "exchange_history"
+    assert payload["enrichment_degraded"] is True
+    assert "differs from exchange history" in payload["warnings"][0]
 
 
-@pytest.mark.parametrize("surface", ["orders", "execution_events"])
-def test_close_ignores_exact_fill_rows_without_matching_client_order_id(
+def test_close_rejects_projection_exact_when_exchange_quantity_conflicts(
     tmp_path: Path,
-    surface: str,
 ) -> None:
     scenario = Scenario()
-    status = _operator_status(
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
         CLOSE_CLIENT_ORDER_ID,
         filled_quantity="0.1",
         average_fill_price="100.5",
     )
-    status[surface][0]["client_order_id"] = ""
-    if surface == "orders":
-        status["execution_events"] = []
-    else:
-        status["orders"][0]["filled_quantity"] = "0"
-        status["orders"][0]["average_fill_price"] = "0"
-    scenario.operator_statuses[CLOSE_INTENT_ID] = status
     scenario.exchange_state = _exchange_state(
         client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_filled_quantity="0.05",
     )
 
     with FakeControlPlane(scenario) as server:
@@ -633,6 +774,323 @@ def test_close_ignores_exact_fill_rows_without_matching_client_order_id(
     assert completed.returncode == 1
     assert payload == {}
     assert "exact CLOSE unproven" in completed.stderr
+
+
+def test_close_rejects_exchange_history_observed_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.refresh_exchange_evidence_on_close = False
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.1",
+        average_fill_price="100.5",
+    )
+    scenario.exchange_state = _exchange_state(
+        fetched_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_filled_quantity="0.1",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+            ),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "ACCOUNT_A_LIVE_TRADE_ACTION_TIMEOUT_SECONDS": "0.01",
+                "ACCOUNT_A_LIVE_TRADE_POLL_INTERVAL_SECONDS": "0",
+            },
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "exact CLOSE unproven" in completed.stderr
+
+
+def test_close_rejects_conflicting_exchange_history_quantities(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.1",
+        average_fill_price="100.5",
+    )
+    scenario.exchange_state = _exchange_state(
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_filled_quantity="0.1",
+        evidence_sources=(
+            "exchange_state.recent_order_history",
+            "exchange_state.recent_algo_order_history",
+        ),
+    )
+    source_evidence = scenario.exchange_state[
+        "opening_execution_evidence"
+    ]["items"][0]["source_evidence"]
+    source_evidence[1]["filled_quantity"] = "0.05"
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert (
+        "exchange history CLOSE evidence is ambiguous"
+        in completed.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "error_text"),
+    [
+        (
+            "state",
+            "definitively_absent",
+            "conflicts with CLOSE identity",
+        ),
+        ("filled_quantity", "0", "has no CLOSE fill"),
+        ("account_id", "account-b", "conflicts with CLOSE identity"),
+        (
+            "instrument_id",
+            "BTCUSDT-PERP.BINANCE",
+            "conflicts with CLOSE symbol",
+        ),
+        ("venue_order_id", "venue-other", "CLOSE evidence is ambiguous"),
+    ],
+)
+def test_close_rejects_mixed_conflicting_exchange_history_proof(
+    tmp_path: Path,
+    field_name: str,
+    field_value: str,
+    error_text: str,
+) -> None:
+    scenario = Scenario()
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.1",
+        average_fill_price="100.5",
+    )
+    scenario.exchange_state = _exchange_state(
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_sources=(
+            "exchange_state.recent_order_history",
+            "exchange_state.recent_algo_order_history",
+        ),
+    )
+    source_evidence = scenario.exchange_state[
+        "opening_execution_evidence"
+    ]["items"][0]["source_evidence"]
+    source_evidence[1][field_name] = field_value
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert error_text in completed.stderr
+
+
+@pytest.mark.parametrize("future_surface", ["mirror", "proof"])
+def test_close_rejects_far_future_exchange_timestamps(
+    tmp_path: Path,
+    future_surface: str,
+) -> None:
+    future_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    scenario = Scenario()
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.1",
+        average_fill_price="100.5",
+    )
+    scenario.exchange_state = _exchange_state(
+        fetched_at=future_at,
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_observed_at=future_at,
+    )
+    if future_surface == "mirror":
+        scenario.refresh_exchange_mirror_on_close = False
+    else:
+        scenario.refresh_exchange_evidence_on_close = False
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+            ),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "ACCOUNT_A_LIVE_TRADE_ACTION_TIMEOUT_SECONDS": "0.01",
+                "ACCOUNT_A_LIVE_TRADE_POLL_INTERVAL_SECONDS": "0",
+            },
+        )
+
+    if future_surface == "mirror":
+        assert completed.returncode == 0, completed.stderr
+        assert payload["accepted"] is False
+        assert payload["error_code"] == "EXCHANGE_MIRROR_LAG"
+        assert "allowed clock skew" in payload["reason"]
+    else:
+        assert completed.returncode == 1
+        assert payload == {}
+        assert "exact CLOSE unproven" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("evidence_overrides", "error_text"),
+    [
+        (
+            {"evidence_account_id": "account-b"},
+            "exact CLOSE unproven",
+        ),
+        (
+            {"evidence_instrument_id": "BTCUSDT-PERP.BINANCE"},
+            "conflicts with CLOSE symbol",
+        ),
+        (
+            {"evidence_sources": ("orders_projection",)},
+            "exact CLOSE unproven",
+        ),
+    ],
+)
+def test_close_rejects_unbound_exchange_history_proof(
+    tmp_path: Path,
+    evidence_overrides: dict[str, Any],
+    error_text: str,
+) -> None:
+    scenario = Scenario()
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.1",
+        average_fill_price="100.5",
+    )
+    scenario.exchange_state = _exchange_state(
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        **evidence_overrides,
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+            ),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "ACCOUNT_A_LIVE_TRADE_ACTION_TIMEOUT_SECONDS": "0.01",
+                "ACCOUNT_A_LIVE_TRADE_POLL_INTERVAL_SECONDS": "0",
+            },
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert error_text in completed.stderr
+
+
+@pytest.mark.parametrize("surface", ["orders", "execution_events"])
+def test_close_ignores_exact_fill_rows_without_matching_client_order_id(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    scenario = Scenario()
+    status = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.1",
+        average_fill_price="100.5",
+    )
+    status[surface][0]["client_order_id"] = ""
+    if surface == "orders":
+        status["execution_events"] = []
+    else:
+        status["orders"][0]["filled_quantity"] = "0"
+        status["orders"][0]["average_fill_price"] = "0"
+    scenario.operator_statuses[CLOSE_INTENT_ID] = status
+    scenario.exchange_state = _exchange_state(
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_filled_quantity="0",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+            ),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "ACCOUNT_A_LIVE_TRADE_ACTION_TIMEOUT_SECONDS": "0.01",
+                "ACCOUNT_A_LIVE_TRADE_POLL_INTERVAL_SECONDS": "0",
+            },
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "exchange history evidence has no CLOSE fill" in (
+        completed.stderr
+    )
 
 
 @pytest.mark.parametrize("action", ["position", "final-snapshot"])
@@ -925,6 +1383,15 @@ def _exchange_state(
     mark_price: str = "100",
     unrealized_pnl: str = "0",
     client_order_id: str = "",
+    evidence_state: str = "confirmed_executed",
+    evidence_observed_at: datetime | None = None,
+    evidence_authoritative: bool = True,
+    evidence_account_id: str = ACCOUNT_ID,
+    evidence_filled_quantity: str = "0.1",
+    evidence_instrument_id: str = f"{SYMBOL}-PERP.BINANCE",
+    evidence_sources: tuple[str, ...] = (
+        "exchange_state.recent_order_history",
+    ),
 ) -> dict[str, Any]:
     observed_at = fetched_at
     if observed_at is None:
@@ -942,12 +1409,33 @@ def _exchange_state(
         )
     evidence_items = []
     if client_order_id:
+        item_observed_at = evidence_observed_at
+        if item_observed_at is None:
+            item_observed_at = observed_at
         evidence_items.append(
             {
-                "account_id": ACCOUNT_ID,
+                "account_id": evidence_account_id,
                 "client_order_id": client_order_id,
-                "state": "confirmed_executed",
-                "observed_at": observed_at.isoformat(),
+                "state": evidence_state,
+                "instrument_id": evidence_instrument_id,
+                "filled_quantity": evidence_filled_quantity,
+                "sources": list(evidence_sources),
+                "source_evidence": [
+                    {
+                        "account_id": evidence_account_id,
+                        "client_order_id": client_order_id,
+                        "state": evidence_state,
+                        "order_status": "FILLED",
+                        "instrument_id": evidence_instrument_id,
+                        "venue_order_id": "venue-close",
+                        "filled_quantity": evidence_filled_quantity,
+                        "source": source,
+                        "observed_at": item_observed_at.isoformat(),
+                        "reason": "fresh_exchange_order_history_match",
+                    }
+                    for source in evidence_sources
+                ],
+                "observed_at": item_observed_at.isoformat(),
             }
         )
     return {
@@ -961,7 +1449,7 @@ def _exchange_state(
             "algo_orders": [],
         },
         "opening_execution_evidence": {
-            "authoritative": True,
+            "authoritative": evidence_authoritative,
             "reason": "fresh_account_scoped_evidence",
             "items": evidence_items,
         },

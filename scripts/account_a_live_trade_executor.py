@@ -2826,14 +2826,21 @@ class AccountALiveTradeExecutor:
                         close_ack = self._adapter.submit_close(
                             reconcile_request
                         )
-                        close_hash = _validate_exact_close_ack(
-                            close_ack,
-                            authorization,
-                            expected_quantity=close_quantity,
-                            expected_side_effect_id=reconcile_request[
-                                "side_effect_id"
-                            ],
+                        close_hash, close_warnings = (
+                            _validate_exact_close_ack(
+                                close_ack,
+                                authorization,
+                                expected_quantity=close_quantity,
+                                expected_side_effect_id=reconcile_request[
+                                    "side_effect_id"
+                                ],
+                            )
                         )
+                        for warning in close_warnings:
+                            self._add_degraded(
+                                "CLOSE_ENRICHMENT_DEGRADED: "
+                                f"{warning}"
+                            )
                         close_confirmed = True
                         close_submitted = True
                         last_errors = []
@@ -2850,6 +2857,9 @@ class AccountALiveTradeExecutor:
                                 ),
                                 "attempt": attempt,
                                 "reconciled": True,
+                                "enrichment_warnings": list(
+                                    close_warnings
+                                ),
                             },
                         )
                         trail.record(
@@ -2867,6 +2877,9 @@ class AccountALiveTradeExecutor:
                                 "side_effect_id": reconcile_request[
                                     "side_effect_id"
                                 ],
+                                "enrichment_warnings": list(
+                                    close_warnings
+                                ),
                             },
                         )
                     except BaseException as exc:  # noqa: BLE001
@@ -2966,14 +2979,16 @@ class AccountALiveTradeExecutor:
                 break
             try:
                 close_ack = self._adapter.submit_close(close_request)
-                close_hash = _validate_exact_close_ack(
+                close_hash, close_warnings = _validate_exact_close_ack(
                     close_ack,
                     authorization,
                     expected_quantity=position.quantity,
-                    expected_side_effect_id=close_request[
-                        "side_effect_id"
-                    ],
+                    expected_side_effect_id=close_request["side_effect_id"],
                 )
+                for warning in close_warnings:
+                    self._add_degraded(
+                        f"CLOSE_ENRICHMENT_DEGRADED: {warning}"
+                    )
                 close_confirmed = True
                 close_submitted = True
                 self._recovery_journal_complete(
@@ -2987,6 +3002,7 @@ class AccountALiveTradeExecutor:
                         "adapter_evidence_sha256": close_hash,
                         "quantity": _decimal_text(position.quantity),
                         "attempt": attempt,
+                        "enrichment_warnings": list(close_warnings),
                     },
                 )
                 trail.record(
@@ -3003,6 +3019,7 @@ class AccountALiveTradeExecutor:
                         "side_effect_id": close_request[
                             "side_effect_id"
                         ],
+                        "enrichment_warnings": list(close_warnings),
                     },
                 )
             except BaseException as exc:  # noqa: BLE001
@@ -5367,7 +5384,7 @@ def _validate_exact_close_ack(
     *,
     expected_quantity: Decimal,
     expected_side_effect_id: str,
-) -> str:
+) -> tuple[str, tuple[str, ...]]:
     evidence_sha256 = _validate_ack(
         payload,
         authorization,
@@ -5385,7 +5402,28 @@ def _validate_exact_close_ack(
         raise LiveTradeExecutionError(
             "close filled quantity differs from position"
         )
-    return evidence_sha256
+    enrichment_degraded = payload.get(
+        "enrichment_degraded",
+        False,
+    )
+    if not isinstance(enrichment_degraded, bool):
+        raise LiveTradeExecutionError(
+            "close enrichment_degraded must be boolean"
+        )
+    raw_warnings = payload.get("warnings", [])
+    if not isinstance(raw_warnings, list):
+        raise LiveTradeExecutionError(
+            "close warnings must be a list"
+        )
+    warnings = tuple(
+        _required_text(item, "close warning")
+        for item in raw_warnings
+    )
+    if enrichment_degraded != bool(warnings):
+        raise LiveTradeExecutionError(
+            "close enrichment state and warnings differ"
+        )
+    return evidence_sha256, warnings
 
 
 def _soft_adapter_rejection(

@@ -24,6 +24,13 @@ ACCOUNT_ID = "account-a"
 SYMBOL = "SOLUSDT"
 EXCHANGE_SOURCE = "exchange"
 NODE_SOURCE = "node"
+EXCHANGE_HISTORY_SOURCES = frozenset(
+    {
+        "exchange_state.recent_order_history",
+        "exchange_state.recent_algo_order_history",
+    }
+)
+MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 30.0
 TERMINAL_ORDER_STATUSES = {
     "CANCELED",
     "CANCELLED",
@@ -516,6 +523,7 @@ class AccountALiveTradeHttpAdapter:
         evidence_state = _opening_evidence_state(
             mirror,
             open_client_order_id,
+            not_before=exchange_not_before,
         )
         position = _target_position(mirror)
         open_status = _open_status(summary, evidence_state)
@@ -720,26 +728,45 @@ class AccountALiveTradeHttpAdapter:
         deadline = self._deadline(request)
         last_reason = "close evidence pending"
         while time.monotonic() < deadline:
-            status = self._operator_status(close_intent_id)
+            projection_warning = ""
+            try:
+                status = self._operator_status(close_intent_id)
+                summary = _execution_summary(
+                    status,
+                    expected_client_order_id=client_order_id,
+                )
+            except AdapterError as exc:
+                if _is_ownership_error(exc):
+                    raise
+                projection_warning = _enrichment_warning(
+                    "close operator projection",
+                    exc,
+                )
+                summary = _empty_execution_summary()
             mirror = self._exchange_state_after(
                 (client_order_id,),
                 not_before=exchange_not_before,
                 deadline=deadline,
             )
             position = _target_position(mirror)
-            summary = _execution_summary(
-                status,
-                expected_client_order_id=client_order_id,
-            )
-            evidence_state = _opening_evidence_state(
+            venue_quantity = _venue_exact_fill_quantity(
                 mirror,
                 client_order_id,
+                not_before=exchange_not_before,
             )
-            exact_fill = summary["filled_quantity"] == quantity
+            venue_exact_fill = venue_quantity == quantity
             if (
                 position["quantity"] == 0
-                and exact_fill
+                and venue_exact_fill
             ):
+                warnings = []
+                if projection_warning:
+                    warnings.append(projection_warning)
+                elif summary["filled_quantity"] != quantity:
+                    warnings.append(
+                        "close operator projection degraded: "
+                        "filled quantity differs from exchange history"
+                    )
                 payload = {
                     **_identity(
                         request,
@@ -752,7 +779,10 @@ class AccountALiveTradeHttpAdapter:
                     "side_effect_id": side_effect_id,
                     "source": EXCHANGE_SOURCE,
                     "fetched_at": _mirror_fetched_at(mirror),
-                    "exchange_evidence_state": evidence_state,
+                    "exchange_evidence_state": "confirmed_executed",
+                    "close_proof_source": "exchange_history",
+                    "enrichment_degraded": bool(warnings),
+                    "warnings": warnings,
                 }
                 return _with_evidence(payload)
             last_reason = (
@@ -936,14 +966,19 @@ class AccountALiveTradeHttpAdapter:
             mirror = self._exchange_state(client_order_ids)
             fetched_at = _mirror_fetched_datetime(mirror)
             mirror_stale = mirror.get("stale") is True
+            mirror_future = _timestamp_is_far_future(fetched_at)
             causal_sample = (
                 not_before is False or fetched_at >= not_before
             )
-            if causal_sample and not mirror_stale:
+            if causal_sample and not mirror_stale and not mirror_future:
                 return mirror
             if mirror_stale:
                 last_code = "EXCHANGE_MIRROR_STALE"
                 last_reason = "exchange mirror remained stale"
+            elif mirror_future:
+                last_reason = (
+                    "exchange mirror timestamp exceeds allowed clock skew"
+                )
             if time.monotonic() >= deadline:
                 raise SoftAdapterError(
                     last_reason,
@@ -1107,20 +1142,134 @@ def _target_orders(raw_rows: Any) -> list[dict[str, Any]]:
 def _opening_evidence_state(
     mirror: Mapping[str, Any],
     client_order_id: str,
+    *,
+    not_before: datetime | bool = False,
 ) -> str:
+    item = _opening_evidence_item(
+        mirror,
+        client_order_id,
+        not_before=not_before,
+    )
+    if item is False:
+        return "unknown"
+    return str(item.get("state") or "unknown")
+
+
+def _opening_evidence_item(
+    mirror: Mapping[str, Any],
+    client_order_id: str,
+    *,
+    not_before: datetime | bool,
+) -> Mapping[str, Any] | bool:
     surface = mirror.get("opening_execution_evidence")
     if not isinstance(surface, dict):
-        return "unknown"
+        return False
+    if surface.get("authoritative") is not True:
+        return False
     items = surface.get("items")
     if not isinstance(items, list):
-        return "unknown"
+        return False
     for item in items:
         if not isinstance(item, dict):
             continue
+        if item.get("account_id") != ACCOUNT_ID:
+            continue
         if item.get("client_order_id") != client_order_id:
             continue
-        return str(item.get("state") or "unknown")
-    return "unknown"
+        observed_at = item.get("observed_at")
+        if observed_at is None or observed_at == "":
+            continue
+        observed_datetime = _timestamp_datetime(observed_at)
+        if _timestamp_is_far_future(observed_datetime):
+            continue
+        if not_before is not False and observed_datetime < not_before:
+            continue
+        return item
+    return False
+
+
+def _venue_exact_fill_quantity(
+    mirror: Mapping[str, Any],
+    client_order_id: str,
+    *,
+    not_before: datetime,
+) -> Decimal | bool:
+    item = _opening_evidence_item(
+        mirror,
+        client_order_id,
+        not_before=not_before,
+    )
+    if item is False:
+        return False
+    source_evidence = item.get("source_evidence")
+    if not isinstance(source_evidence, list):
+        return False
+    quantities: set[Decimal] = set()
+    venue_order_ids: set[str] = set()
+    for proof in source_evidence:
+        if not isinstance(proof, Mapping):
+            raise AdapterError(
+                "source-specific opening evidence is invalid"
+            )
+        if proof.get("source") not in EXCHANGE_HISTORY_SOURCES:
+            continue
+        if (
+            proof.get("account_id") != ACCOUNT_ID
+            or proof.get("client_order_id") != client_order_id
+            or proof.get("state") != "confirmed_executed"
+        ):
+            raise AdapterError(
+                "exchange history evidence conflicts with CLOSE identity"
+            )
+        instrument_id = str(
+            proof.get("instrument_id") or ""
+        ).upper()
+        if _opening_instrument_symbol(instrument_id) != SYMBOL:
+            raise AdapterError(
+                "exchange history evidence conflicts with CLOSE symbol"
+            )
+        observed_at = proof.get("observed_at")
+        if observed_at is None or observed_at == "":
+            raise AdapterError(
+                "exchange history evidence lacks an observation time"
+            )
+        observed_datetime = _timestamp_datetime(observed_at)
+        if _timestamp_is_far_future(observed_datetime):
+            raise AdapterError(
+                "exchange history evidence exceeds allowed clock skew"
+            )
+        if observed_datetime < not_before:
+            raise AdapterError(
+                "exchange history evidence predates CLOSE dispatch"
+            )
+        quantity = _non_negative_decimal(
+            proof.get("filled_quantity"),
+            "exchange history filled_quantity",
+        )
+        if quantity <= 0:
+            raise AdapterError(
+                "exchange history evidence has no CLOSE fill"
+            )
+        quantities.add(quantity)
+        venue_order_id = str(
+            proof.get("venue_order_id") or ""
+        ).strip()
+        if venue_order_id:
+            venue_order_ids.add(venue_order_id)
+    if not quantities:
+        return False
+    if len(quantities) != 1 or len(venue_order_ids) > 1:
+        raise AdapterError(
+            "exchange history CLOSE evidence is ambiguous"
+        )
+    return next(iter(quantities))
+
+
+def _opening_instrument_symbol(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if "-PERP." in text:
+        text = text.split("-", 1)[0]
+    return text
 
 
 def _execution_summary(
@@ -1454,6 +1603,16 @@ def _timestamp_is_fresh(
         datetime.now(timezone.utc) - observed_at
     ).total_seconds()
     return 0 <= age_seconds <= freshness_seconds
+
+
+def _timestamp_is_far_future(value: Any) -> bool:
+    observed_at = value
+    if not isinstance(observed_at, datetime):
+        observed_at = _timestamp_datetime(value)
+    future_seconds = (
+        observed_at - datetime.now(timezone.utc)
+    ).total_seconds()
+    return future_seconds > MAX_FUTURE_TIMESTAMP_SKEW_SECONDS
 
 
 def _timestamp_datetime(value: Any) -> datetime:

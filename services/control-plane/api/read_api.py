@@ -1923,6 +1923,19 @@ def _opening_evidence_item(
     observed_at: Any,
     reason: str,
 ) -> dict[str, Any]:
+    normalized_observed_at = _iso_text(observed_at)
+    source_evidence = {
+        "account_id": account_id,
+        "client_order_id": client_order_id,
+        "state": state,
+        "order_status": order_status,
+        "instrument_id": instrument_id,
+        "venue_order_id": venue_order_id,
+        "filled_quantity": filled_quantity,
+        "source": source,
+        "observed_at": normalized_observed_at,
+        "reason": reason,
+    }
     return {
         "account_id": account_id,
         "client_order_id": client_order_id,
@@ -1932,7 +1945,8 @@ def _opening_evidence_item(
         "venue_order_id": venue_order_id,
         "filled_quantity": filled_quantity,
         "sources": [source],
-        "observed_at": _iso_text(observed_at),
+        "source_evidence": [source_evidence],
+        "observed_at": normalized_observed_at,
         "reason": reason,
     }
 
@@ -1957,7 +1971,42 @@ def _record_opening_evidence(
     elif candidate_rank == current_rank:
         selected = _newer_opening_evidence(current, candidate)
     selected["sources"] = sorted(sources)
+    selected["source_evidence"] = _merge_source_evidence(
+        current,
+        candidate,
+    )
     evidence_by_id[client_order_id] = selected
+
+
+def _merge_source_evidence(
+    current: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    evidence_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+    for item in (
+        list(current.get("source_evidence") or [])
+        + list(candidate.get("source_evidence") or [])
+    ):
+        if not isinstance(item, Mapping):
+            continue
+        normalized = dict(item)
+        key = (
+            str(normalized.get("account_id") or ""),
+            str(normalized.get("client_order_id") or ""),
+            str(normalized.get("source") or ""),
+            str(normalized.get("observed_at") or ""),
+            str(normalized.get("state") or ""),
+            str(normalized.get("order_status") or ""),
+            str(normalized.get("instrument_id") or ""),
+            str(normalized.get("filled_quantity") or ""),
+            str(normalized.get("venue_order_id") or ""),
+            str(normalized.get("reason") or ""),
+        )
+        evidence_by_key[key] = normalized
+    return [
+        evidence_by_key[key]
+        for key in sorted(evidence_by_key)
+    ]
 
 
 def _newer_opening_evidence(

@@ -163,6 +163,8 @@ if not isinstance(host_files, list):
 expected_host = {
     "services/control-plane/api/read_api.py",
     "packages/execution-domain/execution_domain/control_plane.py",
+    "scripts/account_a_live_trade_executor.py",
+    "scripts/account_a_live_trade_http_adapter.py",
 }
 actual_host = set()
 with open(host_path, "w", encoding="utf-8") as output:
@@ -176,10 +178,18 @@ with open(host_path, "w", encoding="utf-8") as output:
             "host target_relative",
         )
         digest = str(item.get("sha256") or "")
+        install_mode = str(item.get("install_mode") or "")
         if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise SystemExit(f"host SHA256 is invalid: {bundle_path}")
+        expected_mode = "0644"
+        if target.startswith("scripts/account_a_live_trade_"):
+            expected_mode = "0755"
+        if install_mode != expected_mode:
+            raise SystemExit(f"host install mode is invalid: {target}")
         actual_host.add(target)
-        output.write(f"{bundle_path}\t{target}\t{digest}\n")
+        output.write(
+            f"{bundle_path}\t{target}\t{digest}\t{install_mode}\n"
+        )
 if actual_host != expected_host:
     raise SystemExit("host control-plane file set is incomplete")
 
@@ -318,8 +328,9 @@ while IFS=$'\t' read -r bundle_path mount_target expected_sha; do
   backup_target "$PATCH_DIR/$bundle_path"
 done <"$CONTAINER_TSV"
 
-while IFS=$'\t' read -r bundle_path target_relative expected_sha; do
-  : "$bundle_path" "$expected_sha"
+while IFS=$'\t' read -r \
+  bundle_path target_relative expected_sha install_mode; do
+  : "$bundle_path" "$expected_sha" "$install_mode"
   backup_target "$T/$target_relative"
 done <"$HOST_TSV"
 
@@ -746,11 +757,12 @@ PY
 echo "== migrations verified: exact delta 0005,0010"
 
 # Control-plane is updated and verified before the node container is recreated.
-while IFS=$'\t' read -r bundle_path target_relative expected_sha; do
+while IFS=$'\t' read -r \
+  bundle_path target_relative expected_sha install_mode; do
   source_path="$STAGING/$bundle_path"
   target_path="$T/$target_relative"
   prepare_file_target "$target_path"
-  install -D -m 0644 "$source_path" "$target_path"
+  install -D -m "$install_mode" "$source_path" "$target_path"
   actual_sha="$(sha256sum "$target_path" | awk '{print $1}')"
   [ "$actual_sha" = "$expected_sha" ] \
     || die "host SHA256 mismatch: $target_path"
@@ -760,6 +772,9 @@ done <"$HOST_TSV"
 grep -Fq 'command_expires_at' \
   "$T/services/control-plane/api/read_api.py" \
   || die "control-plane command expiry field is missing"
+grep -Fq '"source_evidence"' \
+  "$T/services/control-plane/api/read_api.py" \
+  || die "control-plane opening evidence contract is missing"
 systemctl restart "$CONTROL_PLANE_UNIT"
 systemctl is-active --quiet "$CONTROL_PLANE_UNIT" \
   || die "$CONTROL_PLANE_UNIT failed to restart"
@@ -785,6 +800,99 @@ with open(sys.argv[1], encoding="utf-8") as source:
 paths = payload.get("paths") or {}
 if "/v1/nodes/{node_id}/commands" not in paths:
     raise SystemExit("control-plane command polling route is missing")
+if "/v1/nodes/{node_id}/exchange-state" not in paths:
+    raise SystemExit("control-plane exchange-state route is missing")
+PY
+"$T/.venv-cp/bin/python" - "$T/.env.v3" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+
+def read_environment(path: Path) -> dict[str, str]:
+    environment = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in {"'", '"'}
+        ):
+            value = value[1:-1]
+        environment[key] = value
+    return environment
+
+
+environment = read_environment(Path(sys.argv[1]))
+node_id = "nautilus-node-account-a"
+account_id = "account-a"
+token = environment.get("NAUTILUS_NODE_TOKEN", "").strip()
+raw_bindings = environment.get("NAUTILUS_NODE_AUTH_JSON", "").strip()
+if raw_bindings:
+    bindings = json.loads(raw_bindings)
+    binding = bindings.get(node_id)
+    if not isinstance(binding, dict):
+        raise SystemExit("account-a node auth binding is missing")
+    if str(binding.get("account_id") or "").strip() != account_id:
+        raise SystemExit("account-a node auth binding is invalid")
+    token = str(binding.get("token") or "").strip()
+if not token:
+    raise SystemExit("account-a node token is missing")
+
+query = urllib.parse.urlencode({"account_id": account_id})
+request = urllib.request.Request(
+    (
+        "http://127.0.0.1:8080"
+        f"/v1/nodes/{node_id}/exchange-state?{query}"
+    ),
+    headers={
+        "Authorization": f"Bearer {token}",
+        "X-Node-ID": node_id,
+        "X-Account-ID": account_id,
+    },
+)
+with urllib.request.urlopen(request, timeout=5) as response:
+    payload = json.load(response)
+if payload.get("account_id") != account_id:
+    raise SystemExit("exchange-state account identity mismatch")
+surface = payload.get("opening_execution_evidence")
+if not isinstance(surface, dict):
+    raise SystemExit("opening execution evidence surface is missing")
+if not isinstance(surface.get("authoritative"), bool):
+    raise SystemExit("opening execution evidence authority is invalid")
+items = surface.get("items")
+if not isinstance(items, list):
+    raise SystemExit("opening execution evidence items are invalid")
+for item in items:
+    if not isinstance(item, dict):
+        raise SystemExit("opening execution evidence item is invalid")
+    source_evidence = item.get("source_evidence")
+    if not isinstance(source_evidence, list) or not source_evidence:
+        raise SystemExit("source-specific opening evidence is missing")
+    for proof in source_evidence:
+        if not isinstance(proof, dict):
+            raise SystemExit("source-specific opening proof is invalid")
+        required = {
+            "account_id",
+            "client_order_id",
+            "state",
+            "source",
+            "observed_at",
+            "filled_quantity",
+        }
+        if not required.issubset(proof):
+            raise SystemExit("source-specific opening proof is incomplete")
 PY
 echo "== control-plane verified on 127.0.0.1:8080"
 

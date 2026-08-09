@@ -82,6 +82,20 @@ def test_bundle_writes_dependency_closed_release_identity_and_checksums(
     assert host_targets == {
         "services/control-plane/api/read_api.py",
         "packages/execution-domain/execution_domain/control_plane.py",
+        "scripts/account_a_live_trade_executor.py",
+        "scripts/account_a_live_trade_http_adapter.py",
+    }
+    host_modes = {
+        item["target_relative"]: item["install_mode"]
+        for item in manifest["host_files"]
+    }
+    assert host_modes == {
+        "services/control-plane/api/read_api.py": "0644",
+        (
+            "packages/execution-domain/execution_domain/control_plane.py"
+        ): "0644",
+        "scripts/account_a_live_trade_executor.py": "0755",
+        "scripts/account_a_live_trade_http_adapter.py": "0755",
     }
     migration_targets = {
         item["target_relative"]

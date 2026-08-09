@@ -156,11 +156,25 @@ HOST_FILES = (
         "host/read_api.py",
         "services/control-plane/api/read_api.py",
         "services/control-plane/api/read_api.py",
+        "0644",
     ),
     (
         "host/control_plane.py",
         "packages/execution-domain/execution_domain/control_plane.py",
         "packages/execution-domain/execution_domain/control_plane.py",
+        "0644",
+    ),
+    (
+        "host/account_a_live_trade_executor.py",
+        "scripts/account_a_live_trade_executor.py",
+        "scripts/account_a_live_trade_executor.py",
+        "0755",
+    ),
+    (
+        "host/account_a_live_trade_http_adapter.py",
+        "scripts/account_a_live_trade_http_adapter.py",
+        "scripts/account_a_live_trade_http_adapter.py",
+        "0755",
     ),
 )
 
@@ -310,7 +324,12 @@ def build_bundle(
         files.append(artifact)
 
     host_files = []
-    for bundle_path, source_relative, target_relative in HOST_FILES:
+    for (
+        bundle_path,
+        source_relative,
+        target_relative,
+        install_mode,
+    ) in HOST_FILES:
         artifact = _copy_artifact(
             repo_root,
             output_dir,
@@ -318,6 +337,7 @@ def build_bundle(
             source_relative=source_relative,
         )
         artifact["target_relative"] = target_relative
+        artifact["install_mode"] = install_mode
         host_files.append(artifact)
 
     migration_files = []

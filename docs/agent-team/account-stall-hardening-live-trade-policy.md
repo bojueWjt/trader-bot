@@ -60,13 +60,14 @@
    将 account-a 单节点切换到 ACTIVE。
 4. **开仓路径验证**：提交一个显式 quantity 和 limit price 的 `LIMIT + IOC` 开仓单；
    `quantity * limit_price <= permit.max_notional_usdt <= 12 USDT`。
-5. **四层确认**：确认交易所 order/fill、节点事件、PostgreSQL execution event 和
-   projection 一致。IOC 未成交时禁止追加风险；只有交易所明确确认订单不存在时才允许使用
+5. **成交确认**：交易所历史按 account、client order ID、symbol、filled quantity 和
+   observed_at 给出因果绑定的成交证据。节点事件与 PostgreSQL projection 作为 enrichment
+   记录延迟和差异。IOC 未成交时禁止追加风险；只有交易所明确确认订单不存在时才允许使用
    相同 deterministic client order ID 进行幂等恢复。
 6. **平仓路径验证**：按实际 filled quantity 提交 reduce-only MARKET 平仓。
 7. **恢复安全态**：立即通过 operator command 将 account-a 切回 HALTED。
-8. **目标归零确认**：确认 `SOLUSDT` 仓位为零、普通挂单为零、algo 挂单为零，节点缓存与
-   PostgreSQL 投影一致。
+8. **目标归零确认**：以 CLOSE 派发后的新鲜交易所镜像确认 `SOLUSDT` 仓位为零、普通挂单
+   为零、algo 挂单为零。节点缓存与 PostgreSQL 投影差异进入 enrichment 告警。
 9. **组合保护确认**：重新计算非 `SOLUSDT` 的 `portfolio_baseline_sha256`，要求与交易前
    签名基线完全一致。
 10. **事故关闭**：记录费用、滑点、时间线和 release metadata，关闭验证 incident。
@@ -94,7 +95,8 @@ incident 的软异常持续写入审计轨迹。执行器使用有界重试推�
 
 - Exchange：目标订单、成交、目标持仓、普通挂单和 algo 挂单快照，以及非目标组合基线。
 - Node：actor tick、heartbeat、lifecycle、reconciliation 和 execution event 日志。
-- PostgreSQL：intent、command、ack、execution event、order projection、position projection 和 incident。
+- PostgreSQL：intent、command、ack、execution event、order projection、position projection
+  和 incident；projection 用于 enrichment，不阻塞交易所已证明的精确平仓。
 - Release：git SHA、image digest、config hash、dependency lock hash。
 - Financial：实际成交额、手续费、滑点和净损益。
 
