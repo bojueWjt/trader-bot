@@ -35,6 +35,7 @@ ACCOUNTS = {
     "account-b": ("trader-v3-node-b", "BINANCE_ACCOUNT_B"),
 }
 BINANCE_RECV_WINDOW_MS = 30_000
+RECENT_HISTORY_MAX_SYMBOLS = 16
 
 UPSERT_SQL = """
 INSERT INTO exchange_state_mirror (account_id, payload, updated_at)
@@ -126,6 +127,11 @@ def slim_order(o: dict, order_kind: str = "regular") -> dict:
         "client_order_id": o.get("clientOrderId") or o.get("clientAlgoId"),
         "order_kind": order_kind,
         "venue_order_id": venue_order_id,
+        "status": o.get("status") or o.get("algoStatus"),
+        "executed_quantity": o.get("executedQty") or o.get("actualQty"),
+        "average_price": o.get("avgPrice") or o.get("averagePrice"),
+        "created_at_ms": o.get("time") or o.get("createTime"),
+        "updated_at_ms": o.get("updateTime") or o.get("workingTime"),
         # Retained for dashboard compatibility. Consumers must route by order_kind.
         "order_id": o.get("orderId") or o.get("algoId"),
     }
@@ -185,6 +191,61 @@ def _required_decimal(payload: dict, field: str) -> Decimal:
     return value
 
 
+def _order_rows(payload: object) -> list[dict]:
+    rows = payload
+    if isinstance(payload, dict):
+        rows = payload.get("orders", [])
+    if not isinstance(rows, list):
+        raise TypeError("order history response must be a collection")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _recent_history_symbols(
+    positions: list[dict],
+    regular_orders: list[dict],
+    algo_orders: list[dict],
+) -> tuple[str, ...]:
+    symbols = {
+        str(row.get("symbol") or "").strip().upper()
+        for row in positions + regular_orders + algo_orders
+    }
+    symbols.discard("")
+    return tuple(sorted(symbols)[:RECENT_HISTORY_MAX_SYMBOLS])
+
+
+def recent_order_history(
+    base: str,
+    key: str,
+    sec: str,
+    symbols: tuple[str, ...],
+) -> tuple[list[dict], list[dict]]:
+    regular_history: list[dict] = []
+    algo_history: list[dict] = []
+    for symbol in symbols:
+        regular_rows = _order_rows(
+            signed_get(
+                base,
+                "/fapi/v1/allOrders",
+                key,
+                sec,
+                {"symbol": symbol, "limit": 1000},
+            )
+        )
+        regular_history.extend(slim_order(row, "regular") for row in regular_rows)
+
+        algo_rows = _order_rows(
+            signed_get(
+                base,
+                "/fapi/v1/allAlgoOrders",
+                key,
+                sec,
+                {"symbol": symbol, "limit": 1000},
+            )
+        )
+        algo_history.extend(slim_order(row, "algo") for row in algo_rows)
+    return regular_history, algo_history
+
+
 def snapshot_account(base: str, key: str, sec: str) -> dict:
     account_info = signed_get(base, "/fapi/v3/account", key, sec)
     if not isinstance(account_info, dict):
@@ -199,6 +260,13 @@ def snapshot_account(base: str, key: str, sec: str) -> dict:
     algo_raw = signed_get(base, "/fapi/v1/openAlgoOrders", key, sec)
     algo_rows = algo_raw.get("orders", algo_raw) if isinstance(algo_raw, dict) else algo_raw
     algo = [slim_order(o, "algo") for o in algo_rows]
+    history_symbols = _recent_history_symbols(positions, regular, algo)
+    regular_history, algo_history = recent_order_history(
+        base,
+        key,
+        sec,
+        history_symbols,
+    )
     return {
         "source": "binance_fapi",
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -212,6 +280,9 @@ def snapshot_account(base: str, key: str, sec: str) -> dict:
         ],
         "open_orders": regular,
         "algo_orders": algo,
+        "recent_order_history": regular_history,
+        "recent_algo_order_history": algo_history,
+        "recent_order_history_symbols": list(history_symbols),
         "protections": protections(positions, algo, regular),
     }
 

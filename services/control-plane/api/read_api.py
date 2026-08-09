@@ -18,6 +18,7 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
+from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 import psycopg2
@@ -1282,6 +1283,367 @@ def account_generated_at(
         conn.close()
 
 
+_OPENING_CLIENT_ORDER_ID_RE = re.compile(r"^B[0-9a-fA-F]{32}0[0-9]$")
+_OPENING_CONFIRMED_EXECUTED = "confirmed_executed"
+_OPENING_DEFINITIVELY_ABSENT = "definitively_absent"
+_OPENING_UNKNOWN = "unknown"
+_CONFIRMED_ORDER_STATUSES = frozenset(
+    {
+        "accepted",
+        "working",
+        "partially_filled",
+        "filled",
+        "pending_cancel",
+        "cancelled",
+        "canceled",
+        "expired",
+        "closed",
+        "done",
+    }
+)
+_ABSENT_ORDER_STATUSES = frozenset({"rejected", "denied", "failed"})
+_CONFIRMED_ORDER_EVENTS = frozenset(
+    {
+        "OrderAccepted",
+        "OrderFilled",
+        "OrderCanceled",
+        "OrderExpired",
+        "OrderUpdated",
+        "OrderPendingUpdate",
+        "OrderPendingCancel",
+    }
+)
+_ABSENT_ORDER_EVENTS = frozenset(
+    {
+        "OrderRejected",
+        "OrderDenied",
+        "OrderSubmitFailed",
+        "ExecutionFailed",
+    }
+)
+
+
+def _opening_execution_surface(
+    conn,
+    *,
+    account_id: str,
+    exchange_payload: Mapping[str, Any],
+    mirror_stale: bool,
+) -> dict[str, Any]:
+    if mirror_stale:
+        return {
+            "authoritative": False,
+            "reason": "exchange_state_mirror_stale",
+            "items": [],
+        }
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT account_id, instrument_id, client_order_id, venue_order_id,
+                       status, filled_quantity, ts_event, updated_at, payload
+                FROM orders_projection
+                WHERE account_id=%s AND client_order_id ~ %s
+                ORDER BY updated_at, client_order_id
+                """,
+                (account_id, _OPENING_CLIENT_ORDER_ID_RE.pattern),
+            )
+            projection_rows = [dict(row) for row in cur.fetchall()]
+            cur.execute(
+                """
+                SELECT account_id, client_order_id, venue_order_id, trade_id,
+                       event_type, ts_event, payload
+                FROM execution_events
+                WHERE account_id=%s AND client_order_id ~ %s
+                ORDER BY ts_event, created_at
+                """,
+                (account_id, _OPENING_CLIENT_ORDER_ID_RE.pattern),
+            )
+            event_rows = [dict(row) for row in cur.fetchall()]
+    except psycopg2.Error:
+        conn.rollback()
+        return {
+            "authoritative": False,
+            "reason": "opening_evidence_query_failed",
+            "items": [],
+        }
+
+    items = _merge_opening_execution_evidence(
+        account_id=account_id,
+        exchange_payload=exchange_payload,
+        projection_rows=projection_rows,
+        event_rows=event_rows,
+    )
+    return {
+        "authoritative": True,
+        "reason": "fresh_account_scoped_evidence",
+        "items": items,
+    }
+
+
+def _merge_opening_execution_evidence(
+    *,
+    account_id: str,
+    exchange_payload: Mapping[str, Any],
+    projection_rows: list[dict[str, Any]],
+    event_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence_by_id: dict[str, dict[str, Any]] = {}
+    for row in projection_rows:
+        candidate = _projection_opening_evidence(account_id, row)
+        if candidate is not False:
+            _record_opening_evidence(evidence_by_id, candidate)
+    for row in event_rows:
+        candidate = _event_opening_evidence(account_id, row)
+        if candidate is not False:
+            _record_opening_evidence(evidence_by_id, candidate)
+    for collection_name in (
+        "open_orders",
+        "algo_orders",
+        "recent_order_history",
+        "recent_algo_order_history",
+    ):
+        rows = exchange_payload.get(collection_name, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            candidate = _exchange_opening_evidence(
+                account_id,
+                row,
+                source=f"exchange_state.{collection_name}",
+                observed_at=exchange_payload.get("fetched_at"),
+            )
+            if candidate is not False:
+                _record_opening_evidence(evidence_by_id, candidate)
+    return [evidence_by_id[key] for key in sorted(evidence_by_id)]
+
+
+def _projection_opening_evidence(
+    account_id: str,
+    row: Mapping[str, Any],
+) -> dict[str, Any] | bool:
+    row_account_id = str(row.get("account_id") or "")
+    if row_account_id != account_id:
+        return False
+    client_order_id = str(row.get("client_order_id") or "")
+    if not _OPENING_CLIENT_ORDER_ID_RE.fullmatch(client_order_id):
+        return False
+    status = str(row.get("status") or "").strip().lower()
+    venue_order_id = _optional_text(row.get("venue_order_id"))
+    filled_quantity = _optional_text(row.get("filled_quantity"))
+    state = _OPENING_UNKNOWN
+    reason = "projection_has_no_terminal_execution_fact"
+    if _positive_decimal(row.get("filled_quantity")):
+        state = _OPENING_CONFIRMED_EXECUTED
+        reason = "projection_has_fill"
+    elif status in _CONFIRMED_ORDER_STATUSES:
+        state = _OPENING_CONFIRMED_EXECUTED
+        reason = f"projection_status_{status}"
+    elif venue_order_id and status not in _ABSENT_ORDER_STATUSES:
+        state = _OPENING_CONFIRMED_EXECUTED
+        reason = "projection_has_venue_order_id"
+    elif status in _ABSENT_ORDER_STATUSES:
+        state = _OPENING_DEFINITIVELY_ABSENT
+        reason = f"projection_status_{status}"
+    return _opening_evidence_item(
+        account_id=account_id,
+        client_order_id=client_order_id,
+        state=state,
+        order_status=status,
+        instrument_id=_optional_text(row.get("instrument_id")),
+        venue_order_id=venue_order_id,
+        filled_quantity=filled_quantity,
+        source="orders_projection",
+        observed_at=row.get("ts_event") or row.get("updated_at"),
+        reason=reason,
+    )
+
+
+def _event_opening_evidence(
+    account_id: str,
+    row: Mapping[str, Any],
+) -> dict[str, Any] | bool:
+    row_account_id = str(row.get("account_id") or "")
+    if row_account_id != account_id:
+        return False
+    client_order_id = str(row.get("client_order_id") or "")
+    if not _OPENING_CLIENT_ORDER_ID_RE.fullmatch(client_order_id):
+        return False
+    event_type = str(row.get("event_type") or "")
+    venue_order_id = _optional_text(row.get("venue_order_id"))
+    trade_id = _optional_text(row.get("trade_id"))
+    state = _OPENING_UNKNOWN
+    reason = f"event_{event_type or 'unknown'}_is_not_authoritative"
+    if event_type in _CONFIRMED_ORDER_EVENTS:
+        state = _OPENING_CONFIRMED_EXECUTED
+        reason = f"execution_event_{event_type}"
+    elif event_type == "OrderSubmitted" and (venue_order_id or trade_id):
+        state = _OPENING_CONFIRMED_EXECUTED
+        reason = "submitted_event_has_venue_identity"
+    elif event_type in _ABSENT_ORDER_EVENTS:
+        state = _OPENING_DEFINITIVELY_ABSENT
+        reason = f"execution_event_{event_type}"
+    payload = row.get("payload")
+    if not isinstance(payload, Mapping):
+        payload = {}
+    filled_quantity = payload.get("filled_qty")
+    if event_type == "OrderFilled" and not filled_quantity:
+        filled_quantity = payload.get("last_qty") or payload.get("quantity")
+    return _opening_evidence_item(
+        account_id=account_id,
+        client_order_id=client_order_id,
+        state=state,
+        order_status=event_type,
+        instrument_id=_optional_text(payload.get("instrument_id")),
+        venue_order_id=venue_order_id,
+        filled_quantity=_optional_text(filled_quantity),
+        source="execution_events",
+        observed_at=row.get("ts_event"),
+        reason=reason,
+    )
+
+
+def _exchange_opening_evidence(
+    account_id: str,
+    row: Mapping[str, Any],
+    *,
+    source: str,
+    observed_at: Any,
+) -> dict[str, Any] | bool:
+    client_order_id = str(
+        row.get("client_order_id")
+        or row.get("clientOrderId")
+        or row.get("clientAlgoId")
+        or ""
+    )
+    if not _OPENING_CLIENT_ORDER_ID_RE.fullmatch(client_order_id):
+        return False
+    symbol = str(row.get("symbol") or "")
+    instrument_id = None
+    if symbol:
+        instrument_id = f"{symbol}-PERP.BINANCE"
+    venue_order_id = (
+        row.get("venue_order_id")
+        or row.get("order_id")
+        or row.get("orderId")
+        or row.get("algoId")
+    )
+    filled_quantity = (
+        row.get("executed_quantity")
+        or row.get("executedQty")
+        or row.get("actualQty")
+    )
+    return _opening_evidence_item(
+        account_id=account_id,
+        client_order_id=client_order_id,
+        state=_OPENING_CONFIRMED_EXECUTED,
+        order_status=_optional_text(row.get("status") or row.get("algoStatus")),
+        instrument_id=instrument_id,
+        venue_order_id=_optional_text(venue_order_id),
+        filled_quantity=_optional_text(filled_quantity),
+        source=source,
+        observed_at=observed_at,
+        reason="fresh_exchange_order_history_match",
+    )
+
+
+def _opening_evidence_item(
+    *,
+    account_id: str,
+    client_order_id: str,
+    state: str,
+    order_status: str | None,
+    instrument_id: str | None,
+    venue_order_id: str | None,
+    filled_quantity: str | None,
+    source: str,
+    observed_at: Any,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "client_order_id": client_order_id,
+        "state": state,
+        "order_status": order_status,
+        "instrument_id": instrument_id,
+        "venue_order_id": venue_order_id,
+        "filled_quantity": filled_quantity,
+        "sources": [source],
+        "observed_at": _iso_text(observed_at),
+        "reason": reason,
+    }
+
+
+def _record_opening_evidence(
+    evidence_by_id: dict[str, dict[str, Any]],
+    candidate: dict[str, Any],
+) -> None:
+    client_order_id = candidate["client_order_id"]
+    current = evidence_by_id.get(client_order_id)
+    if current is None:
+        evidence_by_id[client_order_id] = candidate
+        return
+
+    sources = set(current.get("sources") or [])
+    sources.update(candidate.get("sources") or [])
+    current_rank = _opening_evidence_rank(current["state"])
+    candidate_rank = _opening_evidence_rank(candidate["state"])
+    selected = current
+    if candidate_rank > current_rank:
+        selected = candidate
+    elif candidate_rank == current_rank:
+        selected = _newer_opening_evidence(current, candidate)
+    selected["sources"] = sorted(sources)
+    evidence_by_id[client_order_id] = selected
+
+
+def _newer_opening_evidence(
+    current: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    current_observed_at = str(current.get("observed_at") or "")
+    candidate_observed_at = str(candidate.get("observed_at") or "")
+    if candidate_observed_at > current_observed_at:
+        return candidate
+    return current
+
+
+def _opening_evidence_rank(state: str) -> int:
+    if state == _OPENING_CONFIRMED_EXECUTED:
+        return 3
+    if state == _OPENING_DEFINITIVELY_ABSENT:
+        return 2
+    return 1
+
+
+def _positive_decimal(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return Decimal(str(value)) > 0
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if not text:
+        return None
+    return text
+
+
+def _iso_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 @app.get("/v1/nodes/{node_id}/exchange-state")
 def node_exchange_state(
     node_id: str,
@@ -1318,7 +1680,17 @@ def node_exchange_state(
             row = cur.fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="exchange state mirror missing")
-        return dict(row)
+        response = dict(row)
+        exchange_payload = response.get("payload")
+        if not isinstance(exchange_payload, Mapping):
+            exchange_payload = {}
+        response["opening_execution_evidence"] = _opening_execution_surface(
+            conn,
+            account_id=account_id,
+            exchange_payload=exchange_payload,
+            mirror_stale=bool(response.get("stale")),
+        )
+        return response
     finally:
         conn.close()
 

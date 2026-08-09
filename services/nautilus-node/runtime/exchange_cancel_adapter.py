@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -24,6 +25,19 @@ _CANCEL_ACTIONS = frozenset({"cancel", "cancel_order"})
 _CANCELED_STATUSES = frozenset({"CANCELED", "CANCELLED"})
 _FILLED_STATUSES = frozenset({"FILLED", "EXECUTED", "TRIGGERED"})
 _ABSENT_ORDER_CODES = frozenset({-2011, -2013})
+OPENING_CONFIRMED_EXECUTED = "confirmed_executed"
+OPENING_DEFINITIVELY_ABSENT = "definitively_absent"
+OPENING_UNKNOWN = "unknown"
+_OPENING_EXECUTION_STATES = frozenset(
+    {
+        OPENING_CONFIRMED_EXECUTED,
+        OPENING_DEFINITIVELY_ABSENT,
+        OPENING_UNKNOWN,
+    }
+)
+_DETERMINISTIC_OPENING_CLIENT_ORDER_ID = re.compile(
+    r"^B[0-9a-fA-F]{32}0[0-9]$"
+)
 DEFAULT_RECV_WINDOW_MS = 30_000
 MAX_RECV_WINDOW_MS = 60_000
 
@@ -115,6 +129,20 @@ class ExchangeOrderRef:
     @property
     def instrument_id(self) -> str:
         return f"{self.symbol}-PERP.BINANCE"
+
+
+@dataclass(frozen=True)
+class OpeningExecutionEvidence:
+    account_id: str
+    client_order_id: str
+    state: str
+    order_status: str | None = None
+    instrument_id: str | None = None
+    venue_order_id: str | None = None
+    filled_quantity: str | None = None
+    sources: tuple[str, ...] = ()
+    observed_at: str | None = None
+    reason: str | None = None
 
 
 class BinanceExchangeCancelAdapter:
@@ -352,6 +380,8 @@ class ControlPlaneExchangeStateMirror:
         self._token = token
         self._timeout_seconds = timeout_seconds
         self._orders: tuple[ExchangeOrderRef, ...] = ()
+        self._opening_evidence: dict[str, OpeningExecutionEvidence] = {}
+        self._opening_evidence_authoritative = False
         self._fresh = False
         self._lock = threading.Lock()
 
@@ -385,8 +415,14 @@ class ControlPlaneExchangeStateMirror:
         if not isinstance(exchange_payload, Mapping):
             raise ExchangeCancelError("exchange state mirror payload is missing")
         orders = _parse_exchange_orders(self._account_id, exchange_payload)
+        evidence, evidence_authoritative = _parse_opening_execution_evidence(
+            self._account_id,
+            payload.get("opening_execution_evidence"),
+        )
         with self._lock:
             self._orders = orders
+            self._opening_evidence = evidence
+            self._opening_evidence_authoritative = evidence_authoritative
             self._fresh = True
         return orders
 
@@ -404,10 +440,129 @@ class ControlPlaneExchangeStateMirror:
                 return order
         return False
 
+    def opening_execution_state(
+        self,
+        client_order_id: str,
+    ) -> OpeningExecutionEvidence:
+        normalized_id = str(client_order_id or "")
+        if not _DETERMINISTIC_OPENING_CLIENT_ORDER_ID.fullmatch(normalized_id):
+            return _unknown_opening_evidence(
+                self._account_id,
+                normalized_id,
+                reason="unsupported_client_order_id",
+            )
+        with self._lock:
+            fresh = self._fresh
+            authoritative = self._opening_evidence_authoritative
+            evidence = self._opening_evidence.get(normalized_id)
+        if not fresh:
+            return _unknown_opening_evidence(
+                self._account_id,
+                normalized_id,
+                reason="mirror_not_fresh",
+            )
+        if not authoritative:
+            return _unknown_opening_evidence(
+                self._account_id,
+                normalized_id,
+                reason="evidence_not_authoritative",
+            )
+        if evidence is None:
+            return _unknown_opening_evidence(
+                self._account_id,
+                normalized_id,
+                reason="no_authoritative_evidence",
+            )
+        return evidence
+
     def _invalidate(self) -> None:
         with self._lock:
             self._orders = ()
+            self._opening_evidence = {}
+            self._opening_evidence_authoritative = False
             self._fresh = False
+
+
+def _parse_opening_execution_evidence(
+    account_id: str,
+    raw_surface: Any,
+) -> tuple[dict[str, OpeningExecutionEvidence], bool]:
+    if not isinstance(raw_surface, Mapping):
+        return {}, False
+    if raw_surface.get("authoritative") is not True:
+        return {}, False
+    raw_items = raw_surface.get("items")
+    if not isinstance(raw_items, list):
+        return {}, False
+
+    parsed: dict[str, OpeningExecutionEvidence] = {}
+    conflicts: set[str] = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, Mapping):
+            continue
+        item_account_id = str(raw_item.get("account_id") or "")
+        client_order_id = str(raw_item.get("client_order_id") or "")
+        state = str(raw_item.get("state") or "")
+        if item_account_id != account_id:
+            continue
+        if not _DETERMINISTIC_OPENING_CLIENT_ORDER_ID.fullmatch(client_order_id):
+            continue
+        if state not in _OPENING_EXECUTION_STATES:
+            continue
+        evidence = OpeningExecutionEvidence(
+            account_id=account_id,
+            client_order_id=client_order_id,
+            state=state,
+            order_status=_optional_text(raw_item.get("order_status")),
+            instrument_id=_optional_text(raw_item.get("instrument_id")),
+            venue_order_id=_optional_text(raw_item.get("venue_order_id")),
+            filled_quantity=_optional_text(raw_item.get("filled_quantity")),
+            sources=_string_tuple(raw_item.get("sources")),
+            observed_at=_optional_text(raw_item.get("observed_at")),
+            reason=_optional_text(raw_item.get("reason")),
+        )
+        previous = parsed.get(client_order_id)
+        if previous is not None and previous.state != evidence.state:
+            conflicts.add(client_order_id)
+            continue
+        parsed[client_order_id] = evidence
+
+    for client_order_id in conflicts:
+        parsed[client_order_id] = _unknown_opening_evidence(
+            account_id,
+            client_order_id,
+            reason="conflicting_authoritative_evidence",
+        )
+    return parsed, True
+
+
+def _unknown_opening_evidence(
+    account_id: str,
+    client_order_id: str,
+    *,
+    reason: str,
+) -> OpeningExecutionEvidence:
+    return OpeningExecutionEvidence(
+        account_id=account_id,
+        client_order_id=client_order_id,
+        state=OPENING_UNKNOWN,
+        reason=reason,
+    )
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if not text:
+        return None
+    return text
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item) for item in value if str(item))
 
 
 def _parse_exchange_orders(

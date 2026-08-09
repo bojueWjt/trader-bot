@@ -44,6 +44,102 @@ class ExchangeStateRecorderTest(unittest.TestCase):
 
         self.assertEqual(row["position_side"], "LONG")
 
+    def test_slim_order_preserves_terminal_execution_evidence(self) -> None:
+        module = _load_module()
+
+        row = module.slim_order(
+            {
+                "symbol": "BTCUSDT",
+                "positionSide": "LONG",
+                "side": "BUY",
+                "type": "MARKET",
+                "orderId": 42,
+                "clientOrderId": "B1111111111111111111111111111111101",
+                "status": "FILLED",
+                "executedQty": "0.01",
+                "avgPrice": "118000",
+                "time": 1_754_700_000_000,
+                "updateTime": 1_754_700_001_000,
+            }
+        )
+
+        self.assertEqual(row["status"], "FILLED")
+        self.assertEqual(row["executed_quantity"], "0.01")
+        self.assertEqual(row["average_price"], "118000")
+        self.assertEqual(row["created_at_ms"], 1_754_700_000_000)
+        self.assertEqual(row["updated_at_ms"], 1_754_700_001_000)
+
+    def test_snapshot_records_recent_regular_and_algo_history(self) -> None:
+        module = _load_module()
+        responses = {
+            "/fapi/v3/account": {
+                "totalMarginBalance": "100",
+                "totalInitialMargin": "10",
+                "availableBalance": "90",
+            },
+            "/fapi/v2/positionRisk": [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "0.01",
+                    "entryPrice": "118000",
+                    "markPrice": "118100",
+                    "unRealizedProfit": "1",
+                    "positionSide": "LONG",
+                }
+            ],
+            "/fapi/v1/openOrders": [],
+            "/fapi/v1/openAlgoOrders": {"orders": []},
+            "/fapi/v1/allOrders": [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "LONG",
+                    "side": "BUY",
+                    "type": "MARKET",
+                    "orderId": 42,
+                    "clientOrderId": "B1111111111111111111111111111111101",
+                    "status": "FILLED",
+                    "executedQty": "0.01",
+                }
+            ],
+            "/fapi/v1/allAlgoOrders": {
+                "orders": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "positionSide": "LONG",
+                        "side": "BUY",
+                        "orderType": "STOP_MARKET",
+                        "algoId": 43,
+                        "clientAlgoId": "B2222222222222222222222222222222201",
+                        "algoStatus": "CANCELED",
+                        "actualQty": "0",
+                    }
+                ]
+            },
+        }
+
+        def fake_signed_get(_base, path, _key, _sec, params=None):
+            if path in {"/fapi/v1/allOrders", "/fapi/v1/allAlgoOrders"}:
+                self.assertEqual(params["symbol"], "BTCUSDT")
+                self.assertEqual(params["limit"], 1000)
+            return responses[path]
+
+        with patch.object(module, "signed_get", side_effect=fake_signed_get):
+            payload = module.snapshot_account(
+                "https://fapi.binance.com",
+                "api-key",
+                "api-secret",
+            )
+
+        self.assertEqual(payload["recent_order_history_symbols"], ["BTCUSDT"])
+        self.assertEqual(
+            payload["recent_order_history"][0]["status"],
+            "FILLED",
+        )
+        self.assertEqual(
+            payload["recent_algo_order_history"][0]["status"],
+            "CANCELED",
+        )
+
     def test_signed_get_includes_extended_recv_window(self) -> None:
         module = _load_module()
         response = io.BytesIO(b"{}")

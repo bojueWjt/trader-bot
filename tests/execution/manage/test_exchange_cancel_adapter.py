@@ -40,6 +40,13 @@ ControlPlaneExchangeStateMirror = (
     EXCHANGE_CANCEL_ADAPTER.ControlPlaneExchangeStateMirror
 )
 ExchangeCancelError = EXCHANGE_CANCEL_ADAPTER.ExchangeCancelError
+OPENING_CONFIRMED_EXECUTED = (
+    EXCHANGE_CANCEL_ADAPTER.OPENING_CONFIRMED_EXECUTED
+)
+OPENING_DEFINITIVELY_ABSENT = (
+    EXCHANGE_CANCEL_ADAPTER.OPENING_DEFINITIVELY_ABSENT
+)
+OPENING_UNKNOWN = EXCHANGE_CANCEL_ADAPTER.OPENING_UNKNOWN
 OrderAlreadyFilledError = EXCHANGE_CANCEL_ADAPTER.OrderAlreadyFilledError
 SignedBinanceTransport = EXCHANGE_CANCEL_ADAPTER.SignedBinanceTransport
 WrongAccountError = EXCHANGE_CANCEL_ADAPTER.WrongAccountError
@@ -307,6 +314,115 @@ class ExchangeStateMirrorTest(unittest.TestCase):
         with self.assertRaisesRegex(ExchangeCancelError, "not fresh"):
             mirror.orders_for_instrument("BTCUSDT-PERP.BINANCE")
 
+    def test_historical_filled_order_is_confirmed_after_refresh(self) -> None:
+        client_order_id = "B1111111111111111111111111111111101"
+        response = _opening_mirror_response(
+            client_order_id=client_order_id,
+            state=OPENING_CONFIRMED_EXECUTED,
+            order_status="filled",
+            sources=["orders_projection", "execution_events"],
+        )
+        mirror = _mirror()
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            return_value=response,
+        ):
+            mirror.refresh()
+
+        evidence = mirror.opening_execution_state(client_order_id)
+        self.assertEqual(evidence.state, OPENING_CONFIRMED_EXECUTED)
+        self.assertEqual(evidence.order_status, "filled")
+        self.assertEqual(evidence.venue_order_id, "venue-42")
+        self.assertEqual(
+            evidence.sources,
+            ("orders_projection", "execution_events"),
+        )
+        self.assertEqual(
+            mirror.find_order("BTCUSDT-PERP.BINANCE", client_order_id),
+            False,
+        )
+
+    def test_explicit_rejection_is_definitively_absent(self) -> None:
+        client_order_id = "B2222222222222222222222222222222201"
+        mirror = _mirror()
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            return_value=_opening_mirror_response(
+                client_order_id=client_order_id,
+                state=OPENING_DEFINITIVELY_ABSENT,
+                order_status="rejected",
+                sources=["orders_projection"],
+            ),
+        ):
+            mirror.refresh()
+
+        evidence = mirror.opening_execution_state(client_order_id)
+        self.assertEqual(evidence.state, OPENING_DEFINITIVELY_ABSENT)
+        self.assertEqual(evidence.reason, "projection_status_rejected")
+
+    def test_missing_stale_or_failed_evidence_is_unknown(self) -> None:
+        client_order_id = "B3333333333333333333333333333333301"
+        mirror = _mirror()
+
+        before_refresh = mirror.opening_execution_state(client_order_id)
+        self.assertEqual(before_refresh.state, OPENING_UNKNOWN)
+        self.assertEqual(before_refresh.reason, "mirror_not_fresh")
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            return_value=_opening_mirror_response(
+                client_order_id=client_order_id,
+                state=OPENING_CONFIRMED_EXECUTED,
+                order_status="filled",
+                sources=["orders_projection"],
+                authoritative=False,
+            ),
+        ):
+            mirror.refresh()
+
+        unavailable = mirror.opening_execution_state(client_order_id)
+        self.assertEqual(unavailable.state, OPENING_UNKNOWN)
+        self.assertEqual(unavailable.reason, "evidence_not_authoritative")
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            side_effect=EXCHANGE_CANCEL_ADAPTER.URLError("timeout"),
+        ):
+            with self.assertRaises(ExchangeCancelError):
+                mirror.refresh()
+
+        failed = mirror.opening_execution_state(client_order_id)
+        self.assertEqual(failed.state, OPENING_UNKNOWN)
+        self.assertEqual(failed.reason, "mirror_not_fresh")
+
+    def test_evidence_from_another_account_is_ignored(self) -> None:
+        client_order_id = "B4444444444444444444444444444444401"
+        response = _opening_mirror_response(
+            client_order_id=client_order_id,
+            state=OPENING_CONFIRMED_EXECUTED,
+            order_status="filled",
+            sources=["orders_projection"],
+            evidence_account_id="account-b",
+        )
+        mirror = _mirror()
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            return_value=response,
+        ):
+            mirror.refresh()
+
+        evidence = mirror.opening_execution_state(client_order_id)
+        self.assertEqual(evidence.state, OPENING_UNKNOWN)
+        self.assertEqual(evidence.reason, "no_authoritative_evidence")
+
 
 class SignedBinanceTransportTest(unittest.TestCase):
     def test_signed_request_includes_extended_recv_window_in_signature(self) -> None:
@@ -405,6 +521,46 @@ def _mirror_response(*, stale: bool, client_order_id: str) -> _JsonResponse:
                     }
                 ],
                 "algo_orders": [],
+            },
+        }
+    )
+
+
+def _opening_mirror_response(
+    *,
+    client_order_id: str,
+    state: str,
+    order_status: str,
+    sources: list[str],
+    authoritative: bool = True,
+    evidence_account_id: str = ACCOUNT_ID,
+) -> _JsonResponse:
+    return _JsonResponse(
+        {
+            "account_id": ACCOUNT_ID,
+            "stale": False,
+            "updated_at": "2026-08-09T12:00:00+00:00",
+            "payload": {
+                "open_orders": [],
+                "algo_orders": [],
+            },
+            "opening_execution_evidence": {
+                "authoritative": authoritative,
+                "reason": "fresh_account_scoped_evidence",
+                "items": [
+                    {
+                        "account_id": evidence_account_id,
+                        "client_order_id": client_order_id,
+                        "state": state,
+                        "order_status": order_status,
+                        "instrument_id": "BTCUSDT-PERP.BINANCE",
+                        "venue_order_id": "venue-42",
+                        "filled_quantity": "0.01",
+                        "sources": sources,
+                        "observed_at": "2026-08-09T11:59:00+00:00",
+                        "reason": f"projection_status_{order_status}",
+                    }
+                ],
             },
         }
     )
