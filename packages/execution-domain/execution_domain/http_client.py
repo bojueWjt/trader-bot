@@ -142,9 +142,18 @@ class HttpControlPlaneClient(ControlPlaneClient):
             allow_empty=True,
         )
 
-    def poll_commands(self, node_id: str, after: Optional[str]) -> list[NodeCommand]:
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[NodeCommand]:
         self._require_node_id(node_id)
-        query_values = {"account_id": self._account_id}
+        bounded_limit = max(1, min(int(limit), 500))
+        query_values = {
+            "account_id": self._account_id,
+            "limit": str(bounded_limit),
+        }
         if after is not None:
             query_values["after"] = after
         query = urlencode(query_values)

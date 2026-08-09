@@ -76,14 +76,20 @@ class InMemoryControlPlane(ControlPlaneClient):
     def heartbeat(self, node_id: str, hb: Heartbeat) -> None:
         self.heartbeats[node_id] = (self._now(), hb)
 
-    def poll_commands(self, node_id: str, after: Optional[str]) -> list[NodeCommand]:
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[NodeCommand]:
+        bounded_limit = max(1, min(int(limit), 500))
         commands = self._commands_by_node.get(node_id, [])
         if after is None:
-            return list(commands)
+            return list(commands[:bounded_limit])
         for index, command in enumerate(commands):
             if command.command_id == after:
-                return list(commands[index + 1 :])
-        return list(commands)
+                return list(commands[index + 1 : index + 1 + bounded_limit])
+        return list(commands[:bounded_limit])
 
     def add_command(self, node_id: str, command: NodeCommand) -> None:
         self._commands_by_node[node_id].append(command)

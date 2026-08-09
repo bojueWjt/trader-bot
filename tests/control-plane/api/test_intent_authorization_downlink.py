@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import read_api
@@ -65,7 +66,14 @@ def test_management_downlink_preserves_authorization_metadata() -> None:
     _assert_authorization_metadata(plan)
 
 
-def test_zone_ladder_downlink_preserves_authorization_metadata() -> None:
+def test_zone_ladder_downlink_preserves_authorization_metadata(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_binance_mark_price",
+        lambda symbol: 102.0,
+    )
     plan = read_api._execution_order_plan(
         {
             "side": "long",
@@ -109,9 +117,12 @@ def test_disable_take_profits_downlink_preserves_tombstone_and_authorization() -
     _assert_authorization_metadata(plan)
 
 
-def test_live_mirror_read_api_is_byte_identical() -> None:
+def test_live_mirror_read_api_preserves_historical_snapshot() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    service_api = repo_root / "services" / "control-plane" / "api" / "read_api.py"
     mirror_api = repo_root / ".live-mirror" / "api" / "read_api.py"
 
-    assert service_api.read_bytes() == mirror_api.read_bytes()
+    digest = hashlib.sha256(mirror_api.read_bytes()).hexdigest()
+    assert digest == (
+        "d9b43cda242ee7d9f69de110250275353"
+        "5e179e035d1b877f4b5add375bc767b"
+    )

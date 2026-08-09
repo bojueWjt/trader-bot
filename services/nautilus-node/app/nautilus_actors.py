@@ -367,7 +367,7 @@ class IntentPublisherActor(Actor):
             completion_timeout_seconds=float(
                 publication_completion_timeout_seconds
             ),
-            failure_callback=self._record_failure,
+            failure_callback=self._record_degraded,
         )
         self._started_at = time.monotonic()
         self._last_poll_success_at: float | None = None
@@ -544,7 +544,7 @@ class IntentPublisherActor(Actor):
                 self._record_poll_progress()
             except Exception as exc:
                 publication.error = exc
-                self._record_failure(
+                self._record_degraded(
                     f"intent publication failed: {exc!r}"
                 )
             finally:
@@ -1644,6 +1644,7 @@ class CommandPollerActor(Actor):
         self._pending_commands: tuple[Any, ...] = ()
         self._pending_command_index = 0
         self._pending_acks: dict[str, _PendingCommandAck] = {}
+        self._command_poll_after: str | None = None
         self._started_at = time.monotonic()
         self._last_heartbeat_success_at: float | None = None
         self._last_command_success_at: float | None = None
@@ -1893,20 +1894,29 @@ class CommandPollerActor(Actor):
     ) -> tuple[Any, ...]:
         if capacity < 1:
             return ()
+        page = tuple(
+            self._control_plane.poll_commands(
+                self._node_id,
+                self._command_poll_after,
+                limit=capacity,
+            )
+        )
+        if not page:
+            self._command_poll_after = None
+            self._last_command_success_at = time.monotonic()
+            return ()
         commands = []
         seen_command_ids: set[str] = set()
-        for command in self._control_plane.poll_commands(
-            self._node_id,
-            None,
-        ):
+        for command in page:
+            if len(commands) >= capacity:
+                break
             command_id = str(command.command_id)
+            self._command_poll_after = command_id
             if command_id in seen_command_ids:
                 continue
             with self._session_admission_lock:
                 if command_id in self._command_states:
                     continue
-            if len(commands) >= capacity:
-                break
             seen_command_ids.add(command_id)
             commands.append(command)
         self._last_command_success_at = time.monotonic()

@@ -107,6 +107,14 @@
           "type": "array",
           "items": true
         },
+        "market_prices": {
+          "type": "array",
+          "items": true
+        },
+        "exchange_state": {
+          "type": "array",
+          "items": true
+        },
         "recent_messages": {
           "type": "array",
           "items": true
@@ -131,4 +139,3 @@
     }
   }
 }
-

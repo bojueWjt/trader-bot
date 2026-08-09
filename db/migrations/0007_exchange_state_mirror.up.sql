@@ -8,6 +8,3 @@ CREATE TABLE IF NOT EXISTS exchange_state_mirror (
   payload jsonb NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-INSERT INTO schema_migrations (version, name)
-VALUES ('0007', 'exchange_state_mirror')
-ON CONFLICT DO NOTHING;

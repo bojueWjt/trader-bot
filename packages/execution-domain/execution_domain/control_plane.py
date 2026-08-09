@@ -145,7 +145,12 @@ class ExecutionEventSink(Protocol):
 class NodeCommandChannel(Protocol):
     """§3: operator/kill-switch commands; every target node must ack."""
 
-    def poll_commands(self, node_id: str, after: Optional[str]) -> list[NodeCommand]: ...
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[NodeCommand]: ...
 
     def ack_command(
         self,

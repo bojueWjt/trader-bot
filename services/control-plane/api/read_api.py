@@ -22,7 +22,7 @@ from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 import psycopg2
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from psycopg2.extras import RealDictCursor
@@ -1185,6 +1185,7 @@ def node_commands(
     node_id: str,
     account_id: str,
     after: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
     authorization: str | None = Header(default=None),
     x_node_id: str | None = Header(default=None),
     x_account_id: str | None = Header(default=None),
@@ -1202,14 +1203,12 @@ def node_commands(
         raise HTTPException(status_code=503, detail="store unavailable")
     conn = psycopg2.connect(database_url)
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT oc.command_id::text, oc.command_type, oc.scope, oc.created_at "
-                "FROM operator_commands oc JOIN command_node_acks na ON na.command_id=oc.command_id "
-                "WHERE na.node_id=%s AND na.status='pending' ORDER BY oc.created_at",
-                (node_id,),
-            )
-            rows = cur.fetchall()
+        rows = _pending_node_commands(
+            conn,
+            node_id=node_id,
+            after=after,
+            limit=limit,
+        )
         commands = []
         for row in rows:
             args = dict(row[2] or {})
@@ -1225,6 +1224,57 @@ def node_commands(
         return {"commands": commands}
     finally:
         conn.close()
+
+
+def _pending_node_commands(
+    conn: Any,
+    *,
+    node_id: str,
+    after: str | None,
+    limit: int,
+) -> list[tuple[Any, ...]]:
+    cursor_key: tuple[Any, Any] | bool = False
+    with conn.cursor() as cur:
+        if after:
+            cur.execute(
+                """
+                SELECT created_at, command_id
+                FROM command_node_acks
+                WHERE node_id=%s
+                  AND command_id::text=%s
+                """,
+                (node_id, after),
+            )
+            cursor_row = cur.fetchone()
+            if cursor_row is not None:
+                cursor_key = (cursor_row[0], cursor_row[1])
+
+        keyset_sql = ""
+        params: list[Any] = [node_id]
+        if cursor_key is not False:
+            keyset_sql = (
+                " AND (na.created_at, na.command_id) > (%s, %s)"
+            )
+            params.extend(cursor_key)
+        params.append(limit)
+        cur.execute(
+            """
+            SELECT oc.command_id::text, oc.command_type, oc.scope,
+                   oc.created_at
+            FROM operator_commands oc
+            JOIN command_node_acks na
+              ON na.command_id=oc.command_id
+            WHERE na.node_id=%s
+              AND na.status='pending'
+            """
+            + keyset_sql
+            + """
+            ORDER BY na.created_at, na.command_id
+            LIMIT %s
+            """,
+            tuple(params),
+        )
+        return list(cur.fetchall())
 
 
 @app.post("/v1/nodes/{node_id}/commands/{command_id}/ack")

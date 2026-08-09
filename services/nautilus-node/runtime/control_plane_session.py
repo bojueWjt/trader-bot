@@ -512,6 +512,8 @@ class NodeControlPlaneSession:
         self._consumer_progress_lock = Lock()
         self._consumer_progress_value: float | None = None
         self._consumer_progress_observed_at: float | None = None
+        self._command_delivery_ids_lock = Lock()
+        self._command_delivery_ids: set[str] = set()
         self._stop_deadline_lock = Lock()
         self._stop_deadline: float | bool = False
         self._drain_failed = Event()
@@ -919,6 +921,8 @@ class NodeControlPlaneSession:
                 ):
                     self._drain_failed.set()
                     break
+            if lane_name == "command_delivery":
+                self._forget_command_delivery(item)
             lane.queue.task_done()
 
     def _execute_with_retry(
@@ -989,15 +993,30 @@ class NodeControlPlaneSession:
             available,
         )
         for command in commands:
+            if not self._remember_command_delivery(command):
+                continue
             if not self._submit_to_lane(delivery, command):
-                raise RuntimeError(
-                    "command delivery queue capacity exceeded"
-                )
+                self._forget_command_delivery(command)
+                break
         if overflowed:
             self._mark_lane_capacity_failure(delivery)
-            raise RuntimeError(
-                "command delivery queue capacity exceeded"
-            )
+
+    def _remember_command_delivery(self, command: Any) -> bool:
+        command_id = _command_delivery_id(command)
+        if command_id is False:
+            return True
+        with self._command_delivery_ids_lock:
+            if command_id in self._command_delivery_ids:
+                return False
+            self._command_delivery_ids.add(command_id)
+            return True
+
+    def _forget_command_delivery(self, command: Any) -> None:
+        command_id = _command_delivery_id(command)
+        if command_id is False:
+            return
+        with self._command_delivery_ids_lock:
+            self._command_delivery_ids.discard(command_id)
 
     def _deliver_command(self, command: Any) -> None:
         apply = self._command_apply
@@ -1317,6 +1336,16 @@ def _lane_is_degraded(lane: LaneHealth) -> bool:
         QueuePressure.DEGRADED.value,
         QueuePressure.FULL.value,
     }
+
+
+def _command_delivery_id(command: Any) -> str | bool:
+    value = getattr(command, "command_id", False)
+    if value is False or value is None:
+        return False
+    command_id = str(value).strip()
+    if not command_id:
+        return False
+    return command_id
 
 
 def _take_bounded(

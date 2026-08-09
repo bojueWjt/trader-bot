@@ -72,6 +72,13 @@ CONTRACT_ENUMS = {
 }
 
 
+def test_migration_files_leave_tracking_to_runner() -> None:
+    migrations_dir = REPO_ROOT / "db" / "migrations"
+    for path in migrations_dir.glob("*.sql"):
+        sql = path.read_text(encoding="utf-8").lower()
+        assert "schema_migrations" not in sql, path.name
+
+
 def _insert_raw_message(conn, *, raw_id: UUID | None = None, source_message_id: str = "msg-1"):
     raw_id = raw_id or uuid4()
     with conn.cursor() as cur:

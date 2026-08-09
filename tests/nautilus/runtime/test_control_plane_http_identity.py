@@ -97,8 +97,33 @@ def test_commands_and_heartbeat_carry_account_identity(
     command_query = parse_qs(urlparse(requests[0].full_url).query)
     heartbeat_body = json.loads(requests[1].data)
     assert command_query["account_id"] == ["account-a"]
+    assert command_query["limit"] == ["100"]
     assert heartbeat_body["account_id"] == "account-a"
     assert requests[1].get_header("X-account-id") == "account-a"
+
+
+def test_command_poll_clamps_limit_and_carries_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = []
+
+    def urlopen(request, timeout):
+        del timeout
+        requests.append(request)
+        return _Response({"commands": []})
+
+    monkeypatch.setattr(http_client_module, "urlopen", urlopen)
+
+    _client().poll_commands(
+        "node-a",
+        after="command-100",
+        limit=50_000,
+    )
+
+    query = parse_qs(urlparse(requests[0].full_url).query)
+    assert query["account_id"] == ["account-a"]
+    assert query["after"] == ["command-100"]
+    assert query["limit"] == ["500"]
 
 
 def test_http_409_raises_typed_fence_conflict(

@@ -713,8 +713,9 @@ class _ProgressControlPlane:
         self,
         node_id: str,
         after: Any,
+        limit: int = 100,
     ) -> tuple[NodeCommand, ...]:
-        del node_id, after
+        del node_id, after, limit
         self.command_poll_count += 1
         if self.command_ack_count:
             return ()

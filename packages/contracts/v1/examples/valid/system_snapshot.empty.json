@@ -16,6 +16,8 @@
     },
     "orders": [],
     "positions": [],
+    "market_prices": [],
+    "exchange_state": [],
     "recent_messages": [],
     "hermes_decisions": [],
     "risk_decisions": [],
@@ -23,4 +25,3 @@
     "audit_trail": []
   }
 }
-

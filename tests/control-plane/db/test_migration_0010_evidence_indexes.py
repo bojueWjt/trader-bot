@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
+from uuid import UUID
 
 import psycopg2
 
@@ -32,6 +34,16 @@ RECORDER = (
     / "tools"
     / "exchange_state_recorder.py"
 )
+CONTROL_PLANE_API = (
+    REPO_ROOT
+    / "services"
+    / "control-plane"
+    / "api"
+)
+if str(CONTROL_PLANE_API) not in sys.path:
+    sys.path.insert(0, str(CONTROL_PLANE_API))
+
+import read_api  # noqa: E402
 
 
 def test_migration_0010_creates_and_removes_evidence_and_poll_indexes(
@@ -143,6 +155,81 @@ def test_pending_opening_symbols_are_distinct_rotating_and_evidence_scoped(
                 )
 
 
+def test_pending_command_poll_uses_stable_keyset_and_restarts_unknown_cursor(
+    pg_cluster,
+) -> None:
+    with psycopg2.connect(pg_cluster["url"]) as conn:
+        try:
+            _create_minimal_index_tables(conn)
+            _seed_operator_commands(conn)
+            with conn.cursor() as cur:
+                cur.execute(UP.read_text(encoding="utf-8"))
+
+            first_page = read_api._pending_node_commands(
+                conn,
+                node_id="node-a",
+                after=None,
+                limit=2,
+            )
+            first_ids = tuple(row[0] for row in first_page)
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE command_node_acks
+                    SET status='acked'
+                    WHERE node_id='node-a'
+                      AND command_id=%s
+                    """,
+                    (first_ids[1],),
+                )
+
+            second_page = read_api._pending_node_commands(
+                conn,
+                node_id="node-a",
+                after=first_ids[1],
+                limit=2,
+            )
+            unknown_cursor_page = read_api._pending_node_commands(
+                conn,
+                node_id="node-a",
+                after="not-a-command-id",
+                limit=2,
+            )
+            other_node_cursor_page = read_api._pending_node_commands(
+                conn,
+                node_id="node-a",
+                after="00000000-0000-0000-0000-000000000099",
+                limit=2,
+            )
+
+            assert first_ids == (
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002",
+            )
+            assert tuple(row[0] for row in second_page) == (
+                "00000000-0000-0000-0000-000000000003",
+                "00000000-0000-0000-0000-000000000004",
+            )
+            expected_restart = (
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000003",
+            )
+            assert (
+                tuple(row[0] for row in unknown_cursor_page)
+                == expected_restart
+            )
+            assert (
+                tuple(row[0] for row in other_node_cursor_page)
+                == expected_restart
+            )
+        finally:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE"
+                )
+
+
 def _create_minimal_index_tables(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -183,6 +270,13 @@ def _create_minimal_index_tables(conn) -> None:
                 command_id uuid NOT NULL,
                 node_id text NOT NULL,
                 status text NOT NULL,
+                created_at timestamptz NOT NULL
+            );
+
+            CREATE TABLE operator_commands (
+                command_id uuid PRIMARY KEY,
+                command_type text NOT NULL,
+                scope jsonb NOT NULL,
                 created_at timestamptz NOT NULL
             );
             """
@@ -285,6 +379,73 @@ def _seed_opening_intents(conn) -> None:
                 'venue-ada',
                 'accepted',
                 0
+            )
+            """
+        )
+
+
+def _seed_operator_commands(conn) -> None:
+    rows = [
+        (
+            str(UUID(int=index)),
+            f"2026-08-09T00:00:0{index}Z",
+        )
+        for index in range(1, 5)
+    ]
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO operator_commands (
+                command_id,
+                command_type,
+                scope,
+                created_at
+            )
+            VALUES (%s, 'HALT', '{}'::jsonb, %s)
+            """,
+            rows,
+        )
+        cur.executemany(
+            """
+            INSERT INTO command_node_acks (
+                command_id,
+                node_id,
+                status,
+                created_at
+            )
+            VALUES (%s, 'node-a', 'pending', %s)
+            """,
+            rows,
+        )
+        cur.execute(
+            """
+            INSERT INTO operator_commands (
+                command_id,
+                command_type,
+                scope,
+                created_at
+            )
+            VALUES (
+                '00000000-0000-0000-0000-000000000099',
+                'HALT',
+                '{}'::jsonb,
+                '2026-08-09T00:00:00Z'
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO command_node_acks (
+                command_id,
+                node_id,
+                status,
+                created_at
+            )
+            VALUES (
+                '00000000-0000-0000-0000-000000000099',
+                'node-b',
+                'pending',
+                '2026-08-09T00:00:00Z'
             )
             """
         )

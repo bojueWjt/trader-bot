@@ -7,10 +7,12 @@
 
 ## Context
 
-当前节点把 heartbeat、operator command poll/ACK、approved intent poll 和部分事件上报
-绑定到 Nautilus actor timer callback。同步网络调用可以占住 actor 调度线程。Redis
-persistence 使用 runtime instance identity 扩展 key space，message streams 没有 retention。
-生产发布依赖 bind-mounted hotpatch，运行字节可以与宿主文件、Git commit 和同组节点分叉。
+历史生产版本曾把 heartbeat、operator command poll/ACK、approved intent poll 和部分事件
+上报绑定到 Nautilus actor timer callback，同步网络调用可以占住 actor 调度线程。当前代码
+已把外部 I/O offload 到专用 executor/worker；当前剩余风险集中在线程与 queue 饱和、重放
+一致性、shutdown 边界和 durable continuation。Redis persistence 使用 runtime instance
+identity 扩展 key space，message streams 没有 retention。生产发布依赖 bind-mounted
+hotpatch，运行字节可以与宿主文件、Git commit 和同组节点分叉。
 
 系统需要一个深模块收敛控制面复杂性：actor 只提交本地工作，网络、重试、队列、时限、
 progress clock 和降级策略全部隐藏在模块实现内。调用者只依赖小而稳定的 interface。
@@ -68,7 +70,7 @@ flowchart LR
 | command ACK | 独立 worker + durable outbox | memory capacity 256，disk spool 有字节上限 | memory 压力进入 degraded；ACK 由 eventual ledger 保留并重试；durable spool 满载 HALT | 至少一次发送，control plane 按 command_id 幂等 |
 | intent fetch | 独立单线程 worker | poll token capacity 1 | delivery queue 达 80% 时暂停拉取 | cursor 只在本地接收并持久化后推进 |
 | intent delivery | node actor 本地 mailbox + durable inbox | capacity 256，disk inbox 有字节上限 | memory 压力暂停 fetch 并进入 degraded；durable inbox 满载 HALT | `RECEIVED -> PREPARED -> DISPATCHED -> EXCHANGE_CONFIRMED/REJECTED`；不确定结果先查交易所历史证据 |
-| strategy durable I/O | 独立单线程 worker + actor result mailbox | task/result capacity 256 | queue 满、fsync 失败或 deadline 超时立即 sticky HALT | actor callback 只 enqueue；fsync 后 continuation 回 actor；management 以 durable terminal 状态收口 |
+| strategy durable I/O | 独立单线程 worker + actor result mailbox | task/result capacity 256 | durable task/result 容量耗尽、fsync 失败或 durable deadline 超时立即 sticky HALT | actor callback 只 enqueue；fsync 后 continuation 回 actor；management 以 durable terminal 状态收口 |
 | strategy external I/O | 独立 worker + coalescing result mailbox | bounded | refresh/cancel timeout、可恢复错误与 mailbox 压力进入 degraded；继续保护、撤单和开仓 admission | refresh latest-wins；cancel 结果最终 drain |
 | event egress | 独立 worker + durable spool | memory capacity 1024，disk spool 64 MiB 初始上限 | memory 满转 disk并进入 degraded；disk 达 80% degraded，满载 HALT | event_id 幂等、批量发送、ACK 后删 spool |
 
@@ -106,7 +108,7 @@ Soft degradation 保持 `process_liveness=true`。节点处于 ACTIVE 时继续�
 
 - heartbeat、command poll/ACK、intent fetch 的 HTTP timeout、5xx 和 circuit open；
 - 普通 operation timeout；
-- 控制面内存 queue pressure/full；
+- 控制面 session 与 actor handoff 内存 queue pressure/full；
 - strategy external refresh/cancel 的可恢复错误和结果 mailbox 压力；
 - event egress 内存 queue pressure。
 
@@ -349,7 +351,8 @@ permit downlink 包含绝对 `expires_at`，control plane、data client 和 stra
 
 - actor event loop 不再承载外部网络等待，单个 endpoint timeout 只降级对应 lane。
 - heartbeat、command 和 intent 拥有独立可观测进度，冻结 payload 无法伪装健康。
-- bounded queues 将无限等待转换为可检测的 backpressure 和明确 HALTED。
+- bounded memory queues 将无限等待转换为可检测的 soft backpressure；durable
+  queue/spool 容量耗尽转换为明确的 sticky HALTED。
 - fenced generation 消除 stale owner 的共享写入窗口；retention、janitor 和容量门让
   generation 生命周期与 Redis 容量保持有界。
 - immutable release identity 消除“同镜像标签、不同运行字节”的状态。

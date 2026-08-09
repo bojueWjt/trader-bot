@@ -206,13 +206,20 @@ def test_intent_mailbox_full_and_stop_release_waiters() -> None:
     with pytest.raises(RuntimeError, match="backlog full"):
         client.deliver(SimpleNamespace(account_id="account-a"))
 
+    assert actor.failure_reason == ""
+    assert actor.degraded_reason == "intent publication backlog full"
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
+        "intent_stream": "intent publication backlog full",
+    }
+
     actor.on_stop()
     worker.join(timeout=1.0)
 
     assert worker.is_alive() is False
     assert len(first_errors) == 1
     assert "stopped" in str(first_errors[0])
-    assert "backlog full" in actor.failure_reason
+    assert actor.failure_reason == ""
 
 
 def test_intent_stop_rejects_delivery_admitted_during_stop_race() -> None:
@@ -296,8 +303,10 @@ def test_intent_stop_deadline_includes_admission_lock_wait() -> None:
 
 def test_intent_delivery_timeout_cancels_late_publication() -> None:
     client = _IntentClient()
+    lifecycle = _ActiveLifecycle()
     actor = IntentPublisherActor(
         client,
+        lifecycle=lifecycle,
         control_plane_session=_LocalSession(),
         publication_completion_timeout_seconds=0.02,
     )
@@ -311,7 +320,49 @@ def test_intent_delivery_timeout_cancels_late_publication() -> None:
     actor.on_stop()
 
     assert published == []
-    assert "timed out" in actor.failure_reason
+    assert actor.failure_reason == ""
+    assert "timed out" in actor.degraded_reason
+    assert lifecycle.trading_state is TradingState.ACTIVE
+
+
+def test_intent_publication_error_degrades_without_halting() -> None:
+    client = _IntentClient()
+    lifecycle = _ActiveLifecycle()
+    actor = IntentPublisherActor(
+        client,
+        lifecycle=lifecycle,
+        control_plane_session=_LocalSession(),
+    )
+
+    def fail_publish(intent: Any) -> None:
+        raise RuntimeError(
+            f"message bus busy: {intent.account_id}"
+        )
+
+    actor.publish = fail_publish
+    errors: list[BaseException] = []
+
+    def deliver() -> None:
+        try:
+            client.deliver(SimpleNamespace(account_id="account-a"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = Thread(target=deliver)
+    worker.start()
+    assert _wait_until(lambda: actor.pending_intent_count == 1)
+
+    actor._on_poll_timer()
+    worker.join(timeout=1.0)
+
+    assert worker.is_alive() is False
+    assert len(errors) == 1
+    assert "message bus busy" in str(errors[0])
+    assert actor.failure_reason == ""
+    assert "intent publication failed" in actor.degraded_reason
+    assert _failed_reasons(lifecycle) == {}
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    actor.on_stop()
 
 
 def test_intent_session_stop_deadline_failure_fails_stream() -> None:
@@ -809,6 +860,70 @@ def test_session_command_repoll_does_not_reapply_while_ack_is_blocked() -> None:
         control_plane.release_ack.set()
         assert control_plane.acked.wait(timeout=1.0)
         actor.on_stop()
+
+
+def test_session_command_delivery_deduplicates_in_flight_command_ids() -> None:
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+    apply_started = Event()
+    release_apply = Event()
+    poll_count = 0
+    apply_count = 0
+
+    def poll(capacity: int) -> tuple[NodeCommand, ...]:
+        nonlocal poll_count
+        assert capacity >= 1
+        poll_count += 1
+        if release_apply.is_set():
+            return ()
+        return (command,)
+
+    def apply(item: Any) -> bool:
+        nonlocal apply_count
+        assert item is command
+        apply_count += 1
+        apply_started.set()
+        release_apply.wait(timeout=1.0)
+        return False
+
+    session = NodeControlPlaneSession(
+        command_poll=poll,
+        command_apply=apply,
+        command_poll_interval_seconds=0.005,
+        command_delivery_capacity=4,
+        operation_timeout_seconds=1.0,
+    )
+    session.start()
+
+    assert apply_started.wait(timeout=1.0)
+    assert _wait_until(lambda: poll_count >= 3)
+    snapshot = session.snapshot()
+    assert snapshot.lanes["command_delivery"].queue_depth == 0
+    assert len(session._command_delivery_ids) == 1
+    assert apply_count == 1
+
+    release_apply.set()
+    assert session.stop(time.monotonic() + 1.0) is True
+    assert session._command_delivery_ids == set()
+
+
+def test_command_delivery_overflow_keeps_poll_lane_live() -> None:
+    session = NodeControlPlaneSession(
+        command_poll=lambda capacity: tuple(
+            SimpleNamespace(command_id=f"command-{index}")
+            for index in range(capacity + 1)
+        ),
+        command_apply=lambda command: False,
+        command_delivery_capacity=2,
+    )
+
+    session._poll_commands()
+
+    snapshot = session.snapshot()
+    assert snapshot.lanes["command_poll"].circuit_state == "closed"
+    assert snapshot.lanes["command_poll"].failure is False
+    assert snapshot.lanes["command_delivery"].queue_pressure == "full"
+    assert snapshot.lanes["command_delivery"].fatal_failure is False
+    assert session._fatal_process.is_set() is False
 
 
 def test_session_command_ack_failure_keeps_process_local_apply_result() -> None:
@@ -1652,9 +1767,9 @@ def test_intent_fetch_progress_refreshes_while_delivery_is_degraded() -> None:
     actor.on_stop()
 
 
-def test_intent_hard_mailbox_failure_survives_normal_drain() -> None:
+def test_intent_mailbox_pressure_degrades_then_recovers_after_drain() -> None:
     client = _IntentClient()
-    lifecycle = _Lifecycle()
+    lifecycle = _ActiveLifecycle()
     actor = IntentPublisherActor(
         client,
         lifecycle=lifecycle,
@@ -1678,16 +1793,22 @@ def test_intent_hard_mailbox_failure_survives_normal_drain() -> None:
     with pytest.raises(RuntimeError, match="backlog full"):
         client.deliver(SimpleNamespace(account_id="account-a"))
 
+    assert actor._intent_stream_failed is False
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
+        "intent_stream": "intent publication backlog full",
+    }
+    assert lifecycle.trading_state is TradingState.ACTIVE
+
     actor._on_poll_timer()
     worker.join(timeout=1.0)
 
     assert worker.is_alive() is False
     assert errors == []
-    assert actor._intent_stream_failed is True
-    assert _failed_reasons(lifecycle)["intent_stream"] == (
-        "intent publication backlog full"
-    )
-    assert lifecycle.ready_dependencies == []
+    assert actor._intent_stream_failed is False
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {}
+    assert lifecycle.trading_state is TradingState.ACTIVE
     actor.on_stop()
 
 
@@ -1758,7 +1879,7 @@ def test_command_poll_progress_refreshes_while_ack_is_degraded() -> None:
 
 
 def test_session_queue_pressure_remains_recoverable_degradation() -> None:
-    lifecycle = _Lifecycle()
+    lifecycle = _ActiveLifecycle()
     session = _LocalSession()
     heartbeat_lane = session._snapshot.lanes["heartbeat"]
     heartbeat_lane.last_success_at = time.monotonic()
@@ -1784,6 +1905,7 @@ def test_session_queue_pressure_remains_recoverable_degradation() -> None:
     assert _degraded_reasons(lifecycle) == {
         "command_stream": "command ACK queue capacity exceeded",
     }
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
 
 def _pump_actor_until(
@@ -2034,8 +2156,13 @@ class _BlockingCommandControlPlane:
         self.release_poll = Event()
         self.poll_thread_id: int | None = None
 
-    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
-        del node_id, after
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Any,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
+        del node_id, after, limit
         self.poll_thread_id = get_ident()
         self.poll_started.set()
         self.release_poll.wait(timeout=2.0)
@@ -2054,8 +2181,13 @@ class _OneCommandControlPlane:
         self.poll_thread_id: int | None = None
         self.ack_thread_id: int | None = None
 
-    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
-        del node_id, after
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Any,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
+        del node_id, after, limit
         self.poll_thread_id = get_ident()
         if self._polled:
             return ()
@@ -2076,8 +2208,13 @@ class _RepeatingCommandControlPlane:
         self.release_ack = Event()
         self.acked = Event()
 
-    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
-        del node_id, after
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Any,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
+        del node_id, after, limit
         self.poll_count += 1
         if self.acked.is_set():
             return ()
@@ -2200,9 +2337,30 @@ class _MutableCommandControlPlane(_AckRecordingControlPlane):
         super().__init__()
         self.commands: tuple[Any, ...] = ()
 
-    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
-        del node_id, after
-        return self.commands
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Any,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
+        del node_id
+        acknowledged_ids = {
+            str(args[1])
+            for args, _kwargs in self.acks
+            if len(args) > 1
+        }
+        commands = tuple(
+            command
+            for command in self.commands
+            if str(command.command_id) not in acknowledged_ids
+        )
+        start = 0
+        if after is not None:
+            for index, command in enumerate(commands):
+                if str(command.command_id) == str(after):
+                    start = index + 1
+                    break
+        return commands[start : start + limit]
 
 
 class _BackloggedBlockingAckControlPlane:
@@ -2213,13 +2371,25 @@ class _BackloggedBlockingAckControlPlane:
         self.acked_command_ids: set[str] = set()
         self._ack_count = 0
 
-    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
-        del node_id, after
-        return tuple(
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Any,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
+        del node_id
+        commands = tuple(
             command
             for command in self._commands
             if command.command_id not in self.acked_command_ids
         )
+        start = 0
+        if after is not None:
+            for index, command in enumerate(commands):
+                if str(command.command_id) == str(after):
+                    start = index + 1
+                    break
+        return commands[start : start + limit]
 
     def ack_command(
         self,
@@ -2242,8 +2412,13 @@ class _FailOnceAckControlPlane(_AckRecordingControlPlane):
         super().__init__()
         self._command = command
 
-    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
-        del node_id, after
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Any,
+        limit: int = 100,
+    ) -> tuple[Any, ...]:
+        del node_id, after, limit
         return (self._command,)
 
     def ack_command(self, *args: Any, **kwargs: Any) -> None:
