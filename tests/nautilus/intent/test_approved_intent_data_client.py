@@ -486,7 +486,9 @@ def test_restart_replays_pending_receipt_then_resumes_after_cursor(
     )
 
     restarted_client = _client(tmp_path, control_plane, publisher)
-    for item in restarted_client.replay_pending():
+    replay = restarted_client.replay_pending()
+    assert replay.commit(len(replay)) is True
+    for item in replay:
         restarted_client.deliver(item)
     assert restarted_client.poll_once(limit=10) == 1
     _flush(restarted_client)

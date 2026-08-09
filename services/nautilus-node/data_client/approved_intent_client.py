@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Lock
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Iterator, Optional, Protocol
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -32,6 +32,35 @@ from runtime.bounded_task_worker import BoundedTaskWorker
 
 class IntentPublisher(Protocol):
     def publish(self, intent: ApprovedTradeIntentV1) -> None: ...
+
+
+class IntentReplayPage:
+    """A replay page whose cursor advances after delivery-lane admission."""
+
+    def __init__(
+        self,
+        items: tuple[IntentItem, ...],
+        commit: Callable[[int], bool],
+    ) -> None:
+        self._items = items
+        self._commit = commit
+        self._committed = False
+
+    def __iter__(self) -> Iterator[IntentItem]:
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, index: int) -> IntentItem:
+        return self._items[index]
+
+    def commit(self, accepted_count: int) -> bool:
+        if self._committed:
+            raise RuntimeError("intent replay page already committed")
+        replay_complete = self._commit(int(accepted_count))
+        self._committed = True
+        return replay_complete
 
 
 @dataclass
@@ -129,7 +158,9 @@ class ApprovedIntentDataClient:
         self._pending_lock = Lock()
         self._pending_cursors: set[str] = set()
         self._replay_receipts = tuple(self._intent_inbox.pending())
-        self._replay_taken = False
+        self._replay_lock = Lock()
+        self._replay_offset = 0
+        self._active_replay_page: object | bool = False
         self._hard_failure_lock = Lock()
         self._hard_failure_requested_reason = ""
         self._hard_failure_reason = ""
@@ -217,22 +248,91 @@ class ApprovedIntentDataClient:
         with self._pending_lock:
             self._pending_cursors.discard(str(item.cursor))
 
-    def replay_pending(self) -> tuple[IntentItem, ...]:
-        if self._replay_taken:
-            return ()
-        self._replay_taken = True
-        items = tuple(
-            IntentItem(
-                cursor=receipt.cursor,
-                intent=receipt.intent,
+    def replay_pending(
+        self,
+        limit: int = 100,
+    ) -> IntentReplayPage:
+        self._raise_if_hard_failure()
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._replay_lock:
+            if self._active_replay_page is not False:
+                raise RuntimeError(
+                    "intent replay page must be committed"
+                )
+            start = self._replay_offset
+            end = min(
+                start + int(limit),
+                len(self._replay_receipts),
             )
-            for receipt in self._replay_receipts
+            receipts = self._replay_receipts[start:end]
+            items = tuple(
+                IntentItem(
+                    cursor=receipt.cursor,
+                    intent=receipt.intent,
+                )
+                for receipt in receipts
+            )
+            if not items:
+                return IntentReplayPage(
+                    (),
+                    lambda accepted_count: (
+                        self._commit_empty_replay_page(
+                            accepted_count
+                        )
+                    ),
+                )
+            token = object()
+            self._active_replay_page = token
+            with self._pending_lock:
+                self._pending_cursors.update(
+                    str(item.cursor) for item in items
+                )
+        return IntentReplayPage(
+            items,
+            lambda accepted_count: self._commit_replay_page(
+                token,
+                start,
+                items,
+                accepted_count,
+            ),
         )
-        with self._pending_lock:
-            self._pending_cursors.update(
-                str(item.cursor) for item in items
+
+    def _commit_empty_replay_page(
+        self,
+        accepted_count: int,
+    ) -> bool:
+        if accepted_count != 0:
+            raise ValueError(
+                "empty intent replay page accepts zero receipts"
             )
-        return items
+        return True
+
+    def _commit_replay_page(
+        self,
+        token: object,
+        start: int,
+        items: tuple[IntentItem, ...],
+        accepted_count: int,
+    ) -> bool:
+        if accepted_count < 0 or accepted_count > len(items):
+            raise ValueError(
+                "accepted replay count exceeds page size"
+            )
+        with self._replay_lock:
+            if self._active_replay_page is not token:
+                raise RuntimeError("stale intent replay page")
+            self._replay_offset = start + accepted_count
+            self._active_replay_page = False
+            rejected = items[accepted_count:]
+            with self._pending_lock:
+                for item in rejected:
+                    self._pending_cursors.discard(
+                        str(item.cursor)
+                    )
+            return self._replay_offset >= len(
+                self._replay_receipts
+            )
 
     def wait_for_durable_inbox(
         self,

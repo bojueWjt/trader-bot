@@ -5,10 +5,12 @@ import random
 import time
 from dataclasses import dataclass
 from enum import Enum
+from inspect import Parameter, signature
+from itertools import islice
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 2.0
 DEFAULT_COMMAND_POLL_INTERVAL_SECONDS = 2.0
@@ -311,7 +313,7 @@ class NodeControlPlaneSession:
         command_poll: Callable[[int], Iterable[Any]] | None = None,
         command_apply: Callable[[Any], Any] | None = None,
         command_ack: Callable[[Any], None] | None = None,
-        intent_replay: Callable[[], Any] | None = None,
+        intent_replay: Callable[..., Any] | None = None,
         intent_fetch: Callable[[int], Iterable[Any]] | None = None,
         intent_deliver: Callable[[Any], None] | None = None,
         execution_event_sink: Callable[[Any], None] | None = None,
@@ -415,6 +417,11 @@ class NodeControlPlaneSession:
         self._command_apply = command_apply
         self._command_ack = command_ack
         self._intent_replay = intent_replay
+        self._intent_replay_accepts_capacity = (
+            _callable_accepts_capacity(intent_replay)
+        )
+        self._legacy_intent_replay_invoked = False
+        self._legacy_intent_replay_iterator: Iterator[Any] | None = None
         self._intent_fetch = intent_fetch
         self._intent_deliver = intent_deliver
         self._execution_event_sink = execution_event_sink
@@ -527,7 +534,7 @@ class NodeControlPlaneSession:
         self._started = False
         self._startup_complete = False
         self._stopped = False
-        self._intent_replayed = False
+        self._intent_replayed = intent_replay is None
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -714,42 +721,129 @@ class NodeControlPlaneSession:
             self._offer_token(self._lanes["heartbeat"])
         if self._command_poll is not None:
             self._offer_token(self._lanes["command_poll"])
-        if self._intent_fetch is not None:
+        if (
+            self._intent_fetch is not None
+            or (
+                self._intent_replay is not None
+                and not self._intent_replayed
+            )
+        ):
             self._offer_token(self._lanes["intent_fetch"])
 
     def _run_startup_barriers(self) -> None:
         replay = self._intent_replay
         if replay is None or self._intent_replayed:
             return
-        replay_items: list[Any] = []
-
-        def collect_replay_items() -> None:
-            result = replay()
-            if result is None or isinstance(result, bool):
-                return
-            delivery = self._lanes["intent_delivery"]
-            items, overflowed = _take_bounded(
-                result,
-                delivery.capacity,
-            )
-            replay_items.extend(items)
-            if overflowed:
-                self._mark_lane_capacity_failure(delivery)
-                raise RuntimeError(
-                    "intent delivery queue capacity exceeded"
-                )
 
         self._require_startup_action(
             self._lanes["intent_fetch"],
-            collect_replay_items,
+            self._replay_into_delivery_lane,
         )
+
+    def _replay_into_delivery_lane(self) -> None:
+        try:
+            self._replay_into_delivery_lane_inner()
+        except BaseException as exc:
+            self._trigger_fatal_termination(
+                self._lanes["intent_fetch"],
+                _exception_detail(exc),
+            )
+            raise
+
+    def _replay_into_delivery_lane_inner(self) -> None:
+        replay = self._intent_replay
+        if replay is None or self._intent_replayed:
+            return
         delivery = self._lanes["intent_delivery"]
-        for item in replay_items:
+        available = delivery.capacity - delivery.queue.qsize()
+        if available <= 0:
+            self._mark_lane_capacity_failure(delivery)
+            return
+        if not self._intent_replay_accepts_capacity:
+            self._replay_legacy_items(delivery, available)
+            return
+
+        result = replay(available)
+        if result is None or isinstance(result, bool):
+            self._intent_replayed = True
+            return
+        items, overflowed = _take_bounded(result, available)
+        accepted_count = self._submit_replay_items(
+            delivery,
+            items,
+        )
+        replay_complete = self._commit_replay_result(
+            result,
+            accepted_count,
+        )
+        if accepted_count < len(items):
+            self._mark_lane_capacity_failure(delivery)
+            return
+        if replay_complete:
+            self._intent_replayed = True
+            return
+        if overflowed or accepted_count >= available:
+            self._mark_lane_capacity_failure(delivery)
+
+    def _replay_legacy_items(
+        self,
+        delivery: _Lane,
+        available: int,
+    ) -> None:
+        if not self._legacy_intent_replay_invoked:
+            replay = self._intent_replay
+            if replay is None:
+                self._intent_replayed = True
+                return
+            result = replay()
+            self._legacy_intent_replay_invoked = True
+            if result is None or isinstance(result, bool):
+                self._intent_replayed = True
+                return
+            self._legacy_intent_replay_iterator = iter(result)
+        iterator = self._legacy_intent_replay_iterator
+        if iterator is None:
+            self._intent_replayed = True
+            return
+        items = tuple(islice(iterator, available))
+        if not items:
+            self._legacy_intent_replay_iterator = None
+            self._intent_replayed = True
+            return
+        accepted_count = self._submit_replay_items(
+            delivery,
+            items,
+        )
+        if accepted_count < len(items):
+            self._mark_lane_capacity_failure(delivery)
+            return
+        if len(items) < available:
+            self._legacy_intent_replay_iterator = None
+            self._intent_replayed = True
+            return
+        self._mark_lane_capacity_failure(delivery)
+
+    def _submit_replay_items(
+        self,
+        delivery: _Lane,
+        items: tuple[Any, ...],
+    ) -> int:
+        accepted_count = 0
+        for item in items:
             if not self._submit_to_lane(delivery, item):
-                raise RuntimeError(
-                    "intent delivery queue capacity exceeded"
-                )
-        self._intent_replayed = True
+                break
+            accepted_count += 1
+        return accepted_count
+
+    def _commit_replay_result(
+        self,
+        result: Any,
+        accepted_count: int,
+    ) -> bool:
+        commit = getattr(result, "commit", None)
+        if not callable(commit):
+            return False
+        return bool(commit(accepted_count))
 
     def _require_startup_action(
         self,
@@ -818,7 +912,13 @@ class NodeControlPlaneSession:
                     ),
                 )
             )
-        if self._intent_fetch is not None:
+        if (
+            self._intent_fetch is not None
+            or (
+                self._intent_replay is not None
+                and not self._intent_replayed
+            )
+        ):
             threads.append(
                 self._thread(
                     "intent-fetch",
@@ -1032,6 +1132,10 @@ class NodeControlPlaneSession:
             raise RuntimeError("command ACK queue capacity exceeded")
 
     def _fetch_intents(self) -> None:
+        if not self._intent_replayed:
+            self._replay_into_delivery_lane()
+            if not self._intent_replayed:
+                return
         fetch = self._intent_fetch
         if fetch is None:
             return
@@ -1346,6 +1450,26 @@ def _command_delivery_id(command: Any) -> str | bool:
     if not command_id:
         return False
     return command_id
+
+
+def _callable_accepts_capacity(
+    callback: Callable[..., Any] | None,
+) -> bool:
+    if callback is None:
+        return False
+    try:
+        parameters = tuple(signature(callback).parameters.values())
+    except (TypeError, ValueError):
+        return True
+    for parameter in parameters:
+        if parameter.kind is Parameter.VAR_POSITIONAL:
+            return True
+        if parameter.kind in {
+            Parameter.POSITIONAL_ONLY,
+            Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            return True
+    return False
 
 
 def _take_bounded(

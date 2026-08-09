@@ -442,6 +442,44 @@ def test_pending_receipts_replay_in_cursor_order(
     ]
 
 
+def test_replay_page_advances_only_committed_receipts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    intents = (_intent(), _intent(), _intent())
+    inbox = JsonDurableIntentInbox(path)
+    for index, intent in enumerate(intents, start=1):
+        inbox.receive(f"cursor-{index}", intent)
+    client = ApprovedIntentDataClient(
+        account_id="account-a",
+        node_id="node-a",
+        source=InMemoryControlPlane(now=lambda: NOW),
+        publisher=_RecordingPublisher(),
+        offset_store=JsonIntentOffsetStore(
+            tmp_path / "intent-offset.json"
+        ),
+        intent_inbox=JsonDurableIntentInbox(path),
+        now=lambda: NOW,
+        trading_state=lambda: TradingState.ACTIVE,
+    )
+
+    first_page = client.replay_pending(limit=2)
+    assert [item.cursor for item in first_page] == [
+        "cursor-1",
+        "cursor-2",
+    ]
+
+    first_page.commit(1)
+    second_page = client.replay_pending(limit=2)
+    assert [item.cursor for item in second_page] == [
+        "cursor-2",
+        "cursor-3",
+    ]
+
+    second_page.commit(2)
+    assert len(client.replay_pending(limit=2)) == 0
+
+
 def test_rejected_receipt_is_terminal_and_removed(
     tmp_path: Path,
 ) -> None:
@@ -519,6 +557,7 @@ def test_restart_replays_accepted_intent_before_fetching_after_cursor(
     try:
         replay = restarted.replay_pending()
         assert len(replay) == 1
+        assert replay.commit(len(replay)) is True
         assert restarted.fetch_once() == ()
         restarted.deliver(replay[0])
         assert restarted.poll_once() == 0
