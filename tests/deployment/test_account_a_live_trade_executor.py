@@ -2938,7 +2938,7 @@ def test_live_preflight_rechecks_funds_immediately_before_open(
     assert "open" not in adapter.calls
 
 
-def test_before_open_preflight_rejects_snapshot_from_before_resume(
+def test_before_open_preflight_allows_fresh_snapshot_from_before_resume(
     tmp_path: Path,
 ) -> None:
     authorization = _authorization(tmp_path)
@@ -2956,15 +2956,40 @@ def test_before_open_preflight_rejects_snapshot_from_before_resume(
 
     result = live_executor.execute(authorization)
 
-    assert result.status == "BLOCKED"
-    assert "preflight fetched_at predates required exchange progress" in (
-        result.failure_reason
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        "BEFORE_OPEN_CAUSAL_FRESHNESS_RELAXED" in warning
+        for warning in result.warnings
     )
     assert adapter.calls.count("preflight") == 2
     assert adapter.calls.count("resume") == 1
-    assert "open" not in adapter.calls
+    assert adapter.calls.count("open") == 1
     before_open_request = adapter.requests["preflight"][1]
-    assert before_open_request["exchange_not_before"] == NOW.isoformat()
+    assert "exchange_not_before" not in before_open_request
+    evidence = json.loads(
+        (
+            tmp_path / "preflight-before-resume-snapshot.json"
+        ).read_text(encoding="ascii")
+    )
+    relaxed_events = [
+        event
+        for event in evidence["events"]
+        if event["event_type"]
+        == "before_open_exchange_causality_relaxed"
+    ]
+    assert len(relaxed_events) == 1
+    assert (
+        relaxed_events[0]["payload"]["resume_boundary"]
+        == NOW.isoformat()
+    )
+    assert relaxed_events[0]["payload"]["retained_hard_checks"] == [
+        "exchange_max_age",
+        "target_position_flat",
+        "target_regular_orders_zero",
+        "target_algo_orders_zero",
+        "known_available_balance_sufficiency",
+    ]
 
 
 def test_non_target_portfolio_drift_is_advisory_for_round_trip(

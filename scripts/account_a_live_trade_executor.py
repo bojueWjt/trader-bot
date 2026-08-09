@@ -1898,12 +1898,41 @@ class AccountALiveTradeExecutor:
                 )
 
             open_now = _utc_now(self._clock)
-            self._run_live_preflight(
+            before_open_preflight = self._run_live_preflight(
                 authorization,
                 trail,
                 phase="before-open",
-                exchange_not_before=resume_exchange_not_before,
             )
+            if (
+                before_open_preflight is not False
+                and before_open_preflight.fetched_at
+                < resume_exchange_not_before
+            ):
+                causal_warning = (
+                    "BEFORE_OPEN_CAUSAL_FRESHNESS_RELAXED: exchange "
+                    "snapshot predates RESUME; max-age, target position, "
+                    "target orders, and known available balance "
+                    "sufficiency remain enforced"
+                )
+                self._add_warning(causal_warning)
+                trail.record(
+                    "before_open_exchange_causality_relaxed",
+                    {
+                        "resume_boundary": (
+                            resume_exchange_not_before.isoformat()
+                        ),
+                        "snapshot_fetched_at": (
+                            before_open_preflight.fetched_at.isoformat()
+                        ),
+                        "retained_hard_checks": [
+                            "exchange_max_age",
+                            "target_position_flat",
+                            "target_regular_orders_zero",
+                            "target_algo_orders_zero",
+                            "known_available_balance_sufficiency",
+                        ],
+                    },
+                )
             health_warnings = _validate_health_freshness(
                 authorization,
                 now=open_now,
@@ -2486,7 +2515,7 @@ class AccountALiveTradeExecutor:
         *,
         phase: str,
         exchange_not_before: datetime | None = None,
-    ) -> None:
+    ) -> LivePreflightEvidence | bool:
         preflight_request = self._base_request(authorization)
         preflight_request["phase"] = phase
         preflight_request["quantity"] = _decimal_text(
@@ -2531,7 +2560,7 @@ class AccountALiveTradeExecutor:
                     ),
                 },
             )
-            return
+            return False
         for warning in preflight_result.warnings:
             self._add_warning(warning)
         if preflight_result.portfolio_drifted:
@@ -2575,6 +2604,7 @@ class AccountALiveTradeExecutor:
                 ),
             },
         )
+        return preflight_result
 
     def _dispatch_open(
         self,

@@ -1,9 +1,9 @@
 # Account Stall 修复重新复盘与收敛计划
 
 日期：2026-08-09
-状态：Claude 元复核与 reviewer 发现已吸收；生产运行 `8a77a50` 并保持 HALTED；
-本地放宽补丁已完成 executor、adapter 和 deployment 聚焦验证，等待最新双 reviewer
-`P0=0 P1=0` 后生成新 commit-bound 部署
+状态：Claude 元复核与 reviewer 发现已吸收；生产运行 `3f3cbe8` 并保持 HALTED；
+本地放宽补丁已完成 executor、adapter 和 deployment 聚焦验证，reviewer
+`P0=0 P1=0`，等待生成新 commit-bound 部署
 生产结论：account-a 保持 HALTED；真实交易 permit 在 `C-GATE=done`、`C-DEPLOY=done`
 且 deployed commit/hash 复核完成后生效，目标为一次
 `0.07 SOLUSDT LIMIT + IOC` 小额往返
@@ -88,7 +88,7 @@ directory entries。`--untracked-files=all` 展开后是 373 个 status entries�
 | 历史放大因素 | 随机 Redis namespace、无界 streams、内存/swap/AOF/I/O 压力 |
 | 历史发布因素 | bind-mounted hotpatch、deleted inode、A/B 运行字节漂移 |
 | 当前生产可用性回归 | `OrderInitialized` 被错误提升为 durable fatal；与 Redis lineage 无直接因果 |
-| 当前生产状态 | 2026-08-09 21:59:07 UTC 部署 `8a77a50`；`/ready` 返回 HALTED，restart=0，bind-mount hash/inode 校验通过 |
+| 当前生产状态 | 2026-08-09 23:04:11 UTC 部署 `3f3cbe8`；account-a 保持 HALTED，live permit ledger 不存在 |
 | 新鲜 exchange filter | 2026-08-09 20:39 UTC 活跃 Redis generation 的 `SOLUSDT` instrument 为 `min_notional=5`、tick/step=`0.01`、min quantity=`0.01`；`0.07 SOL` 在当前价格下满足 |
 | 冲突 filter 处置 | 公网 `exchangeInfo` 同时返回 `minNotional=50`、`minPrice=556.8` 和约 `77.24` 的市场价格，证据内部冲突；gate 采用节点刚启动加载的活跃 instrument cache |
 
@@ -104,6 +104,7 @@ projection/canary 变更选择面。
 | Soft | readiness、heartbeat、projection、reconciliation stale/false | 签名告警，继续 |
 | Soft | HTTP timeout、5xx、circuit open、普通 queue/resource pressure | bounded retry 或降级继续 |
 | Soft | 新鲜 exchange preflight 已证明目标归零后，`/v1/nodes` timeout、普通 5xx 或 snapshot 缺失 | 保留 exchange authority，记录 warning，继续 OPEN |
+| Soft | before-open exchange snapshot 仍在 freshness 窗口内，但时间早于 RESUME ACK | 记录 `BEFORE_OPEN_CAUSAL_FRESHNESS_RELAXED`，继续校验目标仓位、两类目标订单和已知余额充足性后 OPEN |
 | Soft | heartbeat、execution-event、loss-monitor 纯遥测发布普通永久 4xx；本地 durable spool 完整 | 有界降级，不终止进程 |
 | Soft | emergency-close 只有确定性 `contract_replay`，缺少新鲜 testnet execution | 明确记录 `EMERGENCY_CLOSE_CONTRACT_REPLAY_ONLY`，继续 |
 | Soft | `risk_healthy` 缺失/false；actor/loss progress 陈旧；ownership/fencing/durability、writer/lease、余额、filter 遥测缺失 | 记录精确 warning，继续 |
@@ -112,7 +113,7 @@ projection/canary 变更选择面。
 | Hard | 节点或 loss-monitor 发布 401/403/409、identity/fencing conflict | 阻断 |
 | Hard | `process_liveness=false`、`loss_monitor_healthy=false` | 阻断 |
 | Hard | quantity 固定 `0.07`、notional、已知 exchange filter、已知余额不足、single-use permit、loss cap | 阻断 |
-| Hard | `RESUME` 后、`OPEN` 前的新鲜 exchange preflight | 缺失时停止新增风险 |
+| Hard | `OPEN` 前 freshness 窗口内的 exchange preflight | 缺失时停止新增风险；快照早于 RESUME ACK 时降级继续 |
 | Hard | durable journal/订单副作用身份/执行结果唯一性 | 阻断或进入恢复 |
 | Hard | 目标最终平仓、目标订单归零、最终 HALT | 阻断最终 PASS |
 | Hard completion | open/close 唯一成交集合数量守恒、逐 fill commission、成交价、方向和 signed PnL 完整 | 缺失时交易仍完成平仓与 HALT，最终结果为 BLOCKED |
