@@ -140,3 +140,28 @@ def test_strict_node_identity_rejects_duplicate_tokens(
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "node auth tokens must be unique"
+
+
+def test_node_auth_rejects_partial_writer_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.loads(_binding_payload())
+    payload[NODE_A]["writer_id"] = "writer-account-a"
+    monkeypatch.setenv(
+        "NAUTILUS_NODE_AUTH_JSON",
+        json.dumps(payload),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        read_api.require_node(
+            _authorization(),
+            node_id=NODE_A,
+            account_id=ACCOUNT_A,
+            x_node_id=NODE_A,
+            x_account_id=ACCOUNT_A,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == (
+        "node auth writer identity is incomplete"
+    )

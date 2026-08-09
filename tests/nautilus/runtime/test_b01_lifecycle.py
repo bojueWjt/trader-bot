@@ -293,6 +293,25 @@ def test_heartbeat_carries_the_runtime_account_identity(
     assert heartbeat.account_id == config.account_id
 
 
+def test_heartbeat_carries_explicit_writer_and_runtime_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    lifecycle.set_process_liveness_provider(lambda: False)
+    lifecycle.record_loss_monitor_health(False)
+
+    heartbeat = lifecycle.build_heartbeat()
+
+    assert heartbeat.writer_id is None
+    assert heartbeat.lease_id is None
+    assert heartbeat.fencing_epoch is None
+    assert heartbeat.process_liveness is False
+    assert heartbeat.loss_monitor_healthy is False
+    assert heartbeat.loss_monitor_at == clock.now()
+
+
 def test_control_plane_loss_and_stale_snapshot_degrade_active_trading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

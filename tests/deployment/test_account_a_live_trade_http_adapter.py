@@ -20,6 +20,9 @@ ADAPTER = REPO_ROOT / "scripts" / "account_a_live_trade_http_adapter.py"
 RISK_TOKEN = "risk-admin-test-token"
 NODE_TOKEN = "account-a-node-test-token"
 NODE_ID = "nautilus-node-account-a"
+WRITER_ID = "writer-account-a"
+LEASE_ID = "lease-account-a"
+FENCING_EPOCH = 42
 ACCOUNT_ID = "account-a"
 SYMBOL = "SOLUSDT"
 OPEN_INTENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -57,6 +60,7 @@ class Scenario:
         self.exchange_state = _exchange_state()
         self.exchange_states: list[dict[str, Any]] = []
         self.node_snapshot = _node_snapshot()
+        self.node_snapshots: list[dict[str, Any]] | None = None
         self.refresh_exchange_mirror_on_close = True
         self.refresh_exchange_evidence_on_close = True
 
@@ -84,6 +88,8 @@ class Scenario:
             self.node_state = str(body["type"])
             if self.node_state == "RESUME":
                 self.node_state = "ACTIVE"
+            if self.node_state == "HALT":
+                self.node_state = "HALTED"
             return 200, {"command_id": "command-1", "status": "pending"}
         if method == "POST" and path == "/v1/operator/orders":
             assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
@@ -114,6 +120,15 @@ class Scenario:
                 "instrument_id": body["symbol"],
                 "action": body["action"],
             }
+        if (
+            method == "POST"
+            and path == f"/v1/nodes/{NODE_ID}/loss-monitor"
+        ):
+            assert headers["authorization"] == f"Bearer {NODE_TOKEN}"
+            assert headers["x-node-id"] == NODE_ID
+            assert headers["x-account-id"] == ACCOUNT_ID
+            assert isinstance(body, dict)
+            return 200, {"ok": True}
         if method == "GET" and path.startswith("/v1/operator/orders/"):
             assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
             intent_id = path.rsplit("/", 1)[-1]
@@ -136,11 +151,16 @@ class Scenario:
             return 200, exchange_state
         if method == "GET" and path == "/v1/nodes":
             assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
-            node_snapshot = dict(self.node_snapshot)
-            node_snapshot["trading_state"] = self.node_state
-            return 200, {
-                "nodes": [node_snapshot]
-            }
+            snapshots = self.node_snapshots
+            if snapshots is None:
+                snapshots = [self.node_snapshot]
+            nodes = []
+            for snapshot in snapshots:
+                node_snapshot = dict(snapshot)
+                if node_snapshot.get("node_id") == NODE_ID:
+                    node_snapshot["trading_state"] = self.node_state
+                nodes.append(node_snapshot)
+            return 200, {"nodes": nodes}
         raise AssertionError(f"unexpected request: {method} {path}")
 
 
@@ -238,6 +258,81 @@ def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
     assert command["body"]["scope"]["executor_identity"] == _identity()
 
 
+@pytest.mark.parametrize("action", ["resume", "halt"])
+def test_state_polling_allows_missing_extended_identity_with_warnings(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    scenario = Scenario()
+    for field_name in ("writer_id", "lease_id", "fencing_epoch"):
+        scenario.node_snapshot.pop(field_name)
+
+    command = action.upper()
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            action,
+            _request(
+                command=command,
+                scope="single-canary-round-trip",
+                max_round_trips=1,
+                side_effect_id=f"{action}-request-id",
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["accepted"] is True
+    assert payload["warnings"] == [
+        "node identity telemetry missing: writer_id",
+        "node identity telemetry missing: lease_id",
+        "node identity telemetry missing: fencing_epoch",
+    ]
+
+
+@pytest.mark.parametrize("action", ["resume", "halt"])
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "expected_fragment"),
+    [
+        ("node_id", "nautilus-node-account-b", "node node_id mismatch"),
+        ("account_id", "account-b", "node account mismatch"),
+        ("writer_id", "writer-account-b", "node writer_id mismatch"),
+        ("lease_id", "lease-account-b", "node lease_id mismatch"),
+        (
+            "fencing_epoch",
+            FENCING_EPOCH + 1,
+            "node fencing_epoch mismatch",
+        ),
+    ],
+)
+def test_state_polling_rejects_explicit_node_identity_conflict(
+    tmp_path: Path,
+    action: str,
+    field_name: str,
+    field_value: Any,
+    expected_fragment: str,
+) -> None:
+    scenario = Scenario()
+    scenario.node_snapshot[field_name] = field_value
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            action,
+            _request(
+                command=action.upper(),
+                scope="single-canary-round-trip",
+                max_round_trips=1,
+                side_effect_id=f"{action}-request-id",
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert expected_fragment in completed.stderr
+
+
 def test_open_posts_limit_ioc_operator_intent(
     tmp_path: Path,
 ) -> None:
@@ -250,7 +345,7 @@ def test_open_posts_limit_ioc_operator_intent(
                 side="BUY",
                 order_type="LIMIT",
                 time_in_force="IOC",
-                quantity="0.1",
+                quantity="0.07",
                 limit_price_usdt="100",
                 max_actual_open_notional_usdt="12",
                 side_effect_id="open-request-id",
@@ -271,7 +366,307 @@ def test_open_posts_limit_ioc_operator_intent(
         "price": "100",
         "time_in_force": "IOC",
     }
-    assert operator_request["body"]["notional_usdt"] == "10"
+    assert operator_request["body"]["quantity"] == "0.07"
+    assert operator_request["body"]["notional_usdt"] == "7"
+
+
+def test_open_rejects_quantity_other_than_live_canary_quantity(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "open",
+            _request(
+                client_order_id=OPEN_CLIENT_ORDER_ID,
+                side="BUY",
+                order_type="LIMIT",
+                time_in_force="IOC",
+                quantity="0.1",
+                limit_price_usdt="100",
+                max_actual_open_notional_usdt="12",
+                side_effect_id="open-request-id",
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "OPEN quantity must equal 0.07" in completed.stderr
+    assert scenario.requests == []
+
+
+def test_preflight_returns_explicit_exchange_authority(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["action"] == "preflight"
+    assert payload["exchange_authoritative"] is True
+    assert payload["source"] == "exchange"
+    assert payload["mirror_stale"] is False
+    assert payload["available_usdt_balance"] == "100"
+
+
+def test_preflight_waits_for_exchange_snapshot_after_resume_boundary(
+    tmp_path: Path,
+) -> None:
+    not_before = datetime.now(timezone.utc)
+    before_resume = not_before - timedelta(milliseconds=1)
+    after_resume = not_before + timedelta(milliseconds=1)
+    scenario = Scenario()
+    scenario.exchange_states = [
+        _exchange_state(fetched_at=before_resume),
+        _exchange_state(fetched_at=after_resume),
+    ]
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(
+                phase="before-open",
+                exchange_not_before=not_before.isoformat(),
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["fetched_at"] == after_resume.isoformat()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "detail"),
+    [
+        (408, "node telemetry timeout"),
+        (503, "node projection unavailable"),
+    ],
+)
+def test_preflight_keeps_exchange_authority_when_node_telemetry_fails(
+    tmp_path: Path,
+    status_code: int,
+    detail: str,
+) -> None:
+    scenario = Scenario()
+    scenario.forced_responses[("GET", "/v1/nodes")] = (
+        status_code,
+        {"detail": detail},
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["exchange_authoritative"] is True
+    assert payload["target_position_side"] == "FLAT"
+    assert payload["target_position_quantity"] == "0"
+    assert "node_snapshot" not in payload
+    assert any(
+        "node telemetry degraded" in warning
+        and f"HTTP_{status_code}" in warning
+        for warning in payload["warnings"]
+    )
+
+
+def test_preflight_durable_node_failure_is_hard(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.forced_responses[("GET", "/v1/nodes")] = (
+        503,
+        {"detail": "intent store unavailable"},
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "durable control-plane failure" in completed.stderr
+
+
+def test_preflight_keeps_exchange_authority_when_node_is_missing(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.forced_responses[("GET", "/v1/nodes")] = (
+        200,
+        {"nodes": []},
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["exchange_authoritative"] is True
+    assert "node_snapshot" not in payload
+    assert any(
+        "node is missing" in warning
+        for warning in payload["warnings"]
+    )
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 409])
+def test_preflight_node_authorization_failure_is_hard(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    scenario = Scenario()
+    scenario.forced_responses[("GET", "/v1/nodes")] = (
+        status_code,
+        {"detail": "forbidden"},
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert f"HTTP {status_code}" in completed.stderr
+
+
+def test_preflight_rejects_additional_account_nodes(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    foreign_node_one = {
+        **_node_snapshot(),
+        "node_id": "nautilus-node-account-a-replacement",
+    }
+    foreign_node_two = {
+        **_node_snapshot(),
+        "node_id": "nautilus-node-account-a-shadow",
+    }
+    scenario.node_snapshots = [
+        scenario.node_snapshot,
+        foreign_node_one,
+        foreign_node_two,
+    ]
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "multiple account nodes" in completed.stderr
+
+
+def test_preflight_allows_missing_extended_node_identity_with_warnings(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    for field_name in ("writer_id", "lease_id", "fencing_epoch"):
+        scenario.node_snapshot.pop(field_name)
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["action"] == "preflight"
+    assert payload["warnings"] == [
+        "node identity telemetry missing: writer_id",
+        "node identity telemetry missing: lease_id",
+        "node identity telemetry missing: fencing_epoch",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "expected_fragment"),
+    [
+        ("node_id", "nautilus-node-account-b", "node node_id mismatch"),
+        ("account_id", "account-b", "node account mismatch"),
+        ("writer_id", "writer-account-b", "node writer_id mismatch"),
+        ("lease_id", "lease-account-b", "node lease_id mismatch"),
+        (
+            "fencing_epoch",
+            FENCING_EPOCH + 1,
+            "node fencing_epoch mismatch",
+        ),
+    ],
+)
+def test_preflight_rejects_explicit_node_identity_conflict(
+    tmp_path: Path,
+    field_name: str,
+    field_value: Any,
+    expected_fragment: str,
+) -> None:
+    scenario = Scenario()
+    scenario.node_snapshot[field_name] = field_value
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert expected_fragment in completed.stderr
+
+
+def test_preflight_missing_available_balance_is_advisory(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.exchange_state = _exchange_state(
+        available_usdt_balance=False
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "available_usdt_balance" not in payload
+    assert payload["warnings"] == [
+        "available USDT balance telemetry missing"
+    ]
 
 
 def test_observe_uses_real_mirror_and_node_progress_evidence(
@@ -315,7 +710,9 @@ def test_observe_uses_real_mirror_and_node_progress_evidence(
     assert payload["mark_fresh"] is True
     assert payload["loss_monitor_healthy"] is True
     assert payload["mark_at"] == fetched_at.isoformat()
-    assert payload["loss_monitor_at"] == fetched_at.isoformat()
+    assert payload["loss_monitor_at"] == (
+        node_loss_monitor_at.isoformat()
+    )
     assert payload["loss_monitor_source"] == "exchange_mirror+node"
     assert payload["loss_monitor_evidence"] == {
         "actor_tick_at": node_loss_monitor_at.isoformat(),
@@ -326,6 +723,16 @@ def test_observe_uses_real_mirror_and_node_progress_evidence(
     }
     assert payload["node_snapshot"]["node_id"] == NODE_ID
     assert payload["node_snapshot"]["loss_monitor_healthy"] is True
+    publication = next(
+        request
+        for request in scenario.requests
+        if request["path"] == f"/v1/nodes/{NODE_ID}/loss-monitor"
+    )
+    assert publication["body"] == {
+        "account_id": ACCOUNT_ID,
+        "loss_monitor_healthy": True,
+        "loss_monitor_at": node_loss_monitor_at.isoformat(),
+    }
 
 
 def test_observe_returns_soft_failure_when_mirror_remains_stale(
@@ -413,7 +820,7 @@ def test_observe_rejects_non_authoritative_or_pre_dispatch_absence(
     assert payload["exchange_evidence_state"] == "unknown"
 
 
-def test_observe_surfaces_frozen_node_loss_monitor_as_unhealthy(
+def test_observe_treats_frozen_node_loss_monitor_as_advisory(
     tmp_path: Path,
 ) -> None:
     fetched_at = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -431,6 +838,7 @@ def test_observe_surfaces_frozen_node_loss_monitor_as_unhealthy(
     )
     scenario.node_snapshot.update(
         {
+            "actor_tick_at": frozen_at.isoformat(),
             "loss_monitor_at": frozen_at.isoformat(),
             "loss_monitor_healthy": True,
         }
@@ -446,8 +854,13 @@ def test_observe_surfaces_frozen_node_loss_monitor_as_unhealthy(
 
     assert completed.returncode == 0, completed.stderr
     assert payload["mark_fresh"] is True
-    assert payload["loss_monitor_healthy"] is False
-    assert payload["loss_monitor_at"] == frozen_at.isoformat()
+    assert payload["loss_monitor_healthy"] is True
+    assert payload["loss_monitor_at"] == fetched_at.isoformat()
+    assert payload["health_evidence_degraded"] is True
+    assert any(
+        "node health telemetry stale: loss_monitor_at" in warning
+        for warning in payload["warnings"]
+    )
     assert payload["loss_monitor_evidence"][
         "node_loss_monitor_at"
     ] == frozen_at.isoformat()
@@ -491,6 +904,233 @@ def test_observe_degrades_when_optional_node_snapshot_is_unavailable(
     assert payload["loss_monitor_evidence"][
         "node_snapshot_available"
     ] is False
+
+
+def test_observe_loss_monitor_publish_failure_is_advisory(
+    tmp_path: Path,
+) -> None:
+    fetched_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    scenario = Scenario()
+    scenario.operator_statuses[OPEN_INTENT_ID] = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    scenario.exchange_state = _exchange_state(
+        fetched_at=fetched_at,
+        position_quantity="0.07",
+        client_order_id=OPEN_CLIENT_ORDER_ID,
+    )
+    scenario.node_snapshot.update(
+        {
+            "loss_monitor_healthy": False,
+            "process_liveness": True,
+        }
+    )
+    scenario.forced_responses[
+        ("POST", f"/v1/nodes/{NODE_ID}/loss-monitor")
+    ] = (503, {"detail": "loss monitor endpoint unavailable"})
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "observe",
+            _request(open_client_order_id=OPEN_CLIENT_ORDER_ID),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["loss_monitor_healthy"] is False
+    assert payload["health_evidence_degraded"] is True
+    assert any(
+        "loss monitor publication degraded" in warning
+        and "HTTP_503" in warning
+        for warning in payload["warnings"]
+    )
+    assert any(
+        request["path"] == f"/v1/nodes/{NODE_ID}/loss-monitor"
+        for request in scenario.requests
+    )
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 409])
+def test_observe_loss_monitor_identity_conflict_is_hard(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    fetched_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    scenario = Scenario()
+    scenario.operator_statuses[OPEN_INTENT_ID] = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    scenario.exchange_state = _exchange_state(
+        fetched_at=fetched_at,
+        position_quantity="0.07",
+        client_order_id=OPEN_CLIENT_ORDER_ID,
+    )
+    scenario.forced_responses[
+        ("POST", f"/v1/nodes/{NODE_ID}/loss-monitor")
+    ] = (status_code, {"detail": "writer identity conflict"})
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "observe",
+            _request(open_client_order_id=OPEN_CLIENT_ORDER_ID),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "ownership/fencing conflict" in completed.stderr
+
+
+def test_observe_durable_node_snapshot_failure_is_hard(
+    tmp_path: Path,
+) -> None:
+    fetched_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    scenario = Scenario()
+    scenario.operator_statuses[OPEN_INTENT_ID] = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    scenario.exchange_state = _exchange_state(
+        fetched_at=fetched_at,
+        position_quantity="0.07",
+        client_order_id=OPEN_CLIENT_ORDER_ID,
+    )
+    scenario.forced_responses[("GET", "/v1/nodes")] = (
+        503,
+        {"detail": "journal fsync failed"},
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "observe",
+            _request(open_client_order_id=OPEN_CLIENT_ORDER_ID),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "durable control-plane failure" in completed.stderr
+
+
+def test_observe_durable_loss_monitor_publication_failure_is_hard(
+    tmp_path: Path,
+) -> None:
+    fetched_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    scenario = Scenario()
+    scenario.operator_statuses[OPEN_INTENT_ID] = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    scenario.exchange_state = _exchange_state(
+        fetched_at=fetched_at,
+        position_quantity="0.07",
+        client_order_id=OPEN_CLIENT_ORDER_ID,
+    )
+    scenario.forced_responses[
+        ("POST", f"/v1/nodes/{NODE_ID}/loss-monitor")
+    ] = (503, {"detail": "outbox durable write failed"})
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "observe",
+            _request(open_client_order_id=OPEN_CLIENT_ORDER_ID),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "durable control-plane failure" in completed.stderr
+
+
+def test_observe_allows_missing_extended_identity_with_warnings(
+    tmp_path: Path,
+) -> None:
+    fetched_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    scenario = Scenario()
+    for field_name in ("writer_id", "lease_id", "fencing_epoch"):
+        scenario.node_snapshot.pop(field_name)
+    scenario.operator_statuses[OPEN_INTENT_ID] = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    scenario.exchange_state = _exchange_state(
+        fetched_at=fetched_at,
+        position_quantity="0.07",
+        client_order_id=OPEN_CLIENT_ORDER_ID,
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "observe",
+            _request(open_client_order_id=OPEN_CLIENT_ORDER_ID),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["health_evidence_degraded"] is True
+    assert payload["warnings"] == [
+        "node identity telemetry missing: writer_id",
+        "node identity telemetry missing: lease_id",
+        "node identity telemetry missing: fencing_epoch",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "expected_fragment"),
+    [
+        ("node_id", "nautilus-node-account-b", "node node_id mismatch"),
+        ("account_id", "account-b", "node account mismatch"),
+        ("writer_id", "writer-account-b", "node writer_id mismatch"),
+        ("lease_id", "lease-account-b", "node lease_id mismatch"),
+        (
+            "fencing_epoch",
+            FENCING_EPOCH + 1,
+            "node fencing_epoch mismatch",
+        ),
+    ],
+)
+def test_observe_rejects_explicit_node_identity_conflict(
+    tmp_path: Path,
+    field_name: str,
+    field_value: Any,
+    expected_fragment: str,
+) -> None:
+    scenario = Scenario()
+    scenario.node_snapshot[field_name] = field_value
+    scenario.operator_statuses[OPEN_INTENT_ID] = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    scenario.exchange_state = _exchange_state(
+        fetched_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        position_quantity="0.07",
+        client_order_id=OPEN_CLIENT_ORDER_ID,
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "observe",
+            _request(open_client_order_id=OPEN_CLIENT_ORDER_ID),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert expected_fragment in completed.stderr
 
 
 def test_observe_accepts_45_second_exchange_mirror_with_60_second_window(
@@ -697,6 +1337,44 @@ def test_close_uses_causal_exchange_history_when_projection_is_unavailable(
     assert payload["close_proof_source"] == "exchange_history"
     assert payload["enrichment_degraded"] is True
     assert "HTTP_503" in payload["warnings"][0]
+
+
+def test_close_durable_projection_failure_is_hard(
+    tmp_path: Path,
+) -> None:
+    observed_at = datetime.now(timezone.utc)
+    scenario = Scenario()
+    scenario.forced_responses[
+        ("GET", f"/v1/operator/orders/{CLOSE_INTENT_ID}")
+    ] = (503, {"detail": "evidence store unavailable"})
+    scenario.exchange_state = _exchange_state(
+        fetched_at=observed_at,
+        client_order_id=CLOSE_CLIENT_ORDER_ID,
+        evidence_state="confirmed_executed",
+        evidence_observed_at=observed_at,
+        evidence_filled_quantity="0.1",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "close",
+            _request(
+                intent_id=CLOSE_INTENT_ID,
+                open_intent_id=OPEN_INTENT_ID,
+                client_order_id=CLOSE_CLIENT_ORDER_ID,
+                quantity="0.1",
+                reduce_only=True,
+                side="SELL",
+                position_side="LONG",
+                side_effect_id="close-request-id",
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "durable control-plane failure" in completed.stderr
 
 
 def test_close_uses_exchange_history_when_projection_quantity_conflicts(
@@ -1193,7 +1871,638 @@ def test_final_snapshot_degrades_malformed_financial_enrichment(
     assert payload["financial_proof_complete"] is False
     assert len(payload["warnings"]) == 1
     assert "open operator projection degraded" in payload["warnings"][0]
-    assert "asset amount must be numeric" in payload["warnings"][0]
+    assert "commission must be numeric" in payload["warnings"][0]
+
+
+def test_final_snapshot_durable_operator_failure_is_hard(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.forced_responses[
+        ("GET", f"/v1/operator/orders/{OPEN_INTENT_ID}")
+    ] = (503, {"detail": "intent store unavailable"})
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "durable control-plane failure" in completed.stderr
+    assert "intent store unavailable" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "missing_surface",
+    [
+        "orders",
+        "execution_events",
+        "fill_price",
+        "commission",
+        "intent_side",
+        "partial_fill_events",
+        "order_fill_quantity",
+        "fill_price_mismatch",
+    ],
+)
+def test_final_snapshot_rejects_incomplete_successful_projection(
+    tmp_path: Path,
+    missing_surface: str,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    close_status = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+    if missing_surface == "orders":
+        open_status["orders"] = []
+    if missing_surface == "execution_events":
+        open_status["execution_events"] = []
+    if missing_surface == "fill_price":
+        open_status["orders"][0]["average_fill_price"] = "0"
+        open_status["execution_events"][0]["payload"]["last_px"] = "0"
+    if missing_surface == "commission":
+        open_status["execution_events"][0]["payload"].pop("commission")
+    if missing_surface == "intent_side":
+        open_status["intent"]["order_plan"]["side"] = ""
+    if missing_surface == "partial_fill_events":
+        open_status["execution_events"][0]["payload"]["last_qty"] = (
+            "0.01"
+        )
+    if missing_surface == "order_fill_quantity":
+        open_status["orders"][0]["filled_quantity"] = "0"
+    if missing_surface == "fill_price_mismatch":
+        open_status["execution_events"][0]["payload"]["last_px"] = (
+            "101"
+        )
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = close_status
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["enrichment_degraded"] is True
+    assert payload["financial_proof_complete"] is False
+    assert len(payload["warnings"]) == 1
+    assert "incomplete financial proof" in payload["warnings"][0]
+
+
+def test_final_snapshot_requires_commission_for_every_unique_fill(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    first_fill = open_status["execution_events"][0]
+    first_fill["payload"]["last_qty"] = "0.03"
+    second_fill = json.loads(json.dumps(first_fill))
+    second_fill["trade_id"] = f"trade-2-{OPEN_CLIENT_ORDER_ID}"
+    second_fill["payload"]["last_qty"] = "0.04"
+    second_fill["payload"].pop("commission")
+    open_status["execution_events"].append(second_fill)
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert len(payload["warnings"]) == 1
+    assert "commission coverage" in payload["warnings"][0]
+
+
+@pytest.mark.parametrize("empty_commission", [None, ""])
+def test_final_snapshot_rejects_empty_commission_value(
+    tmp_path: Path,
+    empty_commission: str | None,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    open_status["execution_events"][0]["payload"][
+        "commission"
+    ] = empty_commission
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert len(payload["warnings"]) == 1
+    assert "commission coverage" in payload["warnings"][0]
+
+
+def test_final_snapshot_requires_realized_pnl_for_every_unique_fill(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    first_fill = open_status["execution_events"][0]
+    first_fill["payload"]["last_qty"] = "0.03"
+    second_fill = json.loads(json.dumps(first_fill))
+    second_fill["trade_id"] = f"trade-2-{OPEN_CLIENT_ORDER_ID}"
+    second_fill["payload"]["last_qty"] = "0.04"
+    second_fill["payload"].pop("realized_pnl")
+    open_status["execution_events"].append(second_fill)
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert len(payload["warnings"]) == 1
+    assert "realized PnL coverage" in payload["warnings"][0]
+
+
+def test_final_snapshot_preserves_signed_pnl_and_dedupes_fill_fees(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    duplicate_open_fill = json.loads(
+        json.dumps(open_status["execution_events"][0])
+    )
+    open_status["execution_events"].append(duplicate_open_fill)
+    close_status = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="99",
+    )
+    close_status["execution_events"][0]["payload"][
+        "realized_pnl"
+    ] = "-0.05"
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = close_status
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is True
+    assert payload["gross_pnl_usdt"] == "-0.05"
+    assert payload["fees_usdt"] == "0.02"
+    assert payload["net_pnl_usdt"] == "-0.07"
+    assert payload["cumulative_net_loss_usdt"] == "0.07"
+
+
+def test_final_snapshot_preserves_complete_signed_zero_pnl(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.operator_statuses[OPEN_INTENT_ID] = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="99",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is True
+    assert payload["gross_pnl_usdt"] == "0"
+    assert payload["fees_usdt"] == "0.02"
+    assert payload["net_pnl_usdt"] == "-0.02"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "warning_fragment"),
+    [
+        ("quantity", "0.08", "open order quantity"),
+        ("price", "101", "open order limit price"),
+    ],
+)
+def test_final_snapshot_binds_projected_open_order_to_signed_plan(
+    tmp_path: Path,
+    field_name: str,
+    field_value: str,
+    warning_fragment: str,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    open_status["orders"][0][field_name] = field_value
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert any(
+        warning_fragment in warning
+        for warning in payload["warnings"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("signed_side", "projected_side"),
+    [
+        ("BUY", "short"),
+        ("SELL", "long"),
+    ],
+)
+def test_final_snapshot_rejects_projected_side_conflicting_with_signed_side(
+    tmp_path: Path,
+    signed_side: str,
+    projected_side: str,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    open_status["intent"]["order_plan"]["side"] = projected_side
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(open_side=signed_side),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert any(
+        "open side" in warning
+        for warning in payload["warnings"]
+    )
+
+
+def test_final_snapshot_requires_usdt_commission_currency(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    open_status["execution_events"][0]["payload"].update(
+        {
+            "commission": "0.001",
+            "currency": "BNB",
+        }
+    )
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert any(
+        "commission currency" in warning
+        for warning in payload["warnings"]
+    )
+
+
+def test_final_snapshot_rejects_conflicting_commission_currency_fields(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    open_status["execution_events"][0]["payload"].update(
+        {
+            "commission": "0.001",
+            "commission_currency": "USDT",
+            "currency": "BNB",
+        }
+    )
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert any(
+        "commission currency" in warning
+        for warning in payload["warnings"]
+    )
+
+
+def test_final_snapshot_accepts_embedded_usdt_commission_currency(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    open_status["execution_events"][0]["payload"].pop("currency")
+    open_status["execution_events"][0]["payload"]["commission"] = (
+        "0.001 USDT"
+    )
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is True
+
+
+def test_final_snapshot_rejects_whitespace_trade_identity(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    open_status["execution_events"][0]["trade_id"] = "   "
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert any(
+        "fill identity" in warning
+        for warning in payload["warnings"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("conflict", "warning_fragment"),
+    [
+        ("quantity", "cross-leg quantity reconciliation"),
+        ("trade_id", "cross-leg trade identity"),
+    ],
+)
+def test_final_snapshot_rejects_cross_leg_fill_conflict(
+    tmp_path: Path,
+    conflict: str,
+    warning_fragment: str,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    close_status = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+    if conflict == "quantity":
+        close_status["orders"][0]["filled_quantity"] = "0.06"
+        close_status["execution_events"][0]["payload"]["last_qty"] = (
+            "0.06"
+        )
+    if conflict == "trade_id":
+        close_status["execution_events"][0]["trade_id"] = (
+            open_status["execution_events"][0]["trade_id"]
+        )
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = close_status
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert any(
+        warning_fragment in warning
+        for warning in payload["warnings"]
+    )
+
+
+def test_final_snapshot_rejects_conflicting_duplicate_trade(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    conflicting_fill = json.loads(
+        json.dumps(open_status["execution_events"][0])
+    )
+    conflicting_fill["payload"]["commission"] = "0.02"
+    open_status["execution_events"].append(conflicting_fill)
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert len(payload["warnings"]) == 1
+    assert "fill identity" in payload["warnings"][0]
+
+
+@pytest.mark.parametrize(
+    "conflicting_currency_first",
+    [False, True],
+)
+def test_final_snapshot_rejects_zero_commission_duplicate_currency_conflict(
+    tmp_path: Path,
+    conflicting_currency_first: bool,
+) -> None:
+    scenario = Scenario()
+    open_status = _operator_status(
+        OPEN_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100",
+    )
+    valid_fill = open_status["execution_events"][0]
+    valid_fill["payload"].update(
+        {
+            "commission": "0",
+            "currency": "USDT",
+        }
+    )
+    conflicting_fill = json.loads(json.dumps(valid_fill))
+    conflicting_fill["payload"]["currency"] = "BNB"
+    events = [valid_fill, conflicting_fill]
+    if conflicting_currency_first:
+        events.reverse()
+    open_status["execution_events"] = events
+    scenario.operator_statuses[OPEN_INTENT_ID] = open_status
+    scenario.operator_statuses[CLOSE_INTENT_ID] = _operator_status(
+        CLOSE_CLIENT_ORDER_ID,
+        filled_quantity="0.07",
+        average_fill_price="100.5",
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "final-snapshot",
+            _request(),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["financial_proof_complete"] is False
+    assert any(
+        "fill identity" in warning
+        for warning in payload["warnings"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1218,7 +2527,7 @@ def test_http_retryable_statuses_return_soft_error_json(
                 side="BUY",
                 order_type="LIMIT",
                 time_in_force="IOC",
-                quantity="0.1",
+                quantity="0.07",
                 limit_price_usdt="100",
                 max_actual_open_notional_usdt="12",
                 side_effect_id="open-request-id",
@@ -1233,6 +2542,49 @@ def test_http_retryable_statuses_return_soft_error_json(
     assert payload["error_code"] == f"HTTP_{status_code}"
     assert payload["status_code"] == status_code
     assert "temporarily unavailable" in payload["reason"]
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "intent store unavailable",
+        "journal fsync failed",
+        "outbox durable write failed",
+        "capacity exhausted",
+        "ENOSPC",
+    ],
+)
+def test_http_durable_5xx_is_a_hard_adapter_failure(
+    tmp_path: Path,
+    detail: str,
+) -> None:
+    scenario = Scenario()
+    scenario.forced_responses[("POST", "/v1/operator/orders")] = (
+        503,
+        {"detail": detail},
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "open",
+            _request(
+                client_order_id=OPEN_CLIENT_ORDER_ID,
+                side="BUY",
+                order_type="LIMIT",
+                time_in_force="IOC",
+                quantity="0.07",
+                limit_price_usdt="100",
+                max_actual_open_notional_usdt="12",
+                side_effect_id="open-request-id",
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "durable control-plane failure" in completed.stderr
+    assert detail in completed.stderr
 
 
 def _invoke(
@@ -1293,16 +2645,23 @@ def _request(**overrides: Any) -> dict[str, Any]:
             "permit": "9" * 64,
         },
         "portfolio_baseline_sha256": EMPTY_PORTFOLIO_SHA256,
+        "quantity": "0.07",
+        "limit_price_usdt": "100",
+        "open_side": "BUY",
     }
     payload.update(overrides)
     return payload
 
 
-def _identity() -> dict[str, str]:
+def _identity() -> dict[str, Any]:
     return {
         "account_id": ACCOUNT_ID,
         "symbol": SYMBOL,
         "release_id": "release-account-a-test",
+        "node_id": NODE_ID,
+        "writer_id": WRITER_ID,
+        "lease_id": LEASE_ID,
+        "fencing_epoch": FENCING_EPOCH,
         "image_digest": f"sha256:{'1' * 64}",
         "config_sha256": "2" * 64,
         "dependency_lock_sha256": "3" * 64,
@@ -1331,11 +2690,18 @@ def _node_snapshot() -> dict[str, Any]:
     return {
         "node_id": NODE_ID,
         "account_id": ACCOUNT_ID,
+        "writer_id": WRITER_ID,
+        "lease_id": LEASE_ID,
+        "fencing_epoch": FENCING_EPOCH,
         "trading_state": "HALTED",
         "readiness": True,
         "last_heartbeat_at": _now(),
         "projection_lag_ms": 0,
         "reconciliation_state": "healthy",
+        "process_liveness": True,
+        "actor_tick_at": _now(),
+        "loss_monitor_healthy": True,
+        "loss_monitor_at": _now(),
     }
 
 
@@ -1355,7 +2721,9 @@ def _operator_status(
             {
                 "client_order_id": client_order_id,
                 "status": "FILLED",
+                "quantity": filled_quantity,
                 "filled_quantity": filled_quantity,
+                "price": average_fill_price,
                 "average_fill_price": average_fill_price,
             }
         ],
@@ -1366,6 +2734,7 @@ def _operator_status(
                 "trade_id": f"trade-{client_order_id}",
                 "payload": {
                     "commission": "0.01",
+                    "currency": "USDT",
                     "realized_pnl": "0",
                     "last_qty": filled_quantity,
                     "last_px": average_fill_price,
@@ -1392,6 +2761,7 @@ def _exchange_state(
     evidence_sources: tuple[str, ...] = (
         "exchange_state.recent_order_history",
     ),
+    available_usdt_balance: str | bool = "100",
 ) -> dict[str, Any]:
     observed_at = fetched_at
     if observed_at is None:
@@ -1438,16 +2808,22 @@ def _exchange_state(
                 "observed_at": item_observed_at.isoformat(),
             }
         )
+    payload = {
+        "fetched_at": observed_at.isoformat(),
+        "positions": positions,
+        "open_orders": [],
+        "algo_orders": [],
+    }
+    if available_usdt_balance is not False:
+        payload["account"] = {
+            "currency": "USDT",
+            "free": available_usdt_balance,
+        }
     return {
         "account_id": ACCOUNT_ID,
         "updated_at": observed_at.isoformat(),
         "stale": stale,
-        "payload": {
-            "fetched_at": observed_at.isoformat(),
-            "positions": positions,
-            "open_orders": [],
-            "algo_orders": [],
-        },
+        "payload": payload,
         "opening_execution_evidence": {
             "authoritative": evidence_authoritative,
             "reason": "fresh_account_scoped_evidence",

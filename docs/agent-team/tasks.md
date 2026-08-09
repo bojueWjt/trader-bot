@@ -2,10 +2,21 @@
 
 状态枚举：`pending`、`in_progress`、`review`、`done`、`blocked`。
 
+## 2026-08-09 Canary 收敛任务
+
+| ID | Owner | Status | Deliverable | Evidence / Next Gate |
+|---|---|---|---|---|
+| C-P2 | planner/runtime | done | FILTERED/HALTED 优先级、pending session wake、公平清理 wrapper degradation | projection 37 passed/4 skipped；调度竞态 50/50 |
+| C-GATE | planner/live-trade-verifier | done | 可用性 gate 分层、节点遥测与交易所 authority 解耦、独立 loss monitor、身份重验、完整财务证明 | executor+adapter 301 passed；runtime/projection/http focused 73 passed；heartbeat API 14 passed；execution+nautilus 422 passed/11 skipped/2 subtests；deployment 387 passed；control-plane API 86 passed；双 reviewer `P0=0 P1=0 P2=0` |
+| C-DEPLOY | planner | in_progress | 提交并部署当前 clean bundle，保持 account-a HALTED | C-GATE PASS；构建并部署 commit-bound bundle |
+| C-PREFLIGHT | live-trade-verifier | pending | deployed adapter preflight 与 canonical non-target baseline | 等待 C-DEPLOY |
+| C-LIVE | live-trade-verifier | pending | 单次 `0.07 SOLUSDT LIMIT + IOC` 往返、精确平仓、最终 HALT | 等待签名 gate 与 dry-run |
+| C-REVIEW | reviewer/evidence-auditor | pending | 最终 P0/P1、交易所证据、组合基线和损益复核 | 等待 C-LIVE |
+
 ## 2026-08-09 Meta-Review 有效任务
 
-当前只授权 Phase A。下表是现行任务状态；后续历史里程碑和开放修复项全部保持
-`NO-GO hold`，直到 A7 Reviewer 明确授权。
+下表保留 Phase A 冻结时点的任务状态。当前受限 canary 授权以本文件顶部
+“Canary 收敛任务”和现行恢复计划为准。
 
 | ID | Owner | Status | Deliverable | Evidence / Next Gate |
 |---|---|---|---|---|

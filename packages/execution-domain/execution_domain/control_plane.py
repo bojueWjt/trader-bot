@@ -99,10 +99,28 @@ class Heartbeat:
     projection_lag_ms: int
     reconciliation_state: ReconciliationState
     last_event_id: Optional[str] = None
+    writer_id: Optional[str] = None
+    lease_id: Optional[str] = None
+    fencing_epoch: Optional[int] = None
+    process_liveness: Optional[bool] = None
+    loss_monitor_healthy: Optional[bool] = None
+    loss_monitor_at: Optional[datetime] = None
 
     def __post_init__(self) -> None:
         if not str(self.account_id).strip():
             raise ValueError("heartbeat account_id is required")
+        for field_name in ("writer_id", "lease_id"):
+            value = getattr(self, field_name)
+            if value is not None and not str(value).strip():
+                raise ValueError(f"heartbeat {field_name} cannot be empty")
+        if self.fencing_epoch is not None:
+            if (
+                isinstance(self.fencing_epoch, bool)
+                or self.fencing_epoch < 1
+            ):
+                raise ValueError(
+                    "heartbeat fencing_epoch must be positive"
+                )
 
 
 @runtime_checkable

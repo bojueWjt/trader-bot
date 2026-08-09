@@ -18,6 +18,7 @@ import execution_domain.http_client as http_client_module  # noqa: E402
 from execution_domain.contracts import ReconciliationState  # noqa: E402
 from execution_domain.control_plane import Heartbeat, TradingState  # noqa: E402
 from execution_domain.http_client import (  # noqa: E402
+    ControlPlaneDurableError,
     ControlPlaneFenceConflictError,
     ControlPlaneHttpError,
     ControlPlaneIdentityError,
@@ -91,6 +92,20 @@ def test_commands_and_heartbeat_carry_account_identity(
             readiness=False,
             projection_lag_ms=0,
             reconciliation_state=ReconciliationState.DEGRADED,
+            writer_id="writer-account-a",
+            lease_id="lease-account-a",
+            fencing_epoch=42,
+            process_liveness=False,
+            loss_monitor_healthy=False,
+            loss_monitor_at=datetime(
+                2026,
+                7,
+                29,
+                0,
+                0,
+                1,
+                tzinfo=timezone.utc,
+            ),
         ),
     )
 
@@ -99,6 +114,14 @@ def test_commands_and_heartbeat_carry_account_identity(
     assert command_query["account_id"] == ["account-a"]
     assert command_query["limit"] == ["100"]
     assert heartbeat_body["account_id"] == "account-a"
+    assert heartbeat_body["writer_id"] == "writer-account-a"
+    assert heartbeat_body["lease_id"] == "lease-account-a"
+    assert heartbeat_body["fencing_epoch"] == 42
+    assert heartbeat_body["process_liveness"] is False
+    assert heartbeat_body["loss_monitor_healthy"] is False
+    assert heartbeat_body["loss_monitor_at"] == (
+        "2026-07-29T00:00:01+00:00"
+    )
     assert requests[1].get_header("X-account-id") == "account-a"
 
 
@@ -172,6 +195,49 @@ def test_http_503_preserves_status_as_recoverable_http_error(
     assert captured.value.status_code == 503
 
 
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "journal fsync failed",
+        "outbox durable write failed",
+        "capacity exhausted",
+    ),
+)
+def test_http_503_durable_failure_is_typed_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+    detail: str,
+) -> None:
+    def urlopen(request, timeout):
+        del timeout
+        raise HTTPError(
+            request.full_url,
+            503,
+            "Service Unavailable",
+            hdrs={},
+            fp=BytesIO(
+                json.dumps({"detail": detail}).encode("utf-8")
+            ),
+        )
+
+    monkeypatch.setattr(http_client_module, "urlopen", urlopen)
+
+    with pytest.raises(ControlPlaneDurableError) as captured:
+        _client().heartbeat(
+            "node-a",
+            Heartbeat(
+                account_id="account-a",
+                ts=datetime(2026, 8, 9, tzinfo=timezone.utc),
+                trading_state=TradingState.HALTED,
+                readiness=False,
+                projection_lag_ms=0,
+                reconciliation_state=ReconciliationState.DEGRADED,
+            ),
+        )
+
+    assert captured.value.status_code == 503
+    assert captured.value.fatal is True
+
+
 def test_non_fencing_http_409_remains_recoverable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -223,6 +289,22 @@ def test_heartbeat_rejects_empty_account_identity() -> None:
             readiness=False,
             projection_lag_ms=0,
             reconciliation_state=ReconciliationState.DEGRADED,
+        )
+
+
+def test_heartbeat_rejects_boolean_fencing_epoch() -> None:
+    with pytest.raises(
+        ValueError,
+        match="heartbeat fencing_epoch must be positive",
+    ):
+        Heartbeat(
+            account_id="account-a",
+            ts=datetime(2026, 7, 29, tzinfo=timezone.utc),
+            trading_state=TradingState.HALTED,
+            readiness=False,
+            projection_lag_ms=0,
+            reconciliation_state=ReconciliationState.DEGRADED,
+            fencing_epoch=True,
         )
 
 

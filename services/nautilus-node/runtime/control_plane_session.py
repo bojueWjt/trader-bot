@@ -28,6 +28,15 @@ DEFAULT_CIRCUIT_RESET_SECONDS = 5.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 15.0
 DEFAULT_CONSUMER_FREEZE_THRESHOLD_SECONDS = 60.0
 DEFAULT_RETRY_DELAY_SECONDS = DEFAULT_RETRY_BASE_DELAY_SECONDS
+_TERMINAL_HEARTBEAT_MAX_WAIT_SECONDS = 1.0
+_TELEMETRY_LANES = frozenset(
+    {
+        "heartbeat",
+        "execution_event",
+    }
+)
+_AUTH_IDENTITY_HTTP_STATUS_CODES = frozenset({401, 403})
+_TRANSIENT_CLIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429})
 _POLL_TOKEN = object()
 
 
@@ -527,6 +536,7 @@ class NodeControlPlaneSession:
         self._fatal_process = Event()
         self._fatal_termination_lock = Lock()
         self._fatal_termination_invoked = False
+        self._heartbeat_publish_lock = Lock()
         self._lifecycle_lock = Lock()
         self._threads: list[Thread] = []
         self._startup_thread: Thread | None = None
@@ -600,7 +610,7 @@ class NodeControlPlaneSession:
         return stopped
 
     def submit_execution_event(self, event: Any) -> SubmissionResult:
-        if self._stop.is_set():
+        if self._stop.is_set() or self._fatal_process.is_set():
             return SubmissionResult.BACKPRESSURED
         if self._execution_event_sink is None:
             return SubmissionResult.BACKPRESSURED
@@ -877,7 +887,7 @@ class NodeControlPlaneSession:
                     lambda: self._run_periodic(
                         "heartbeat",
                         self._heartbeat_interval_seconds,
-                        self._heartbeat,
+                        self._publish_heartbeat_once,
                     ),
                 )
             )
@@ -969,12 +979,17 @@ class NodeControlPlaneSession:
         action: Callable[[], None],
     ) -> None:
         lane = self._lanes[lane_name]
-        while not self._stop.is_set():
+        while (
+            not self._stop.is_set()
+            and not self._fatal_process.is_set()
+        ):
             try:
                 lane.queue.get(timeout=0.05)
             except Empty:
                 continue
             try:
+                if self._fatal_process.is_set():
+                    return
                 self._execute_with_retry(
                     lane,
                     action,
@@ -982,6 +997,8 @@ class NodeControlPlaneSession:
                 )
             finally:
                 lane.queue.task_done()
+            if self._fatal_process.is_set():
+                return
             if self._stop.wait(interval_seconds):
                 return
             self._offer_token(lane)
@@ -998,6 +1015,11 @@ class NodeControlPlaneSession:
             try:
                 item = lane.queue.get(timeout=0.05)
             except Empty:
+                continue
+            if self._fatal_process.is_set():
+                if lane_name == "command_delivery":
+                    self._forget_command_delivery(item)
+                lane.queue.task_done()
                 continue
             delivered = False
             while not delivered:
@@ -1032,6 +1054,8 @@ class NodeControlPlaneSession:
         *,
         drain_on_stop: bool,
     ) -> bool:
+        if self._fatal_process.is_set():
+            return False
         if not self._wait_for_circuit(
             lane,
             drain_on_stop=drain_on_stop,
@@ -1039,15 +1063,20 @@ class NodeControlPlaneSession:
             return False
         attempt = 0
         while attempt < lane.retry_budget:
+            if self._fatal_process.is_set():
+                return False
             half_open = lane.begin()
             started_at = time.monotonic()
             try:
                 action()
             except BaseException as exc:
                 detail, deadline_reported = lane.fail(exc)
-                if _is_fence_conflict(exc):
+                if _requires_fatal_termination(lane, exc):
                     self._trigger_fatal_termination(lane, detail)
                     return False
+                if _is_nonfatal_telemetry_rejection(lane, exc):
+                    self._report_failure(lane.name, exc)
+                    return True
                 if deadline_reported:
                     return False
                 attempt += 1
@@ -1160,6 +1189,8 @@ class NodeControlPlaneSession:
             )
 
     def _submit_to_lane(self, lane: _Lane, item: Any) -> bool:
+        if self._fatal_process.is_set():
+            return False
         if not lane.accepts_submissions():
             return False
         try:
@@ -1180,6 +1211,9 @@ class NodeControlPlaneSession:
             return
 
     def _delivery_should_stop(self, lane: _Lane) -> bool:
+        if self._fatal_process.is_set():
+            self._discard_delivery_queue(lane)
+            return True
         if not self._stop.is_set():
             return False
         if lane.queue.empty():
@@ -1188,6 +1222,16 @@ class NodeControlPlaneSession:
             self._drain_failed.set()
             return True
         return False
+
+    def _discard_delivery_queue(self, lane: _Lane) -> None:
+        while True:
+            try:
+                item = lane.queue.get_nowait()
+            except Empty:
+                return
+            if lane.name == "command_delivery":
+                self._forget_command_delivery(item)
+            lane.queue.task_done()
 
     def _stop_deadline_expired(self) -> bool:
         if not self._stop.is_set():
@@ -1281,6 +1325,8 @@ class NodeControlPlaneSession:
         drain_on_stop: bool,
     ) -> bool:
         while True:
+            if self._fatal_process.is_set():
+                return False
             remaining = lane.seconds_until_attempt()
             if remaining <= 0:
                 return True
@@ -1296,6 +1342,8 @@ class NodeControlPlaneSession:
         *,
         drain_on_stop: bool,
     ) -> bool:
+        if self._fatal_process.is_set():
+            return False
         bounded_delay = max(float(delay), 0.0)
         if not self._stop.is_set():
             return not self._stop.wait(bounded_delay)
@@ -1369,7 +1417,8 @@ class NodeControlPlaneSession:
             lane.mark_fatal(reason)
             self._fatal_process.set()
             self._stop.set()
-            self._termination.set()
+        self._publish_terminal_heartbeat(lane)
+        self._termination.set()
         self._report_failure(
             lane.name,
             TimeoutError(reason),
@@ -1381,6 +1430,56 @@ class NodeControlPlaneSession:
             hook(reason)
         except Exception:
             return
+
+    def _publish_terminal_heartbeat(self, fatal_lane: _Lane) -> None:
+        heartbeat = self._heartbeat
+        if heartbeat is None:
+            return
+        if fatal_lane.name == "heartbeat":
+            return
+
+        completed = Event()
+        failures: list[BaseException] = []
+
+        def publish() -> None:
+            try:
+                self._publish_heartbeat_once()
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                completed.set()
+
+        worker = Thread(
+            target=publish,
+            name=f"{self._thread_name_prefix}.terminal-heartbeat",
+            daemon=True,
+        )
+        worker.start()
+        timeout = min(
+            self._operation_timeout_seconds,
+            _TERMINAL_HEARTBEAT_MAX_WAIT_SECONDS,
+        )
+        if not completed.wait(timeout=timeout):
+            self._report_failure(
+                "terminal_heartbeat",
+                TimeoutError(
+                    "terminal heartbeat timed out after "
+                    f"{timeout:.3f}s"
+                ),
+            )
+            return
+        if failures:
+            self._report_failure(
+                "terminal_heartbeat",
+                failures[0],
+            )
+
+    def _publish_heartbeat_once(self) -> None:
+        heartbeat = self._heartbeat
+        if heartbeat is None:
+            return
+        with self._heartbeat_publish_lock:
+            heartbeat()
 
 
 def _require_positive_interval(name: str, value: float) -> None:
@@ -1396,10 +1495,84 @@ def _exception_detail(exc: BaseException) -> str:
 
 
 def _is_fence_conflict(exc: BaseException) -> bool:
-    status_code = getattr(exc, "status_code", None)
-    if status_code != 409:
+    for candidate in _exception_chain(exc):
+        status_code = getattr(candidate, "status_code", None)
+        if status_code != 409:
+            continue
+        if getattr(candidate, "is_fence_conflict", False) is True:
+            return True
+    return False
+
+
+def _is_identity_conflict(exc: BaseException) -> bool:
+    for candidate in _exception_chain(exc):
+        if getattr(candidate, "is_identity_conflict", False) is True:
+            return True
+        if type(candidate).__name__ == "ControlPlaneIdentityError":
+            return True
+        status_code = getattr(candidate, "status_code", None)
+        if status_code in _AUTH_IDENTITY_HTTP_STATUS_CODES:
+            return True
+    return False
+
+
+def _is_permanent_publish_rejection(exc: BaseException) -> bool:
+    for candidate in _exception_chain(exc):
+        if getattr(candidate, "permanent", False) is True:
+            return True
+        status_code = getattr(candidate, "status_code", None)
+        if not isinstance(status_code, int):
+            continue
+        if status_code in _TRANSIENT_CLIENT_HTTP_STATUS_CODES:
+            continue
+        if 400 <= status_code < 500:
+            return True
+    return False
+
+
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None:
+        identity = id(current)
+        if identity in seen:
+            return
+        seen.add(identity)
+        yield current
+        cause = current.__cause__
+        if cause is None:
+            cause = current.__context__
+        current = cause
+
+
+def _requires_fatal_termination(
+    lane: _Lane,
+    exc: BaseException,
+) -> bool:
+    if _is_fence_conflict(exc):
+        return True
+    if _is_identity_conflict(exc):
+        return True
+    if getattr(exc, "fatal", False) is True:
+        return True
+    if lane.name in _TELEMETRY_LANES:
         return False
-    return getattr(exc, "is_fence_conflict", False) is True
+    return _is_permanent_publish_rejection(exc)
+
+
+def _is_nonfatal_telemetry_rejection(
+    lane: _Lane,
+    exc: BaseException,
+) -> bool:
+    if lane.name not in _TELEMETRY_LANES:
+        return False
+    if _is_fence_conflict(exc):
+        return False
+    if _is_identity_conflict(exc):
+        return False
+    if getattr(exc, "fatal", False) is True:
+        return False
+    return _is_permanent_publish_rejection(exc)
 
 
 def _monotonic_age_ms(

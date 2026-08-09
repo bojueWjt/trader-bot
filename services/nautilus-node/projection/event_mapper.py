@@ -249,7 +249,7 @@ def _ensure_aware(value: datetime) -> datetime:
 def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
-    text = str(getattr(value, "value", value))
+    text = str(getattr(value, "value", value)).strip()
     return text or None
 
 

@@ -170,6 +170,9 @@ class FakeAdapter:
         preflight_regular_order_count: int = 0,
         preflight_algo_order_count: int = 0,
         preflight_baseline_sha256: str = "",
+        preflight_available_usdt_balance: str | bool = "100",
+        preflight_fetched_at: datetime = NOW,
+        refresh_preflight_after_resume: bool = True,
         signal_number: int | None = None,
         position_failures: int = 0,
         close_failures: int = 0,
@@ -181,6 +184,7 @@ class FakeAdapter:
         halt_source: str = executor.NODE_STATE_EVIDENCE_SOURCE,
         halt_state: str = "HALTED",
         halt_observed_at: datetime = NOW,
+        resume_observed_at: datetime = NOW,
         on_resume: Callable[[], None] | None = None,
         resume_failures: int = 0,
         observe_failures: int = 0,
@@ -210,6 +214,13 @@ class FakeAdapter:
         self.preflight_regular_order_count = preflight_regular_order_count
         self.preflight_algo_order_count = preflight_algo_order_count
         self.preflight_baseline_sha256 = preflight_baseline_sha256
+        self.preflight_available_usdt_balance = (
+            preflight_available_usdt_balance
+        )
+        self.preflight_fetched_at = preflight_fetched_at
+        self.refresh_preflight_after_resume = (
+            refresh_preflight_after_resume
+        )
         self.signal_number = signal_number
         self.position_failures = position_failures
         self.close_failures = close_failures
@@ -221,6 +232,7 @@ class FakeAdapter:
         self.halt_source = halt_source
         self.halt_state = halt_state
         self.halt_observed_at = halt_observed_at
+        self.resume_observed_at = resume_observed_at
         self.on_resume = on_resume
         self.resume_failures = resume_failures
         self.observe_failures = observe_failures
@@ -240,6 +252,7 @@ class FakeAdapter:
         self.close_requests: list[Mapping[str, Any]] = []
         self.position_quantity = Decimal(0)
         self.position_side = "FLAT"
+        self.trading_state = "HALTED"
 
     def preflight(
         self,
@@ -257,7 +270,8 @@ class FakeAdapter:
             {
                 "action": "preflight",
                 "source": executor.EXCHANGE_EVIDENCE_SOURCE,
-                "fetched_at": NOW.isoformat(),
+                "exchange_authoritative": True,
+                "fetched_at": self.preflight_fetched_at.isoformat(),
                 "mirror_stale": False,
                 "target_position_side": self.preflight_position_side,
                 "target_position_quantity": (
@@ -272,15 +286,29 @@ class FakeAdapter:
                 "non_target_portfolio_baseline_sha256": baseline,
                 "node_snapshot": {
                     "account_id": self.authorization.account_id,
-                    "trading_state": "HALTED",
+                    "node_id": self.authorization.release.node_id,
+                    "writer_id": self.authorization.release.writer_id,
+                    "lease_id": self.authorization.release.lease_id,
+                    "fencing_epoch": (
+                        self.authorization.release.fencing_epoch
+                    ),
+                    "trading_state": self.trading_state,
                     "process_liveness": True,
-                    "actor_tick_at": NOW.isoformat(),
+                    "actor_tick_at": (
+                        self.authorization.actor_tick_at.isoformat()
+                    ),
                     "loss_monitor_healthy": True,
-                    "loss_monitor_at": NOW.isoformat(),
+                    "loss_monitor_at": (
+                        self.authorization.loss_monitor_at.isoformat()
+                    ),
                 },
                 "evidence_sha256": _digest("preflight"),
             }
         )
+        if self.preflight_available_usdt_balance is not False:
+            payload["available_usdt_balance"] = (
+                self.preflight_available_usdt_balance
+            )
         return payload
 
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -288,10 +316,19 @@ class FakeAdapter:
         self._record_call("resume", request)
         if self.calls.count("resume") <= self.resume_failures:
             raise TimeoutError("injected RESUME response timeout")
+        self.trading_state = "ACTIVE"
+        if self.refresh_preflight_after_resume:
+            self.preflight_fetched_at = max(
+                self.preflight_fetched_at,
+                self.resume_observed_at,
+            )
         if self.on_resume is not None:
             self.on_resume()
         return self._ack(
             "resume",
+            source=executor.NODE_STATE_EVIDENCE_SOURCE,
+            trading_state=self.trading_state,
+            observed_at=self.resume_observed_at.isoformat(),
             side_effect_id=request["side_effect_id"],
         )
 
@@ -498,6 +535,7 @@ class FakeAdapter:
         self._record_call("halt", request)
         if self.calls.count("halt") <= self.halt_failures:
             raise RuntimeError("injected HALT failure")
+        self.trading_state = self.halt_state
         return self._ack(
             "halt",
             source=self.halt_source,
@@ -512,6 +550,10 @@ class FakeAdapter:
             "account_id": authorization.account_id,
             "symbol": authorization.symbol,
             "release_id": authorization.release.release_id,
+            "node_id": authorization.release.node_id,
+            "writer_id": authorization.release.writer_id,
+            "lease_id": authorization.release.lease_id,
+            "fencing_epoch": authorization.release.fencing_epoch,
             "image_digest": authorization.release.image_digest,
             "config_sha256": authorization.release.config_sha256,
             "dependency_lock_sha256": (
@@ -762,7 +804,7 @@ def test_live_authorization_rejects_forged_self_signed_reviewer_key(
         "loss_monitor_at",
     ],
 )
-def test_authorization_rejects_stale_hard_safety_timestamp(
+def test_authorization_accepts_stale_signed_safety_timestamp_with_warning(
     tmp_path: Path,
     field_name: str,
 ) -> None:
@@ -775,15 +817,16 @@ def test_authorization_rejects_stale_hard_safety_timestamp(
         rebuild_hash_chain=True,
     )
 
-    with pytest.raises(
-        executor.LiveTradeExecutionError,
-        match=f"safety gate {field_name} is stale",
-    ):
-        executor.load_authorization(
-            paths,
-            execute_live=False,
-            now=NOW,
-        )
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert any(
+        f"safety gate {field_name} is stale" in warning
+        for warning in authorization.warnings
+    )
 
 
 @pytest.mark.parametrize(
@@ -900,6 +943,456 @@ def test_authorization_soft_safety_truths_become_warnings(
             "memory_queue_pressure=true"
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "ownership_healthy",
+        "fencing_healthy",
+        "durability_healthy",
+    ],
+)
+def test_authorization_rejects_explicit_scoped_safety_failure(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].update(
+            {field_name: False}
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match=f"safety gate requires {field_name}=true",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "warning_code"),
+    [
+        (
+            "ownership_healthy",
+            "SAFETY_OWNERSHIP_HEALTH_MISSING",
+        ),
+        (
+            "fencing_healthy",
+            "SAFETY_FENCING_HEALTH_MISSING",
+        ),
+        (
+            "durability_healthy",
+            "SAFETY_DURABILITY_HEALTH_MISSING",
+        ),
+    ],
+)
+def test_authorization_treats_missing_scoped_safety_health_as_advisory(
+    tmp_path: Path,
+    field_name: str,
+    warning_code: str,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].pop(
+            field_name
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert any(
+        warning_code in warning
+        for warning in authorization.warnings
+    )
+
+
+@pytest.mark.parametrize("field_value", [None, False])
+def test_authorization_treats_risk_health_as_advisory(
+    tmp_path: Path,
+    field_value: bool | None,
+) -> None:
+    def mutate(documents: dict[str, dict[str, Any]]) -> None:
+        safety_gate = documents["safety_gate"]
+        if field_value is None:
+            safety_gate.pop("risk_healthy")
+            return
+        safety_gate["risk_healthy"] = field_value
+
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=mutate,
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert any(
+        "SAFETY_RISK_DEGRADED" in warning
+        for warning in authorization.warnings
+    )
+
+
+def test_authorization_treats_missing_loss_monitor_health_as_advisory(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].pop(
+            "loss_monitor_healthy"
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert any(
+        "SAFETY_LOSS_MONITOR_HEALTH_MISSING" in warning
+        for warning in authorization.warnings
+    )
+
+
+def test_authorization_rejects_explicit_unhealthy_loss_monitor(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].update(
+            {"loss_monitor_healthy": False}
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="requires loss_monitor_healthy=true",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("field_name", executor.SIGNED_HEALTH_FIELDS)
+def test_authorization_treats_missing_health_timestamp_as_advisory(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].pop(
+            field_name
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert getattr(authorization, field_name) is None
+    assert any(
+        (
+            "SAFETY_HEALTH_TELEMETRY_MISSING" in warning
+            and field_name in warning
+        )
+        for warning in authorization.warnings
+    )
+
+
+def test_authorization_parses_fee_reserve_and_optional_exchange_filters(
+    tmp_path: Path,
+) -> None:
+    def mutate(documents: dict[str, dict[str, Any]]) -> None:
+        documents["permit"]["exchange_filters"] = {
+            "quantity_step": "0.01",
+            "min_quantity": "0.01",
+            "price_tick": "0.01",
+            "min_notional": "5",
+        }
+
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=mutate,
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert authorization.fee_reserve_usdt == Decimal("0.10")
+    assert authorization.exchange_filters == {
+        "quantity_step": Decimal("0.01"),
+        "min_quantity": Decimal("0.01"),
+        "price_tick": Decimal("0.01"),
+        "min_notional": Decimal("5"),
+    }
+
+
+def test_authorization_requires_fixed_live_canary_quantity(
+    tmp_path: Path,
+) -> None:
+    def mutate(documents: dict[str, dict[str, Any]]) -> None:
+        documents["emergency_close_gate"]["verified_quantity"] = "0.1"
+        documents["permit"]["quantity"] = "0.1"
+
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=mutate,
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="permit quantity must equal 0.07 SOL",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
+def test_authorization_missing_exchange_filters_is_advisory(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["permit"].pop(
+            "exchange_filters"
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert authorization.exchange_filters == {}
+    assert any(
+        "EXCHANGE_FILTERS_MISSING" in warning
+        for warning in authorization.warnings
+    )
+
+
+def test_authorization_rejects_malformed_exchange_filters(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["permit"].update(
+            {"exchange_filters": "unavailable"}
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="exchange_filters must be an object",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("quantity_step", "0.03"),
+        ("min_quantity", "0.11"),
+        ("price_tick", "0.03"),
+        ("min_notional", "11"),
+    ],
+)
+def test_authorization_rejects_known_exchange_filter_violation(
+    tmp_path: Path,
+    field_name: str,
+    field_value: str,
+) -> None:
+    def mutate(documents: dict[str, dict[str, Any]]) -> None:
+        filters = {
+            "quantity_step": "0.01",
+            "min_quantity": "0.01",
+            "price_tick": "0.01",
+            "min_notional": "5",
+        }
+        filters[field_name] = field_value
+        documents["permit"]["exchange_filters"] = filters
+
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=mutate,
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match=f"exchange filter rejected: {field_name}",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "node_id",
+        "writer_id",
+        "lease_id",
+        "fencing_epoch",
+    ],
+)
+def test_authorization_requires_signed_execution_identity(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["release_gate"].pop(
+            field_name
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match=f"release gate {field_name}",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "document_name",
+    [
+        "safety_gate",
+        "emergency_close_gate",
+        "permit",
+    ],
+)
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("node_id", "nautilus-node-account-b"),
+        ("writer_id", "writer-account-b"),
+        ("lease_id", "lease-account-b"),
+        ("fencing_epoch", 43),
+    ],
+)
+def test_authorization_rejects_execution_identity_drift(
+    tmp_path: Path,
+    document_name: str,
+    field_name: str,
+    field_value: str | int,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents[document_name].update(
+            {field_name: field_value}
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match=(
+            f"{document_name.replace('_', ' ')} "
+            f"release identity mismatch: {field_name}"
+        ),
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
+def test_authorization_accepts_emergency_close_contract_replay_with_warning(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["emergency_close_gate"].update(
+            {
+                "evidence_type": "contract_replay",
+                "environment": "contract_replay",
+            }
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert authorization.emergency_close_evidence_type == "contract_replay"
+    assert authorization.emergency_close_environment == "contract_replay"
+    assert (
+        "EMERGENCY_CLOSE_CONTRACT_REPLAY_ONLY: "
+        "emergency close evidence is a deterministic contract replay"
+    ) in authorization.warnings
+
+
+def test_authorization_rejects_unknown_emergency_close_evidence_type(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["emergency_close_gate"].update(
+            {
+                "evidence_type": "manual_claim",
+                "environment": "manual",
+            }
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="emergency close evidence_type is unsupported",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
 
 
 def test_close_intent_and_client_order_id_are_distinct_and_stable(
@@ -1389,7 +1882,7 @@ def test_open_exception_still_closes_exact_position_then_halts(
     assert result.passed is False
     assert "injected observation failure" in result.failure_reason
     assert result.close_submitted is True
-    assert result.close_quantity == Decimal("0.1")
+    assert result.close_quantity == Decimal("0.07")
     assert adapter.calls.index("close") < adapter.calls.index("halt")
     assert adapter.close_requests == [
         {
@@ -1409,7 +1902,7 @@ def test_open_exception_still_closes_exact_position_then_halts(
             "side": "SELL",
             "position_side": "LONG",
             "order_type": "MARKET",
-            "quantity": "0.1",
+            "quantity": "0.07",
             "reduce_only": True,
             "reason": "failure-cleanup",
             "attempt": 1,
@@ -1425,7 +1918,7 @@ def test_open_exception_still_closes_exact_position_then_halts(
     assert evidence["passed"] is False
     assert evidence["finished_halted"] is True
     assert evidence["mainnet_round_trip"]["close_reduce_only"] is True
-    assert evidence["mainnet_round_trip"]["close_quantity"] == "0.1"
+    assert evidence["mainnet_round_trip"]["close_quantity"] == "0.07"
     assert evidence["testnet_emergency_close"]["verified"] is True
 
 
@@ -1580,6 +2073,17 @@ def test_stalled_journal_write_times_out_before_emergency_recovery(
         )
     )
     assert evidence["permit_journal_degraded"] is True
+    outcome = store.claim_or_recover(
+        authorization,
+        mode="live",
+    )
+    assert outcome.recovery_required is True
+    assert outcome.terminal is False
+    with pytest.raises(
+        executor.DuplicatePermitError,
+        match="already has durable state",
+    ):
+        store.claim(authorization, mode="live")
 
 
 def test_open_timeout_after_exchange_acceptance_recovers_exchange_first(
@@ -1836,13 +2340,56 @@ def test_live_preflight_blocks_existing_position_without_closing_it(
     assert result.finished_halted is True
 
 
-def test_live_preflight_transport_failure_degrades_and_continues(
+@pytest.mark.parametrize(
+    "failure_message",
+    [
+        "ownership conflict: projection unavailable",
+        "fencing lease lost during readiness timeout",
+        "permit journal fsync failed: HTTP 503",
+        "durable write failed with ENOSPC: service unavailable",
+        "capacity-exhausted while projection is stale",
+    ],
+)
+def test_live_preflight_hard_failure_precedes_soft_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_message: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+
+    def fail_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        adapter._record_call("preflight", request)
+        raise RuntimeError(failure_message)
+
+    monkeypatch.setattr(adapter, "preflight", fail_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-hard-failure.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert failure_message in result.failure_reason
+    assert adapter.calls.count("preflight") == 1
+    assert "resume" not in adapter.calls
+    assert "open" not in adapter.calls
+    assert "PREFLIGHT" not in result.retry_counts
+
+
+def test_before_resume_preflight_transport_failure_degrades_and_continues(
     tmp_path: Path,
 ) -> None:
     authorization = _authorization(tmp_path)
     adapter = FakeAdapter(
         authorization,
-        preflight_failures=6,
+        preflight_failures=3,
     )
     live_executor = _executor(
         tmp_path,
@@ -1855,12 +2402,450 @@ def test_live_preflight_transport_failure_degrades_and_continues(
 
     assert result.status == "DEGRADED"
     assert result.passed is True
-    assert adapter.calls.count("preflight") == 6
+    assert adapter.calls.count("preflight") == 4
     assert adapter.calls.count("open") == 1
     assert any(
         "PREFLIGHT soft failure budget exhausted" in reason
         for reason in result.degraded_reasons
     )
+
+
+def test_before_open_preflight_transport_failure_blocks_after_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def fail_before_open(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if request.get("phase") == "before-open":
+            adapter._record_call("preflight", request)
+            raise TimeoutError("exchange authority timeout")
+        return original_preflight(request)
+
+    monkeypatch.setattr(adapter, "preflight", fail_before_open)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-before-open-timeout.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.error_code == "EXCHANGE_AUTHORITY_UNAVAILABLE"
+    assert (
+        "before-open exchange authority unavailable after RESUME"
+        in result.failure_reason
+    )
+    assert adapter.calls.count("preflight") == 4
+    assert adapter.calls.count("resume") == 1
+    assert "open" not in adapter.calls
+
+
+def test_before_open_preflight_blocks_without_any_exchange_snapshot(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        preflight_failures=6,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-no-exchange-snapshot.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.error_code == "EXCHANGE_AUTHORITY_UNAVAILABLE"
+    assert "before-open exchange authority unavailable" in (
+        result.failure_reason
+    )
+    assert "open" not in adapter.calls
+
+
+@pytest.mark.parametrize("authority_value", [None, False])
+def test_before_open_preflight_exchange_authority_flag_is_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority_value: bool | None,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def non_authoritative_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") != "before-open":
+            return payload
+        if authority_value is None:
+            payload.pop("exchange_authoritative", None)
+            return payload
+        payload["exchange_authoritative"] = authority_value
+        return payload
+
+    monkeypatch.setattr(
+        adapter,
+        "preflight",
+        non_authoritative_preflight,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-exchange-authority.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        "PREFLIGHT_EXCHANGE_AUTHORITY_UNCONFIRMED" in warning
+        for warning in result.warnings
+    )
+    assert adapter.calls.count("preflight") == 2
+    assert adapter.calls.count("open") == 1
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "process_liveness",
+        "loss_monitor_healthy",
+    ],
+)
+def test_before_open_preflight_missing_live_health_is_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def unhealthy_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") != "before-open":
+            return payload
+        node_snapshot = dict(payload["node_snapshot"])
+        node_snapshot.pop(field_name, None)
+        payload["node_snapshot"] = node_snapshot
+        return payload
+
+    monkeypatch.setattr(adapter, "preflight", unhealthy_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / f"preflight-{field_name}.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        f"PREFLIGHT_NODE_HEALTH_MISSING: {field_name}" in warning
+        for warning in result.warnings
+    )
+    assert adapter.calls.count("open") == 1
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "process_liveness",
+        "loss_monitor_healthy",
+    ],
+)
+def test_before_open_preflight_explicit_unhealthy_state_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def unhealthy_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") != "before-open":
+            return payload
+        node_snapshot = dict(payload["node_snapshot"])
+        node_snapshot[field_name] = False
+        payload["node_snapshot"] = node_snapshot
+        return payload
+
+    monkeypatch.setattr(adapter, "preflight", unhealthy_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / f"preflight-false-{field_name}.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert f"preflight requires {field_name}=true" in (
+        result.failure_reason
+    )
+    assert "open" not in adapter.calls
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "expected_error"),
+    [
+        ("actor_tick_at", None, "preflight actor_tick_at is required"),
+        (
+            "actor_tick_at",
+            NOW - timedelta(seconds=6),
+            "preflight actor_tick_at is stale",
+        ),
+        (
+            "loss_monitor_at",
+            None,
+            "preflight loss_monitor_at is required",
+        ),
+        (
+            "loss_monitor_at",
+            NOW - timedelta(seconds=6),
+            "preflight loss_monitor_at is stale",
+        ),
+    ],
+)
+def test_before_open_preflight_live_progress_is_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    field_value: datetime | None,
+    expected_error: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def stale_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") != "before-open":
+            return payload
+        node_snapshot = dict(payload["node_snapshot"])
+        if field_value is None:
+            node_snapshot.pop(field_name, None)
+        else:
+            node_snapshot[field_name] = field_value.isoformat()
+        payload["node_snapshot"] = node_snapshot
+        return payload
+
+    monkeypatch.setattr(adapter, "preflight", stale_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / f"preflight-{field_name}.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        expected_error in warning
+        for warning in result.warnings
+    )
+    assert adapter.calls.count("open") == 1
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "writer_id",
+        "lease_id",
+        "fencing_epoch",
+    ],
+)
+def test_before_open_preflight_missing_extended_identity_is_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def incomplete_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") != "before-open":
+            return payload
+        node_snapshot = dict(payload["node_snapshot"])
+        node_snapshot.pop(field_name, None)
+        payload["node_snapshot"] = node_snapshot
+        return payload
+
+    monkeypatch.setattr(adapter, "preflight", incomplete_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / f"preflight-missing-{field_name}.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        f"PREFLIGHT_NODE_IDENTITY_MISSING: {field_name}" in warning
+        for warning in result.warnings
+    )
+    assert adapter.calls.count("open") == 1
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        "node telemetry degraded: HTTP_503 node projection unavailable",
+        "node telemetry degraded: HTTP_TIMEOUT node telemetry timeout",
+        "node telemetry degraded: ADAPTER_ERROR node is missing",
+    ],
+)
+def test_before_open_preflight_allows_unavailable_node_telemetry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    warning: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def exchange_only_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") != "before-open":
+            return payload
+        payload.pop("node_snapshot")
+        payload["warnings"] = [warning]
+        return payload
+
+    monkeypatch.setattr(adapter, "preflight", exchange_only_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-node-unavailable.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert warning in result.warnings
+    assert adapter.calls.count("open") == 1
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("node_id", "nautilus-node-account-b"),
+        ("writer_id", "writer-account-b"),
+        ("lease_id", "lease-account-b"),
+        ("fencing_epoch", 43),
+    ],
+)
+def test_before_open_preflight_binds_signed_execution_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    field_value: str | int,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def mismatched_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") != "before-open":
+            return payload
+        node_snapshot = dict(payload["node_snapshot"])
+        node_snapshot[field_name] = field_value
+        payload["node_snapshot"] = node_snapshot
+        return payload
+
+    monkeypatch.setattr(adapter, "preflight", mismatched_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / f"preflight-{field_name}.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert f"preflight node identity mismatch: {field_name}" in (
+        result.failure_reason
+    )
+    assert "open" not in adapter.calls
+
+
+def test_before_resume_preflight_blocks_explicit_writer_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def mismatched_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        node_snapshot = dict(payload["node_snapshot"])
+        node_snapshot["writer_id"] = "writer-account-b"
+        payload["node_snapshot"] = node_snapshot
+        return payload
+
+    monkeypatch.setattr(adapter, "preflight", mismatched_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-before-resume-writer.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "preflight node identity mismatch: writer_id" in (
+        result.failure_reason
+    )
+    assert adapter.calls[0] == "preflight"
+    assert "resume" not in adapter.calls
+    assert "open" not in adapter.calls
 
 
 def test_live_preflight_rechecks_funds_immediately_before_open(
@@ -1892,7 +2877,36 @@ def test_live_preflight_rechecks_funds_immediately_before_open(
     assert "open" not in adapter.calls
 
 
-def test_financial_enrichment_failure_degrades_without_blocking_flat_proof(
+def test_before_open_preflight_rejects_snapshot_from_before_resume(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        preflight_fetched_at=NOW - timedelta(seconds=1),
+        refresh_preflight_after_resume=False,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-before-resume-snapshot.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "preflight fetched_at predates required exchange progress" in (
+        result.failure_reason
+    )
+    assert adapter.calls.count("preflight") == 2
+    assert adapter.calls.count("resume") == 1
+    assert "open" not in adapter.calls
+    before_open_request = adapter.requests["preflight"][1]
+    assert before_open_request["exchange_not_before"] == NOW.isoformat()
+
+
+def test_financial_enrichment_failure_blocks_final_certification_only(
     tmp_path: Path,
 ) -> None:
     authorization = _authorization(tmp_path)
@@ -1910,14 +2924,133 @@ def test_financial_enrichment_failure_degrades_without_blocking_flat_proof(
 
     result = live_executor.execute(authorization)
 
-    assert result.status == "DEGRADED"
-    assert result.passed is True
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.error_code == "FINANCIAL_PROOF_INCOMPLETE"
+    assert "loss threshold cannot be certified" in result.failure_reason
     assert result.close_submitted is True
     assert result.finished_halted is True
     assert any(
         "FINANCIAL_PROOF_DEGRADED" in reason
         for reason in result.degraded_reasons
     )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "enrichment_degraded",
+        "financial_proof_complete",
+    ],
+)
+def test_final_snapshot_requires_explicit_financial_proof_state(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    payload = dict(adapter.final_snapshot({}))
+    payload.pop(field_name)
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match=f"final {field_name} must be boolean",
+    ):
+        executor._validate_final_snapshot(
+            payload,
+            authorization,
+            now=NOW,
+        )
+
+
+def test_final_snapshot_rejects_warning_and_proof_state_mismatch(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    payload = dict(adapter.final_snapshot({}))
+    payload["warnings"] = ["operator projection unavailable"]
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="final warnings and enrichment state differ",
+    ):
+        executor._validate_final_snapshot(
+            payload,
+            authorization,
+            now=NOW,
+        )
+
+
+def test_live_preflight_blocks_known_insufficient_balance(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        preflight_available_usdt_balance="7.09",
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-insufficient-balance.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "available USDT balance is below order plus fee reserve" in (
+        result.failure_reason
+    )
+    assert "open" not in adapter.calls
+
+
+def test_live_preflight_request_binds_order_and_fee_reserve(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-order-envelope.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.passed is True
+    requests = adapter.requests["preflight"]
+    assert requests[0]["quantity"] == "0.07"
+    assert requests[0]["limit_price_usdt"] == "100"
+    assert requests[0]["fee_reserve_usdt"] == "0.10"
+
+
+def test_live_preflight_missing_balance_is_advisory(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        preflight_available_usdt_balance=False,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-balance-missing.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        "PREFLIGHT_AVAILABLE_BALANCE_MISSING" in warning
+        for warning in result.warnings
+    )
+    assert adapter.calls.count("open") == 1
 
 
 def test_close_enrichment_degradation_is_retained_in_execution_audit(
@@ -1991,7 +3124,7 @@ def test_resume_timeout_recovers_as_degraded_with_bounded_retry(
     )
 
 
-def test_resume_timeout_exhaustion_continues_open_as_degraded(
+def test_resume_timeout_exhaustion_blocks_open_while_node_remains_halted(
     tmp_path: Path,
 ) -> None:
     authorization = _authorization(tmp_path)
@@ -2010,15 +3143,16 @@ def test_resume_timeout_exhaustion_continues_open_as_degraded(
 
     result = live_executor.execute(authorization)
 
-    assert result.status == "DEGRADED"
-    assert result.passed is True
-    assert result.retryable is False
-    assert result.error_code == "SOFT_TRANSPORT_DEGRADED"
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert "preflight node state is invalid for before-open" in (
+        result.failure_reason
+    )
     assert adapter.calls.count("resume") == 3
-    assert adapter.calls.count("open") == 1
+    assert "open" not in adapter.calls
     snapshot = store.snapshot(authorization, mode="live")
     assert snapshot is not None
-    assert snapshot["state"] == "EVIDENCE_COMMITTED"
+    assert snapshot["state"] == "HALTED"
 
 
 def test_observe_timeout_recovers_as_degraded_without_open_replay(
@@ -2223,6 +3357,8 @@ def test_final_pass_uses_fresh_post_halt_exchange_snapshot(
     final_requests = adapter.requests["final-snapshot"]
     assert final_requests[0]["phase"] == "pre-halt-close-proof"
     assert final_requests[1]["phase"] == "post-halt-final"
+    assert final_requests[0]["open_side"] == authorization.open_side
+    assert final_requests[1]["open_side"] == authorization.open_side
     evidence = json.loads(evidence_path.read_text(encoding="ascii"))
     round_trip = evidence["mainnet_round_trip"]
     assert round_trip["final_snapshot_phase"] == "post-halt-final"
@@ -2230,6 +3366,98 @@ def test_final_pass_uses_fresh_post_halt_exchange_snapshot(
     assert round_trip["final_snapshot_evidence_sha256"] == _digest(
         "post-halt-final"
     )
+
+
+def test_state_identity_missing_warnings_are_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_resume = adapter.resume
+    original_halt = adapter.halt
+
+    def resume_with_warning(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_resume(request))
+        payload["warnings"] = [
+            "node identity telemetry missing: writer_id"
+        ]
+        return payload
+
+    def halt_with_warning(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_halt(request))
+        payload["warnings"] = [
+            "node identity telemetry missing: lease_id"
+        ]
+        return payload
+
+    monkeypatch.setattr(adapter, "resume", resume_with_warning)
+    monkeypatch.setattr(adapter, "halt", halt_with_warning)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "state-identity-warning.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.warnings == (
+        "node identity telemetry missing: writer_id",
+        "node identity telemetry missing: lease_id",
+    )
+    assert adapter.calls.count("open") == 1
+
+
+def test_post_halt_loss_at_permit_cap_blocks_final_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        observation_loss="1.48",
+    )
+    original_final_snapshot = adapter.final_snapshot
+
+    def final_snapshot(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_final_snapshot(request))
+        if request.get("phase") == "post-halt-final":
+            payload.update(
+                {
+                    "gross_pnl_usdt": "-1.47",
+                    "fees_usdt": "0.02",
+                    "net_pnl_usdt": "-1.49",
+                    "cumulative_net_loss_usdt": "1.49",
+                }
+            )
+        return payload
+
+    monkeypatch.setattr(adapter, "final_snapshot", final_snapshot)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "post-halt-loss-cap.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.finished_halted is True
+    assert "post-HALT cumulative net loss threshold reached" in (
+        result.failure_reason
+    )
+    assert adapter.calls[-2:] == ["halt", "final-snapshot"]
 
 
 def test_stale_post_halt_snapshot_blocks_final_pass(
@@ -2463,7 +3691,7 @@ def test_actual_open_notional_breach_closes_and_halts(
     authorization = _authorization(tmp_path)
     adapter = FakeAdapter(
         authorization,
-        observation_price="121",
+        observation_price="172",
     )
     live_executor = _executor(
         tmp_path,
@@ -2485,7 +3713,7 @@ def test_actual_open_notional_breach_closes_and_halts(
     )
     assert (
         evidence["mainnet_round_trip"]["actual_open_notional_usdt"]
-        == "12.1"
+        == "12.04"
     )
 
 
@@ -2546,7 +3774,7 @@ def test_loss_threshold_reached_closes_and_halts_immediately(
         "loss_monitor_at",
     ],
 )
-def test_hard_health_is_revalidated_after_resume_before_open(
+def test_signed_live_progress_staleness_after_resume_is_advisory(
     tmp_path: Path,
     field_name: str,
 ) -> None:
@@ -2571,6 +3799,16 @@ def test_hard_health_is_revalidated_after_resume_before_open(
     adapter = FakeAdapter(
         authorization,
         on_resume=advance_clock_after_resume,
+        observation_times={
+            "observed_at": fresh_at_open,
+            "mark_at": fresh_at_open,
+            "loss_monitor_at": fresh_at_open,
+        },
+        position_fetched_at=fresh_at_open,
+        final_fetched_at=fresh_at_open,
+        halt_observed_at=fresh_at_open,
+        resume_observed_at=fresh_at_open,
+        post_halt_final_fetched_at=fresh_at_open,
     )
     live_executor = _executor(
         tmp_path,
@@ -2582,12 +3820,13 @@ def test_hard_health_is_revalidated_after_resume_before_open(
 
     result = live_executor.execute(authorization)
 
-    assert result.passed is False
-    assert f"before OPEN {field_name} is stale" in (
-        result.failure_reason
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        f"before OPEN {field_name} is stale" in warning
+        for warning in result.warnings
     )
-    assert "open" not in adapter.calls
-    assert adapter.calls[-1] == "halt"
+    assert adapter.calls.count("open") == 1
 
 
 @pytest.mark.parametrize(
@@ -2632,6 +3871,7 @@ def test_soft_health_staleness_after_resume_continues_open(
         final_fetched_at=fresh_at_open,
         post_halt_final_fetched_at=fresh_at_open,
         halt_observed_at=fresh_at_open,
+        resume_observed_at=fresh_at_open,
     )
     live_executor = _executor(
         tmp_path,
@@ -2657,7 +3897,6 @@ def test_soft_health_staleness_after_resume_continues_open(
     [
         ("observed_at", 6),
         ("mark_at", 121),
-        ("loss_monitor_at", 6),
     ],
 )
 def test_stale_trade_observation_closes_and_halts(
@@ -2685,6 +3924,34 @@ def test_stale_trade_observation_closes_and_halts(
     assert f"observation {field_name} is stale" in result.failure_reason
     assert result.close_submitted is True
     assert adapter.calls.index("close") < adapter.calls.index("halt")
+
+
+def test_stale_loss_monitor_observation_is_advisory(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        observation_times={
+            "loss_monitor_at": NOW - timedelta(seconds=6),
+        },
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "stale-observation-loss-monitor.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        "observation loss_monitor_at is stale" in warning
+        for warning in result.warnings
+    )
+    assert adapter.calls.count("open") == 1
 
 
 @pytest.mark.parametrize(
@@ -3022,6 +4289,42 @@ def test_successful_round_trip_binds_ids_and_evidence_chain(
     assert state_indexes == sorted(state_indexes)
 
 
+def test_successful_short_round_trip_closes_buy_reduce_only(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path, open_side="SELL")
+    adapter = FakeAdapter(authorization)
+    evidence_path = tmp_path / "short-success-evidence.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.passed is True
+    assert adapter.requests["open"][0]["side"] == "SELL"
+    close_request = adapter.close_requests[0]
+    assert close_request["side"] == "BUY"
+    assert close_request["position_side"] == "SHORT"
+    assert close_request["reduce_only"] is True
+    assert close_request["quantity"] == "0.07"
+    final_requests = adapter.requests["final-snapshot"]
+    assert final_requests[-1]["open_side"] == "SELL"
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    round_trip = evidence["mainnet_round_trip"]
+    assert round_trip["open_side"] == "SELL"
+    assert round_trip["open_filled_quantity"] == "0.07"
+    assert round_trip["close_filled_quantity"] == "0.07"
+    assert round_trip["target_symbol_flat"] is True
+    assert round_trip["target_symbol_regular_orders_zero"] is True
+    assert round_trip["target_symbol_algo_orders_zero"] is True
+    assert round_trip["cumulative_net_loss_usdt"] == "0.10"
+    assert result.finished_halted is True
+
+
 def test_restart_commits_evidence_prepared_before_publication_crash(
     tmp_path: Path,
 ) -> None:
@@ -3344,8 +4647,23 @@ def test_live_cli_rejects_nonfixed_ledger_before_operation_lock(
     assert lock_constructed is False
 
 
-def _authorization(tmp_path: Path) -> executor.CanaryAuthorization:
-    paths = _write_authorization_files(tmp_path)
+def _authorization(
+    tmp_path: Path,
+    *,
+    open_side: str = "BUY",
+) -> executor.CanaryAuthorization:
+    mutate = None
+    rebuild_hash_chain = False
+    if open_side != "BUY":
+        mutate = lambda documents: documents["permit"].update(
+            {"open_side": open_side}
+        )
+        rebuild_hash_chain = True
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=mutate,
+        rebuild_hash_chain=rebuild_hash_chain,
+    )
     authorization = executor.load_authorization(
         paths,
         execute_live=False,
@@ -3589,6 +4907,10 @@ def _documents() -> dict[str, dict[str, Any]]:
         "account_id": executor.ACCOUNT_ID,
         "symbol": executor.SYMBOL,
         "release_id": "release-account-a-canary",
+        "node_id": "nautilus-node-account-a",
+        "writer_id": "writer-account-a",
+        "lease_id": "lease-account-a",
+        "fencing_epoch": 42,
         "image_digest": "sha256:" + ("1" * 64),
         "config_sha256": "2" * 64,
         "dependency_lock_sha256": "3" * 64,
@@ -3621,6 +4943,10 @@ def _documents() -> dict[str, dict[str, Any]]:
         "target_symbol_regular_orders_zero": True,
         "target_symbol_algo_orders_zero": True,
         "loss_monitor_healthy": True,
+        "ownership_healthy": True,
+        "fencing_healthy": True,
+        "risk_healthy": True,
+        "durability_healthy": True,
         "no_open_p0_p1_incidents": True,
         "non_target_portfolio_baseline_sha256": "4" * 64,
         "actor_tick_at": NOW.isoformat(),
@@ -3639,12 +4965,13 @@ def _documents() -> dict[str, dict[str, Any]]:
         "release_gate_sha256": release_hash,
         "safety_gate_sha256": safety_hash,
         "verified": True,
+        "evidence_type": "testnet_execution",
         "environment": "testnet",
         "open_order_type": "LIMIT",
         "open_time_in_force": "IOC",
         "close_order_type": "MARKET",
         "close_reduce_only": True,
-        "verified_quantity": "0.1",
+        "verified_quantity": "0.07",
         "testnet_evidence_sha256": "5" * 64,
         "verified_at": "2026-08-08T11:30:00+00:00",
         "target_symbol_flat": True,
@@ -3665,9 +4992,16 @@ def _documents() -> dict[str, dict[str, Any]]:
             executor.deterministic_close_client_order_id(intent_id)
         ),
         "open_side": "BUY",
-        "quantity": "0.1",
+        "quantity": "0.07",
         "limit_price_usdt": "100",
         "max_notional_usdt": "12",
+        "fee_reserve_usdt": "0.10",
+        "exchange_filters": {
+            "quantity_step": "0.01",
+            "min_quantity": "0.01",
+            "price_tick": "0.01",
+            "min_notional": "5",
+        },
         "max_cumulative_net_loss_usdt": "1.49",
         "max_round_trips": 1,
         "single_use": True,
@@ -3714,6 +5048,10 @@ def _base_request(
         "account_id": authorization.account_id,
         "symbol": authorization.symbol,
         "release_id": authorization.release.release_id,
+        "node_id": authorization.release.node_id,
+        "writer_id": authorization.release.writer_id,
+        "lease_id": authorization.release.lease_id,
+        "fencing_epoch": authorization.release.fencing_epoch,
         "image_digest": authorization.release.image_digest,
         "config_sha256": authorization.release.config_sha256,
         "dependency_lock_sha256": (

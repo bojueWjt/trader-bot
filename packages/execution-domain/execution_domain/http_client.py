@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Optional, Sequence
@@ -41,6 +42,10 @@ class ControlPlaneFenceConflictError(ControlPlaneHttpError):
     is_fence_conflict = True
 
 
+class ControlPlaneDurableError(ControlPlaneHttpError):
+    fatal = True
+
+
 _FENCE_CONFLICT_CODES = frozenset(
     {
         "fence_conflict",
@@ -48,6 +53,19 @@ _FENCE_CONFLICT_CODES = frozenset(
         "stale_writer",
         "writer_identity_conflict",
     }
+)
+_DURABLE_HTTP_FAILURE_RE = re.compile(
+    r"(?:"
+    r"\b(?:intent|command|evidence)\s+store\s+unavailable\b|"
+    r"\bjournal\b|"
+    r"\boutbox\b|"
+    r"\bfsync\b|"
+    r"\bdurab(?:le|ility)\b|"
+    r"\bENOSPC\b|"
+    r"\bno[-_ ]space\b|"
+    r"\bcapacity[-_ ]?(?:exhausted|full)\b"
+    r")",
+    re.IGNORECASE,
 )
 
 
@@ -255,6 +273,11 @@ class HttpControlPlaneClient(ControlPlaneClient):
                 and _is_fence_conflict_response(detail)
             ):
                 error_type = ControlPlaneFenceConflictError
+            elif (
+                500 <= exc.code <= 599
+                and _is_durable_failure_response(detail)
+            ):
+                error_type = ControlPlaneDurableError
             raise error_type(
                 message,
                 status_code=exc.code,
@@ -297,11 +320,17 @@ def _is_fence_conflict_response(raw_detail: str) -> bool:
     )
 
 
+def _is_durable_failure_response(raw_detail: str) -> bool:
+    return _DURABLE_HTTP_FAILURE_RE.search(raw_detail) is not None
+
+
 def _heartbeat_dump(hb: Heartbeat) -> dict[str, Any]:
     payload = asdict(hb)
     payload["ts"] = hb.ts.isoformat()
     payload["trading_state"] = hb.trading_state.value
     payload["reconciliation_state"] = hb.reconciliation_state.value
+    if hb.loss_monitor_at is not None:
+        payload["loss_monitor_at"] = hb.loss_monitor_at.isoformat()
     return payload
 
 

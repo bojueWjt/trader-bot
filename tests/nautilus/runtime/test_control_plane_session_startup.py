@@ -17,11 +17,35 @@ sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 from execution_domain.http_client import (  # noqa: E402
+    ControlPlaneDurableError,
     ControlPlaneFenceConflictError,
     ControlPlaneHttpError,
+    ControlPlaneIdentityError,
 )
+from app.node import _wire_control_plane_session_liveness  # noqa: E402
 from runtime.control_plane_session import NodeControlPlaneSession  # noqa: E402
 from runtime.health import HealthService  # noqa: E402
+
+
+def test_session_liveness_is_wired_to_health_and_heartbeat() -> None:
+    health = _ProcessLivenessTarget()
+    lifecycle = _ProcessLivenessTarget()
+    runtime = SimpleNamespace(
+        health=health,
+        lifecycle=lifecycle,
+    )
+    session = SimpleNamespace(
+        snapshot=lambda: SimpleNamespace(
+            started=True,
+            stopped=False,
+            process_liveness=False,
+        )
+    )
+
+    _wire_control_plane_session_liveness(runtime, session)
+
+    assert health.resolve() is False
+    assert lifecycle.resolve() is False
 
 
 def test_consumer_gate_wait_does_not_start_io_or_operation_deadlines() -> None:
@@ -79,6 +103,17 @@ def test_consumer_gate_wait_does_not_start_io_or_operation_deadlines() -> None:
     assert running.process_liveness is True
     assert fatal_reasons == []
     assert session.stop(time.monotonic() + 1.0) is True
+
+
+class _ProcessLivenessTarget:
+    def __init__(self) -> None:
+        self._provider = lambda: True
+
+    def set_process_liveness_provider(self, provider) -> None:
+        self._provider = provider
+
+    def resolve(self) -> bool:
+        return bool(self._provider())
 
 
 def test_explicit_consumer_ready_signal_releases_startup_gate() -> None:
@@ -159,6 +194,252 @@ def test_startup_heartbeat_http_failure_degrades_then_recovers() -> None:
     assert session.stop(time.monotonic() + 1.0) is True
 
 
+def test_fatal_termination_publishes_dead_heartbeat_before_stop() -> None:
+    heartbeat_observations: list[tuple[bool, bool]] = []
+    heartbeat_sent = Event()
+    terminal_heartbeat_sent = Event()
+    session_holder: dict[str, NodeControlPlaneSession] = {}
+    conflict = ControlPlaneFenceConflictError(
+        "execution event HTTP 409 stale writer",
+        status_code=409,
+    )
+
+    def heartbeat() -> None:
+        session = session_holder["session"]
+        observation = (
+            session.snapshot().process_liveness,
+            session.wait_for_termination(timeout=0),
+        )
+        heartbeat_observations.append(observation)
+        heartbeat_sent.set()
+        if observation[0] is False:
+            terminal_heartbeat_sent.set()
+
+    session = NodeControlPlaneSession(
+        heartbeat=heartbeat,
+        execution_event_sink=lambda event: _raise(conflict),
+        heartbeat_interval_seconds=60.0,
+        operation_timeout_seconds=0.1,
+        retry_budget=1,
+    )
+    session_holder["session"] = session
+    session.start()
+
+    assert heartbeat_sent.wait(timeout=1.0)
+    assert _wait_until(lambda: session.snapshot().ready)
+    heartbeat_observations.clear()
+
+    session.submit_execution_event("fill-1")
+
+    assert terminal_heartbeat_sent.wait(timeout=1.0)
+    assert session.wait_for_termination(timeout=1.0) is True
+    assert heartbeat_observations == [(False, False)]
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_terminal_heartbeat_commits_after_inflight_live_heartbeat() -> None:
+    ordinary_started = Event()
+    release_ordinary = Event()
+    committed_liveness: list[bool] = []
+    session_holder: dict[str, NodeControlPlaneSession] = {}
+    conflict = ControlPlaneFenceConflictError(
+        "execution event HTTP 409 stale writer",
+        status_code=409,
+    )
+
+    def heartbeat() -> None:
+        session = session_holder["session"]
+        process_liveness = session.snapshot().process_liveness
+        if process_liveness:
+            ordinary_started.set()
+            release_ordinary.wait(timeout=1.0)
+        committed_liveness.append(process_liveness)
+
+    session = NodeControlPlaneSession(
+        heartbeat=heartbeat,
+        execution_event_sink=lambda event: _raise(conflict),
+        heartbeat_interval_seconds=60.0,
+        operation_timeout_seconds=0.2,
+        retry_budget=1,
+    )
+    session_holder["session"] = session
+    session.start()
+
+    assert ordinary_started.wait(timeout=1.0)
+    assert session.submit_execution_event("fill-1").value == "accepted"
+    assert _wait_until(
+        lambda: session.snapshot().process_liveness is False
+    )
+    release_ordinary.set()
+
+    assert session.wait_for_termination(timeout=1.0) is True
+    assert committed_liveness == [True, False]
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_terminal_heartbeat_timeout_warns_and_fatal_stop_is_bounded() -> None:
+    heartbeat_started = Event()
+    release_heartbeat = Event()
+    warnings: list[tuple[str, str]] = []
+    calls = 0
+    conflict = ControlPlaneFenceConflictError(
+        "execution event HTTP 409 stale writer",
+        status_code=409,
+    )
+
+    def heartbeat() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return
+        heartbeat_started.set()
+        release_heartbeat.wait(timeout=1.0)
+
+    session = NodeControlPlaneSession(
+        heartbeat=heartbeat,
+        execution_event_sink=lambda event: _raise(conflict),
+        heartbeat_interval_seconds=60.0,
+        operation_timeout_seconds=0.02,
+        retry_budget=1,
+        failure_callback=lambda lane, detail: warnings.append(
+            (lane, detail)
+        ),
+    )
+    session.start()
+    assert _wait_until(lambda: session.snapshot().ready)
+
+    started_at = time.monotonic()
+    session.submit_execution_event("fill-1")
+
+    assert heartbeat_started.wait(timeout=1.0)
+    assert session.wait_for_termination(timeout=1.0) is True
+    assert time.monotonic() - started_at < 0.2
+    assert any(
+        lane == "terminal_heartbeat" and "timed out" in detail
+        for lane, detail in warnings
+    )
+
+    release_heartbeat.set()
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_heartbeat_lane_fatal_does_not_recursively_send_terminal_heartbeat(
+) -> None:
+    heartbeat_calls = 0
+    fatal_reasons: list[str] = []
+    conflict = ControlPlaneFenceConflictError(
+        "heartbeat HTTP 409 stale writer",
+        status_code=409,
+    )
+
+    def heartbeat() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        raise conflict
+
+    session = NodeControlPlaneSession(
+        heartbeat=heartbeat,
+        heartbeat_interval_seconds=60.0,
+        operation_timeout_seconds=0.1,
+        retry_budget=1,
+        fatal_termination_hook=fatal_reasons.append,
+    )
+    session.start()
+
+    assert session.wait_for_termination(timeout=1.0) is True
+    assert heartbeat_calls == 1
+    assert fatal_reasons == [str(conflict)]
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_permanent_heartbeat_publish_rejection_is_nonfatal_degradation(
+) -> None:
+    publish_calls = 0
+    warnings: list[tuple[str, str]] = []
+    fatal_reasons: list[str] = []
+    rejection = ControlPlaneHttpError(
+        "heartbeat HTTP 422 schema rejection",
+        status_code=422,
+    )
+
+    def heartbeat() -> None:
+        nonlocal publish_calls
+        publish_calls += 1
+        raise rejection
+
+    session = NodeControlPlaneSession(
+        heartbeat=heartbeat,
+        heartbeat_interval_seconds=60.0,
+        operation_timeout_seconds=0.1,
+        retry_budget=3,
+        failure_callback=lambda lane, detail: warnings.append(
+            (lane, detail)
+        ),
+        fatal_termination_hook=fatal_reasons.append,
+    )
+    session.start()
+
+    assert _wait_until(
+        lambda: session.snapshot().lanes["heartbeat"].failure
+        == str(rejection)
+    )
+    health = session.snapshot()
+
+    assert publish_calls == 1
+    assert health.process_liveness is True
+    assert health.degraded is True
+    assert health.lanes["heartbeat"].fatal_failure is False
+    assert warnings == [("heartbeat", str(rejection))]
+    assert fatal_reasons == []
+    assert session.wait_for_termination(timeout=0.01) is False
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_permanent_command_publish_rejection_remains_fatal() -> None:
+    rejection = ControlPlaneHttpError(
+        "command poll HTTP 422 schema rejection",
+        status_code=422,
+    )
+    fatal_reasons: list[str] = []
+    session = NodeControlPlaneSession(
+        command_poll=lambda capacity: _raise(rejection),
+        operation_timeout_seconds=0.1,
+        retry_budget=3,
+        fatal_termination_hook=fatal_reasons.append,
+    )
+    session.start()
+
+    assert session.wait_for_termination(timeout=1.0) is True
+    health = session.snapshot()
+
+    assert health.process_liveness is False
+    assert health.lanes["command_poll"].fatal_failure == str(rejection)
+    assert fatal_reasons == [str(rejection)]
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_heartbeat_identity_conflict_remains_fatal() -> None:
+    conflict = ControlPlaneIdentityError(
+        "account_id mismatch: bound='account-a' requested='account-b'"
+    )
+    fatal_reasons: list[str] = []
+    session = NodeControlPlaneSession(
+        heartbeat=lambda: _raise(conflict),
+        operation_timeout_seconds=0.1,
+        retry_budget=3,
+        fatal_termination_hook=fatal_reasons.append,
+    )
+    session.start()
+
+    assert session.wait_for_termination(timeout=1.0) is True
+    health = session.snapshot()
+
+    assert health.process_liveness is False
+    assert health.lanes["heartbeat"].fatal_failure == str(conflict)
+    assert fatal_reasons == [str(conflict)]
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
 @pytest.mark.parametrize(
     "lane_name",
     (
@@ -222,6 +503,81 @@ def test_fence_conflict_marks_lane_fatal_and_terminates_once(
     assert fatal.process_liveness is False
     assert fatal.lanes[expected_lane_name].fatal_failure == str(conflict)
     assert fatal_reasons == [str(conflict)]
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+@pytest.mark.parametrize(
+    "delivery_kind",
+    ("command", "intent"),
+)
+def test_fatal_conflict_discards_queued_delivery_side_effects(
+    delivery_kind: str,
+) -> None:
+    delivered: list[str] = []
+    conflict = ControlPlaneFenceConflictError(
+        f"{delivery_kind} HTTP 409 stale writer",
+        status_code=409,
+    )
+    options: dict[str, Any] = {
+        "operation_timeout_seconds": 0.1,
+        "retry_budget": 1,
+    }
+
+    def deliver(item: str) -> None:
+        delivered.append(item)
+        if item.endswith("-1"):
+            raise conflict
+
+    if delivery_kind == "command":
+        options["command_poll"] = lambda capacity: (
+            "command-1",
+            "command-2",
+        )
+        options["command_apply"] = deliver
+    else:
+        options["intent_fetch"] = lambda capacity: (
+            "intent-1",
+            "intent-2",
+        )
+        options["intent_deliver"] = deliver
+
+    session = NodeControlPlaneSession(**options)
+    session.start()
+
+    assert session.wait_for_termination(timeout=1.0) is True
+    time.sleep(0.05)
+    assert delivered == [f"{delivery_kind}-1"]
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+@pytest.mark.parametrize(
+    "lane_name",
+    ("heartbeat", "execution_event"),
+)
+def test_explicit_durable_telemetry_failure_is_fatal(
+    lane_name: str,
+) -> None:
+    failure = ControlPlaneDurableError(
+        f"{lane_name} HTTP 503 journal fsync failed",
+        status_code=503,
+    )
+    options: dict[str, Any] = {
+        "operation_timeout_seconds": 0.1,
+        "retry_budget": 1,
+    }
+    if lane_name == "heartbeat":
+        options["heartbeat"] = lambda: _raise(failure)
+    else:
+        options["execution_event_sink"] = lambda event: _raise(failure)
+
+    session = NodeControlPlaneSession(**options)
+    session.start()
+    if lane_name == "execution_event":
+        assert _wait_until(lambda: session.snapshot().ready)
+        assert session.submit_execution_event("fill-1").value == "accepted"
+
+    assert session.wait_for_termination(timeout=1.0) is True
+    assert session.snapshot().process_liveness is False
     assert session.stop(time.monotonic() + 1.0) is True
 
 

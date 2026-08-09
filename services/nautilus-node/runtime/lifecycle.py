@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from config.node_config import NodeConfig
 from execution_domain.contracts import ReconciliationState
@@ -61,6 +61,11 @@ class NodeLifecycle:
         self._last_event_id: Optional[str] = None
         self._projection_lag_ms = 0
         self._reconciliation_state = ReconciliationState.DEGRADED
+        self._process_liveness_provider: (
+            Callable[[], bool] | None
+        ) = None
+        self._loss_monitor_healthy: bool | None = None
+        self._loss_monitor_at: datetime | None = None
 
     @property
     def trading_state(self) -> TradingState:
@@ -130,7 +135,24 @@ class NodeLifecycle:
             projection_lag_ms=self._projection_lag_ms,
             reconciliation_state=self._reconciliation_state,
             last_event_id=self._last_event_id,
+            process_liveness=self._resolve_process_liveness(),
+            loss_monitor_healthy=self._loss_monitor_healthy,
+            loss_monitor_at=self._loss_monitor_at,
         )
+
+    def set_process_liveness_provider(
+        self,
+        provider: Callable[[], bool],
+    ) -> None:
+        self._process_liveness_provider = provider
+
+    def record_loss_monitor_health(
+        self,
+        healthy: bool,
+        observed_at: datetime | None = None,
+    ) -> None:
+        self._loss_monitor_healthy = bool(healthy)
+        self._loss_monitor_at = observed_at or self._clock.now()
 
     def set_open_orders_provider(self, provider) -> None:
         """Any heartbeat sender (health checker, poller) then carries the open-order
@@ -206,6 +228,15 @@ class NodeLifecycle:
         # A silent halt cost 2h of debugging on 2026-07-10: every halt must be
         # loud. print reaches docker logs regardless of logging config.
         print(f"[NodeLifecycle] TRADING HALTED: {reason}", flush=True)
+
+    def _resolve_process_liveness(self) -> bool | None:
+        provider = self._process_liveness_provider
+        if provider is None:
+            return None
+        try:
+            return bool(provider())
+        except Exception:
+            return False
 
 
 class TradingLifecycle:

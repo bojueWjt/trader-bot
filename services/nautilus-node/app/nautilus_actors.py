@@ -14,6 +14,7 @@ from commands.durable_command_journal import (
     CommandJournalPhase,
     InMemoryCommandJournal,
 )
+from projection.actor import ProjectionSinkUnavailable
 
 try:  # pragma: no cover - Nautilus is unavailable on local dev hosts.
     from nautilus_trader.common.actor import Actor  # type: ignore[import-not-found]
@@ -107,6 +108,12 @@ class _ProjectionPersistenceState(str, Enum):
     PERSISTED = "PERSISTED"
     FILTERED = "FILTERED"
     FAILED = "FAILED"
+
+
+class _ProjectionDegradationCause(str, Enum):
+    FILTERED = "FILTERED"
+    SESSION_WAKE = "SESSION_WAKE"
+    SPOOL_FLUSH = "SPOOL_FLUSH"
 
 
 class _QueueingIntentPublisher:
@@ -830,6 +837,7 @@ class ExecutionProjectionActor(Actor):
         ),
         fatal_callback: Callable[[str], None] | None = None,
         degraded_callback: Callable[[str], None] | None = None,
+        recovered_callback: Callable[[], None] | None = None,
         control_plane_session: Any = None,
         manage_control_plane_session: bool = True,
     ) -> None:
@@ -887,9 +895,15 @@ class ExecutionProjectionActor(Actor):
         self._flush_stop_deadline: float | None = None
         self._halt_lock = RLock()
         self._halted_reason = ""
-        self._degraded_reason = ""
+        self._degraded_reasons: dict[
+            _ProjectionDegradationCause,
+            str,
+        ] = {}
+        self._filtered_degradation_epoch = 0
+        self._pending_filtered_recovery_epoch = 0
         self._fatal_callback = fatal_callback
         self._degraded_callback = degraded_callback
+        self._recovered_callback = recovered_callback
         self._fatal_reported = False
         self._session_wake_pending = Event()
         self._control_plane_session = control_plane_session
@@ -908,7 +922,8 @@ class ExecutionProjectionActor(Actor):
 
     @property
     def degraded_reason(self) -> str:
-        return self._degraded_reason
+        with self._halt_lock:
+            return self._combined_degraded_reason_locked()
 
     @property
     def control_plane_consumer_ready(self) -> bool:
@@ -1100,11 +1115,17 @@ class ExecutionProjectionActor(Actor):
                         persistence_outcome
                         is _ProjectionPersistenceState.FILTERED
                     ):
+                        if not self._retry_session_flush_wake():
+                            return
                         continue
                     if self._control_plane_session is not None:
-                        if not self._submit_flush_wake(publication.event):
+                        if not self._submit_flush_wake(
+                            publication.event,
+                            mapped_durable=True,
+                        ):
                             return
                     else:
+                        self._register_filtered_recovery_candidate()
                         self._flush_wake.set()
                     continue
                 self._project_legacy_event(publication.event)
@@ -1143,6 +1164,7 @@ class ExecutionProjectionActor(Actor):
                     publication.event.get("event_type") or event_type
                 )
             self._degrade_egress(
+                _ProjectionDegradationCause.FILTERED,
                 "execution projection filtered subscribed event: "
                 f"{event_type}"
             )
@@ -1198,11 +1220,17 @@ class ExecutionProjectionActor(Actor):
         except Exception:
             return
 
-    def _submit_flush_wake(self, event: Any) -> bool:
+    def _submit_flush_wake(
+        self,
+        event: Any,
+        *,
+        mapped_durable: bool = False,
+    ) -> bool:
+        if mapped_durable:
+            self._register_filtered_recovery_candidate()
         session = self._control_plane_session
         if session is None:
             self._session_wake_pending.clear()
-            self._clear_degraded()
             self._flush_wake.set()
             return True
         self._session_wake_pending.set()
@@ -1210,13 +1238,16 @@ class ExecutionProjectionActor(Actor):
             result = session.submit_execution_event(event)
         except Exception as exc:
             self._degrade_egress(
+                _ProjectionDegradationCause.SESSION_WAKE,
                 "execution projection session wake failed: "
                 f"{exc!r}"
             )
             return True
         if _submission_was_accepted(result):
             self._session_wake_pending.clear()
-            self._clear_degraded()
+            self._clear_degraded(
+                _ProjectionDegradationCause.SESSION_WAKE
+            )
             return True
         hard_failure = self._session_wake_hard_failure()
         if hard_failure:
@@ -1226,6 +1257,7 @@ class ExecutionProjectionActor(Actor):
             )
             return False
         self._degrade_egress(
+            _ProjectionDegradationCause.SESSION_WAKE,
             "execution projection session wake backpressured"
         )
         return True
@@ -1412,13 +1444,40 @@ class ExecutionProjectionActor(Actor):
     ) -> None:
         while True:
             before = self._durable_pending_count()
-            self._flush_projection_once(
-                session_callback=session_callback,
-            )
+            try:
+                self._flush_projection_once(
+                    session_callback=session_callback,
+                )
+            except ProjectionSinkUnavailable as exc:
+                self._degrade_egress(
+                    _ProjectionDegradationCause.SPOOL_FLUSH,
+                    "execution projection spool flush failed: "
+                    f"{exc!r}",
+                )
+                if session_callback:
+                    raise
+                return
+            except Exception as exc:
+                self._halt_egress(
+                    "execution projection durable spool flush failed: "
+                    f"{exc!r}"
+                )
+                raise
             after = self._durable_pending_count()
             if before is None or after is None:
                 return
-            if after <= 0 or after >= before:
+            if after <= 0:
+                self._clear_degraded(
+                    _ProjectionDegradationCause.SPOOL_FLUSH
+                )
+                self._complete_filtered_recovery()
+                return
+            if after >= before:
+                if before > 0:
+                    self._degrade_egress(
+                        _ProjectionDegradationCause.SPOOL_FLUSH,
+                        "execution projection spool flush made no progress",
+                    )
                 return
             if self._flush_deadline_reached():
                 return
@@ -1522,7 +1581,8 @@ class ExecutionProjectionActor(Actor):
         with self._halt_lock:
             if not self._halted_reason:
                 self._halted_reason = reason
-                self._degraded_reason = ""
+                self._degraded_reasons.clear()
+                self._pending_filtered_recovery_epoch = 0
                 halt_projection = True
         if not halt_projection:
             return
@@ -1533,21 +1593,99 @@ class ExecutionProjectionActor(Actor):
             except Exception:
                 return
 
-    def _degrade_egress(self, reason: str) -> None:
+    def _degrade_egress(
+        self,
+        cause: _ProjectionDegradationCause,
+        reason: str,
+    ) -> None:
+        if cause is _ProjectionDegradationCause.FILTERED:
+            defer_ready = getattr(
+                self._projection_actor,
+                "defer_ready_until_recovery",
+                None,
+            )
+            if callable(defer_ready):
+                defer_ready()
         callback = None
+        combined_reason = ""
         with self._halt_lock:
             if self._halted_reason:
                 return
-            if self._degraded_reason == reason:
+            if cause is _ProjectionDegradationCause.FILTERED:
+                self._filtered_degradation_epoch += 1
+            if self._degraded_reasons.get(cause) == reason:
                 return
-            self._degraded_reason = reason
+            self._degraded_reasons[cause] = reason
             callback = self._degraded_callback
+            combined_reason = self._combined_degraded_reason_locked()
         if callback is not None:
-            callback(reason)
+            callback(combined_reason)
 
-    def _clear_degraded(self) -> None:
+    def _clear_degraded(
+        self,
+        cause: _ProjectionDegradationCause,
+    ) -> None:
+        degraded_callback = None
+        recovered_callback = None
+        combined_reason = ""
         with self._halt_lock:
-            self._degraded_reason = ""
+            removed = self._degraded_reasons.pop(cause, None)
+            if removed is None:
+                return
+            combined_reason = self._combined_degraded_reason_locked()
+            if combined_reason:
+                degraded_callback = self._degraded_callback
+            else:
+                recovered_callback = self._recovered_callback
+        if degraded_callback is not None:
+            degraded_callback(combined_reason)
+        if recovered_callback is not None:
+            recovered_callback()
+
+    def _combined_degraded_reason_locked(self) -> str:
+        reasons = []
+        for cause in _ProjectionDegradationCause:
+            reason = self._degraded_reasons.get(cause)
+            if reason:
+                reasons.append(reason)
+        return "; ".join(reasons)
+
+    def _register_filtered_recovery_candidate(self) -> None:
+        with self._halt_lock:
+            if self._halted_reason:
+                return
+            if (
+                _ProjectionDegradationCause.FILTERED
+                not in self._degraded_reasons
+            ):
+                return
+            self._pending_filtered_recovery_epoch = (
+                self._filtered_degradation_epoch
+            )
+
+    def _complete_filtered_recovery(self) -> None:
+        with self._halt_lock:
+            recovery_epoch = self._pending_filtered_recovery_epoch
+            self._pending_filtered_recovery_epoch = 0
+            if recovery_epoch <= 0:
+                return
+            if recovery_epoch != self._filtered_degradation_epoch:
+                return
+            removed = self._degraded_reasons.pop(
+                _ProjectionDegradationCause.FILTERED,
+                None,
+            )
+            if removed is None:
+                return
+            combined_reason = self._combined_degraded_reason_locked()
+            if combined_reason:
+                degraded_callback = self._degraded_callback
+                if degraded_callback is not None:
+                    degraded_callback(combined_reason)
+            else:
+                recovered_callback = self._recovered_callback
+                if recovered_callback is not None:
+                    recovered_callback()
 
     def _report_fatal(self) -> None:
         callback = None

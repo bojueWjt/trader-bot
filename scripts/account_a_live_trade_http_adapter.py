@@ -22,6 +22,7 @@ from uuid import UUID, uuid5
 
 ACCOUNT_ID = "account-a"
 SYMBOL = "SOLUSDT"
+LIVE_CANARY_OPEN_QUANTITY = Decimal("0.07")
 EXCHANGE_SOURCE = "exchange"
 NODE_SOURCE = "node"
 EXCHANGE_HISTORY_SOURCES = frozenset(
@@ -42,10 +43,27 @@ TERMINAL_ORDER_STATUSES = {
     "REJECTED",
 }
 SOFT_HTTP_STATUSES = {408, 425, 429}
+DURABLE_HTTP_FAILURE_RE = re.compile(
+    r"(?:"
+    r"\b(?:intent|command|evidence)\s+store\s+unavailable\b|"
+    r"\bjournal\b|"
+    r"\boutbox\b|"
+    r"\bfsync\b|"
+    r"\bdurab(?:le|ility)\b|"
+    r"\bENOSPC\b|"
+    r"\bno[-_ ]space\b|"
+    r"\bcapacity[-_ ]?(?:exhausted|full)\b"
+    r")",
+    re.IGNORECASE,
+)
 IDENTITY_FIELDS = (
     "account_id",
     "symbol",
     "release_id",
+    "node_id",
+    "writer_id",
+    "lease_id",
+    "fencing_epoch",
     "image_digest",
     "config_sha256",
     "dependency_lock_sha256",
@@ -215,6 +233,19 @@ class ControlPlaneClient:
             node_headers=True,
         )
 
+    def node_post(
+        self,
+        path: str,
+        body: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            path,
+            token=self._config.node_token,
+            body=body,
+            node_headers=True,
+        )
+
     def _request(
         self,
         method: str,
@@ -268,9 +299,18 @@ class ControlPlaneClient:
             except urllib.error.HTTPError as exc:
                 raw = exc.read()
                 detail = _http_error_detail(raw, exc.reason)
-                if exc.code == 409:
+                if exc.code in {401, 403, 409}:
                     raise AdapterError(
-                        f"ownership/fencing conflict: HTTP 409 {detail}"
+                        "ownership/fencing conflict: "
+                        f"HTTP {exc.code} {detail}"
+                    ) from exc
+                if (
+                    500 <= exc.code <= 599
+                    and _is_durable_http_failure(detail)
+                ):
+                    raise AdapterError(
+                        "durable control-plane failure: "
+                        f"HTTP {exc.code} {detail}"
                     ) from exc
                 if _is_soft_http_status(exc.code):
                     last_error = SoftAdapterError(
@@ -305,6 +345,10 @@ class AccountALiveTradeHttpAdapter:
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
         _validate_base_request(request)
+        if request.get("node_id") != self._config.node_id:
+            raise AdapterError(
+                "ownership/fencing conflict: signed node_id mismatch"
+            )
         if action == "resume":
             return self._set_trading_state(
                 request,
@@ -367,7 +411,7 @@ class AccountALiveTradeHttpAdapter:
             command_body,
             request_id=side_effect_id,
         )
-        node = self._wait_for_node_state(
+        node, identity_warnings = self._wait_for_node_state(
             expected_states,
             request=request,
         )
@@ -388,6 +432,8 @@ class AccountALiveTradeHttpAdapter:
             "side_effect_id": side_effect_id,
             "node_snapshot": _redacted_node_snapshot(node),
         }
+        if identity_warnings:
+            payload["warnings"] = list(identity_warnings)
         return _with_evidence(payload)
 
     def _wait_for_node_state(
@@ -395,30 +441,25 @@ class AccountALiveTradeHttpAdapter:
         expected_states: set[str],
         *,
         request: Mapping[str, Any],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], tuple[str, ...]]:
         deadline = self._deadline(request)
         last_state = ""
+        warnings: list[str] = []
         while time.monotonic() < deadline:
             response = self._client.risk_get("/v1/nodes")
-            nodes = response.get("nodes")
-            if not isinstance(nodes, list):
-                raise AdapterError("node list response is invalid")
-            for raw_node in nodes:
-                if not isinstance(raw_node, dict):
-                    continue
-                if raw_node.get("node_id") != self._config.node_id:
-                    continue
-                if raw_node.get("account_id") != ACCOUNT_ID:
-                    raise AdapterError(
-                        "ownership/fencing conflict: node account mismatch"
-                    )
-                last_state = str(
-                    raw_node.get("trading_state")
-                    or raw_node.get("status")
-                    or ""
-                ).upper()
-                if last_state in expected_states:
-                    return raw_node
+            raw_node = _find_node(response, self._config.node_id)
+            _validate_node_identity(
+                raw_node,
+                request,
+                warnings=warnings,
+            )
+            last_state = str(
+                raw_node.get("trading_state")
+                or raw_node.get("status")
+                or ""
+            ).upper()
+            if last_state in expected_states:
+                return raw_node, tuple(warnings)
             time.sleep(self._config.poll_interval_seconds)
         raise SoftAdapterError(
             f"node state poll timeout; last_state={last_state or 'missing'}",
@@ -445,6 +486,8 @@ class AccountALiveTradeHttpAdapter:
         if side not in {"BUY", "SELL"}:
             raise AdapterError("OPEN side must be BUY or SELL")
         quantity = _positive_decimal(request.get("quantity"), "quantity")
+        if quantity != LIVE_CANARY_OPEN_QUANTITY:
+            raise AdapterError("OPEN quantity must equal 0.07")
         limit_price = _positive_decimal(
             request.get("limit_price_usdt"),
             "limit_price_usdt",
@@ -469,6 +512,7 @@ class AccountALiveTradeHttpAdapter:
             "account_id": ACCOUNT_ID,
             "symbol": SYMBOL,
             "side": side_name,
+            "quantity": _decimal_text(quantity),
             "entry": {
                 "type": "limit",
                 "price": _decimal_text(limit_price),
@@ -536,7 +580,7 @@ class AccountALiveTradeHttpAdapter:
         cumulative_loss = max(Decimal(0), -net_pnl)
         fetched_at = _mirror_fetched_at(mirror)
         node_snapshot, health_warnings = (
-            self._optional_node_snapshot()
+            self._optional_node_snapshot(request)
         )
         loss_monitor = _loss_monitor_evidence(
             mirror,
@@ -548,6 +592,12 @@ class AccountALiveTradeHttpAdapter:
                 self._config.node_freshness_seconds
             ),
         )
+        health_warnings.extend(loss_monitor["warnings"])
+        publication_warning = self._publish_loss_monitor_evidence(
+            loss_monitor
+        )
+        if publication_warning:
+            health_warnings.append(publication_warning)
         payload = {
             **_identity(request),
             "open_client_order_id": open_client_order_id,
@@ -736,7 +786,7 @@ class AccountALiveTradeHttpAdapter:
                     expected_client_order_id=client_order_id,
                 )
             except AdapterError as exc:
-                if _is_ownership_error(exc):
+                if _is_hard_control_plane_error(exc):
                     raise
                 projection_warning = _enrichment_warning(
                     "close operator projection",
@@ -811,6 +861,14 @@ class AccountALiveTradeHttpAdapter:
         baseline = _portfolio_baseline_sha256(exchange_payload)
         open_intent_id = str(request["intent_id"])
         close_intent_id = _close_intent_id(open_intent_id)
+        signed_quantity = _positive_decimal(
+            request.get("quantity"),
+            "quantity",
+        )
+        signed_limit_price = _positive_decimal(
+            request.get("limit_price_usdt"),
+            "limit_price_usdt",
+        )
         warnings: list[str] = []
         open_status, open_summary = (
             self._operator_execution_enrichment(
@@ -822,7 +880,7 @@ class AccountALiveTradeHttpAdapter:
                 warnings=warnings,
             )
         )
-        _close_status, close_summary = (
+        close_status, close_summary = (
             self._operator_execution_enrichment(
                 close_intent_id,
                 client_order_id=_open_client_order_id(
@@ -832,12 +890,41 @@ class AccountALiveTradeHttpAdapter:
                 warnings=warnings,
             )
         )
+        signed_open_side = _required_text(
+            request.get("open_side"),
+            "open_side",
+        ).upper()
+        if signed_open_side not in {"BUY", "SELL"}:
+            raise AdapterError("open_side must be BUY or SELL")
+        side_warning = _financial_open_side_warning(
+            open_status,
+            signed_open_side=signed_open_side,
+        )
+        if side_warning:
+            warnings.append(side_warning)
+        warnings.extend(
+            _financial_open_plan_warnings(
+                open_summary,
+                signed_quantity=signed_quantity,
+                signed_limit_price=signed_limit_price,
+            )
+        )
+        warnings.extend(
+            _round_trip_financial_warnings(
+                open_summary,
+                close_summary,
+            )
+        )
         fees = open_summary["fees"] + close_summary["fees"]
         gross_pnl = (
             open_summary["realized_pnl"]
             + close_summary["realized_pnl"]
         )
-        if gross_pnl == 0:
+        realized_pnl_complete = (
+            open_summary.get("realized_pnl_complete") is True
+            and close_summary.get("realized_pnl_complete") is True
+        )
+        if not realized_pnl_complete:
             gross_pnl = _derived_round_trip_pnl(
                 open_status,
                 open_summary,
@@ -875,16 +962,22 @@ class AccountALiveTradeHttpAdapter:
         client_order_id: str,
         label: str,
         warnings: list[str],
-    ) -> tuple[dict[str, Any], dict[str, Decimal | str]]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         try:
             status = self._operator_status(intent_id)
             summary = _execution_summary(
                 status,
                 expected_client_order_id=client_order_id,
             )
+            proof_warning = _financial_summary_warning(
+                summary,
+                label=label,
+            )
+            if proof_warning:
+                warnings.append(proof_warning)
             return status, summary
         except AdapterError as exc:
-            if _is_ownership_error(exc):
+            if _is_hard_control_plane_error(exc):
                 raise
             warnings.append(
                 _enrichment_warning(
@@ -898,19 +991,35 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
-        mirror = self._exchange_state(())
+        mirror = self._exchange_state_after(
+            (),
+            not_before=_exchange_not_before(request),
+            deadline=self._deadline(request),
+        )
         exchange_payload = _exchange_payload(mirror)
         position = _target_position(mirror)
-        nodes = self._client.risk_get("/v1/nodes")
-        node = _find_node(nodes, self._config.node_id)
-        if node.get("account_id") != ACCOUNT_ID:
-            raise AdapterError(
-                "ownership/fencing conflict: node account mismatch"
+        warnings: list[str] = []
+        node: Mapping[str, Any] | bool = False
+        try:
+            nodes = self._client.risk_get("/v1/nodes")
+            node = _find_node(nodes, self._config.node_id)
+        except AdapterError as exc:
+            if _is_hard_control_plane_error(exc):
+                raise
+            warnings.append(
+                _enrichment_warning("node telemetry", exc)
+            )
+        if isinstance(node, Mapping):
+            _validate_node_identity(
+                node,
+                request,
+                warnings=warnings,
             )
         payload = {
             **_identity(request),
             "action": "preflight",
             "source": EXCHANGE_SOURCE,
+            "exchange_authoritative": True,
             "fetched_at": _mirror_fetched_at(mirror),
             "mirror_stale": mirror.get("stale") is True,
             "target_position_side": position["side"],
@@ -929,8 +1038,16 @@ class AccountALiveTradeHttpAdapter:
             "non_target_portfolio_baseline_sha256": (
                 _portfolio_baseline_sha256(exchange_payload)
             ),
-            "node_snapshot": _redacted_node_snapshot(node),
         }
+        if isinstance(node, Mapping):
+            payload["node_snapshot"] = _redacted_node_snapshot(node)
+        available_balance = _available_usdt_balance(exchange_payload)
+        if available_balance is False:
+            warnings.append("available USDT balance telemetry missing")
+        else:
+            payload["available_usdt_balance"] = available_balance
+        if warnings:
+            payload["warnings"] = warnings
         return _with_evidence(payload)
 
     def _exchange_state(
@@ -996,23 +1113,48 @@ class AccountALiveTradeHttpAdapter:
 
     def _optional_node_snapshot(
         self,
+        request: Mapping[str, Any],
     ) -> tuple[dict[str, Any] | bool, list[str]]:
         warnings: list[str] = []
         try:
             response = self._client.risk_get("/v1/nodes")
             node = _find_node(response, self._config.node_id)
         except AdapterError as exc:
-            if _is_ownership_error(exc):
+            if _is_hard_control_plane_error(exc):
                 raise
             warnings.append(
                 _enrichment_warning("node health evidence", exc)
             )
             return False, warnings
-        if node.get("account_id") != ACCOUNT_ID:
-            raise AdapterError(
-                "ownership/fencing conflict: node account mismatch"
-            )
+        _validate_node_identity(
+            node,
+            request,
+            warnings=warnings,
+        )
         return _redacted_node_snapshot(node), warnings
+
+    def _publish_loss_monitor_evidence(
+        self,
+        loss_monitor: Mapping[str, Any],
+    ) -> str:
+        body = {
+            "account_id": ACCOUNT_ID,
+            "loss_monitor_healthy": loss_monitor["healthy"],
+            "loss_monitor_at": loss_monitor["observed_at"],
+        }
+        try:
+            self._client.node_post(
+                f"/v1/nodes/{self._config.node_id}/loss-monitor",
+                body,
+            )
+        except AdapterError as exc:
+            if _is_hard_control_plane_error(exc):
+                raise
+            return _enrichment_warning(
+                "loss monitor publication",
+                exc,
+            )
+        return ""
 
     def _deadline(self, request: Mapping[str, Any]) -> float:
         timeout = self._config.action_timeout_seconds
@@ -1032,6 +1174,7 @@ def _validate_base_request(request: Mapping[str, Any]) -> None:
         raise AdapterError("adapter symbol must be SOLUSDT")
     for field_name in IDENTITY_FIELDS:
         _required_text(request.get(field_name), field_name)
+    _positive_int(request.get("fencing_epoch"), "fencing_epoch")
     _canonical_uuid(request.get("intent_id"), "intent_id")
 
 
@@ -1039,9 +1182,9 @@ def _identity(
     request: Mapping[str, Any],
     *,
     intent_id: str = "",
-) -> dict[str, str]:
+) -> dict[str, Any]:
     payload = {
-        field_name: str(request[field_name])
+        field_name: request[field_name]
         for field_name in IDENTITY_FIELDS
     }
     if intent_id:
@@ -1054,6 +1197,27 @@ def _exchange_payload(mirror: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AdapterError("exchange mirror payload is invalid")
     return payload
+
+
+def _available_usdt_balance(
+    exchange_payload: Mapping[str, Any],
+) -> str | bool:
+    account = exchange_payload.get("account")
+    if not isinstance(account, Mapping):
+        return False
+    currency = str(account.get("currency") or "USDT").upper()
+    if currency != "USDT":
+        return False
+    raw_balance = account.get("free")
+    if raw_balance is None or raw_balance == "":
+        raw_balance = account.get("available_balance")
+    if raw_balance is None or raw_balance == "":
+        return False
+    balance = _non_negative_decimal(
+        raw_balance,
+        "exchange available USDT balance",
+    )
+    return _decimal_text(balance)
 
 
 def _mirror_fetched_at(mirror: Mapping[str, Any]) -> str:
@@ -1276,10 +1440,13 @@ def _execution_summary(
     status: Mapping[str, Any],
     *,
     expected_client_order_id: str,
-) -> dict[str, Decimal | str]:
+) -> dict[str, Decimal | str | bool]:
     filled_quantity = Decimal(0)
     average_fill_price = Decimal(0)
+    order_quantity = Decimal(0)
+    order_price = Decimal(0)
     order_status = "UNKNOWN"
+    matched_order = False
     orders = status.get("orders")
     if isinstance(orders, list):
         for raw in orders:
@@ -1293,6 +1460,7 @@ def _execution_summary(
                 and client_order_id != expected_client_order_id
             ):
                 continue
+            matched_order = True
             candidate_quantity = _non_negative_decimal(
                 raw.get("filled_quantity"),
                 "filled_quantity",
@@ -1303,16 +1471,45 @@ def _execution_summary(
                     raw.get("average_fill_price"),
                     "average_fill_price",
                 )
+                order_quantity = _non_negative_decimal(
+                    raw.get("quantity"),
+                    "quantity",
+                )
+                order_price = _non_negative_decimal(
+                    raw.get("price"),
+                    "price",
+                )
                 order_status = str(
                     raw.get("status") or "UNKNOWN"
                 ).upper()
     fees = Decimal(0)
     realized_pnl = Decimal(0)
+    order_filled_quantity = filled_quantity
+    order_average_fill_price = average_fill_price
     weighted_quote = Decimal(0)
     weighted_quantity = Decimal(0)
+    matched_fill_event = False
+    fill_event_count = 0
+    commission_event_count = 0
+    commission_currency_event_count = 0
+    realized_pnl_event_count = 0
+    fill_identity_complete = True
+    fill_details_complete = True
+    seen_trade_fingerprints: dict[
+        str,
+        tuple[
+            Decimal,
+            Decimal,
+            bool,
+            Decimal,
+            str,
+            bool,
+            bool,
+            Decimal,
+        ],
+    ] = {}
     events = status.get("execution_events")
     if isinstance(events, list):
-        seen_trade_ids: set[str] = set()
         for raw in events:
             if not isinstance(raw, dict):
                 continue
@@ -1327,18 +1524,9 @@ def _execution_summary(
             payload = raw.get("payload")
             if not isinstance(payload, dict):
                 payload = {}
-            fees += _asset_amount(payload.get("commission"))
-            realized_pnl += _asset_amount(
-                payload.get("realized_pnl")
-            )
             event_type = str(raw.get("event_type") or "")
             if event_type != "OrderFilled":
                 continue
-            trade_id = str(raw.get("trade_id") or "")
-            if trade_id and trade_id in seen_trade_ids:
-                continue
-            if trade_id:
-                seen_trade_ids.add(trade_id)
             last_quantity = _first_decimal(
                 payload,
                 ("last_qty", "quantity", "qty"),
@@ -1347,30 +1535,311 @@ def _execution_summary(
                 payload,
                 ("last_px", "price", "avg_px"),
             )
+            (
+                commission_present,
+                commission,
+                commission_currency,
+                commission_currency_complete,
+            ) = _commission_value(payload)
+            realized_pnl_present = _financial_value_present(
+                payload.get("realized_pnl")
+            )
+            event_realized_pnl = Decimal(0)
+            if realized_pnl_present:
+                event_realized_pnl = _decimal(
+                    payload.get("realized_pnl"),
+                    "realized_pnl",
+                )
+            trade_id = str(raw.get("trade_id") or "").strip()
+            if not trade_id:
+                fill_identity_complete = False
+            if trade_id:
+                fingerprint = (
+                    last_quantity,
+                    last_price,
+                    commission_present,
+                    commission,
+                    commission_currency,
+                    commission_currency_complete,
+                    realized_pnl_present,
+                    event_realized_pnl,
+                )
+                previous = seen_trade_fingerprints.get(trade_id)
+                if previous is not None:
+                    if previous != fingerprint:
+                        fill_identity_complete = False
+                    continue
+                seen_trade_fingerprints[trade_id] = fingerprint
+            fill_event_count += 1
+            if commission_present:
+                fees += commission
+                commission_event_count += 1
+                if commission_currency_complete:
+                    commission_currency_event_count += 1
+            if realized_pnl_present:
+                realized_pnl += event_realized_pnl
+                realized_pnl_event_count += 1
             if last_quantity > 0 and last_price > 0:
+                matched_fill_event = True
                 weighted_quantity += last_quantity
                 weighted_quote += last_quantity * last_price
+            else:
+                fill_details_complete = False
     if filled_quantity == 0 and weighted_quantity > 0:
         filled_quantity = weighted_quantity
     if average_fill_price == 0 and weighted_quantity > 0:
         average_fill_price = weighted_quote / weighted_quantity
+    event_average_fill_price = Decimal(0)
+    if weighted_quantity > 0:
+        event_average_fill_price = weighted_quote / weighted_quantity
+    trade_ids = tuple(sorted(seen_trade_fingerprints))
     return {
         "filled_quantity": filled_quantity,
         "average_fill_price": average_fill_price,
+        "order_filled_quantity": order_filled_quantity,
+        "order_average_fill_price": order_average_fill_price,
+        "order_quantity": order_quantity,
+        "order_price": order_price,
         "fees": fees,
         "realized_pnl": realized_pnl,
         "status": order_status,
+        "matched_order": matched_order,
+        "matched_fill_event": matched_fill_event,
+        "event_filled_quantity": weighted_quantity,
+        "event_average_fill_price": event_average_fill_price,
+        "fill_identity_complete": fill_identity_complete,
+        "fill_details_complete": fill_details_complete,
+        "commission_complete": (
+            fill_event_count > 0
+            and commission_event_count == fill_event_count
+        ),
+        "commission_currency_complete": (
+            fill_event_count > 0
+            and commission_currency_event_count == fill_event_count
+        ),
+        "realized_pnl_complete": (
+            fill_event_count > 0
+            and realized_pnl_event_count == fill_event_count
+        ),
+        "trade_ids": trade_ids,
     }
 
 
-def _empty_execution_summary() -> dict[str, Decimal | str]:
+def _empty_execution_summary() -> dict[str, Decimal | str | bool]:
     return {
         "filled_quantity": Decimal(0),
         "average_fill_price": Decimal(0),
+        "order_filled_quantity": Decimal(0),
+        "order_average_fill_price": Decimal(0),
+        "order_quantity": Decimal(0),
+        "order_price": Decimal(0),
         "fees": Decimal(0),
         "realized_pnl": Decimal(0),
         "status": "UNKNOWN",
+        "matched_order": False,
+        "matched_fill_event": False,
+        "event_filled_quantity": Decimal(0),
+        "event_average_fill_price": Decimal(0),
+        "fill_identity_complete": False,
+        "fill_details_complete": False,
+        "commission_complete": False,
+        "commission_currency_complete": False,
+        "realized_pnl_complete": False,
+        "trade_ids": (),
     }
+
+
+def _financial_summary_warning(
+    summary: Mapping[str, Any],
+    *,
+    label: str,
+) -> str:
+    gaps: list[str] = []
+    if summary.get("matched_order") is not True:
+        gaps.append("matching order")
+    order_filled_quantity = Decimal(
+        str(summary["order_filled_quantity"])
+    )
+    if order_filled_quantity <= 0:
+        gaps.append("order filled quantity")
+    order_average_fill_price = Decimal(
+        str(summary["order_average_fill_price"])
+    )
+    if order_average_fill_price <= 0:
+        gaps.append("order fill price")
+    if summary.get("matched_fill_event") is not True:
+        gaps.append("matching fill event")
+    event_filled_quantity = Decimal(
+        str(summary["event_filled_quantity"])
+    )
+    if event_filled_quantity != order_filled_quantity:
+        gaps.append("fill quantity reconciliation")
+    if summary.get("fill_identity_complete") is not True:
+        gaps.append("fill identity")
+    if summary.get("fill_details_complete") is not True:
+        gaps.append("fill details")
+    event_average_fill_price = Decimal(
+        str(summary["event_average_fill_price"])
+    )
+    if event_average_fill_price != order_average_fill_price:
+        gaps.append("fill price reconciliation")
+    if summary.get("commission_complete") is not True:
+        gaps.append("commission coverage")
+    if summary.get("commission_currency_complete") is not True:
+        gaps.append("commission currency")
+    if summary.get("realized_pnl_complete") is not True:
+        gaps.append("realized PnL coverage")
+    if not gaps:
+        return ""
+    missing = ", ".join(gaps)
+    return (
+        f"{label} operator projection degraded: "
+        f"incomplete financial proof: {missing}"
+    )
+
+
+def _financial_open_side_warning(
+    status: Mapping[str, Any],
+    *,
+    signed_open_side: str,
+) -> str:
+    if not status:
+        return ""
+    side = ""
+    intent = status.get("intent")
+    if isinstance(intent, dict):
+        plan = intent.get("order_plan")
+        if isinstance(plan, dict):
+            side = str(plan.get("side") or "").lower()
+    normalized_side = ""
+    if side in {"long", "buy"}:
+        normalized_side = "BUY"
+    if side in {"short", "sell"}:
+        normalized_side = "SELL"
+    if normalized_side == signed_open_side:
+        return ""
+    return (
+        "open operator projection degraded: "
+        "incomplete financial proof: open side"
+    )
+
+
+def _financial_open_plan_warnings(
+    summary: Mapping[str, Any],
+    *,
+    signed_quantity: Decimal,
+    signed_limit_price: Decimal,
+) -> list[str]:
+    if summary.get("matched_order") is not True:
+        return []
+    warnings: list[str] = []
+    order_quantity = Decimal(str(summary["order_quantity"]))
+    if order_quantity != signed_quantity:
+        warnings.append(
+            "open operator projection degraded: "
+            "incomplete financial proof: open order quantity"
+        )
+    order_price = Decimal(str(summary["order_price"]))
+    if order_price != signed_limit_price:
+        warnings.append(
+            "open operator projection degraded: "
+            "incomplete financial proof: open order limit price"
+        )
+    return warnings
+
+
+def _round_trip_financial_warnings(
+    open_summary: Mapping[str, Any],
+    close_summary: Mapping[str, Any],
+) -> list[str]:
+    warnings: list[str] = []
+    open_quantity = Decimal(
+        str(open_summary["order_filled_quantity"])
+    )
+    close_quantity = Decimal(
+        str(close_summary["order_filled_quantity"])
+    )
+    quantities_comparable = (
+        open_summary.get("matched_order") is True
+        and close_summary.get("matched_order") is True
+        and open_quantity > 0
+        and close_quantity > 0
+    )
+    if quantities_comparable and open_quantity != close_quantity:
+        warnings.append(
+            "round-trip operator projection degraded: "
+            "incomplete financial proof: cross-leg quantity reconciliation"
+        )
+    open_trade_ids = {
+        str(value).strip()
+        for value in open_summary.get("trade_ids", ())
+        if str(value).strip()
+    }
+    close_trade_ids = {
+        str(value).strip()
+        for value in close_summary.get("trade_ids", ())
+        if str(value).strip()
+    }
+    if open_trade_ids.intersection(close_trade_ids):
+        warnings.append(
+            "round-trip operator projection degraded: "
+            "incomplete financial proof: cross-leg trade identity"
+        )
+    return warnings
+
+
+def _financial_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
+
+
+def _commission_value(
+    payload: Mapping[str, Any],
+) -> tuple[bool, Decimal, str, bool]:
+    raw_value = payload.get("commission")
+    if not _financial_value_present(raw_value):
+        return False, Decimal(0), "", False
+    text = str(raw_value).strip()
+    match = re.fullmatch(
+        (
+            r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+            r"(?:\s+([A-Za-z0-9]{2,16}))?"
+        ),
+        text,
+    )
+    if match is None:
+        raise AdapterError("commission must be numeric")
+    commission = abs(_decimal(match.group(1), "commission"))
+    embedded_currency = str(match.group(2) or "").upper()
+    commission_currency = str(
+        payload.get("commission_currency") or ""
+    ).strip().upper()
+    legacy_currency = str(
+        payload.get("currency") or ""
+    ).strip().upper()
+    supplied_currencies = {
+        currency
+        for currency in (
+            embedded_currency,
+            commission_currency,
+            legacy_currency,
+        )
+        if currency
+    }
+    currency = (
+        embedded_currency
+        or commission_currency
+        or legacy_currency
+    )
+    currency_complete = (
+        supplied_currencies == {"USDT"}
+    )
+    if not currency_complete:
+        commission = Decimal(0)
+    return True, commission, currency, currency_complete
 
 
 def _open_status(
@@ -1436,13 +1905,21 @@ def _derived_round_trip_pnl(
     open_summary: Mapping[str, Any],
     close_summary: Mapping[str, Any],
 ) -> Decimal:
-    open_quantity = Decimal(str(open_summary["filled_quantity"]))
-    close_quantity = Decimal(str(close_summary["filled_quantity"]))
-    quantity = min(open_quantity, close_quantity)
-    if quantity <= 0:
+    open_quantity = Decimal(
+        str(open_summary["order_filled_quantity"])
+    )
+    close_quantity = Decimal(
+        str(close_summary["order_filled_quantity"])
+    )
+    if open_quantity <= 0 or open_quantity != close_quantity:
         return Decimal(0)
-    open_price = Decimal(str(open_summary["average_fill_price"]))
-    close_price = Decimal(str(close_summary["average_fill_price"]))
+    quantity = open_quantity
+    open_price = Decimal(
+        str(open_summary["order_average_fill_price"])
+    )
+    close_price = Decimal(
+        str(close_summary["order_average_fill_price"])
+    )
     if open_price <= 0 or close_price <= 0:
         return Decimal(0)
     side = ""
@@ -1498,10 +1975,81 @@ def _find_node(
     nodes = payload.get("nodes")
     if not isinstance(nodes, list):
         raise AdapterError("node response is invalid")
-    for node in nodes:
-        if isinstance(node, dict) and node.get("node_id") == node_id:
-            return node
+    normalized_nodes = [
+        node
+        for node in nodes
+        if isinstance(node, dict)
+    ]
+    account_nodes = [
+        node
+        for node in normalized_nodes
+        if node.get("account_id") == ACCOUNT_ID
+    ]
+    foreign_account_nodes = [
+        node
+        for node in account_nodes
+        if node.get("node_id") != node_id
+    ]
+    if foreign_account_nodes:
+        raise AdapterError(
+            "ownership/fencing conflict: multiple account nodes or "
+            "node node_id mismatch"
+        )
+    matching_nodes = [
+        node
+        for node in normalized_nodes
+        if node.get("node_id") == node_id
+    ]
+    if len(matching_nodes) > 1:
+        raise AdapterError(
+            "ownership/fencing conflict: duplicate node identity"
+        )
+    if matching_nodes:
+        return matching_nodes[0]
     raise AdapterError(f"node is missing: {node_id}")
+
+
+def _validate_node_identity(
+    node: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    warnings: list[str],
+) -> None:
+    if node.get("node_id") != request.get("node_id"):
+        raise AdapterError(
+            "ownership/fencing conflict: node node_id mismatch"
+        )
+    if node.get("account_id") != request.get("account_id"):
+        raise AdapterError(
+            "ownership/fencing conflict: node account mismatch"
+        )
+    for field_name in ("writer_id", "lease_id", "fencing_epoch"):
+        actual_value = node.get(field_name)
+        if actual_value is None or actual_value == "":
+            warning = (
+                f"node identity telemetry missing: {field_name}"
+            )
+            if warning not in warnings:
+                warnings.append(warning)
+            continue
+        expected_value = request.get(field_name)
+        if field_name == "fencing_epoch":
+            try:
+                actual_value = int(actual_value)
+                expected_value = int(expected_value)
+            except (TypeError, ValueError):
+                raise AdapterError(
+                    "ownership/fencing conflict: "
+                    "node fencing_epoch mismatch"
+                )
+        else:
+            actual_value = str(actual_value)
+            expected_value = str(expected_value)
+        if actual_value != expected_value:
+            raise AdapterError(
+                "ownership/fencing conflict: "
+                f"node {field_name} mismatch"
+            )
 
 
 def _redacted_node_snapshot(
@@ -1512,6 +2060,9 @@ def _redacted_node_snapshot(
         for key in (
             "node_id",
             "account_id",
+            "writer_id",
+            "lease_id",
+            "fencing_epoch",
             "trading_state",
             "status",
             "readiness",
@@ -1546,6 +2097,7 @@ def _loss_monitor_evidence(
     )
     healthy = mirror_fresh
     progress_timestamps = [fetched_at]
+    warnings: list[str] = []
     source_parts = ["exchange_mirror"]
     evidence: dict[str, Any] = {
         "exchange_mirror_fetched_at": fetched_at,
@@ -1561,6 +2113,9 @@ def _loss_monitor_evidence(
         for node_field, evidence_field in node_progress_fields:
             value = node_snapshot.get(node_field)
             if value is None or value == "":
+                warnings.append(
+                    f"node health telemetry missing: {node_field}"
+                )
                 continue
             timestamp = _timestamp_text(
                 value,
@@ -1573,14 +2128,16 @@ def _loss_monitor_evidence(
                 timestamp,
                 freshness_seconds=node_freshness_seconds,
             ):
-                healthy = False
+                warnings.append(
+                    f"node health telemetry stale: {node_field}"
+                )
         if node_snapshot.get("loss_monitor_healthy") is False:
             healthy = False
         if node_snapshot.get("process_liveness") is False:
             healthy = False
         if node_progress_available:
             source_parts.append("node")
-    observed_at = min(
+    observed_at = max(
         progress_timestamps,
         key=_timestamp_datetime,
     )
@@ -1590,6 +2147,7 @@ def _loss_monitor_evidence(
         "observed_at": observed_at,
         "source": "+".join(source_parts),
         "evidence": evidence,
+        "warnings": warnings,
     }
 
 
@@ -1643,7 +2201,10 @@ def _enrichment_warning(
 
 def _is_ownership_error(error: AdapterError) -> bool:
     return re.search(
-        r"ownership|fencing",
+        (
+            r"ownership|fencing|identity[-_ ]?conflict|"
+            r"unauthori[sz]ed|forbidden|HTTP (?:401|403|409)"
+        ),
         str(error),
         re.IGNORECASE,
     ) is not None
@@ -1653,6 +2214,20 @@ def _is_soft_http_status(status_code: int) -> bool:
     if status_code in SOFT_HTTP_STATUSES:
         return True
     return 500 <= status_code <= 599
+
+
+def _is_durable_http_failure(detail: str) -> bool:
+    return DURABLE_HTTP_FAILURE_RE.search(detail) is not None
+
+
+def _is_durable_control_plane_error(error: AdapterError) -> bool:
+    return "durable control-plane failure" in str(error).lower()
+
+
+def _is_hard_control_plane_error(error: AdapterError) -> bool:
+    if _is_ownership_error(error):
+        return True
+    return _is_durable_control_plane_error(error)
 
 
 def _read_token_file(environment_name: str) -> str:
@@ -1814,10 +2389,6 @@ def _first_decimal(
         if number != 0:
             return abs(number)
     return Decimal(0)
-
-
-def _asset_amount(value: Any) -> Decimal:
-    return abs(_decimal(value, "asset amount"))
 
 
 def _decimal_text(value: Decimal) -> str:

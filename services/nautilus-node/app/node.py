@@ -293,6 +293,7 @@ def build_nautilus_trading_node(
             reason,
             hard=False,
         ),
+        recovered_callback=runtime.projection_actor.mark_ready_if_healthy,
     )
     command_actor = CommandPollerActor(
         runtime.control_plane,
@@ -441,14 +442,15 @@ def _wire_control_plane_session_liveness(
     runtime: AccountRuntime,
     session: Any,
 ) -> None:
-    setter = getattr(
-        runtime.health,
-        "set_process_liveness_provider",
-        None,
-    )
-    if not callable(setter):
-        return
-    setter(lambda: _session_process_liveness(session))
+    provider = lambda: _session_process_liveness(session)
+    for target in (runtime.health, runtime.lifecycle):
+        setter = getattr(
+            target,
+            "set_process_liveness_provider",
+            None,
+        )
+        if callable(setter):
+            setter(provider)
 
 
 def _session_process_liveness(session: Any) -> bool:

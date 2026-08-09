@@ -11,6 +11,24 @@ from .event_mapper import ProjectionConfig, ProjectionEventMapper
 from .spool import JsonExecutionSpool
 
 
+class ProjectionSinkUnavailable(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = getattr(cause, "status_code", None)
+        self.is_fence_conflict = getattr(
+            cause,
+            "is_fence_conflict",
+            False,
+        )
+        self.permanent = getattr(cause, "permanent", False)
+        self.fatal = getattr(cause, "fatal", False)
+
+
 class ExecutionEventSink(Protocol):
     def post_events(
         self, node_id: str, events: Sequence[ExecutionEventEnvelopeV1]
@@ -67,6 +85,7 @@ class ProjectionActor:
         self._spool_lock = RLock()
         self._egress_halted_reason = ""
         self._lag_degraded = False
+        self._ready_deferred = False
 
     @property
     def egress_halted_reason(self) -> str:
@@ -84,8 +103,20 @@ class ProjectionActor:
         return result.event_id
 
     def ingest_event(self, event: Any) -> ProjectionIngestResult:
+        with self._spool_lock:
+            if self._egress_halted_reason:
+                return ProjectionIngestResult(
+                    outcome=ProjectionIngestOutcome.HALTED,
+                    event_id=None,
+                )
         envelope = self._mapper.to_envelope(event)
         if envelope is None:
+            with self._spool_lock:
+                if self._egress_halted_reason:
+                    return ProjectionIngestResult(
+                        outcome=ProjectionIngestOutcome.HALTED,
+                        event_id=None,
+                    )
             return ProjectionIngestResult(
                 outcome=ProjectionIngestOutcome.FILTERED,
                 event_id=None,
@@ -122,12 +153,15 @@ class ProjectionActor:
             return []
         try:
             acked = self._sink.post_events(self.config.node_id, pending)
-        except Exception:
+        except Exception as exc:
             self._mark_projection_degraded(
                 "control-plane execution-event sink unavailable"
             )
             if propagate_sink_error:
-                raise
+                raise ProjectionSinkUnavailable(
+                    "control-plane execution-event sink unavailable",
+                    cause=exc,
+                ) from exc
             return []
         with self._spool_lock:
             self.spool.mark_acked(acked)
@@ -147,6 +181,19 @@ class ProjectionActor:
                 return
             self._egress_halted_reason = reason
             self._mark_projection_failed(reason)
+
+    def defer_ready_until_recovery(self) -> None:
+        with self._spool_lock:
+            if self._egress_halted_reason:
+                return
+            self._ready_deferred = True
+
+    def mark_ready_if_healthy(self) -> None:
+        with self._spool_lock:
+            if self._egress_halted_reason:
+                return
+            self._ready_deferred = False
+            self._mark_projection_ready()
 
     def _record_projection_progress(self, envelope: ExecutionEventEnvelopeV1) -> None:
         with self._spool_lock:
@@ -170,7 +217,7 @@ class ProjectionActor:
                     self._health.mark_projection_failed(reason)
                 return
             self._lag_degraded = False
-            self._health.mark_projection_ready()
+            self._mark_projection_ready()
 
     def _mark_projection_ready(self) -> None:
         with self._spool_lock:
@@ -179,6 +226,8 @@ class ProjectionActor:
             if self._egress_halted_reason:
                 return
             if self._lag_degraded:
+                return
+            if self._ready_deferred:
                 return
             self._health.mark_projection_ready()
 

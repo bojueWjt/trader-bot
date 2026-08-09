@@ -1,15 +1,30 @@
 # Account Stall 修复重新复盘与收敛计划
 
 日期：2026-08-09
-状态：Meta-reviewed，仅授权 Phase A
-生产结论：NO-GO，account-a/account-b 保持 HALTED，禁止真实交易
+状态：Claude 元复核与最终 reviewer 发现已吸收，本地代码、测试 gate 和双 reviewer 复核完成，部署待完成
+生产结论：account-a 保持 HALTED；真实交易 permit 在 `C-GATE=done`、`C-DEPLOY=done`
+且 deployed commit/hash 复核完成后生效，目标为一次
+`0.07 SOLUSDT LIMIT + IOC` 小额往返
 
 ## 1. 决策
 
-当前工作停止继续扩展功能，转入收敛模式。
+当前工作保持收敛模式。Claude 元复核提出的三个必修项已经进入现行决策：
 
-本计划经 Claude 元复核后，当前只允许执行 Phase A。Phase B 及后续阶段必须等待
-Phase A 冻结测试 inventory 与契约差异矩阵，并对当前 stall 机制给出可复现结论。
+1. 历史同步 I/O stall 与当前投影恢复回归使用两条独立因果链。
+2. 测试结论绑定可复跑命令、选择范围和明确的 pass/skip 数字。
+3. runtime resource 契约按三个 owner、两个 consumer 和可选性漂移建模，后续提取共享
+   required/allowed/default 定义。
+
+当前生产可用性回归的直接根因已经定位为：`34d41e7` 引入 async durable ingress 后，
+wrapper 将 mapper 不支持的订阅事件统一解释为 fatal `IGNORED`。节点启动恢复既有保护单时
+收到 `OrderInitialized`，该事件按 mapper 契约应被过滤，却触发 account-wide HALT 与
+`/ready` 503。修复把 durable ingress 结果拆分为：
+
+- `FILTERED`：记录降级并继续，后续成功 durable flush 清除降级。
+- `HALTED`：durable core 已停止，保持 sticky fatal。
+- durable write、queue capacity、deadline 和 fsync 失败：保持 hard fail-closed。
+
+该回归与 2026-07 历史 account stall、Redis namespace 变更分别记录，避免互相替代因果。
 
 后续交付面保持四类：
 
@@ -29,15 +44,21 @@ entries；后续 source freeze 有 169 个，其中 61 个 tracked 修改、108 
 directory entries。`--untracked-files=all` 展开后是 373 个 status entries。该工作树已混入
 其他任务。
 
-2026-08-09 已冻结的测试选择范围和结果摘要见
+2026-08-09 当前收敛分支的可复跑测试选择范围和结果如下；初始冻结清单见
 `docs/evidence/2026-08-09-account-stall-test-baseline.md`：
 
 | 验证面 | 结果 | 判定 |
 |---|---:|---|
-| `tests/execution tests/nautilus`，538 collected，Nautilus 1.227.0 | 523 passed, 4 failed, 11 skipped, 22 subtests passed | 4 个失败均为 live runtime resource fail-open |
-| release 聚焦套件 | 29 passed, 48 failed | FAIL |
-| deployment 聚焦套件 | 36 passed, 34 failed, 2 skipped, 30 subtests passed | FAIL |
-| maintenance fence + rollout API | 8 passed, 8 failed | fence 数据层可用；rollout 调用契约未同步 |
+| `tests/execution tests/nautilus` | 422 passed, 11 skipped, 2 subtests passed | PASS |
+| runtime/projection/http reviewer 聚焦 | 73 passed | PASS |
+| filtered-event 调度竞态独立进程循环 | 50/50 passed | PASS |
+| `tests/deployment` | 387 passed | PASS |
+| `tests/control-plane/api` | 86 passed | PASS |
+| live executor + adapter 聚焦 | 301 passed | PASS |
+| heartbeat persistence 聚焦 | 14 passed | PASS |
+| reviewer red-suite + projection mapper 聚焦 | 284 passed | PASS |
+| Python compile + `git diff --check` | PASS | PASS |
+| 双 Codex reviewer | `P0=0 P1=0 P2=0` / `P0=0 P1=0 P2=0` | PASS |
 
 2026-08-08 incident 中的 `491 passed, 21 skipped` 与上述数字对应不同日期、不同工作树和
 不同测试 inventory。2026-08-08 没有保存 collect-only 清单，两个结果只能分别证明各自
@@ -55,6 +76,33 @@ directory entries。`--untracked-files=all` 展开后是 373 个 status entries�
 | 当前 cleanup/fencing 缺陷 | shared-session terminal executor 泄漏和 durable worker `stop(False)` 传播缺口已有确定性 red/green 验证；它们与生产 account stall 的直接因果仍待 A7 审查 |
 | 历史放大因素 | 随机 Redis namespace、无界 streams、内存/swap/AOF/I/O 压力 |
 | 历史发布因素 | bind-mounted hotpatch、deleted inode、A/B 运行字节漂移 |
+| 当前生产可用性回归 | `OrderInitialized` 被错误提升为 durable fatal；与 Redis lineage 无直接因果 |
+| 当前生产状态 | `/ready` HTTP 200，account-a HALTED，release `499415f` 已连续通过 readiness |
+
+上述历史基线继续保留为 2026-08-09 复盘证据。当前分支的 pass 数字只证明本次
+projection/canary 变更选择面。
+
+### 2.1 真实交易门禁分层
+
+为了避免保护逻辑再次阻塞恢复验证，canary 使用以下分层：
+
+| 类型 | 条件 | 行为 |
+|---|---|---|
+| Soft | readiness、heartbeat、projection、reconciliation stale/false | 签名告警，继续 |
+| Soft | HTTP timeout、5xx、circuit open、普通 queue/resource pressure | bounded retry 或降级继续 |
+| Soft | 新鲜 exchange preflight 已证明目标归零和组合基线后，`/v1/nodes` timeout、普通 5xx 或 snapshot 缺失 | 保留 exchange authority，记录 warning，继续 OPEN |
+| Soft | heartbeat、execution-event、loss-monitor 纯遥测发布普通永久 4xx；本地 durable spool 完整 | 有界降级，不终止进程 |
+| Soft | emergency-close 只有确定性 `contract_replay`，缺少新鲜 testnet execution | 明确记录 `EMERGENCY_CLOSE_CONTRACT_REPLAY_ONLY`，继续 |
+| Soft | `risk_healthy` 缺失/false；actor/loss progress 陈旧；ownership/fencing/durability、writer/lease、余额、filter 遥测缺失 | 记录精确 warning，继续 |
+| Soft | `exchange_authoritative` 标记缺失/false，同时 exchange source/freshness 有效 | 记录 `PREFLIGHT_EXCHANGE_AUTHORITY_UNCONFIRMED`，继续 |
+| Hard | account/symbol/release/writer/lease/fencing identity | 阻断 |
+| Hard | 节点或 loss-monitor 发布 401/403/409、identity/fencing conflict | 阻断 |
+| Hard | `process_liveness=false`、`loss_monitor_healthy=false` | 阻断 |
+| Hard | quantity 固定 `0.07`、notional、已知 exchange filter、已知余额不足、single-use permit、loss cap | 阻断 |
+| Hard | `RESUME` 后、`OPEN` 前的新鲜 exchange preflight | 缺失时停止新增风险 |
+| Hard | durable journal/订单副作用身份/执行结果唯一性 | 阻断或进入恢复 |
+| Hard | 目标最终平仓、目标订单归零、非目标组合 baseline 不变、最终 HALT | 阻断最终 PASS |
+| Hard completion | open/close 唯一成交集合数量守恒、逐 fill commission、成交价、方向和 signed PnL 完整 | 缺失时交易仍完成平仓与 HALT，最终结果为 BLOCKED |
 
 ## 3. 为什么持续返工
 
@@ -329,14 +377,15 @@ Phase B-S 保持未授权。
 
 ### Phase G：HALTED canary 和真实小额交易
 
-目标：在所有前置门通过后完成 account-a 单次 12 USDT SOLUSDT round trip。
+目标：在所有前置门通过后完成 account-a 单次 `0.07 SOLUSDT LIMIT + IOC` round trip，
+实际名义金额不超过 12 USDT。
 
 | 项目 | 动作 | 验收 |
 |---|---|---|
 | G1 | 部署 account-a immutable digest，保持 HALTED | 无 deleted inode，release identity 完整 |
-| G2 | HALTED soak 和故障注入 | tick、heartbeat、projection、reconciliation 保持阈值 |
-| G3 | testnet 同形状 emergency close | `LIMIT + IOC` 与 reduce-only close PASS |
-| G4 | 单次 permit、restricted RESUME 和 round trip | 名义金额不超过 12 USDT，净亏损低于 1.5 USDT |
+| G2 | HALTED soak 和故障注入 | 显式 process/loss unhealthy、identity conflict、durable failure 可硬停；遥测缺失可降级 |
+| G3 | emergency close contract | 新鲜 testnet execution 或签名 `contract_replay` 覆盖 `LIMIT + IOC` 与 reduce-only close |
+| G4 | 单次 permit、restricted RESUME 和 round trip | quantity=`0.07`，名义金额不超过 12 USDT，净亏损低于 1.5 USDT |
 | G5 | 精确平仓、HALT、目标归零、组合签名复核 | SOLUSDT position/orders 为零，非目标组合不变 |
 | G6 | account-b rollout | account-a 证据签名后才允许进入 fleet complete |
 
@@ -373,7 +422,7 @@ PostgreSQL 或生产证据。
 
 ## 9. 停止条件
 
-出现以下任一情况时保持 NO-GO：
+以下条件阻断 release-wide rollout：
 
 - 工作树重新混入无关功能。
 - GAP-0 缺少当前代码的可重复诊断结论。
@@ -386,9 +435,14 @@ PostgreSQL 或生产证据。
 - release 或 deployment 聚焦测试存在失败。
 - Linux immutable build、真实 Redis/PostgreSQL 或 rollback 验证缺失。
 - 生产事实超过 gate 规定的新鲜度。
-- account-a 或 account-b 存在开放 P0/P1 incident。
+- account-a 或 account-b 存在与 ownership、fencing、durability、目标仓位或 loss monitor
+  直接相关的开放 P0/P1 incident。
 
-## 10. 第一执行批次
+受限 account-a canary 使用独立 gate：无关历史 incident、软遥测缺失和普通 transport
+degradation 进入签名告警；明确 identity 冲突、durable 失败、已知资金/filter 违规、
+process/loss unhealthy、交易结果歧义和最终安全证明失败继续阻断。
+
+## 10. Phase A 历史执行批次
 
 第一批只执行 Phase A：
 
@@ -400,8 +454,8 @@ PostgreSQL 或生产证据。
 5. 对 GAP-0 给出“已复现机制”或“当前残余机制未证实”的 Reviewer 结论。
 6. 形成独立 commit 和 Phase B/Phase B-S 授权建议。
 
-Phase A PASS 前，不修改 runtime/release/deployment 行为，不执行 SSH、生产只读采集、生产
-mutation、节点 restart 或真实交易。
+该段记录 2026-08-09 Phase A 启动时的授权边界。当前执行边界由顶部状态、2.1 节和
+Phase G 更新。
 
 ## 11. Claude Review 状态
 
@@ -423,6 +477,15 @@ Claude Opus 于 2026-08-09 使用只读方式核验计划、事故记录、关�
 6. rollout 的 8 个失败按调用 fixture 漂移处理。
 7. 首轮使用共享 Shell guard helper，Python guard CLI 延后。
 8. GO gate 使用零失败、无新增回归、skip 有解释和 inventory 可比性。
+
+当前 canary 收敛对三项元复核的处理边界：
+
+- M1：历史同步 callback I/O、当前 cleanup/fencing 缺陷和 `OrderInitialized` FILTERED
+  回归分别保留独立证据链。
+- M2：本轮 gate 已绑定可复跑命令和明确 pass/skip 数字；release-wide 原始输出、JUnit、
+  继承环境和依赖制品 hash 继续作为 fleet rollout 前置项。
+- M3：runtime resource 单一 owner 与 Node/manifest parity 继续作为 release-wide Phase B；
+  受限 canary 只消费已部署 release identity，不把该架构债转化为动态遥测硬门。
 
 ## 12. Runtime Validation 状态
 
@@ -449,4 +512,9 @@ fail-closed 仍属 Phase B，当前验证提交未修改相关 owner。
 A7 直接导入被依赖闭包阻断。Phase A 与验证分支在七个目标文件上相差 15,543 行新增和
 2,274 行删除，Strategy 单文件相差 8,383 行。下一步必须先形成 hunk-level
 dependency-closed import manifest，再决定可导入的原子批次。验证提交不作为 release
-source，生产和真实交易继续 `NO-GO`。
+source。
+
+该历史 A7 结论继续约束验证分支的直接导入。现行
+`codex/account-stall-phase-a` 分支已独立完成 runtime、deployment、control-plane 和
+canary 契约验证；本文顶部的签名单次 `0.07 SOLUSDT` 授权为当前 superseding gate。
+常规 production/fleet RESUME 继续保持关闭。

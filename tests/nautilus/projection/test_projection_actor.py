@@ -84,6 +84,21 @@ class ProjectionActorTests(unittest.TestCase):
         self.assertEqual(envelope.payload["commission"], "0.004 USDT")
         self.assertNotIn("nautilus-emission", envelope.event_id)
 
+    def test_whitespace_optional_identity_is_normalized_to_missing(self) -> None:
+        envelope = _mapper(now=lambda: NOW).to_envelope(
+            _Event(
+                "OrderFilled",
+                ts_event=1_718_000_000_000_000_000,
+                client_order_id=CLIENT_ORDER_ID,
+                venue_order_id="   ",
+                trade_id="   ",
+            )
+        )
+
+        self.assertIsInstance(envelope, ExecutionEventEnvelopeV1)
+        self.assertIsNone(envelope.venue_order_id)
+        self.assertIsNone(envelope.trade_id)
+
     def test_duplicate_business_event_is_spooled_and_posted_once(self) -> None:
         sink = _RecordingSink()
         actor = _actor(self._tmp_spool(), sink=sink)
@@ -217,6 +232,31 @@ class ProjectionActorTests(unittest.TestCase):
             health.degraded,
         )
         self.assertEqual(health.failed, [])
+
+    def test_ready_waits_for_wrapper_recovery_confirmation(self) -> None:
+        health = _RecordingHealth()
+        actor = _actor(
+            self._tmp_spool(),
+            sink=_RecordingSink(),
+            health=health,
+        )
+        actor.defer_ready_until_recovery()
+
+        event_id = actor.on_event(
+            _Event(
+                "OrderAccepted",
+                ts_event=_ns(NOW),
+                client_order_id="coid-recovery",
+            )
+        )
+
+        self.assertIsNotNone(event_id)
+        self.assertEqual(actor.spool.pending_count, 0)
+        self.assertEqual(health.ready, 0)
+
+        actor.mark_ready_if_healthy()
+
+        self.assertEqual(health.ready, 1)
 
     def test_event_mapping_catalog_lists_required_families(self) -> None:
         self.assertIn("OrderFilled", EVENT_MAPPING_CATALOG)

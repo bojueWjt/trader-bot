@@ -26,6 +26,7 @@ from uuid import UUID, uuid5
 
 ACCOUNT_ID = "account-a"
 SYMBOL = "SOLUSDT"
+LIVE_CANARY_QUANTITY = Decimal("0.07")
 MAX_ACTUAL_OPEN_NOTIONAL_USDT = Decimal(12)
 ABSOLUTE_LOSS_CAP_USDT = Decimal("1.5")
 MAX_CLOCK_SKEW = timedelta(seconds=60)
@@ -89,13 +90,11 @@ RESULT_STATUSES = {
     RESULT_DEGRADED,
     RESULT_BLOCKED,
 }
-SOFT_HEALTH_FIELDS = (
+SIGNED_HEALTH_FIELDS = (
+    "actor_tick_at",
     "heartbeat_at",
     "projection_at",
     "reconciliation_at",
-)
-HARD_HEALTH_FIELDS = (
-    "actor_tick_at",
     "loss_monitor_at",
 )
 SOFT_ADAPTER_ERROR_RE = re.compile(
@@ -112,6 +111,19 @@ SOFT_ADAPTER_ERROR_RE = re.compile(
     r"rate[-_ ]?limit|too many requests|"
     r"readiness|heartbeat|projection|"
     r"service unavailable|temporar|overload"
+    r")",
+    re.IGNORECASE,
+)
+HARD_ADAPTER_ERROR_RE = re.compile(
+    r"(?:"
+    r"\bownership\b|"
+    r"\bfenc(?:e|ing)\b|"
+    r"\bjournal\b|"
+    r"\bfsync\b|"
+    r"\bdurab(?:le|ility)\b|"
+    r"\bENOSPC\b|"
+    r"\bno[-_ ]space\b|"
+    r"\bcapacity[-_ ]?exhausted\b"
     r")",
     re.IGNORECASE,
 )
@@ -231,6 +243,10 @@ class AuthorizationPaths:
 @dataclass(frozen=True)
 class ReleaseIdentity:
     release_id: str
+    node_id: str
+    writer_id: str
+    lease_id: str
+    fencing_epoch: int
     image_digest: str
     config_sha256: str
     dependency_lock_sha256: str
@@ -254,17 +270,21 @@ class CanaryAuthorization:
     quantity: Decimal
     limit_price_usdt: Decimal
     max_notional_usdt: Decimal
+    fee_reserve_usdt: Decimal
+    exchange_filters: Mapping[str, Decimal]
     max_cumulative_net_loss_usdt: Decimal
     portfolio_baseline_sha256: str
     expires_at: datetime
-    testnet_emergency_close_verified_at: datetime
-    testnet_emergency_close_quantity: Decimal
-    testnet_emergency_close_evidence_sha256: str
-    actor_tick_at: datetime
-    heartbeat_at: datetime
-    projection_at: datetime
-    reconciliation_at: datetime
-    loss_monitor_at: datetime
+    emergency_close_evidence_type: str
+    emergency_close_environment: str
+    emergency_close_verified_at: datetime
+    emergency_close_quantity: Decimal
+    emergency_close_evidence_sha256: str
+    actor_tick_at: datetime | None
+    heartbeat_at: datetime | None
+    projection_at: datetime | None
+    reconciliation_at: datetime | None
+    loss_monitor_at: datetime | None
     health_max_age_seconds: Decimal
     exchange_max_age_seconds: Decimal
     document_sha256: Mapping[str, str]
@@ -288,6 +308,7 @@ class TradeObservation:
     mark_at: datetime
     loss_monitor_at: datetime
     evidence_sha256: str
+    warnings: tuple[str, ...]
 
     @property
     def actual_open_notional_usdt(self) -> Decimal:
@@ -696,6 +717,10 @@ class DryRunAdapter:
         self._authorization = authorization
         self._position_quantity = Decimal(0)
         self._position_side = "FLAT"
+        self._trading_state = "HALTED"
+        self._evidence_timestamp = (
+            _synthetic_authorization_timestamp(authorization)
+        )
 
     def preflight(
         self,
@@ -706,28 +731,30 @@ class DryRunAdapter:
             {
                 "action": "preflight",
                 "source": EXCHANGE_EVIDENCE_SOURCE,
-                "fetched_at": (
-                    self._authorization.actor_tick_at.isoformat()
-                ),
+                "exchange_authoritative": True,
+                "fetched_at": self._evidence_timestamp.isoformat(),
                 "mirror_stale": False,
                 "target_position_side": "FLAT",
                 "target_position_quantity": "0",
                 "target_regular_order_count": 0,
                 "target_algo_order_count": 0,
+                "available_usdt_balance": "100",
                 "non_target_portfolio_baseline_sha256": (
                     self._authorization.portfolio_baseline_sha256
                 ),
                 "node_snapshot": {
                     "account_id": self._authorization.account_id,
-                    "trading_state": "HALTED",
+                    "node_id": self._authorization.release.node_id,
+                    "writer_id": self._authorization.release.writer_id,
+                    "lease_id": self._authorization.release.lease_id,
+                    "fencing_epoch": (
+                        self._authorization.release.fencing_epoch
+                    ),
+                    "trading_state": self._trading_state,
                     "process_liveness": True,
-                    "actor_tick_at": (
-                        self._authorization.actor_tick_at.isoformat()
-                    ),
+                    "actor_tick_at": self._evidence_timestamp.isoformat(),
                     "loss_monitor_healthy": True,
-                    "loss_monitor_at": (
-                        self._authorization.loss_monitor_at.isoformat()
-                    ),
+                    "loss_monitor_at": self._evidence_timestamp.isoformat(),
                 },
                 "evidence_sha256": _synthetic_hash(
                     "dry-run-preflight"
@@ -737,7 +764,14 @@ class DryRunAdapter:
         return payload
 
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        return self._ack("resume", request)
+        self._trading_state = "ACTIVE"
+        return self._ack(
+            "resume",
+            request,
+            source=NODE_STATE_EVIDENCE_SOURCE,
+            trading_state=self._trading_state,
+            observed_at=self._evidence_timestamp.isoformat(),
+        )
 
     def submit_open(
         self,
@@ -771,15 +805,9 @@ class DryRunAdapter:
                 "cumulative_net_loss_usdt": "0",
                 "mark_fresh": True,
                 "loss_monitor_healthy": True,
-                "observed_at": (
-                    self._authorization.actor_tick_at.isoformat()
-                ),
-                "mark_at": (
-                    self._authorization.actor_tick_at.isoformat()
-                ),
-                "loss_monitor_at": (
-                    self._authorization.loss_monitor_at.isoformat()
-                ),
+                "observed_at": self._evidence_timestamp.isoformat(),
+                "mark_at": self._evidence_timestamp.isoformat(),
+                "loss_monitor_at": self._evidence_timestamp.isoformat(),
                 "loss_monitor_source": "exchange_mirror+node",
                 "exchange_evidence_state": "confirmed_executed",
                 "evidence_sha256": _synthetic_hash("dry-run-observe"),
@@ -809,9 +837,7 @@ class DryRunAdapter:
                     self._position_quantity
                 ),
                 "source": EXCHANGE_EVIDENCE_SOURCE,
-                "fetched_at": (
-                    self._authorization.actor_tick_at.isoformat()
-                ),
+                "fetched_at": self._evidence_timestamp.isoformat(),
                 "evidence_sha256": _synthetic_hash("dry-run-position"),
             }
         )
@@ -856,10 +882,11 @@ class DryRunAdapter:
                 "fees_usdt": "0",
                 "net_pnl_usdt": "0",
                 "cumulative_net_loss_usdt": "0",
+                "enrichment_degraded": False,
+                "financial_proof_complete": True,
+                "warnings": [],
                 "source": EXCHANGE_EVIDENCE_SOURCE,
-                "fetched_at": (
-                    self._authorization.actor_tick_at.isoformat()
-                ),
+                "fetched_at": self._evidence_timestamp.isoformat(),
                 "evidence_sha256": _synthetic_hash(
                     "dry-run-final-snapshot"
                 ),
@@ -868,14 +895,13 @@ class DryRunAdapter:
         return payload
 
     def halt(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        self._trading_state = "HALTED"
         return self._ack(
             "halt",
             request,
             source=NODE_STATE_EVIDENCE_SOURCE,
             trading_state="HALTED",
-            observed_at=(
-                self._authorization.actor_tick_at.isoformat()
-            ),
+            observed_at=self._evidence_timestamp.isoformat(),
         )
 
     def _identity_payload(self) -> dict[str, Any]:
@@ -1790,20 +1816,22 @@ class AccountALiveTradeExecutor:
                 action="RESUME",
                 request=resume_request,
             )
-            resume_hash = self._run_soft_action(
+            resume_dispatched_at = _utc_now(self._clock)
+            resume_result = self._run_soft_action(
                 action="RESUME",
                 trail=trail,
-                operation=lambda: _validate_ack(
+                operation=lambda: _validate_resume_ack(
                     self._adapter.resume(resume_request),
                     authorization,
-                    action="resume",
+                    now=_utc_now(self._clock),
                     expected_side_effect_id=resume_request[
                         "side_effect_id"
                     ],
                 ),
             )
             open_journal_fallback_state = "AUTHORIZED"
-            if resume_hash is False:
+            resume_exchange_not_before = resume_dispatched_at
+            if resume_result is False:
                 self._journal_continue_after_soft_failure(
                     authorization,
                     enabled=journal_enabled,
@@ -1819,6 +1847,14 @@ class AccountALiveTradeExecutor:
                     },
                 )
             else:
+                (
+                    resume_hash,
+                    resume_observed_at,
+                    resume_warnings,
+                ) = resume_result
+                for warning in resume_warnings:
+                    self._add_warning(warning)
+                resume_exchange_not_before = resume_observed_at
                 open_journal_fallback_state = "RESUMED"
                 self._journal_complete(
                     authorization,
@@ -1827,12 +1863,14 @@ class AccountALiveTradeExecutor:
                     state="RESUMED",
                     result={
                         "adapter_evidence_sha256": resume_hash,
+                        "observed_at": resume_observed_at.isoformat(),
                     },
                 )
                 trail.record(
                     "limited_resume_accepted",
                     {
                         "adapter_evidence_sha256": resume_hash,
+                        "observed_at": resume_observed_at.isoformat(),
                         "side_effect_id": resume_request[
                             "side_effect_id"
                         ],
@@ -1844,6 +1882,7 @@ class AccountALiveTradeExecutor:
                 authorization,
                 trail,
                 phase="before-open",
+                exchange_not_before=resume_exchange_not_before,
             )
             health_warnings = _validate_health_freshness(
                 authorization,
@@ -2176,6 +2215,41 @@ class AccountALiveTradeExecutor:
             )
             error_code = "DURABLE_WRITE_OR_CAPACITY_FAILURE"
 
+        final_snapshot = cleanup_result.final_snapshot
+        if final_snapshot is not None:
+            post_halt_loss = _decimal(
+                final_snapshot.get("cumulative_net_loss_usdt"),
+                "post-HALT cumulative_net_loss_usdt",
+                non_negative=True,
+            )
+            peak_cumulative_loss = max(
+                peak_cumulative_loss,
+                post_halt_loss,
+            )
+            if post_halt_loss >= (
+                authorization.max_cumulative_net_loss_usdt
+            ):
+                failure_reason = _join_errors(
+                    failure_reason,
+                    (
+                        "post-HALT cumulative net loss threshold "
+                        "reached",
+                    ),
+                )
+                error_code = "LOSS_LIMIT_REACHED"
+        if (
+            final_snapshot is not None
+            and final_snapshot.get("financial_proof_complete") is not True
+        ):
+            failure_reason = _join_errors(
+                failure_reason,
+                (
+                    "final financial proof is incomplete; "
+                    "loss threshold cannot be certified",
+                ),
+            )
+            error_code = "FINANCIAL_PROOF_INCOMPLETE"
+
         hard_completion_proved = (
             round_trip_complete
             and finished_halted
@@ -2273,9 +2347,23 @@ class AccountALiveTradeExecutor:
         trail: AuditTrail,
         *,
         phase: str,
+        exchange_not_before: datetime | None = None,
     ) -> None:
         preflight_request = self._base_request(authorization)
         preflight_request["phase"] = phase
+        preflight_request["quantity"] = _decimal_text(
+            authorization.quantity
+        )
+        preflight_request["limit_price_usdt"] = _decimal_text(
+            authorization.limit_price_usdt
+        )
+        preflight_request["fee_reserve_usdt"] = _decimal_text(
+            authorization.fee_reserve_usdt
+        )
+        if exchange_not_before is not None:
+            preflight_request["exchange_not_before"] = (
+                exchange_not_before.isoformat()
+            )
         preflight_result = self._run_soft_action(
             action="PREFLIGHT",
             trail=trail,
@@ -2284,9 +2372,18 @@ class AccountALiveTradeExecutor:
                 authorization,
                 now=_utc_now(self._clock),
                 phase=phase,
+                exchange_not_before=exchange_not_before,
             ),
         )
         if preflight_result is False:
+            if phase == "before-open":
+                raise ClassifiedExecutionError(
+                    (
+                        "before-open exchange authority unavailable "
+                        "after RESUME"
+                    ),
+                    code="EXCHANGE_AUTHORITY_UNAVAILABLE",
+                )
             trail.record(
                 "live_preflight_degraded_continue",
                 {
@@ -2297,7 +2394,7 @@ class AccountALiveTradeExecutor:
                 },
             )
             return
-        preflight_hash, preflight_warnings = preflight_result
+        preflight_hash, fetched_at, preflight_warnings = preflight_result
         for warning in preflight_warnings:
             self._add_warning(warning)
         trail.record(
@@ -2305,7 +2402,15 @@ class AccountALiveTradeExecutor:
             {
                 "phase": phase,
                 "adapter_evidence_sha256": preflight_hash,
+                "fetched_at": fetched_at.isoformat(),
                 "warning_count": len(preflight_warnings),
+                "quantity": _decimal_text(authorization.quantity),
+                "limit_price_usdt": _decimal_text(
+                    authorization.limit_price_usdt
+                ),
+                "fee_reserve_usdt": _decimal_text(
+                    authorization.fee_reserve_usdt
+                ),
             },
         )
 
@@ -2467,6 +2572,7 @@ class AccountALiveTradeExecutor:
             mark_at=initial_time,
             loss_monitor_at=initial_time,
             evidence_sha256="0" * 64,
+            warnings=(),
         )
         for observation_index in range(1, self._max_observations + 1):
             observe_request = self._base_request(authorization)
@@ -2518,6 +2624,8 @@ class AccountALiveTradeExecutor:
                 )
                 return False
             latest = observed
+            for warning in latest.warnings:
+                self._add_warning(warning)
             self._journal_complete(
                 authorization,
                 enabled=journal_enabled,
@@ -3064,6 +3172,13 @@ class AccountALiveTradeExecutor:
                         "reason": reason,
                         "phase": "pre-halt-close-proof",
                         "attempt": attempt,
+                        "quantity": _decimal_text(
+                            authorization.quantity
+                        ),
+                        "open_side": authorization.open_side,
+                        "limit_price_usdt": _decimal_text(
+                            authorization.limit_price_usdt
+                        ),
                         "hard_timeout_seconds": (
                             self._recovery_seconds_remaining(
                                 verification_started_at
@@ -3238,7 +3353,11 @@ class AccountALiveTradeExecutor:
                 break
             try:
                 halt_ack = self._adapter.halt(halt_request)
-                halt_hash, halt_observed_at = _validate_halt_ack(
+                (
+                    halt_hash,
+                    halt_observed_at,
+                    halt_warnings,
+                ) = _validate_halt_ack(
                     halt_ack,
                     authorization,
                     now=_utc_now(self._clock),
@@ -3246,6 +3365,8 @@ class AccountALiveTradeExecutor:
                         "side_effect_id"
                     ],
                 )
+                for warning in halt_warnings:
+                    self._add_warning(warning)
                 self._recovery_journal_complete(
                     authorization,
                     trail,
@@ -3322,6 +3443,13 @@ class AccountALiveTradeExecutor:
                     "reason": "post-halt-final-proof",
                     "phase": "post-halt-final",
                     "attempt": attempt,
+                    "quantity": _decimal_text(
+                        authorization.quantity
+                    ),
+                    "open_side": authorization.open_side,
+                    "limit_price_usdt": _decimal_text(
+                        authorization.limit_price_usdt
+                    ),
                     "halt_observed_at": halt_observed_at.isoformat(),
                     "exchange_not_before": (
                         halt_observed_at.isoformat()
@@ -4030,6 +4158,19 @@ class AccountALiveTradeExecutor:
             "open_order_type": "LIMIT",
             "open_time_in_force": "IOC",
             "open_side": authorization.open_side,
+            "requested_quantity": _decimal_text(authorization.quantity),
+            "limit_price_usdt": _decimal_text(
+                authorization.limit_price_usdt
+            ),
+            "fee_reserve_usdt": _decimal_text(
+                authorization.fee_reserve_usdt
+            ),
+            "exchange_filters": {
+                field_name: _decimal_text(field_value)
+                for field_name, field_value in (
+                    authorization.exchange_filters.items()
+                )
+            },
             "open_client_order_id": (
                 authorization.open_client_order_id
             ),
@@ -4078,6 +4219,36 @@ class AccountALiveTradeExecutor:
             execution_details["final_snapshot_evidence_sha256"] = str(
                 final_snapshot.get("evidence_sha256") or ""
             )
+        emergency_close_evidence = {
+            "verified": True,
+            "evidence_type": authorization.emergency_close_evidence_type,
+            "verified_at": (
+                authorization.emergency_close_verified_at.isoformat()
+            ),
+            "environment": authorization.emergency_close_environment,
+            "release_id": authorization.release.release_id,
+            "image_digest": authorization.release.image_digest,
+            "symbol": authorization.symbol,
+            "open_order_type": "LIMIT",
+            "open_time_in_force": "IOC",
+            "open_filled_quantity": _decimal_text(
+                authorization.emergency_close_quantity
+            ),
+            "close_order_type": "MARKET",
+            "close_reduce_only": True,
+            "close_quantity": _decimal_text(
+                authorization.emergency_close_quantity
+            ),
+            "close_filled_quantity": _decimal_text(
+                authorization.emergency_close_quantity
+            ),
+            "target_symbol_flat": True,
+            "target_symbol_regular_orders_zero": True,
+            "target_symbol_algo_orders_zero": True,
+            "evidence_sha256": (
+                authorization.emergency_close_evidence_sha256
+            ),
+        }
         evidence = {
             "schema_version": EVIDENCE_SCHEMA,
             "generated_at": _utc_now(self._clock).isoformat(),
@@ -4154,40 +4325,12 @@ class AccountALiveTradeExecutor:
                 authorization.portfolio_baseline_sha256
             ),
             "non_target_portfolio_after_sha256": portfolio_after,
-            "testnet_emergency_close": {
-                "verified": True,
-                "verified_at": (
-                    authorization.testnet_emergency_close_verified_at
-                    .isoformat()
-                ),
-                "environment": "testnet",
-                "release_id": authorization.release.release_id,
-                "image_digest": authorization.release.image_digest,
-                "symbol": authorization.symbol,
-                "open_order_type": "LIMIT",
-                "open_time_in_force": "IOC",
-                "open_filled_quantity": _decimal_text(
-                    authorization.testnet_emergency_close_quantity
-                ),
-                "close_order_type": "MARKET",
-                "close_reduce_only": True,
-                "close_quantity": _decimal_text(
-                    authorization.testnet_emergency_close_quantity
-                ),
-                "close_filled_quantity": _decimal_text(
-                    authorization.testnet_emergency_close_quantity
-                ),
-                "target_symbol_flat": True,
-                "target_symbol_regular_orders_zero": True,
-                "target_symbol_algo_orders_zero": True,
-                "evidence_sha256": (
-                    authorization
-                    .testnet_emergency_close_evidence_sha256
-                ),
-            },
+            "emergency_close_evidence": emergency_close_evidence,
             "event_chain_sha256": trail.chain_sha256,
             "events": list(trail.events),
         }
+        if authorization.emergency_close_evidence_type == "testnet_execution":
+            evidence["testnet_emergency_close"] = emergency_close_evidence
         details_key = "dry_run_round_trip"
         if self._mode == "live":
             details_key = "mainnet_round_trip"
@@ -4323,6 +4466,22 @@ def _validate_authorization_documents(
             release_gate.get("release_id"),
             "release gate release_id",
         ),
+        node_id=_required_text(
+            release_gate.get("node_id"),
+            "release gate node_id",
+        ),
+        writer_id=_required_text(
+            release_gate.get("writer_id"),
+            "release gate writer_id",
+        ),
+        lease_id=_required_text(
+            release_gate.get("lease_id"),
+            "release gate lease_id",
+        ),
+        fencing_epoch=_positive_integer(
+            release_gate.get("fencing_epoch"),
+            "release gate fencing_epoch",
+        ),
         image_digest=_required_image_digest(
             release_gate.get("image_digest"),
             "release gate image_digest",
@@ -4387,26 +4546,57 @@ def _validate_authorization_documents(
         "target_symbol_flat",
         "target_symbol_regular_orders_zero",
         "target_symbol_algo_orders_zero",
-        "loss_monitor_healthy",
     )
     for field_name in required_safety_truths:
         if safety_gate.get(field_name) is not True:
             raise LiveTradeExecutionError(
                 f"safety gate requires {field_name}=true"
             )
-    scoped_hard_truths = (
-        "ownership_healthy",
-        "fencing_healthy",
-        "risk_healthy",
-        "durability_healthy",
+    loss_monitor_healthy = safety_gate.get(
+        "loss_monitor_healthy"
     )
-    for field_name in scoped_hard_truths:
-        if field_name not in safety_gate:
-            continue
-        if safety_gate.get(field_name) is not True:
+    if loss_monitor_healthy is False:
+        raise LiveTradeExecutionError(
+            "safety gate requires loss_monitor_healthy=true"
+        )
+    if loss_monitor_healthy is not True:
+        warnings.append(
+            "SAFETY_LOSS_MONITOR_HEALTH_MISSING: "
+            "loss_monitor_healthy telemetry is missing"
+        )
+    scoped_safety_health = (
+        (
+            "ownership_healthy",
+            "SAFETY_OWNERSHIP_HEALTH_MISSING",
+        ),
+        (
+            "fencing_healthy",
+            "SAFETY_FENCING_HEALTH_MISSING",
+        ),
+        (
+            "durability_healthy",
+            "SAFETY_DURABILITY_HEALTH_MISSING",
+        ),
+    )
+    for field_name, warning_code in scoped_safety_health:
+        health_value = safety_gate.get(field_name)
+        if health_value is False:
             raise LiveTradeExecutionError(
                 f"safety gate requires {field_name}=true"
             )
+        if health_value is None or health_value == "":
+            warnings.append(
+                f"{warning_code}: {field_name} telemetry is missing"
+            )
+            continue
+        if health_value is not True:
+            raise LiveTradeExecutionError(
+                f"safety gate {field_name} must be boolean"
+            )
+    if safety_gate.get("risk_healthy") is not True:
+        warnings.append(
+            "SAFETY_RISK_DEGRADED: risk_healthy is missing or false"
+        )
     soft_truth_warnings = (
         (
             "readiness_healthy",
@@ -4471,38 +4661,19 @@ def _validate_authorization_documents(
         raise LiveTradeExecutionError(
             "safety gate exchange max age exceeds 180 seconds"
         )
-    health_timestamps = {
-        "actor_tick_at": _timestamp(
-            safety_gate.get("actor_tick_at"),
-            "safety gate actor_tick_at",
-        ),
-        "heartbeat_at": _timestamp(
-            safety_gate.get("heartbeat_at"),
-            "safety gate heartbeat_at",
-        ),
-        "projection_at": _timestamp(
-            safety_gate.get("projection_at"),
-            "safety gate projection_at",
-        ),
-        "reconciliation_at": _timestamp(
-            safety_gate.get("reconciliation_at"),
-            "safety gate reconciliation_at",
-        ),
-        "loss_monitor_at": _timestamp(
-            safety_gate.get("loss_monitor_at"),
-            "safety gate loss_monitor_at",
-        ),
-    }
-    for field_name in HARD_HEALTH_FIELDS:
-        timestamp = health_timestamps[field_name]
-        _require_fresh_timestamp(
-            timestamp,
-            now=now,
-            max_age_seconds=health_max_age_seconds,
-            label=f"safety gate {field_name}",
+    health_timestamps: dict[str, datetime | None] = {}
+    for field_name in SIGNED_HEALTH_FIELDS:
+        timestamp = _optional_timestamp(
+            safety_gate.get(field_name),
+            f"safety gate {field_name}",
         )
-    for field_name in SOFT_HEALTH_FIELDS:
-        timestamp = health_timestamps[field_name]
+        health_timestamps[field_name] = timestamp
+        if timestamp is None:
+            warnings.append(
+                "SAFETY_HEALTH_TELEMETRY_MISSING: "
+                f"{field_name} is missing"
+            )
+            continue
         warning = _freshness_warning(
             timestamp,
             now=now,
@@ -4536,9 +4707,32 @@ def _validate_authorization_documents(
         document_sha256["safety_gate"],
         "emergency close gate",
     )
+    evidence_type = _required_text(
+        emergency_gate.get("evidence_type", "testnet_execution"),
+        "emergency close gate evidence_type",
+    )
+    supported_evidence_environments = {
+        "testnet_execution": "testnet",
+        "contract_replay": "contract_replay",
+    }
+    expected_environment = supported_evidence_environments.get(evidence_type)
+    if expected_environment is None:
+        raise LiveTradeExecutionError(
+            "emergency close evidence_type is unsupported"
+        )
+    if emergency_gate.get("environment") != expected_environment:
+        raise LiveTradeExecutionError(
+            "emergency close gate mismatch: environment"
+        )
+    if evidence_type == "contract_replay":
+        warnings.append(
+            (
+                "EMERGENCY_CLOSE_CONTRACT_REPLAY_ONLY: "
+                "emergency close evidence is a deterministic contract replay"
+            )
+        )
     expected_emergency_values = {
         "verified": True,
-        "environment": "testnet",
         "open_order_type": "LIMIT",
         "open_time_in_force": "IOC",
         "close_order_type": "MARKET",
@@ -4552,24 +4746,27 @@ def _validate_authorization_documents(
             raise LiveTradeExecutionError(
                 f"emergency close gate mismatch: {field_name}"
             )
-    testnet_evidence_sha256 = _required_sha256(
-        emergency_gate.get("testnet_evidence_sha256"),
-        "emergency close gate testnet_evidence_sha256",
+    emergency_evidence_sha256 = _required_sha256(
+        emergency_gate.get(
+            "evidence_sha256",
+            emergency_gate.get("testnet_evidence_sha256"),
+        ),
+        "emergency close gate evidence_sha256",
     )
-    testnet_verified_at = _timestamp(
+    emergency_verified_at = _timestamp(
         emergency_gate.get("verified_at"),
         "emergency close gate verified_at",
     )
-    testnet_age = now - testnet_verified_at
-    if testnet_age < -MAX_CLOCK_SKEW:
+    evidence_age = now - emergency_verified_at
+    if evidence_age < -MAX_CLOCK_SKEW:
         raise LiveTradeExecutionError(
-            "emergency close testnet verification is in the future"
+            "emergency close verification is in the future"
         )
-    if testnet_age > timedelta(days=1):
+    if evidence_age > timedelta(days=1):
         warnings.append(
             (
-                "TESTNET_EMERGENCY_PROOF_STALE: "
-                "emergency close testnet verification exceeds 1 day"
+                "EMERGENCY_CLOSE_PROOF_STALE: "
+                "emergency close verification exceeds 1 day"
             )
         )
     emergency_quantity = _decimal(
@@ -4647,6 +4844,10 @@ def _validate_authorization_documents(
         "quantity",
         positive=True,
     )
+    if quantity != LIVE_CANARY_QUANTITY:
+        raise LiveTradeExecutionError(
+            "permit quantity must equal 0.07 SOL"
+        )
     if quantity != emergency_quantity:
         raise LiveTradeExecutionError(
             "permit quantity differs from emergency close evidence"
@@ -4674,6 +4875,18 @@ def _validate_authorization_documents(
         raise LiveTradeExecutionError(
             "requested open notional exceeds 12 USDT"
         )
+    fee_reserve = _decimal(
+        permit.get("fee_reserve_usdt"),
+        "fee_reserve_usdt",
+        non_negative=True,
+    )
+    exchange_filters = _parse_exchange_filters(
+        permit.get("exchange_filters"),
+        quantity=quantity,
+        limit_price=limit_price,
+        requested_notional=requested_notional,
+        warnings=warnings,
+    )
     max_loss = _decimal(
         permit.get("max_cumulative_net_loss_usdt"),
         "max_cumulative_net_loss_usdt",
@@ -4719,29 +4932,25 @@ def _validate_authorization_documents(
         "quantity": _decimal_text(quantity),
         "limit_price_usdt": _decimal_text(limit_price),
         "max_notional_usdt": _decimal_text(max_notional),
+        "fee_reserve_usdt": _decimal_text(fee_reserve),
+        "exchange_filters": {
+            field_name: _decimal_text(field_value)
+            for field_name, field_value in exchange_filters.items()
+        },
         "max_cumulative_net_loss_usdt": _decimal_text(max_loss),
         "portfolio_baseline_sha256": portfolio_baseline_sha256,
         "expires_at": expires_at.isoformat(),
-        "testnet_emergency_close_verified_at": (
-            testnet_verified_at.isoformat()
+        "emergency_close_evidence_type": evidence_type,
+        "emergency_close_environment": expected_environment,
+        "emergency_close_verified_at": (
+            emergency_verified_at.isoformat()
         ),
-        "testnet_emergency_close_quantity": _decimal_text(
+        "emergency_close_quantity": _decimal_text(
             emergency_quantity
         ),
-        "testnet_emergency_close_evidence_sha256": (
-            testnet_evidence_sha256
+        "emergency_close_evidence_sha256": (
+            emergency_evidence_sha256
         ),
-        "actor_tick_at": health_timestamps[
-            "actor_tick_at"
-        ].isoformat(),
-        "heartbeat_at": health_timestamps["heartbeat_at"].isoformat(),
-        "projection_at": health_timestamps["projection_at"].isoformat(),
-        "reconciliation_at": health_timestamps[
-            "reconciliation_at"
-        ].isoformat(),
-        "loss_monitor_at": health_timestamps[
-            "loss_monitor_at"
-        ].isoformat(),
         "health_max_age_seconds": _decimal_text(
             health_max_age_seconds
         ),
@@ -4751,6 +4960,11 @@ def _validate_authorization_documents(
         "document_sha256": normalized_hashes,
         "signatures_verified": signatures_verified,
     }
+    for field_name in SIGNED_HEALTH_FIELDS:
+        timestamp = health_timestamps[field_name]
+        authorization_payload[field_name] = None
+        if timestamp is not None:
+            authorization_payload[field_name] = timestamp.isoformat()
     authorization_sha256 = _sha256_bytes(
         _canonical_json_bytes(authorization_payload)
     )
@@ -4767,13 +4981,17 @@ def _validate_authorization_documents(
         quantity=quantity,
         limit_price_usdt=limit_price,
         max_notional_usdt=max_notional,
+        fee_reserve_usdt=fee_reserve,
+        exchange_filters=exchange_filters,
         max_cumulative_net_loss_usdt=max_loss,
         portfolio_baseline_sha256=portfolio_baseline_sha256,
         expires_at=expires_at,
-        testnet_emergency_close_verified_at=testnet_verified_at,
-        testnet_emergency_close_quantity=emergency_quantity,
-        testnet_emergency_close_evidence_sha256=(
-            testnet_evidence_sha256
+        emergency_close_evidence_type=evidence_type,
+        emergency_close_environment=expected_environment,
+        emergency_close_verified_at=emergency_verified_at,
+        emergency_close_quantity=emergency_quantity,
+        emergency_close_evidence_sha256=(
+            emergency_evidence_sha256
         ),
         actor_tick_at=health_timestamps["actor_tick_at"],
         heartbeat_at=health_timestamps["heartbeat_at"],
@@ -4843,6 +5061,10 @@ def _validate_authorization_for_execution(
         raise LiveTradeExecutionError(
             "execution symbol must be SOLUSDT"
         )
+    if authorization.quantity != LIVE_CANARY_QUANTITY:
+        raise LiveTradeExecutionError(
+            "execution quantity must equal 0.07 SOL"
+        )
     if authorization.requested_open_notional_usdt > (
         MAX_ACTUAL_OPEN_NOTIONAL_USDT
     ):
@@ -4875,7 +5097,8 @@ def _validate_live_preflight(
     *,
     now: datetime,
     phase: str = "before-resume",
-) -> tuple[str, tuple[str, ...]]:
+    exchange_not_before: datetime | None = None,
+) -> tuple[str, datetime, tuple[str, ...]]:
     _validate_adapter_identity(payload, authorization)
     if payload.get("action") != "preflight":
         raise LiveTradeExecutionError(
@@ -4886,6 +5109,17 @@ def _validate_live_preflight(
         expected=EXCHANGE_EVIDENCE_SOURCE,
         label="preflight",
     )
+    warnings = _validated_payload_warnings(
+        payload,
+        label="preflight",
+    )
+    if (
+        phase == "before-open"
+        and payload.get("exchange_authoritative") is not True
+    ):
+        warnings.append(
+            "PREFLIGHT_EXCHANGE_AUTHORITY_UNCONFIRMED"
+        )
     fetched_at = _timestamp(
         payload.get("fetched_at"),
         "preflight fetched_at",
@@ -4894,6 +5128,11 @@ def _validate_live_preflight(
         fetched_at,
         now=now,
         max_age_seconds=authorization.exchange_max_age_seconds,
+        label="preflight fetched_at",
+    )
+    _require_timestamp_not_before(
+        fetched_at,
+        not_before=exchange_not_before,
         label="preflight fetched_at",
     )
     if payload.get("mirror_stale") is True:
@@ -4935,75 +5174,154 @@ def _validate_live_preflight(
             "preflight non-target portfolio baseline changed"
         )
     node_snapshot = payload.get("node_snapshot")
-    if not isinstance(node_snapshot, Mapping):
+    if (
+        node_snapshot is not None
+        and node_snapshot is not False
+        and not isinstance(node_snapshot, Mapping)
+    ):
         raise LiveTradeExecutionError(
             "preflight node snapshot is invalid"
         )
-    if node_snapshot.get("account_id") != authorization.account_id:
-        raise LiveTradeExecutionError(
-            "preflight node account identity mismatch"
-        )
-    trading_state = _required_text(
-        node_snapshot.get("trading_state"),
-        "preflight trading_state",
-    ).upper()
-    allowed_trading_states = {"HALTED", "STOPPED"}
-    if phase == "before-open":
-        allowed_trading_states.update({"RUNNING", "RESUMED"})
-    if trading_state not in allowed_trading_states:
-        raise LiveTradeExecutionError(
-            f"preflight node state is invalid for {phase}"
-        )
-    if node_snapshot.get("process_liveness") is False:
-        raise LiveTradeExecutionError(
-            "preflight process liveness is false"
-        )
-    if node_snapshot.get("loss_monitor_healthy") is False:
-        raise LiveTradeExecutionError(
-            "preflight loss monitor is unhealthy"
-        )
-    warnings: list[str] = []
-    if phase == "before-resume":
-        hard_progress_fields = (
+    if isinstance(node_snapshot, Mapping):
+        if node_snapshot.get("account_id") != authorization.account_id:
+            raise LiveTradeExecutionError(
+                "preflight node account identity mismatch"
+            )
+        expected_node_identity = {
+            "node_id": authorization.release.node_id,
+            "writer_id": authorization.release.writer_id,
+            "lease_id": authorization.release.lease_id,
+            "fencing_epoch": authorization.release.fencing_epoch,
+        }
+        for field_name, expected_value in expected_node_identity.items():
+            actual_value = node_snapshot.get(field_name)
+            missing_value = actual_value is None or actual_value == ""
+            if field_name != "node_id" and missing_value:
+                warnings.append(
+                    f"PREFLIGHT_NODE_IDENTITY_MISSING: {field_name}"
+                )
+                continue
+            if actual_value != expected_value:
+                raise LiveTradeExecutionError(
+                    f"preflight node identity mismatch: {field_name}"
+                )
+        trading_state = _required_text(
+            node_snapshot.get("trading_state"),
+            "preflight trading_state",
+        ).upper()
+        allowed_trading_states = {"HALTED", "STOPPED"}
+        if phase == "before-open":
+            allowed_trading_states = {
+                "ACTIVE",
+                "RUNNING",
+                "RESUMED",
+            }
+        if trading_state not in allowed_trading_states:
+            raise LiveTradeExecutionError(
+                f"preflight node state is invalid for {phase}"
+            )
+        for field_name in (
+            "process_liveness",
+            "loss_monitor_healthy",
+        ):
+            health_value = node_snapshot.get(field_name)
+            if health_value is False:
+                raise LiveTradeExecutionError(
+                    f"preflight requires {field_name}=true"
+                )
+            if health_value is not True:
+                warnings.append(
+                    f"PREFLIGHT_NODE_HEALTH_MISSING: {field_name}"
+                )
+        for field_name in (
             "actor_tick_at",
             "loss_monitor_at",
-        )
-        for field_name in hard_progress_fields:
+        ):
             raw_timestamp = node_snapshot.get(field_name)
             if raw_timestamp is None or raw_timestamp == "":
                 warnings.append(
-                    f"PREFLIGHT_NODE_PROGRESS_MISSING: {field_name}"
+                    f"preflight {field_name} is required"
                 )
                 continue
             timestamp = _timestamp(
                 raw_timestamp,
                 f"preflight {field_name}",
             )
-            _require_fresh_timestamp(
+            warning = _freshness_warning(
                 timestamp,
                 now=now,
                 max_age_seconds=authorization.health_max_age_seconds,
                 label=f"preflight {field_name}",
             )
-    if node_snapshot.get("readiness") is False:
-        warnings.append("PREFLIGHT_READINESS_DEGRADED")
-    reconciliation_state = str(
-        node_snapshot.get("reconciliation_state") or ""
-    ).lower()
-    if reconciliation_state and reconciliation_state not in {
-        "healthy",
-        "ready",
-        "ok",
-    }:
-        warnings.append(
-            "PREFLIGHT_RECONCILIATION_DEGRADED: "
-            f"{reconciliation_state}"
+            if warning:
+                warnings.append(warning)
+        if node_snapshot.get("readiness") is False:
+            warnings.append("PREFLIGHT_READINESS_DEGRADED")
+        reconciliation_state = str(
+            node_snapshot.get("reconciliation_state") or ""
+        ).lower()
+        if reconciliation_state and reconciliation_state not in {
+            "healthy",
+            "ready",
+            "ok",
+        }:
+            warnings.append(
+                "PREFLIGHT_RECONCILIATION_DEGRADED: "
+                f"{reconciliation_state}"
+            )
+    else:
+        warnings.append("PREFLIGHT_NODE_TELEMETRY_UNAVAILABLE")
+    raw_available_balance = payload.get("available_usdt_balance")
+    if raw_available_balance is None or raw_available_balance == "":
+        warnings.append("PREFLIGHT_AVAILABLE_BALANCE_MISSING")
+    else:
+        available_balance = _decimal(
+            raw_available_balance,
+            "preflight available_usdt_balance",
+            non_negative=True,
         )
+        required_balance = (
+            authorization.requested_open_notional_usdt
+            + authorization.fee_reserve_usdt
+        )
+        if available_balance < required_balance:
+            raise LiveTradeExecutionError(
+                "available USDT balance is below order plus fee reserve"
+            )
     evidence_sha256 = _required_sha256(
         payload.get("evidence_sha256"),
         "preflight evidence_sha256",
     )
-    return evidence_sha256, tuple(warnings)
+    return (
+        evidence_sha256,
+        fetched_at,
+        tuple(dict.fromkeys(warnings)),
+    )
+
+
+def _validated_payload_warnings(
+    payload: Mapping[str, Any],
+    *,
+    label: str,
+) -> list[str]:
+    raw_warnings = payload.get("warnings", [])
+    if not isinstance(raw_warnings, list):
+        raise LiveTradeExecutionError(
+            f"{label} warnings must be a list"
+        )
+    return [
+        _required_text(item, f"{label} warning")
+        for item in raw_warnings
+    ]
+
+
+def _observation_warnings(
+    payload: Mapping[str, Any],
+) -> list[str]:
+    return _validated_payload_warnings(
+        payload,
+        label="observation",
+    )
 
 
 def _parse_observation(
@@ -5024,9 +5342,15 @@ def _parse_observation(
         raise LiveTradeExecutionError(
             "observation mark price is stale"
         )
-    if payload.get("loss_monitor_healthy") is not True:
+    warnings = _observation_warnings(payload)
+    loss_monitor_healthy = payload.get("loss_monitor_healthy")
+    if loss_monitor_healthy is False:
         raise LiveTradeExecutionError(
             "loss monitor is unhealthy"
+        )
+    if loss_monitor_healthy is not True:
+        warnings.append(
+            "observation loss_monitor_healthy telemetry is missing"
         )
     open_status = _required_text(
         payload.get("open_status"),
@@ -5079,10 +5403,6 @@ def _parse_observation(
         payload.get("mark_at"),
         "observation mark_at",
     )
-    loss_monitor_at = _timestamp(
-        payload.get("loss_monitor_at"),
-        "observation loss_monitor_at",
-    )
     _require_fresh_timestamp(
         observed_at,
         now=now,
@@ -5095,19 +5415,36 @@ def _parse_observation(
         max_age_seconds=authorization.exchange_max_age_seconds,
         label="observation mark_at",
     )
-    loss_monitor_source = _required_text(
-        payload.get("loss_monitor_source"),
-        "loss_monitor_source",
-    ).lower()
+    loss_monitor_source = str(
+        payload.get("loss_monitor_source") or ""
+    ).strip().lower()
+    if not loss_monitor_source:
+        loss_monitor_source = "exchange_mirror"
+        warnings.append(
+            "observation loss_monitor_source telemetry is missing"
+        )
     loss_monitor_max_age = authorization.exchange_max_age_seconds
     if "node" in loss_monitor_source:
         loss_monitor_max_age = authorization.health_max_age_seconds
-    _require_fresh_timestamp(
-        loss_monitor_at,
-        now=now,
-        max_age_seconds=loss_monitor_max_age,
-        label="observation loss_monitor_at",
-    )
+    raw_loss_monitor_at = payload.get("loss_monitor_at")
+    if raw_loss_monitor_at is None or raw_loss_monitor_at == "":
+        loss_monitor_at = mark_at
+        warnings.append(
+            "observation loss_monitor_at telemetry is missing"
+        )
+    else:
+        loss_monitor_at = _timestamp(
+            raw_loss_monitor_at,
+            "observation loss_monitor_at",
+        )
+        warning = _freshness_warning(
+            loss_monitor_at,
+            now=now,
+            max_age_seconds=loss_monitor_max_age,
+            label="observation loss_monitor_at",
+        )
+        if warning:
+            warnings.append(warning)
     _require_timestamp_not_before(
         mark_at,
         not_before=exchange_not_before,
@@ -5127,6 +5464,7 @@ def _parse_observation(
         mark_at=mark_at,
         loss_monitor_at=loss_monitor_at,
         evidence_sha256=evidence_sha256,
+        warnings=tuple(warnings),
     )
 
 
@@ -5290,23 +5628,34 @@ def _validate_final_snapshot(
         "final cumulative_net_loss_usdt",
         non_negative=True,
     )
-    enrichment_degraded = payload.get("enrichment_degraded") is True
+    enrichment_degraded = payload.get("enrichment_degraded")
+    if not isinstance(enrichment_degraded, bool):
+        raise LiveTradeExecutionError(
+            "final enrichment_degraded must be boolean"
+        )
     financial_proof_complete = payload.get(
-        "financial_proof_complete",
-        not enrichment_degraded,
+        "financial_proof_complete"
     )
     if not isinstance(financial_proof_complete, bool):
         raise LiveTradeExecutionError(
             "final financial_proof_complete must be boolean"
         )
-    if enrichment_degraded and financial_proof_complete:
-        raise LiveTradeExecutionError(
-            "degraded enrichment cannot claim complete financial proof"
-        )
     warnings = payload.get("warnings", [])
     if not isinstance(warnings, list):
         raise LiveTradeExecutionError(
             "final snapshot warnings must be a list"
+        )
+    normalized_warnings = [
+        _required_text(item, "final snapshot warning")
+        for item in warnings
+    ]
+    if enrichment_degraded != bool(normalized_warnings):
+        raise LiveTradeExecutionError(
+            "final warnings and enrichment state differ"
+        )
+    if financial_proof_complete != (not normalized_warnings):
+        raise LiveTradeExecutionError(
+            "final warnings and financial proof state differ"
         )
     if net_pnl != gross_pnl - fees:
         raise LiveTradeExecutionError(
@@ -5325,7 +5674,8 @@ def _validate_final_snapshot(
         cumulative_loss
     )
     normalized["financial_proof_complete"] = financial_proof_complete
-    normalized["warnings"] = [str(item) for item in warnings]
+    normalized["enrichment_degraded"] = enrichment_degraded
+    normalized["warnings"] = normalized_warnings
     normalized["source"] = EXCHANGE_EVIDENCE_SOURCE
     normalized["fetched_at"] = fetched_at.isoformat()
     return normalized
@@ -5375,6 +5725,54 @@ def _validate_ack(
     return _required_sha256(
         payload.get("evidence_sha256"),
         f"{action} evidence_sha256",
+    )
+
+
+def _validate_resume_ack(
+    payload: Mapping[str, Any],
+    authorization: CanaryAuthorization,
+    *,
+    now: datetime,
+    expected_side_effect_id: str,
+) -> tuple[str, datetime, tuple[str, ...]]:
+    evidence_sha256 = _validate_ack(
+        payload,
+        authorization,
+        action="resume",
+        expected_side_effect_id=expected_side_effect_id,
+    )
+    _require_evidence_source(
+        payload,
+        expected=NODE_STATE_EVIDENCE_SOURCE,
+        label="RESUME acknowledgement",
+    )
+    trading_state = _required_text(
+        payload.get("trading_state"),
+        "RESUME acknowledgement trading_state",
+    ).upper()
+    if trading_state not in {"ACTIVE", "RUNNING", "RESUMED"}:
+        raise LiveTradeExecutionError(
+            "RESUME acknowledgement did not prove an active trading state"
+        )
+    observed_at = _timestamp(
+        payload.get("observed_at"),
+        "RESUME acknowledgement observed_at",
+    )
+    _require_fresh_timestamp(
+        observed_at,
+        now=now,
+        max_age_seconds=authorization.health_max_age_seconds,
+        label="RESUME acknowledgement observed_at",
+    )
+    return (
+        evidence_sha256,
+        observed_at,
+        tuple(
+            _validated_payload_warnings(
+                payload,
+                label="RESUME acknowledgement",
+            )
+        ),
     )
 
 
@@ -5440,6 +5838,8 @@ def _soft_adapter_rejection(
         str(payload.get("status_code") or ""),
     ]
     description = " ".join(parts).strip()
+    if HARD_ADAPTER_ERROR_RE.search(description) is not None:
+        return None
     if SOFT_ADAPTER_ERROR_RE.search(description) is None:
         return None
     code = _soft_failure_code(description)
@@ -5450,6 +5850,8 @@ def _soft_adapter_rejection(
 
 
 def _is_soft_action_failure(exc: BaseException) -> bool:
+    if HARD_ADAPTER_ERROR_RE.search(_exception_text(exc)) is not None:
+        return False
     if isinstance(exc, SoftActionFailure):
         return True
     if isinstance(
@@ -5550,7 +5952,7 @@ def _validate_halt_ack(
     *,
     now: datetime,
     expected_side_effect_id: str,
-) -> tuple[str, datetime]:
+) -> tuple[str, datetime, tuple[str, ...]]:
     evidence_sha256 = _validate_ack(
         payload,
         authorization,
@@ -5580,7 +5982,16 @@ def _validate_halt_ack(
         max_age_seconds=authorization.health_max_age_seconds,
         label="HALT acknowledgement observed_at",
     )
-    return evidence_sha256, observed_at
+    return (
+        evidence_sha256,
+        observed_at,
+        tuple(
+            _validated_payload_warnings(
+                payload,
+                label="HALT acknowledgement",
+            )
+        ),
+    )
 
 
 def _validate_adapter_identity(
@@ -5628,6 +6039,10 @@ def _identity_payload(
         "account_id": authorization.account_id,
         "symbol": authorization.symbol,
         "release_id": authorization.release.release_id,
+        "node_id": authorization.release.node_id,
+        "writer_id": authorization.release.writer_id,
+        "lease_id": authorization.release.lease_id,
+        "fencing_epoch": authorization.release.fencing_epoch,
         "image_digest": authorization.release.image_digest,
         "config_sha256": authorization.release.config_sha256,
         "dependency_lock_sha256": (
@@ -5660,6 +6075,78 @@ def _require_target_identity(
         raise LiveTradeExecutionError(
             f"{label} symbol must be SOLUSDT"
         )
+
+
+def _positive_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LiveTradeExecutionError(
+            f"{label} must be a positive integer"
+        )
+    if value < 1:
+        raise LiveTradeExecutionError(
+            f"{label} must be a positive integer"
+        )
+    return value
+
+
+def _parse_exchange_filters(
+    value: Any,
+    *,
+    quantity: Decimal,
+    limit_price: Decimal,
+    requested_notional: Decimal,
+    warnings: list[str],
+) -> dict[str, Decimal]:
+    if value is None:
+        warnings.append(
+            "EXCHANGE_FILTERS_MISSING: signed exchange metadata unavailable"
+        )
+        return {}
+    if not isinstance(value, Mapping):
+        raise LiveTradeExecutionError(
+            "exchange_filters must be an object"
+        )
+    filter_values: dict[str, Decimal] = {}
+    filter_fields = (
+        "quantity_step",
+        "min_quantity",
+        "price_tick",
+        "min_notional",
+    )
+    for field_name in filter_fields:
+        raw_value = value.get(field_name)
+        if raw_value is None or raw_value == "":
+            warnings.append(
+                f"EXCHANGE_FILTER_MISSING: {field_name}"
+            )
+            continue
+        filter_values[field_name] = _decimal(
+            raw_value,
+            f"exchange_filters.{field_name}",
+            positive=True,
+        )
+
+    quantity_step = filter_values.get("quantity_step")
+    if quantity_step is not None and quantity % quantity_step != 0:
+        raise LiveTradeExecutionError(
+            "exchange filter rejected: quantity_step"
+        )
+    min_quantity = filter_values.get("min_quantity")
+    if min_quantity is not None and quantity < min_quantity:
+        raise LiveTradeExecutionError(
+            "exchange filter rejected: min_quantity"
+        )
+    price_tick = filter_values.get("price_tick")
+    if price_tick is not None and limit_price % price_tick != 0:
+        raise LiveTradeExecutionError(
+            "exchange filter rejected: price_tick"
+        )
+    min_notional = filter_values.get("min_notional")
+    if min_notional is not None and requested_notional < min_notional:
+        raise LiveTradeExecutionError(
+            "exchange filter rejected: min_notional"
+        )
+    return filter_values
 
 
 def _require_release_identity(
@@ -5850,17 +6337,15 @@ def _validate_health_freshness(
         "reconciliation_at": authorization.reconciliation_at,
         "loss_monitor_at": authorization.loss_monitor_at,
     }
-    for field_name in HARD_HEALTH_FIELDS:
-        timestamp = timestamps[field_name]
-        _require_fresh_timestamp(
-            timestamp,
-            now=now,
-            max_age_seconds=authorization.health_max_age_seconds,
-            label=f"{label} {field_name}",
-        )
     warnings = []
-    for field_name in SOFT_HEALTH_FIELDS:
+    for field_name in SIGNED_HEALTH_FIELDS:
         timestamp = timestamps[field_name]
+        if timestamp is None:
+            warnings.append(
+                "SOFT_HEALTH_TELEMETRY_MISSING: "
+                f"{label} {field_name} is missing"
+            )
+            continue
         warning = _freshness_warning(
             timestamp,
             now=now,
@@ -6168,6 +6653,8 @@ def _synthetic_hash(label: str) -> str:
 
 
 def _required_text(value: Any, label: str) -> str:
+    if value is None:
+        raise LiveTradeExecutionError(f"{label} is required")
     text = str(value).strip()
     if not text:
         raise LiveTradeExecutionError(f"{label} is required")
@@ -6256,6 +6743,31 @@ def _timestamp(value: Any, label: str) -> datetime:
             f"{label} must be an ISO-8601 timestamp"
         ) from exc
     return _aware_utc(parsed, label)
+
+
+def _optional_timestamp(
+    value: Any,
+    label: str,
+) -> datetime | None:
+    if value is None or value == "":
+        return None
+    return _timestamp(value, label)
+
+
+def _synthetic_authorization_timestamp(
+    authorization: CanaryAuthorization,
+) -> datetime:
+    candidates = (
+        authorization.actor_tick_at,
+        authorization.loss_monitor_at,
+        authorization.heartbeat_at,
+        authorization.projection_at,
+        authorization.reconciliation_at,
+    )
+    for timestamp in candidates:
+        if timestamp is not None:
+            return timestamp
+    return authorization.emergency_close_verified_at
 
 
 def _aware_utc(value: datetime, label: str) -> datetime:

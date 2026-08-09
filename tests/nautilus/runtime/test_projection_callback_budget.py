@@ -17,10 +17,17 @@ EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
 sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
-from app.nautilus_actors import ExecutionProjectionActor  # noqa: E402
-from projection.actor import ProjectionActor  # noqa: E402
+from app.nautilus_actors import (  # noqa: E402
+    ExecutionProjectionActor,
+    _ProjectionDegradationCause,
+)
+from projection.actor import (  # noqa: E402
+    ProjectionActor,
+    ProjectionSinkUnavailable,
+)
 from projection.event_mapper import ProjectionConfig  # noqa: E402
 from projection.spool import JsonExecutionSpool  # noqa: E402
+from execution_domain.http_client import ControlPlaneHttpError  # noqa: E402
 from runtime.control_plane_session import NodeControlPlaneSession  # noqa: E402
 
 MAX_CALLBACK_SECONDS = 0.01
@@ -59,10 +66,12 @@ def test_projection_filters_order_initialized_without_halting_durable_lane(
     )
     fatal_reasons: list[str] = []
     degraded_reasons: list[str] = []
+    recovered: list[bool] = []
     actor = ExecutionProjectionActor(
         projection,
         fatal_callback=fatal_reasons.append,
         degraded_callback=degraded_reasons.append,
+        recovered_callback=lambda: recovered.append(True),
     )
     actor.on_start()
 
@@ -88,6 +97,8 @@ def test_projection_filters_order_initialized_without_halting_durable_lane(
     assert actor.on_event(_execution_event("event-after-filter")) is True
     assert _wait_until(lambda: bool(sink.calls))
     assert actor.halted_reason == ""
+    assert _wait_until(lambda: actor.degraded_reason == "")
+    assert recovered == [True]
     assert fatal_reasons == []
     assert actor.on_stop() is True
 
@@ -110,7 +121,14 @@ def test_projection_halted_core_remains_sticky_fatal(
     )
     actor.on_start()
 
-    assert actor.on_event(_execution_event("event-after-core-halt")) is True
+    assert actor.on_event(
+        {
+            "event_type": "OrderInitialized",
+            "client_order_id": "event-after-core-halt",
+            "instrument_id": "GOOGLUSDT-PERP.BINANCE",
+            "ts_event": 1_786_000_000_000_000_000,
+        }
+    ) is True
     assert _wait_until(lambda: bool(fatal_reasons))
     assert actor.halted_reason == (
         "execution projection durable ingress is halted"
@@ -118,6 +136,155 @@ def test_projection_halted_core_remains_sticky_fatal(
     assert fatal_reasons == [actor.halted_reason]
     assert actor.on_event("event-after-wrapper-halt") is False
     actor.on_stop()
+
+
+def test_filtered_event_retries_pending_session_wake_before_next_ingest() -> None:
+    projection = _BlockingSecondFilteredProjection()
+    session = _BackpressuredAfterStartupSession()
+    actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+    )
+    actor.on_start()
+
+    assert actor.on_event("persisted-before-filter") is True
+    assert _wait_until(lambda: actor.degraded_reason != "")
+    submissions_before_filter = len(session.submitted)
+
+    assert actor.on_event("filtered-first") is True
+    assert actor.on_event("filtered-second") is True
+    assert projection.second_filtered_started.wait(timeout=1.0)
+
+    assert len(session.submitted) > submissions_before_filter
+
+    projection.release_second_filtered.set()
+    actor.on_stop()
+
+
+def test_projection_degradation_causes_isolate_session_wake_from_filtered_recovery(
+) -> None:
+    projection = _ControlledSpoolProjection()
+    session = _BackpressuredAfterStartupSession()
+    actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+    )
+    actor.on_start()
+
+    assert actor.on_event("durable-before-filter") is True
+    assert _wait_until(
+        lambda: "session wake backpressured" in actor.degraded_reason
+    )
+
+    assert actor.on_event("filtered-after-backpressure") is True
+    assert projection.filtered.wait(timeout=1.0)
+    assert _wait_until(
+        lambda: (
+            "filtered subscribed event" in actor.degraded_reason
+            and "session wake backpressured" in actor.degraded_reason
+        )
+    )
+
+    session.release_backpressure.set()
+    assert session.wake_accepted.wait(timeout=1.0)
+    assert _wait_until(
+        lambda: "session wake backpressured" not in actor.degraded_reason
+    )
+    assert actor._session_wake_pending.is_set() is False
+    assert "filtered subscribed event" in actor.degraded_reason
+
+    projection.allow_drain.set()
+    assert actor.on_event("durable-after-filter") is True
+    assert _wait_until(lambda: projection.spool.pending_count >= 2)
+    actor.session_flush_execution_event(False)
+    assert _wait_until(lambda: actor.degraded_reason == "")
+    assert actor.on_stop() is True
+
+
+def test_projection_degradation_causes_isolate_spool_flush_from_filtered_recovery(
+) -> None:
+    projection = _ControlledSpoolProjection()
+    actor = ExecutionProjectionActor(projection)
+    actor.on_start()
+
+    assert actor.on_event("durable-before-filter") is True
+    assert projection.flush_with_pending.wait(timeout=1.0)
+    assert _wait_until(
+        lambda: "spool flush made no progress" in actor.degraded_reason
+    )
+
+    assert actor.on_event("filtered-after-spool-stall") is True
+    assert projection.filtered.wait(timeout=1.0)
+    assert _wait_until(
+        lambda: (
+            "filtered subscribed event" in actor.degraded_reason
+            and "spool flush made no progress" in actor.degraded_reason
+        )
+    )
+
+    projection.allow_drain.set()
+    actor.session_flush_execution_event(False)
+
+    assert projection.spool.pending_count == 0
+    assert "spool flush made no progress" not in actor.degraded_reason
+    assert "filtered subscribed event" in actor.degraded_reason
+
+    assert actor.on_event("deduped-after-filter") is True
+    assert _wait_until(lambda: actor.degraded_reason == "")
+    assert actor.on_stop() is True
+
+
+def test_projection_spool_flush_exception_is_sticky_fatal(
+) -> None:
+    projection = _ControlledSpoolProjection()
+    actor = ExecutionProjectionActor(projection)
+    actor.on_start()
+    projection.fail_flush.set()
+
+    assert actor.on_event("durable-before-flush-error") is True
+    assert projection.flush_with_pending.wait(timeout=1.0)
+    assert _wait_until(
+        lambda: "durable spool flush failed" in actor.halted_reason
+    )
+    assert actor.degraded_reason == ""
+    assert actor.on_event("durable-after-flush-error") is False
+    actor.on_stop()
+
+
+def test_projection_halt_clears_all_degradation_causes_and_stays_sticky() -> None:
+    projection = _FilterableDurableProjection()
+    session = _BackpressuredAfterStartupSession()
+    actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+    )
+    actor.on_start()
+
+    assert actor.on_event("durable-before-halt") is True
+    assert _wait_until(
+        lambda: "session wake backpressured" in actor.degraded_reason
+    )
+    assert actor.on_event("filtered-before-halt") is True
+    assert projection.filtered.wait(timeout=1.0)
+    assert _wait_until(
+        lambda: (
+            "filtered subscribed event" in actor.degraded_reason
+            and "session wake backpressured" in actor.degraded_reason
+        )
+    )
+
+    actor._halt_egress("explicit final projection halt")
+
+    assert actor.halted_reason == "explicit final projection halt"
+    assert actor.degraded_reason == ""
+    assert actor.on_event("durable-after-halt") is False
+
+    session.release_backpressure.set()
+    actor.session_flush_execution_event(False)
+
+    assert actor.halted_reason == "explicit final projection halt"
+    assert actor.degraded_reason == ""
+    assert actor.on_stop() is True
 
 
 def test_projection_sink_http_failure_is_recoverable_degradation(
@@ -147,6 +314,179 @@ def test_projection_sink_http_failure_is_recoverable_degradation(
     assert health.failed.is_set() is False
 
 
+def test_projection_sink_wrapper_preserves_failure_classification(
+    tmp_path: Path,
+) -> None:
+    failure = _ClassifiedSinkError(
+        "HTTP 409 lease owner conflict",
+        status_code=409,
+        is_fence_conflict=True,
+        permanent=True,
+        fatal=True,
+    )
+    sink = _ClassifiedFailingSink(failure)
+    spool = JsonExecutionSpool(
+        tmp_path / "execution-events-classified.json"
+    )
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            lag_degrade_threshold_ms=10**12,
+        ),
+        sink,
+        spool,
+    )
+    result = projection.ingest_event(
+        _execution_event("event-classified")
+    )
+
+    assert result.outcome.value == "DURABLE"
+    with pytest.raises(ProjectionSinkUnavailable) as captured:
+        projection.flush_for_session()
+
+    wrapped = captured.value
+    assert wrapped.status_code == 409
+    assert wrapped.is_fence_conflict is True
+    assert wrapped.permanent is True
+    assert wrapped.fatal is True
+    assert wrapped.__cause__ is failure
+    assert spool.pending_count == 1
+
+
+def test_projection_session_permanent_422_is_nonfatal_degradation(
+    tmp_path: Path,
+) -> None:
+    failure = ControlPlaneHttpError(
+        "HTTP 422 permanent schema rejection",
+        status_code=422,
+    )
+    sink = _ClassifiedFailingSink(failure)
+    spool = JsonExecutionSpool(
+        tmp_path / "execution-events-permanent-failure.json"
+    )
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            lag_degrade_threshold_ms=10**12,
+        ),
+        sink,
+        spool,
+    )
+    actor_holder: dict[str, ExecutionProjectionActor] = {}
+    fatal_reasons: list[str] = []
+    session = NodeControlPlaneSession(
+        execution_event_sink=lambda event: actor_holder[
+            "actor"
+        ].session_flush_execution_event(event),
+        retry_budget=3,
+        retry_base_delay_seconds=0.001,
+        retry_max_delay_seconds=0.001,
+        retry_jitter_ratio=0,
+        fatal_termination_hook=fatal_reasons.append,
+    )
+    actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+        worker_shutdown_wait_seconds=0.5,
+    )
+    actor_holder["actor"] = actor
+    actor.on_start()
+
+    assert actor.on_event(
+        _execution_event("event-session-permanent")
+    ) is True
+    assert _wait_until(lambda: sink.calls == 1)
+    assert _wait_until(
+        lambda: (
+            session.snapshot().lanes["execution_event"].failure
+            == "control-plane execution-event sink unavailable"
+        )
+    )
+
+    degraded = session.snapshot()
+    lane = degraded.lanes["execution_event"]
+    assert degraded.process_liveness is True
+    assert degraded.degraded is True
+    assert lane.fatal_failure is False
+    assert lane.queue_depth == 0
+    assert fatal_reasons == []
+    assert session.wait_for_termination(timeout=0.01) is False
+    assert sink.calls == 1
+    assert spool.pending_count == 1
+
+    sink.failure = None
+    assert actor.on_event(
+        _execution_event("event-session-after-permanent")
+    ) is True
+    assert _wait_until(lambda: spool.pending_count == 0)
+    assert actor.on_stop() is True
+
+
+def test_projection_session_sink_fence_conflict_is_fatal(
+    tmp_path: Path,
+) -> None:
+    failure = _ClassifiedSinkError(
+        "HTTP 409 stale writer",
+        status_code=409,
+        is_fence_conflict=True,
+        permanent=True,
+    )
+    sink = _ClassifiedFailingSink(failure)
+    spool = JsonExecutionSpool(
+        tmp_path / "execution-events-fence-conflict.json"
+    )
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            lag_degrade_threshold_ms=10**12,
+        ),
+        sink,
+        spool,
+    )
+    actor_holder: dict[str, ExecutionProjectionActor] = {}
+    fatal_reasons: list[str] = []
+    session = NodeControlPlaneSession(
+        execution_event_sink=lambda event: actor_holder[
+            "actor"
+        ].session_flush_execution_event(event),
+        retry_budget=3,
+        retry_base_delay_seconds=0.001,
+        retry_max_delay_seconds=0.001,
+        retry_jitter_ratio=0,
+        fatal_termination_hook=fatal_reasons.append,
+    )
+    actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+        worker_shutdown_wait_seconds=0.5,
+    )
+    actor_holder["actor"] = actor
+    actor.on_start()
+
+    assert actor.on_event(
+        _execution_event("event-session-fence")
+    ) is True
+    assert session.wait_for_termination(timeout=1.0) is True
+
+    fatal = session.snapshot()
+    lane = fatal.lanes["execution_event"]
+    assert fatal.process_liveness is False
+    assert lane.fatal_failure == (
+        "control-plane execution-event sink unavailable"
+    )
+    assert fatal_reasons == [lane.fatal_failure]
+    assert sink.calls == 1
+    assert spool.pending_count == 1
+
+    sink.failure = None
+    actor.session_flush_execution_event(False)
+    assert spool.pending_count == 0
+    assert actor.on_stop() is True
+
+
 def test_projection_session_sink_failure_retries_same_spooled_event(
     tmp_path: Path,
 ) -> None:
@@ -164,6 +504,7 @@ def test_projection_session_sink_failure_retries_same_spooled_event(
         health=health,
     )
     actor_holder: dict[str, ExecutionProjectionActor] = {}
+    fatal_reasons: list[str] = []
     session = NodeControlPlaneSession(
         execution_event_sink=lambda event: actor_holder[
             "actor"
@@ -173,6 +514,7 @@ def test_projection_session_sink_failure_retries_same_spooled_event(
         retry_max_delay_seconds=0.001,
         retry_jitter_ratio=0,
         circuit_reset_seconds=0.01,
+        fatal_termination_hook=fatal_reasons.append,
     )
     actor = ExecutionProjectionActor(
         projection,
@@ -195,6 +537,8 @@ def test_projection_session_sink_failure_retries_same_spooled_event(
     assert failed_lane.error_count >= 1
     assert sink.calls >= 1
     assert spool.pending_count == 1
+    assert session.snapshot().process_liveness is True
+    assert fatal_reasons == []
 
     sink.fail = False
 
@@ -210,6 +554,7 @@ def test_projection_session_sink_failure_retries_same_spooled_event(
     recovered_lane = session.snapshot().lanes["execution_event"]
     assert spool.pending_count == 0
     assert recovered_lane.success_count >= 1
+    assert fatal_reasons == []
     assert actor.on_stop() is True
 
 
@@ -240,6 +585,149 @@ def test_projection_lag_degradation_survives_same_flush_until_low_lag_progress(
     projection.on_event(_execution_event("event-low-lag"))
 
     assert health.states[-1] == ("ready", "")
+
+
+def test_wrapper_recovery_does_not_clear_active_projection_lag(
+    tmp_path: Path,
+) -> None:
+    event_time = datetime.fromtimestamp(1_786_000_000, tz=timezone.utc)
+    now_value = [event_time + timedelta(milliseconds=6)]
+    health = _ProjectionHealth()
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            lag_degrade_threshold_ms=5,
+        ),
+        _RecordingSink(),
+        JsonExecutionSpool(tmp_path / "execution-events-wrapper-lag.json"),
+        now=lambda: now_value[0],
+        health=health,
+    )
+    actor = ExecutionProjectionActor(
+        projection,
+        recovered_callback=projection.mark_ready_if_healthy,
+    )
+    actor.on_start()
+
+    assert actor.on_event(
+        {
+            "event_type": "OrderInitialized",
+            "client_order_id": "filtered-before-lag",
+            "instrument_id": "GOOGLUSDT-PERP.BINANCE",
+            "ts_event": int(event_time.timestamp() * 1_000_000_000),
+        }
+    ) is True
+    assert _wait_until(lambda: actor.degraded_reason != "")
+
+    assert actor.on_event(_execution_event("event-wrapper-lag")) is True
+    assert _wait_until(lambda: actor.degraded_reason == "")
+
+    assert ("ready", "") not in health.states
+    assert health.degraded
+    assert set(health.degraded) == {"projection lag 6ms exceeds 5ms"}
+    assert actor.on_stop() is True
+
+
+def test_older_flush_cannot_recover_later_filtered_degradation(
+    tmp_path: Path,
+) -> None:
+    sink = _BlockingFirstSink()
+    health = _ProjectionHealth()
+    spool = JsonExecutionSpool(
+        tmp_path / "execution-events-filtered-flush-race.json"
+    )
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            lag_degrade_threshold_ms=10**12,
+        ),
+        sink,
+        spool,
+        health=health,
+    )
+    actor = ExecutionProjectionActor(
+        projection,
+        degraded_callback=health.mark_projection_degraded,
+        recovered_callback=projection.mark_ready_if_healthy,
+    )
+    actor.on_start()
+
+    assert actor.on_event(_execution_event("durable-before-filter")) is True
+    assert sink.first_post_started.wait(timeout=1.0)
+
+    assert actor.on_event(
+        {
+            "event_type": "OrderInitialized",
+            "client_order_id": "filtered-after-flush-start",
+            "instrument_id": "BTCUSDT-PERP.BINANCE",
+            "ts_event": 1_786_000_000_000_000_000,
+        }
+    ) is True
+    assert _wait_until(
+        lambda: "filtered subscribed event" in actor.degraded_reason
+    )
+    assert health.states[-1][0] == "degraded"
+
+    sink.release_first_post.set()
+    assert _wait_until(lambda: spool.pending_count == 0)
+
+    assert "filtered subscribed event" in actor.degraded_reason
+    assert health.states[-1][0] == "degraded"
+
+    assert actor.on_event(
+        _execution_event("durable-recovery-candidate")
+    ) is True
+    assert _wait_until(lambda: actor.degraded_reason == "")
+
+    assert health.states[-1] == ("ready", "")
+    assert actor.on_stop() is True
+
+
+def test_filtered_recovery_callback_precedes_new_degradation() -> None:
+    projection = _DurableProjection()
+    callback_order: list[str] = []
+    recovery_started = Event()
+    release_recovery = Event()
+
+    def recovered_callback() -> None:
+        recovery_started.set()
+        release_recovery.wait(timeout=1.0)
+        callback_order.append("recovered")
+
+    actor = ExecutionProjectionActor(
+        projection,
+        degraded_callback=lambda reason: callback_order.append(
+            "degraded"
+        ),
+        recovered_callback=recovered_callback,
+    )
+    cause = _ProjectionDegradationCause.FILTERED
+    reason = "execution projection filtered subscribed event: OrderInitialized"
+
+    actor._degrade_egress(cause, reason)
+    actor._register_filtered_recovery_candidate()
+    recovery = Thread(target=actor._complete_filtered_recovery)
+    recovery.start()
+
+    assert recovery_started.wait(timeout=1.0)
+    degradation = Thread(
+        target=lambda: actor._degrade_egress(cause, reason)
+    )
+    degradation.start()
+    time.sleep(0.02)
+    assert degradation.is_alive() is True
+
+    release_recovery.set()
+    recovery.join(timeout=1.0)
+    degradation.join(timeout=1.0)
+
+    assert recovery.is_alive() is False
+    assert degradation.is_alive() is False
+    assert callback_order[-2:] == ["recovered", "degraded"]
+    assert actor.degraded_reason == reason
+    assert actor._filtered_degradation_epoch == 2
 
 
 def test_projection_callback_only_enqueues_while_durable_ingest_blocks() -> None:
@@ -713,6 +1201,19 @@ class _RecordingSink:
         return [str(event.event_id) for event in batch]
 
 
+class _BlockingFirstSink(_RecordingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_post_started = Event()
+        self.release_first_post = Event()
+
+    def post_events(self, node_id: str, events: Any) -> list[str]:
+        if not self.first_post_started.is_set():
+            self.first_post_started.set()
+            self.release_first_post.wait(timeout=2.0)
+        return super().post_events(node_id, events)
+
+
 class _FailingSink(_RecordingSink):
     def post_events(self, node_id: str, events: Any) -> list[str]:
         del node_id, events
@@ -729,6 +1230,37 @@ class _ToggleFailingSink:
         self.calls += 1
         if self.fail:
             raise RuntimeError("HTTP 503")
+        return [str(event.event_id) for event in events]
+
+
+class _ClassifiedSinkError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        is_fence_conflict: bool,
+        permanent: bool,
+        fatal: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.is_fence_conflict = is_fence_conflict
+        self.permanent = permanent
+        self.fatal = fatal
+
+
+class _ClassifiedFailingSink:
+    def __init__(self, failure: Exception | None) -> None:
+        self.failure = failure
+        self.calls = 0
+
+    def post_events(self, node_id: str, events: Any) -> list[str]:
+        del node_id
+        self.calls += 1
+        failure = self.failure
+        if failure is not None:
+            raise failure
         return [str(event.event_id) for event in events]
 
 
@@ -831,6 +1363,72 @@ class _DurableProjection:
 
     def halt_egress(self, reason: str) -> None:
         self.halted_reasons.append(reason)
+
+
+class _BlockingSecondFilteredProjection(_DurableProjection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.filtered_count = 0
+        self.second_filtered_started = Event()
+        self.release_second_filtered = Event()
+
+    def ingest_event(self, event: Any) -> Any:
+        if str(event).startswith("filtered-"):
+            self.filtered_count += 1
+            if self.filtered_count == 2:
+                self.second_filtered_started.set()
+                self.release_second_filtered.wait(timeout=2.0)
+            return SimpleNamespace(
+                outcome="FILTERED",
+                event_id=False,
+            )
+        return super().ingest_event(event)
+
+
+class _FilterableDurableProjection(_DurableProjection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.filtered = Event()
+
+    def ingest_event(self, event: Any) -> Any:
+        if str(event).startswith("filtered-"):
+            self.filtered.set()
+            return SimpleNamespace(
+                outcome="FILTERED",
+                event_id=False,
+            )
+        if str(event).startswith("deduped-"):
+            return SimpleNamespace(
+                outcome="DEDUPED",
+                event_id=str(event),
+            )
+        return super().ingest_event(event)
+
+
+class _ControlledSpoolProjection(_FilterableDurableProjection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.spool = SimpleNamespace(pending_count=0)
+        self.allow_drain = Event()
+        self.fail_flush = Event()
+        self.flush_with_pending = Event()
+
+    def ingest_event(self, event: Any) -> Any:
+        result = super().ingest_event(event)
+        if result.outcome == "DURABLE":
+            self.spool.pending_count += 1
+        return result
+
+    def flush(self) -> list[str]:
+        super().flush()
+        if self.spool.pending_count <= 0:
+            return []
+        self.flush_with_pending.set()
+        if self.fail_flush.is_set():
+            raise RuntimeError("recoverable flush failure")
+        if self.allow_drain.is_set():
+            self.spool.pending_count = 0
+        return []
 
 
 class _BackpressuredAfterStartupSession:

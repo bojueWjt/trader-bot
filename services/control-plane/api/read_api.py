@@ -16,7 +16,13 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import (
+    Decimal,
+    DecimalException,
+    InvalidOperation,
+    ROUND_DOWN,
+    localcontext,
+)
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import UUID, uuid4
@@ -126,7 +132,14 @@ async def v1_stream(authorization: str | None = Header(default=None)):
     )
 
 
-def _node_auth_bindings() -> dict[str, dict[str, str]] | bool:
+_NODE_WRITER_IDENTITY_FIELDS = (
+    "writer_id",
+    "lease_id",
+    "fencing_epoch",
+)
+
+
+def _node_auth_bindings() -> dict[str, dict[str, Any]] | bool:
     raw = os.environ.get("NAUTILUS_NODE_AUTH_JSON", "").strip()
     if not raw:
         return False
@@ -143,7 +156,7 @@ def _node_auth_bindings() -> dict[str, dict[str, str]] | bool:
             detail="node auth binding config is empty",
         )
 
-    bindings: dict[str, dict[str, str]] = {}
+    bindings: dict[str, dict[str, Any]] = {}
     token_owners: dict[str, str] = {}
     for raw_node_id, raw_binding in payload.items():
         node_id = str(raw_node_id or "").strip()
@@ -166,10 +179,56 @@ def _node_auth_bindings() -> dict[str, dict[str, str]] | bool:
                 detail="node auth tokens must be unique",
             )
         token_owners[token] = node_id
-        bindings[node_id] = {
+        binding: dict[str, Any] = {
             "account_id": account_id,
             "token": token,
         }
+        identity_values = {
+            field_name: raw_binding.get(field_name)
+            for field_name in _NODE_WRITER_IDENTITY_FIELDS
+        }
+        identity_present = {
+            field_name: value is not None and value != ""
+            for field_name, value in identity_values.items()
+        }
+        if any(identity_present.values()) and not all(
+            identity_present.values()
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="node auth writer identity is incomplete",
+            )
+        if all(identity_present.values()):
+            writer_id = str(
+                identity_values["writer_id"]
+            ).strip()
+            lease_id = str(identity_values["lease_id"]).strip()
+            raw_fencing_epoch = identity_values["fencing_epoch"]
+            if isinstance(raw_fencing_epoch, bool):
+                raise HTTPException(
+                    status_code=503,
+                    detail="node auth fencing epoch is invalid",
+                )
+            try:
+                fencing_epoch = int(raw_fencing_epoch)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="node auth fencing epoch is invalid",
+                ) from exc
+            if not writer_id or not lease_id or fencing_epoch < 1:
+                raise HTTPException(
+                    status_code=503,
+                    detail="node auth writer identity is invalid",
+                )
+            binding.update(
+                {
+                    "writer_id": writer_id,
+                    "lease_id": lease_id,
+                    "fencing_epoch": fencing_epoch,
+                }
+            )
+        bindings[node_id] = binding
     return bindings
 
 
@@ -237,6 +296,45 @@ def require_node(
             "node account conflicts with the bound writer identity"
         )
     return bound_account_id
+
+
+def _verified_node_writer_identity(
+    node_id: str,
+    body: Mapping[str, Any],
+) -> dict[str, Any]:
+    bindings = _node_auth_bindings()
+    if bindings is False:
+        return {}
+    binding = bindings.get(node_id)
+    if not binding:
+        return {}
+    if not all(
+        field_name in binding
+        for field_name in _NODE_WRITER_IDENTITY_FIELDS
+    ):
+        return {}
+    verified = {
+        field_name: binding[field_name]
+        for field_name in _NODE_WRITER_IDENTITY_FIELDS
+    }
+    for field_name, expected_value in verified.items():
+        declared_value = body.get(field_name)
+        if declared_value is None or declared_value == "":
+            continue
+        if field_name == "fencing_epoch":
+            try:
+                declared_value = int(declared_value)
+            except (TypeError, ValueError):
+                raise _writer_identity_conflict(
+                    "node fencing epoch conflicts with auth binding"
+                )
+        else:
+            declared_value = str(declared_value).strip()
+        if declared_value != expected_value:
+            raise _writer_identity_conflict(
+                f"node {field_name} conflicts with auth binding"
+            )
+    return verified
 
 
 def _nautilus_instrument_id(instr: str | None) -> str | None:
@@ -1166,6 +1264,20 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
         x_node_id=x_node_id,
         x_account_id=x_account_id,
     )
+    verified_identity = _verified_node_writer_identity(
+        node_id,
+        body,
+    )
+    for field_name in (
+        "process_liveness",
+        "loss_monitor_healthy",
+    ):
+        value = body.get(field_name)
+        if value is not None and not isinstance(value, bool):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name} must be boolean",
+            )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
@@ -1174,21 +1286,116 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
     conn = psycopg2.connect(database_url)
     try:
         with conn.cursor() as cur:
+            heartbeat_payload = {
+                k: body.get(k)
+                for k in (
+                    "readiness",
+                    "projection_lag_ms",
+                    "reconciliation_state",
+                    "last_event_id",
+                    "ts",
+                    "open_orders",
+                    "process_liveness",
+                )
+            }
+            for field_name in (
+                "loss_monitor_healthy",
+                "loss_monitor_at",
+            ):
+                value = body.get(field_name)
+                if value is not None:
+                    heartbeat_payload[field_name] = value
+            heartbeat_payload.update(verified_identity)
             cur.execute(
                 "INSERT INTO node_heartbeats (node_id, account_id, status, version, payload, last_seen_at) "
                 "VALUES (%s,%s,%s,%s,%s, now()) "
                 "ON CONFLICT (node_id) DO UPDATE SET account_id=COALESCE(EXCLUDED.account_id, node_heartbeats.account_id), "
-                "status=EXCLUDED.status, version=EXCLUDED.version, payload=EXCLUDED.payload, last_seen_at=now()",
+                "status=EXCLUDED.status, version=EXCLUDED.version, "
+                "payload=COALESCE(node_heartbeats.payload, '{}'::jsonb) || EXCLUDED.payload, "
+                "last_seen_at=now()",
                 (node_id, bound_account_id, str(body.get("trading_state") or "UNKNOWN"),
                  body.get("version"),
-                 Json({k: body.get(k) for k in
-                       ("readiness", "projection_lag_ms", "reconciliation_state", "last_event_id", "ts",
-                        "open_orders")})),
+                 Json(heartbeat_payload)),
             )
         conn.commit()
         return {"ok": True}
     finally:
         conn.close()
+
+
+@app.post("/v1/nodes/{node_id}/loss-monitor")
+def node_loss_monitor(
+    node_id: str,
+    body: dict = Body(default={}),
+    authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
+):
+    """Persist independent loss-monitor health without extending node liveness."""
+    account_id = str(body.get("account_id") or "").strip()
+    if not account_id:
+        raise HTTPException(
+            status_code=403,
+            detail="node account is required",
+        )
+    bound_account_id = require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
+    loss_monitor_healthy = body.get("loss_monitor_healthy")
+    if not isinstance(loss_monitor_healthy, bool):
+        raise HTTPException(
+            status_code=400,
+            detail="loss_monitor_healthy must be boolean",
+        )
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    from psycopg2.extras import Json
+
+    conn = None
+    try:
+        conn = psycopg2.connect(database_url)
+        with conn.cursor() as cur:
+            monitor_payload = {
+                "account_id": bound_account_id,
+                "loss_monitor_healthy": loss_monitor_healthy,
+                "loss_monitor_at": body.get("loss_monitor_at"),
+            }
+            cur.execute(
+                "UPDATE node_heartbeats "
+                "SET payload = COALESCE(payload, '{}'::jsonb) || %s::jsonb "
+                "WHERE node_id=%s AND account_id=%s",
+                (
+                    Json(monitor_payload),
+                    node_id,
+                    bound_account_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise HTTPException(
+                    status_code=503,
+                    detail="node heartbeat unavailable",
+                )
+        conn.commit()
+        return {"ok": True}
+    except HTTPException:
+        if conn is not None:
+            conn.rollback()
+        raise
+    except psycopg2.Error as exc:
+        if conn is not None:
+            conn.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="loss monitor write failed",
+        ) from exc
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @app.get("/v1/nodes/{node_id}/commands")
@@ -2253,6 +2460,14 @@ def v1_nodes(authorization: str | None = Header(default=None)):
                 "instrument_count": int(r["instrument_count"] or 0),
                 "projection_lag_ms": payload.get("projection_lag_ms"),
                 "reconciliation_state": payload.get("reconciliation_state"),
+                "writer_id": payload.get("writer_id"),
+                "lease_id": payload.get("lease_id"),
+                "fencing_epoch": payload.get("fencing_epoch"),
+                "process_liveness": payload.get("process_liveness"),
+                "loss_monitor_healthy": payload.get(
+                    "loss_monitor_healthy"
+                ),
+                "loss_monitor_at": payload.get("loss_monitor_at"),
                 "version": r["version"],
             })
         return {**env, "nodes": nodes}
@@ -2945,12 +3160,46 @@ _AUTHORIZATION_REPLAY_FIELDS = (
 )
 
 
+_ORDER_PLAN_REPLAY_METADATA_FIELDS = (
+    "authorization",
+    "attribution",
+)
+
+
 def _stable_authorization_evidence(authorization: object) -> dict:
     if not isinstance(authorization, dict):
         return {}
     return {
         field: authorization.get(field)
         for field in _AUTHORIZATION_REPLAY_FIELDS
+    }
+
+
+def _operator_trade_semantics(
+    account_id: object,
+    symbol: object,
+    action: object,
+    order_plan: object,
+    risk_budget: object,
+    target_position_id: object,
+) -> dict:
+    semantic_plan = {}
+    if isinstance(order_plan, Mapping):
+        semantic_plan = dict(order_plan)
+    for field in _ORDER_PLAN_REPLAY_METADATA_FIELDS:
+        semantic_plan.pop(field, None)
+    semantic_risk_budget = {}
+    if isinstance(risk_budget, Mapping):
+        semantic_risk_budget = dict(risk_budget)
+    return {
+        "account_id": str(account_id),
+        "symbol": str(symbol),
+        "action": str(action),
+        "order_plan": semantic_plan,
+        "risk_budget": semantic_risk_budget,
+        "target_position_id": str(
+            target_position_id or ""
+        ).strip(),
     }
 
 
@@ -3423,9 +3672,108 @@ def _op_num(value, field: str, required: bool = False):
         num = float(value)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail=f"{field} must be a number")
+    if not math.isfinite(num):
+        raise HTTPException(status_code=400, detail=f"{field} must be a number")
     if num <= 0:
         raise HTTPException(status_code=400, detail=f"{field} must be > 0")
     return num
+
+
+_OP_DECIMAL_MAX_INPUT_CHARS = 128
+_OP_DECIMAL_MAX_TOTAL_DIGITS = 28
+_OP_DECIMAL_MAX_SCIENTIFIC_EXPONENT = 18
+_OP_DECIMAL_MAX_DECIMAL_PLACES = 18
+_OP_DECIMAL_MAX_MAGNITUDE = Decimal("1e18")
+
+
+def _op_decimal(value, field: str) -> Decimal:
+    raw_value = str(value).strip()
+    if len(raw_value) > _OP_DECIMAL_MAX_INPUT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} input is too long",
+        )
+    try:
+        number = Decimal(raw_value)
+    except (InvalidOperation, TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be a number",
+        )
+    if not number.is_finite():
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be a number",
+        )
+    exponent_match = re.search(r"[eE]([+-]?\d+)$", raw_value)
+    if exponent_match is not None:
+        scientific_exponent = int(exponent_match.group(1))
+        if abs(scientific_exponent) > (
+            _OP_DECIMAL_MAX_SCIENTIFIC_EXPONENT
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} exponent is out of range",
+            )
+    decimal_tuple = number.as_tuple()
+    digits = list(decimal_tuple.digits)
+    decimal_exponent = int(decimal_tuple.exponent)
+    while (
+        len(digits) > 1
+        and digits[-1] == 0
+        and decimal_exponent < 0
+    ):
+        digits.pop()
+        decimal_exponent += 1
+    if len(digits) > _OP_DECIMAL_MAX_TOTAL_DIGITS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} has too many total digits",
+        )
+    decimal_places = max(-decimal_exponent, 0)
+    if decimal_places > _OP_DECIMAL_MAX_DECIMAL_PLACES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} has too many decimal places",
+        )
+    if number.copy_abs() > _OP_DECIMAL_MAX_MAGNITUDE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} magnitude exceeds limit",
+        )
+    if number <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be > 0",
+        )
+    return number
+
+
+def _op_decimal_product(
+    left: Decimal,
+    right: Decimal,
+    field: str,
+) -> Decimal:
+    precision = (
+        len(left.as_tuple().digits)
+        + len(right.as_tuple().digits)
+        + 2
+    )
+    try:
+        with localcontext() as context:
+            context.prec = max(64, precision)
+            product = left * right
+    except DecimalException:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} is out of range",
+        )
+    if not product.is_finite():
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} is out of range",
+        )
+    return product
 
 
 @app.post("/v1/operator/orders")
@@ -3610,15 +3958,55 @@ def operator_order(
 
     notional = None
     quantity = None
+    quantity_decimal = None
+    entry_price_decimal = None
+    notional_decimal = None
     if action == "open_position":
         if side not in ("long", "short"):
             raise HTTPException(status_code=400, detail="side must be long|short for open_position")
+        if body.get("quantity") is not None:
+            if entry_type != "limit":
+                raise HTTPException(
+                    status_code=400,
+                    detail="explicit quantity requires a limit entry",
+                )
+            quantity_decimal = _op_decimal(
+                body.get("quantity"),
+                "quantity",
+            )
+            entry_price_decimal = _op_decimal(
+                entry.get("price"),
+                "entry.price",
+            )
+            quantity = format(quantity_decimal, "f")
+        raw_notional = body.get("notional_usdt")
+        if raw_notional is not None:
+            notional_decimal = _op_decimal(
+                raw_notional,
+                "notional_usdt",
+            )
         notional = _size_open_order(
-            _op_num(body.get("notional_usdt"), "notional_usdt"),
+            _op_num(raw_notional, "notional_usdt"),
             symbol, account_id, side, entry_type,
             entry_price, entry_price_min, entry_price_max,
             stop_loss, caps, checks,
         )
+        if quantity_decimal is not None:
+            quantity_cap_decimal = notional_decimal
+            if quantity_cap_decimal is None:
+                quantity_cap_decimal = Decimal(str(notional))
+            requested_notional_decimal = _op_decimal_product(
+                quantity_decimal,
+                entry_price_decimal,
+                "quantity * entry.price",
+            )
+            if requested_notional_decimal > quantity_cap_decimal:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "quantity * entry.price exceeds notional_usdt"
+                    ),
+                )
     elif action == "partial_close":
         quantity = _op_num(body.get("quantity"), "quantity", required=True)
 
@@ -3825,13 +4213,39 @@ def operator_order(
                     idem,
                 )
             cur.execute(
-                "SELECT intent_id::text, status::text, valid_until, order_plan "
+                "SELECT intent_id::text, status::text, valid_until, "
+                "account_id, instrument_id, action::text, order_plan, "
+                "risk_budget, target_position_id "
                 "FROM trade_intents WHERE idempotency_key=%s",
                 (idem,),
             )
             existing = cur.fetchone()
             if existing:
-                existing_plan = existing[3] or {}
+                existing_plan = existing[6] or {}
+                existing_risk_budget = existing[7] or {}
+                persisted_semantics = _operator_trade_semantics(
+                    existing[3],
+                    existing[4],
+                    existing[5],
+                    existing_plan,
+                    existing_risk_budget,
+                    existing[8],
+                )
+                requested_semantics = _operator_trade_semantics(
+                    account_id,
+                    symbol,
+                    action,
+                    order_plan,
+                    risk_budget,
+                    body.get("target_position_id"),
+                )
+                if persisted_semantics != requested_semantics:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "idempotency key trade semantics mismatch"
+                        ),
+                    )
                 persisted_authorization = existing_plan.get("authorization")
                 if (
                     _stable_authorization_evidence(persisted_authorization)
@@ -3845,8 +4259,9 @@ def operator_order(
                     "intent_id": existing[0], "status": existing[1], "replay": True,
                     "valid_until": existing[2].isoformat() if existing[2] else None,
                 }
-                if attribution:
-                    replay_response["attribution"] = attribution
+                persisted_attribution = existing_plan.get("attribution")
+                if persisted_attribution:
+                    replay_response["attribution"] = persisted_attribution
                 replay_response["authorization"] = persisted_authorization
                 return replay_response
             cur.execute(
@@ -3993,7 +4408,8 @@ def operator_order_status(intent_id: str, authorization: str | None = Header(def
             if intent is None:
                 raise HTTPException(status_code=404, detail="intent not found")
             cur.execute(
-                "SELECT client_order_id, status::text, filled_quantity, average_fill_price, updated_at "
+                "SELECT client_order_id, status::text, quantity, price, "
+                "filled_quantity, average_fill_price, updated_at "
                 "FROM orders_projection WHERE intent_id=%s ORDER BY updated_at",
                 (intent_id,),
             )
