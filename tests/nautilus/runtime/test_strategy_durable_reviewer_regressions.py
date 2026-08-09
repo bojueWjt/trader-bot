@@ -329,36 +329,90 @@ def test_worker_failure_is_applied_by_actor_mailbox_thread(
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
 
 
-def test_timer_callback_claims_runtime_actor_thread(
+def test_timer_callbacks_dispatch_drain_to_actor_thread(
     tmp_path: Path,
 ) -> None:
     strategy = _ProbeStrategy(tmp_path)
-    startup_thread_id = get_ident()
+    actor_thread_id = get_ident()
     callback_thread_ids: list[int] = []
     callback_errors: list[BaseException] = []
+    direct_drain_errors: list[BaseException] = []
+    continuation_thread_ids: list[int] = []
+    dispatched: list[Any] = []
+    first_callback_complete = Event()
+    release_first_thread = Event()
+    strategy.set_durable_io_actor_dispatcher(dispatched.append)
     strategy._start_durable_io_lane()
+    strategy._entry_protection_stash["intent-a"] = {
+        "state": "pending",
+    }
+    strategy._schedule_protection_sync = (  # type: ignore[method-assign]
+        lambda _intent_key, delay_seconds=None: (
+            continuation_thread_ids.append(get_ident())
+        )
+    )
+    assert strategy._queue_entry_protection_stash_persist(
+        continuation={
+            "kind": "protection_schedule",
+            "intent_key": "intent-a",
+        }
+    )
+    assert strategy.wait_for_durable_io(timeout_seconds=1.0)
 
-    def invoke_timer() -> None:
+    def direct_worker_drain() -> None:
+        try:
+            strategy.drain_durable_io_mailbox()
+        except BaseException as exc:
+            direct_drain_errors.append(exc)
+
+    def invoke_first_timer() -> None:
         callback_thread_ids.append(get_ident())
         try:
             strategy._on_durable_io_mailbox_timer()
         except BaseException as exc:
             callback_errors.append(exc)
+        finally:
+            first_callback_complete.set()
+            release_first_thread.wait(timeout=1.0)
+
+    def invoke_second_timer() -> None:
+        first_callback_complete.wait(timeout=1.0)
+        callback_thread_ids.append(get_ident())
+        try:
+            strategy._on_durable_io_mailbox_timer()
+        except BaseException as exc:
+            callback_errors.append(exc)
+        finally:
+            release_first_thread.set()
 
     try:
-        timer_thread = Thread(target=invoke_timer)
-        timer_thread.start()
-        timer_thread.join(timeout=1.0)
+        direct_thread = Thread(target=direct_worker_drain)
+        direct_thread.start()
+        direct_thread.join(timeout=1.0)
+        first_thread = Thread(target=invoke_first_timer)
+        second_thread = Thread(target=invoke_second_timer)
+        first_thread.start()
+        second_thread.start()
+        first_thread.join(timeout=1.0)
+        second_thread.join(timeout=1.0)
 
-        assert not timer_thread.is_alive()
+        assert not direct_thread.is_alive()
+        assert not first_thread.is_alive()
+        assert not second_thread.is_alive()
+        assert len(direct_drain_errors) == 1
+        assert isinstance(direct_drain_errors[0], RuntimeError)
         assert callback_errors == []
-        assert callback_thread_ids
-        assert callback_thread_ids[0] != startup_thread_id
-        assert (
-            strategy._durable_io_actor_thread_id
-            == callback_thread_ids[0]
-        )
+        assert len(callback_thread_ids) == 2
+        assert actor_thread_id not in callback_thread_ids
+        assert len(set(callback_thread_ids)) == 2
+        assert len(dispatched) == 1
+        assert continuation_thread_ids == []
+
+        dispatched.pop()()
+
+        assert continuation_thread_ids == [actor_thread_id]
     finally:
+        release_first_thread.set()
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
 
 

@@ -178,6 +178,9 @@ class NodeAppAssemblyTest(unittest.TestCase):
             strategy.durable_io_fatal_handler,
             fatal_callback,
         )
+        dispatched = object()
+        strategy.durable_io_actor_dispatcher(dispatched)
+        self.assertEqual(node.dispatched, [dispatched])
         self.assertEqual(len(runtime.background_workers), 3)
         self.assertIs(
             strategy.durable_io_cleanup_worker(),
@@ -500,6 +503,12 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
             self.config = config
             self.trader = _Trader()
             self.added: list[tuple[Any, ...]] = []
+            self.dispatched: list[Any] = []
+            self.kernel = types.SimpleNamespace(
+                loop=types.SimpleNamespace(
+                    call_soon_threadsafe=self.dispatched.append
+                )
+            )
             assembled["node"] = self
 
         def add_data_client_factory(self, name: str, factory: Any) -> None:
@@ -543,6 +552,7 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
         def __init__(self, config: Any) -> None:
             self.config = config
             self.durable_io_fatal_handler: Any = None
+            self.durable_io_actor_dispatcher: Any = None
             self.intent_receipt_handler: Any = None
             self.trading_state_getter: Any = None
             self.denial_reporter: Any = None
@@ -558,6 +568,12 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
             handler: Any,
         ) -> None:
             self.durable_io_fatal_handler = handler
+
+        def set_durable_io_actor_dispatcher(
+            self,
+            dispatcher: Any,
+        ) -> None:
+            self.durable_io_actor_dispatcher = dispatcher
 
         def durable_io_cleanup_worker(self) -> Any:
             return self.cleanup_worker
@@ -588,7 +604,9 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
     assembled["data_factory"] = data_factory
     assembled["exec_factory"] = exec_factory
 
-    _install_module("runtime", types.ModuleType("runtime"))
+    runtime_package = types.ModuleType("runtime")
+    runtime_package.__path__ = [str(SERVICE_ROOT / "runtime")]
+    _install_module("runtime", runtime_package)
     runtime_binance_config = types.ModuleType("runtime.binance_adapter_config")
     runtime_binance_config.build_binance_client_configs = lambda config: (_Config(), _Config())
     _install_module("runtime.binance_adapter_config", runtime_binance_config)

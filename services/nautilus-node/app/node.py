@@ -199,6 +199,9 @@ def build_nautilus_trading_node(
         runtime,
         fatal_callback=fatal_callback,
     )
+    strategy.set_durable_io_actor_dispatcher(
+        _node_actor_dispatcher(node)
+    )
     node.trader.add_strategy(strategy)
     actor_holder: dict[str, Any] = {}
     session_config = runtime.config.control_plane.session
@@ -322,6 +325,19 @@ def build_nautilus_trading_node(
     node.trader.add_actor(projection_actor)
     node.trader.add_actor(command_actor)
     return node
+
+
+def _node_actor_dispatcher(
+    node: Any,
+) -> Callable[[Callable[[], None]], None]:
+    kernel = getattr(node, "kernel", None)
+    loop = getattr(kernel, "loop", None)
+    dispatcher = getattr(loop, "call_soon_threadsafe", None)
+    if not callable(dispatcher):
+        raise RuntimeError(
+            "TradingNode actor loop dispatcher is unavailable"
+        )
+    return dispatcher
 
 
 def run_startup_readiness_checks(runtime: AccountRuntime) -> None:

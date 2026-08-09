@@ -295,7 +295,11 @@ class IntentExecutionStrategy(Strategy):
         self._strategy_stopping = False
         self._durable_io_active = False
         self._durable_io_actor_thread_id: int | bool = False
-        self._durable_io_actor_thread_lock = Lock()
+        self._durable_io_actor_dispatcher: Optional[
+            Callable[[Callable[[], None]], None]
+        ] = None
+        self._durable_io_dispatch_lock = Lock()
+        self._durable_io_drain_scheduled = False
         self._durable_io_halted_reason = ""
         self._durable_io_halt_requested_reason = ""
         self._durable_io_halt_lock = Lock()
@@ -398,6 +402,14 @@ class IntentExecutionStrategy(Strategy):
     ) -> None:
         self._durable_io_fatal_handler = handler
 
+    def set_durable_io_actor_dispatcher(
+        self,
+        dispatcher: Optional[
+            Callable[[Callable[[], None]], None]
+        ],
+    ) -> None:
+        self._durable_io_actor_dispatcher = dispatcher
+
     def set_intent_receipt_handler(
         self,
         handler: Optional[Callable[[Any, str, str], bool]],
@@ -483,8 +495,9 @@ class IntentExecutionStrategy(Strategy):
         self._register_exchange_state_timer()
 
     def _start_durable_io_lane(self) -> None:
-        with self._durable_io_actor_thread_lock:
-            self._durable_io_actor_thread_id = False
+        self._durable_io_actor_thread_id = get_ident()
+        with self._durable_io_dispatch_lock:
+            self._durable_io_drain_scheduled = False
         self._durable_stash_canonical = {
             str(intent_key): self._jsonable_protection_stash_value(
                 value
@@ -525,19 +538,33 @@ class IntentExecutionStrategy(Strategy):
     ) -> None:
         if self._strategy_stopping:
             return
-        self.drain_durable_io_mailbox()
-
-    def _claim_durable_io_actor_thread(self) -> None:
-        current_thread_id = get_ident()
-        with self._durable_io_actor_thread_lock:
-            actor_thread_id = self._durable_io_actor_thread_id
-            if actor_thread_id is False:
-                self._durable_io_actor_thread_id = current_thread_id
-                return
-        if actor_thread_id != current_thread_id:
-            raise RuntimeError(
-                "durable I/O continuations require the actor thread"
+        dispatcher = self._durable_io_actor_dispatcher
+        if dispatcher is None:
+            self._request_durable_io_halt(
+                "strategy actor dispatcher is unavailable"
             )
+            return
+        with self._durable_io_dispatch_lock:
+            if self._durable_io_drain_scheduled:
+                return
+            self._durable_io_drain_scheduled = True
+        try:
+            dispatcher(self._drain_durable_io_mailbox_on_actor)
+        except Exception as exc:
+            with self._durable_io_dispatch_lock:
+                self._durable_io_drain_scheduled = False
+            self._request_durable_io_halt(
+                f"strategy actor dispatch failed: {exc!r}"
+            )
+
+    def _drain_durable_io_mailbox_on_actor(self) -> None:
+        try:
+            if self._strategy_stopping:
+                return
+            self.drain_durable_io_mailbox()
+        finally:
+            with self._durable_io_dispatch_lock:
+                self._durable_io_drain_scheduled = False
 
     def _register_exchange_state_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -1153,8 +1180,15 @@ class IntentExecutionStrategy(Strategy):
                 raise ValueError("max_items must be positive or False")
         if time_budget_ms <= 0:
             raise ValueError("time_budget_ms must be positive")
-        if self._durable_io_active:
-            self._claim_durable_io_actor_thread()
+        actor_thread_id = self._durable_io_actor_thread_id
+        if (
+            self._durable_io_active
+            and actor_thread_id is not False
+            and actor_thread_id != get_ident()
+        ):
+            raise RuntimeError(
+                "durable I/O continuations require the actor thread"
+            )
         self._drain_durable_io_fatal_mailbox()
         item_limit = max_results
         if max_items is not False:
@@ -2050,14 +2084,10 @@ class IntentExecutionStrategy(Strategy):
         return self._durable_io_halted_reason
 
     def _halt_durable_io(self, reason: str) -> None:
-        with self._durable_io_actor_thread_lock:
-            actor_thread_id = self._durable_io_actor_thread_id
+        actor_thread_id = self._durable_io_actor_thread_id
         if (
-            self._durable_io_active
-            and (
-                actor_thread_id is False
-                or actor_thread_id != get_ident()
-            )
+            actor_thread_id is not False
+            and actor_thread_id != get_ident()
         ):
             self._request_durable_io_halt(reason)
             return
