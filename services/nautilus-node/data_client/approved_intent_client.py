@@ -121,15 +121,26 @@ class ApprovedIntentDataClient:
         return self._state
 
     def poll_once(self, limit: int = 100, wait_ms: int = 0) -> int:
+        items = self.fetch_once(limit=limit, wait_ms=wait_ms)
+        for item in items:
+            self.deliver(item)
+        return len(items)
+
+    def fetch_once(
+        self,
+        limit: int = 100,
+        wait_ms: int = 0,
+    ) -> tuple[IntentItem, ...]:
         batch = self._source.fetch_intents(
             account_id=self._account_id,
             after_cursor=self._state.last_cursor,
             limit=limit,
             wait_ms=wait_ms,
         )
-        for item in batch.items:
-            self._process_item(item)
-        return len(batch.items)
+        return tuple(batch.items)
+
+    def deliver(self, item: IntentItem) -> None:
+        self._process_item(item)
 
     def _process_item(self, item: IntentItem) -> None:
         intent_id = _extract_intent_id(item)

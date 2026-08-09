@@ -24,6 +24,8 @@ class DependencyName(str, Enum):
     INSTRUMENTS = "instruments"
     REDIS = "redis"
     CONTROL_PLANE = "control_plane"
+    INTENT_STREAM = "intent_stream"
+    COMMAND_STREAM = "command_stream"
     RECONCILIATION = "reconciliation"
     PROJECTION = "projection"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import timedelta
@@ -65,12 +66,29 @@ class BinanceNodeConfig:
 
 
 @dataclass(frozen=True)
+class ControlPlaneSessionNodeConfig:
+    command_delivery_capacity: int = 128
+    command_ack_capacity: int = 256
+    intent_delivery_capacity: int = 256
+    execution_event_capacity: int = 1024
+    queue_degraded_ratio: float = 0.8
+    retry_budget: int = 3
+    retry_base_delay_seconds: float = 0.05
+    retry_max_delay_seconds: float = 1.0
+    retry_jitter_ratio: float = 0.2
+    circuit_reset_seconds: float = 5.0
+    operation_timeout_seconds: float = 15.0
+    shutdown_timeout_seconds: float = 1.0
+
+
+@dataclass(frozen=True)
 class ControlPlaneNodeConfig:
     base_url: str
     token: str
     auth_source: str
     heartbeat_timeout: timedelta
     snapshot_stale_after: timedelta
+    session: ControlPlaneSessionNodeConfig
 
 
 @dataclass(frozen=True)
@@ -152,6 +170,9 @@ def load_node_config(path: str | Path) -> NodeConfig:
             seconds=_required_positive_number(
                 control_plane_raw, "snapshot_stale_after_seconds"
             )
+        ),
+        session=_load_control_plane_session_config(
+            control_plane_raw.get("session")
         ),
     )
 
@@ -284,6 +305,88 @@ def _load_reconciliation_config(raw: Any) -> ReconciliationNodeConfig:
     )
 
 
+def _load_control_plane_session_config(
+    raw: Any,
+) -> ControlPlaneSessionNodeConfig:
+    if raw is None:
+        return ControlPlaneSessionNodeConfig()
+    if not isinstance(raw, Mapping):
+        raise NodeConfigError("control_plane.session must be an object")
+
+    retry_base_delay_seconds = _optional_positive_number(
+        raw,
+        "retry_base_delay_seconds",
+        0.05,
+    )
+    retry_max_delay_seconds = _optional_positive_number(
+        raw,
+        "retry_max_delay_seconds",
+        1.0,
+    )
+    if retry_max_delay_seconds < retry_base_delay_seconds:
+        raise NodeConfigError(
+            "control_plane.session.retry_max_delay_seconds must be at "
+            "least retry_base_delay_seconds"
+        )
+
+    return ControlPlaneSessionNodeConfig(
+        command_delivery_capacity=_optional_positive_int(
+            raw,
+            "command_delivery_capacity",
+            128,
+        ),
+        command_ack_capacity=_optional_positive_int(
+            raw,
+            "command_ack_capacity",
+            256,
+        ),
+        intent_delivery_capacity=_optional_positive_int(
+            raw,
+            "intent_delivery_capacity",
+            256,
+        ),
+        execution_event_capacity=_optional_positive_int(
+            raw,
+            "execution_event_capacity",
+            1024,
+        ),
+        queue_degraded_ratio=_optional_ratio(
+            raw,
+            "queue_degraded_ratio",
+            0.8,
+            allow_zero=False,
+        ),
+        retry_budget=_optional_positive_int(
+            raw,
+            "retry_budget",
+            3,
+        ),
+        retry_base_delay_seconds=retry_base_delay_seconds,
+        retry_max_delay_seconds=retry_max_delay_seconds,
+        retry_jitter_ratio=_optional_ratio(
+            raw,
+            "retry_jitter_ratio",
+            0.2,
+            allow_zero=True,
+        ),
+        circuit_reset_seconds=_optional_positive_number(
+            raw,
+            "circuit_reset_seconds",
+            5.0,
+        ),
+        operation_timeout_seconds=_optional_positive_number(
+            raw,
+            "operation_timeout_seconds",
+            15.0,
+        ),
+        shutdown_timeout_seconds=_optional_positive_number(
+            raw,
+            "shutdown_timeout_seconds",
+            1.0,
+        ),
+    )
+
+
 def _optional_bool(raw: Mapping[str, Any], key: str, default: bool) -> bool:
     value = raw.get(key, default)
     if not isinstance(value, bool):
@@ -300,9 +403,42 @@ def _optional_str(raw: Mapping[str, Any], key: str, default: str) -> str:
 
 def _optional_positive_int(raw: Mapping[str, Any], key: str, default: int) -> int:
     value = raw.get(key, default)
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise NodeConfigError(f"{key} must be a positive integer")
     return value
+
+
+def _optional_positive_number(
+    raw: Mapping[str, Any],
+    key: str,
+    default: float,
+) -> float:
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise NodeConfigError(f"{key} must be a positive number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise NodeConfigError(f"{key} must be a positive number")
+    return number
+
+
+def _optional_ratio(
+    raw: Mapping[str, Any],
+    key: str,
+    default: float,
+    *,
+    allow_zero: bool,
+) -> float:
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise NodeConfigError(f"{key} must be a ratio below 1")
+    ratio = float(value)
+    lower_bound_valid = ratio >= 0
+    if not allow_zero:
+        lower_bound_valid = ratio > 0
+    if not math.isfinite(ratio) or not lower_bound_valid or ratio >= 1:
+        raise NodeConfigError(f"{key} must be a ratio below 1")
+    return ratio
 
 
 def _reject_overlapping_identity(

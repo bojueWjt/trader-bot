@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 from config.node_config import (  # noqa: E402
     CredentialResolutionError,
+    NodeConfigError,
     load_node_config,
 )
 from execution_domain.control_plane import TradingState  # noqa: E402
@@ -67,6 +69,125 @@ def test_missing_credentials_fail_startup_without_test_fallback(
     assert "test" not in exc.value.resolved_value_hint.lower()
 
 
+def test_control_plane_session_defaults_are_available_to_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+
+    assert vars(config.control_plane.session) == {
+        "command_delivery_capacity": 128,
+        "command_ack_capacity": 256,
+        "intent_delivery_capacity": 256,
+        "execution_event_capacity": 1024,
+        "queue_degraded_ratio": 0.8,
+        "retry_budget": 3,
+        "retry_base_delay_seconds": 0.05,
+        "retry_max_delay_seconds": 1.0,
+        "retry_jitter_ratio": 0.2,
+        "circuit_reset_seconds": 5.0,
+        "operation_timeout_seconds": 15.0,
+        "shutdown_timeout_seconds": 1.0,
+    }
+
+
+def test_control_plane_session_overrides_are_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = {
+        "command_delivery_capacity": 12,
+        "command_ack_capacity": 13,
+        "intent_delivery_capacity": 14,
+        "execution_event_capacity": 15,
+        "queue_degraded_ratio": 0.7,
+        "retry_budget": 4,
+        "retry_base_delay_seconds": 0.1,
+        "retry_max_delay_seconds": 0.5,
+        "retry_jitter_ratio": 0.1,
+        "circuit_reset_seconds": 3.0,
+        "operation_timeout_seconds": 8.0,
+        "shutdown_timeout_seconds": 2.0,
+    }
+
+    config = load_node_config(
+        _account_a_config_with_session(monkeypatch, tmp_path, session)
+    )
+
+    assert vars(config.control_plane.session) == session
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("command_delivery_capacity", 0),
+        ("command_ack_capacity", -1),
+        ("intent_delivery_capacity", 1.5),
+        ("execution_event_capacity", True),
+        ("retry_budget", 0),
+        ("retry_base_delay_seconds", 0),
+        ("retry_max_delay_seconds", -1),
+        ("circuit_reset_seconds", 0),
+        ("operation_timeout_seconds", 0),
+        ("shutdown_timeout_seconds", 0),
+        ("queue_degraded_ratio", 0),
+        ("queue_degraded_ratio", 1),
+        ("retry_jitter_ratio", -0.1),
+        ("retry_jitter_ratio", 1),
+    ],
+)
+def test_control_plane_session_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    path = _account_a_config_with_session(
+        monkeypatch,
+        tmp_path,
+        {field: value},
+    )
+
+    with pytest.raises(NodeConfigError):
+        load_node_config(path)
+
+
+def test_control_plane_session_rejects_retry_delay_inversion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = _account_a_config_with_session(
+        monkeypatch,
+        tmp_path,
+        {
+            "retry_base_delay_seconds": 2.0,
+            "retry_max_delay_seconds": 1.0,
+        },
+    )
+
+    with pytest.raises(
+        NodeConfigError,
+        match="retry_max_delay_seconds",
+    ):
+        load_node_config(path)
+
+
+def test_control_plane_session_must_be_an_object(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = _account_a_config_with_session(
+        monkeypatch,
+        tmp_path,
+        "invalid",
+    )
+
+    with pytest.raises(
+        NodeConfigError,
+        match="control_plane.session must be an object",
+    ):
+        load_node_config(path)
+
+
 def test_startup_is_halted_and_readiness_requires_all_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -81,6 +202,30 @@ def test_startup_is_halted_and_readiness_requires_all_dependencies(
 
     assert lifecycle.readiness.ready is True
     assert lifecycle.trading_state is TradingState.HALTED
+
+
+def test_readiness_requires_intent_and_command_stream_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    stream_dependencies = {
+        DependencyName.INTENT_STREAM,
+        DependencyName.COMMAND_STREAM,
+    }
+
+    for dependency in DependencyName:
+        if dependency in stream_dependencies:
+            continue
+        lifecycle.mark_dependency_ready(dependency)
+
+    assert set(lifecycle.readiness.missing) == stream_dependencies
+
+    lifecycle.mark_dependency_ready(DependencyName.INTENT_STREAM)
+    assert lifecycle.readiness.ready is False
+
+    lifecycle.mark_dependency_ready(DependencyName.COMMAND_STREAM)
+    assert lifecycle.readiness.ready is True
 
 
 def test_heartbeat_carries_the_runtime_account_identity(
@@ -134,6 +279,22 @@ def _load_account_a(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BINANCE_ACCOUNT_A_API_SECRET", "account-a-secret")
     monkeypatch.setenv("CONTROL_PLANE_ACCOUNT_A_TOKEN", "node-a-token")
     return load_node_config(SERVICE_ROOT / "config" / "examples" / "account-a.sandbox.json")
+
+
+def _account_a_config_with_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session: object,
+) -> Path:
+    monkeypatch.setenv("BINANCE_ACCOUNT_A_API_KEY", "account-a-key")
+    monkeypatch.setenv("BINANCE_ACCOUNT_A_API_SECRET", "account-a-secret")
+    monkeypatch.setenv("CONTROL_PLANE_ACCOUNT_A_TOKEN", "node-a-token")
+    source = SERVICE_ROOT / "config" / "examples" / "account-a.sandbox.json"
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    raw["control_plane"]["session"] = session
+    target = tmp_path / "account-a.session.json"
+    target.write_text(json.dumps(raw), encoding="utf-8")
+    return target
 
 
 class _FixedClock:
