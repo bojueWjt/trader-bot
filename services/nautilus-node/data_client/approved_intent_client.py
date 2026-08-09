@@ -149,6 +149,22 @@ class ApprovedIntentDataClient:
     def state(self) -> IntentOffsetState:
         return self._state
 
+    def intent_receipt_status(
+        self,
+        intent_id: UUID | str,
+    ) -> str | bool:
+        status_getter = getattr(
+            self._intent_inbox,
+            "status",
+            None,
+        )
+        if not callable(status_getter):
+            receipt = self._intent_inbox.get(intent_id)
+            if receipt is None:
+                return False
+            return str(receipt.status)
+        return status_getter(intent_id)
+
     def poll_once(self, limit: int = 100, wait_ms: int = 0) -> int:
         self._raise_if_hard_failure()
         items = self.fetch_once(limit=limit, wait_ms=wait_ms)

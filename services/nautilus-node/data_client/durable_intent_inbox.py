@@ -109,6 +109,16 @@ class JsonDurableIntentInbox:
                 return None
             return self._receipt(record)
 
+    def status(
+        self,
+        intent_id: UUID | str,
+    ) -> str | bool:
+        with self._lock:
+            record = self._records.get(str(intent_id))
+            if record is None:
+                return False
+            return self._validated_status(record["status"])
+
     def pending(self) -> tuple[DurableIntentReceipt, ...]:
         with self._lock:
             records = sorted(

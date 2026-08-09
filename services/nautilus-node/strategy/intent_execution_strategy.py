@@ -198,6 +198,10 @@ class IntentExecutionStrategy(Strategy):
         self._intent_receipt_handler: Optional[
             Callable[[Any, str, str], bool]
         ] = None
+        self._intent_receipt_status_getter: Optional[
+            Callable[[Any], Any]
+        ] = None
+        self._opening_replay_resubmitted_ids: set[str] = set()
         self._protection_stash_version = 0
         self._protection_stash_persisted_version = 0
         self._protection_continuation_versions: dict[str, int] = {}
@@ -260,6 +264,12 @@ class IntentExecutionStrategy(Strategy):
         handler: Optional[Callable[[Any, str, str], bool]],
     ) -> None:
         self._intent_receipt_handler = handler
+
+    def set_intent_receipt_status_getter(
+        self,
+        getter: Optional[Callable[[Any], Any]],
+    ) -> None:
+        self._intent_receipt_status_getter = getter
 
     def durable_io_cleanup_worker(
         self,
@@ -1809,9 +1819,13 @@ class IntentExecutionStrategy(Strategy):
                 self._record_denial(denial)
             return
         if action in {"open_position", "add_position"}:
+            receipt_status = self._intent_receipt_status(intent)
             reconciled = self._reconcile_existing_opening(
                 intent,
                 exchange_state_ready=exchange_state_ready,
+                require_historical_evidence=(
+                    receipt_status == "DISPATCHED"
+                ),
             )
             if reconciled is None:
                 self._defer_opening_reconciliation(intent)
@@ -2227,6 +2241,7 @@ class IntentExecutionStrategy(Strategy):
         intent: Any,
         *,
         exchange_state_ready: bool,
+        require_historical_evidence: bool = False,
     ) -> bool | None:
         if not exchange_state_ready:
             return None
@@ -2283,7 +2298,153 @@ class IntentExecutionStrategy(Strategy):
                 f"reconciled:{client_order_id}",
             )
             return True
-        return False
+        if not require_historical_evidence:
+            return False
+        return self._reconcile_historical_opening(
+            intent,
+            intent_id=intent_id,
+            instrument_id=instrument_id,
+        )
+
+    def _reconcile_historical_opening(
+        self,
+        intent: Any,
+        *,
+        intent_id: str,
+        instrument_id: str,
+    ) -> bool | None:
+        mirror = self._exchange_state_mirror
+        opening_execution_state = getattr(
+            mirror,
+            "opening_execution_state",
+            None,
+        ) if mirror else None
+        if not callable(opening_execution_state):
+            self._record_denial(
+                OrderDenied(
+                    "opening_execution_evidence_unavailable",
+                    intent_id,
+                )
+            )
+            return None
+
+        expected_client_order_ids = (
+            self._expected_opening_client_order_ids(intent)
+        )
+        evidence_items: list[Any] = []
+        for client_order_id in expected_client_order_ids:
+            try:
+                evidence = opening_execution_state(
+                    client_order_id
+                )
+            except Exception as exc:
+                self._record_denial(
+                    OrderDenied(
+                        "opening_execution_evidence_failed",
+                        repr(exc),
+                    )
+                )
+                return None
+            evidence_items.append(evidence)
+
+        confirmed = next(
+            (
+                evidence
+                for evidence in evidence_items
+                if str(getattr(evidence, "state", ""))
+                == "confirmed_executed"
+            ),
+            False,
+        )
+        if confirmed is not False:
+            client_order_id = str(
+                getattr(confirmed, "client_order_id", "")
+            )
+            evidence_instrument_id = str(
+                getattr(confirmed, "instrument_id", "") or ""
+            )
+            if (
+                evidence_instrument_id
+                and evidence_instrument_id != instrument_id
+            ):
+                self._record_denial(
+                    OrderDenied(
+                        "opening_execution_evidence_conflict",
+                        (
+                            f"{client_order_id}:"
+                            f"{evidence_instrument_id}"
+                        ),
+                    )
+                )
+                return None
+            self._processed_intent_ids.add(intent_id)
+            self._record_intent_id_terminal(
+                getattr(intent, "intent_id", intent_id),
+                "CONFIRMED",
+                f"historical_execution:{client_order_id}",
+            )
+            return True
+
+        states = {
+            str(getattr(evidence, "state", ""))
+            for evidence in evidence_items
+        }
+        if states == {"definitively_absent"}:
+            if intent_id in self._opening_replay_resubmitted_ids:
+                return None
+            self._opening_replay_resubmitted_ids.add(intent_id)
+            return False
+        self._record_denial(
+            OrderDenied(
+                "opening_execution_evidence_unknown",
+                intent_id,
+            )
+        )
+        return None
+
+    def _expected_opening_client_order_ids(
+        self,
+        intent: Any,
+    ) -> tuple[str, ...]:
+        intent_id = getattr(intent, "intent_id", None)
+        if intent_id is None:
+            return ()
+        raw_order_plan = getattr(intent, "order_plan", {}) or {}
+        order_type = str(
+            raw_order_plan.get("type", "")
+        ).strip().lower()
+        sequence_count = 1
+        if order_type == "zone_ladder":
+            tranches = raw_order_plan.get("tranches")
+            if isinstance(tranches, (list, tuple)):
+                sequence_count = min(max(len(tranches), 1), 9)
+        return tuple(
+            encode_client_order_id(
+                intent_id,
+                sequence=sequence,
+            )
+            for sequence in range(1, sequence_count + 1)
+        )
+
+    def _intent_receipt_status(
+        self,
+        intent: Any,
+    ) -> str:
+        getter = self._intent_receipt_status_getter
+        if getter is None:
+            return ""
+        intent_id = getattr(intent, "intent_id", False)
+        if intent_id is False:
+            return ""
+        try:
+            status = getter(intent_id)
+        except Exception as exc:
+            self._halt_durable_io(
+                "intent receipt read failed: "
+                f"{exc!r}"
+            )
+            return ""
+        return str(status or "").strip().upper()
 
     def _defer_opening_reconciliation(
         self,
@@ -2400,9 +2561,13 @@ class IntentExecutionStrategy(Strategy):
             self._pending_opening_reconciliations.values()
         )
         for intent in pending:
+            receipt_status = self._intent_receipt_status(intent)
             reconciled = self._reconcile_existing_opening(
                 intent,
                 exchange_state_ready=True,
+                require_historical_evidence=(
+                    receipt_status == "DISPATCHED"
+                ),
             )
             if reconciled is None:
                 continue
@@ -5251,6 +5416,11 @@ class IntentExecutionStrategy(Strategy):
         status: str,
         detail: str,
     ) -> bool:
+        normalized_status = str(status).strip().upper()
+        if normalized_status != "DISPATCHED":
+            self._opening_replay_resubmitted_ids.discard(
+                str(intent_id)
+            )
         handler = self._intent_receipt_handler
         if handler is None:
             return False

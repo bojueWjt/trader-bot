@@ -197,6 +197,7 @@ def test_receipt_state_machine_preserves_dispatched_until_terminal(
     inbox = JsonDurableIntentInbox(path)
 
     inbox.receive("cursor-1", intent)
+    assert inbox.status(intent.intent_id) == "RECEIVED"
     assert [(item.status, item.detail) for item in inbox.pending()] == [
         ("RECEIVED", ""),
     ]
@@ -204,6 +205,7 @@ def test_receipt_state_machine_preserves_dispatched_until_terminal(
     inbox.complete(intent.intent_id, "PREPARED", "durable")
     inbox.complete(intent.intent_id, "DISPATCHED", "submitted")
     restarted = JsonDurableIntentInbox(path)
+    assert restarted.status(intent.intent_id) == "DISPATCHED"
     assert [
         (item.status, item.detail)
         for item in restarted.pending()
@@ -214,6 +216,7 @@ def test_receipt_state_machine_preserves_dispatched_until_terminal(
         "EXCHANGE_CONFIRMED",
         "filled",
     )
+    assert restarted.status(intent.intent_id) is False
     assert JsonDurableIntentInbox(path).pending() == ()
 
 

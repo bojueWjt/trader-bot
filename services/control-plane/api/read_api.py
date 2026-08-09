@@ -1330,12 +1330,9 @@ def _opening_execution_surface(
     exchange_payload: Mapping[str, Any],
     mirror_stale: bool,
 ) -> dict[str, Any]:
-    if mirror_stale:
-        return {
-            "authoritative": False,
-            "reason": "exchange_state_mirror_stale",
-            "items": [],
-        }
+    projection_rows: list[dict[str, Any]] = []
+    event_rows: list[dict[str, Any]] = []
+    durable_evidence_available = True
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -1362,21 +1359,35 @@ def _opening_execution_surface(
             event_rows = [dict(row) for row in cur.fetchall()]
     except psycopg2.Error:
         conn.rollback()
+        durable_evidence_available = False
+        projection_rows = []
+        event_rows = []
+
+    trusted_exchange_payload: Mapping[str, Any] = exchange_payload
+    if mirror_stale:
+        trusted_exchange_payload = {}
+    authoritative = durable_evidence_available or not mirror_stale
+    if not authoritative:
         return {
             "authoritative": False,
-            "reason": "opening_evidence_query_failed",
+            "reason": "opening_evidence_unavailable",
             "items": [],
         }
 
     items = _merge_opening_execution_evidence(
         account_id=account_id,
-        exchange_payload=exchange_payload,
+        exchange_payload=trusted_exchange_payload,
         projection_rows=projection_rows,
         event_rows=event_rows,
     )
+    reason = "fresh_account_scoped_evidence"
+    if mirror_stale:
+        reason = "durable_evidence_only_exchange_mirror_stale"
+    elif not durable_evidence_available:
+        reason = "fresh_exchange_evidence_durable_query_failed"
     return {
         "authoritative": True,
-        "reason": "fresh_account_scoped_evidence",
+        "reason": reason,
         "items": items,
     }
 

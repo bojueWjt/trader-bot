@@ -103,7 +103,10 @@ def test_exchange_state_returns_account_scoped_historical_opening_evidence(
     assert all(item["account_id"] == ACCOUNT_ID for item in surface["items"])
 
 
-def test_stale_exchange_state_disables_authoritative_evidence(monkeypatch) -> None:
+def test_stale_exchange_state_keeps_durable_evidence_authoritative(
+    monkeypatch,
+) -> None:
+    client_order_id = "B6666666666666666666666666666666601"
     conn = _FakeConnection(
         mirror_row={
             "account_id": ACCOUNT_ID,
@@ -111,7 +114,15 @@ def test_stale_exchange_state_disables_authoritative_evidence(monkeypatch) -> No
             "stale": True,
             "payload": {"open_orders": [], "algo_orders": []},
         },
-        projection_rows=[],
+        projection_rows=[
+            _projection_row(
+                account_id=ACCOUNT_ID,
+                client_order_id=client_order_id,
+                status="filled",
+                filled_quantity="0.01",
+                venue_order_id="venue-stale-mirror",
+            )
+        ],
         event_rows=[],
     )
     _configure(monkeypatch, conn)
@@ -123,19 +134,69 @@ def test_stale_exchange_state_disables_authoritative_evidence(monkeypatch) -> No
     )
 
     assert response.status_code == 200
-    assert response.json()["opening_execution_evidence"] == {
-        "authoritative": False,
-        "reason": "exchange_state_mirror_stale",
-        "items": [],
-    }
+    surface = response.json()["opening_execution_evidence"]
+    assert surface["authoritative"] is True
+    assert surface["reason"] == (
+        "durable_evidence_only_exchange_mirror_stale"
+    )
+    assert surface["items"][0]["client_order_id"] == client_order_id
+    assert surface["items"][0]["state"] == "confirmed_executed"
 
 
-def test_projection_query_failure_disables_authoritative_evidence(monkeypatch) -> None:
+def test_projection_query_failure_uses_fresh_exchange_evidence(
+    monkeypatch,
+) -> None:
+    client_order_id = "B7777777777777777777777777777777701"
     conn = _FakeConnection(
         mirror_row={
             "account_id": ACCOUNT_ID,
             "updated_at": datetime.now(timezone.utc),
             "stale": False,
+            "payload": {
+                "open_orders": [],
+                "algo_orders": [],
+                "recent_order_history": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "client_order_id": client_order_id,
+                        "venue_order_id": "venue-query-failed",
+                        "status": "FILLED",
+                        "executed_quantity": "0.01",
+                    }
+                ],
+            },
+        },
+        projection_rows=[],
+        event_rows=[],
+        fail_projection_query=True,
+    )
+    _configure(monkeypatch, conn)
+
+    response = _client().get(
+        f"/v1/nodes/{NODE_ID}/exchange-state",
+        params={"account_id": ACCOUNT_ID},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    surface = response.json()["opening_execution_evidence"]
+    assert surface["authoritative"] is True
+    assert surface["reason"] == (
+        "fresh_exchange_evidence_durable_query_failed"
+    )
+    assert surface["items"][0]["client_order_id"] == client_order_id
+    assert surface["items"][0]["state"] == "confirmed_executed"
+    assert conn.rollback_count == 1
+
+
+def test_stale_mirror_and_durable_query_failure_are_unknown(
+    monkeypatch,
+) -> None:
+    conn = _FakeConnection(
+        mirror_row={
+            "account_id": ACCOUNT_ID,
+            "updated_at": datetime.now(timezone.utc),
+            "stale": True,
             "payload": {"open_orders": [], "algo_orders": []},
         },
         projection_rows=[],
@@ -153,10 +214,9 @@ def test_projection_query_failure_disables_authoritative_evidence(monkeypatch) -
     assert response.status_code == 200
     assert response.json()["opening_execution_evidence"] == {
         "authoritative": False,
-        "reason": "opening_evidence_query_failed",
+        "reason": "opening_evidence_unavailable",
         "items": [],
     }
-    assert conn.rollback_count == 1
 
 
 class _FakeConnection:

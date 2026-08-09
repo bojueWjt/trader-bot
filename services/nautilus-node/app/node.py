@@ -653,6 +653,23 @@ def _build_strategy(
         strategy.set_intent_receipt_handler(
             intent_receipt_handler
         )
+    intent_receipt_status_getter = getattr(
+        runtime.intent_data_client,
+        "intent_receipt_status",
+        None,
+    )
+    intent_receipt_status_setter = getattr(
+        strategy,
+        "set_intent_receipt_status_getter",
+        None,
+    )
+    if (
+        callable(intent_receipt_status_getter)
+        and callable(intent_receipt_status_setter)
+    ):
+        intent_receipt_status_setter(
+            intent_receipt_status_getter
+        )
     inbox_fatal_setter = getattr(
         runtime.intent_data_client,
         "set_durable_inbox_fatal_handler",

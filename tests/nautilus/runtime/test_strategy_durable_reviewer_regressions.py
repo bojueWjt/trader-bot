@@ -571,6 +571,9 @@ def test_dispatched_replay_reconciles_exchange_before_submit(
             )
 
     strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_status_getter(
+        lambda _intent_id: "DISPATCHED"
+    )
     strategy.set_intent_receipt_handler(
         lambda replay_intent_id, status, detail: (
             receipts.append(
@@ -634,6 +637,9 @@ def test_dispatched_replay_refresh_timeout_retries_without_rejection(
             )
 
     strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_status_getter(
+        lambda _intent_id: "DISPATCHED"
+    )
     strategy.set_intent_receipt_handler(
         lambda replay_intent_id, status, detail: (
             receipts.append(
@@ -675,6 +681,170 @@ def test_dispatched_replay_refresh_timeout_retries_without_rejection(
     assert not any(
         status == "REJECTED"
         for _receipt_id, status, _detail in receipts
+    )
+
+
+def test_dispatched_filled_opening_uses_historical_evidence(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent_id = UUID("f4444444-4444-4444-8444-444444444444")
+    client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
+    )
+    receipts: list[tuple[Any, str, str]] = []
+
+    class Mirror:
+        def refresh(self) -> None:
+            return None
+
+        def orders_for_instrument(
+            self,
+            _instrument_id: str,
+        ) -> tuple[Any, ...]:
+            return ()
+
+        def opening_execution_state(
+            self,
+            requested_client_order_id: str,
+        ) -> Any:
+            assert requested_client_order_id == client_order_id
+            return SimpleNamespace(
+                client_order_id=client_order_id,
+                instrument_id="BTCUSDT-PERP.BINANCE",
+                state="confirmed_executed",
+            )
+
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_status_getter(
+        lambda _intent_id: "DISPATCHED"
+    )
+    strategy.set_intent_receipt_handler(
+        lambda replay_intent_id, status, detail: (
+            receipts.append(
+                (replay_intent_id, status, detail)
+            )
+            or True
+        )
+    )
+    replayed_intent = _replayed_opening_intent(intent_id)
+
+    strategy._handle_intent(replayed_intent)
+
+    assert strategy.submitted == []
+    assert receipts == [
+        (
+            intent_id,
+            "CONFIRMED",
+            f"historical_execution:{client_order_id}",
+        )
+    ]
+    assert str(intent_id) in strategy._processed_intent_ids
+
+
+def test_dispatched_opening_resubmits_only_after_authoritative_absence(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent_id = UUID("f5555555-5555-4555-8555-555555555555")
+    client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
+    )
+
+    class Mirror:
+        def orders_for_instrument(
+            self,
+            _instrument_id: str,
+        ) -> tuple[Any, ...]:
+            return ()
+
+        def opening_execution_state(
+            self,
+            requested_client_order_id: str,
+        ) -> Any:
+            assert requested_client_order_id == client_order_id
+            return SimpleNamespace(
+                client_order_id=client_order_id,
+                instrument_id="BTCUSDT-PERP.BINANCE",
+                state="definitively_absent",
+            )
+
+    intent = _replayed_opening_intent(intent_id)
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+
+    first = strategy._reconcile_existing_opening(
+        intent,
+        exchange_state_ready=True,
+        require_historical_evidence=True,
+    )
+    second = strategy._reconcile_existing_opening(
+        intent,
+        exchange_state_ready=True,
+        require_historical_evidence=True,
+    )
+
+    assert first is False
+    assert second is None
+
+
+def test_dispatched_opening_unknown_evidence_remains_pending(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent_id = UUID("f6666666-6666-4666-8666-666666666666")
+    client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
+    )
+    receipts: list[tuple[Any, str, str]] = []
+
+    class Mirror:
+        def refresh(self) -> None:
+            return None
+
+        def orders_for_instrument(
+            self,
+            _instrument_id: str,
+        ) -> tuple[Any, ...]:
+            return ()
+
+        def opening_execution_state(
+            self,
+            requested_client_order_id: str,
+        ) -> Any:
+            assert requested_client_order_id == client_order_id
+            return SimpleNamespace(
+                client_order_id=client_order_id,
+                instrument_id=None,
+                state="unknown",
+            )
+
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_status_getter(
+        lambda _intent_id: "DISPATCHED"
+    )
+    strategy.set_intent_receipt_handler(
+        lambda replay_intent_id, status, detail: (
+            receipts.append(
+                (replay_intent_id, status, detail)
+            )
+            or True
+        )
+    )
+    replayed_intent = _replayed_opening_intent(intent_id)
+
+    strategy._handle_intent(replayed_intent)
+
+    assert strategy.submitted == []
+    assert receipts == []
+    assert str(intent_id) in (
+        strategy._pending_opening_reconciliations
+    )
+    assert any(
+        denial.reason == "opening_execution_evidence_unknown"
+        for denial in strategy.denials
     )
 
 
@@ -1194,6 +1364,19 @@ def _authorized_order_plan(
                 "source_message_id=message-1",
             ),
         }
+    )
+
+
+def _replayed_opening_intent(intent_id: UUID) -> Any:
+    return SimpleNamespace(
+        intent_id=intent_id,
+        instrument_id="BTCUSDT-PERP.BINANCE",
+        action="open_position",
+        order_plan={
+            "type": "market",
+            "side": "buy",
+            "quantity": "0.1",
+        },
     )
 
 
