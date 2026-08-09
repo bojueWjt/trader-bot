@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import timedelta
 from queue import Empty, Full, Queue
@@ -91,34 +92,37 @@ class _QueueingIntentPublisher:
         self._completion_timeout_seconds = completion_timeout_seconds
         self._failure_callback = failure_callback
         self._stopped = Event()
+        self._admission_lock = RLock()
 
     def stop(self) -> None:
-        self._stopped.set()
-        while True:
-            try:
-                publication = self._pending.get_nowait()
-            except Empty:
-                return
-            publication.cancelled.set()
-            publication.error = RuntimeError(
-                "intent publisher actor stopped before publication"
-            )
-            publication.completed.set()
-            self._pending.task_done()
+        with self._admission_lock:
+            self._stopped.set()
+            while True:
+                try:
+                    publication = self._pending.get_nowait()
+                except Empty:
+                    return
+                publication.cancelled.set()
+                publication.error = RuntimeError(
+                    "intent publisher actor stopped before publication"
+                )
+                publication.completed.set()
+                self._pending.task_done()
 
     def publish(self, intent: Any) -> None:
-        if self._stopped.is_set():
-            raise RuntimeError("intent publisher actor is stopped")
         publication = _IntentPublication(intent=intent)
-        try:
-            self._pending.put(
-                publication,
-                timeout=self._enqueue_timeout_seconds,
-            )
-        except Full as exc:
-            reason = "intent publication backlog full"
-            self._failure_callback(reason)
-            raise RuntimeError(reason) from exc
+        with self._admission_lock:
+            if self._stopped.is_set():
+                raise RuntimeError("intent publisher actor is stopped")
+            try:
+                self._pending.put(
+                    publication,
+                    timeout=self._enqueue_timeout_seconds,
+                )
+            except Full as exc:
+                reason = "intent publication backlog full"
+                self._failure_callback(reason)
+                raise RuntimeError(reason) from exc
 
         deadline = time.monotonic() + self._completion_timeout_seconds
         while not publication.completed.wait(timeout=0.01):
@@ -370,10 +374,18 @@ class IntentPublisherActor(Actor):
                 self._record_failure(
                     "control-plane session failed to stop before deadline"
                 )
-        executor = self._executor
-        self._executor = None
-        _shutdown_executor(executor, self._poll_future)
-        self._poll_future = None
+        worker_stopped = _shutdown_executor(
+            self._executor,
+            self._poll_future,
+            deadline=deadline,
+        )
+        if worker_stopped:
+            self._executor = None
+            self._poll_future = None
+        else:
+            self._record_failure(
+                "approved intent poll worker failed to stop before deadline"
+            )
 
     def poll_once(self) -> int:
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1373,6 +1385,10 @@ class CommandPollerActor(Actor):
         self._session_commands: Queue[_SessionCommandPublication] = Queue(
             maxsize=self._max_pending_commands
         )
+        self._session_admission_lock = RLock()
+        # Process-local until ACK succeeds. Restart durability belongs to the
+        # command journal and remains outside this adapter batch.
+        self._session_pending_acks: dict[str, _PendingCommandAck] = {}
         self._stopped = Event()
         self._heartbeat_executor: ThreadPoolExecutor | None = None
         self._command_executor: ThreadPoolExecutor | None = None
@@ -1413,10 +1429,11 @@ class CommandPollerActor(Actor):
         self._register_poll_timer()
 
     def on_stop(self) -> None:
-        self._stopped.set()
-        self._reject_session_commands(
-            "command poller actor stopped before apply"
-        )
+        with self._session_admission_lock:
+            self._stopped.set()
+            self._reject_session_commands(
+                "command poller actor stopped before apply"
+            )
         deadline = time.monotonic() + self._worker_shutdown_wait_seconds
         session = self._control_plane_session
         if session is not None and self._manage_control_plane_session:
@@ -1433,19 +1450,53 @@ class CommandPollerActor(Actor):
                 )
                 self._mark_dependency_failed("control_plane", reason)
                 self._fail_command_stream(reason)
-        executors = (
-            (self._heartbeat_executor, self._heartbeat_future),
-            (self._command_executor, self._command_future),
-            (self._ack_executor, self._ack_future),
+        lanes = (
+            (
+                "_heartbeat_executor",
+                "_heartbeat_future",
+                self._heartbeat_executor,
+                self._heartbeat_future,
+                "control_plane",
+                "control-plane heartbeat worker failed to stop before deadline",
+            ),
+            (
+                "_command_executor",
+                "_command_future",
+                self._command_executor,
+                self._command_future,
+                "command_stream",
+                "operator command poll worker failed to stop before deadline",
+            ),
+            (
+                "_ack_executor",
+                "_ack_future",
+                self._ack_executor,
+                self._ack_future,
+                "command_stream",
+                "operator command ACK worker failed to stop before deadline",
+            ),
         )
-        self._heartbeat_executor = None
-        self._command_executor = None
-        self._ack_executor = None
-        for executor, future in executors:
-            _shutdown_executor(executor, future)
-        self._heartbeat_future = None
-        self._command_future = None
-        self._ack_future = None
+        for (
+            executor_attr,
+            future_attr,
+            executor,
+            future,
+            dependency,
+            reason,
+        ) in lanes:
+            worker_stopped = _shutdown_executor(
+                executor,
+                future,
+                deadline=deadline,
+            )
+            if worker_stopped:
+                setattr(self, executor_attr, None)
+                setattr(self, future_attr, None)
+                continue
+            if dependency == "control_plane":
+                self._mark_dependency_failed(dependency, reason)
+                continue
+            self._fail_command_stream(reason)
 
     def _register_poll_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -1523,18 +1574,23 @@ class CommandPollerActor(Actor):
         self,
         command: Any,
     ) -> _PendingCommandAck:
-        if self._stopped.is_set():
-            raise RuntimeError("command poller actor is stopped")
+        command_id = str(command.command_id)
         publication = _SessionCommandPublication(command=command)
-        try:
-            self._session_commands.put(
-                publication,
-                timeout=self._session_enqueue_timeout_seconds,
-            )
-        except Full as exc:
-            reason = "operator command actor mailbox capacity exceeded"
-            self._fail_command_stream(reason)
-            raise RuntimeError(reason) from exc
+        with self._session_admission_lock:
+            if self._stopped.is_set():
+                raise RuntimeError("command poller actor is stopped")
+            acknowledgement = self._session_pending_acks.get(command_id)
+            if acknowledgement is not None:
+                return acknowledgement
+            try:
+                self._session_commands.put(
+                    publication,
+                    timeout=self._session_enqueue_timeout_seconds,
+                )
+            except Full as exc:
+                reason = "operator command actor mailbox capacity exceeded"
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason) from exc
 
         deadline = (
             time.monotonic()
@@ -1572,6 +1628,11 @@ class CommandPollerActor(Actor):
             acknowledgement.status,
             error=acknowledgement.error,
         )
+        command_id = str(acknowledgement.command_id)
+        with self._session_admission_lock:
+            pending = self._session_pending_acks.get(command_id)
+            if pending is acknowledgement:
+                self._session_pending_acks.pop(command_id, None)
 
     def _drain_session_commands(self) -> int:
         drained = 0
@@ -1589,11 +1650,17 @@ class CommandPollerActor(Actor):
             try:
                 if not publication.cancelled.is_set():
                     status, error = self._apply(publication.command)
-                    publication.acknowledgement = _PendingCommandAck(
+                    acknowledgement = _PendingCommandAck(
                         command_id=publication.command.command_id,
                         status=status,
                         error=error,
                     )
+                    publication.acknowledgement = acknowledgement
+                    command_id = str(publication.command.command_id)
+                    with self._session_admission_lock:
+                        self._session_pending_acks[
+                            command_id
+                        ] = acknowledgement
             except Exception as exc:
                 publication.error = exc
                 self._fail_command_stream(
@@ -1938,12 +2005,22 @@ def _first_attr(source: Any, names: tuple[str, ...]) -> Any:
 def _shutdown_executor(
     executor: ThreadPoolExecutor | None,
     future: Future[Any] | None,
-) -> None:
-    if future is not None and not future.done():
-        future.cancel()
+    *,
+    deadline: float,
+) -> bool:
     if executor is None:
-        return
-    executor.shutdown(wait=False, cancel_futures=True)
+        return True
+    if future is not None and not future.done():
+        remaining = max(deadline - time.monotonic(), 0.0)
+        try:
+            future.result(timeout=remaining)
+        except FutureTimeoutError:
+            pass
+        except Exception:
+            pass
+    wait = future is None or future.done()
+    executor.shutdown(wait=wait, cancel_futures=True)
+    return wait
 
 
 def _submission_was_accepted(result: Any) -> bool:
