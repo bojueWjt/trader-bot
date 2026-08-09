@@ -88,6 +88,11 @@ class _ExchangeRefreshResult:
     denial: Any = False
 
 
+@dataclass(frozen=True)
+class _ExternalIoDegradedResult:
+    denial: OrderDenied
+
+
 try:  # pragma: no cover - Nautilus is unavailable on local Py3.14 dev hosts.
     from nautilus_trader.trading.strategy import Strategy  # type: ignore[import-not-found]
     from nautilus_trader.trading.config import StrategyConfig  # type: ignore[import-not-found]
@@ -191,7 +196,8 @@ class IntentExecutionStrategy(Strategy):
             self._process_external_io_task,
             capacity=self._DURABLE_IO_QUEUE_CAPACITY,
             task_timeout_seconds=False,
-            on_overflow=self._request_durable_io_halt,
+            on_overflow=self._classify_external_io_worker_issue,
+            on_error=self._classify_external_io_worker_issue,
         )
 
     def set_trading_state_getter(self, getter: Optional[Callable[[], Any]]) -> None:
@@ -702,6 +708,9 @@ class IntentExecutionStrategy(Strategy):
         self,
         result: Any,
     ) -> None:
+        if isinstance(result, _ExternalIoDegradedResult):
+            self._record_denial(result.denial)
+            return
         if isinstance(result, _ExchangeCancelResult):
             self._on_exchange_cancel_result(result)
             return
@@ -769,6 +778,11 @@ class IntentExecutionStrategy(Strategy):
         success_continuation: Mapping[str, Any] | bool = False,
         failure_continuation: Mapping[str, Any] | bool = False,
     ) -> bool:
+        if self._strategy_stopping:
+            self._request_durable_io_halt(
+                "strategy external I/O session is stopped"
+            )
+            return False
         if not self._durable_io_active:
             if self._refresh_exchange_state():
                 if isinstance(success_continuation, Mapping):
@@ -781,9 +795,7 @@ class IntentExecutionStrategy(Strategy):
                     failure_continuation
                 )
             return False
-        if not self._external_io_worker.snapshot().running:
-            self._external_io_worker.start()
-        return self._external_io_worker.submit(
+        return self._submit_external_io_task(
             _ExchangeRefreshTask(
                 success_continuation=success_continuation,
                 failure_continuation=failure_continuation,
@@ -798,6 +810,11 @@ class IntentExecutionStrategy(Strategy):
         success_continuation: Mapping[str, Any] | bool = False,
         failure_continuation: Mapping[str, Any] | bool = False,
     ) -> bool:
+        if self._strategy_stopping:
+            self._request_durable_io_halt(
+                "strategy external I/O session is stopped"
+            )
+            return False
         if not self._durable_io_active:
             for client_order_id in cancel_order_ids:
                 if self._cancel_via_exchange_adapter(
@@ -815,9 +832,7 @@ class IntentExecutionStrategy(Strategy):
                     success_continuation
                 )
             return True
-        if not self._external_io_worker.snapshot().running:
-            self._external_io_worker.start()
-        return self._external_io_worker.submit(
+        return self._submit_external_io_task(
             _ExchangeCancelTask(
                 instrument_id=str(instrument_id),
                 cancel_order_ids=cancel_order_ids,
@@ -825,6 +840,41 @@ class IntentExecutionStrategy(Strategy):
                 failure_continuation=failure_continuation,
             )
         )
+
+    def _submit_external_io_task(self, task: Any) -> bool:
+        if self._strategy_stopping:
+            self._request_durable_io_halt(
+                "strategy external I/O session is stopped"
+            )
+            return False
+        if not self._external_io_worker.snapshot().running:
+            self._external_io_worker.start()
+        return self._external_io_worker.submit(task)
+
+    def _classify_external_io_worker_issue(self, reason: str) -> None:
+        detail = str(reason).strip()
+        if self._strategy_stopping or re.search(
+            r"\bis stopped\b|failed to stop within",
+            detail,
+        ):
+            self._request_durable_io_halt(detail)
+            return
+        denial_reason = "strategy_external_io_degraded"
+        if "queue capacity exceeded" in detail:
+            denial_reason = "strategy_external_io_backpressure"
+        self._queue_external_io_degraded(
+            OrderDenied(denial_reason, detail)
+        )
+
+    def _queue_external_io_degraded(self, denial: OrderDenied) -> None:
+        try:
+            self._durable_io_mailbox.put_nowait(
+                _ExternalIoDegradedResult(denial=denial)
+            )
+        except Full:
+            self._request_durable_io_halt(
+                "strategy external I/O result mailbox capacity exceeded"
+            )
 
     def _run_protection_continuation(
         self,

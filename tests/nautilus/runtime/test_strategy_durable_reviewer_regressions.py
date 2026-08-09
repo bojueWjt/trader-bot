@@ -51,6 +51,10 @@ class _ProbeStrategy(IntentExecutionStrategy):
         self.scheduled.append(intent_key)
 
 
+class _SmallExternalQueueProbeStrategy(_ProbeStrategy):
+    _DURABLE_IO_QUEUE_CAPACITY = 1
+
+
 def test_entry_fsync_continuation_rechecks_live_halt_before_opening(
     tmp_path: Path,
 ) -> None:
@@ -349,6 +353,126 @@ def test_exchange_cancel_continuation_runs_on_worker_lane(
         assert str(plan.intent_id) in strategy._processed_intent_ids
     finally:
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+
+
+def test_recoverable_external_errors_keep_active_opening_admission(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    opening_plan = _order_plan(
+        UUID("ffffffff-ffff-4fff-8fff-ffffffffffff"),
+        "entry-after-soft-error",
+    )
+
+    class Adapter:
+        def cancel(self, _operation: str, _request: Any) -> Any:
+            raise TimeoutError("temporary cancel timeout")
+
+    class Mirror:
+        def refresh(self) -> None:
+            raise ConnectionError("temporary refresh failure")
+
+        def find_order(
+            self,
+            _instrument_id: str,
+            _client_order_id: str,
+        ) -> Any:
+            return SimpleNamespace(
+                account_id="account-a",
+                symbol="BTCUSDT",
+                position_side="LONG",
+                order_kind="regular",
+                venue_order_id="123",
+            )
+
+    strategy.set_exchange_cancel_adapter(Adapter(), Mirror())
+    strategy._start_durable_io_lane()
+    try:
+        assert strategy._queue_exchange_refresh()
+        assert strategy._queue_exchange_cancel(
+            instrument_id=opening_plan.instrument_id,
+            cancel_order_ids=("old-order",),
+        )
+        assert strategy.external_io_cleanup_worker().submit(object())
+        _drain_until_idle(strategy)
+
+        denial_reasons = {denial.reason for denial in strategy.denials}
+        assert "exchange_state_refresh_failed" in denial_reasons
+        assert "order_cancel_failed" in denial_reasons
+        assert "strategy_external_io_degraded" in denial_reasons
+        assert strategy.durable_io_halted_reason == ""
+        assert strategy._opening_side_effect_allowed(opening_plan) is True
+    finally:
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_external_queue_backpressure_is_soft_degraded(
+    tmp_path: Path,
+) -> None:
+    strategy = _SmallExternalQueueProbeStrategy(tmp_path)
+    first_started = Event()
+    first_release = Event()
+    second_started = Event()
+    second_release = Event()
+    refresh_calls = 0
+
+    class Mirror:
+        def refresh(self) -> None:
+            nonlocal refresh_calls
+            refresh_calls += 1
+            if refresh_calls == 1:
+                first_started.set()
+                first_release.wait(timeout=5.0)
+                return
+            second_started.set()
+            second_release.wait(timeout=5.0)
+
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy._start_durable_io_lane()
+    try:
+        assert strategy._queue_exchange_refresh()
+        assert first_started.wait(timeout=1.0)
+        assert strategy._queue_exchange_refresh()
+        assert strategy._queue_exchange_refresh() is False
+        strategy.drain_durable_io_mailbox()
+
+        denial_reasons = {denial.reason for denial in strategy.denials}
+        assert "strategy_external_io_backpressure" in denial_reasons
+        assert strategy.durable_io_halted_reason == ""
+
+        first_release.set()
+        assert second_started.wait(timeout=1.0)
+        strategy.drain_durable_io_mailbox()
+        second_release.set()
+        assert strategy.wait_for_durable_io(timeout_seconds=1.0)
+        strategy.drain_durable_io_mailbox()
+    finally:
+        first_release.set()
+        second_release.set()
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_external_submit_after_session_stopped_is_hard(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    strategy._strategy_stopping = True
+    try:
+        assert strategy._queue_exchange_refresh() is False
+        strategy.drain_durable_io_mailbox()
+
+        assert "session is stopped" in strategy.durable_io_halted_reason
+    finally:
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
 
 
 def _drain_until_idle(strategy: IntentExecutionStrategy) -> None:
