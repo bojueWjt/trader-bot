@@ -1,7 +1,9 @@
 # Account Stall 修复重新复盘与收敛计划
 
 日期：2026-08-09
-状态：Claude 元复核与最终 reviewer 发现已吸收，本地代码、测试 gate 和双 reviewer 复核完成，部署待完成
+状态：Claude 元复核与最终 reviewer 发现已吸收；生产仍运行 `fbcadf2` 并保持 HALTED；
+放宽后的结构基线与 recorder 部署补丁已通过 `421 passed` 和双独立 reviewer
+`P0=0 P1=0`，等待新 commit-bound 部署
 生产结论：account-a 保持 HALTED；真实交易 permit 在 `C-GATE=done`、`C-DEPLOY=done`
 且 deployed commit/hash 复核完成后生效，目标为一次
 `0.07 SOLUSDT LIMIT + IOC` 小额往返
@@ -77,7 +79,9 @@ directory entries。`--untracked-files=all` 展开后是 373 个 status entries�
 | 历史放大因素 | 随机 Redis namespace、无界 streams、内存/swap/AOF/I/O 压力 |
 | 历史发布因素 | bind-mounted hotpatch、deleted inode、A/B 运行字节漂移 |
 | 当前生产可用性回归 | `OrderInitialized` 被错误提升为 durable fatal；与 Redis lineage 无直接因果 |
-| 当前生产状态 | `/ready` HTTP 200，account-a HALTED，release `499415f` 已连续通过 readiness |
+| 当前生产状态 | `/ready` 返回 HALTED，account-a release `fbcadf2` 已完成 bind-mount hash/inode 校验 |
+| 新鲜 exchange filter | 2026-08-09 20:39 UTC 活跃 Redis generation 的 `SOLUSDT` instrument 为 `min_notional=5`、tick/step=`0.01`、min quantity=`0.01`；`0.07 SOL` 在当前价格下满足 |
+| 冲突 filter 处置 | 公网 `exchangeInfo` 同时返回 `minNotional=50`、`minPrice=556.8` 和约 `77.24` 的市场价格，证据内部冲突；gate 采用节点刚启动加载的活跃 instrument cache |
 
 上述历史基线继续保留为 2026-08-09 复盘证据。当前分支的 pass 数字只证明本次
 projection/canary 变更选择面。
@@ -103,6 +107,12 @@ projection/canary 变更选择面。
 | Hard | durable journal/订单副作用身份/执行结果唯一性 | 阻断或进入恢复 |
 | Hard | 目标最终平仓、目标订单归零、非目标组合 baseline 不变、最终 HALT | 阻断最终 PASS |
 | Hard completion | open/close 唯一成交集合数量守恒、逐 fill commission、成交价、方向和 signed PnL 完整 | 缺失时交易仍完成平仓与 HALT，最终结果为 BLOCKED |
+
+非目标组合基线使用明确 allowlist。持仓只绑定 `symbol`、`position_side`、
+`position_amt`、`entry_price`、`leverage`、`margin_type`、`isolated_margin` 和
+`is_auto_add_margin`；行情价格、浮盈、名义价值、强平价与未知扩展字段不进入阻断哈希。
+普通挂单和 algo 挂单继续完整绑定。该规则把市场刷新归为可用性软变化，把真实敞口、
+杠杆、保证金模式、自动追加保证金配置和订单结构变化保留为硬阻断。
 
 ## 3. 为什么持续返工
 

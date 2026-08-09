@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import hmac
 import io
+import runpy
 import sys
 import types
 import unittest
@@ -73,6 +74,108 @@ class ExchangeStateRecorderTest(unittest.TestCase):
         self.assertEqual(row["created_at_ms"], 1_754_700_000_000)
         self.assertEqual(row["updated_at_ms"], 1_754_700_001_000)
 
+    def test_slim_position_preserves_stable_risk_fields(self) -> None:
+        module = _load_module()
+
+        row = module.slim_position(
+            {
+                "symbol": "SOLUSDT",
+                "positionAmt": "0.07",
+                "entryPrice": "77.10",
+                "positionSide": "LONG",
+                "leverage": "5",
+                "marginType": "isolated",
+                "isolatedMargin": "1.25",
+                "isAutoAddMargin": "false",
+            }
+        )
+
+        self.assertEqual(row["symbol"], "SOLUSDT")
+        self.assertEqual(row["position_amt"], "0.07")
+        self.assertEqual(row["entry_price"], "77.10")
+        self.assertEqual(row["position_side"], "LONG")
+        self.assertEqual(row["leverage"], "5")
+        self.assertEqual(row["margin_type"], "isolated")
+        self.assertEqual(row["isolated_margin"], "1.25")
+        self.assertEqual(row["is_auto_add_margin"], "false")
+
+    def test_slim_position_accepts_missing_optional_fields(self) -> None:
+        module = _load_module()
+
+        row = module.slim_position(
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "0.01",
+            }
+        )
+
+        self.assertEqual(row["symbol"], "BTCUSDT")
+        self.assertEqual(row["position_amt"], "0.01")
+        self.assertIsNone(row["entry_price"])
+        self.assertIsNone(row["position_side"])
+        self.assertIsNone(row["leverage"])
+        self.assertIsNone(row["margin_type"])
+        self.assertIsNone(row["isolated_margin"])
+        self.assertIsNone(row["is_auto_add_margin"])
+
+    def test_slim_position_records_market_observation_fields(self) -> None:
+        module = _load_module()
+
+        row = module.slim_position(
+            {
+                "symbol": "BTCUSDT",
+                "positionAmt": "0.01",
+                "markPrice": "118100",
+                "unRealizedProfit": "1",
+                "notional": "1181",
+                "liquidationPrice": "90000",
+            }
+        )
+
+        self.assertEqual(row["mark_price"], "118100")
+        self.assertEqual(row["unrealized_pnl"], "1")
+        self.assertEqual(row["notional"], "1181")
+        self.assertEqual(row["liquidation_price"], "90000")
+
+    def test_slim_position_covers_canary_structural_baseline(self) -> None:
+        module = _load_module()
+        adapter_namespace = runpy.run_path(
+            str(
+                REPO_ROOT
+                / "scripts"
+                / "account_a_live_trade_http_adapter.py"
+            )
+        )
+        baseline_fields = adapter_namespace[
+            "NON_TARGET_POSITION_BASELINE_FIELDS"
+        ]
+        row = module.slim_position(
+            {
+                "symbol": "SOLUSDT",
+                "positionAmt": "0.07",
+                "entryPrice": "77.10",
+                "positionSide": "LONG",
+                "leverage": "5",
+                "marginType": "isolated",
+                "isolatedMargin": "1.25",
+            }
+        )
+
+        self.assertEqual(
+            baseline_fields,
+            (
+                "symbol",
+                "position_side",
+                "position_amt",
+                "entry_price",
+                "leverage",
+                "margin_type",
+                "isolated_margin",
+                "is_auto_add_margin",
+            ),
+        )
+        self.assertLessEqual(set(baseline_fields), set(row))
+
     def test_snapshot_records_recent_regular_and_algo_history(self) -> None:
         module = _load_module()
         responses = {
@@ -89,6 +192,12 @@ class ExchangeStateRecorderTest(unittest.TestCase):
                     "markPrice": "118100",
                     "unRealizedProfit": "1",
                     "positionSide": "LONG",
+                    "leverage": "5",
+                    "marginType": "isolated",
+                    "isolatedMargin": "250",
+                    "isAutoAddMargin": "false",
+                    "notional": "1181",
+                    "liquidationPrice": "90000",
                 }
             ],
             "/fapi/v1/openOrders": [],
@@ -135,6 +244,25 @@ class ExchangeStateRecorderTest(unittest.TestCase):
             )
 
         self.assertEqual(payload["recent_order_history_symbols"], ["BTCUSDT"])
+        self.assertEqual(
+            payload["positions"],
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "position_amt": "0.01",
+                    "entry_price": "118000",
+                    "position_side": "LONG",
+                    "leverage": "5",
+                    "margin_type": "isolated",
+                    "isolated_margin": "250",
+                    "is_auto_add_margin": "false",
+                    "mark_price": "118100",
+                    "unrealized_pnl": "1",
+                    "notional": "1181",
+                    "liquidation_price": "90000",
+                }
+            ],
+        )
         self.assertEqual(
             payload["recent_order_history"][0]["status"],
             "FILLED",

@@ -24,6 +24,11 @@
 - 目标 symbol 当前无持仓、无普通挂单、无 algo 挂单。
 - 非目标持仓、普通挂单和 algo 挂单已规范化并冻结为签名的
   `portfolio_baseline_sha256`。
+- 非目标持仓基线只包含 `symbol`、`position_side`、`position_amt`、`entry_price`、
+  `leverage`、`margin_type`、`isolated_margin` 和 `is_auto_add_margin`。
+  `mark_price`、`unrealized_pnl`、`notional`、`liquidation_price`、其他行情派生字段和
+  未知扩展字段不进入阻断哈希。
+- 非目标普通挂单和 algo 挂单继续完整进入阻断哈希。
 - durable journal、intent、outbox 和 evidence store 可写且有剩余容量。
 - rollout phase 为 `account_a_canary`，受限 canary RESUME gate 已绑定当前 release。
 - `process_liveness=false` 或 `loss_monitor_healthy=false` 未出现。
@@ -68,6 +73,9 @@
 4. 客户端订单 ID、account ID、node ID 全部绑定到 account-a。
 
 选择过程记录交易所 filters、价格、数量和预估费用。策略不包含市场方向判断，持仓时间保持最短。
+2026-08-09 20:39 UTC 启动的 account-a 活跃 Redis generation 中，`SOLUSDT` instrument
+记录 `min_notional=5 USDT`、`price_increment=0.01`、`size_increment=0.01` 和
+`min_quantity=0.01`。签名 permit 绑定该新鲜运行时证据。
 
 ## 执行顺序
 
@@ -107,7 +115,7 @@
 - 订单数量、方向、position side、reduce-only 或 client order ID 与计划不一致。
 - 累计净亏损达到 permit 阈值；permit 阈值严格低于 `1.5 USDT`。
 - 出现额外目标仓位、额外目标挂单、重复 intent、重复 order 或跨账户数据。
-- 非目标 `portfolio_baseline_sha256` 发生变化。
+- 非目标结构 `portfolio_baseline_sha256` 发生变化。
 - exact reduce-only close 无法按实际成交数量提交或确认。
 - 最终 HALT 或 HALT 后交易所归零快照无法证明。
 - 最终手续费、滑点和净损益证明缺失，无法认证累计净亏损低于 permit 阈值。

@@ -8,6 +8,7 @@ STAGING="${STAGING:-$SCRIPT_DIR}"
 NODE_CONTAINER="trader-v3-node-a"
 NODE_PORT="${NODE_PORT:-8081}"
 CONTROL_PLANE_UNIT="trader-v3-controlplane.service"
+EXCHANGE_STATE_UNIT="trader-v3-exchange-state.service"
 OPERATION_LOCK="/var/lock/trader-v3-account-stall-operation.lock"
 MEMORY_LIMIT="${ACCOUNT_A_MEMORY_LIMIT:-768m}"
 MEMORY_SWAP_LIMIT="${ACCOUNT_A_MEMORY_SWAP_LIMIT:-768m}"
@@ -20,6 +21,10 @@ ROLLBACK_PATH="$BACKUP_ROOT/rollback.sh"
 MANIFEST="$STAGING/bundle-manifest.json"
 CHECKSUMS="$STAGING/SHA256SUMS"
 PATCH_DIR="$T/container-patches"
+RECORDER_RELATIVE="services/control-plane/tools/exchange_state_recorder.py"
+RECORDER_TARGET="$T/$RECORDER_RELATIVE"
+RECORDER_VERIFIER="$STAGING/tools/verify-exchange-state-recorder.py"
+RECORDER_WATERMARK=""
 GENERATOR_TARGET="$T/hk-gen-recreate-patched.py"
 RECREATE_TARGET="$T/recreate-$NODE_CONTAINER.sh"
 DEPLOYED_COMMIT_TARGET="$T/DEPLOYED_COMMIT.txt"
@@ -82,6 +87,8 @@ done
 [ -f "$CHECKSUMS" ] || die "bundle checksums are missing: $CHECKSUMS"
 [ -f "$STAGING/tools/hk-gen-recreate-patched.py" ] \
   || die "recreate generator is missing"
+[ -f "$RECORDER_VERIFIER" ] \
+  || die "exchange-state recorder verifier is missing"
 [ -x "$RECREATE_TARGET" ] || die "existing account-a recreate script is missing"
 [ -x "$T/.venv-cp/bin/python" ] \
   || die "control-plane Python environment is missing"
@@ -91,6 +98,19 @@ done
   cd "$STAGING"
   sha256sum -c "$(basename "$CHECKSUMS")" >/dev/null
 ) || die "staging SHA256 verification failed"
+
+EXCHANGE_STATE_PID="$(
+  systemctl show \
+    --property=MainPID \
+    --value \
+    "$EXCHANGE_STATE_UNIT"
+)" || die "$EXCHANGE_STATE_UNIT MainPID is unavailable"
+python3 "$RECORDER_VERIFIER" process \
+  --pid "$EXCHANGE_STATE_PID" \
+  --working-directory "$T" \
+  --python "$T/.venv-cp/bin/python" \
+  --recorder "$RECORDER_TARGET" \
+  || die "$EXCHANGE_STATE_UNIT process identity is invalid"
 
 TEMP_DIR="$(mktemp -d)"
 CONTAINER_TSV="$TEMP_DIR/container.tsv"
@@ -162,6 +182,7 @@ if not isinstance(host_files, list):
     raise SystemExit("host file manifest is invalid")
 expected_host = {
     "services/control-plane/api/read_api.py",
+    "services/control-plane/tools/exchange_state_recorder.py",
     "packages/execution-domain/execution_domain/control_plane.py",
     "scripts/account_a_live_trade_executor.py",
     "scripts/account_a_live_trade_http_adapter.py",
@@ -226,7 +247,11 @@ deployment_paths = {
     str(item.get("bundle_path") or "")
     for item in manifest.get("deployment_files") or []
 }
-required_tools = {"deploy.sh", "tools/hk-gen-recreate-patched.py"}
+required_tools = {
+    "deploy.sh",
+    "tools/hk-gen-recreate-patched.py",
+    "tools/verify-exchange-state-recorder.py",
+}
 if not required_tools.issubset(deployment_paths):
     raise SystemExit("deployment tools are incomplete")
 print(commit)
@@ -345,6 +370,9 @@ backup_target "$DEPLOYED_COMMIT_TARGET"
 cp "$TEMP_DIR/container-inspect.json" "$BACKUP_ROOT/container-inspect.json"
 cp "$MANIFEST" "$BACKUP_ROOT/bundle-manifest.json"
 cp "$CHECKSUMS" "$BACKUP_ROOT/staging-SHA256SUMS"
+cp "$RECORDER_VERIFIER" \
+  "$BACKUP_ROOT/verify-exchange-state-recorder.py"
+chmod 0700 "$BACKUP_ROOT/verify-exchange-state-recorder.py"
 
 cat >"$ROLLBACK_PATH" <<'ROLLBACK'
 #!/usr/bin/env bash
@@ -356,7 +384,11 @@ LOCK="/var/lock/trader-v3-account-stall-operation.lock"
 T="$(cd "$BACKUP_ROOT/../.." && pwd)"
 NODE_CONTAINER="trader-v3-node-a"
 CONTROL_PLANE_UNIT="trader-v3-controlplane.service"
+EXCHANGE_STATE_UNIT="trader-v3-exchange-state.service"
 RECREATE_TARGET="$T/recreate-$NODE_CONTAINER.sh"
+RECORDER_TARGET="$T/services/control-plane/tools/exchange_state_recorder.py"
+RECORDER_VERIFIER="$BACKUP_ROOT/verify-exchange-state-recorder.py"
+RECORDER_WATERMARK="$BACKUP_ROOT/rollback-exchange-state-watermark.txt"
 
 exec 9>"$LOCK"
 flock -n 9 || {
@@ -368,6 +400,11 @@ flock -n 9 || {
   cd "$BACKUP_ROOT"
   sha256sum -c SHA256SUMS >/dev/null
 )
+
+systemctl stop "$CONTROL_PLANE_UNIT" "$EXCHANGE_STATE_UNIT"
+"$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" capture \
+  --env-file "$T/.env.v3" \
+  --output "$RECORDER_WATERMARK"
 
 while IFS=$'\t' read -r status target backup_relative; do
   case "$target" in
@@ -393,8 +430,27 @@ while IFS=$'\t' read -r status target backup_relative; do
   esac
 done <"$INDEX"
 
-systemctl restart "$CONTROL_PLANE_UNIT"
+systemctl start "$CONTROL_PLANE_UNIT"
 systemctl is-active --quiet "$CONTROL_PLANE_UNIT"
+systemctl start "$EXCHANGE_STATE_UNIT"
+systemctl is-active --quiet "$EXCHANGE_STATE_UNIT"
+EXCHANGE_STATE_PID="$(
+  systemctl show \
+    --property=MainPID \
+    --value \
+    "$EXCHANGE_STATE_UNIT"
+)"
+"$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" process \
+  --pid "$EXCHANGE_STATE_PID" \
+  --working-directory "$T" \
+  --python "$T/.venv-cp/bin/python" \
+  --recorder "$RECORDER_TARGET"
+"$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" wait \
+  --env-file "$T/.env.v3" \
+  --watermark-file "$RECORDER_WATERMARK" \
+  --account account-a \
+  --timeout-seconds 150 \
+  --poll-seconds 5
 [ -x "$RECREATE_TARGET" ] || {
   echo "FATAL: restored recreate script is unavailable" >&2
   exit 1
@@ -775,9 +831,43 @@ grep -Fq 'command_expires_at' \
 grep -Fq '"source_evidence"' \
   "$T/services/control-plane/api/read_api.py" \
   || die "control-plane opening evidence contract is missing"
+[ -f "$RECORDER_TARGET" ] \
+  || die "exchange-state recorder install is missing"
+systemctl stop "$EXCHANGE_STATE_UNIT"
+RECORDER_WATERMARK="$TEMP_DIR/exchange-state-watermark.txt"
+"$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" capture \
+  --env-file "$T/.env.v3" \
+  --output "$RECORDER_WATERMARK" \
+  || die "exchange-state recorder watermark capture failed"
 systemctl restart "$CONTROL_PLANE_UNIT"
 systemctl is-active --quiet "$CONTROL_PLANE_UNIT" \
   || die "$CONTROL_PLANE_UNIT failed to restart"
+systemctl start "$EXCHANGE_STATE_UNIT"
+systemctl is-active --quiet "$EXCHANGE_STATE_UNIT" \
+  || die "$EXCHANGE_STATE_UNIT failed to start"
+EXCHANGE_STATE_PID="$(
+  systemctl show \
+    --property=MainPID \
+    --value \
+    "$EXCHANGE_STATE_UNIT"
+)" || die "$EXCHANGE_STATE_UNIT MainPID is unavailable after start"
+"$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" process \
+  --pid "$EXCHANGE_STATE_PID" \
+  --working-directory "$T" \
+  --python "$T/.venv-cp/bin/python" \
+  --recorder "$RECORDER_TARGET" \
+  || die "$EXCHANGE_STATE_UNIT process identity changed after start"
+"$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" wait \
+  --env-file "$T/.env.v3" \
+  --watermark-file "$RECORDER_WATERMARK" \
+  --account account-a \
+  --require-position-field leverage \
+  --require-position-field margin_type \
+  --require-position-field isolated_margin \
+  --require-position-field is_auto_add_margin \
+  --timeout-seconds 150 \
+  --poll-seconds 5 \
+  || die "exchange-state recorder did not publish fresh snapshots"
 
 CONTROL_PLANE_READY=0
 for _ in $(seq 1 30); do

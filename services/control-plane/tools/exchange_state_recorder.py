@@ -144,6 +144,23 @@ def slim_order(o: dict, order_kind: str = "regular") -> dict:
     }
 
 
+def slim_position(position: dict) -> dict:
+    return {
+        "symbol": position["symbol"],
+        "position_amt": position["positionAmt"],
+        "entry_price": position.get("entryPrice"),
+        "position_side": position.get("positionSide"),
+        "leverage": position.get("leverage"),
+        "margin_type": position.get("marginType"),
+        "isolated_margin": position.get("isolatedMargin"),
+        "is_auto_add_margin": position.get("isAutoAddMargin"),
+        "mark_price": position.get("markPrice"),
+        "unrealized_pnl": position.get("unRealizedProfit"),
+        "notional": position.get("notional"),
+        "liquidation_price": position.get("liquidationPrice"),
+    }
+
+
 def protections(positions: list[dict], algo: list[dict], regular: list[dict]) -> list[dict]:
     """Per open position: which stop-loss / take-profit orders protect it."""
     out = []
@@ -573,13 +590,7 @@ def snapshot_account(
         "source": "binance_fapi",
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "account": account,
-        "positions": [
-            {"symbol": p["symbol"], "position_amt": p["positionAmt"],
-             "entry_price": p.get("entryPrice"), "mark_price": p.get("markPrice"),
-             "unrealized_pnl": p.get("unRealizedProfit"),
-             "position_side": p.get("positionSide")}
-            for p in positions
-        ],
+        "positions": [slim_position(position) for position in positions],
         "open_orders": regular,
         "algo_orders": algo,
         "recent_order_history": regular_history,

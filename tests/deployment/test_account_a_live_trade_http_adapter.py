@@ -418,6 +418,157 @@ def test_preflight_returns_explicit_exchange_authority(
     assert payload["available_usdt_balance"] == "100"
 
 
+def test_portfolio_baseline_ignores_non_target_position_market_refresh(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    position = {
+        "symbol": "ETHUSDT",
+        "position_side": "LONG",
+        "position_amt": "0.25",
+        "entry_price": "100",
+        "mark_price": "101",
+        "unrealized_pnl": "0.25",
+        "notional": "25.25",
+        "liquidation_price": "50",
+        "break_even_price": "100.1",
+        "update_time_ms": 1_754_700_000_000,
+        "adl": 1,
+    }
+    scenario.exchange_state["payload"]["positions"] = [position]
+
+    with FakeControlPlane(scenario) as server:
+        baseline = _preflight_portfolio_baseline(
+            scenario,
+            tmp_path,
+            server.url,
+        )
+        position["mark_price"] = "102"
+        position["unrealized_pnl"] = "0.5"
+        position["notional"] = "25.5"
+        position["liquidation_price"] = "51"
+        position["break_even_price"] = "100.2"
+        position["update_time_ms"] = 1_754_700_001_000
+        position["adl"] = 2
+        refreshed_baseline = _preflight_portfolio_baseline(
+            scenario,
+            tmp_path,
+            server.url,
+        )
+
+    assert refreshed_baseline == baseline
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("symbol", "BTCUSDT"),
+        ("position_side", "SHORT"),
+        ("position_amt", "0.5"),
+        ("entry_price", "99"),
+        ("leverage", "10"),
+        ("margin_type", "isolated"),
+        ("isolated_margin", "5"),
+        ("is_auto_add_margin", "true"),
+    ],
+)
+def test_portfolio_baseline_binds_non_target_position_fields(
+    tmp_path: Path,
+    field_name: str,
+    field_value: str,
+) -> None:
+    scenario = Scenario()
+    position = {
+        "symbol": "ETHUSDT",
+        "position_side": "LONG",
+        "position_amt": "0.25",
+        "entry_price": "100",
+        "mark_price": "101",
+        "unrealized_pnl": "0.25",
+        "leverage": "5",
+        "margin_type": "cross",
+        "isolated_margin": "0",
+        "is_auto_add_margin": "false",
+    }
+    scenario.exchange_state["payload"]["positions"] = [position]
+
+    with FakeControlPlane(scenario) as server:
+        baseline = _preflight_portfolio_baseline(
+            scenario,
+            tmp_path,
+            server.url,
+        )
+        position[field_name] = field_value
+        changed_baseline = _preflight_portfolio_baseline(
+            scenario,
+            tmp_path,
+            server.url,
+        )
+
+    assert changed_baseline != baseline
+
+
+def test_portfolio_baseline_ignores_unknown_non_target_position_fields(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    position = {
+        "symbol": "ETHUSDT",
+        "position_side": "LONG",
+        "position_amt": "0.25",
+        "entry_price": "100",
+        "mark_price": "101",
+        "unrealized_pnl": "0.25",
+        "future_exchange_field": "before",
+    }
+    scenario.exchange_state["payload"]["positions"] = [position]
+
+    with FakeControlPlane(scenario) as server:
+        baseline = _preflight_portfolio_baseline(
+            scenario,
+            tmp_path,
+            server.url,
+        )
+        position["future_exchange_field"] = "after"
+        refreshed_baseline = _preflight_portfolio_baseline(
+            scenario,
+            tmp_path,
+            server.url,
+        )
+
+    assert refreshed_baseline == baseline
+
+
+@pytest.mark.parametrize("collection_name", ["open_orders", "algo_orders"])
+def test_portfolio_baseline_hashes_complete_non_target_orders(
+    tmp_path: Path,
+    collection_name: str,
+) -> None:
+    scenario = Scenario()
+    order = {
+        "symbol": "ETHUSDT",
+        "order_id": "order-1",
+        "price": "99",
+        "status": "NEW",
+    }
+    scenario.exchange_state["payload"][collection_name] = [order]
+
+    with FakeControlPlane(scenario) as server:
+        baseline = _preflight_portfolio_baseline(
+            scenario,
+            tmp_path,
+            server.url,
+        )
+        order["price"] = "100"
+        changed_baseline = _preflight_portfolio_baseline(
+            scenario,
+            tmp_path,
+            server.url,
+        )
+
+    assert changed_baseline != baseline
+
+
 def test_preflight_waits_for_exchange_snapshot_after_resume_boundary(
     tmp_path: Path,
 ) -> None:
@@ -2651,6 +2802,23 @@ def _request(**overrides: Any) -> dict[str, Any]:
     }
     payload.update(overrides)
     return payload
+
+
+def _preflight_portfolio_baseline(
+    scenario: Scenario,
+    tmp_path: Path,
+    server_url: str,
+) -> str:
+    invocation_path = tmp_path / f"baseline-{len(scenario.requests)}"
+    invocation_path.mkdir()
+    completed, payload = _invoke(
+        "preflight",
+        _request(phase="before-open"),
+        invocation_path,
+        server_url,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return str(payload["non_target_portfolio_baseline_sha256"])
 
 
 def _identity() -> dict[str, Any]:

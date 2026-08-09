@@ -81,6 +81,7 @@ def test_bundle_writes_dependency_closed_release_identity_and_checksums(
     }
     assert host_targets == {
         "services/control-plane/api/read_api.py",
+        "services/control-plane/tools/exchange_state_recorder.py",
         "packages/execution-domain/execution_domain/control_plane.py",
         "scripts/account_a_live_trade_executor.py",
         "scripts/account_a_live_trade_http_adapter.py",
@@ -91,6 +92,9 @@ def test_bundle_writes_dependency_closed_release_identity_and_checksums(
     }
     assert host_modes == {
         "services/control-plane/api/read_api.py": "0644",
+        (
+            "services/control-plane/tools/exchange_state_recorder.py"
+        ): "0644",
         (
             "packages/execution-domain/execution_domain/control_plane.py"
         ): "0644",
@@ -115,6 +119,7 @@ def test_bundle_writes_dependency_closed_release_identity_and_checksums(
     assert deployment_paths == {
         "deploy.sh",
         "tools/hk-gen-recreate-patched.py",
+        "tools/verify-exchange-state-recorder.py",
     }
     for relative in deployment_paths:
         assert (output_dir / relative).stat().st_mode & 0o111

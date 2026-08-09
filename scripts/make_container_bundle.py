@@ -159,6 +159,12 @@ HOST_FILES = (
         "0644",
     ),
     (
+        "host/exchange_state_recorder.py",
+        "services/control-plane/tools/exchange_state_recorder.py",
+        "services/control-plane/tools/exchange_state_recorder.py",
+        "0644",
+    ),
+    (
         "host/control_plane.py",
         "packages/execution-domain/execution_domain/control_plane.py",
         "packages/execution-domain/execution_domain/control_plane.py",
@@ -210,6 +216,10 @@ DEPLOYMENT_FILES = (
     (
         "tools/hk-gen-recreate-patched.py",
         "scripts/hk-gen-recreate-patched.py",
+    ),
+    (
+        "tools/verify-exchange-state-recorder.py",
+        "scripts/verify_exchange_state_recorder.py",
     ),
     (
         "deploy.sh",

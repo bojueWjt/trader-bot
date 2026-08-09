@@ -81,6 +81,16 @@ ACTION_NAMES = {
     "halt",
     "preflight",
 }
+NON_TARGET_POSITION_BASELINE_FIELDS = (
+    "symbol",
+    "position_side",
+    "position_amt",
+    "entry_price",
+    "leverage",
+    "margin_type",
+    "isolated_margin",
+    "is_auto_add_margin",
+)
 
 
 class AdapterError(RuntimeError):
@@ -1867,6 +1877,7 @@ def _portfolio_baseline_sha256(
     baseline = {
         "positions": _non_target_rows(
             exchange_payload.get("positions"),
+            baseline_fields=NON_TARGET_POSITION_BASELINE_FIELDS,
         ),
         "open_orders": _non_target_rows(
             exchange_payload.get("open_orders"),
@@ -1878,7 +1889,11 @@ def _portfolio_baseline_sha256(
     return hashlib.sha256(_canonical_json_bytes(baseline)).hexdigest()
 
 
-def _non_target_rows(raw_rows: Any) -> list[dict[str, Any]]:
+def _non_target_rows(
+    raw_rows: Any,
+    *,
+    baseline_fields: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
     if not isinstance(raw_rows, list):
         raise AdapterError("portfolio collection is invalid")
     rows = []
@@ -1888,7 +1903,14 @@ def _non_target_rows(raw_rows: Any) -> list[dict[str, Any]]:
         symbol = str(raw.get("symbol") or "").upper()
         if symbol == SYMBOL:
             continue
-        rows.append(_json_safe(raw))
+        row = raw
+        if baseline_fields:
+            row = {
+                key: raw[key]
+                for key in baseline_fields
+                if key in raw
+            }
+        rows.append(_json_safe(row))
     rows.sort(
         key=lambda row: json.dumps(
             row,

@@ -33,9 +33,13 @@ def test_deploy_script_is_control_plane_first() -> None:
         'systemctl restart "$CONTROL_PLANE_UNIT"',
         host_install,
     )
+    recorder_restart = text.index(
+        'systemctl start "$EXCHANGE_STATE_UNIT"',
+        control_plane_restart,
+    )
     port_8080_check = text.index(
         '"http://127.0.0.1:8080/openapi.json"',
-        control_plane_restart,
+        recorder_restart,
     )
     patch_install = text.index(
         'target_path="$PATCH_DIR/$bundle_path"',
@@ -44,7 +48,8 @@ def test_deploy_script_is_control_plane_first() -> None:
     recreate = text.index('bash "$RECREATE_TARGET"', patch_install)
 
     assert host_install < control_plane_restart
-    assert control_plane_restart < port_8080_check
+    assert control_plane_restart < recorder_restart
+    assert recorder_restart < port_8080_check
     assert port_8080_check < patch_install
     assert patch_install < recreate
 
@@ -63,6 +68,36 @@ def test_deploy_script_installs_and_probes_live_trade_contract() -> None:
     assert "source-specific opening evidence is missing" in text
 
 
+def test_deploy_script_installs_and_restarts_exchange_state_recorder() -> None:
+    text = _text()
+
+    recorder_relative = (
+        "services/control-plane/tools/exchange_state_recorder.py"
+    )
+    assert f'RECORDER_RELATIVE="{recorder_relative}"' in text
+    assert 'RECORDER_TARGET="$T/$RECORDER_RELATIVE"' in text
+    assert recorder_relative in text
+    assert '"host/exchange_state_recorder.py"' not in text
+    assert 'EXCHANGE_STATE_UNIT="trader-v3-exchange-state.service"' in text
+    assert 'RECORDER_VERIFIER="$STAGING/tools/' in text
+    assert "verify-exchange-state-recorder.py" in text
+    assert "--property=MainPID" in text
+    assert "--working-directory" in text
+    assert "--recorder" in text
+    assert "--watermark-file" in text
+    assert "--require-position-field leverage" in text
+    assert "--require-position-field margin_type" in text
+    assert "--require-position-field isolated_margin" in text
+    assert "--require-position-field is_auto_add_margin" in text
+    assert "--account account-a" in text
+    assert '[ -f "$RECORDER_TARGET" ]' in text
+    assert text.count('systemctl stop "$EXCHANGE_STATE_UNIT"') == 1
+    assert text.count('systemctl start "$EXCHANGE_STATE_UNIT"') == 2
+    assert text.count(
+        'systemctl is-active --quiet "$EXCHANGE_STATE_UNIT"'
+    ) == 2
+
+
 def test_deploy_script_keeps_lock_backup_and_precise_rollback() -> None:
     text = _text()
 
@@ -73,6 +108,12 @@ def test_deploy_script_keeps_lock_backup_and_precise_rollback() -> None:
     assert 'flock -n 9 || die "another operation holds $OPERATION_LOCK"' in text
     assert 'backup_target "$PATCH_DIR/$bundle_path"' in text
     assert 'backup_target "$T/$target_relative"' in text
+    assert (
+        '"services/control-plane/tools/exchange_state_recorder.py",'
+        in text
+    )
+    assert '"$BACKUP_ROOT/verify-exchange-state-recorder.py"' in text
+    assert "rollback-exchange-state-watermark.txt" in text
     assert 'backup_target "$RECREATE_TARGET"' in text
     assert 'backup_target "$DEPLOYED_COMMIT_TARGET"' in text
     assert 'docker inspect "$NODE_CONTAINER" >' in text
@@ -94,6 +135,13 @@ def test_deploy_script_verifies_sha_mounts_and_deleted_inodes() -> None:
     text = _text()
 
     assert 'sha256sum -c "$(basename "$CHECKSUMS")"' in text
+    staging_verify = text.index(
+        'sha256sum -c "$(basename "$CHECKSUMS")"'
+    )
+    recorder_process_verify = text.index(
+        'python3 "$RECORDER_VERIFIER" process'
+    )
+    assert staging_verify < recorder_process_verify
     assert "container patch SHA256 mismatch" in text
     assert "container target SHA256 mismatch" in text
     assert "container mount mismatch" in text
