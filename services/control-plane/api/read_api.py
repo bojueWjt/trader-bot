@@ -318,6 +318,7 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
     b_side = {"long": "buy", "buy": "buy", "short": "sell", "sell": "sell"}.get(side, side)
     entry = op.get("entry") or {}
     raw_entry_type = str(entry.get("type") or op.get("type") or "").lower()
+    entry_time_in_force = entry.get("time_in_force")
     act = str(action or "").lower()
     if act in _MANAGEMENT_ACTIONS:
         out: dict = {"side": b_side}
@@ -367,6 +368,7 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
         entry_price,
         price_min,
         price_max,
+        entry_time_in_force,
     )
     if entry_type == "zone":
         try:
@@ -377,6 +379,7 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
                 b_side,
                 price_min,
                 price_max,
+                entry_time_in_force,
             )
             if ladder_plan is not None:
                 return ladder_plan
@@ -394,6 +397,7 @@ def _single_execution_order_plan(
     entry_price,
     price_min,
     price_max,
+    entry_time_in_force,
 ) -> dict:
     max_notional = (risk_budget or {}).get("max_notional")
     quantity = op.get("quantity")
@@ -410,8 +414,14 @@ def _single_execution_order_plan(
             quantity = float(max_notional) / float(sizing_price)
         except (TypeError, ValueError, ZeroDivisionError):
             quantity = None
-    out: dict = {"side": b_side, "type": entry_type,
-                 "time_in_force": "IOC" if entry_type == "market" else "GTC"}
+    time_in_force = entry_time_in_force
+    if not time_in_force:
+        time_in_force = "IOC" if entry_type == "market" else "GTC"
+    out: dict = {
+        "side": b_side,
+        "type": entry_type,
+        "time_in_force": time_in_force,
+    }
     if quantity is not None:
         out["quantity"] = str(quantity)
     if entry_type in ("limit", "zone") and entry_price is not None:
@@ -439,6 +449,7 @@ def _zone_ladder_order_plan(
     b_side: str,
     price_min,
     price_max,
+    entry_time_in_force,
 ) -> dict | None:
     if price_min is None or price_max is None:
         return None
@@ -520,7 +531,7 @@ def _zone_ladder_order_plan(
     out: dict = {
         "side": b_side,
         "type": "zone_ladder",
-        "time_in_force": "GTC",
+        "time_in_force": entry_time_in_force or "GTC",
         "tranches": tranches,
         "stop_loss": op.get("stop_loss"),
         "take_profits": op.get("take_profits") or [],
@@ -2655,6 +2666,7 @@ _EXECUTABLE_PARENT_ACTIONS = frozenset(
     }
 )
 _OPERATOR_ACCOUNTS = ("account-a", "account-b")
+_OPERATOR_TIME_IN_FORCE = ("GTC", "IOC", "FOK", "GTD")
 _ORDER_AUTHORIZATION_TYPES = ("user", "channel")
 _INTERNAL_ORDER_SERVICE_RE = re.compile(r"internal|watchdog|reconciler", re.IGNORECASE)
 _TG_SIGNAL_REF_RE = re.compile(
@@ -3304,6 +3316,55 @@ def _safe_execution_preview(order_plan, risk_budget, symbol, action):
         return {"preview_unavailable": str(exc)[:200]}
 
 
+def _explicit_operator_intent_id(body: dict) -> str | bool:
+    if "intent_id" not in body:
+        return False
+    raw_intent_id = body.get("intent_id")
+    if not isinstance(raw_intent_id, str):
+        raise HTTPException(status_code=400, detail="intent_id must be a uuid")
+    try:
+        return str(UUID(raw_intent_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="intent_id must be a uuid")
+
+
+def _assert_operator_intent_binding(
+    cur,
+    intent_id: str,
+    idempotency_key: str,
+) -> None:
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (idempotency_key,),
+    )
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 1))",
+        (intent_id,),
+    )
+    cur.execute(
+        "SELECT intent_id::text, idempotency_key FROM trade_intents "
+        "WHERE idempotency_key=%s OR intent_id::text=%s",
+        (idempotency_key, intent_id),
+    )
+    for bound_intent_id, bound_idempotency_key in cur.fetchall():
+        if (
+            bound_idempotency_key == idempotency_key
+            and bound_intent_id != intent_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="idempotency key is already bound to a different intent_id",
+            )
+        if (
+            bound_intent_id == intent_id
+            and bound_idempotency_key != idempotency_key
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="intent_id is already bound to a different idempotency key",
+            )
+
+
 def _op_num(value, field: str, required: bool = False):
     if value is None:
         if required:
@@ -3353,6 +3414,7 @@ def operator_order(
         raise HTTPException(status_code=400, detail="reason required (audit trail)")
     source = str(body.get("source") or "hermes-agent")[:64]
     client_ref = str(body.get("client_ref") or "").strip()
+    explicit_intent_id = _explicit_operator_intent_id(body)
 
     caps = _operator_caps()
     checks = [{"name": "operator_auth", "passed": True}]
@@ -3362,6 +3424,18 @@ def operator_order(
         entry_type = "market"
     if entry_type not in ("market", "limit", "zone"):
         raise HTTPException(status_code=400, detail="entry.type must be market|limit|zone")
+    if (
+        action == "open_position"
+        and "time_in_force" in entry
+        and entry.get("time_in_force") not in _OPERATOR_TIME_IN_FORCE
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "entry.time_in_force must be one of "
+                f"{list(_OPERATOR_TIME_IN_FORCE)}"
+            ),
+        )
     entry_price = _op_num(entry.get("price"), "entry.price")
     entry_price_min = _op_num(entry.get("price_min"), "entry.price_min")
     entry_price_max = _op_num(entry.get("price_max"), "entry.price_max")
@@ -3518,10 +3592,17 @@ def operator_order(
         if position_side:
             order_plan["position_side"] = position_side
     else:
+        semantic_entry = {
+            "type": entry_type,
+            "price": entry_price,
+            "price_min": entry_price_min,
+            "price_max": entry_price_max,
+        }
+        if action == "open_position" and "time_in_force" in entry:
+            semantic_entry["time_in_force"] = entry["time_in_force"]
         order_plan = {
             "side": side,
-            "entry": {"type": entry_type, "price": entry_price,
-                      "price_min": entry_price_min, "price_max": entry_price_max},
+            "entry": semantic_entry,
             "stop_loss": stop_loss,
             "take_profits": take_profits,
             "leverage": leverage,
@@ -3633,23 +3714,6 @@ def operator_order(
     if attribution:
         order_plan["attribution"] = attribution
     canonical_request = _canonical_order_request(body, authorization_evidence)
-
-    if dry_run:
-        order_plan_preview = dict(order_plan)
-        return {
-            "dry_run": True,
-            "action": action,
-            "symbol": symbol,
-            "account_id": account_id,
-            "computed_notional": notional,
-            "checks": checks,
-            "order_plan_preview": order_plan_preview,
-            "authorization": authorization_evidence,
-            "attribution": attribution,
-        }
-
-    now = datetime.now(timezone.utc)
-    raw_id, run_id, ctx_id, dec_id, risk_id, intent_id = (str(uuid4()) for _ in range(6))
     if action == "open_position":
         idem = hashlib.sha256(
             f"operator|{account_id}|{client_ref}".encode()
@@ -3659,12 +3723,58 @@ def operator_order(
             f"operator-v2|{account_id}|{action}|{symbol}|"
             f"{position_side or ''}|{client_ref}".encode()
         ).hexdigest()
+
+    if dry_run:
+        if explicit_intent_id:
+            conn = psycopg2.connect(database_url)
+            try:
+                with conn.cursor() as cur:
+                    _assert_operator_intent_binding(
+                        cur,
+                        explicit_intent_id,
+                        idem,
+                    )
+            finally:
+                conn.close()
+        order_plan_preview = dict(order_plan)
+        dry_run_response = {
+            "dry_run": True,
+            "action": action,
+            "symbol": symbol,
+            "account_id": account_id,
+            "computed_notional": notional,
+            "checks": checks,
+            "order_plan_preview": order_plan_preview,
+            "execution_preview": _safe_execution_preview(
+                order_plan,
+                risk_budget,
+                symbol,
+                action,
+            ),
+            "authorization": authorization_evidence,
+            "attribution": attribution,
+        }
+        if explicit_intent_id:
+            dry_run_response["intent_id"] = explicit_intent_id
+        return dry_run_response
+
+    now = datetime.now(timezone.utc)
+    raw_id, run_id, ctx_id, dec_id, risk_id = (
+        str(uuid4()) for _ in range(5)
+    )
+    intent_id = explicit_intent_id or str(uuid4())
     message_type = "new_signal" if action == "open_position" else "position_update"
     valid_until = now + timedelta(seconds=valid_seconds)
 
     conn = psycopg2.connect(database_url)
     try:
         with conn.cursor() as cur:
+            if explicit_intent_id:
+                _assert_operator_intent_binding(
+                    cur,
+                    explicit_intent_id,
+                    idem,
+                )
             cur.execute(
                 "SELECT intent_id::text, status::text, valid_until, order_plan "
                 "FROM trade_intents WHERE idempotency_key=%s",
