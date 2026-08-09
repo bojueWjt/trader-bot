@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -15,7 +17,18 @@ sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 from app import run_node  # noqa: E402
+from app.nautilus_actors import (  # noqa: E402
+    CommandPollerActor,
+    ExecutionProjectionActor,
+    IntentPublisherActor,
+)
+from execution_domain.control_plane import (  # noqa: E402
+    CommandType,
+    NodeCommand,
+    TradingState,
+)
 from runtime.bounded_task_worker import BoundedTaskWorker  # noqa: E402
+from runtime.control_plane_session import NodeControlPlaneSession  # noqa: E402
 
 
 class _LeaseGuard:
@@ -120,6 +133,160 @@ class _RedisClient:
         if self._close_failures > 0:
             self._close_failures -= 1
             raise RuntimeError("redis client close failed")
+
+
+def test_blocked_intent_lane_preserves_actor_and_peer_lane_progress() -> None:
+    lifecycle = _ProgressLifecycle()
+    control_plane = _ProgressControlPlane()
+    intent_client = _ProgressIntentClient()
+    projection = _ProgressProjection()
+    fetch_started = Event()
+    release_fetch = Event()
+    actor_ticks: list[float] = []
+    pump_stop = Event()
+    fetched = False
+    actor_holder: dict[str, Any] = {}
+
+    def fetch_intents(capacity: int) -> tuple[Any, ...]:
+        nonlocal fetched
+        del capacity
+        if fetched:
+            return ()
+        fetch_started.set()
+        release_fetch.wait(timeout=2.0)
+        fetched = True
+        return (SimpleNamespace(account_id="account-a"),)
+
+    session = NodeControlPlaneSession(
+        heartbeat=lambda: actor_holder[
+            "command"
+        ].session_send_heartbeat(),
+        command_poll=lambda capacity: actor_holder[
+            "command"
+        ].session_poll_commands(capacity),
+        command_apply=lambda command: actor_holder[
+            "command"
+        ].session_apply_command(command),
+        command_ack=lambda acknowledgement: actor_holder[
+            "command"
+        ].session_ack_command(acknowledgement),
+        intent_fetch=fetch_intents,
+        intent_deliver=intent_client.deliver,
+        execution_event_sink=lambda event: actor_holder[
+            "projection"
+        ].session_flush_execution_event(event),
+        heartbeat_interval_seconds=0.01,
+        command_poll_interval_seconds=0.01,
+        intent_fetch_interval_seconds=0.01,
+        operation_timeout_seconds=1.0,
+        retry_budget=1,
+    )
+    intent_actor = IntentPublisherActor(
+        intent_client,
+        lifecycle=lifecycle,
+        control_plane_session=session,
+        manage_control_plane_session=False,
+        stale_after_seconds=1.0,
+    )
+    intent_actor.publish = intent_client.record_published  # type: ignore[method-assign]
+    projection_actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+        manage_control_plane_session=False,
+    )
+    command_actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        manage_control_plane_session=False,
+        stale_after_seconds=1.0,
+    )
+    actor_holder.update(
+        {
+            "command": command_actor,
+            "intent": intent_actor,
+            "projection": projection_actor,
+        }
+    )
+
+    def pump_actor_callbacks() -> None:
+        while not pump_stop.is_set():
+            actor_ticks.append(time.monotonic())
+            command_actor._on_poll_timer()
+            intent_actor._on_poll_timer()
+            time.sleep(0.005)
+
+    intent_actor.on_start()
+    projection_actor.on_start()
+    command_actor.on_start()
+    session.start()
+    pump = Thread(
+        target=pump_actor_callbacks,
+        name="account-stall.actor-pump",
+    )
+    pump.start()
+    try:
+        assert fetch_started.wait(timeout=1.0)
+        started_at = time.monotonic()
+        assert projection_actor.on_event("fill-1") is True
+        assert time.monotonic() - started_at < 0.01
+        assert _wait_for(
+            lambda: (
+                lifecycle.heartbeat_count >= 2
+                and control_plane.command_poll_count >= 1
+                and control_plane.command_ack_count >= 1
+                and projection.flush_count >= 1
+            ),
+            timeout=1.0,
+        )
+        blocked_snapshot = session.snapshot()
+        assert actor_ticks
+        assert time.monotonic() - actor_ticks[-1] < 0.1
+        assert (
+            blocked_snapshot.lanes["heartbeat"].last_success_at
+            is not False
+        )
+        assert (
+            blocked_snapshot.lanes["command_poll"].last_success_at
+            is not False
+        )
+        assert (
+            blocked_snapshot.lanes["command_ack"].last_success_at
+            is not False
+        )
+        assert (
+            blocked_snapshot.lanes["execution_event"].last_success_at
+            is not False
+        )
+        assert (
+            blocked_snapshot.lanes["intent_fetch"].last_success_at
+            is False
+        )
+
+        release_fetch.set()
+        assert _wait_for(
+            lambda: bool(intent_client.published),
+            timeout=1.0,
+        )
+        recovered_snapshot = session.snapshot()
+        assert (
+            recovered_snapshot.lanes["intent_fetch"].last_success_at
+            is not False
+        )
+        assert intent_client.published[0].account_id == "account-a"
+        assert lifecycle.failed_dependencies == []
+    finally:
+        release_fetch.set()
+        assert session.stop(time.monotonic() + 1.0)
+        pump_stop.set()
+        pump.join(timeout=1.0)
+        intent_actor.on_stop()
+        projection_actor.on_stop()
+        command_actor.on_stop()
+
+    assert pump.is_alive() is False
 
 
 def test_cleanup_retains_lease_when_bounded_worker_stop_returns_false() -> None:
@@ -332,3 +499,116 @@ def _runtime(
         redis_runtime_safety_client=redis_client,
         namespace_lease_guard=lease_guard,
     )
+
+
+def _wait_for(predicate: Any, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return bool(predicate())
+
+
+class _AttachablePublisher:
+    def __init__(self) -> None:
+        self._publishers: list[Any] = []
+
+    def attach(self, publisher: Any) -> None:
+        self._publishers.append(publisher)
+
+    def publish(self, intent: Any) -> None:
+        for publisher in self._publishers:
+            publisher.publish(intent)
+
+
+class _ProgressIntentClient:
+    def __init__(self) -> None:
+        self._publisher = _AttachablePublisher()
+        self.published: list[Any] = []
+
+    def deliver(self, item: Any) -> None:
+        self._publisher.publish(item)
+
+    def record_published(self, intent: Any) -> None:
+        self.published.append(intent)
+
+
+class _ProgressControlPlane:
+    def __init__(self) -> None:
+        self.command_poll_count = 0
+        self.command_ack_count = 0
+        self._command = NodeCommand(
+            command_id="progress-command",
+            type=CommandType.HALT,
+        )
+
+    def poll_commands(
+        self,
+        node_id: str,
+        after: Any,
+    ) -> tuple[NodeCommand, ...]:
+        del node_id, after
+        self.command_poll_count += 1
+        if self.command_ack_count:
+            return ()
+        return (self._command,)
+
+    def ack_command(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        self.command_ack_count += 1
+
+
+class _ProgressLifecycle:
+    def __init__(self) -> None:
+        self.trading_state = TradingState.ACTIVE
+        self.heartbeat_count = 0
+        self.failed_dependencies: list[tuple[Any, str]] = []
+
+    def send_heartbeat(self) -> None:
+        self.heartbeat_count += 1
+
+    def set_open_orders_provider(self, provider: Any) -> None:
+        del provider
+
+    def apply_operator_state(
+        self,
+        state: TradingState,
+        reason: str,
+    ) -> None:
+        del reason
+        self.trading_state = state
+
+    def mark_dependency_ready(self, dependency: Any) -> None:
+        del dependency
+
+    def mark_dependency_degraded(
+        self,
+        dependency: Any,
+        reason: str,
+    ) -> None:
+        del dependency, reason
+
+    def mark_dependency_failed(
+        self,
+        dependency: Any,
+        reason: str,
+    ) -> None:
+        self.failed_dependencies.append((dependency, reason))
+
+
+class _ProgressProjection:
+    def __init__(self) -> None:
+        self.ingested: list[Any] = []
+        self.flush_count = 0
+
+    def ingest_event(self, event: Any) -> Any:
+        self.ingested.append(event)
+        return SimpleNamespace(outcome="DURABLE")
+
+    def flush(self) -> list[str]:
+        self.flush_count += 1
+        return []
+
+    def halt_egress(self, reason: str) -> None:
+        raise AssertionError(reason)
