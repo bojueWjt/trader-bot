@@ -124,6 +124,22 @@ maintenance fence 进入实现后，旧 fixture 继续构造 v2/部分资源对�
 
 ## 5. 目标架构调整
 
+### 5.0 可用性优先的故障分级
+
+本轮 runtime 修复以“软故障继续交易，硬一致性故障停止新增风险”为统一契约：
+
+| 分类 | 故障 | ACTIVE 行为 |
+|---|---|---|
+| Soft | HTTP poll/heartbeat/ACK timeout、5xx、普通 operation timeout、circuit open | 记录 degraded，继续开仓 admission、订单管理和保护动作 |
+| Soft | 控制面内存 queue pressure/full | 暂停或合并新输入，按容量分批 drain，继续交易 |
+| Soft | exchange refresh/cancel 可恢复错误、external result mailbox 压力 | bounded retry，继续保护与交易 |
+| Hard | 显式 HALT；带结构化 fence code 的 lease/owner/fencing HTTP 409 | sticky HALTED 或 fatal termination |
+| Hard | durable write/fsync/deadline、durable task/result/inbox/outbox 满载 | sticky HALTED 或 fatal termination |
+| Hard | session stopped、actor tick/continuation progress freeze、writer/release identity conflict | sticky HALTED 或 fatal termination |
+
+生产部署、Redis/PostgreSQL mutation 与真实交易继续受 Phase E-G gate 约束。故障分级放宽
+运行时 availability，发布门禁继续验证 release identity、持久化与交易后归零证据。
+
 ### 5.1 明确契约所有权
 
 本轮不新建覆盖整个发布链路的 `ReleaseContractV3` 大模块。先消除已经造成失败的重复

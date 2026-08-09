@@ -64,12 +64,13 @@ flowchart LR
 |---|---|---|---|---|
 | heartbeat | 独立单线程 worker | capacity 1，latest-wins | 合并旧 tick，持续发送最新状态 | 不排队历史 heartbeat；记录 last_attempt/last_success |
 | command poll | 独立单线程 worker | poll token capacity 1 | 合并重复 poll tick | 命令按 control-plane cursor 串行获取 |
-| command apply | node actor 本地 mailbox | capacity 128 | queue 达 80% 进入 degraded；满载立即 HALT | 按 command sequence 串行；command_id 去重 |
-| command ACK | 独立 worker + durable outbox | memory capacity 256，disk spool 有字节上限 | 写入 disk spool；spool 达 80% degraded，满载 HALT | 至少一次发送，control plane 按 command_id 幂等 |
+| command apply | node actor 本地 mailbox | capacity 128 | queue 达 80% 或满载进入 degraded；暂停拉取并按容量分批 drain | 按 command sequence 串行；command_id 去重 |
+| command ACK | 独立 worker + durable outbox | memory capacity 256，disk spool 有字节上限 | memory 压力进入 degraded；ACK 由 eventual ledger 保留并重试；durable spool 满载 HALT | 至少一次发送，control plane 按 command_id 幂等 |
 | intent fetch | 独立单线程 worker | poll token capacity 1 | delivery queue 达 80% 时暂停拉取 | cursor 只在本地接收并持久化后推进 |
-| intent delivery | node actor 本地 mailbox + durable inbox | capacity 256，disk inbox 有字节上限 | 暂停 fetch；过期 intent 按契约 ACK；inbox 满载立即 HALT | `RECEIVED -> DISPATCHED -> EXCHANGE_CONFIRMED/REJECTED`；不确定结果先查交易所 |
+| intent delivery | node actor 本地 mailbox + durable inbox | capacity 256，disk inbox 有字节上限 | memory 压力暂停 fetch 并进入 degraded；durable inbox 满载 HALT | `RECEIVED -> PREPARED -> DISPATCHED -> EXCHANGE_CONFIRMED/REJECTED`；不确定结果先查交易所历史证据 |
 | strategy durable I/O | 独立单线程 worker + actor result mailbox | task/result capacity 256 | queue 满、fsync 失败或 deadline 超时立即 sticky HALT | actor callback 只 enqueue；fsync 后 continuation 回 actor；management 以 durable terminal 状态收口 |
-| event egress | 独立 worker + durable spool | memory capacity 1024，disk spool 64 MiB 初始上限 | memory 满转 disk；disk 达 80% degraded，满载 HALT | event_id 幂等、批量发送、ACK 后删 spool |
+| strategy external I/O | 独立 worker + coalescing result mailbox | bounded | refresh/cancel timeout、可恢复错误与 mailbox 压力进入 degraded；继续保护、撤单和开仓 admission | refresh latest-wins；cancel 结果最终 drain |
+| event egress | 独立 worker + durable spool | memory capacity 1024，disk spool 64 MiB 初始上限 | memory 满转 disk并进入 degraded；disk 达 80% degraded，满载 HALT | event_id 幂等、批量发送、ACK 后删 spool |
 
 每条 lane 使用独立 timeout、retry budget、circuit state、metrics 和 progress timestamp。
 lane 之间不共享 thread pool，不允许 heartbeat 被 intent long poll、ACK retry 或 event backlog
@@ -96,10 +97,38 @@ hash，禁止运行时静默漂移。
   `EXCHANGE_CONFIRMED`。重启看到 `DISPATCHED` 且无法证明 terminal result 时保持
   fail-closed，禁止重复执行。
 
+### Failure Classification
+
+节点按一致性风险区分 soft degradation 与 hard stop。
+
+Soft degradation 保持 `process_liveness=true`。节点处于 ACTIVE 时继续新开仓 admission、
+订单管理和保护动作：
+
+- heartbeat、command poll/ACK、intent fetch 的 HTTP timeout、5xx 和 circuit open；
+- 普通 operation timeout；
+- 控制面内存 queue pressure/full；
+- strategy external refresh/cancel 的可恢复错误和结果 mailbox 压力；
+- event egress 内存 queue pressure。
+
+Soft degradation 会记录 lane reason、暂停或合并新输入、执行 bounded retry，并在恢复后
+自动清除 degraded 状态。
+
+Hard stop 进入 sticky HALTED 或触发单次 fatal process termination：
+
+- 显式 operator HALT；
+- HTTP 409 表达的 lease、owner 或 fencing conflict；
+- durable inbox/outbox/task/result queue 满载；
+- durable write、fsync、原子替换或 durable operation deadline 失败；
+- session 已停止后仍收到工作；
+- actor tick 或 durable actor continuation 的真实 progress freeze；
+- release identity、Redis writer identity 或 reconciliation 证明所有权冲突。
+
 ### Timeout And Retry
 
 - 每次网络调用必须有 connect/read/total deadline。
-- 每条 lane 同时设置 hard deadline。hard deadline 到期后将
+- 控制面网络与 exchange refresh/cancel 的普通 operation deadline 到期后进入 soft
+  degradation，打开对应 lane circuit，其他 lane 和 ACTIVE 开仓 admission 继续运行。
+- durable operation deadline 与 actor progress deadline 到期后将
   `process_liveness=false`，触发单次 fatal process termination，由 orchestrator
   重启到 HALTED。
 - retry 使用 bounded exponential backoff 与 jitter。
@@ -107,7 +136,8 @@ hash，禁止运行时静默漂移。
 - command ACK 和 execution event 使用 durable outbox；重试跨进程重启保留。
 - command journal 恢复出的 pending ACK 在 session 启动后直接进入 ACK lane，
   发送成功后按 `command_id` durable 删除。
-- intent fetch timeout 只影响 intent lane。intent queue backpressure 主动停止新 fetch。
+- intent fetch timeout 只影响 intent lane。intent queue backpressure 主动停止新 fetch，
+  当前 ACTIVE 交易与保护动作继续运行。
 - 连续 timeout 打开该 lane circuit，其他 lane 继续运行并报告精确 degraded reason。
 
 ### Watchdog And Health
@@ -127,11 +157,14 @@ timestamps，不执行控制面网络调用。
 默认判定：
 
 - actor tick age > 15 秒：readiness=false，创建 incident，进入 HALTED；
-- heartbeat success age > 15 秒：control-plane readiness=false，进入 HALTED；
+- heartbeat success age > 15 秒：control-plane readiness=false，记录 degraded；当前 ACTIVE
+  交易与保护动作继续运行；
 - actor tick age > 60 秒：watchdog 触发进程退出，由 orchestrator 重启到 HALTED；
-- 任一 lane in-flight age 超过该 lane hard deadline：立即标记 process dead，
-  触发进程退出；阻塞线程的存活状态不再代表进程健康；
-- queue 达 80%：degraded + alert；queue 满或 durable spool 写失败：HALTED；
+- 控制面或 external exchange lane in-flight age 超过 operation deadline：degraded +
+  circuit open；actor 与其他 lane 保持运行；
+- durable lane in-flight age 超过 durable deadline：立即标记 process dead并触发进程退出；
+- memory queue 达 80% 或满载：degraded + alert + bounded backpressure；
+- durable queue/spool 满载或 durable write 失败：HALTED；
 - frozen DB heartbeat payload 无论内容为何，超过 freshness threshold 都判 unavailable。
 
 阈值必须配置化并写入 release manifest。生产初始值采用上述值，chaos test 验证后调整。
@@ -147,9 +180,12 @@ timestamps，不执行控制面网络调用。
 
 语义：
 
-- dependency failure、queue overflow、watchdog stall、release drift、Redis write failure 会将
-  `trading_state` 转为 sticky `HALTED`。
-- 依赖恢复只更新 readiness；trading state 继续 HALTED。
+- 控制面 dependency failure、普通 timeout、circuit open 和 memory queue pressure只更新
+  degraded/readiness，当前 ACTIVE 交易与保护动作继续运行。
+- durable queue/spool failure、watchdog stall、fencing conflict、release drift 和 Redis
+  writer conflict 会将 `trading_state` 转为 sticky `HALTED`。
+- soft dependency 恢复会清除 degraded/readiness 原因并保留当前 trading state；hard stop
+  恢复只更新 readiness，trading state 继续 HALTED。
 - `RESUME` 需要显式 operator command、有效审计身份、fresh heartbeat、健康 reconciliation、
   无 P0/P1 incident、release gate PASS。
 - HALTED 允许 cancel、reduce、close 等风险降低动作；open/add 始终拒绝。
