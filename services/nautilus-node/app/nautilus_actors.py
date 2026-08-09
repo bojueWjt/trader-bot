@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import timedelta
+from queue import Empty, Full, Queue
+from threading import Event
 from typing import Any, Callable, Iterable
 
 try:  # pragma: no cover - Nautilus is unavailable on local dev hosts.
@@ -27,6 +32,99 @@ DEFAULT_EXECUTION_EVENT_TOPICS: tuple[str, ...] = (
 
 
 ORDER_SNAPSHOT_LIMIT = 100
+CONTROL_PLANE_STALE_AFTER_SECONDS = 15.0
+DEFAULT_PENDING_INTENT_LIMIT = 100
+DEFAULT_PENDING_COMMAND_LIMIT = 128
+DEFAULT_PENDING_COMMAND_ACK_LIMIT = 256
+DEFAULT_COMMAND_ACK_BATCH_SIZE = 16
+DEFAULT_WORKER_SHUTDOWN_WAIT_SECONDS = 0.5
+DEFAULT_CALLBACK_MAX_ITEMS = 16
+DEFAULT_CALLBACK_TIME_BUDGET_SECONDS = 0.005
+
+
+@dataclass
+class _PendingCommandAck:
+    command_id: Any
+    status: Any
+    error: str | None
+
+
+@dataclass
+class _IntentPublication:
+    intent: Any
+    completed: Event = field(default_factory=Event)
+    cancelled: Event = field(default_factory=Event)
+    error: Exception | None = None
+
+
+@dataclass
+class _SessionCommandPublication:
+    command: Any
+    completed: Event = field(default_factory=Event)
+    cancelled: Event = field(default_factory=Event)
+    acknowledgement: _PendingCommandAck | None = None
+    error: Exception | None = None
+
+
+class _QueueingIntentPublisher:
+    def __init__(
+        self,
+        pending: Queue[_IntentPublication],
+        *,
+        enqueue_timeout_seconds: float,
+        completion_timeout_seconds: float,
+        failure_callback: Callable[[str], None],
+    ) -> None:
+        self._pending = pending
+        self._enqueue_timeout_seconds = enqueue_timeout_seconds
+        self._completion_timeout_seconds = completion_timeout_seconds
+        self._failure_callback = failure_callback
+        self._stopped = Event()
+
+    def stop(self) -> None:
+        self._stopped.set()
+        while True:
+            try:
+                publication = self._pending.get_nowait()
+            except Empty:
+                return
+            publication.cancelled.set()
+            publication.error = RuntimeError(
+                "intent publisher actor stopped before publication"
+            )
+            publication.completed.set()
+            self._pending.task_done()
+
+    def publish(self, intent: Any) -> None:
+        if self._stopped.is_set():
+            raise RuntimeError("intent publisher actor is stopped")
+        publication = _IntentPublication(intent=intent)
+        try:
+            self._pending.put(
+                publication,
+                timeout=self._enqueue_timeout_seconds,
+            )
+        except Full as exc:
+            reason = "intent publication backlog full"
+            self._failure_callback(reason)
+            raise RuntimeError(reason) from exc
+
+        deadline = time.monotonic() + self._completion_timeout_seconds
+        while not publication.completed.wait(timeout=0.01):
+            if self._stopped.is_set():
+                publication.cancelled.set()
+                raise RuntimeError(
+                    "intent publisher actor stopped before publication"
+                )
+            if time.monotonic() >= deadline:
+                reason = (
+                    "intent publication timed out waiting for actor thread"
+                )
+                publication.cancelled.set()
+                self._failure_callback(reason)
+                raise RuntimeError(reason)
+        if publication.error is not None:
+            raise publication.error
 
 
 def _string_value(value: Any) -> str | None:
@@ -149,20 +247,133 @@ class IntentPublisherActor(Actor):
         wait_ms: int = 0,
         timer_name: str = "approved-intents.poll",
         custom_data_builder: CustomDataBuilder | None = None,
+        lifecycle: Any = None,
+        stale_after_seconds: float = CONTROL_PLANE_STALE_AFTER_SECONDS,
+        pending_intent_limit: int = DEFAULT_PENDING_INTENT_LIMIT,
+        publication_enqueue_timeout_seconds: float = 0.1,
+        publication_completion_timeout_seconds: float = (
+            CONTROL_PLANE_STALE_AFTER_SECONDS
+        ),
+        worker_shutdown_wait_seconds: float = (
+            DEFAULT_WORKER_SHUTDOWN_WAIT_SECONDS
+        ),
+        callback_max_items: int = DEFAULT_CALLBACK_MAX_ITEMS,
+        callback_time_budget_seconds: float = (
+            DEFAULT_CALLBACK_TIME_BUDGET_SECONDS
+        ),
+        control_plane_session: Any = None,
+        manage_control_plane_session: bool = True,
     ) -> None:
         _init_actor_base(self)
+        if pending_intent_limit < 1:
+            raise ValueError("pending_intent_limit must be positive")
+        if publication_enqueue_timeout_seconds < 0:
+            raise ValueError(
+                "publication_enqueue_timeout_seconds must be non-negative"
+            )
+        if publication_completion_timeout_seconds <= 0:
+            raise ValueError(
+                "publication_completion_timeout_seconds must be positive"
+            )
+        if callback_max_items < 1:
+            raise ValueError("callback_max_items must be positive")
+        if callback_time_budget_seconds <= 0:
+            raise ValueError("callback_time_budget_seconds must be positive")
         self._intent_data_client = intent_data_client
         self._poll_interval_seconds = poll_interval_seconds
         self._poll_limit = poll_limit
         self._wait_ms = wait_ms
         self._timer_name = timer_name
         self._custom_data_builder = custom_data_builder
-        self._attach_to_plain_client_publisher()
+        self._lifecycle = lifecycle
+        self._stale_after_seconds = float(stale_after_seconds)
+        self._worker_shutdown_wait_seconds = max(
+            float(worker_shutdown_wait_seconds),
+            0.0,
+        )
+        self._callback_max_items = int(callback_max_items)
+        self._callback_time_budget_seconds = float(
+            callback_time_budget_seconds
+        )
+        self._control_plane_session = control_plane_session
+        self._manage_control_plane_session = bool(
+            manage_control_plane_session
+        )
+        self._stopped = Event()
+        self._executor: ThreadPoolExecutor | None = None
+        self._poll_future: Future[int] | None = None
+        self._pending_intents: Queue[_IntentPublication] = Queue(
+            maxsize=pending_intent_limit
+        )
+        self._queued_publisher = _QueueingIntentPublisher(
+            self._pending_intents,
+            enqueue_timeout_seconds=float(
+                publication_enqueue_timeout_seconds
+            ),
+            completion_timeout_seconds=float(
+                publication_completion_timeout_seconds
+            ),
+            failure_callback=self._record_failure,
+        )
+        self._started_at = time.monotonic()
+        self._last_poll_success_at: float | None = None
+        self._intent_stream_failed = False
+        self._failure_reason = ""
+        self._attach_to_plain_client_publisher(self._queued_publisher)
+
+    @property
+    def failure_reason(self) -> str:
+        return self._failure_reason
+
+    @property
+    def pending_intent_count(self) -> int:
+        return self._pending_intents.qsize()
 
     def on_start(self) -> None:
+        self._started_at = time.monotonic()
+        session = self._control_plane_session
+        if session is not None:
+            if self._manage_control_plane_session:
+                session.start()
+            self._register_poll_timer()
+            return
+        self._ensure_executor()
         self._register_poll_timer()
 
+    def on_stop(self) -> None:
+        self._stopped.set()
+        self._queued_publisher.stop()
+        deadline = (
+            time.monotonic() + self._worker_shutdown_wait_seconds
+        )
+        session = self._control_plane_session
+        if session is not None and self._manage_control_plane_session:
+            try:
+                stopped = bool(session.stop(deadline))
+            except Exception as exc:
+                stopped = False
+                self._record_failure(
+                    f"control-plane session stop failed: {exc!r}"
+                )
+            if not stopped:
+                self._record_failure(
+                    "control-plane session failed to stop before deadline"
+                )
+        executor = self._executor
+        self._executor = None
+        _shutdown_executor(executor, self._poll_future)
+        self._poll_future = None
+
     def poll_once(self) -> int:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._poll_client_once)
+            while not future.done():
+                self._drain_pending_intents()
+                time.sleep(0.001)
+            self._drain_pending_intents()
+            return int(future.result())
+
+    def _poll_client_once(self) -> int:
         poll_once = getattr(self._intent_data_client, "poll_once", None)
         if not callable(poll_once):
             raise RuntimeError("intent_data_client does not expose poll_once")
@@ -181,7 +392,121 @@ class IntentPublisherActor(Actor):
         self._publish_via_engine_or_bus(intent)
 
     def _on_poll_timer(self, *_args: Any, **_kwargs: Any) -> None:
-        self.poll_once()
+        if self._stopped.is_set():
+            return
+        self._drain_pending_intents()
+        if self._control_plane_session is not None:
+            self._evaluate_session_health()
+            return
+        self._harvest_poll()
+        self._submit_poll()
+        self._evaluate_poll_staleness()
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        executor = self._executor
+        if executor is not None:
+            return executor
+        executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"{self._timer_name}.worker",
+        )
+        self._executor = executor
+        return executor
+
+    def _submit_poll(self) -> None:
+        if self._stopped.is_set():
+            return
+        future = self._poll_future
+        if future is not None:
+            return
+        self._poll_future = self._ensure_executor().submit(
+            self._poll_client_once
+        )
+
+    def _harvest_poll(self) -> None:
+        future = self._poll_future
+        if future is None or not future.done():
+            return
+        self._poll_future = None
+        try:
+            future.result()
+        except Exception as exc:
+            self._record_failure(f"approved intent poll failed: {exc!r}")
+            return
+        self._record_poll_progress()
+
+    def _drain_pending_intents(self) -> int:
+        published = 0
+        inspected = 0
+        deadline = (
+            time.monotonic() + self._callback_time_budget_seconds
+        )
+        while inspected < self._callback_max_items:
+            if inspected > 0 and time.monotonic() >= deadline:
+                return published
+            try:
+                publication = self._pending_intents.get_nowait()
+            except Empty:
+                return published
+            inspected += 1
+            try:
+                if publication.cancelled.is_set():
+                    continue
+                self.publish(publication.intent)
+                published += 1
+                self._record_poll_progress()
+            except Exception as exc:
+                publication.error = exc
+                self._record_failure(
+                    f"intent publication failed: {exc!r}"
+                )
+            finally:
+                publication.completed.set()
+                self._pending_intents.task_done()
+        return published
+
+    def _evaluate_poll_staleness(self) -> None:
+        reference = self._last_poll_success_at
+        if reference is None:
+            reference = self._started_at
+        if time.monotonic() - reference < self._stale_after_seconds:
+            return
+        self._record_failure("approved intent poll stale")
+
+    def _evaluate_session_health(self) -> None:
+        session = self._control_plane_session
+        if session is None:
+            return
+        try:
+            snapshot = session.snapshot()
+        except Exception as exc:
+            self._record_failure(
+                f"control-plane session snapshot failed: {exc!r}"
+            )
+            return
+        lanes = getattr(snapshot, "lanes", {})
+        fetch_lane = lanes.get("intent_fetch")
+        delivery_lane = lanes.get("intent_delivery")
+        for lane in (fetch_lane, delivery_lane):
+            failure = str(
+                getattr(lane, "failure", "") or ""
+            ).strip()
+            if failure:
+                self._record_failure(failure)
+                return
+        last_success = getattr(fetch_lane, "last_success_at", False)
+        if last_success is not False:
+            self._record_poll_progress()
+            return
+        self._evaluate_poll_staleness()
+
+    def _record_poll_progress(self) -> None:
+        self._last_poll_success_at = time.monotonic()
+        self._mark_dependency_ready("intent_stream")
+
+    def _record_failure(self, reason: str) -> None:
+        self._failure_reason = reason
+        self._mark_dependency_failed("intent_stream", reason)
 
     def _register_poll_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -206,11 +531,14 @@ class IntentPublisherActor(Actor):
             pass
         set_timer(self._timer_name, interval, self._on_poll_timer)
 
-    def _attach_to_plain_client_publisher(self) -> None:
+    def _attach_to_plain_client_publisher(
+        self,
+        selected_publisher: Any,
+    ) -> None:
         publisher = getattr(self._intent_data_client, "_publisher", None)
         attach = getattr(publisher, "attach", None)
         if callable(attach):
-            attach(self)
+            attach(selected_publisher)
 
     def _build_custom_data(self, intent: Any) -> Any:
         if self._custom_data_builder is not None:
@@ -239,6 +567,26 @@ class IntentPublisherActor(Actor):
 
     def _message_bus(self) -> Any:
         return _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
+
+    def _mark_dependency_ready(self, dependency_value: str) -> None:
+        dependency = _dependency_by_value(dependency_value)
+        marker = getattr(self._lifecycle, "mark_dependency_ready", None)
+        if dependency is not None and callable(marker):
+            marker(dependency)
+        self._intent_stream_failed = False
+
+    def _mark_dependency_failed(
+        self,
+        dependency_value: str,
+        reason: str,
+    ) -> None:
+        if self._intent_stream_failed:
+            return
+        dependency = _dependency_by_value(dependency_value)
+        marker = getattr(self._lifecycle, "mark_dependency_failed", None)
+        if dependency is not None and callable(marker):
+            marker(dependency, reason)
+        self._intent_stream_failed = True
 
 
 class ExecutionProjectionActor(Actor):
@@ -347,8 +695,45 @@ class CommandPollerActor(Actor):
         account_id: str | None = None,
         poll_interval_seconds: float = 2.0,
         timer_name: str = "operator-commands.poll",
+        stale_after_seconds: float = CONTROL_PLANE_STALE_AFTER_SECONDS,
+        max_pending_commands: int = DEFAULT_PENDING_COMMAND_LIMIT,
+        max_pending_acks: int = DEFAULT_PENDING_COMMAND_ACK_LIMIT,
+        ack_batch_size: int = DEFAULT_COMMAND_ACK_BATCH_SIZE,
+        command_apply_max_items: int = DEFAULT_CALLBACK_MAX_ITEMS,
+        command_apply_time_budget_seconds: float = (
+            DEFAULT_CALLBACK_TIME_BUDGET_SECONDS
+        ),
+        worker_shutdown_wait_seconds: float = (
+            DEFAULT_WORKER_SHUTDOWN_WAIT_SECONDS
+        ),
+        control_plane_session: Any = None,
+        manage_control_plane_session: bool = True,
+        session_enqueue_timeout_seconds: float = 0.1,
+        session_completion_timeout_seconds: float = (
+            CONTROL_PLANE_STALE_AFTER_SECONDS
+        ),
     ) -> None:
         _init_actor_base(self)
+        if max_pending_commands < 1:
+            raise ValueError("max_pending_commands must be positive")
+        if max_pending_acks < 1:
+            raise ValueError("max_pending_acks must be positive")
+        if ack_batch_size < 1:
+            raise ValueError("ack_batch_size must be positive")
+        if command_apply_max_items < 1:
+            raise ValueError("command_apply_max_items must be positive")
+        if command_apply_time_budget_seconds <= 0:
+            raise ValueError(
+                "command_apply_time_budget_seconds must be positive"
+            )
+        if session_enqueue_timeout_seconds < 0:
+            raise ValueError(
+                "session_enqueue_timeout_seconds must be non-negative"
+            )
+        if session_completion_timeout_seconds <= 0:
+            raise ValueError(
+                "session_completion_timeout_seconds must be positive"
+            )
         self._control_plane = control_plane
         self._lifecycle = lifecycle
         self._node_id = str(node_id or "").strip()
@@ -359,9 +744,107 @@ class CommandPollerActor(Actor):
             raise ValueError("command poller account_id is required")
         self._poll_interval_seconds = poll_interval_seconds
         self._timer_name = timer_name
+        self._stale_after_seconds = float(stale_after_seconds)
+        self._max_pending_commands = int(max_pending_commands)
+        self._max_pending_acks = int(max_pending_acks)
+        self._ack_batch_size = min(
+            int(ack_batch_size),
+            self._max_pending_acks,
+        )
+        self._command_apply_max_items = int(command_apply_max_items)
+        self._command_apply_time_budget_seconds = float(
+            command_apply_time_budget_seconds
+        )
+        self._worker_shutdown_wait_seconds = max(
+            float(worker_shutdown_wait_seconds),
+            0.0,
+        )
+        self._control_plane_session = control_plane_session
+        self._manage_control_plane_session = bool(
+            manage_control_plane_session
+        )
+        self._session_enqueue_timeout_seconds = float(
+            session_enqueue_timeout_seconds
+        )
+        self._session_completion_timeout_seconds = float(
+            session_completion_timeout_seconds
+        )
+        self._session_commands: Queue[_SessionCommandPublication] = Queue(
+            maxsize=self._max_pending_commands
+        )
+        self._stopped = Event()
+        self._heartbeat_executor: ThreadPoolExecutor | None = None
+        self._command_executor: ThreadPoolExecutor | None = None
+        self._ack_executor: ThreadPoolExecutor | None = None
+        self._heartbeat_future: Future[None] | None = None
+        self._command_future: Future[tuple[Any, ...]] | None = None
+        self._ack_future: Future[tuple[str, ...]] | None = None
+        self._pending_commands: tuple[Any, ...] = ()
+        self._pending_command_index = 0
+        self._pending_acks: dict[str, _PendingCommandAck] = {}
+        self._started_at = time.monotonic()
+        self._last_heartbeat_success_at: float | None = None
+        self._last_command_success_at: float | None = None
+        self._failed_dependencies: set[str] = set()
+        self._failure_reason = ""
+
+    @property
+    def pending_command_count(self) -> int:
+        legacy_pending = max(
+            len(self._pending_commands) - self._pending_command_index,
+            0,
+        )
+        return legacy_pending + self._session_commands.qsize()
+
+    @property
+    def failure_reason(self) -> str:
+        return self._failure_reason
 
     def on_start(self) -> None:
+        self._started_at = time.monotonic()
+        session = self._control_plane_session
+        if session is not None:
+            if self._manage_control_plane_session:
+                session.start()
+            self._register_poll_timer()
+            return
+        self._ensure_executors()
         self._register_poll_timer()
+
+    def on_stop(self) -> None:
+        self._stopped.set()
+        self._reject_session_commands(
+            "command poller actor stopped before apply"
+        )
+        deadline = time.monotonic() + self._worker_shutdown_wait_seconds
+        session = self._control_plane_session
+        if session is not None and self._manage_control_plane_session:
+            try:
+                stopped = bool(session.stop(deadline))
+            except Exception as exc:
+                stopped = False
+                reason = f"control-plane session stop failed: {exc!r}"
+                self._mark_dependency_failed("control_plane", reason)
+                self._fail_command_stream(reason)
+            if not stopped:
+                reason = (
+                    "control-plane session failed to stop before deadline"
+                )
+                self._mark_dependency_failed("control_plane", reason)
+                self._fail_command_stream(reason)
+        executors = (
+            (self._heartbeat_executor, self._heartbeat_future),
+            (self._command_executor, self._command_future),
+            (self._ack_executor, self._ack_future),
+        )
+        self._heartbeat_executor = None
+        self._command_executor = None
+        self._ack_executor = None
+        for executor, future in executors:
+            _shutdown_executor(executor, future)
+        self._heartbeat_future = None
+        self._command_future = None
+        self._ack_future = None
 
     def _register_poll_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -377,7 +860,20 @@ class CommandPollerActor(Actor):
         set_timer(self._timer_name, interval, self._on_poll_timer)
 
     def _on_poll_timer(self, *_args: Any, **_kwargs: Any) -> None:
-        self.poll_once()
+        if self._stopped.is_set():
+            return
+        if self._control_plane_session is not None:
+            self._drain_session_commands()
+            self._evaluate_session_health()
+            return
+        self._harvest_heartbeat()
+        self._harvest_commands()
+        self._drain_pending_commands()
+        self._harvest_acks()
+        self._submit_heartbeat()
+        self._submit_commands()
+        self._submit_acks()
+        self._evaluate_poll_staleness()
 
     def _cache(self) -> Any:
         return _first_attr(self, ("cache", "_cache")) or _first_attr(
@@ -385,18 +881,8 @@ class CommandPollerActor(Actor):
         )
 
     def poll_once(self) -> int:
-        # Liveness: refresh the control-plane heartbeat on every tick so
-        # node_heartbeats.last_seen_at stays fresh and the system snapshot's
-        # stale/missing_nodes gate reflects the node actually being alive. Without
-        # this the heartbeat is sent only once at startup and the snapshot goes
-        # permanently stale. Failure here must not stop operator-command polling.
         try:
-            if not getattr(self, '_oo_provider_registered', False):
-                register = getattr(self._lifecycle, 'set_open_orders_provider', None)
-                if callable(register):
-                    register(lambda: open_orders_snapshot(self._cache()))
-                    self._oo_provider_registered = True
-            self._lifecycle.send_heartbeat()
+            self.session_send_heartbeat()
         except Exception:
             pass
         commands = self._control_plane.poll_commands(self._node_id, None)
@@ -407,6 +893,394 @@ class CommandPollerActor(Actor):
             except Exception:  # ack failure must not crash the poll loop
                 pass
         return len(commands)
+
+    def session_send_heartbeat(self) -> None:
+        self._ensure_open_orders_provider()
+        self._lifecycle.send_heartbeat()
+        self._last_heartbeat_success_at = time.monotonic()
+
+    def session_poll_commands(
+        self,
+        capacity: int,
+    ) -> tuple[Any, ...]:
+        if capacity < 1:
+            return ()
+        commands = []
+        for command in self._control_plane.poll_commands(
+            self._node_id,
+            None,
+        ):
+            if len(commands) >= capacity:
+                reason = "operator command delivery capacity exceeded"
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason)
+            commands.append(command)
+        self._last_command_success_at = time.monotonic()
+        return tuple(commands)
+
+    def session_apply_command(
+        self,
+        command: Any,
+    ) -> _PendingCommandAck:
+        if self._stopped.is_set():
+            raise RuntimeError("command poller actor is stopped")
+        publication = _SessionCommandPublication(command=command)
+        try:
+            self._session_commands.put(
+                publication,
+                timeout=self._session_enqueue_timeout_seconds,
+            )
+        except Full as exc:
+            reason = "operator command actor mailbox capacity exceeded"
+            self._fail_command_stream(reason)
+            raise RuntimeError(reason) from exc
+
+        deadline = (
+            time.monotonic()
+            + self._session_completion_timeout_seconds
+        )
+        while not publication.completed.wait(timeout=0.01):
+            if self._stopped.is_set():
+                publication.cancelled.set()
+                raise RuntimeError(
+                    "command poller actor stopped before apply"
+                )
+            if time.monotonic() >= deadline:
+                reason = (
+                    "operator command apply timed out waiting for actor thread"
+                )
+                publication.cancelled.set()
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason)
+        if publication.error is not None:
+            raise publication.error
+        acknowledgement = publication.acknowledgement
+        if acknowledgement is None:
+            raise RuntimeError(
+                "operator command apply produced no acknowledgement"
+            )
+        return acknowledgement
+
+    def session_ack_command(
+        self,
+        acknowledgement: _PendingCommandAck,
+    ) -> None:
+        self._control_plane.ack_command(
+            self._node_id,
+            acknowledgement.command_id,
+            acknowledgement.status,
+            error=acknowledgement.error,
+        )
+
+    def _drain_session_commands(self) -> int:
+        drained = 0
+        deadline = (
+            time.monotonic()
+            + self._command_apply_time_budget_seconds
+        )
+        while drained < self._command_apply_max_items:
+            if drained > 0 and time.monotonic() >= deadline:
+                break
+            try:
+                publication = self._session_commands.get_nowait()
+            except Empty:
+                break
+            try:
+                if not publication.cancelled.is_set():
+                    status, error = self._apply(publication.command)
+                    publication.acknowledgement = _PendingCommandAck(
+                        command_id=publication.command.command_id,
+                        status=status,
+                        error=error,
+                    )
+            except Exception as exc:
+                publication.error = exc
+                self._fail_command_stream(
+                    f"operator command apply failed: {exc!r}"
+                )
+            finally:
+                publication.completed.set()
+                self._session_commands.task_done()
+            drained += 1
+        return drained
+
+    def _reject_session_commands(self, reason: str) -> None:
+        while True:
+            try:
+                publication = self._session_commands.get_nowait()
+            except Empty:
+                return
+            publication.cancelled.set()
+            publication.error = RuntimeError(reason)
+            publication.completed.set()
+            self._session_commands.task_done()
+
+    def _ensure_executors(
+        self,
+    ) -> tuple[
+        ThreadPoolExecutor,
+        ThreadPoolExecutor,
+        ThreadPoolExecutor,
+    ]:
+        heartbeat_executor = self._heartbeat_executor
+        if heartbeat_executor is None:
+            heartbeat_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"{self._timer_name}.heartbeat",
+            )
+            self._heartbeat_executor = heartbeat_executor
+        command_executor = self._command_executor
+        if command_executor is None:
+            command_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"{self._timer_name}.commands",
+            )
+            self._command_executor = command_executor
+        ack_executor = self._ack_executor
+        if ack_executor is None:
+            ack_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"{self._timer_name}.acks",
+            )
+            self._ack_executor = ack_executor
+        return heartbeat_executor, command_executor, ack_executor
+
+    def _submit_heartbeat(self) -> None:
+        if self._stopped.is_set() or self._heartbeat_future is not None:
+            return
+        heartbeat_executor, _, _ = self._ensure_executors()
+        self._heartbeat_future = heartbeat_executor.submit(
+            self.session_send_heartbeat
+        )
+
+    def _harvest_heartbeat(self) -> None:
+        future = self._heartbeat_future
+        if future is None or not future.done():
+            return
+        self._heartbeat_future = None
+        try:
+            future.result()
+        except Exception as exc:
+            self._mark_dependency_failed(
+                "control_plane",
+                f"control-plane heartbeat failed: {exc!r}",
+            )
+            return
+        self._mark_dependency_ready("control_plane")
+
+    def _submit_commands(self) -> None:
+        if self._stopped.is_set() or self._command_future is not None:
+            return
+        if self.pending_command_count > 0:
+            return
+        _, command_executor, _ = self._ensure_executors()
+        self._command_future = command_executor.submit(
+            self.session_poll_commands,
+            self._max_pending_commands,
+        )
+
+    def _harvest_commands(self) -> None:
+        future = self._command_future
+        if future is None or not future.done():
+            return
+        self._command_future = None
+        try:
+            commands = future.result()
+        except Exception as exc:
+            self._fail_command_stream(
+                f"operator command poll failed: {exc!r}"
+            )
+            return
+        self._pending_commands = tuple(commands)
+        self._pending_command_index = 0
+        self._mark_dependency_ready("command_stream")
+
+    def _drain_pending_commands(self) -> int:
+        applied = 0
+        deadline = (
+            time.monotonic()
+            + self._command_apply_time_budget_seconds
+        )
+        while self._pending_command_index < len(
+            self._pending_commands
+        ):
+            if applied >= self._command_apply_max_items:
+                break
+            if applied > 0 and time.monotonic() >= deadline:
+                break
+            command = self._pending_commands[
+                self._pending_command_index
+            ]
+            self._pending_command_index += 1
+            status, error = self._apply(command)
+            command_id = str(command.command_id)
+            if len(self._pending_acks) >= self._max_pending_acks:
+                self._fail_command_stream(
+                    "operator command ACK backlog capacity exceeded"
+                )
+                break
+            self._pending_acks[command_id] = _PendingCommandAck(
+                command_id=command.command_id,
+                status=status,
+                error=error,
+            )
+            applied += 1
+        if self._pending_command_index >= len(self._pending_commands):
+            self._pending_commands = ()
+            self._pending_command_index = 0
+        return applied
+
+    def _submit_acks(self) -> None:
+        if self._stopped.is_set() or self._ack_future is not None:
+            return
+        if not self._pending_acks:
+            return
+        batch = tuple(self._pending_acks.values())[
+            : self._ack_batch_size
+        ]
+        _, _, ack_executor = self._ensure_executors()
+        self._ack_future = ack_executor.submit(
+            self._run_ack_batch,
+            batch,
+        )
+
+    def _run_ack_batch(
+        self,
+        batch: tuple[_PendingCommandAck, ...],
+    ) -> tuple[str, ...]:
+        acknowledged = []
+        for item in batch:
+            self.session_ack_command(item)
+            acknowledged.append(str(item.command_id))
+        return tuple(acknowledged)
+
+    def _harvest_acks(self) -> None:
+        future = self._ack_future
+        if future is None or not future.done():
+            return
+        self._ack_future = None
+        try:
+            acknowledged = future.result()
+        except Exception as exc:
+            self._fail_command_stream(
+                f"operator command ACK failed: {exc!r}"
+            )
+            return
+        for command_id in acknowledged:
+            self._pending_acks.pop(command_id, None)
+
+    def _evaluate_poll_staleness(self) -> None:
+        now = time.monotonic()
+        heartbeat_reference = self._last_heartbeat_success_at
+        if heartbeat_reference is None:
+            heartbeat_reference = self._started_at
+        if now - heartbeat_reference >= self._stale_after_seconds:
+            self._mark_dependency_failed(
+                "control_plane",
+                "control-plane heartbeat stale",
+            )
+        command_reference = self._last_command_success_at
+        if command_reference is None:
+            command_reference = self._started_at
+        if now - command_reference >= self._stale_after_seconds:
+            self._fail_command_stream("operator command poll stale")
+
+    def _evaluate_session_health(self) -> None:
+        session = self._control_plane_session
+        if session is None:
+            return
+        try:
+            snapshot = session.snapshot()
+        except Exception as exc:
+            reason = f"control-plane session snapshot failed: {exc!r}"
+            self._mark_dependency_failed("control_plane", reason)
+            self._fail_command_stream(reason)
+            return
+        lanes = getattr(snapshot, "lanes", {})
+        heartbeat_lane = lanes.get("heartbeat")
+        heartbeat_failure = str(
+            getattr(heartbeat_lane, "failure", "") or ""
+        ).strip()
+        if heartbeat_failure:
+            self._mark_dependency_failed(
+                "control_plane",
+                heartbeat_failure,
+            )
+        heartbeat_success = getattr(
+            heartbeat_lane,
+            "last_success_at",
+            False,
+        )
+        if not heartbeat_failure and heartbeat_success is not False:
+            self._last_heartbeat_success_at = float(heartbeat_success)
+            self._mark_dependency_ready("control_plane")
+
+        command_lanes = (
+            lanes.get("command_poll"),
+            lanes.get("command_delivery"),
+            lanes.get("command_ack"),
+        )
+        command_failures = [
+            str(getattr(lane, "failure", "") or "").strip()
+            for lane in command_lanes
+            if lane is not None
+        ]
+        command_failures = [
+            failure for failure in command_failures if failure
+        ]
+        if command_failures:
+            self._fail_command_stream(command_failures[0])
+        command_lane = lanes.get("command_poll")
+        command_success = getattr(
+            command_lane,
+            "last_success_at",
+            False,
+        )
+        if (
+            not command_failures
+            and command_success is not False
+            and not self._failure_reason
+        ):
+            self._last_command_success_at = float(command_success)
+            self._mark_dependency_ready("command_stream")
+        self._evaluate_poll_staleness()
+
+    def _ensure_open_orders_provider(self) -> None:
+        if getattr(self, "_oo_provider_registered", False):
+            return
+        register = getattr(
+            self._lifecycle,
+            "set_open_orders_provider",
+            None,
+        )
+        if not callable(register):
+            return
+        register(lambda: open_orders_snapshot(self._cache()))
+        self._oo_provider_registered = True
+
+    def _fail_command_stream(self, reason: str) -> None:
+        self._failure_reason = reason
+        self._mark_dependency_failed("command_stream", reason)
+
+    def _mark_dependency_ready(self, dependency_value: str) -> None:
+        dependency = _dependency_by_value(dependency_value)
+        marker = getattr(self._lifecycle, "mark_dependency_ready", None)
+        if dependency is not None and callable(marker):
+            marker(dependency)
+        self._failed_dependencies.discard(dependency_value)
+
+    def _mark_dependency_failed(
+        self,
+        dependency_value: str,
+        reason: str,
+    ) -> None:
+        if dependency_value in self._failed_dependencies:
+            return
+        dependency = _dependency_by_value(dependency_value)
+        marker = getattr(self._lifecycle, "mark_dependency_failed", None)
+        if dependency is not None and callable(marker):
+            marker(dependency, reason)
+        self._failed_dependencies.add(dependency_value)
 
     def _apply(self, cmd: Any):
         from execution_domain.control_plane import (  # type: ignore
@@ -457,6 +1331,28 @@ def _first_attr(source: Any, names: tuple[str, ...]) -> Any:
         value = getattr(source, name, None)
         if value is not None:
             return value
+    return None
+
+
+def _shutdown_executor(
+    executor: ThreadPoolExecutor | None,
+    future: Future[Any] | None,
+) -> None:
+    if future is not None and not future.done():
+        future.cancel()
+    if executor is None:
+        return
+    executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _dependency_by_value(value: str) -> Any:
+    try:
+        from runtime.lifecycle import DependencyName  # type: ignore
+    except ImportError:
+        return None
+    for dependency in DependencyName:
+        if dependency.value == value:
+            return dependency
     return None
 
 
