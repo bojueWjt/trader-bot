@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,11 @@ BUNDLE_FILES = (
         "/app/projection/actor.py",
     ),
     (
+        "projection_spool.py",
+        "services/nautilus-node/projection/spool.py",
+        "/app/projection/spool.py",
+    ),
+    (
         "event_mapper.py",
         "services/nautilus-node/projection/event_mapper.py",
         "/app/projection/event_mapper.py",
@@ -58,30 +64,153 @@ BUNDLE_FILES = (
         "/app/runtime/lifecycle.py",
     ),
     (
+        "health.py",
+        "services/nautilus-node/runtime/health.py",
+        "/app/runtime/health.py",
+    ),
+    (
+        "bounded_task_worker.py",
+        "services/nautilus-node/runtime/bounded_task_worker.py",
+        "/app/runtime/bounded_task_worker.py",
+    ),
+    (
+        "control_plane_session.py",
+        "services/nautilus-node/runtime/control_plane_session.py",
+        "/app/runtime/control_plane_session.py",
+    ),
+    (
         "binance_adapter_config.py",
         "services/nautilus-node/runtime/binance_adapter_config.py",
         "/app/runtime/binance_adapter_config.py",
     ),
-    ("node.py", "services/nautilus-node/app/node.py", "/app/app/node.py"),
+    (
+        "node_config.py",
+        "services/nautilus-node/config/node_config.py",
+        "/app/config/node_config.py",
+    ),
+    (
+        "node.py",
+        "services/nautilus-node/app/node.py",
+        "/app/app/node.py",
+    ),
+    (
+        "run_node.py",
+        "services/nautilus-node/app/run_node.py",
+        "/app/app/run_node.py",
+    ),
+    (
+        "health_server.py",
+        "services/nautilus-node/app/health_server.py",
+        "/app/app/health_server.py",
+    ),
     (
         "nautilus_actors.py",
         "services/nautilus-node/app/nautilus_actors.py",
         "/app/app/nautilus_actors.py",
     ),
     (
+        "approved_intent_client.py",
+        "services/nautilus-node/data_client/approved_intent_client.py",
+        "/app/data_client/approved_intent_client.py",
+    ),
+    (
+        "atomic_json.py",
+        "services/nautilus-node/data_client/atomic_json.py",
+        "/app/data_client/atomic_json.py",
+    ),
+    (
+        "durable_intent_inbox.py",
+        "services/nautilus-node/data_client/durable_intent_inbox.py",
+        "/app/data_client/durable_intent_inbox.py",
+    ),
+    (
+        "data_client_init.py",
+        "services/nautilus-node/data_client/__init__.py",
+        "/app/data_client/__init__.py",
+    ),
+    (
+        "durable_command_journal.py",
+        "services/nautilus-node/commands/durable_command_journal.py",
+        "/app/commands/durable_command_journal.py",
+    ),
+    (
+        "commands_init.py",
+        "services/nautilus-node/commands/__init__.py",
+        "/app/commands/__init__.py",
+    ),
+    (
         "binance_execution.py",
         "container-patches/binance_execution.py",
-        "/usr/local/lib/python3.12/site-packages/"
-        "nautilus_trader/adapters/binance/execution.py",
+        (
+            "/usr/local/lib/python3.12/site-packages/"
+            "nautilus_trader/adapters/binance/execution.py"
+        ),
     ),
     (
         "binance_futures_execution.py",
         "container-patches/binance_futures_execution.py",
-        "/usr/local/lib/python3.12/site-packages/"
-        "nautilus_trader/adapters/binance/futures/execution.py",
+        (
+            "/usr/local/lib/python3.12/site-packages/"
+            "nautilus_trader/adapters/binance/futures/execution.py"
+        ),
     ),
 )
+
+HOST_FILES = (
+    (
+        "host/read_api.py",
+        "services/control-plane/api/read_api.py",
+        "services/control-plane/api/read_api.py",
+    ),
+    (
+        "host/control_plane.py",
+        "packages/execution-domain/execution_domain/control_plane.py",
+        "packages/execution-domain/execution_domain/control_plane.py",
+    ),
+)
+
+MIGRATION_FILES = (
+    (
+        "migration/migrate.py",
+        "services/control-plane/db/migrate.py",
+        "services/control-plane/db/migrate.py",
+    ),
+    (
+        "migration/0005_order_management.up.sql",
+        "db/migrations/0005_order_management.up.sql",
+        "db/migrations/0005_order_management.up.sql",
+    ),
+    (
+        "migration/0005_order_management.down.sql",
+        "db/migrations/0005_order_management.down.sql",
+        "db/migrations/0005_order_management.down.sql",
+    ),
+    (
+        "migration/0010_evidence_and_poll_indexes.up.sql",
+        "db/migrations/0010_evidence_and_poll_indexes.up.sql",
+        "db/migrations/0010_evidence_and_poll_indexes.up.sql",
+    ),
+    (
+        "migration/0010_evidence_and_poll_indexes.down.sql",
+        "db/migrations/0010_evidence_and_poll_indexes.down.sql",
+        "db/migrations/0010_evidence_and_poll_indexes.down.sql",
+    ),
+)
+
+DEPLOYMENT_FILES = (
+    (
+        "tools/hk-gen-recreate-patched.py",
+        "scripts/hk-gen-recreate-patched.py",
+    ),
+    (
+        "deploy.sh",
+        "scripts/hk-deploy-account-stall-availability.sh",
+    ),
+)
+
 MANIFEST_NAME = "bundle-manifest.json"
+CHECKSUMS_NAME = "SHA256SUMS"
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class BundleError(ValueError):
@@ -96,56 +225,156 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _copy_artifact(
+    repo_root: Path,
+    output_dir: Path,
+    *,
+    bundle_path: str,
+    source_relative: str,
+) -> dict[str, object]:
+    source = (repo_root / source_relative).resolve()
+    try:
+        source.relative_to(repo_root)
+    except ValueError as exc:
+        raise BundleError(
+            f"source escapes repository: {source_relative}"
+        ) from exc
+    if not source.is_file():
+        raise BundleError(f"bundle source is missing: {source_relative}")
+
+    destination = (output_dir / bundle_path).resolve()
+    try:
+        destination.relative_to(output_dir)
+    except ValueError as exc:
+        raise BundleError(
+            f"bundle path escapes output directory: {bundle_path}"
+        ) from exc
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    source_hash = _sha256(source)
+    destination_hash = _sha256(destination)
+    if source_hash != destination_hash:
+        raise BundleError(f"copied bundle hash mismatch: {bundle_path}")
+    return {
+        "bundle_path": bundle_path,
+        "source_path": source_relative,
+        "sha256": destination_hash,
+        "size": destination.stat().st_size,
+    }
+
+
+def _validate_file_contracts() -> None:
+    bundle_paths = [item[0] for item in BUNDLE_FILES]
+    mount_targets = [item[2] for item in BUNDLE_FILES]
+    artifact_paths = bundle_paths.copy()
+    artifact_paths.extend(item[0] for item in HOST_FILES)
+    artifact_paths.extend(item[0] for item in MIGRATION_FILES)
+    artifact_paths.extend(item[0] for item in DEPLOYMENT_FILES)
+    if len(bundle_paths) != len(set(bundle_paths)):
+        raise BundleError("container bundle paths must be unique")
+    if len(mount_targets) != len(set(mount_targets)):
+        raise BundleError("container mount targets must be unique")
+    if len(artifact_paths) != len(set(artifact_paths)):
+        raise BundleError("bundle artifact paths must be unique")
+
+
+def _write_checksums(output_dir: Path, artifact_paths: list[str]) -> None:
+    lines = []
+    for relative in sorted(artifact_paths):
+        path = output_dir / relative
+        lines.append(f"{_sha256(path)}  {relative}")
+    checksums_path = output_dir / CHECKSUMS_NAME
+    checksums_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def build_bundle(
     repo_root: Path,
     output_dir: Path,
     *,
     repo_commit: str,
     repo_dirty: bool,
-) -> dict:
+) -> dict[str, object]:
     repo_root = repo_root.resolve()
     output_dir = output_dir.resolve()
+    if _COMMIT_RE.fullmatch(repo_commit) is None:
+        raise BundleError("repo_commit must be a full lowercase git SHA")
     if output_dir.exists() and any(output_dir.iterdir()):
         raise BundleError(f"output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
+    _validate_file_contracts()
 
     files = []
-    for bundle_name, source_relative, mount_target in BUNDLE_FILES:
-        source = (repo_root / source_relative).resolve()
-        try:
-            source.relative_to(repo_root)
-        except ValueError as exc:
-            raise BundleError(f"source escapes repository: {source_relative}") from exc
-        if not source.is_file():
-            raise BundleError(f"bundle source is missing: {source_relative}")
-        destination = output_dir / bundle_name
-        shutil.copyfile(source, destination)
-        source_hash = _sha256(source)
-        destination_hash = _sha256(destination)
-        if source_hash != destination_hash:
-            raise BundleError(f"copied bundle hash mismatch: {bundle_name}")
-        files.append(
-            {
-                "bundle_path": bundle_name,
-                "source_path": source_relative,
-                "mount_target": mount_target,
-                "sha256": destination_hash,
-                "size": destination.stat().st_size,
-            }
+    for bundle_path, source_relative, mount_target in BUNDLE_FILES:
+        artifact = _copy_artifact(
+            repo_root,
+            output_dir,
+            bundle_path=bundle_path,
+            source_relative=source_relative,
         )
+        artifact["mount_target"] = mount_target
+        files.append(artifact)
 
-    manifest = {
-        "schema_version": "1.0",
+    host_files = []
+    for bundle_path, source_relative, target_relative in HOST_FILES:
+        artifact = _copy_artifact(
+            repo_root,
+            output_dir,
+            bundle_path=bundle_path,
+            source_relative=source_relative,
+        )
+        artifact["target_relative"] = target_relative
+        host_files.append(artifact)
+
+    migration_files = []
+    for bundle_path, source_relative, target_relative in MIGRATION_FILES:
+        artifact = _copy_artifact(
+            repo_root,
+            output_dir,
+            bundle_path=bundle_path,
+            source_relative=source_relative,
+        )
+        artifact["target_relative"] = target_relative
+        migration_files.append(artifact)
+
+    deployment_files = []
+    for bundle_path, source_relative in DEPLOYMENT_FILES:
+        artifact = _copy_artifact(
+            repo_root,
+            output_dir,
+            bundle_path=bundle_path,
+            source_relative=source_relative,
+        )
+        (output_dir / bundle_path).chmod(0o755)
+        deployment_files.append(artifact)
+
+    manifest: dict[str, object] = {
+        "schema_version": "2.0",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "release_id": repo_commit,
         "repo_commit": repo_commit,
         "repo_dirty": repo_dirty,
         "files": files,
+        "host_files": host_files,
+        "migration_files": migration_files,
+        "deployment_files": deployment_files,
     }
     manifest_path = output_dir / MANIFEST_NAME
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    artifact_paths = [
+        str(item["bundle_path"])
+        for group in (
+            files,
+            host_files,
+            migration_files,
+            deployment_files,
+        )
+        for item in group
+    ]
+    artifact_paths.append(MANIFEST_NAME)
+    _write_checksums(output_dir, artifact_paths)
     return manifest
 
 
@@ -164,7 +393,7 @@ def _git_output(repo_root: Path, *args: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Build container-patches from pinned repository source paths."
+        description="Build an account-stall availability hotfix bundle."
     )
     parser.add_argument("output_dir", type=Path)
     parser.add_argument(
