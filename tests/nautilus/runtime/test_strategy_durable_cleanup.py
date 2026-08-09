@@ -190,9 +190,12 @@ def test_stale_version_result_waits_for_latest_persist_before_continuations(
         assert strategy.wait_for_durable_io(timeout_seconds=1.0)
 
         assert strategy.drain_durable_io_mailbox(max_results=1) == 1
-        assert strategy.scheduled == []
+        assert [item[0] for item in strategy.scheduled] == [
+            "intent-a",
+        ]
         assert strategy.drain_durable_io_mailbox() == 1
         assert [item[0] for item in strategy.scheduled] == [
+            "intent-a",
             "intent-latest",
         ]
         assert strategy._protection_stash_persisted_version == 2

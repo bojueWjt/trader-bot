@@ -5,9 +5,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
-from threading import Event, get_ident
+from threading import Event, Thread, get_ident
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
@@ -66,6 +68,49 @@ class _FailingInbox(JsonDurableIntentInbox):
         raise OSError("disk unavailable")
 
 
+class _FailingTerminalInbox(JsonDurableIntentInbox):
+    def complete(
+        self,
+        intent_id: Any,
+        status: str,
+        detail: str,
+    ) -> None:
+        if status == "DISPATCHED":
+            raise OSError("terminal disk unavailable")
+        super().complete(intent_id, status, detail)
+
+
+class _BlockingTerminalInbox(JsonDurableIntentInbox):
+    def __init__(
+        self,
+        path: Path,
+        terminal_started: Event,
+        terminal_release: Event,
+    ) -> None:
+        self._terminal_started = terminal_started
+        self._terminal_release = terminal_release
+        self._block_terminal = False
+        super().__init__(path)
+
+    def complete(
+        self,
+        intent_id: Any,
+        status: str,
+        detail: str,
+    ) -> None:
+        self._block_terminal = status == "CONFIRMED"
+        try:
+            super().complete(intent_id, status, detail)
+        finally:
+            self._block_terminal = False
+
+    def _write_records(self, records: dict[str, Any]) -> None:
+        if self._block_terminal:
+            self._terminal_started.set()
+            self._terminal_release.wait(timeout=5.0)
+        super()._write_records(records)
+
+
 def test_accepted_ack_and_cursor_follow_durable_inbox_receipt(
     tmp_path: Path,
 ) -> None:
@@ -95,15 +140,28 @@ def test_accepted_ack_and_cursor_follow_durable_inbox_receipt(
         now=lambda: NOW,
         trading_state=lambda: TradingState.ACTIVE,
     )
+    delivery_error: list[BaseException] = []
+
+    def deliver() -> None:
+        try:
+            items = client.fetch_once()
+            assert len(items) == 1
+            client.deliver(items[0])
+        except BaseException as exc:
+            delivery_error.append(exc)
+
+    delivery_thread = Thread(target=deliver)
     try:
-        assert client.poll_once() == 1
+        delivery_thread.start()
         assert started.wait(timeout=1.0)
         assert control_plane.intent_acks == []
         assert publisher.published == []
         assert not (tmp_path / "intent-offset.json").exists()
 
         release.set()
-        assert client.wait_for_durable_inbox(timeout_seconds=1.0)
+        delivery_thread.join(timeout=1.0)
+        assert not delivery_thread.is_alive()
+        assert delivery_error == []
         payload = json.loads(inbox_path.read_text(encoding="utf-8"))
         offset = json.loads(
             (tmp_path / "intent-offset.json").read_text(
@@ -122,15 +180,115 @@ def test_accepted_ack_and_cursor_follow_durable_inbox_receipt(
                 None,
             )
         ]
-        assert publisher.published == []
-
-        assert client.drain_intent_delivery_mailbox() == 1
         assert publisher.published == [intent]
     finally:
         release.set()
+        delivery_thread.join(timeout=1.0)
         client.durable_inbox_cleanup_worker().stop(
             timeout_seconds=1.0
         )
+
+
+def test_receipt_state_machine_preserves_dispatched_until_terminal(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    intent = _intent()
+    inbox = JsonDurableIntentInbox(path)
+
+    inbox.receive("cursor-1", intent)
+    assert [(item.status, item.detail) for item in inbox.pending()] == [
+        ("RECEIVED", ""),
+    ]
+
+    inbox.complete(intent.intent_id, "PREPARED", "durable")
+    inbox.complete(intent.intent_id, "DISPATCHED", "submitted")
+    restarted = JsonDurableIntentInbox(path)
+    assert [
+        (item.status, item.detail)
+        for item in restarted.pending()
+    ] == [("DISPATCHED", "submitted")]
+
+    restarted.complete(
+        intent.intent_id,
+        "EXCHANGE_CONFIRMED",
+        "filled",
+    )
+    assert JsonDurableIntentInbox(path).pending() == ()
+
+
+def test_pending_receipts_replay_in_cursor_order(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    first = _intent(intent_id="ffffffff-ffff-4fff-8fff-ffffffffffff")
+    second = _intent(intent_id="00000000-0000-4000-8000-000000000000")
+    inbox = JsonDurableIntentInbox(path)
+
+    inbox.receive("2026-08-09T01:00:00+00:00|first", first)
+    inbox.receive("2026-08-09T02:00:00+00:00|second", second)
+
+    assert [
+        receipt.cursor
+        for receipt in JsonDurableIntentInbox(path).pending()
+    ] == [
+        "2026-08-09T01:00:00+00:00|first",
+        "2026-08-09T02:00:00+00:00|second",
+    ]
+
+
+def test_rejected_receipt_is_terminal_and_removed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    intent = _intent()
+    inbox = JsonDurableIntentInbox(path)
+
+    inbox.receive("cursor-1", intent)
+    inbox.complete(intent.intent_id, "REJECTED", "denied")
+
+    assert JsonDurableIntentInbox(path).pending() == ()
+
+
+def test_terminal_completion_cannot_overwrite_concurrent_new_receipt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    terminal_started = Event()
+    terminal_release = Event()
+    inbox = _BlockingTerminalInbox(
+        path,
+        terminal_started,
+        terminal_release,
+    )
+    first = _intent()
+    second = _intent()
+    inbox.receive("cursor-1", first)
+    terminal_thread = Thread(
+        target=lambda: inbox.complete(
+            first.intent_id,
+            "CONFIRMED",
+            "accepted",
+        )
+    )
+    receive_thread = Thread(
+        target=lambda: inbox.receive("cursor-2", second)
+    )
+
+    terminal_thread.start()
+    assert terminal_started.wait(timeout=1.0)
+    receive_thread.start()
+    assert receive_thread.is_alive()
+    terminal_release.set()
+    terminal_thread.join(timeout=1.0)
+    receive_thread.join(timeout=1.0)
+
+    assert not terminal_thread.is_alive()
+    assert not receive_thread.is_alive()
+    pending = JsonDurableIntentInbox(path).pending()
+    assert [receipt.intent.intent_id for receipt in pending] == [
+        second.intent_id,
+    ]
 
 
 def test_restart_replays_accepted_intent_before_fetching_after_cursor(
@@ -146,7 +304,7 @@ def test_restart_replays_accepted_intent_before_fetching_after_cursor(
     first = _client(tmp_path, control_plane, first_publisher)
     assert first.poll_once() == 1
     assert first.wait_for_durable_inbox(timeout_seconds=1.0)
-    assert first_publisher.published == []
+    assert first_publisher.published == [intent]
     first.durable_inbox_cleanup_worker().stop(
         timeout_seconds=1.0
     )
@@ -154,11 +312,14 @@ def test_restart_replays_accepted_intent_before_fetching_after_cursor(
     replay_publisher = _RecordingPublisher()
     restarted = _client(tmp_path, control_plane, replay_publisher)
     try:
+        replay = restarted.replay_pending()
+        assert len(replay) == 1
+        assert restarted.fetch_once() == ()
+        restarted.deliver(replay[0])
         assert restarted.poll_once() == 0
         assert restarted.wait_for_durable_inbox(
             timeout_seconds=1.0
         )
-        assert restarted.drain_intent_delivery_mailbox() == 1
 
         assert replay_publisher.published == [intent]
         assert control_plane.intent_acks[-1] == (
@@ -226,7 +387,6 @@ def test_ack_timeout_is_degraded_and_does_not_block_delivery(
         assert client.wait_for_durable_inbox(
             timeout_seconds=1.0
         )
-        assert client.drain_intent_delivery_mailbox() == 1
 
         assert publisher.published == [intent]
         assert any(
@@ -267,15 +427,60 @@ def test_durable_inbox_write_failure_is_fatal_on_actor_thread(
     client.set_durable_inbox_fatal_handler(
         lambda _reason: fatal_threads.append(get_ident())
     )
+    with pytest.raises(OSError, match="disk unavailable"):
+        client.poll_once()
+    assert fatal_threads == [actor_thread_id]
+    assert get_ident() == actor_thread_id
+    client.durable_inbox_cleanup_worker().stop(
+        timeout_seconds=1.0
+    )
+
+
+def test_terminal_receipt_worker_failure_reaches_actor_fatal_mailbox(
+    tmp_path: Path,
+) -> None:
+    control_plane = InMemoryControlPlane(now=lambda: NOW)
+    intent = _intent()
+    control_plane.add_intent(
+        "account-a",
+        IntentItem(cursor="cursor-1", intent=intent),
+    )
+    actor_thread_id = get_ident()
+    fatal_threads: list[int] = []
+    client = ApprovedIntentDataClient(
+        account_id="account-a",
+        node_id="node-a",
+        source=control_plane,
+        publisher=_RecordingPublisher(),
+        offset_store=JsonIntentOffsetStore(
+            tmp_path / "intent-offset.json"
+        ),
+        intent_inbox=_FailingTerminalInbox(
+            tmp_path / "intent-inbox.json"
+        ),
+        now=lambda: NOW,
+        trading_state=lambda: TradingState.ACTIVE,
+    )
+    client.set_durable_inbox_fatal_handler(
+        lambda _reason: fatal_threads.append(get_ident())
+    )
     try:
         assert client.poll_once() == 1
+        assert client.record_execution_terminal(
+            intent.intent_id,
+            "DISPATCHED",
+            "",
+        )
         assert client.wait_for_durable_inbox(
             timeout_seconds=1.0
         )
         assert fatal_threads == []
 
-        client.drain_intent_delivery_mailbox()
-
+        with pytest.raises(
+            RuntimeError,
+            match="durable intent inbox failed",
+        ):
+            client.poll_once()
         assert fatal_threads == [actor_thread_id]
     finally:
         client.durable_inbox_cleanup_worker().stop(
@@ -304,8 +509,11 @@ def _client(
     )
 
 
-def _intent() -> ApprovedTradeIntentV1:
-    intent_id = uuid4()
+def _intent(intent_id: Any = False) -> ApprovedTradeIntentV1:
+    if intent_id is False:
+        intent_id = uuid4()
+    else:
+        intent_id = UUID(str(intent_id))
     return ApprovedTradeIntentV1.model_construct(
         schema_version="1.0",
         intent_id=intent_id,

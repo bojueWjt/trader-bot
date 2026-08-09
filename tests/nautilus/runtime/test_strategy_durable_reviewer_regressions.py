@@ -9,13 +9,19 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
 sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
-from strategy.intent_execution_planner import ManagementPlan, OrderPlan
+from strategy.intent_execution_planner import (
+    ManagementPlan,
+    OrderPlan,
+    encode_client_order_id,
+)
 from strategy.intent_execution_strategy import (
     IntentExecutionStrategy,
     IntentExecutionStrategyConfig,
@@ -106,7 +112,7 @@ def test_entry_fsync_continuation_rechecks_live_halt_before_opening(
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
 
 
-def test_stale_continuation_does_not_execute_against_latest_owner_snapshot(
+def test_independent_opening_continuations_each_execute_exact_version(
     tmp_path: Path,
 ) -> None:
     strategy = _ProbeStrategy(tmp_path)
@@ -160,7 +166,11 @@ def test_stale_continuation_does_not_execute_against_latest_owner_snapshot(
                 "plan": latest,
                 "source_intent": False,
                 "protection_preimage": {},
-            }
+            },
+            changed_intent_keys=(
+                str(first.intent_id),
+                str(latest.intent_id),
+            ),
         )
         release.set()
         assert strategy.wait_for_durable_io(timeout_seconds=1.0)
@@ -172,8 +182,11 @@ def test_stale_continuation_does_not_execute_against_latest_owner_snapshot(
         )
 
         assert sorted(persisted) == [str(latest.intent_id)]
-        assert strategy.submitted == ["entry-latest-owner"]
-        assert str(first.intent_id) not in strategy._processed_intent_ids
+        assert strategy.submitted == [
+            "entry-first-owner",
+            "entry-latest-owner",
+        ]
+        assert str(first.intent_id) in strategy._processed_intent_ids
         assert str(latest.intent_id) in strategy._processed_intent_ids
     finally:
         release.set()
@@ -217,11 +230,381 @@ def test_worker_failure_is_applied_by_actor_mailbox_thread(
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
 
 
-def test_large_stash_enqueue_stays_within_actor_callback_budget(
+def test_superseded_version_for_same_logical_intent_runs_latest_only(
     tmp_path: Path,
 ) -> None:
     strategy = _ProbeStrategy(tmp_path)
     strategy._start_durable_io_lane()
+    first_started = Event()
+    first_release = Event()
+    original_write = strategy._write_entry_protection_stash
+    intent_id = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+    first = _order_plan(intent_id, "entry-version-1")
+    latest = _order_plan(intent_id, "entry-version-2")
+    writes = 0
+
+    def blocked_first_write(payload: Any) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            first_started.set()
+            first_release.wait(timeout=5.0)
+        original_write(payload)
+
+    strategy._write_entry_protection_stash = blocked_first_write  # type: ignore[method-assign]
+    try:
+        assert strategy._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "entry_submit",
+                "plan": first,
+                "source_intent": False,
+                "protection_preimage": {},
+            }
+        )
+        assert first_started.wait(timeout=1.0)
+        assert strategy._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "entry_submit",
+                "plan": latest,
+                "source_intent": False,
+                "protection_preimage": {},
+            }
+        )
+        first_release.set()
+        _drain_until_idle(strategy)
+
+        assert strategy.submitted == ["entry-version-2"]
+    finally:
+        first_release.set()
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+
+
+def test_opening_without_protection_waits_for_durable_prepare(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    strategy._start_durable_io_lane()
+    writer_started = Event()
+    writer_release = Event()
+    original_write = strategy._write_entry_protection_stash
+    plan = _authorized_order_plan(
+        UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+        "entry-no-protection",
+    )
+    intent = SimpleNamespace(order_plan={})
+
+    def blocked_write(payload: Any) -> None:
+        writer_started.set()
+        writer_release.wait(timeout=5.0)
+        original_write(payload)
+
+    strategy._write_entry_protection_stash = blocked_write  # type: ignore[method-assign]
+    try:
+        assert strategy._stash_entry_protection(
+            intent,
+            plan,
+            continuation={
+                "kind": "entry_submit",
+                "plan": plan,
+                "source_intent": False,
+                "protection_preimage": {},
+            },
+        )
+        assert writer_started.wait(timeout=1.0)
+        assert strategy.submitted == []
+
+        writer_release.set()
+        _drain_until_idle(strategy)
+        assert strategy.submitted == ["entry-no-protection"]
+    finally:
+        writer_release.set()
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+
+
+def test_zone_partial_submit_stays_dispatched_without_canceling_live_rungs(
+    tmp_path: Path,
+) -> None:
+    intent_id = UUID("e1111111-1111-4111-8111-111111111111")
+    source_intent = SimpleNamespace(
+        intent_id=intent_id,
+        instrument_id="BTCUSDT-PERP.BINANCE",
+    )
+    plans = tuple(
+        OrderPlan(
+            **{
+                **_authorized_order_plan(
+                    intent_id,
+                    encode_client_order_id(
+                        intent_id,
+                        sequence=sequence,
+                    ),
+                ).__dict__,
+                "price": str(26000 - sequence),
+            }
+        )
+        for sequence in range(1, 4)
+    )
+    receipts: list[tuple[Any, str, str]] = []
+
+    class PartialSubmitStrategy(_ProbeStrategy):
+        def __init__(self, state_dir: Path) -> None:
+            self.canceled: list[str] = []
+            super().__init__(state_dir)
+
+        def _submit_order_plan(self, plan: OrderPlan) -> bool:
+            self.submitted.append(plan.client_order_id)
+            return len(self.submitted) != 2
+
+        def _cancel_order_by_client_order_id(
+            self,
+            _instrument_id: str,
+            client_order_id: str,
+        ) -> bool:
+            self.canceled.append(client_order_id)
+            return True
+
+    strategy = PartialSubmitStrategy(tmp_path)
+    strategy.set_intent_receipt_handler(
+        lambda receipt_intent_id, status, detail: (
+            receipts.append(
+                (receipt_intent_id, status, detail)
+            )
+            or True
+        )
+    )
+
+    assert strategy._continue_zone_submit(
+        {
+            "plans": plans,
+            "source_intent": source_intent,
+        }
+    )
+
+    assert strategy.submitted == [
+        plans[0].client_order_id,
+        plans[1].client_order_id,
+    ]
+    assert strategy.canceled == []
+    assert receipts == [(intent_id, "DISPATCHED", "")]
+    assert str(intent_id) in strategy._processed_intent_ids
+    assert str(intent_id) in (
+        strategy._pending_opening_reconciliations
+    )
+    assert any(
+        denial.reason == "zone_partial_submit"
+        for denial in strategy.denials
+    )
+
+
+def test_zone_partial_submit_empty_mirror_does_not_resubmit(
+    tmp_path: Path,
+) -> None:
+    intent_id = UUID("e2222222-2222-4222-8222-222222222222")
+    source_intent = SimpleNamespace(
+        intent_id=intent_id,
+        instrument_id="BTCUSDT-PERP.BINANCE",
+    )
+
+    class Mirror:
+        def orders_for_instrument(
+            self,
+            _instrument_id: str,
+        ) -> tuple[Any, ...]:
+            return ()
+
+    strategy = _ProbeStrategy(tmp_path)
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy._defer_opening_reconciliation(
+        source_intent,
+        allow_resubmit=False,
+    )
+
+    strategy._retry_pending_opening_reconciliations()
+
+    assert strategy.submitted == []
+    assert str(intent_id) in (
+        strategy._pending_opening_reconciliations
+    )
+    assert (
+        strategy._opening_reconciliation_resubmit_allowed[
+            str(intent_id)
+        ]
+        is False
+    )
+
+
+def test_dispatched_replay_reconciles_exchange_before_submit(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent_id = UUID("f1111111-1111-4111-8111-111111111111")
+    client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
+    )
+    receipts: list[tuple[Any, str, str]] = []
+
+    class Mirror:
+        def refresh(self) -> None:
+            return None
+
+        def orders_for_instrument(
+            self,
+            _instrument_id: str,
+        ) -> tuple[Any, ...]:
+            return (
+                SimpleNamespace(
+                    client_order_id=client_order_id,
+                    instrument_id="BTCUSDT-PERP.BINANCE",
+                ),
+            )
+
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_handler(
+        lambda replay_intent_id, status, detail: (
+            receipts.append(
+                (replay_intent_id, status, detail)
+            )
+            or True
+        )
+    )
+    replayed_intent = SimpleNamespace(
+        intent_id=intent_id,
+        instrument_id="BTCUSDT-PERP.BINANCE",
+        action="open_position",
+        order_plan={
+            "type": "market",
+            "side": "buy",
+            "quantity": "0.1",
+        },
+    )
+
+    strategy._handle_intent(replayed_intent)
+
+    assert strategy.submitted == []
+    assert receipts == [
+        (
+            intent_id,
+            "CONFIRMED",
+            f"reconciled:{client_order_id}",
+        )
+    ]
+    assert str(intent_id) in strategy._processed_intent_ids
+
+
+def test_dispatched_replay_refresh_timeout_retries_without_rejection(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent_id = UUID("f3333333-3333-4333-8333-333333333333")
+    client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
+    )
+    receipts: list[tuple[Any, str, str]] = []
+    refresh_calls = 0
+
+    class Mirror:
+        def refresh(self) -> None:
+            nonlocal refresh_calls
+            refresh_calls += 1
+            if refresh_calls == 1:
+                raise TimeoutError("temporary mirror timeout")
+
+        def orders_for_instrument(
+            self,
+            _instrument_id: str,
+        ) -> tuple[Any, ...]:
+            return (
+                SimpleNamespace(
+                    client_order_id=client_order_id,
+                    instrument_id="BTCUSDT-PERP.BINANCE",
+                ),
+            )
+
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_handler(
+        lambda replay_intent_id, status, detail: (
+            receipts.append(
+                (replay_intent_id, status, detail)
+            )
+            or True
+        )
+    )
+    replayed_intent = SimpleNamespace(
+        intent_id=intent_id,
+        instrument_id="BTCUSDT-PERP.BINANCE",
+        action="open_position",
+        order_plan={
+            "type": "market",
+            "side": "buy",
+            "quantity": "0.1",
+        },
+    )
+
+    strategy._handle_intent(replayed_intent)
+
+    assert strategy.submitted == []
+    assert receipts == []
+    assert str(intent_id) in (
+        strategy._pending_opening_reconciliations
+    )
+
+    strategy._on_exchange_state_timer()
+
+    assert strategy.submitted == []
+    assert receipts == [
+        (
+            intent_id,
+            "CONFIRMED",
+            f"reconciled:{client_order_id}",
+        )
+    ]
+    assert strategy._pending_opening_reconciliations == {}
+    assert not any(
+        status == "REJECTED"
+        for _receipt_id, status, _detail in receipts
+    )
+
+
+def test_order_accepted_confirms_durable_intent_receipt(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent_id = UUID("f2222222-2222-4222-8222-222222222222")
+    receipts: list[tuple[Any, str, str]] = []
+    strategy.set_intent_receipt_handler(
+        lambda confirmed_intent_id, status, detail: (
+            receipts.append(
+                (confirmed_intent_id, status, detail)
+            )
+            or True
+        )
+    )
+    client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
+    )
+
+    strategy.on_order_accepted(
+        SimpleNamespace(client_order_id=client_order_id)
+    )
+
+    assert receipts == [
+        (
+            intent_id,
+            "CONFIRMED",
+            f"order_accepted:{client_order_id}",
+        )
+    ]
+
+
+@pytest.mark.parametrize("stash_size", [1024, 2048])
+def test_large_stash_enqueue_stays_within_actor_callback_budget(
+    tmp_path: Path,
+    stash_size: int,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
     started = Event()
     release = Event()
 
@@ -230,10 +613,17 @@ def test_large_stash_enqueue_stays_within_actor_callback_budget(
         release.wait(timeout=5.0)
 
     strategy._write_entry_protection_stash = blocked_write  # type: ignore[method-assign]
-    _seed_large_stash(strategy)
+    _seed_large_stash(strategy, stash_size)
+    strategy._start_durable_io_lane()
+    changed_intent_key = f"{stash_size - 1:032x}"
+    strategy._entry_protection_stash[
+        changed_intent_key
+    ]["protected_quantity"] = "0.2"
     try:
         started_at = time.perf_counter()
-        accepted = strategy._queue_entry_protection_stash_persist()
+        accepted = strategy._queue_entry_protection_stash_persist(
+            changed_intent_keys=changed_intent_key
+        )
         elapsed_ms = (time.perf_counter() - started_at) * 1000
 
         assert accepted is True
@@ -505,7 +895,28 @@ def _order_plan(intent_id: UUID, client_order_id: str) -> OrderPlan:
     )
 
 
-def _seed_large_stash(strategy: IntentExecutionStrategy) -> None:
+def _authorized_order_plan(
+    intent_id: UUID,
+    client_order_id: str,
+) -> OrderPlan:
+    plan = _order_plan(intent_id, client_order_id)
+    return OrderPlan(
+        **{
+            **plan.__dict__,
+            "tags": (
+                f"intent_id={intent_id}",
+                "authorized_by_type=user",
+                "authorized_by_id=risk-admin",
+                "source_message_id=message-1",
+            ),
+        }
+    )
+
+
+def _seed_large_stash(
+    strategy: IntentExecutionStrategy,
+    stash_size: int,
+) -> None:
     terminal_event = {
         "event_type": "OrderRejected",
         "reason": "would immediately trigger " + ("x" * 96),
@@ -517,7 +928,7 @@ def _seed_large_stash(strategy: IntentExecutionStrategy) -> None:
         "protection_revision": 8,
         "observed_at": "2026-08-09T12:00:00+00:00",
     }
-    for index in range(256):
+    for index in range(stash_size):
         intent_id = f"{index:032x}"
         strategy._entry_protection_stash[intent_id] = {
             "stop_loss": "25000",

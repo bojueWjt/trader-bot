@@ -719,10 +719,34 @@ class NodeControlPlaneSession:
         replay = self._intent_replay
         if replay is None or self._intent_replayed:
             return
+        replay_items: list[Any] = []
+
+        def collect_replay_items() -> None:
+            result = replay()
+            if result is None or isinstance(result, bool):
+                return
+            delivery = self._lanes["intent_delivery"]
+            items, overflowed = _take_bounded(
+                result,
+                delivery.capacity,
+            )
+            replay_items.extend(items)
+            if overflowed:
+                self._mark_lane_capacity_failure(delivery)
+                raise RuntimeError(
+                    "intent delivery queue capacity exceeded"
+                )
+
         self._require_startup_action(
             self._lanes["intent_fetch"],
-            replay,
+            collect_replay_items,
         )
+        delivery = self._lanes["intent_delivery"]
+        for item in replay_items:
+            if not self._submit_to_lane(delivery, item):
+                raise RuntimeError(
+                    "intent delivery queue capacity exceeded"
+                )
         self._intent_replayed = True
 
     def _require_startup_action(
@@ -880,7 +904,9 @@ class NodeControlPlaneSession:
                     break
                 delivered = self._execute_with_retry(
                     lane,
-                    lambda: action(item),
+                    lambda delivery_item=item: action(
+                        delivery_item
+                    ),
                     drain_on_stop=True,
                 )
                 if delivered:

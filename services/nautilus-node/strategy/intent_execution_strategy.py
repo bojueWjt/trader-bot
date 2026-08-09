@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -51,9 +51,17 @@ from strategy.intent_execution_planner import (
 
 
 @dataclass(frozen=True)
+class _ProtectionStashDelta:
+    intent_key: str
+    entry: Mapping[str, Any] | bool = False
+    deleted: bool = False
+
+
+@dataclass(frozen=True)
 class _ProtectionStashTask:
     version: int
-    payload: bytes
+    deltas: tuple[_ProtectionStashDelta, ...]
+    continuation_key: str
     continuation: Mapping[str, Any] | bool = False
 
 
@@ -159,6 +167,16 @@ class IntentExecutionStrategy(Strategy):
         self._reported_protection_denials: set[tuple[str, str]] = set()
         self._exchange_cancel_adapter: Any = False
         self._exchange_state_mirror: Any = False
+        self._pending_opening_reconciliations: dict[
+            str,
+            Any,
+        ] = {}
+        self._opening_reconciliation_resubmit_allowed: dict[
+            str,
+            bool,
+        ] = {}
+        self._opening_reconciliation_attempt = 0
+        self._opening_reconciliation_retry_scheduled = False
         self._strategy_stopping = False
         self._durable_io_active = False
         self._durable_io_actor_thread_id: int | bool = False
@@ -173,6 +191,11 @@ class IntentExecutionStrategy(Strategy):
         ] = None
         self._protection_stash_version = 0
         self._protection_stash_persisted_version = 0
+        self._protection_continuation_versions: dict[str, int] = {}
+        self._durable_stash_canonical: dict[
+            str,
+            dict[str, Any],
+        ] = {}
         self._durable_io_mailbox: Queue[Any] = Queue(
             maxsize=self._DURABLE_IO_QUEUE_CAPACITY
         )
@@ -244,6 +267,9 @@ class IntentExecutionStrategy(Strategy):
 
     def on_start(self) -> None:
         self._strategy_stopping = False
+        self._entry_protection_stash = (
+            self._load_entry_protection_stash()
+        )
         self._start_durable_io_lane()
         self._register_durable_io_mailbox_timer()
         # C-08 host-verify fix: subscribe_data(data_type) is rejected for clientless
@@ -260,7 +286,6 @@ class IntentExecutionStrategy(Strategy):
             topic=f"node.commands.{self.config.account_id}",
             handler=self._on_node_command,
         )
-        self._entry_protection_stash = self._load_entry_protection_stash()
         self._schedule_startup_protection_syncs()
         self._queue_exchange_refresh(
             success_continuation={
@@ -271,6 +296,13 @@ class IntentExecutionStrategy(Strategy):
 
     def _start_durable_io_lane(self) -> None:
         self._durable_io_actor_thread_id = get_ident()
+        self._durable_stash_canonical = {
+            str(intent_key): self._jsonable_protection_stash_value(
+                value
+            )
+            for intent_key, value in self._entry_protection_stash.items()
+            if isinstance(value, dict)
+        }
         self._durable_io_active = True
         self._durable_io_worker.start()
         self._external_io_worker.start()
@@ -325,8 +357,11 @@ class IntentExecutionStrategy(Strategy):
     def _on_exchange_state_timer(self, *_args: Any, **_kwargs: Any) -> None:
         self._queue_exchange_refresh(
             success_continuation={
-                "kind": "retry_pending_take_profit_disables",
-            }
+                "kind": "retry_exchange_state_dependents",
+            },
+            failure_continuation={
+                "kind": "pending_opening_refresh_failed",
+            },
         )
 
     def _refresh_exchange_state(self) -> bool:
@@ -538,6 +573,7 @@ class IntentExecutionStrategy(Strategy):
         self,
         *,
         continuation: Mapping[str, Any] | bool = False,
+        changed_intent_keys: str | Iterable[str] | bool = False,
     ) -> bool:
         if not self._durable_io_active:
             if not self._persist_entry_protection_stash():
@@ -552,19 +588,36 @@ class IntentExecutionStrategy(Strategy):
         ):
             return False
 
-        payload = self._entry_protection_stash_snapshot()
         self._protection_stash_version += 1
         version = self._protection_stash_version
         task_continuation: Mapping[str, Any] | bool = False
         if isinstance(continuation, Mapping):
-            task_continuation = copy.deepcopy(dict(continuation))
+            task_continuation = MappingProxyType(
+                dict(continuation)
+            )
+        changed_keys = self._protection_changed_intent_keys(
+            changed_intent_keys,
+            task_continuation,
+        )
+        deltas = tuple(
+            self._protection_stash_delta(intent_key)
+            for intent_key in changed_keys
+        )
+        continuation_key = self._protection_continuation_key(
+            task_continuation,
+            version,
+        )
+        self._protection_continuation_versions[
+            continuation_key
+        ] = version
 
         if not self._durable_io_worker.snapshot().running:
             self._durable_io_worker.start()
         return self._durable_io_worker.submit(
             _ProtectionStashTask(
                 version=version,
-                payload=payload,
+                deltas=deltas,
+                continuation_key=continuation_key,
                 continuation=task_continuation,
             )
         )
@@ -577,10 +630,26 @@ class IntentExecutionStrategy(Strategy):
             raise ValueError(
                 "protection stash task requires a positive version"
             )
-        payload = self._decode_entry_protection_stash_snapshot(
-            task.payload
+        for delta in task.deltas:
+            if delta.deleted:
+                self._durable_stash_canonical.pop(
+                    delta.intent_key,
+                    None,
+                )
+                continue
+            entry = delta.entry
+            if not isinstance(entry, Mapping):
+                raise ValueError(
+                    "protection stash delta requires an entry"
+                )
+            self._durable_stash_canonical[
+                delta.intent_key
+            ] = self._jsonable_protection_stash_value(
+                dict(entry)
+            )
+        self._write_entry_protection_stash(
+            self._durable_stash_canonical
         )
-        self._write_entry_protection_stash(payload)
         result = _ProtectionStashResult(task=task)
         try:
             self._durable_io_mailbox.put_nowait(result)
@@ -588,6 +657,84 @@ class IntentExecutionStrategy(Strategy):
             self._request_durable_io_halt(
                 "strategy durable I/O result mailbox capacity exceeded"
             )
+
+    def _protection_changed_intent_keys(
+        self,
+        changed_intent_keys: str | Iterable[str] | bool,
+        continuation: Mapping[str, Any] | bool,
+    ) -> tuple[str, ...]:
+        values: Iterable[Any] = ()
+        if isinstance(changed_intent_keys, str):
+            values = (changed_intent_keys,)
+        elif changed_intent_keys is not False:
+            values = changed_intent_keys
+        keys = tuple(
+            dict.fromkeys(
+                str(value)
+                for value in values
+                if str(value)
+            )
+        )
+        if keys:
+            return keys
+        if isinstance(continuation, Mapping):
+            explicit = continuation.get(
+                "protection_changed_keys"
+            )
+            if isinstance(explicit, (list, tuple, set)):
+                return tuple(
+                    dict.fromkeys(
+                        str(value)
+                        for value in explicit
+                        if str(value)
+                    )
+                )
+            intent_key = str(
+                continuation.get("intent_key") or ""
+            )
+            if intent_key:
+                return (intent_key,)
+            plan = continuation.get("plan")
+            intent_id = str(
+                getattr(plan, "intent_id", "") or ""
+            )
+            if intent_id:
+                return (intent_id,)
+        if len(self._entry_protection_stash) == 1:
+            return (next(iter(self._entry_protection_stash)),)
+        return ()
+
+    def _protection_stash_delta(
+        self,
+        intent_key: str,
+    ) -> _ProtectionStashDelta:
+        entry = self._entry_protection_stash.get(intent_key)
+        if not isinstance(entry, dict):
+            return _ProtectionStashDelta(
+                intent_key=intent_key,
+                deleted=True,
+            )
+        return _ProtectionStashDelta(
+            intent_key=intent_key,
+            entry=copy.deepcopy(entry),
+        )
+
+    def _restore_protection_preimage(
+        self,
+        preimage: Mapping[str, Any],
+    ) -> None:
+        for intent_key, entry in preimage.items():
+            key = str(intent_key)
+            if entry is False:
+                self._entry_protection_stash.pop(
+                    key,
+                    None,
+                )
+                continue
+            if isinstance(entry, dict):
+                self._entry_protection_stash[
+                    key
+                ] = copy.deepcopy(entry)
 
     def _process_external_io_task(
         self,
@@ -726,11 +873,49 @@ class IntentExecutionStrategy(Strategy):
             self._protection_stash_persisted_version,
             version,
         )
-        if version != self._protection_stash_version:
+        latest_version = self._protection_continuation_versions.get(
+            result.task.continuation_key
+        )
+        if version != latest_version:
             return
+        self._protection_continuation_versions.pop(
+            result.task.continuation_key,
+            None,
+        )
         continuation = result.task.continuation
         if isinstance(continuation, Mapping):
             self._run_protection_continuation(continuation)
+
+    def _protection_continuation_key(
+        self,
+        continuation: Mapping[str, Any] | bool,
+        version: int,
+    ) -> str:
+        if not isinstance(continuation, Mapping):
+            return f"persist:{version}"
+        explicit_key = str(
+            continuation.get("logical_intent_key") or ""
+        ).strip()
+        if explicit_key:
+            return explicit_key
+        for field_name in ("plan", "source_intent", "intent"):
+            value = continuation.get(field_name)
+            intent_id = str(
+                getattr(value, "intent_id", "") or ""
+            ).strip()
+            if intent_id:
+                return f"intent:{intent_id}"
+        intent_key = str(
+            continuation.get("intent_key") or ""
+        ).strip()
+        if intent_key:
+            return f"intent:{intent_key}"
+        event_key = str(
+            continuation.get("event_key") or ""
+        ).strip()
+        if event_key:
+            return f"event:{event_key}"
+        return f"persist:{version}"
 
     def _discard_durable_io_result(
         self,
@@ -970,6 +1155,16 @@ class IntentExecutionStrategy(Strategy):
         if kind == "retry_pending_take_profit_disables":
             self._retry_pending_take_profit_disables()
             return True
+        if kind == "retry_exchange_state_dependents":
+            self._retry_pending_opening_reconciliations()
+            self._retry_pending_take_profit_disables()
+            return True
+        if kind == "retry_pending_opening_reconciliations":
+            self._retry_pending_opening_reconciliations()
+            return True
+        if kind == "pending_opening_refresh_failed":
+            self._schedule_opening_reconciliation_retry()
+            return False
         if kind == "handle_intent_after_exchange_refresh":
             self._handle_intent(
                 continuation.get("intent"),
@@ -978,11 +1173,12 @@ class IntentExecutionStrategy(Strategy):
             return True
         if kind == "intent_exchange_refresh_failed":
             intent = continuation.get("intent")
-            denial = self.denials[-1] if self.denials else OrderDenied(
-                "exchange_state_refresh_failed",
-                str(getattr(intent, "intent_id", "")),
+            raw_action = getattr(intent, "action", "")
+            action = str(
+                getattr(raw_action, "value", raw_action)
             )
-            self._report_denial(intent, denial)
+            if action in {"open_position", "add_position"}:
+                self._defer_opening_reconciliation(intent)
             return False
         self._halt_durable_io(
             f"unsupported protection continuation: {kind}"
@@ -1030,13 +1226,17 @@ class IntentExecutionStrategy(Strategy):
             )
             preimage = continuation.get("protection_preimage")
             if isinstance(preimage, dict):
-                self._entry_protection_stash = copy.deepcopy(preimage)
+                self._restore_protection_preimage(preimage)
             queued = self._queue_entry_protection_stash_persist(
                 continuation={
                     "kind": "entry_submit_failed",
                     "plan": plan,
                     "source_intent": source_intent,
-                }
+                },
+                changed_intent_keys=continuation.get(
+                    "protection_changed_keys",
+                    (str(plan.intent_id),),
+                ),
             )
             if queued:
                 return True
@@ -1053,13 +1253,17 @@ class IntentExecutionStrategy(Strategy):
             )
         preimage = continuation.get("protection_preimage")
         if isinstance(preimage, dict):
-            self._entry_protection_stash = copy.deepcopy(preimage)
+            self._restore_protection_preimage(preimage)
         queued = self._queue_entry_protection_stash_persist(
             continuation={
                 "kind": "entry_submit_failed",
                 "plan": plan,
                 "source_intent": source_intent,
-            }
+            },
+            changed_intent_keys=continuation.get(
+                "protection_changed_keys",
+                (str(plan.intent_id),),
+            ),
         )
         if queued:
             return True
@@ -1102,15 +1306,17 @@ class IntentExecutionStrategy(Strategy):
                         "protection_preimage",
                         False,
                     ),
-                }
+                    "protection_changed_keys": (
+                        intent_key,
+                    ),
+                },
+                changed_intent_keys=intent_key,
             )
             if queued:
                 return True
             preimage = continuation.get("protection_preimage")
             if isinstance(preimage, dict):
-                self._entry_protection_stash = copy.deepcopy(
-                    preimage
-                )
+                self._restore_protection_preimage(preimage)
             return self._complete_plan_submission(
                 first_plan,
                 continuation.get("source_intent", False),
@@ -1149,7 +1355,7 @@ class IntentExecutionStrategy(Strategy):
             )
             preimage = continuation.get("protection_preimage")
             if isinstance(preimage, dict):
-                self._entry_protection_stash = copy.deepcopy(preimage)
+                self._restore_protection_preimage(preimage)
             queued = self._queue_entry_protection_stash_persist(
                 continuation={
                     "kind": "entry_submit_failed",
@@ -1158,7 +1364,11 @@ class IntentExecutionStrategy(Strategy):
                         "source_intent",
                         False,
                     ),
-                }
+                },
+                changed_intent_keys=continuation.get(
+                    "protection_changed_keys",
+                    (str(first_plan.intent_id),),
+                ),
             )
             if queued:
                 return True
@@ -1175,14 +1385,32 @@ class IntentExecutionStrategy(Strategy):
                 )
                 return False
             if not self._submit_order_plan(plan):
-                for submitted_plan in submitted_plans:
-                    self._cancel_order_by_client_order_id(
-                        submitted_plan.instrument_id,
-                        submitted_plan.client_order_id,
+                source_intent = continuation.get(
+                    "source_intent",
+                    False,
+                )
+                if submitted_plans:
+                    self._record_denial(
+                        OrderDenied(
+                            "zone_partial_submit",
+                            (
+                                f"submitted={len(submitted_plans)} "
+                                f"failed={plan.client_order_id}"
+                            ),
+                        )
+                    )
+                    self._defer_opening_reconciliation(
+                        source_intent,
+                        allow_resubmit=False,
+                    )
+                    return self._complete_plan_submission(
+                        first_plan,
+                        source_intent,
+                        True,
                     )
                 return self._complete_plan_submission(
                     first_plan,
-                    continuation.get("source_intent", False),
+                    source_intent,
                     False,
                 )
             submitted_plans.append(plan)
@@ -1386,6 +1614,8 @@ class IntentExecutionStrategy(Strategy):
             and not raw_order_plan.get("take_profits")
         )
         needs_exchange_state = action in {
+            "open_position",
+            "add_position",
             "cancel",
             "cancel_order",
             "move_stop_loss",
@@ -1413,8 +1643,18 @@ class IntentExecutionStrategy(Strategy):
                     str(intent.intent_id),
                 )
                 self._record_denial(denial)
-                self._report_denial(intent, denial)
             return
+        if action in {"open_position", "add_position"}:
+            reconciled = self._reconcile_existing_opening(
+                intent,
+                exchange_state_ready=exchange_state_ready,
+            )
+            if reconciled is None:
+                self._defer_opening_reconciliation(intent)
+                return
+            self._clear_opening_reconciliation(intent)
+            if reconciled:
+                return
         context = PlannerContext(
             account_id=self.config.account_id,
             trading_state=self._trading_state(),
@@ -1453,9 +1693,6 @@ class IntentExecutionStrategy(Strategy):
             return
 
         if action in ("open_position", "add_position"):
-            protection_preimage = copy.deepcopy(
-                self._entry_protection_stash
-            )
             queued = self._stash_entry_protection(
                 intent,
                 result,
@@ -1463,11 +1700,9 @@ class IntentExecutionStrategy(Strategy):
                     "kind": "entry_submit",
                     "plan": result,
                     "source_intent": intent,
-                    "protection_preimage": protection_preimage,
                 },
             )
             if not queued:
-                self._entry_protection_stash = protection_preimage
                 denial = self.denials[-1] if self.denials else OrderDenied(
                     "order_submit_failed",
                     str(result.intent_id),
@@ -1500,7 +1735,8 @@ class IntentExecutionStrategy(Strategy):
         source_message_id = authorization["source_message_id"]
         parent_intent_id = authorization["parent_intent_id"]
         same_source_owner: Optional[tuple[str, dict[str, Any]]] = None
-        owner_changed = False
+        changed_intent_keys: set[str] = set()
+        protection_preimage: dict[str, Any] = {}
         for key, other in tuple(self._entry_protection_stash.items()):
             if str(other.get("instrument_id")) != plan.instrument_id:
                 continue
@@ -1511,27 +1747,58 @@ class IntentExecutionStrategy(Strategy):
             if other_source_message_id == source_message_id:
                 same_source_owner = (key, other)
                 continue
-            owner_changed = True
+            protection_preimage[str(key)] = copy.deepcopy(
+                other
+            )
+            changed_intent_keys.add(str(key))
             self._entry_protection_stash.pop(key, None)
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + key)
 
         if stop_loss is None and not take_profits:
-            if owner_changed:
-                return self._queue_entry_protection_stash_persist(
-                    continuation=continuation
-                )
+            prepared_continuation = continuation
             if isinstance(continuation, Mapping):
-                self._run_protection_continuation(continuation)
-            return True
+                prepared_continuation = {
+                    **dict(continuation),
+                    "protection_changed_keys": tuple(
+                        sorted(changed_intent_keys)
+                    ),
+                    "protection_preimage": protection_preimage,
+                }
+            queued = self._queue_entry_protection_stash_persist(
+                continuation=prepared_continuation,
+                changed_intent_keys=tuple(
+                    sorted(changed_intent_keys)
+                ),
+            )
+            if not queued:
+                self._restore_protection_preimage(
+                    protection_preimage
+                )
+            return queued
 
         if same_source_owner is not None:
             key, _other = same_source_owner
             if key != str(plan.intent_id):
+                protection_preimage[str(key)] = copy.deepcopy(
+                    self._entry_protection_stash.get(key)
+                )
+                changed_intent_keys.add(str(key))
                 self._entry_protection_stash.pop(key, None)
                 self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + key)
         # protection_sequence_start=11 for all paths: revisioned protection ids live
         # in the 11..99 space (see _protection_order_plans), entries stay in 1..9.
-        self._entry_protection_stash[str(plan.intent_id)] = {
+        plan_intent_key = str(plan.intent_id)
+        existing_plan_stash = self._entry_protection_stash.get(
+            plan_intent_key
+        )
+        if isinstance(existing_plan_stash, dict):
+            protection_preimage[
+                plan_intent_key
+            ] = copy.deepcopy(existing_plan_stash)
+        else:
+            protection_preimage[plan_intent_key] = False
+        changed_intent_keys.add(plan_intent_key)
+        self._entry_protection_stash[plan_intent_key] = {
             "stop_loss": stop_loss,
             "take_profits": tuple(take_profits or ()),
             "instrument_id": plan.instrument_id,
@@ -1547,9 +1814,26 @@ class IntentExecutionStrategy(Strategy):
             "tp_consumed": {},
             "pending_cancel_ids": (),
         }
-        return self._queue_entry_protection_stash_persist(
-            continuation=continuation
+        prepared_continuation = continuation
+        if isinstance(continuation, Mapping):
+            prepared_continuation = {
+                **dict(continuation),
+                "protection_changed_keys": tuple(
+                    sorted(changed_intent_keys)
+                ),
+                "protection_preimage": protection_preimage,
+            }
+        queued = self._queue_entry_protection_stash_persist(
+            continuation=prepared_continuation,
+            changed_intent_keys=tuple(
+                sorted(changed_intent_keys)
+            ),
         )
+        if not queued:
+            self._restore_protection_preimage(
+                protection_preimage
+            )
+        return queued
 
     def _handle_zone_ladder(
         self,
@@ -1564,7 +1848,6 @@ class IntentExecutionStrategy(Strategy):
             self._report_denial(intent, plans)
             return
 
-        protection_preimage = copy.deepcopy(self._entry_protection_stash)
         if not self._stash_entry_protection(
             intent,
             plans[0],
@@ -1572,10 +1855,8 @@ class IntentExecutionStrategy(Strategy):
                 "kind": "zone_stash_ready",
                 "plans": plans,
                 "source_intent": intent,
-                "protection_preimage": protection_preimage,
             },
         ):
-            self._entry_protection_stash = protection_preimage
             self._report_denial(intent, self.denials[-1])
 
     def _zone_ladder_order_plans(
@@ -1699,6 +1980,9 @@ class IntentExecutionStrategy(Strategy):
     )
     _PROTECTION_TIMER_PREFIX = "protsync-"
 
+    def on_order_accepted(self, event: Any) -> None:
+        self._confirm_entry_order_event(event)
+
     def on_order_filled(self, event: Any) -> None:
         client_order_id = _event_client_order_id(event)
         if client_order_id is None:
@@ -1725,13 +2009,20 @@ class IntentExecutionStrategy(Strategy):
                     "intent_key": intent_key,
                 }
             self._queue_entry_protection_stash_persist(
-                continuation=continuation
+                continuation=continuation,
+                changed_intent_keys=intent_key,
             )
             return
         try:
             trace = decode_client_order_id(client_order_id)
         except ValueError:
             return
+        if trace.sequence <= 9:
+            self._record_intent_id_terminal(
+                trace.intent_id,
+                "CONFIRMED",
+                f"order_filled:{client_order_id}",
+            )
         stash = self._entry_protection_stash.get(str(trace.intent_id))
         if stash is not None:
             entry_sequence_max = int(stash.get("entry_sequence_max", 1))
@@ -1747,6 +2038,228 @@ class IntentExecutionStrategy(Strategy):
                 for key, other in tuple(self._entry_protection_stash.items()):
                     if str(other.get("instrument_id")) == instrument_id:
                         self._schedule_protection_sync(key)
+
+    def _confirm_entry_order_event(self, event: Any) -> None:
+        client_order_id = _event_client_order_id(event)
+        if client_order_id is None:
+            return
+        try:
+            trace = decode_client_order_id(client_order_id)
+        except ValueError:
+            return
+        if trace.sequence > 9:
+            return
+        self._clear_opening_reconciliation_id(
+            str(trace.intent_id)
+        )
+        self._record_intent_id_terminal(
+            trace.intent_id,
+            "CONFIRMED",
+            f"order_accepted:{client_order_id}",
+        )
+
+    def _reconcile_existing_opening(
+        self,
+        intent: Any,
+        *,
+        exchange_state_ready: bool,
+    ) -> bool | None:
+        if not exchange_state_ready:
+            return None
+        intent_id = str(getattr(intent, "intent_id", "") or "")
+        instrument_id = str(
+            getattr(intent, "instrument_id", "") or ""
+        )
+        orders = list(self._cache_orders_all(instrument_id))
+        mirror = self._exchange_state_mirror
+        orders_for_instrument = getattr(
+            mirror,
+            "orders_for_instrument",
+            None,
+        ) if mirror else None
+        if not callable(orders_for_instrument):
+            self._record_denial(
+                OrderDenied(
+                    "exchange_state_refresh_failed",
+                    "exchange order mirror is unavailable",
+                )
+            )
+            return None
+        try:
+            orders.extend(
+                tuple(orders_for_instrument(instrument_id))
+            )
+        except Exception as exc:
+            self._record_denial(
+                OrderDenied(
+                    "exchange_state_refresh_failed",
+                    repr(exc),
+                )
+            )
+            return None
+        for order in orders:
+            client_order_id = str(
+                getattr(order, "client_order_id", "") or ""
+            )
+            try:
+                trace = decode_client_order_id(
+                    client_order_id
+                )
+            except ValueError:
+                continue
+            if (
+                str(trace.intent_id) != intent_id
+                or trace.sequence > 9
+            ):
+                continue
+            self._processed_intent_ids.add(intent_id)
+            self._record_intent_id_terminal(
+                trace.intent_id,
+                "CONFIRMED",
+                f"reconciled:{client_order_id}",
+            )
+            return True
+        return False
+
+    def _defer_opening_reconciliation(
+        self,
+        intent: Any,
+        *,
+        allow_resubmit: bool = True,
+    ) -> None:
+        intent_id = str(
+            getattr(intent, "intent_id", "") or ""
+        )
+        if not intent_id:
+            return
+        self._pending_opening_reconciliations[
+            intent_id
+        ] = intent
+        current = self._opening_reconciliation_resubmit_allowed.get(
+            intent_id,
+            True,
+        )
+        self._opening_reconciliation_resubmit_allowed[
+            intent_id
+        ] = current and allow_resubmit
+        self._opening_reconciliation_attempt += 1
+        self._schedule_opening_reconciliation_retry()
+
+    def _clear_opening_reconciliation(
+        self,
+        intent: Any,
+    ) -> None:
+        intent_id = str(
+            getattr(intent, "intent_id", "") or ""
+        )
+        self._clear_opening_reconciliation_id(intent_id)
+
+    def _clear_opening_reconciliation_id(
+        self,
+        intent_id: str,
+    ) -> None:
+        self._pending_opening_reconciliations.pop(
+            intent_id,
+            None,
+        )
+        self._opening_reconciliation_resubmit_allowed.pop(
+            intent_id,
+            None,
+        )
+        if self._pending_opening_reconciliations:
+            return
+        self._opening_reconciliation_attempt = 0
+        self._opening_reconciliation_retry_scheduled = False
+        self._cancel_clock_timer(
+            "intent-opening.reconcile"
+        )
+
+    def _schedule_opening_reconciliation_retry(self) -> None:
+        if (
+            not self._pending_opening_reconciliations
+            or self._opening_reconciliation_retry_scheduled
+        ):
+            return
+        clock = getattr(self, "clock", None)
+        set_time_alert = getattr(
+            clock,
+            "set_time_alert",
+            None,
+        ) if clock is not None else None
+        if not callable(set_time_alert):
+            return
+        exponent = max(
+            self._opening_reconciliation_attempt - 1,
+            0,
+        )
+        delay_seconds = min(2 ** exponent, 45)
+        when = self._now() + timedelta(
+            seconds=delay_seconds
+        )
+        try:
+            set_time_alert(
+                "intent-opening.reconcile",
+                when,
+                callback=self._on_opening_reconciliation_alert,
+            )
+        except TypeError:
+            try:
+                set_time_alert(
+                    "intent-opening.reconcile",
+                    when,
+                )
+            except (NotImplementedError, RuntimeError):
+                return
+        except (NotImplementedError, RuntimeError):
+            return
+        self._opening_reconciliation_retry_scheduled = True
+
+    def _on_opening_reconciliation_alert(
+        self,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        self._opening_reconciliation_retry_scheduled = False
+        self._queue_exchange_refresh(
+            success_continuation={
+                "kind": "retry_pending_opening_reconciliations",
+            },
+            failure_continuation={
+                "kind": "pending_opening_refresh_failed",
+            },
+        )
+
+    def _retry_pending_opening_reconciliations(
+        self,
+    ) -> None:
+        pending = tuple(
+            self._pending_opening_reconciliations.values()
+        )
+        for intent in pending:
+            reconciled = self._reconcile_existing_opening(
+                intent,
+                exchange_state_ready=True,
+            )
+            if reconciled is None:
+                continue
+            if reconciled:
+                self._clear_opening_reconciliation(intent)
+                continue
+            intent_id = str(
+                getattr(intent, "intent_id", "") or ""
+            )
+            if not self._opening_reconciliation_resubmit_allowed.get(
+                intent_id,
+                True,
+            ):
+                continue
+            self._clear_opening_reconciliation(intent)
+            self._handle_intent(
+                intent,
+                exchange_state_ready=True,
+            )
+        if self._pending_opening_reconciliations:
+            self._schedule_opening_reconciliation_retry()
 
     def _protection_role_for_order(
         self,
@@ -1962,18 +2475,42 @@ class IntentExecutionStrategy(Strategy):
     # immediately trigger") leaves the position naked exactly when price is
     # attacking the stop. Any terminal event on a protection id re-arms the sync.
     def on_order_rejected(self, event: Any) -> None:
+        self._reject_entry_order_event(event, "order_rejected")
         self._on_protection_order_terminal(event, count_retry=True)
 
     def on_order_denied(self, event: Any) -> None:
+        self._reject_entry_order_event(event, "order_denied")
         self._on_protection_order_terminal(event, count_retry=True)
 
     def on_order_canceled(self, event: Any) -> None:
+        self._reject_entry_order_event(event, "order_canceled")
         # Usually our own make-before-break cancel confirmations: resync to
         # verify convergence, but do NOT feed the backoff counter (review P2-3).
         self._on_protection_order_terminal(event, count_retry=False)
 
     def on_order_expired(self, event: Any) -> None:
+        self._reject_entry_order_event(event, "order_expired")
         self._on_protection_order_terminal(event, count_retry=True)
+
+    def _reject_entry_order_event(
+        self,
+        event: Any,
+        event_name: str,
+    ) -> None:
+        client_order_id = _event_client_order_id(event)
+        if client_order_id is None:
+            return
+        try:
+            trace = decode_client_order_id(client_order_id)
+        except ValueError:
+            return
+        if trace.sequence > 9:
+            return
+        self._record_intent_id_terminal(
+            trace.intent_id,
+            "REJECTED",
+            f"{event_name}:{client_order_id}",
+        )
 
     def on_order_cancel_rejected(self, event: Any) -> None:
         client_order_id = _event_client_order_id(event)
@@ -1996,17 +2533,23 @@ class IntentExecutionStrategy(Strategy):
             }
             if client_order_id not in live_ids:
                 self._remove_pending_cancel_id(stash, client_order_id)
-                self._queue_entry_protection_stash_persist()
+                self._queue_entry_protection_stash_persist(
+                    changed_intent_keys=intent_key
+                )
             return
 
     def _on_protection_order_terminal(self, event: Any, count_retry: bool = True) -> None:
         client_order_id = _event_client_order_id(event)
         if client_order_id is None:
             return
-        for stash in self._entry_protection_stash.values():
+        for intent_key, stash in (
+            self._entry_protection_stash.items()
+        ):
             if client_order_id in tuple(stash.get("pending_cancel_ids") or ()):
                 self._remove_pending_cancel_id(stash, client_order_id)
-                self._queue_entry_protection_stash_persist()
+                self._queue_entry_protection_stash_persist(
+                    changed_intent_keys=intent_key
+                )
                 return
         role_match = self._protection_role_for_order(
             client_order_id,
@@ -2047,7 +2590,9 @@ class IntentExecutionStrategy(Strategy):
                     "market_fallback_failed",
                     denial_reason="take_profit_market_fallback_failed",
                 )
-                self._queue_entry_protection_stash_persist()
+                self._queue_entry_protection_stash_persist(
+                    changed_intent_keys=intent_key
+                )
                 return
             stash["protected_quantity"] = None
             self._queue_entry_protection_stash_persist(
@@ -2055,7 +2600,8 @@ class IntentExecutionStrategy(Strategy):
                     "kind": "protection_schedule",
                     "intent_key": intent_key,
                     "count_retry": count_retry,
-                }
+                },
+                changed_intent_keys=intent_key,
             )
             return
         try:
@@ -2096,7 +2642,8 @@ class IntentExecutionStrategy(Strategy):
                 "kind": "protection_schedule",
                 "intent_key": intent_key,
                 "count_retry": count_retry,
-            }
+            },
+            changed_intent_keys=intent_key,
         )
 
     def _record_protection_terminal_event(
@@ -2199,7 +2746,9 @@ class IntentExecutionStrategy(Strategy):
         fallbacks = stash.setdefault("tp_market_fallbacks", {})
         existing = fallbacks.get(fallback_id)
         if isinstance(existing, dict):
-            return self._queue_entry_protection_stash_persist()
+            return self._queue_entry_protection_stash_persist(
+                changed_intent_keys=intent_key
+            )
         quantity = str(
             role_info.get("quantity")
             or _event_last_qty(event)
@@ -2216,7 +2765,9 @@ class IntentExecutionStrategy(Strategy):
                 "market_fallback_invalid_quantity",
                 denial_reason="take_profit_market_fallback_invalid_quantity",
             )
-            return self._queue_entry_protection_stash_persist()
+            return self._queue_entry_protection_stash_persist(
+                changed_intent_keys=intent_key
+            )
         tags = self._tp_market_fallback_tags(
             event,
             stash,
@@ -2262,7 +2813,8 @@ class IntentExecutionStrategy(Strategy):
                 "tp_price": tp_price,
                 "event_key": event_key,
                 "plan": plan,
-            }
+            },
+            changed_intent_keys=intent_key,
         )
 
     def _continue_immediate_tp_market_fallback(
@@ -2301,7 +2853,9 @@ class IntentExecutionStrategy(Strategy):
                 "market_fallback_submit_failed",
                 denial_reason="take_profit_market_fallback_submit_failed",
             )
-            self._queue_entry_protection_stash_persist()
+            self._queue_entry_protection_stash_persist(
+                changed_intent_keys=intent_key
+            )
             return False
         state["status"] = "submitted"
         state["submitted_at"] = self._now().isoformat()
@@ -2346,7 +2900,9 @@ class IntentExecutionStrategy(Strategy):
             client_order_id=fallback_id,
             payload=payload,
         )
-        return self._queue_entry_protection_stash_persist()
+        return self._queue_entry_protection_stash_persist(
+            changed_intent_keys=intent_key
+        )
 
     def _tp_market_fallback_tags(
         self,
@@ -2527,10 +3083,14 @@ class IntentExecutionStrategy(Strategy):
         stash.pop("sync_scheduled", None)
         self._normalize_protection_stash(intent_key, stash)
         if stash.get("protection_frozen"):
-            self._queue_entry_protection_stash_persist()
+            self._queue_entry_protection_stash_persist(
+                changed_intent_keys=intent_key
+            )
             return
         if not self._has_authorized_protection_parent(intent_key, stash):
-            self._queue_entry_protection_stash_persist()
+            self._queue_entry_protection_stash_persist(
+                changed_intent_keys=intent_key
+            )
             return
         instrument_id = str(stash["instrument_id"])
         instrument = self._instrument_spec(instrument_id)
@@ -2563,7 +3123,8 @@ class IntentExecutionStrategy(Strategy):
                 continuation={
                     "kind": "protection_cancel_timer",
                     "intent_key": intent_key,
-                }
+                },
+                changed_intent_keys=intent_key,
             )
             return
 
@@ -2609,7 +3170,9 @@ class IntentExecutionStrategy(Strategy):
                     plan,
                 )
             stash.pop("sync_retries", None)
-            self._queue_entry_protection_stash_persist()
+            self._queue_entry_protection_stash_persist(
+                changed_intent_keys=intent_key
+            )
             return
 
         desired = plans_for_adoption
@@ -2630,7 +3193,9 @@ class IntentExecutionStrategy(Strategy):
             stash["protected_quantity"] = quantity
             stash.pop("sync_retries", None)
             self._prune_protection_roles(intent_key, stash)
-            self._queue_entry_protection_stash_persist()
+            self._queue_entry_protection_stash_persist(
+                changed_intent_keys=intent_key
+            )
             return
 
         revision = int(stash.get("protection_revision", -1)) + 1
@@ -2641,7 +3206,9 @@ class IntentExecutionStrategy(Strategy):
                 "revisions_exhausted",
                 denial_reason="protection_revisions_exhausted",
             )
-            self._queue_entry_protection_stash_persist()
+            self._queue_entry_protection_stash_persist(
+                changed_intent_keys=intent_key
+            )
             return
 
         revision_plans = self._protection_order_plans(
@@ -2677,7 +3244,8 @@ class IntentExecutionStrategy(Strategy):
                     "kind": "protection_schedule",
                     "intent_key": intent_key,
                     "count_retry": True,
-                }
+                },
+                changed_intent_keys=intent_key,
             )
             return
         keep = set(keep_ids) | set(submitted_ids)
@@ -2703,7 +3271,8 @@ class IntentExecutionStrategy(Strategy):
                 "count_retry": True,
             }
         self._queue_entry_protection_stash_persist(
-            continuation=continuation
+            continuation=continuation,
+            changed_intent_keys=intent_key,
         )
 
     def _has_authorized_protection_parent(
@@ -4122,7 +4691,11 @@ class IntentExecutionStrategy(Strategy):
                     )
             stash["protected_quantity"] = None
         if self._queue_entry_protection_stash_persist(
-            continuation=continuation
+            continuation=continuation,
+            changed_intent_keys=tuple(
+                intent_key
+                for intent_key, _stash in targeted
+            ),
         ):
             return True
         for key, value in preimage.items():
@@ -4172,7 +4745,11 @@ class IntentExecutionStrategy(Strategy):
                 return False
             tombstone["pending_cancel_ids"] = pending_ids
         if self._queue_entry_protection_stash_persist(
-            continuation=continuation
+            continuation=continuation,
+            changed_intent_keys=tuple(
+                intent_key
+                for intent_key, _stash in targeted
+            ),
         ):
             return True
         for key, value in preimage.items():
@@ -4235,7 +4812,8 @@ class IntentExecutionStrategy(Strategy):
                     "instrument_id": instrument_id,
                     "pending_ids": tuple(sorted(pending_ids)),
                     "live_ids": tuple(sorted(live_by_id)),
-                }
+                },
+                changed_intent_keys=intent_key,
             ):
                 continue
 
@@ -4281,7 +4859,9 @@ class IntentExecutionStrategy(Strategy):
         if not pending_ids:
             tombstone["state"] = "disabled"
             tombstone["completed_at"] = self._now().isoformat()
-        return self._queue_entry_protection_stash_persist()
+        return self._queue_entry_protection_stash_persist(
+            changed_intent_keys=intent_key
+        )
 
     def _complete_retry_take_profit_disable(
         self,
@@ -4313,7 +4893,9 @@ class IntentExecutionStrategy(Strategy):
         if not pending_ids:
             tombstone["state"] = "disabled"
             tombstone["completed_at"] = self._now().isoformat()
-        return self._queue_entry_protection_stash_persist()
+        return self._queue_entry_protection_stash_persist(
+            changed_intent_keys=intent_key
+        )
 
     def _finalize_take_profit_disable(
         self,
@@ -4351,7 +4933,11 @@ class IntentExecutionStrategy(Strategy):
             tombstone["completed_at"] = self._now().isoformat()
             tombstone["pending_cancel_ids"] = []
         if self._queue_entry_protection_stash_persist(
-            continuation=continuation
+            continuation=continuation,
+            changed_intent_keys=tuple(
+                intent_key
+                for intent_key, _stash in targeted
+            ),
         ):
             return True
         for key, value in preimage.items():
@@ -4486,6 +5072,21 @@ class IntentExecutionStrategy(Strategy):
             return False
         intent_id = getattr(intent, "intent_id", False)
         if intent_id is False:
+            return False
+        return self._record_intent_id_terminal(
+            intent_id,
+            status,
+            detail,
+        )
+
+    def _record_intent_id_terminal(
+        self,
+        intent_id: Any,
+        status: str,
+        detail: str,
+    ) -> bool:
+        handler = self._intent_receipt_handler
+        if handler is None:
             return False
         try:
             return bool(handler(intent_id, status, detail))

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +12,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from data_client.atomic_json import write_json_atomic
 from data_client.durable_intent_inbox import JsonDurableIntentInbox
 from execution_domain.contracts import (
     ApprovedTradeIntentV1,
@@ -73,28 +73,12 @@ class JsonIntentOffsetStore:
         )
 
     def save(self, state: IntentOffsetState) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "last_cursor": state.last_cursor,
             "processed_intents": sorted(state.processed_intents),
             "processed_idempotency_keys": sorted(state.processed_idempotency_keys),
         }
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{self._path.name}.",
-            suffix=".tmp",
-            dir=str(self._path.parent),
-            text=True,
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                json.dump(payload, tmp, sort_keys=True)
-                tmp.write("\n")
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            os.replace(tmp_name, self._path)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
+        write_json_atomic(self._path, payload)
 
 
 class ApprovedIntentDataClient:
@@ -106,7 +90,6 @@ class ApprovedIntentDataClient:
     }
     _DURABLE_INBOX_CAPACITY = 256
     _DURABLE_INBOX_TASK_TIMEOUT_SECONDS = 2.0
-
     def __init__(
         self,
         account_id: str,
@@ -133,17 +116,22 @@ class ApprovedIntentDataClient:
         self._intent_inbox = inbox
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._trading_state = trading_state or (lambda: TradingState.HALTED)
-        self._delivery_mailbox: Queue[ApprovedTradeIntentV1] = Queue(
-            maxsize=self._DURABLE_INBOX_CAPACITY
-        )
         self._degraded_lock = Lock()
         self._degraded_reasons: list[str] = []
+        self._pending_ack_lock = Lock()
+        self._pending_acks: OrderedDict[
+            tuple[str, str, str],
+            tuple[UUID, IntentAckStatus, Optional[str]],
+        ] = OrderedDict()
+        self._pending_lock = Lock()
+        self._pending_cursors: set[str] = set()
+        self._replay_receipts = tuple(self._intent_inbox.pending())
+        self._replay_taken = False
         self._hard_failure_lock = Lock()
         self._hard_failure_requested_reason = ""
         self._hard_failure_reason = ""
         self._hard_failure_handler: Callable[[str], None] | None = None
         self._hard_failure_mailbox: Queue[str] = Queue(maxsize=1)
-        self._replay_enqueued = False
         worker_name = f"{node_id}.durable-intent-inbox"
         self._durable_inbox_worker = BoundedTaskWorker(
             worker_name,
@@ -162,9 +150,18 @@ class ApprovedIntentDataClient:
         return self._state
 
     def poll_once(self, limit: int = 100, wait_ms: int = 0) -> int:
+        self._raise_if_hard_failure()
         items = self.fetch_once(limit=limit, wait_ms=wait_ms)
-        for item in items:
-            self.deliver(item)
+        for index, item in enumerate(items):
+            try:
+                self.deliver(item)
+            except BaseException:
+                with self._pending_lock:
+                    for pending in items[index:]:
+                        self._pending_cursors.discard(
+                            str(pending.cursor)
+                        )
+                raise
         return len(items)
 
     def fetch_once(
@@ -172,16 +169,51 @@ class ApprovedIntentDataClient:
         limit: int = 100,
         wait_ms: int = 0,
     ) -> tuple[IntentItem, ...]:
+        self._raise_if_hard_failure()
+        self._retry_pending_acks()
+        if limit < 1:
+            raise ValueError("limit must be positive")
         batch = self._source.fetch_intents(
             account_id=self._account_id,
             after_cursor=self._state.last_cursor,
             limit=limit,
             wait_ms=wait_ms,
         )
-        return tuple(batch.items)
+        accepted: list[IntentItem] = []
+        with self._pending_lock:
+            for item in batch.items:
+                cursor = str(item.cursor)
+                if cursor in self._pending_cursors:
+                    continue
+                self._pending_cursors.add(cursor)
+                accepted.append(item)
+                if len(accepted) >= limit:
+                    break
+        return tuple(accepted)
 
     def deliver(self, item: IntentItem) -> None:
+        self._raise_if_hard_failure()
+        self._retry_pending_acks()
         self._process_item(item)
+        with self._pending_lock:
+            self._pending_cursors.discard(str(item.cursor))
+
+    def replay_pending(self) -> tuple[IntentItem, ...]:
+        if self._replay_taken:
+            return ()
+        self._replay_taken = True
+        items = tuple(
+            IntentItem(
+                cursor=receipt.cursor,
+                intent=receipt.intent,
+            )
+            for receipt in self._replay_receipts
+        )
+        with self._pending_lock:
+            self._pending_cursors.update(
+                str(item.cursor) for item in items
+            )
+        return items
 
     def wait_for_durable_inbox(
         self,
@@ -200,18 +232,7 @@ class ApprovedIntentDataClient:
         if max_items < 1:
             raise ValueError("max_items must be positive")
         self._drain_hard_failure_mailbox()
-        drained = 0
-        while drained < max_items:
-            try:
-                intent = self._delivery_mailbox.get_nowait()
-            except Empty:
-                break
-            try:
-                self._publisher.publish(intent)
-            finally:
-                self._delivery_mailbox.task_done()
-            drained += 1
-        return drained
+        return 0
 
     def record_execution_terminal(
         self,
@@ -219,8 +240,9 @@ class ApprovedIntentDataClient:
         status: str,
         detail: str,
     ) -> bool:
+        self._drain_hard_failure_mailbox()
         self._start_durable_inbox_lane()
-        return self._durable_inbox_worker.submit(
+        accepted = self._durable_inbox_worker.submit(
             _IntentInboxTask(
                 kind="complete",
                 intent_id=str(intent_id),
@@ -228,6 +250,9 @@ class ApprovedIntentDataClient:
                 detail=str(detail),
             )
         )
+        if not accepted:
+            self._drain_hard_failure_mailbox()
+        return accepted
 
     def durable_inbox_cleanup_worker(
         self,
@@ -245,50 +270,19 @@ class ApprovedIntentDataClient:
         with self._degraded_lock:
             return tuple(self._degraded_reasons)
 
+    @property
+    def pending_ack_count(self) -> int:
+        with self._pending_ack_lock:
+            return len(self._pending_acks)
+
     def _start_durable_inbox_lane(self) -> None:
         if not self._durable_inbox_worker.snapshot().running:
             self._durable_inbox_worker.start()
-        if self._replay_enqueued:
-            return
-        self._replay_enqueued = True
-        for receipt in self._intent_inbox.pending():
-            accepted = self._durable_inbox_worker.submit(
-                _IntentInboxTask(
-                    kind="replay",
-                    cursor=receipt.cursor,
-                    intent=receipt.intent,
-                )
-            )
-            if not accepted:
-                raise RuntimeError(
-                    "durable intent replay queue capacity exceeded"
-                )
 
     def _process_durable_inbox_task(
         self,
         task: "_IntentInboxTask",
     ) -> None:
-        if task.kind == "process":
-            item = task.item
-            if not isinstance(item, IntentItem):
-                raise ValueError(
-                    "durable intent process task requires an item"
-                )
-            self._process_item(item)
-            return
-        if task.kind == "replay":
-            intent = task.intent
-            if not isinstance(intent, ApprovedTradeIntentV1):
-                raise ValueError(
-                    "durable intent replay requires an intent"
-                )
-            self._ack_degraded(
-                intent.intent_id,
-                IntentAckStatus.ACCEPTED,
-                None,
-            )
-            self._enqueue_delivery(intent)
-            return
         if task.kind == "complete":
             self._intent_inbox.complete(
                 task.intent_id,
@@ -301,26 +295,64 @@ class ApprovedIntentDataClient:
         )
 
     def _process_item(self, item: IntentItem) -> None:
-        intent_id = _extract_intent_id(item)
         intent = self._validate_intent(item)
         if intent is None:
-            self._ack(intent_id, IntentAckStatus.REJECTED, "schema_mismatch")
+            intent_id = _try_extract_intent_id(item)
+            if intent_id is not False:
+                self._ack_degraded(
+                    intent_id,
+                    IntentAckStatus.REJECTED,
+                    "schema_mismatch",
+                )
+            else:
+                self._record_degraded(
+                    "poison intent skipped without acknowledgement: "
+                    f"cursor={item.cursor}"
+                )
             self._advance_cursor(item.cursor)
             return
 
         if intent.account_id != self._account_id:
-            self._ack(intent.intent_id, IntentAckStatus.REJECTED, "wrong_account")
+            self._ack_degraded(
+                intent.intent_id,
+                IntentAckStatus.REJECTED,
+                "wrong_account",
+            )
             self._advance_cursor(item.cursor)
             return
 
         if _as_aware(intent.valid_until) <= self._now_aware():
-            self._ack(intent.intent_id, IntentAckStatus.EXPIRED, "expired")
+            self._ack_degraded(
+                intent.intent_id,
+                IntentAckStatus.EXPIRED,
+                "expired",
+            )
             self._advance_cursor(item.cursor)
+            return
+
+        receipt_getter = getattr(self._intent_inbox, "get", None)
+        receipt = False
+        if callable(receipt_getter):
+            receipt = receipt_getter(intent.intent_id)
+        if (
+            receipt is not None
+            and receipt is not False
+            and str(receipt.cursor) == str(item.cursor)
+        ):
+            self._prepare_received_intent(
+                item,
+                intent,
+                receipt_status=str(receipt.status),
+            )
             return
 
         duplicate_detail = self._state.has_processed(intent)
         if duplicate_detail is not None:
-            self._ack(intent.intent_id, IntentAckStatus.DUPLICATE, duplicate_detail)
+            self._ack_degraded(
+                intent.intent_id,
+                IntentAckStatus.DUPLICATE,
+                duplicate_detail,
+            )
             self._advance_cursor(item.cursor)
             return
 
@@ -328,38 +360,63 @@ class ApprovedIntentDataClient:
             TradingState(self._trading_state()) is TradingState.HALTED
             and intent.action in self._NEW_POSITION_ACTIONS
         ):
-            self._ack(intent.intent_id, IntentAckStatus.REJECTED, "halted")
+            self._ack_degraded(
+                intent.intent_id,
+                IntentAckStatus.REJECTED,
+                "halted",
+            )
             self._advance_cursor(item.cursor)
             return
 
-        self._intent_inbox.receive(item.cursor, intent)
-        candidate = IntentOffsetState(
-            last_cursor=item.cursor,
-            processed_intents=set(self._state.processed_intents),
-            processed_idempotency_keys=set(
-                self._state.processed_idempotency_keys
+        self._run_durable_write(
+            "receipt receive",
+            lambda: self._intent_inbox.receive(
+                item.cursor,
+                intent,
             ),
         )
-        candidate.record_processed(intent)
-        self._offset_store.save(candidate)
-        self._state = candidate
+        self._prepare_received_intent(
+            item,
+            intent,
+            receipt_status="RECEIVED",
+        )
+
+    def _prepare_received_intent(
+        self,
+        item: IntentItem,
+        intent: ApprovedTradeIntentV1,
+        *,
+        receipt_status: str,
+    ) -> None:
+        if self._state.has_processed(intent) is None:
+            candidate = IntentOffsetState(
+                last_cursor=item.cursor,
+                processed_intents=set(self._state.processed_intents),
+                processed_idempotency_keys=set(
+                    self._state.processed_idempotency_keys
+                ),
+            )
+            candidate.record_processed(intent)
+            self._run_durable_write(
+                "offset prepare",
+                lambda: self._offset_store.save(candidate),
+            )
+            self._state = candidate
+        if receipt_status == "RECEIVED":
+            self._run_durable_write(
+                "receipt prepare",
+                lambda: self._intent_inbox.complete(
+                    intent.intent_id,
+                    "PREPARED",
+                    "",
+                ),
+            )
         self._ack_degraded(
             intent.intent_id,
             IntentAckStatus.ACCEPTED,
             None,
         )
-        self._enqueue_delivery(intent)
-
-    def _enqueue_delivery(
-        self,
-        intent: ApprovedTradeIntentV1,
-    ) -> None:
-        try:
-            self._delivery_mailbox.put_nowait(intent)
-        except Full as exc:
-            raise RuntimeError(
-                "durable intent delivery queue capacity exceeded"
-            ) from exc
+        self._publisher.publish(intent)
 
     def _ack_degraded(
         self,
@@ -369,13 +426,81 @@ class ApprovedIntentDataClient:
     ) -> bool:
         try:
             self._ack(intent_id, status, detail)
+            self._remove_pending_ack(intent_id, status, detail)
             return True
         except Exception as exc:
+            self._store_pending_ack(
+                intent_id,
+                status,
+                detail,
+            )
             self._record_degraded(
                 "intent ACK failed and remains recoverable: "
                 f"{exc!r}"
             )
             return False
+
+    def _retry_pending_acks(self) -> None:
+        with self._pending_ack_lock:
+            pending = tuple(self._pending_acks.items())
+        for key, acknowledgement in pending:
+            intent_id, status, detail = acknowledgement
+            try:
+                self._ack(intent_id, status, detail)
+            except Exception as exc:
+                self._record_degraded(
+                    "intent ACK retry failed and remains recoverable: "
+                    f"{exc!r}"
+                )
+                continue
+            with self._pending_ack_lock:
+                self._pending_acks.pop(key, None)
+
+    def _store_pending_ack(
+        self,
+        intent_id: UUID,
+        status: IntentAckStatus,
+        detail: Optional[str],
+    ) -> None:
+        key = self._pending_ack_key(
+            intent_id,
+            status,
+            detail,
+        )
+        with self._pending_ack_lock:
+            if key in self._pending_acks:
+                return
+            self._pending_acks[key] = (
+                intent_id,
+                status,
+                detail,
+            )
+
+    def _remove_pending_ack(
+        self,
+        intent_id: UUID,
+        status: IntentAckStatus,
+        detail: Optional[str],
+    ) -> None:
+        key = self._pending_ack_key(
+            intent_id,
+            status,
+            detail,
+        )
+        with self._pending_ack_lock:
+            self._pending_acks.pop(key, None)
+
+    def _pending_ack_key(
+        self,
+        intent_id: UUID,
+        status: IntentAckStatus,
+        detail: Optional[str],
+    ) -> tuple[str, str, str]:
+        return (
+            str(intent_id),
+            str(status.value),
+            str(detail or ""),
+        )
 
     def _record_degraded(self, reason: str) -> None:
         value = str(reason).strip()
@@ -418,6 +543,13 @@ class ApprovedIntentDataClient:
         finally:
             self._hard_failure_mailbox.task_done()
 
+    def _raise_if_hard_failure(self) -> None:
+        self._drain_hard_failure_mailbox()
+        with self._hard_failure_lock:
+            reason = self._hard_failure_reason
+        if reason:
+            raise RuntimeError(reason)
+
     def _validate_intent(self, item: IntentItem) -> Optional[ApprovedTradeIntentV1]:
         try:
             payload = _intent_payload(item.intent)
@@ -440,8 +572,32 @@ class ApprovedIntentDataClient:
         )
 
     def _advance_cursor(self, cursor: str) -> None:
-        self._state.last_cursor = cursor
-        self._offset_store.save(self._state)
+        candidate = IntentOffsetState(
+            last_cursor=cursor,
+            processed_intents=set(self._state.processed_intents),
+            processed_idempotency_keys=set(
+                self._state.processed_idempotency_keys
+            ),
+        )
+        self._run_durable_write(
+            "offset advance",
+            lambda: self._offset_store.save(candidate),
+        )
+        self._state = candidate
+
+    def _run_durable_write(
+        self,
+        operation: str,
+        action: Callable[[], Any],
+    ) -> Any:
+        try:
+            return action()
+        except Exception as exc:
+            self._request_hard_failure(
+                f"{operation} failed: {exc!r}"
+            )
+            self._drain_hard_failure_mailbox()
+            raise
 
     def _now_aware(self) -> datetime:
         return _as_aware(self._now())
@@ -453,16 +609,19 @@ def _intent_payload(raw: object) -> object:
     return raw
 
 
-def _extract_intent_id(item: IntentItem) -> UUID:
-    raw_intent = item.intent
-    if isinstance(raw_intent, ApprovedTradeIntentV1):
-        return raw_intent.intent_id
-    if isinstance(raw_intent, dict) and "intent_id" in raw_intent:
-        return UUID(str(raw_intent["intent_id"]))
-    intent_id = getattr(raw_intent, "intent_id", None)
-    if intent_id is not None:
-        return UUID(str(intent_id))
-    raise ValueError("cannot ack invalid intent without intent_id")
+def _try_extract_intent_id(item: IntentItem) -> UUID | bool:
+    try:
+        raw_intent = item.intent
+        if isinstance(raw_intent, ApprovedTradeIntentV1):
+            return raw_intent.intent_id
+        if isinstance(raw_intent, dict) and "intent_id" in raw_intent:
+            return UUID(str(raw_intent["intent_id"]))
+        intent_id = getattr(raw_intent, "intent_id", None)
+        if intent_id is not None:
+            return UUID(str(intent_id))
+    except (TypeError, ValueError):
+        return False
+    return False
 
 
 def _as_aware(value: datetime) -> datetime:
