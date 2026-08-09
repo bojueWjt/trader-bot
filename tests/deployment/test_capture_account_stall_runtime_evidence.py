@@ -5,8 +5,11 @@ import importlib.metadata as importlib_metadata
 import importlib.util
 import json
 import os
+import socket
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -434,6 +437,7 @@ def test_distribution_artifact_hashes_cover_installed_metadata(
 
         def __init__(self) -> None:
             self.metadata = {"Name": "Sample_Pkg"}
+            self._path = dist_info
 
         def locate_file(self, package_file: Path) -> Path:
             return tmp_path / package_file
@@ -507,6 +511,12 @@ def test_distribution_without_record_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    dist_info = tmp_path / "sample_pkg-1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Name: sample-pkg\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
     package_path = tmp_path / "sample.py"
     package_path.write_text("sample\n", encoding="utf-8")
 
@@ -516,6 +526,7 @@ def test_distribution_without_record_fails_closed(
 
         def __init__(self) -> None:
             self.metadata = {"Name": "sample-pkg"}
+            self._path = dist_info
 
         def locate_file(self, package_file: Path) -> Path:
             return tmp_path / package_file
@@ -527,6 +538,67 @@ def test_distribution_without_record_fails_closed(
     )
 
     with pytest.raises(capture.CaptureError, match="lacks RECORD"):
+        capture._distribution_artifact_records()
+
+
+def test_distribution_direct_url_must_match_installed_file_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dist_info = tmp_path / "sample_pkg-1.0.dist-info"
+    dist_info.mkdir()
+    metadata_path = dist_info / "METADATA"
+    record_path = dist_info / "RECORD"
+    direct_url_path = dist_info / "direct_url.json"
+    metadata_path.write_text(
+        "Name: sample-pkg\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    record_path.write_text(
+        "sample_pkg-1.0.dist-info/METADATA,,\n"
+        "sample_pkg-1.0.dist-info/RECORD,,\n"
+        "sample_pkg-1.0.dist-info/direct_url.json,,\n",
+        encoding="utf-8",
+    )
+    direct_url_path.write_text(
+        '{"dir_info":{"editable":false}}\n',
+        encoding="utf-8",
+    )
+
+    class FakeDistribution:
+        version = "1.0"
+        files = (
+            Path("sample_pkg-1.0.dist-info/METADATA"),
+            Path("sample_pkg-1.0.dist-info/RECORD"),
+            Path("sample_pkg-1.0.dist-info/direct_url.json"),
+        )
+
+        def __init__(self) -> None:
+            self.metadata = {"Name": "sample-pkg"}
+            self._path = dist_info
+
+        def locate_file(self, package_file: Path) -> Path:
+            return tmp_path / package_file
+
+    real_regular_file_bytes = capture._regular_file_bytes
+
+    def changed_direct_url(path: Path) -> bytes:
+        if path == direct_url_path:
+            return b'{"dir_info":{"editable":true}}\n'
+        return real_regular_file_bytes(path)
+
+    monkeypatch.setattr(
+        capture.metadata,
+        "distributions",
+        lambda: (FakeDistribution(),),
+    )
+    monkeypatch.setattr(
+        capture,
+        "_regular_file_bytes",
+        changed_direct_url,
+    )
+
+    with pytest.raises(capture.CaptureError, match="changed while being recorded"):
         capture._distribution_artifact_records()
 
 
@@ -563,6 +635,45 @@ def test_real_distribution_record_identity_and_install_roots_fail_closed(
         with pytest.raises(capture.CaptureError, match="lacks RECORD"):
             capture._distribution_artifact_records()
 
+    wrong_record_site = tmp_path / "wrong-record-site"
+    wrong_record_site.mkdir()
+    wrong_record_dist_info = wrong_record_site / "sample-1.0.dist-info"
+    wrong_record_dist_info.mkdir()
+    (wrong_record_dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: sample\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    unrelated_dist_info = wrong_record_site / "other-9.9.dist-info"
+    unrelated_dist_info.mkdir()
+    (unrelated_dist_info / "RECORD").write_text(
+        "attacker-controlled-record\n",
+        encoding="utf-8",
+    )
+    (wrong_record_site / "sample.py").write_text(
+        "sample\n",
+        encoding="utf-8",
+    )
+    (wrong_record_dist_info / "RECORD").write_text(
+        "other-9.9.dist-info/RECORD,,\nsample.py,,\n",
+        encoding="utf-8",
+    )
+    wrong_record_distributions = tuple(
+        distribution
+        for distribution in importlib_metadata.distributions(
+            path=[str(wrong_record_site)]
+        )
+        if distribution.metadata.get("Name") == "sample"
+    )
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(
+            capture.metadata,
+            "distributions",
+            lambda: wrong_record_distributions,
+        )
+        with pytest.raises(capture.CaptureError, match="exact RECORD"):
+            capture._distribution_artifact_records()
+
     traversal_site = tmp_path / "traversal-site"
     traversal_site.mkdir()
     traversal_dist_info = traversal_site / "sample-1.0.dist-info"
@@ -589,6 +700,75 @@ def test_real_distribution_record_identity_and_install_roots_fail_closed(
         )
         with pytest.raises(capture.CaptureError, match="unsafe"):
             capture._distribution_artifact_records()
+
+    global_root_site = tmp_path / "global-root-site"
+    global_root_site.mkdir()
+    global_root_dist_info = global_root_site / "sample-1.0.dist-info"
+    global_root_dist_info.mkdir()
+    (global_root_dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: sample\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    interpreter = Path(sys.executable).resolve(strict=True)
+    interpreter_relative = Path(
+        os.path.relpath(
+            interpreter,
+            global_root_site.resolve(strict=True),
+        )
+    )
+    (global_root_dist_info / "RECORD").write_text(
+        "sample-1.0.dist-info/RECORD,,\n"
+        f"{interpreter_relative.as_posix()},,\n",
+        encoding="utf-8",
+    )
+    global_root_distributions = tuple(
+        distribution
+        for distribution in importlib_metadata.distributions(
+            path=[str(global_root_site)]
+        )
+        if distribution.metadata.get("Name") == "sample"
+    )
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(
+            capture.metadata,
+            "distributions",
+            lambda: global_root_distributions,
+        )
+        with pytest.raises(capture.CaptureError, match="unsafe"):
+            capture._distribution_artifact_records()
+
+
+def test_distribution_rejects_cross_distribution_file_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    shared_path = site / "shared.py"
+    shared_path.write_text("shared\n", encoding="utf-8")
+
+    for name in ("alpha", "beta"):
+        dist_info = site / f"{name}-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n",
+            encoding="utf-8",
+        )
+        (dist_info / "RECORD").write_text(
+            f"{name}-1.0.dist-info/RECORD,,\nshared.py,,\n",
+            encoding="utf-8",
+        )
+
+    distributions = tuple(importlib_metadata.distributions(path=[str(site)]))
+    monkeypatch.setattr(
+        capture.metadata,
+        "distributions",
+        lambda: distributions,
+    )
+
+    with pytest.raises(capture.CaptureError, match="cross-distribution"):
+        capture._distribution_artifact_records()
 
 
 def test_success_requires_collect_and_junit_counts_to_match(
@@ -794,11 +974,196 @@ def test_manifest_audits_nested_manifest_name_and_rejects_symlinks(
     outside = tmp_path / "outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (staging_dir / "linked.txt").symlink_to(outside)
-    capture._sanitize_staging_files(staging_dir, ("outside",))
+    with pytest.raises(capture.CaptureError, match="symlink"):
+        capture._sanitize_staging_files(staging_dir, ("outside",))
     assert outside.read_text(encoding="utf-8") == "outside\n"
 
     with pytest.raises(capture.CaptureError, match="contains a symlink"):
         capture._artifact_manifest(staging_dir)
+
+
+def test_parent_directory_symlink_is_rejected_before_sanitization(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    outside = real_parent / "outside.txt"
+    outside.write_text("outside secret\n", encoding="utf-8")
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(capture.CaptureError, match="symlink"):
+        capture._sanitize_file(linked_parent / "outside.txt", ("secret",))
+
+    assert outside.read_text(encoding="utf-8") == "outside secret\n"
+
+
+def test_manifest_rejects_non_regular_payload_entries(tmp_path: Path) -> None:
+    staging_dir = tmp_path / "evidence"
+    staging_dir.mkdir()
+    (staging_dir / "result.json").write_text("{}\n", encoding="utf-8")
+    os.mkfifo(staging_dir / "unversionable.pipe")
+
+    with pytest.raises(capture.CaptureError, match="unsupported file type"):
+        capture._artifact_manifest(staging_dir)
+
+
+def test_manifest_rejects_socket_payload_entry() -> None:
+    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    with tempfile.TemporaryDirectory(
+        prefix="a3-socket-",
+        dir=temporary_root,
+    ) as temp_dir:
+        staging_dir = Path(temp_dir) / "evidence"
+        staging_dir.mkdir()
+        socket_path = staging_dir / "payload.socket"
+        unix_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            unix_socket.bind(str(socket_path))
+            with pytest.raises(
+                capture.CaptureError,
+                match="unsupported file type",
+            ):
+                capture._artifact_manifest(staging_dir)
+        finally:
+            unix_socket.close()
+
+
+@pytest.mark.parametrize("device_mode", (stat.S_IFCHR, stat.S_IFBLK))
+def test_manifest_rejects_device_payload_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    device_mode: int,
+) -> None:
+    staging_dir = tmp_path / "evidence"
+    staging_dir.mkdir()
+    directory_fd = capture._open_directory_path_nofollow(staging_dir)
+
+    class DeviceEntry:
+        name = "unversionable.device"
+
+        @staticmethod
+        def stat(*, follow_symlinks: bool):
+            assert follow_symlinks is False
+            return os.stat_result((device_mode | 0o600, *([0] * 9)))
+
+    monkeypatch.setattr(
+        capture,
+        "_payload_entries",
+        lambda _directory_fd: [DeviceEntry()],
+    )
+    try:
+        with pytest.raises(capture.CaptureError, match="unsupported file type"):
+            capture._artifact_manifest_from_fd(
+                directory_fd,
+                display_dir=staging_dir,
+            )
+    finally:
+        os.close(directory_fd)
+
+
+def test_capture_rejects_payload_symlink_without_writing_external_target(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "evidence"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-original\n", encoding="utf-8")
+    delegate = FakePytestRunner(
+        collect_stdout="tests/test_sample.py::test_ok\n",
+        run_stdout="1 passed\n",
+    )
+
+    def runner(command, **kwargs):
+        result = delegate(command, **kwargs)
+        command_values = [str(value) for value in command]
+        if command_values[0] == "git":
+            return result
+        if "--collect-only" in command_values:
+            return result
+        junit_path = delegate._junit_path(command_values)
+        (junit_path.parent / "result.json").symlink_to(outside)
+        return result
+
+    with pytest.raises(capture.CaptureError, match="symlink"):
+        capture.capture_runtime_evidence(
+            _config(git_repo, output_dir, "tests/test_sample.py"),
+            runner=runner,
+            environ={"LC_ALL": "C"},
+            distributions=[],
+        )
+
+    assert outside.read_text(encoding="utf-8") == "outside-original\n"
+    assert output_dir.exists() is False
+
+
+def test_capture_rejects_symlinked_output_parent(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    runner = FakePytestRunner(
+        collect_stdout="tests/test_sample.py::test_ok\n",
+        run_stdout="1 passed\n",
+    )
+
+    with pytest.raises(capture.CaptureError, match="symlink"):
+        capture.capture_runtime_evidence(
+            _config(
+                git_repo,
+                linked_parent / "evidence",
+                "tests/test_sample.py",
+            ),
+            runner=runner,
+            environ={"LC_ALL": "C"},
+            distributions=[],
+        )
+
+    assert list(real_parent.iterdir()) == []
+
+
+def test_capture_rejects_output_parent_replaced_after_pytest(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    output_parent = tmp_path / "publication"
+    output_parent.mkdir()
+    output_dir = output_parent / "evidence"
+    preserved_parent = tmp_path / "preserved-publication"
+    delegate = FakePytestRunner(
+        collect_stdout="tests/test_sample.py::test_ok\n",
+        run_stdout="1 passed\n",
+    )
+    parent_replaced = False
+
+    def runner(command, **kwargs):
+        nonlocal parent_replaced
+        result = delegate(command, **kwargs)
+        command_values = [str(value) for value in command]
+        if command_values[0] == "git":
+            return result
+        if "--collect-only" in command_values:
+            return result
+        if parent_replaced:
+            return result
+        parent_replaced = True
+        output_parent.rename(preserved_parent)
+        output_parent.mkdir()
+        return result
+
+    with pytest.raises(capture.CaptureError, match="output parent.*identity changed"):
+        capture.capture_runtime_evidence(
+            _config(git_repo, output_dir, "tests/test_sample.py"),
+            runner=runner,
+            environ={"LC_ALL": "C"},
+            distributions=[],
+        )
+
+    assert list(output_parent.iterdir()) == []
+    assert (preserved_parent / ".evidence.payload").is_dir()
 
 
 def test_publication_lock_preserves_staging(
@@ -829,16 +1194,28 @@ def test_publication_never_replaces_external_output_path(
     staging_dir.mkdir()
     (staging_dir / "result.json").write_text("{}\n", encoding="utf-8")
     capture._write_artifact_manifest(staging_dir)
-    real_rename = capture._rename_directory_noreplace
+    real_rename = capture._rename_directory_noreplace_at
 
-    def create_competing_output(source: Path, destination: Path) -> None:
+    def create_competing_output(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+        display_destination: Path,
+    ) -> None:
         output_dir.mkdir()
         (output_dir / "owner.txt").write_text("external\n", encoding="utf-8")
-        real_rename(source, destination)
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            display_destination,
+        )
 
     monkeypatch.setattr(
         capture,
-        "_rename_directory_noreplace",
+        "_rename_directory_noreplace_at",
         create_competing_output,
     )
 
@@ -871,22 +1248,37 @@ def test_publication_quarantines_replaced_staging_identity(
     )
     capture._write_artifact_manifest(replacement_dir)
     preserved_dir = tmp_path / ".preserved"
-    real_rename = capture._rename_directory_noreplace
+    real_rename = capture._rename_directory_noreplace_at
 
     def replace_source_before_rename(
-        source: Path,
-        destination: Path,
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+        display_destination: Path,
     ) -> None:
-        if source != staging_dir:
-            real_rename(source, destination)
+        if source_name != staging_dir.name:
+            real_rename(
+                source_fd,
+                source_name,
+                destination_fd,
+                destination_name,
+                display_destination,
+            )
             return
-        source.rename(preserved_dir)
-        replacement_dir.rename(source)
-        real_rename(source, destination)
+        staging_dir.rename(preserved_dir)
+        replacement_dir.rename(staging_dir)
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            display_destination,
+        )
 
     monkeypatch.setattr(
         capture,
-        "_rename_directory_noreplace",
+        "_rename_directory_noreplace_at",
         replace_source_before_rename,
     )
 
@@ -919,23 +1311,35 @@ def test_publication_quarantines_manifest_changed_after_rename(
     staging_dir.mkdir()
     (staging_dir / "result.json").write_text("trusted\n", encoding="utf-8")
     capture._write_artifact_manifest(staging_dir)
-    real_rename = capture._rename_directory_noreplace
+    real_rename = capture._rename_directory_noreplace_at
     publication_mutated = False
 
-    def mutate_after_rename(source: Path, destination: Path) -> None:
+    def mutate_after_rename(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+        display_destination: Path,
+    ) -> None:
         nonlocal publication_mutated
-        real_rename(source, destination)
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            display_destination,
+        )
         if publication_mutated:
             return
         publication_mutated = True
-        (destination / "artifact-manifest.json").write_text(
+        (display_destination / "artifact-manifest.json").write_text(
             "{}\n",
             encoding="utf-8",
         )
 
     monkeypatch.setattr(
         capture,
-        "_rename_directory_noreplace",
+        "_rename_directory_noreplace_at",
         mutate_after_rename,
     )
 
@@ -948,6 +1352,165 @@ def test_publication_quarantines_manifest_changed_after_rename(
     assert output_dir.exists() is False
     rejected = list(tmp_path.glob(".evidence.rejected-*"))
     assert len(rejected) == 1
+
+
+@pytest.mark.parametrize(
+    ("manifest_content", "payload_content"),
+    (
+        (False, "tampered\n"),
+        ("{}\n", "trusted\n"),
+    ),
+)
+def test_publication_rejects_manifest_not_bound_to_payload(
+    tmp_path: Path,
+    manifest_content: str | bool,
+    payload_content: str,
+) -> None:
+    output_dir = tmp_path / "evidence"
+    staging_dir = tmp_path / ".evidence.payload"
+    staging_dir.mkdir()
+    result_path = staging_dir / "result.json"
+    result_path.write_text("trusted\n", encoding="utf-8")
+    capture._write_artifact_manifest(staging_dir)
+    result_path.write_text(payload_content, encoding="utf-8")
+    if manifest_content is not False:
+        (staging_dir / "artifact-manifest.json").write_text(
+            manifest_content,
+            encoding="utf-8",
+        )
+
+    with pytest.raises(capture.CaptureError, match="manifest"):
+        capture._publish_staging_directory(
+            staging_dir=staging_dir,
+            output_dir=output_dir,
+        )
+
+    assert staging_dir.is_dir()
+    assert output_dir.exists() is False
+
+
+def test_publication_quarantines_payload_changed_after_rename(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "evidence"
+    staging_dir = tmp_path / ".evidence.payload"
+    staging_dir.mkdir()
+    (staging_dir / "result.json").write_text("trusted\n", encoding="utf-8")
+    capture._write_artifact_manifest(staging_dir)
+    real_rename = capture._rename_directory_noreplace_at
+    publication_mutated = False
+
+    def mutate_after_rename(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+        display_destination: Path,
+    ) -> None:
+        nonlocal publication_mutated
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            display_destination,
+        )
+        if publication_mutated:
+            return
+        publication_mutated = True
+        (display_destination / "result.json").write_text(
+            "tampered\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        capture,
+        "_rename_directory_noreplace_at",
+        mutate_after_rename,
+    )
+
+    with pytest.raises(capture.CaptureError, match="manifest"):
+        capture._publish_staging_directory(
+            staging_dir=staging_dir,
+            output_dir=output_dir,
+        )
+
+    assert output_dir.exists() is False
+    rejected = list(tmp_path.glob(".evidence.rejected-*"))
+    assert len(rejected) == 1
+
+
+def test_publication_fsyncs_payload_tree_before_rename(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "evidence"
+    staging_dir = tmp_path / ".evidence.payload"
+    nested_dir = staging_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    result_path = staging_dir / "result.json"
+    nested_path = nested_dir / "detail.txt"
+    result_path.write_text("trusted\n", encoding="utf-8")
+    nested_path.write_text("detail\n", encoding="utf-8")
+    capture._write_artifact_manifest(staging_dir)
+
+    payload_files = (
+        result_path,
+        nested_path,
+        staging_dir / "artifact-manifest.json",
+    )
+    payload_directories = (staging_dir, nested_dir)
+    expected_file_identities = {
+        capture._entry_identity(path.stat()) for path in payload_files
+    }
+    expected_directory_identities = {
+        capture._entry_identity(path.stat()) for path in payload_directories
+    }
+    synced_file_identities: set[tuple[int, int]] = set()
+    synced_directory_identities: set[tuple[int, int]] = set()
+    real_fsync = os.fsync
+    real_rename = capture._rename_directory_noreplace_at
+
+    def record_fsync(file_descriptor: int) -> None:
+        file_stat = os.fstat(file_descriptor)
+        identity = capture._entry_identity(file_stat)
+        if stat.S_ISREG(file_stat.st_mode):
+            synced_file_identities.add(identity)
+        if stat.S_ISDIR(file_stat.st_mode):
+            synced_directory_identities.add(identity)
+        real_fsync(file_descriptor)
+
+    def assert_fsync_before_rename(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+        display_destination: Path,
+    ) -> None:
+        assert expected_file_identities <= synced_file_identities
+        assert expected_directory_identities <= synced_directory_identities
+        real_rename(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            display_destination,
+        )
+
+    monkeypatch.setattr(capture.os, "fsync", record_fsync)
+    monkeypatch.setattr(
+        capture,
+        "_rename_directory_noreplace_at",
+        assert_fsync_before_rename,
+    )
+
+    capture._publish_staging_directory(
+        staging_dir=staging_dir,
+        output_dir=output_dir,
+    )
+
+    assert output_dir.is_dir()
 
 
 def test_published_directory_is_recursively_versionable(

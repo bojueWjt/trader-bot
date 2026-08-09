@@ -122,6 +122,17 @@ class CommandResult:
     invocation_error: str | bool = False
 
 
+@dataclass(frozen=True)
+class DistributionContext:
+    distribution: object
+    canonical_name: str
+    version: str
+    package_files: tuple[object, ...]
+    metadata_dir: Path
+    record_file: object
+    allowed_roots: tuple[Path, ...]
+
+
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
@@ -130,22 +141,205 @@ def _json_text(value: object) -> str:
 
 
 def _write_json(path: Path, value: object) -> None:
-    path.write_text(_json_text(value), encoding="utf-8")
+    _write_bytes(path, _json_text(value).encode("utf-8"))
 
 
 def _write_text(path: Path, value: str) -> None:
-    path.write_text(value, encoding="utf-8")
+    _write_bytes(path, value.encode("utf-8"))
 
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _regular_file_digest(path: Path) -> tuple[str, int]:
+def _directory_open_flags() -> int:
     flags = os.O_RDONLY
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    flags |= nofollow
-    fd = os.open(path, flags)
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    return flags
+
+
+def _regular_open_flags(flags: int) -> int:
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    return flags
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(path))
+
+
+def _raise_unsafe_path(path: Path, exc: OSError) -> None:
+    raise CaptureError(
+        f"evidence path contains a symlink or invalid component: {path}"
+    ) from exc
+
+
+def _open_directory_path_nofollow(
+    path: Path,
+    *,
+    create: bool = False,
+    create_mode: int = 0o755,
+) -> int:
+    absolute = _absolute_path(path)
+    directory_fd = os.open("/", _directory_open_flags())
+    try:
+        for component in absolute.parts[1:]:
+            try:
+                next_fd = os.open(
+                    component,
+                    _directory_open_flags(),
+                    dir_fd=directory_fd,
+                )
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(
+                        component,
+                        mode=create_mode,
+                        dir_fd=directory_fd,
+                    )
+                except FileExistsError:
+                    pass
+                try:
+                    next_fd = os.open(
+                        component,
+                        _directory_open_flags(),
+                        dir_fd=directory_fd,
+                    )
+                except OSError as exc:
+                    _raise_unsafe_path(absolute, exc)
+            except OSError as exc:
+                _raise_unsafe_path(absolute, exc)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def _open_regular_path_nofollow(path: Path, flags: int) -> int:
+    absolute = _absolute_path(path)
+    parent_fd = _open_directory_path_nofollow(absolute.parent)
+    try:
+        try:
+            return os.open(
+                absolute.name,
+                _regular_open_flags(flags),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            _raise_unsafe_path(absolute, exc)
+    finally:
+        os.close(parent_fd)
+
+
+def _write_bytes_at(
+    directory_fd: int,
+    relative_path: str,
+    value: bytes,
+    *,
+    display_path: Path,
+) -> None:
+    if not relative_path or "/" in relative_path or relative_path in {".", ".."}:
+        raise CaptureError(f"invalid evidence file name: {relative_path}")
+    flags = _regular_open_flags(os.O_WRONLY)
+    try:
+        fd = os.open(
+            relative_path,
+            flags,
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        try:
+            fd = os.open(
+                relative_path,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except OSError as exc:
+            _raise_unsafe_path(display_path, exc)
+    except OSError as exc:
+        _raise_unsafe_path(display_path, exc)
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise CaptureError(
+                f"evidence path is not a regular file: {display_path}"
+            )
+        os.ftruncate(fd, 0)
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(value)
+            handle.flush()
+    finally:
+        os.close(fd)
+
+
+def _write_bytes(path: Path, value: bytes) -> None:
+    absolute = _absolute_path(path)
+    parent_fd = _open_directory_path_nofollow(absolute.parent)
+    try:
+        _write_bytes_at(
+            parent_fd,
+            absolute.name,
+            value,
+            display_path=absolute,
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def _write_text_at(
+    directory_fd: int,
+    relative_path: str,
+    value: str,
+    *,
+    display_path: Path,
+) -> None:
+    _write_bytes_at(
+        directory_fd,
+        relative_path,
+        value.encode("utf-8"),
+        display_path=display_path,
+    )
+
+
+def _write_json_at(
+    directory_fd: int,
+    relative_path: str,
+    value: object,
+    *,
+    display_path: Path,
+) -> None:
+    _write_bytes_at(
+        directory_fd,
+        relative_path,
+        _json_text(value).encode("utf-8"),
+        display_path=display_path,
+    )
+
+
+def _same_file_snapshot(before: os.stat_result, after: os.stat_result) -> bool:
+    return (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+
+
+def _regular_file_digest(path: Path) -> tuple[str, int]:
+    fd = _open_regular_path_nofollow(path, os.O_RDONLY)
     return _regular_file_digest_from_fd(fd, path)
 
 
@@ -155,8 +349,8 @@ def _regular_file_digest_from_fd(
 ) -> tuple[str, int]:
     digest = hashlib.sha256()
     try:
-        file_stat = os.fstat(fd)
-        if not stat.S_ISREG(file_stat.st_mode):
+        before_stat = os.fstat(fd)
+        if not stat.S_ISREG(before_stat.st_mode):
             raise CaptureError(
                 f"evidence path is not a regular file: {display_path}"
             )
@@ -164,7 +358,12 @@ def _regular_file_digest_from_fd(
             handle.seek(0)
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
-        return digest.hexdigest(), int(file_stat.st_size)
+        after_stat = os.fstat(fd)
+        if not _same_file_snapshot(before_stat, after_stat):
+            raise CaptureError(
+                f"evidence file changed while being read: {display_path}"
+            )
+        return digest.hexdigest(), int(after_stat.st_size)
     finally:
         os.close(fd)
 
@@ -180,19 +379,43 @@ def _regular_file_bytes_at(
     *,
     display_path: Path,
 ) -> bytes:
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(relative_path, flags, dir_fd=directory_fd)
     try:
-        file_stat = os.fstat(fd)
-        if not stat.S_ISREG(file_stat.st_mode):
+        fd = os.open(
+            relative_path,
+            _regular_open_flags(os.O_RDONLY),
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        _raise_unsafe_path(display_path, exc)
+    try:
+        before_stat = os.fstat(fd)
+        if not stat.S_ISREG(before_stat.st_mode):
             raise CaptureError(
                 f"evidence path is not a regular file: {display_path}"
             )
         with os.fdopen(fd, "rb", closefd=False) as handle:
-            return handle.read()
+            value = handle.read()
+        after_stat = os.fstat(fd)
+        if not _same_file_snapshot(before_stat, after_stat):
+            raise CaptureError(
+                f"evidence file changed while being read: {display_path}"
+            )
+        return value
     finally:
         os.close(fd)
+
+
+def _regular_file_bytes(path: Path) -> bytes:
+    absolute = _absolute_path(path)
+    parent_fd = _open_directory_path_nofollow(absolute.parent)
+    try:
+        return _regular_file_bytes_at(
+            parent_fd,
+            absolute.name,
+            display_path=absolute,
+        )
+    finally:
+        os.close(parent_fd)
 
 
 def _directory_identity_from_fd(
@@ -207,10 +430,14 @@ def _directory_identity_from_fd(
 
 
 def _directory_identity(path: Path) -> tuple[int, int]:
-    directory_stat = path.stat(follow_symlinks=False)
-    if not stat.S_ISDIR(directory_stat.st_mode):
-        raise CaptureError(f"evidence path is not a directory: {path}")
-    return int(directory_stat.st_dev), int(directory_stat.st_ino)
+    directory_fd = _open_directory_path_nofollow(path)
+    try:
+        return _directory_identity_from_fd(
+            directory_fd,
+            display_path=path,
+        )
+    finally:
+        os.close(directory_fd)
 
 
 def _path_is_within(path: Path, roots: Sequence[Path]) -> bool:
@@ -218,12 +445,15 @@ def _path_is_within(path: Path, roots: Sequence[Path]) -> bool:
 
 
 def _distribution_record_file(
+    distribution: object,
     package_files: Sequence[object],
     *,
+    metadata_dir: Path,
     canonical_name: str,
     version: str,
 ) -> object:
     candidates = []
+    exact_candidates = []
     for package_file in package_files:
         relative = Path(str(package_file))
         if relative.is_absolute():
@@ -233,25 +463,91 @@ def _distribution_record_file(
         if not relative.parent.name.endswith(".dist-info"):
             continue
         candidates.append(package_file)
-    if len(candidates) != 1:
-        raise CaptureError(
-            f"distribution lacks RECORD inventory: {canonical_name}=={version}"
-        )
-    return candidates[0]
-
-
-def _distribution_allowed_roots(record_path: Path) -> tuple[Path, ...]:
-    roots = {record_path.parent.parent.resolve(strict=True)}
-    configured_paths = sysconfig.get_paths()
-    for key in ("data", "headers", "platlib", "purelib", "scripts"):
-        configured = configured_paths.get(key)
-        if not configured:
-            continue
-        root = Path(configured)
+        located = _absolute_path(Path(distribution.locate_file(package_file)))
         try:
-            roots.add(root.resolve(strict=True))
+            located_parent = located.parent.resolve(strict=True)
         except OSError:
             continue
+        if located_parent == metadata_dir:
+            exact_candidates.append(package_file)
+    if len(exact_candidates) == 1:
+        return exact_candidates[0]
+    if candidates:
+        raise CaptureError(
+            "distribution lacks exact RECORD binding: "
+            f"{canonical_name}=={version}"
+        )
+    raise CaptureError(
+        f"distribution lacks RECORD inventory: {canonical_name}=={version}"
+    )
+
+
+def _distribution_metadata_directory(
+    distribution: object,
+    *,
+    canonical_name: str,
+    version: str,
+) -> Path:
+    metadata_path = getattr(distribution, "_path", False)
+    if metadata_path is False:
+        raise CaptureError(
+            "distribution metadata directory is unavailable: "
+            f"{canonical_name}=={version}"
+        )
+    try:
+        metadata_dir = Path(metadata_path).resolve(strict=True)
+    except OSError as exc:
+        raise CaptureError(
+            "distribution metadata directory is unavailable: "
+            f"{canonical_name}=={version}"
+        ) from exc
+    if not metadata_dir.name.endswith(".dist-info"):
+        raise CaptureError(
+            "distribution metadata directory is not dist-info: "
+            f"{canonical_name}=={version}: {metadata_dir}"
+        )
+    if not metadata_dir.is_dir():
+        raise CaptureError(
+            "distribution metadata directory is unavailable: "
+            f"{canonical_name}=={version}"
+        )
+    return metadata_dir
+
+
+def _distribution_allowed_roots(metadata_dir: Path) -> tuple[Path, ...]:
+    install_library_root = metadata_dir.parent.resolve(strict=True)
+    roots = {install_library_root}
+    for scheme in sysconfig.get_scheme_names():
+        try:
+            configured_paths = sysconfig.get_paths(scheme=scheme)
+        except (KeyError, TypeError, ValueError):
+            continue
+        library_roots = set()
+        for key in ("platlib", "purelib"):
+            configured = configured_paths.get(key)
+            if not configured:
+                continue
+            try:
+                library_roots.add(Path(configured).resolve(strict=True))
+            except OSError:
+                continue
+        if install_library_root not in library_roots:
+            continue
+        for key in (
+            "data",
+            "include",
+            "platinclude",
+            "platlib",
+            "purelib",
+            "scripts",
+        ):
+            configured = configured_paths.get(key)
+            if not configured:
+                continue
+            try:
+                roots.add(Path(configured).resolve(strict=True))
+            except OSError:
+                continue
     return tuple(sorted(roots, key=lambda item: os.fsencode(item)))
 
 
@@ -260,6 +556,7 @@ def _safe_distribution_file(
     package_file: object,
     *,
     allowed_roots: Sequence[Path],
+    metadata_dir: Path,
     canonical_name: str,
     version: str,
 ) -> Path:
@@ -282,6 +579,14 @@ def _safe_distribution_file(
             "distribution contains unsafe installed file path: "
             f"{canonical_name}=={version}: {relative.as_posix()}"
         )
+    for parent in resolved.parents:
+        if not parent.name.endswith(".dist-info"):
+            continue
+        if parent != metadata_dir:
+            raise CaptureError(
+                "distribution contains cross-distribution metadata path: "
+                f"{canonical_name}=={version}: {relative.as_posix()}"
+            )
     return resolved
 
 
@@ -540,9 +845,11 @@ def _installed_distributions() -> list[tuple[str, str]]:
     return installed
 
 
-def _distribution_artifact_records() -> list[dict[str, object]]:
-    records = []
-    for distribution in metadata.distributions():
+def _distribution_contexts(
+    distributions: Sequence[object],
+) -> tuple[DistributionContext, ...]:
+    contexts = []
+    for distribution in distributions:
         name = distribution.metadata.get("Name")
         if not name:
             name = "unknown-distribution"
@@ -554,50 +861,110 @@ def _distribution_artifact_records() -> list[dict[str, object]]:
                 f"distribution lacks installed file inventory: "
                 f"{canonical_name}=={version}"
             )
-        record_file = _distribution_record_file(
-            package_files,
+        metadata_dir = _distribution_metadata_directory(
+            distribution,
             canonical_name=canonical_name,
             version=version,
         )
-        record_relative_path = Path(str(record_file))
-        record_path = Path(distribution.locate_file(record_file))
-        try:
-            record_path = record_path.resolve(strict=True)
-        except OSError as exc:
-            raise CaptureError(
-                "distribution installed file is unavailable: "
-                f"{canonical_name}=={version}: "
-                f"{record_relative_path.as_posix()}"
-            ) from exc
-        allowed_roots = _distribution_allowed_roots(record_path)
-        metadata_relative_dir = record_relative_path.parent
-        evidence_files = []
-        installed_files = []
-        editable = False
+        record_file = _distribution_record_file(
+            distribution,
+            package_files,
+            metadata_dir=metadata_dir,
+            canonical_name=canonical_name,
+            version=version,
+        )
+        contexts.append(
+            DistributionContext(
+                distribution=distribution,
+                canonical_name=canonical_name,
+                version=version,
+                package_files=package_files,
+                metadata_dir=metadata_dir,
+                record_file=record_file,
+                allowed_roots=_distribution_allowed_roots(metadata_dir),
+            )
+        )
+    return tuple(contexts)
+
+
+def _distribution_resolved_files(
+    contexts: Sequence[DistributionContext],
+) -> tuple[tuple[tuple[object, Path, Path], ...], ...]:
+    resolved_by_distribution = []
+    owners: dict[Path, list[tuple[int, str]]] = {}
+    for context_index, context in enumerate(contexts):
+        resolved_files = []
         seen_relative_paths = set()
         seen_resolved_paths = set()
-        for package_file in package_files:
+        for package_file in context.package_files:
             package_relative_path = Path(str(package_file))
             relative_path = package_relative_path.as_posix()
             if relative_path in seen_relative_paths:
                 raise CaptureError(
                     "distribution contains duplicate installed file path: "
-                    f"{canonical_name}=={version}: {relative_path}"
+                    f"{context.canonical_name}=={context.version}: {relative_path}"
                 )
             seen_relative_paths.add(relative_path)
             path = _safe_distribution_file(
-                distribution,
+                context.distribution,
                 package_file,
-                allowed_roots=allowed_roots,
-                canonical_name=canonical_name,
-                version=version,
+                allowed_roots=context.allowed_roots,
+                metadata_dir=context.metadata_dir,
+                canonical_name=context.canonical_name,
+                version=context.version,
             )
             if path in seen_resolved_paths:
                 raise CaptureError(
                     "distribution contains duplicate installed file identity: "
-                    f"{canonical_name}=={version}: {relative_path}"
+                    f"{context.canonical_name}=={context.version}: {relative_path}"
                 )
             seen_resolved_paths.add(path)
+            resolved_files.append(
+                (
+                    package_file,
+                    package_relative_path,
+                    path,
+                )
+            )
+            owners.setdefault(path, []).append((context_index, relative_path))
+        resolved_by_distribution.append(tuple(resolved_files))
+
+    for path, path_owners in owners.items():
+        distribution_indexes = {item[0] for item in path_owners}
+        if len(distribution_indexes) < 2:
+            continue
+        owner_names = sorted(
+            {
+                (
+                    f"{contexts[index].canonical_name}=="
+                    f"{contexts[index].version}"
+                )
+                for index in distribution_indexes
+            }
+        )
+        raise CaptureError(
+            "cross-distribution installed file identity: "
+            f"{path}: {', '.join(owner_names)}"
+        )
+    return tuple(resolved_by_distribution)
+
+
+def _distribution_artifact_records() -> list[dict[str, object]]:
+    contexts = _distribution_contexts(tuple(metadata.distributions()))
+    resolved_by_distribution = _distribution_resolved_files(contexts)
+    records = []
+    for context, resolved_files in zip(
+        contexts,
+        resolved_by_distribution,
+        strict=True,
+    ):
+        record_relative_path = Path(str(context.record_file))
+        metadata_relative_dir = record_relative_path.parent
+        evidence_files = []
+        installed_files = []
+        editable = False
+        for _package_file, package_relative_path, path in resolved_files:
+            relative_path = package_relative_path.as_posix()
             installed_record = _distribution_file_record(path, relative_path)
             installed_files.append(installed_record)
             evidence_name = package_relative_path.name
@@ -606,9 +973,20 @@ def _distribution_artifact_records() -> list[dict[str, object]]:
             if evidence_name not in DIST_INFO_EVIDENCE_FILES:
                 continue
             if evidence_name == "direct_url.json":
+                direct_url_bytes = _regular_file_bytes(path)
+                if (
+                    _sha256_bytes(direct_url_bytes)
+                    != installed_record["sha256"]
+                ):
+                    raise CaptureError(
+                        "distribution installed file changed while "
+                        f"being recorded: {relative_path}"
+                    )
                 try:
-                    direct_url = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, TypeError, ValueError):
+                    direct_url = json.loads(
+                        direct_url_bytes.decode("utf-8")
+                    )
+                except (TypeError, UnicodeError, ValueError):
                     direct_url = {}
                 dir_info = direct_url.get("dir_info")
                 if isinstance(dir_info, dict):
@@ -624,8 +1002,8 @@ def _distribution_artifact_records() -> list[dict[str, object]]:
         installed_files.sort(key=lambda item: str(item["path"]).encode("utf-8"))
         records.append(
             {
-                "name": canonical_name,
-                "version": version,
+                "name": context.canonical_name,
+                "version": context.version,
                 "editable": editable,
                 "metadata_files": evidence_files,
                 "installed_files": installed_files,
@@ -980,7 +1358,7 @@ def _normalized_config(config: CaptureConfig) -> CaptureConfig:
     )
 
 
-def _write_placeholder_junit(path: Path, suite_name: str) -> None:
+def _placeholder_junit_bytes(suite_name: str) -> bytes:
     testsuites = ET.Element(
         "testsuites",
         {
@@ -1012,20 +1390,297 @@ def _write_placeholder_junit(path: Path, suite_name: str) -> None:
             "message": "pytest did not create JUnit XML",
         },
     )
-    tree = ET.ElementTree(testsuites)
-    tree.write(path, encoding="utf-8", xml_declaration=True)
-    with path.open("ab") as handle:
-        handle.write(b"\n")
+    return (
+        ET.tostring(
+            testsuites,
+            encoding="utf-8",
+            xml_declaration=True,
+        )
+        + b"\n"
+    )
 
 
-def _sanitize_file(path: Path, secret_values: Sequence[str]) -> None:
-    flags = os.O_RDWR
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
+def _write_placeholder_junit(path: Path, suite_name: str) -> None:
+    _write_bytes(path, _placeholder_junit_bytes(suite_name))
+
+
+def _entry_identity(file_stat: os.stat_result) -> tuple[int, int]:
+    return int(file_stat.st_dev), int(file_stat.st_ino)
+
+
+def _entry_stat_at(
+    directory_fd: int,
+    name: str,
+    *,
+    display_path: Path,
+) -> os.stat_result:
     try:
-        file_stat = os.fstat(fd)
-        if not stat.S_ISREG(file_stat.st_mode):
-            raise CaptureError(f"evidence path is not a regular file: {path}")
+        return os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        _raise_unsafe_path(display_path, exc)
+
+
+def _directory_entry_identity(
+    directory_fd: int,
+    name: str,
+    *,
+    display_path: Path,
+) -> tuple[int, int]:
+    entry_stat = _entry_stat_at(
+        directory_fd,
+        name,
+        display_path=display_path,
+    )
+    if stat.S_ISLNK(entry_stat.st_mode):
+        raise CaptureError(
+            f"evidence path contains a symlink or invalid component: {display_path}"
+        )
+    if not stat.S_ISDIR(entry_stat.st_mode):
+        raise CaptureError(f"evidence path is not a directory: {display_path}")
+    return _entry_identity(entry_stat)
+
+
+def _verify_directory_path_identity(
+    path: Path,
+    directory_fd: int,
+    *,
+    description: str,
+) -> None:
+    try:
+        path_fd = _open_directory_path_nofollow(path)
+    except OSError as exc:
+        raise CaptureError(f"{description} is unavailable: {path}") from exc
+    try:
+        expected_identity = _directory_identity_from_fd(
+            directory_fd,
+            display_path=path,
+        )
+        path_identity = _directory_identity_from_fd(
+            path_fd,
+            display_path=path,
+        )
+    finally:
+        os.close(path_fd)
+    if path_identity != expected_identity:
+        raise CaptureError(f"{description} identity changed: {path}")
+
+
+def _open_directory_entry(
+    directory_fd: int,
+    name: str,
+    *,
+    expected_stat: os.stat_result,
+    display_path: Path,
+) -> int:
+    try:
+        child_fd = os.open(
+            name,
+            _directory_open_flags(),
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        _raise_unsafe_path(display_path, exc)
+    child_stat = os.fstat(child_fd)
+    if _entry_identity(child_stat) != _entry_identity(expected_stat):
+        os.close(child_fd)
+        raise CaptureError(
+            f"evidence directory identity changed: {display_path}"
+        )
+    return child_fd
+
+
+def _open_regular_entry(
+    directory_fd: int,
+    name: str,
+    *,
+    flags: int,
+    expected_stat: os.stat_result,
+    display_path: Path,
+) -> int:
+    try:
+        file_fd = os.open(
+            name,
+            _regular_open_flags(flags),
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        _raise_unsafe_path(display_path, exc)
+    file_stat = os.fstat(file_fd)
+    if not stat.S_ISREG(file_stat.st_mode):
+        os.close(file_fd)
+        raise CaptureError(
+            f"evidence path is not a regular file: {display_path}"
+        )
+    if _entry_identity(file_stat) != _entry_identity(expected_stat):
+        os.close(file_fd)
+        raise CaptureError(
+            f"evidence file identity changed: {display_path}"
+        )
+    return file_fd
+
+
+def _payload_entries(directory_fd: int) -> list[os.DirEntry]:
+    with os.scandir(directory_fd) as iterator:
+        return sorted(
+            iterator,
+            key=lambda item: os.fsencode(item.name),
+        )
+
+
+def _regular_file_exists_at(
+    directory_fd: int,
+    relative_path: str,
+    *,
+    display_path: Path,
+) -> bool:
+    try:
+        file_stat = os.stat(
+            relative_path,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(file_stat.st_mode):
+        raise CaptureError(
+            f"evidence payload contains a symlink: {relative_path}"
+        )
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise CaptureError(
+            f"evidence path is not a regular file: {display_path}"
+        )
+    return True
+
+
+def _sanitize_regular_file_at(
+    directory_fd: int,
+    relative_path: str,
+    *,
+    display_path: Path,
+    secret_values: Sequence[str],
+) -> str:
+    entry_stat = _entry_stat_at(
+        directory_fd,
+        relative_path,
+        display_path=display_path,
+    )
+    if stat.S_ISLNK(entry_stat.st_mode):
+        raise CaptureError(
+            f"evidence payload contains a symlink: {relative_path}"
+        )
+    if not stat.S_ISREG(entry_stat.st_mode):
+        raise CaptureError(
+            f"evidence path is not a regular file: {display_path}"
+        )
+    file_fd = _open_regular_entry(
+        directory_fd,
+        relative_path,
+        flags=os.O_RDWR,
+        expected_stat=entry_stat,
+        display_path=display_path,
+    )
+    return _sanitize_file_from_fd(
+        file_fd,
+        display_path,
+        secret_values,
+    )
+
+
+def _payload_artifact_records_from_fd(
+    directory_fd: int,
+    *,
+    display_dir: Path,
+    relative_dir: str = "",
+) -> list[dict[str, object]]:
+    artifacts = []
+    for entry in _payload_entries(directory_fd):
+        relative_path = entry.name
+        if relative_dir:
+            relative_path = f"{relative_dir}/{entry.name}"
+        display_path = display_dir / relative_path
+        entry_stat = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise CaptureError(
+                f"evidence payload contains a symlink: {relative_path}"
+            )
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = _open_directory_entry(
+                directory_fd,
+                entry.name,
+                expected_stat=entry_stat,
+                display_path=display_path,
+            )
+            try:
+                child_artifacts = _payload_artifact_records_from_fd(
+                    child_fd,
+                    display_dir=display_dir,
+                    relative_dir=relative_path,
+                )
+            finally:
+                os.close(child_fd)
+            if not child_artifacts:
+                raise CaptureError(
+                    "evidence payload contains an empty directory: "
+                    f"{relative_path}"
+                )
+            artifacts.extend(child_artifacts)
+            continue
+        if not stat.S_ISREG(entry_stat.st_mode):
+            raise CaptureError(
+                "evidence payload contains an unsupported file type: "
+                f"{relative_path}"
+            )
+        if relative_path == "artifact-manifest.json":
+            continue
+        file_fd = _open_regular_entry(
+            directory_fd,
+            entry.name,
+            flags=os.O_RDONLY,
+            expected_stat=entry_stat,
+            display_path=display_path,
+        )
+        digest, size = _regular_file_digest_from_fd(file_fd, display_path)
+        artifacts.append(
+            {
+                "path": relative_path,
+                "sha256": digest,
+                "size": size,
+            }
+        )
+    return artifacts
+
+
+def _artifact_manifest_from_fd(
+    directory_fd: int,
+    *,
+    display_dir: Path,
+) -> dict:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "algorithm": "sha256",
+        "manifest_excludes": ["artifact-manifest.json"],
+        "artifacts": _payload_artifact_records_from_fd(
+            directory_fd,
+            display_dir=display_dir,
+        ),
+    }
+
+
+def _sanitize_file_from_fd(
+    fd: int,
+    display_path: Path,
+    secret_values: Sequence[str],
+) -> str:
+    try:
+        before_stat = os.fstat(fd)
+        if not stat.S_ISREG(before_stat.st_mode):
+            raise CaptureError(
+                f"evidence path is not a regular file: {display_path}"
+            )
         with os.fdopen(
             fd,
             "r+",
@@ -1034,64 +1689,207 @@ def _sanitize_file(path: Path, secret_values: Sequence[str]) -> None:
             closefd=False,
         ) as handle:
             content = handle.read()
+            before_write_stat = os.fstat(fd)
+            if not _same_file_snapshot(before_stat, before_write_stat):
+                raise CaptureError(
+                    f"evidence file changed while being read: {display_path}"
+                )
             sanitized = _sanitize_text(content, secret_values)
             handle.seek(0)
             handle.write(sanitized)
             handle.truncate()
             handle.flush()
             os.fsync(handle.fileno())
+        return content
     finally:
         os.close(fd)
+
+
+def _sanitize_file(path: Path, secret_values: Sequence[str]) -> None:
+    fd = _open_regular_path_nofollow(path, os.O_RDWR)
+    _sanitize_file_from_fd(fd, path, secret_values)
+
+
+def _sanitize_staging_files_from_fd(
+    directory_fd: int,
+    *,
+    display_dir: Path,
+    secret_values: Sequence[str],
+    relative_dir: str = "",
+) -> None:
+    for entry in _payload_entries(directory_fd):
+        relative_path = entry.name
+        if relative_dir:
+            relative_path = f"{relative_dir}/{entry.name}"
+        display_path = display_dir / relative_path
+        entry_stat = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise CaptureError(
+                f"evidence payload contains a symlink: {relative_path}"
+            )
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = _open_directory_entry(
+                directory_fd,
+                entry.name,
+                expected_stat=entry_stat,
+                display_path=display_path,
+            )
+            try:
+                _sanitize_staging_files_from_fd(
+                    child_fd,
+                    display_dir=display_dir,
+                    secret_values=secret_values,
+                    relative_dir=relative_path,
+                )
+            finally:
+                os.close(child_fd)
+            continue
+        if not stat.S_ISREG(entry_stat.st_mode):
+            raise CaptureError(
+                "evidence payload contains an unsupported file type: "
+                f"{relative_path}"
+            )
+        file_fd = _open_regular_entry(
+            directory_fd,
+            entry.name,
+            flags=os.O_RDWR,
+            expected_stat=entry_stat,
+            display_path=display_path,
+        )
+        _sanitize_file_from_fd(file_fd, display_path, secret_values)
 
 
 def _sanitize_staging_files(
     staging_dir: Path,
     secret_values: Sequence[str],
 ) -> None:
-    for path in staging_dir.rglob("*"):
-        if path.is_symlink():
-            continue
-        if not path.is_file():
-            continue
-        _sanitize_file(path, secret_values)
+    directory_fd = _open_directory_path_nofollow(staging_dir)
+    try:
+        _sanitize_staging_files_from_fd(
+            directory_fd,
+            display_dir=staging_dir,
+            secret_values=secret_values,
+        )
+    finally:
+        os.close(directory_fd)
 
 
 def _artifact_manifest(staging_dir: Path) -> dict:
-    artifacts = []
-    for path in sorted(
-        staging_dir.rglob("*"),
-        key=lambda item: item.relative_to(staging_dir).as_posix(),
-    ):
-        relative_path = path.relative_to(staging_dir).as_posix()
-        if path.is_symlink():
+    directory_fd = _open_directory_path_nofollow(staging_dir)
+    try:
+        return _artifact_manifest_from_fd(
+            directory_fd,
+            display_dir=staging_dir,
+        )
+    finally:
+        os.close(directory_fd)
+
+
+def _write_artifact_manifest(
+    staging_dir: Path,
+    *,
+    directory_fd: int | None = None,
+) -> None:
+    owned_fd = False
+    active_fd = directory_fd
+    if active_fd is None:
+        active_fd = _open_directory_path_nofollow(staging_dir)
+        owned_fd = True
+    try:
+        manifest = _artifact_manifest_from_fd(
+            active_fd,
+            display_dir=staging_dir,
+        )
+        _write_json_at(
+            active_fd,
+            "artifact-manifest.json",
+            manifest,
+            display_path=staging_dir / "artifact-manifest.json",
+        )
+    finally:
+        if owned_fd is True:
+            os.close(active_fd)
+
+
+def _validated_manifest_bytes_from_fd(
+    directory_fd: int,
+    *,
+    display_dir: Path,
+) -> bytes:
+    manifest_path = display_dir / "artifact-manifest.json"
+    manifest_bytes = _regular_file_bytes_at(
+        directory_fd,
+        "artifact-manifest.json",
+        display_path=manifest_path,
+    )
+    try:
+        stored_manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise CaptureError(
+            f"evidence artifact manifest is malformed: {manifest_path}"
+        ) from exc
+    expected_manifest = _artifact_manifest_from_fd(
+        directory_fd,
+        display_dir=display_dir,
+    )
+    expected_bytes = _json_text(expected_manifest).encode("utf-8")
+    if stored_manifest != expected_manifest or manifest_bytes != expected_bytes:
+        raise CaptureError(
+            "evidence artifact manifest does not match payload: "
+            f"{manifest_path}"
+        )
+    return manifest_bytes
+
+
+def _fsync_payload_tree_from_fd(
+    directory_fd: int,
+    *,
+    display_dir: Path,
+    relative_dir: str = "",
+) -> None:
+    for entry in _payload_entries(directory_fd):
+        relative_path = entry.name
+        if relative_dir:
+            relative_path = f"{relative_dir}/{entry.name}"
+        display_path = display_dir / relative_path
+        entry_stat = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(entry_stat.st_mode):
             raise CaptureError(
                 f"evidence payload contains a symlink: {relative_path}"
             )
-        if not path.is_file():
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = _open_directory_entry(
+                directory_fd,
+                entry.name,
+                expected_stat=entry_stat,
+                display_path=display_path,
+            )
+            try:
+                _fsync_payload_tree_from_fd(
+                    child_fd,
+                    display_dir=display_dir,
+                    relative_dir=relative_path,
+                )
+            finally:
+                os.close(child_fd)
             continue
-        if relative_path == "artifact-manifest.json":
-            continue
-        digest, size = _regular_file_digest(path)
-        artifacts.append(
-            {
-                "path": relative_path,
-                "sha256": digest,
-                "size": size,
-            }
+        if not stat.S_ISREG(entry_stat.st_mode):
+            raise CaptureError(
+                "evidence payload contains an unsupported file type: "
+                f"{relative_path}"
+            )
+        file_fd = _open_regular_entry(
+            directory_fd,
+            entry.name,
+            flags=os.O_RDONLY,
+            expected_stat=entry_stat,
+            display_path=display_path,
         )
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "algorithm": "sha256",
-        "manifest_excludes": ["artifact-manifest.json"],
-        "artifacts": artifacts,
-    }
-
-
-def _write_artifact_manifest(staging_dir: Path) -> None:
-    _write_json(
-        staging_dir / "artifact-manifest.json",
-        _artifact_manifest(staging_dir),
-    )
+        try:
+            os.fsync(file_fd)
+        finally:
+            os.close(file_fd)
+    os.fsync(directory_fd)
 
 
 def _normalized_exit_code(exit_code: int) -> int:
@@ -1125,6 +1923,7 @@ def _capture_into_staging(
     *,
     config: CaptureConfig,
     staging_dir: Path,
+    staging_fd: int,
     runner: Runner,
     environ: Mapping[str, str],
     distributions: Iterable[tuple[str, str]] | None,
@@ -1251,11 +2050,24 @@ def _capture_into_staging(
     if pytest_run.invocation_error:
         capture_errors.append(str(pytest_run.invocation_error))
 
-    junit_generated_by_pytest = junit_path.is_file()
+    junit_generated_by_pytest = _regular_file_exists_at(
+        staging_fd,
+        "junit.xml",
+        display_path=junit_path,
+    )
     if not junit_generated_by_pytest:
-        _write_placeholder_junit(junit_path, config.suite_name)
-    junit_content = junit_path.read_text(encoding="utf-8", errors="replace")
-    _sanitize_file(junit_path, secret_values)
+        _write_bytes_at(
+            staging_fd,
+            "junit.xml",
+            _placeholder_junit_bytes(config.suite_name),
+            display_path=junit_path,
+        )
+    junit_content = _sanitize_regular_file_at(
+        staging_fd,
+        "junit.xml",
+        display_path=junit_path,
+        secret_values=secret_values,
+    )
     junit_report = _junit_report_text(junit_content, config.repo_root)
     executed_nodeids = [str(nodeid) for nodeid in junit_report["nodeids"]]
     executed_nodeids_content = _nodeids_text_bytes(executed_nodeids)
@@ -1294,98 +2106,155 @@ def _capture_into_staging(
     collected_nodeid_count = len(collected_nodeids)
     junit_test_count = int(junit_report["test_count"])
 
-    _write_text(
-        staging_dir / "git-head.txt",
+    _write_text_at(
+        staging_fd,
+        "git-head.txt",
         _sanitize_text(git_head.stdout, secret_values),
+        display_path=staging_dir / "git-head.txt",
     )
-    _write_text(
-        staging_dir / "git-head.stderr.txt",
+    _write_text_at(
+        staging_fd,
+        "git-head.stderr.txt",
         _sanitize_text(git_head.stderr, secret_values),
+        display_path=staging_dir / "git-head.stderr.txt",
     )
-    _write_text(
-        staging_dir / "git-head.exit-code.txt",
+    _write_text_at(
+        staging_fd,
+        "git-head.exit-code.txt",
         f"{git_head.exit_code}\n",
+        display_path=staging_dir / "git-head.exit-code.txt",
     )
-    _write_text(
-        staging_dir / "git-status.txt",
+    _write_text_at(
+        staging_fd,
+        "git-status.txt",
         _sanitize_text(git_status.stdout, secret_values),
+        display_path=staging_dir / "git-status.txt",
     )
-    _write_text(
-        staging_dir / "git-status.stderr.txt",
+    _write_text_at(
+        staging_fd,
+        "git-status.stderr.txt",
         _sanitize_text(git_status.stderr, secret_values),
+        display_path=staging_dir / "git-status.stderr.txt",
     )
-    _write_text(
-        staging_dir / "git-status.exit-code.txt",
+    _write_text_at(
+        staging_fd,
+        "git-status.exit-code.txt",
         f"{git_status.exit_code}\n",
+        display_path=staging_dir / "git-status.exit-code.txt",
     )
-    _write_json(
-        staging_dir / "python-platform.json",
+    _write_json_at(
+        staging_fd,
+        "python-platform.json",
         python_platform,
+        display_path=staging_dir / "python-platform.json",
     )
-    _write_json(
-        staging_dir / "environment.json",
+    _write_json_at(
+        staging_fd,
+        "environment.json",
         environment_manifest,
+        display_path=staging_dir / "environment.json",
     )
-    (staging_dir / "distributions.txt").write_bytes(distributions_content)
-    _write_text(
-        staging_dir / "distributions.sha256.txt",
+    _write_bytes_at(
+        staging_fd,
+        "distributions.txt",
+        distributions_content,
+        display_path=staging_dir / "distributions.txt",
+    )
+    _write_text_at(
+        staging_fd,
+        "distributions.sha256.txt",
         f"{distributions_hash}\n",
+        display_path=staging_dir / "distributions.sha256.txt",
     )
-    (staging_dir / "distribution-artifacts.json").write_bytes(
-        distribution_artifact_content
+    _write_bytes_at(
+        staging_fd,
+        "distribution-artifacts.json",
+        distribution_artifact_content,
+        display_path=staging_dir / "distribution-artifacts.json",
     )
-    _write_text(
-        staging_dir / "distribution-artifacts.sha256.txt",
+    _write_text_at(
+        staging_fd,
+        "distribution-artifacts.sha256.txt",
         f"{distribution_artifact_hash}\n",
+        display_path=staging_dir / "distribution-artifacts.sha256.txt",
     )
-    _write_text(
-        staging_dir / "collect.stdout.txt",
+    _write_text_at(
+        staging_fd,
+        "collect.stdout.txt",
         sanitized_collect_stdout,
+        display_path=staging_dir / "collect.stdout.txt",
     )
-    _write_text(
-        staging_dir / "collect.stderr.txt",
+    _write_text_at(
+        staging_fd,
+        "collect.stderr.txt",
         _sanitize_text(collect.stderr, secret_values),
+        display_path=staging_dir / "collect.stderr.txt",
     )
-    _write_text(
-        staging_dir / "collect.exit-code.txt",
+    _write_text_at(
+        staging_fd,
+        "collect.exit-code.txt",
         f"{collect.exit_code}\n",
+        display_path=staging_dir / "collect.exit-code.txt",
     )
-    (staging_dir / "nodeids.txt").write_bytes(sanitized_nodeids_content)
-    _write_text(
-        staging_dir / "nodeids.sha256.txt",
+    _write_bytes_at(
+        staging_fd,
+        "nodeids.txt",
+        sanitized_nodeids_content,
+        display_path=staging_dir / "nodeids.txt",
+    )
+    _write_text_at(
+        staging_fd,
+        "nodeids.sha256.txt",
         f"{nodeids_hash}\n",
+        display_path=staging_dir / "nodeids.sha256.txt",
     )
-    (staging_dir / "executed-nodeids.txt").write_bytes(sanitized_executed_nodeids)
-    _write_text(
-        staging_dir / "executed-nodeids.sha256.txt",
+    _write_bytes_at(
+        staging_fd,
+        "executed-nodeids.txt",
+        sanitized_executed_nodeids,
+        display_path=staging_dir / "executed-nodeids.txt",
+    )
+    _write_text_at(
+        staging_fd,
+        "executed-nodeids.sha256.txt",
         f"{executed_nodeids_hash}\n",
+        display_path=staging_dir / "executed-nodeids.sha256.txt",
     )
-    _write_text(
-        staging_dir / "pytest.stdout.txt",
+    _write_text_at(
+        staging_fd,
+        "pytest.stdout.txt",
         _sanitize_text(pytest_run.stdout, secret_values),
+        display_path=staging_dir / "pytest.stdout.txt",
     )
-    _write_text(
-        staging_dir / "pytest.stderr.txt",
+    _write_text_at(
+        staging_fd,
+        "pytest.stderr.txt",
         _sanitize_text(pytest_run.stderr, secret_values),
+        display_path=staging_dir / "pytest.stderr.txt",
     )
-    _write_text(
-        staging_dir / "pytest.exit-code.txt",
+    _write_text_at(
+        staging_fd,
+        "pytest.exit-code.txt",
         f"{pytest_run.exit_code}\n",
+        display_path=staging_dir / "pytest.exit-code.txt",
     )
-    _write_json(
-        staging_dir / "test-report.json",
+    _write_json_at(
+        staging_fd,
+        "test-report.json",
         _sanitized_test_report(
             junit_report=junit_report,
             warning_report=warning_report,
             secret_values=secret_values,
         ),
+        display_path=staging_dir / "test-report.json",
     )
 
     path_replacements = {
         str(staging_dir): str(config.output_dir),
     }
-    _write_json(
-        staging_dir / "commands.json",
+    _write_json_at(
+        staging_fd,
+        "commands.json",
         {
             "schema_version": SCHEMA_VERSION,
             "suite_name": config.suite_name,
@@ -1421,6 +2290,7 @@ def _capture_into_staging(
                 "exit_code": pytest_run.exit_code,
             },
         },
+        display_path=staging_dir / "commands.json",
     )
 
     result_exit_code = _result_exit_code(
@@ -1436,8 +2306,9 @@ def _capture_into_staging(
     sanitized_errors = [
         _sanitize_text(message, secret_values) for message in capture_errors
     ]
-    _write_json(
-        staging_dir / "result.json",
+    _write_json_at(
+        staging_fd,
+        "result.json",
         {
             "schema_version": SCHEMA_VERSION,
             "suite_name": config.suite_name,
@@ -1465,33 +2336,45 @@ def _capture_into_staging(
             "known_secret_values_are_sanitized": True,
             "child_environment_overrides": CHILD_ENVIRONMENT_OVERRIDES,
         },
+        display_path=staging_dir / "result.json",
     )
-    _write_artifact_manifest(staging_dir)
+    _write_artifact_manifest(
+        staging_dir,
+        directory_fd=staging_fd,
+    )
     return result_exit_code
 
 
 def _write_unexpected_failure(
     *,
     staging_dir: Path,
+    staging_fd: int,
     config: CaptureConfig,
     exc: Exception,
     secret_values: Sequence[str],
 ) -> None:
-    _sanitize_staging_files(staging_dir, secret_values)
+    _sanitize_staging_files_from_fd(
+        staging_fd,
+        display_dir=staging_dir,
+        secret_values=secret_values,
+    )
     error_message = _sanitize_text(
         f"{type(exc).__name__}: {exc}",
         secret_values,
     )
-    _write_json(
-        staging_dir / "capture-error.json",
+    _write_json_at(
+        staging_fd,
+        "capture-error.json",
         {
             "schema_version": SCHEMA_VERSION,
             "suite_name": config.suite_name,
             "error": error_message,
         },
+        display_path=staging_dir / "capture-error.json",
     )
-    _write_json(
-        staging_dir / "result.json",
+    _write_json_at(
+        staging_fd,
+        "result.json",
         {
             "schema_version": SCHEMA_VERSION,
             "suite_name": config.suite_name,
@@ -1500,8 +2383,12 @@ def _write_unexpected_failure(
             "capture_errors": [error_message],
             "known_secret_values_are_sanitized": True,
         },
+        display_path=staging_dir / "result.json",
     )
-    _write_artifact_manifest(staging_dir)
+    _write_artifact_manifest(
+        staging_dir,
+        directory_fd=staging_fd,
+    )
 
 
 def capture_runtime_evidence(
@@ -1520,138 +2407,294 @@ def capture_runtime_evidence(
     }
     secret_values = _known_secret_values(environment, normalized.pytest_args)
 
-    normalized.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    output_parent = normalized.output_dir.parent
+    parent_fd = _open_directory_path_nofollow(
+        output_parent,
+        create=True,
+    )
     staging_dir = normalized.output_dir.with_name(
         f".{normalized.output_dir.name}.payload"
     )
+    staging_fd: int | None = None
     try:
-        staging_dir.mkdir(mode=0o700)
-    except FileExistsError as exc:
-        raise CaptureError(f"evidence payload already exists: {staging_dir}") from exc
-
-    result_exit_code = 2
-    try:
-        result_exit_code = _capture_into_staging(
-            config=normalized,
-            staging_dir=staging_dir,
-            runner=runner,
-            environ=environment,
-            distributions=distributions,
+        _verify_directory_path_identity(
+            output_parent,
+            parent_fd,
+            description="evidence output parent",
         )
-    except Exception as exc:  # noqa: BLE001 - preserve unexpected capture evidence.
         try:
-            _write_unexpected_failure(
+            os.stat(
+                normalized.output_dir.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _raise_unsafe_path(normalized.output_dir, exc)
+        else:
+            raise CaptureError(
+                f"output directory already exists: {normalized.output_dir}"
+            )
+
+        try:
+            os.mkdir(
+                staging_dir.name,
+                mode=0o700,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError as exc:
+            raise CaptureError(
+                f"evidence payload already exists: {staging_dir}"
+            ) from exc
+        except OSError as exc:
+            _raise_unsafe_path(staging_dir, exc)
+
+        staging_stat = _entry_stat_at(
+            parent_fd,
+            staging_dir.name,
+            display_path=staging_dir,
+        )
+        if not stat.S_ISDIR(staging_stat.st_mode):
+            raise CaptureError(
+                f"evidence staging path is not a directory: {staging_dir}"
+            )
+        staging_fd = _open_directory_entry(
+            parent_fd,
+            staging_dir.name,
+            expected_stat=staging_stat,
+            display_path=staging_dir,
+        )
+
+        result_exit_code = 2
+        try:
+            result_exit_code = _capture_into_staging(
                 staging_dir=staging_dir,
                 config=normalized,
-                exc=exc,
-                secret_values=secret_values,
+                staging_fd=staging_fd,
+                runner=runner,
+                environ=environment,
+                distributions=distributions,
             )
-        except Exception as write_exc:
-            raise CaptureError(
-                "evidence capture failed and the staging result could not be "
-                f"completed: {staging_dir}: {type(write_exc).__name__}"
-            ) from write_exc
+        except Exception as exc:  # noqa: BLE001 - preserve capture evidence.
+            try:
+                _write_unexpected_failure(
+                    staging_dir=staging_dir,
+                    staging_fd=staging_fd,
+                    config=normalized,
+                    exc=exc,
+                    secret_values=secret_values,
+                )
+            except Exception as write_exc:
+                safe_write_error = _sanitize_text(
+                    f"{type(write_exc).__name__}: {write_exc}",
+                    secret_values,
+                )
+                raise CaptureError(
+                    "evidence capture failed and the staging result could not be "
+                    f"completed: {staging_dir}: {safe_write_error}"
+                ) from write_exc
 
-    _publish_staging_directory(
-        staging_dir=staging_dir,
-        output_dir=normalized.output_dir,
-    )
-    return result_exit_code
+        _publish_staging_directory(
+            staging_dir=staging_dir,
+            output_dir=normalized.output_dir,
+            parent_fd=parent_fd,
+            staging_fd=staging_fd,
+        )
+        return result_exit_code
+    finally:
+        if staging_fd is not None:
+            os.close(staging_fd)
+        os.close(parent_fd)
 
 
 def _publish_staging_directory(
     *,
     staging_dir: Path,
     output_dir: Path,
+    parent_fd: int | None = None,
+    staging_fd: int | None = None,
 ) -> None:
-    lock_path = output_dir.with_name(f".{output_dir.name}.publish.lock")
-    try:
-        lock_fd = os.open(
-            lock_path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o600,
-        )
-    except FileExistsError as exc:
+    absolute_staging = _absolute_path(staging_dir)
+    absolute_output = _absolute_path(output_dir)
+    if absolute_staging.parent != absolute_output.parent:
         raise CaptureError(
-            "evidence publication lock already exists; staging evidence retained at "
-            f"{staging_dir}"
-        ) from exc
+            "evidence staging and output directories require the same parent"
+        )
+
+    active_parent_fd = parent_fd
+    owned_parent_fd = False
+    if active_parent_fd is None:
+        active_parent_fd = _open_directory_path_nofollow(absolute_output.parent)
+        owned_parent_fd = True
+
+    active_staging_fd = staging_fd
+    owned_staging_fd = False
+    lock_fd: int | None = None
+    lock_identity: tuple[int, int] | None = None
+    lock_name = f".{absolute_output.name}.publish.lock"
+    lock_path = absolute_output.with_name(lock_name)
     try:
-        os.write(lock_fd, f"{staging_dir}\n".encode())
-        os.fsync(lock_fd)
-        directory_flags = os.O_RDONLY
-        directory_flags |= getattr(os, "O_DIRECTORY", 0)
-        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        _verify_directory_path_identity(
+            absolute_output.parent,
+            active_parent_fd,
+            description="evidence output parent",
+        )
         try:
-            staging_fd = os.open(staging_dir, directory_flags)
+            lock_fd = os.open(
+                lock_name,
+                _regular_open_flags(os.O_CREAT | os.O_EXCL | os.O_WRONLY),
+                0o600,
+                dir_fd=active_parent_fd,
+            )
+        except FileExistsError as exc:
+            raise CaptureError(
+                "evidence publication lock already exists; staging evidence "
+                f"retained at {absolute_staging}"
+            ) from exc
+        except OSError as exc:
+            _raise_unsafe_path(lock_path, exc)
+
+        lock_stat = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_stat.st_mode):
+            raise CaptureError(
+                f"evidence publication lock is not a regular file: {lock_path}"
+            )
+        lock_identity = _entry_identity(lock_stat)
+        with os.fdopen(lock_fd, "wb", closefd=False) as lock_handle:
+            lock_handle.write(f"{absolute_staging}\n".encode())
+            lock_handle.flush()
+        os.fsync(lock_fd)
+        os.fsync(active_parent_fd)
+
+        if active_staging_fd is None:
+            staging_stat = _entry_stat_at(
+                active_parent_fd,
+                absolute_staging.name,
+                display_path=absolute_staging,
+            )
+            if not stat.S_ISDIR(staging_stat.st_mode):
+                raise CaptureError(
+                    "evidence staging directory is unavailable: "
+                    f"{absolute_staging}"
+                )
+            active_staging_fd = _open_directory_entry(
+                active_parent_fd,
+                absolute_staging.name,
+                expected_stat=staging_stat,
+                display_path=absolute_staging,
+            )
+            owned_staging_fd = True
+
+        expected_identity = _directory_identity_from_fd(
+            active_staging_fd,
+            display_path=absolute_staging,
+        )
+        expected_manifest = _validated_manifest_bytes_from_fd(
+            active_staging_fd,
+            display_dir=absolute_staging,
+        )
+        _fsync_payload_tree_from_fd(
+            active_staging_fd,
+            display_dir=absolute_staging,
+        )
+        durable_manifest = _validated_manifest_bytes_from_fd(
+            active_staging_fd,
+            display_dir=absolute_staging,
+        )
+        if durable_manifest != expected_manifest:
+            raise CaptureError(
+                "evidence manifest or payload changed before publication"
+            )
+
+        _verify_directory_path_identity(
+            absolute_output.parent,
+            active_parent_fd,
+            description="evidence output parent",
+        )
+        source_identity = _directory_entry_identity(
+            active_parent_fd,
+            absolute_staging.name,
+            display_path=absolute_staging,
+        )
+        if source_identity != expected_identity:
+            raise CaptureError(
+                "evidence staging directory identity changed before publication"
+            )
+
+        try:
+            _rename_directory_noreplace_at(
+                active_parent_fd,
+                absolute_staging.name,
+                active_parent_fd,
+                absolute_output.name,
+                absolute_output,
+            )
+        except FileExistsError as exc:
+            raise CaptureError(
+                "output path appeared during capture; staging evidence retained at "
+                f"{absolute_staging}"
+            ) from exc
         except OSError as exc:
             raise CaptureError(
-                f"evidence staging directory is unavailable: {staging_dir}"
+                "evidence publication failed; staging evidence retained at "
+                f"{absolute_staging}: {type(exc).__name__}: {exc}"
             ) from exc
-        try:
-            expected_identity = _directory_identity_from_fd(
-                staging_fd,
-                display_path=staging_dir,
-            )
-            expected_manifest = _regular_file_bytes_at(
-                staging_fd,
-                "artifact-manifest.json",
-                display_path=staging_dir / "artifact-manifest.json",
-            )
-            if _directory_identity(staging_dir) != expected_identity:
-                raise CaptureError(
-                    "evidence staging directory identity changed before publication"
-                )
-            try:
-                _rename_directory_noreplace(staging_dir, output_dir)
-            except FileExistsError as exc:
-                raise CaptureError(
-                    "output path appeared during capture; staging evidence retained at "
-                    f"{staging_dir}"
-                ) from exc
-            except OSError as exc:
-                raise CaptureError(
-                    "evidence publication failed; staging evidence retained at "
-                    f"{staging_dir}: {type(exc).__name__}: {exc}"
-                ) from exc
 
-            publication_error = _published_identity_error(
-                output_dir=output_dir,
-                expected_identity=expected_identity,
-                expected_manifest=expected_manifest,
-                directory_flags=directory_flags,
+        os.fsync(active_parent_fd)
+        publication_error = _published_identity_error(
+            parent_fd=active_parent_fd,
+            output_dir=absolute_output,
+            expected_identity=expected_identity,
+            expected_manifest=expected_manifest,
+        )
+        if publication_error:
+            quarantine_dir = _quarantine_published_directory_at(
+                parent_fd=active_parent_fd,
+                output_dir=absolute_output,
             )
-            if publication_error:
-                quarantine_dir = _quarantine_published_directory(output_dir)
-                raise CaptureError(
-                    f"{publication_error}; rejected evidence retained at "
-                    f"{quarantine_dir}"
-                )
-        finally:
-            os.close(staging_fd)
-        parent_fd = os.open(output_dir.parent, os.O_RDONLY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
+            raise CaptureError(
+                f"{publication_error}; rejected evidence retained at "
+                f"{quarantine_dir}"
+            )
     finally:
-        os.close(lock_fd)
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+        if owned_staging_fd is True and active_staging_fd is not None:
+            os.close(active_staging_fd)
+        if lock_fd is not None:
+            os.close(lock_fd)
+            if lock_identity is not None:
+                _unlink_owned_entry_at(
+                    active_parent_fd,
+                    lock_name,
+                    expected_identity=lock_identity,
+                )
+            os.fsync(active_parent_fd)
+        if owned_parent_fd is True:
+            os.close(active_parent_fd)
 
 
 def _published_identity_error(
     *,
+    parent_fd: int,
     output_dir: Path,
     expected_identity: tuple[int, int],
     expected_manifest: bytes,
-    directory_flags: int,
 ) -> str | bool:
     try:
-        published_fd = os.open(output_dir, directory_flags)
-    except OSError:
+        output_stat = _entry_stat_at(
+            parent_fd,
+            output_dir.name,
+            display_path=output_dir,
+        )
+        if not stat.S_ISDIR(output_stat.st_mode):
+            return "published evidence directory is unavailable"
+        published_fd = _open_directory_entry(
+            parent_fd,
+            output_dir.name,
+            expected_stat=output_stat,
+            display_path=output_dir,
+        )
+    except (CaptureError, OSError):
         return "published evidence directory is unavailable"
     try:
         published_identity = _directory_identity_from_fd(
@@ -1660,28 +2703,75 @@ def _published_identity_error(
         )
         if published_identity != expected_identity:
             return "published evidence directory identity changed"
-        if _directory_identity(output_dir) != expected_identity:
-            return "published evidence path identity changed"
-        published_manifest = _regular_file_bytes_at(
+        _verify_directory_path_identity(
+            output_dir,
             published_fd,
-            "artifact-manifest.json",
-            display_path=output_dir / "artifact-manifest.json",
+            description="published evidence path",
+        )
+        published_manifest = _validated_manifest_bytes_from_fd(
+            published_fd,
+            display_dir=output_dir,
         )
         if published_manifest != expected_manifest:
             return "published evidence manifest changed"
-    except (CaptureError, OSError):
+        repeated_manifest = _validated_manifest_bytes_from_fd(
+            published_fd,
+            display_dir=output_dir,
+        )
+        if repeated_manifest != expected_manifest:
+            return "published evidence manifest changed"
+        path_identity = _directory_entry_identity(
+            parent_fd,
+            output_dir.name,
+            display_path=output_dir,
+        )
+        if path_identity != expected_identity:
+            return "published evidence path identity changed"
+    except CaptureError:
+        return "published evidence manifest changed or does not match payload"
+    except OSError:
         return "published evidence verification failed"
     finally:
         os.close(published_fd)
     return False
 
 
-def _quarantine_published_directory(output_dir: Path) -> Path:
+def _unlink_owned_entry_at(
+    directory_fd: int,
+    name: str,
+    *,
+    expected_identity: tuple[int, int],
+) -> None:
+    try:
+        entry_stat = os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    if _entry_identity(entry_stat) != expected_identity:
+        return
+    os.unlink(name, dir_fd=directory_fd)
+
+
+def _quarantine_published_directory_at(
+    *,
+    parent_fd: int,
+    output_dir: Path,
+) -> Path:
     quarantine_dir = output_dir.with_name(
         f".{output_dir.name}.rejected-{os.getpid()}-{time.time_ns()}"
     )
     try:
-        _rename_directory_noreplace(output_dir, quarantine_dir)
+        _rename_directory_noreplace_at(
+            parent_fd,
+            output_dir.name,
+            parent_fd,
+            quarantine_dir.name,
+            quarantine_dir,
+        )
+        os.fsync(parent_fd)
     except OSError as exc:
         raise CaptureError(
             "published evidence failed identity verification and could not be "
@@ -1694,35 +2784,85 @@ def _rename_directory_noreplace(
     source: Path,
     destination: Path,
 ) -> None:
+    absolute_source = _absolute_path(source)
+    absolute_destination = _absolute_path(destination)
+    source_parent_fd = _open_directory_path_nofollow(absolute_source.parent)
+    try:
+        destination_parent_fd = _open_directory_path_nofollow(
+            absolute_destination.parent
+        )
+        try:
+            _rename_directory_noreplace_at(
+                source_parent_fd,
+                absolute_source.name,
+                destination_parent_fd,
+                absolute_destination.name,
+                absolute_destination,
+            )
+        finally:
+            os.close(destination_parent_fd)
+    finally:
+        os.close(source_parent_fd)
+
+
+def _rename_directory_noreplace_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+    display_destination: Path,
+) -> None:
+    for name in (source_name, destination_name):
+        if not name or "/" in name or name in {".", ".."}:
+            raise CaptureError(f"invalid evidence directory name: {name}")
     if sys.platform == "darwin":
-        _darwin_rename_noreplace(source, destination)
+        _darwin_rename_noreplace_at(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            display_destination,
+        )
         return
     if sys.platform.startswith("linux"):
-        _linux_rename_noreplace(source, destination)
+        _linux_rename_noreplace_at(
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            display_destination,
+        )
         return
     raise OSError(
         errno.ENOTSUP,
         "atomic no-replace directory publication is unsupported",
-        str(destination),
+        str(display_destination),
     )
 
 
-def _darwin_rename_noreplace(
-    source: Path,
-    destination: Path,
+def _darwin_rename_noreplace_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+    display_destination: Path,
 ) -> None:
     rename_excl = 0x00000004
     libc = ctypes.CDLL(None, use_errno=True)
-    renamex_np = libc.renamex_np
-    renamex_np.argtypes = [
+    renameatx_np = libc.renameatx_np
+    renameatx_np.argtypes = [
+        ctypes.c_int,
         ctypes.c_char_p,
+        ctypes.c_int,
         ctypes.c_char_p,
         ctypes.c_uint,
     ]
-    renamex_np.restype = ctypes.c_int
-    result = renamex_np(
-        os.fsencode(source),
-        os.fsencode(destination),
+    renameatx_np.restype = ctypes.c_int
+    result = renameatx_np(
+        source_fd,
+        os.fsencode(source_name),
+        destination_fd,
+        os.fsencode(destination_name),
         rename_excl,
     )
     if result == 0:
@@ -1732,20 +2872,22 @@ def _darwin_rename_noreplace(
         raise FileExistsError(
             error_number,
             os.strerror(error_number),
-            str(destination),
+            str(display_destination),
         )
     raise OSError(
         error_number,
         os.strerror(error_number),
-        str(destination),
+        str(display_destination),
     )
 
 
-def _linux_rename_noreplace(
-    source: Path,
-    destination: Path,
+def _linux_rename_noreplace_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+    display_destination: Path,
 ) -> None:
-    at_fdcwd = -100
     rename_noreplace = 1
     libc = ctypes.CDLL(None, use_errno=True)
     try:
@@ -1754,7 +2896,7 @@ def _linux_rename_noreplace(
         raise OSError(
             errno.ENOTSUP,
             "libc renameat2 is unavailable",
-            str(destination),
+            str(display_destination),
         ) from exc
     renameat2.argtypes = [
         ctypes.c_int,
@@ -1765,10 +2907,10 @@ def _linux_rename_noreplace(
     ]
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        at_fdcwd,
-        os.fsencode(source),
-        at_fdcwd,
-        os.fsencode(destination),
+        source_fd,
+        os.fsencode(source_name),
+        destination_fd,
+        os.fsencode(destination_name),
         rename_noreplace,
     )
     if result == 0:
@@ -1778,12 +2920,12 @@ def _linux_rename_noreplace(
         raise FileExistsError(
             error_number,
             os.strerror(error_number),
-            str(destination),
+            str(display_destination),
         )
     raise OSError(
         error_number,
         os.strerror(error_number),
-        str(destination),
+        str(display_destination),
     )
 
 
