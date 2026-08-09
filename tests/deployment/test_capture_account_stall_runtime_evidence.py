@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata as importlib_metadata
 import importlib.util
 import json
 import os
@@ -163,7 +164,11 @@ def _assert_artifact_manifest(output_dir: Path) -> None:
     expected_paths = {
         path.relative_to(output_dir).as_posix()
         for path in output_dir.rglob("*")
-        if path.is_file() and path.name != "artifact-manifest.json"
+        if (
+            path.is_file()
+            and path.relative_to(output_dir).as_posix()
+            != "artifact-manifest.json"
+        )
     }
     assert set(recorded) == expected_paths
     for relative_path, item in recorded.items():
@@ -203,8 +208,8 @@ def test_success_publishes_complete_atomic_evidence(
 
     assert exit_code == 0
     assert output_dir.is_dir()
-    assert output_dir.is_symlink()
-    assert list(tmp_path.glob(".evidence-success.tmp-*")) == []
+    assert output_dir.is_symlink() is False
+    assert (tmp_path / ".evidence-success.payload").exists() is False
     assert (output_dir / "git-head.txt").read_text(encoding="utf-8") == expected_head
     git_status = (output_dir / "git-status.txt").read_text(encoding="utf-8")
     assert "## " in git_status
@@ -525,6 +530,67 @@ def test_distribution_without_record_fails_closed(
         capture._distribution_artifact_records()
 
 
+def test_real_distribution_record_identity_and_install_roots_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ambiguous_site = tmp_path / "ambiguous-site"
+    ambiguous_site.mkdir()
+    ambiguous_dist_info = ambiguous_site / "sample-1.0.dist-info"
+    ambiguous_dist_info.mkdir()
+    (ambiguous_dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: sample\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    package = ambiguous_site / "package"
+    package.mkdir()
+    (package / "RECORD").write_text("unrelated\n", encoding="utf-8")
+    (ambiguous_site / "sample.py").write_text("sample\n", encoding="utf-8")
+    (ambiguous_dist_info / "RECORD").write_text(
+        "package/RECORD,,\nsample.py,,\n",
+        encoding="utf-8",
+    )
+    ambiguous_distributions = tuple(
+        importlib_metadata.distributions(path=[str(ambiguous_site)])
+    )
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(
+            capture.metadata,
+            "distributions",
+            lambda: ambiguous_distributions,
+        )
+        with pytest.raises(capture.CaptureError, match="lacks RECORD"):
+            capture._distribution_artifact_records()
+
+    traversal_site = tmp_path / "traversal-site"
+    traversal_site.mkdir()
+    traversal_dist_info = traversal_site / "sample-1.0.dist-info"
+    traversal_dist_info.mkdir()
+    (traversal_dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: sample\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-host.bin"
+    outside.write_bytes(b"outside-host-bytes")
+    (traversal_dist_info / "RECORD").write_text(
+        "sample-1.0.dist-info/RECORD,,\n../outside-host.bin,,\n",
+        encoding="utf-8",
+    )
+    traversal_distributions = tuple(
+        importlib_metadata.distributions(path=[str(traversal_site)])
+    )
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(
+            capture.metadata,
+            "distributions",
+            lambda: traversal_distributions,
+        )
+        with pytest.raises(capture.CaptureError, match="unsafe"):
+            capture._distribution_artifact_records()
+
+
 def test_success_requires_collect_and_junit_counts_to_match(
     git_repo: Path,
     tmp_path: Path,
@@ -707,6 +773,34 @@ def test_structured_warning_and_skip_report(tmp_path: Path) -> None:
     ]
 
 
+def test_manifest_audits_nested_manifest_name_and_rejects_symlinks(
+    tmp_path: Path,
+) -> None:
+    staging_dir = tmp_path / "evidence"
+    staging_dir.mkdir()
+    nested = staging_dir / "nested"
+    nested.mkdir()
+    (nested / "artifact-manifest.json").write_text(
+        "nested evidence\n",
+        encoding="utf-8",
+    )
+
+    manifest = capture._artifact_manifest(staging_dir)
+
+    assert {
+        item["path"] for item in manifest["artifacts"]
+    } == {"nested/artifact-manifest.json"}
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    (staging_dir / "linked.txt").symlink_to(outside)
+    capture._sanitize_staging_files(staging_dir, ("outside",))
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+    with pytest.raises(capture.CaptureError, match="contains a symlink"):
+        capture._artifact_manifest(staging_dir)
+
+
 def test_publication_lock_preserves_staging(
     tmp_path: Path,
 ) -> None:
@@ -734,14 +828,19 @@ def test_publication_never_replaces_external_output_path(
     staging_dir = tmp_path / ".evidence.payload-test"
     staging_dir.mkdir()
     (staging_dir / "result.json").write_text("{}\n", encoding="utf-8")
-    real_symlink = capture.os.symlink
+    capture._write_artifact_manifest(staging_dir)
+    real_rename = capture._rename_directory_noreplace
 
-    def create_competing_output(*args, **kwargs):
+    def create_competing_output(source: Path, destination: Path) -> None:
         output_dir.mkdir()
         (output_dir / "owner.txt").write_text("external\n", encoding="utf-8")
-        return real_symlink(*args, **kwargs)
+        real_rename(source, destination)
 
-    monkeypatch.setattr(capture.os, "symlink", create_competing_output)
+    monkeypatch.setattr(
+        capture,
+        "_rename_directory_noreplace",
+        create_competing_output,
+    )
 
     with pytest.raises(capture.CaptureError, match="output path appeared"):
         capture._publish_staging_directory(
@@ -752,3 +851,136 @@ def test_publication_never_replaces_external_output_path(
     assert staging_dir.is_dir()
     assert output_dir.is_dir()
     assert (output_dir / "owner.txt").read_text(encoding="utf-8") == "external\n"
+
+
+def test_publication_quarantines_replaced_staging_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "evidence"
+    staging_dir = tmp_path / ".evidence.payload"
+    staging_dir.mkdir()
+    (staging_dir / "result.json").write_text("trusted\n", encoding="utf-8")
+    capture._write_artifact_manifest(staging_dir)
+
+    replacement_dir = tmp_path / ".replacement"
+    replacement_dir.mkdir()
+    (replacement_dir / "result.json").write_text(
+        "replacement\n",
+        encoding="utf-8",
+    )
+    capture._write_artifact_manifest(replacement_dir)
+    preserved_dir = tmp_path / ".preserved"
+    real_rename = capture._rename_directory_noreplace
+
+    def replace_source_before_rename(
+        source: Path,
+        destination: Path,
+    ) -> None:
+        if source != staging_dir:
+            real_rename(source, destination)
+            return
+        source.rename(preserved_dir)
+        replacement_dir.rename(source)
+        real_rename(source, destination)
+
+    monkeypatch.setattr(
+        capture,
+        "_rename_directory_noreplace",
+        replace_source_before_rename,
+    )
+
+    with pytest.raises(
+        capture.CaptureError,
+        match="directory identity changed",
+    ):
+        capture._publish_staging_directory(
+            staging_dir=staging_dir,
+            output_dir=output_dir,
+        )
+
+    assert output_dir.exists() is False
+    assert (preserved_dir / "result.json").read_text(
+        encoding="utf-8"
+    ) == "trusted\n"
+    rejected = list(tmp_path.glob(".evidence.rejected-*"))
+    assert len(rejected) == 1
+    assert (rejected[0] / "result.json").read_text(
+        encoding="utf-8"
+    ) == "replacement\n"
+
+
+def test_publication_quarantines_manifest_changed_after_rename(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "evidence"
+    staging_dir = tmp_path / ".evidence.payload"
+    staging_dir.mkdir()
+    (staging_dir / "result.json").write_text("trusted\n", encoding="utf-8")
+    capture._write_artifact_manifest(staging_dir)
+    real_rename = capture._rename_directory_noreplace
+    publication_mutated = False
+
+    def mutate_after_rename(source: Path, destination: Path) -> None:
+        nonlocal publication_mutated
+        real_rename(source, destination)
+        if publication_mutated:
+            return
+        publication_mutated = True
+        (destination / "artifact-manifest.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        capture,
+        "_rename_directory_noreplace",
+        mutate_after_rename,
+    )
+
+    with pytest.raises(capture.CaptureError, match="manifest changed"):
+        capture._publish_staging_directory(
+            staging_dir=staging_dir,
+            output_dir=output_dir,
+        )
+
+    assert output_dir.exists() is False
+    rejected = list(tmp_path.glob(".evidence.rejected-*"))
+    assert len(rejected) == 1
+
+
+def test_published_directory_is_recursively_versionable(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = git_repo / "evidence"
+    runner = FakePytestRunner(
+        collect_stdout="tests/test_sample.py::test_ok\n",
+        run_stdout="1 passed\n",
+    )
+    exit_code = capture.capture_runtime_evidence(
+        _config(git_repo, output_dir, "tests/test_sample.py"),
+        runner=runner,
+        environ={"LC_ALL": "C"},
+        distributions=[],
+    )
+    assert exit_code == 0
+    assert output_dir.is_dir()
+    assert output_dir.is_symlink() is False
+
+    subprocess.run(
+        ["git", "add", "evidence"],
+        cwd=git_repo,
+        check=True,
+    )
+    tracked = subprocess.run(
+        ["git", "ls-files", "--stage", "evidence"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert "\tevidence/result.json\n" in tracked
+    assert "\tevidence/artifact-manifest.json\n" in tracked
