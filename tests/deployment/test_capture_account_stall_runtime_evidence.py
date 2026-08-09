@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,7 @@ class FakePytestRunner:
         run_stderr: str = "",
         run_exit_code: int = 0,
         junit_test_count: int | None = None,
+        junit_xml: str | None = None,
     ) -> None:
         self.collect_stdout = collect_stdout
         self.collect_stderr = collect_stderr
@@ -41,6 +43,7 @@ class FakePytestRunner:
         self.run_stderr = run_stderr
         self.run_exit_code = run_exit_code
         self.junit_test_count = junit_test_count
+        self.junit_xml = junit_xml
         self.commands: list[list[str]] = []
         self.pytest_commands: list[list[str]] = []
 
@@ -61,6 +64,14 @@ class FakePytestRunner:
 
         junit_path = self._junit_path(command)
         junit_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.junit_xml is not None:
+            junit_path.write_text(self.junit_xml, encoding="utf-8")
+            return subprocess.CompletedProcess(
+                command,
+                self.run_exit_code,
+                self.run_stdout,
+                self.run_stderr,
+            )
         junit_test_count = self.junit_test_count
         nodeids = (
             capture._nodeids_bytes(self.collect_stdout).decode("utf-8").splitlines()
@@ -192,6 +203,7 @@ def test_success_publishes_complete_atomic_evidence(
 
     assert exit_code == 0
     assert output_dir.is_dir()
+    assert output_dir.is_symlink()
     assert list(tmp_path.glob(".evidence-success.tmp-*")) == []
     assert (output_dir / "git-head.txt").read_text(encoding="utf-8") == expected_head
     git_status = (output_dir / "git-status.txt").read_text(encoding="utf-8")
@@ -215,6 +227,10 @@ def test_success_publishes_complete_atomic_evidence(
     assert runner.commands[1][:2] == ["git", "status"]
     assert "--collect-only" in runner.commands[2]
     assert "--junitxml" in runner.commands[3]
+    for command in runner.pytest_commands:
+        assert command.count("-o") == 2
+        assert "addopts=" in command
+        assert "filterwarnings=default" in command
     _assert_artifact_manifest(output_dir)
 
 
@@ -396,9 +412,11 @@ def test_distribution_artifact_hashes_cover_installed_metadata(
     metadata_path = dist_info / "METADATA"
     record_path = dist_info / "RECORD"
     wheel_path = dist_info / "WHEEL"
+    package_path = tmp_path / "sample.py"
     metadata_path.write_text("Name: sample-pkg\nVersion: 1.0\n", encoding="utf-8")
     record_path.write_text("sample.py,sha256=abc,3\n", encoding="utf-8")
     wheel_path.write_text("Wheel-Version: 1.0\n", encoding="utf-8")
+    package_path.write_text("one\n", encoding="utf-8")
 
     class FakeDistribution:
         version = "1.0"
@@ -406,6 +424,7 @@ def test_distribution_artifact_hashes_cover_installed_metadata(
             Path("sample_pkg-1.0.dist-info/METADATA"),
             Path("sample_pkg-1.0.dist-info/RECORD"),
             Path("sample_pkg-1.0.dist-info/WHEEL"),
+            Path("sample.py"),
         )
 
         def __init__(self) -> None:
@@ -444,8 +463,66 @@ def test_distribution_artifact_hashes_cover_installed_metadata(
                     "size": wheel_path.stat().st_size,
                 },
             ],
+            "installed_files": [
+                {
+                    "path": "sample.py",
+                    "sha256": hashlib.sha256(package_path.read_bytes()).hexdigest(),
+                    "size": package_path.stat().st_size,
+                },
+                {
+                    "path": "sample_pkg-1.0.dist-info/METADATA",
+                    "sha256": hashlib.sha256(metadata_path.read_bytes()).hexdigest(),
+                    "size": metadata_path.stat().st_size,
+                },
+                {
+                    "path": "sample_pkg-1.0.dist-info/RECORD",
+                    "sha256": hashlib.sha256(record_path.read_bytes()).hexdigest(),
+                    "size": record_path.stat().st_size,
+                },
+                {
+                    "path": "sample_pkg-1.0.dist-info/WHEEL",
+                    "sha256": hashlib.sha256(wheel_path.read_bytes()).hexdigest(),
+                    "size": wheel_path.stat().st_size,
+                },
+            ],
         }
     ]
+
+    first_hash = hashlib.sha256(
+        capture._distribution_artifact_bytes(records)
+    ).hexdigest()
+    package_path.write_text("two\n", encoding="utf-8")
+    second_hash = hashlib.sha256(
+        capture._distribution_artifact_bytes(capture._distribution_artifact_records())
+    ).hexdigest()
+    assert second_hash != first_hash
+
+
+def test_distribution_without_record_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "sample.py"
+    package_path.write_text("sample\n", encoding="utf-8")
+
+    class FakeDistribution:
+        version = "1.0"
+        files = (Path("sample.py"),)
+
+        def __init__(self) -> None:
+            self.metadata = {"Name": "sample-pkg"}
+
+        def locate_file(self, package_file: Path) -> Path:
+            return tmp_path / package_file
+
+    monkeypatch.setattr(
+        capture.metadata,
+        "distributions",
+        lambda: (FakeDistribution(),),
+    )
+
+    with pytest.raises(capture.CaptureError, match="lacks RECORD"):
+        capture._distribution_artifact_records()
 
 
 def test_success_requires_collect_and_junit_counts_to_match(
@@ -522,6 +599,74 @@ def test_secret_nodeid_fails_closed(
     assert "pg-secret" not in (output_dir / "executed-nodeids.txt").read_text(
         encoding="utf-8"
     )
+    stored_nodeids = (output_dir / "nodeids.txt").read_bytes()
+    result = _read_json(output_dir, "result.json")
+    assert result["nodeids_sha256"] == hashlib.sha256(stored_nodeids).hexdigest()
+    assert (
+        result["nodeids_sha256"]
+        != hashlib.sha256(b"tests/test_auth.py::test_auth[pg-secret]\n").hexdigest()
+    )
+
+
+def test_malformed_junit_is_sanitized_before_capture_error_publication(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "evidence-malformed-junit"
+    runner = FakePytestRunner(
+        collect_stdout="tests/test_auth.py::test_auth\n",
+        junit_xml='<testsuites secret="pg-secret">',
+    )
+
+    exit_code = capture.capture_runtime_evidence(
+        _config(git_repo, output_dir, "tests"),
+        runner=runner,
+        environ={"PGPASSWORD": "pg-secret"},
+        distributions=[],
+    )
+
+    assert exit_code == 2
+    result = _read_json(output_dir, "result.json")
+    assert result["status"] == "capture-error"
+    for path in output_dir.rglob("*"):
+        if path.is_file():
+            assert "pg-secret" not in path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+
+
+def test_managed_ini_overrides_restore_warning_evidence(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "evidence-warning-config"
+    (git_repo / "pytest.ini").write_text(
+        "[pytest]\naddopts = --disable-warnings\nfilterwarnings = ignore\n",
+        encoding="utf-8",
+    )
+    (git_repo / "test_warning.py").write_text(
+        "import warnings\n\n"
+        "def test_warning():\n"
+        "    warnings.warn('visible warning', RuntimeWarning)\n",
+        encoding="utf-8",
+    )
+
+    exit_code = capture.capture_runtime_evidence(
+        _config(git_repo, output_dir, "-q", "test_warning.py"),
+        environ={"PATH": os.environ["PATH"]},
+        distributions=[],
+    )
+
+    assert exit_code == 0
+    result = _read_json(output_dir, "result.json")
+    assert result["warning_count"] == 1
+    report = _read_json(output_dir, "test-report.json")
+    assert report["warnings"]["count"] == 1
+    assert any(
+        "RuntimeWarning: visible warning" in line
+        for line in report["warnings"]["summary"]
+    )
 
 
 def test_structured_warning_and_skip_report(tmp_path: Path) -> None:
@@ -579,3 +724,31 @@ def test_publication_lock_preserves_staging(
 
     assert staging_dir.is_dir()
     assert not output_dir.exists()
+
+
+def test_publication_never_replaces_external_output_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "evidence"
+    staging_dir = tmp_path / ".evidence.payload-test"
+    staging_dir.mkdir()
+    (staging_dir / "result.json").write_text("{}\n", encoding="utf-8")
+    real_symlink = capture.os.symlink
+
+    def create_competing_output(*args, **kwargs):
+        output_dir.mkdir()
+        (output_dir / "owner.txt").write_text("external\n", encoding="utf-8")
+        return real_symlink(*args, **kwargs)
+
+    monkeypatch.setattr(capture.os, "symlink", create_competing_output)
+
+    with pytest.raises(capture.CaptureError, match="output path appeared"):
+        capture._publish_staging_directory(
+            staging_dir=staging_dir,
+            output_dir=output_dir,
+        )
+
+    assert staging_dir.is_dir()
+    assert output_dir.is_dir()
+    assert (output_dir / "owner.txt").read_text(encoding="utf-8") == "external\n"

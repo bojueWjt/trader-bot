@@ -9,7 +9,6 @@ import platform
 import re
 import subprocess
 import sys
-import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -71,6 +70,12 @@ OWNED_PYTEST_OPTIONS = frozenset(
         "--collect-only",
         "--junit-xml",
         "--junitxml",
+    }
+)
+OWNED_PYTEST_INI_OPTIONS = frozenset(
+    {
+        "addopts",
+        "filterwarnings",
     }
 )
 FORBIDDEN_PYTEST_OPTIONS = frozenset(
@@ -388,15 +393,43 @@ def _distribution_artifact_records() -> list[dict[str, object]]:
             name = "unknown-distribution"
         canonical_name = _normalize_distribution_name(str(name))
         version = str(distribution.version).strip()
+        package_files = tuple(distribution.files or ())
+        if not package_files:
+            raise CaptureError(
+                f"distribution lacks installed file inventory: "
+                f"{canonical_name}=={version}"
+            )
         evidence_files = []
+        installed_files = []
         editable = False
-        for package_file in distribution.files or ():
+        record_present = False
+        seen_relative_paths = set()
+        for package_file in package_files:
+            relative_path = Path(str(package_file)).as_posix()
+            if relative_path in seen_relative_paths:
+                raise CaptureError(
+                    "distribution contains duplicate installed file path: "
+                    f"{canonical_name}=={version}: {relative_path}"
+                )
+            seen_relative_paths.add(relative_path)
             evidence_name = Path(str(package_file)).name
-            if evidence_name not in DIST_INFO_EVIDENCE_FILES:
-                continue
             path = Path(distribution.locate_file(package_file))
             if not path.is_file():
+                raise CaptureError(
+                    "distribution installed file is unavailable: "
+                    f"{canonical_name}=={version}: {relative_path}"
+                )
+            installed_files.append(
+                {
+                    "path": relative_path,
+                    "sha256": _sha256_path(path),
+                    "size": path.stat().st_size,
+                }
+            )
+            if evidence_name not in DIST_INFO_EVIDENCE_FILES:
                 continue
+            if evidence_name == "RECORD":
+                record_present = True
             if evidence_name == "direct_url.json":
                 try:
                     direct_url = json.loads(path.read_text(encoding="utf-8"))
@@ -412,13 +445,19 @@ def _distribution_artifact_records() -> list[dict[str, object]]:
                     "size": path.stat().st_size,
                 }
             )
+        if not record_present:
+            raise CaptureError(
+                f"distribution lacks RECORD inventory: {canonical_name}=={version}"
+            )
         evidence_files.sort(key=lambda item: str(item["name"]).encode("utf-8"))
+        installed_files.sort(key=lambda item: str(item["path"]).encode("utf-8"))
         records.append(
             {
                 "name": canonical_name,
                 "version": version,
                 "editable": editable,
                 "metadata_files": evidence_files,
+                "installed_files": installed_files,
             }
         )
     records.sort(
@@ -505,7 +544,14 @@ def _contains_secret(value: str, secret_values: Sequence[str]) -> bool:
 
 
 def _junit_report(path: Path, repo_root: Path) -> dict[str, object]:
-    root = ET.parse(path).getroot()
+    return _junit_report_text(
+        path.read_text(encoding="utf-8", errors="replace"),
+        repo_root,
+    )
+
+
+def _junit_report_text(content: str, repo_root: Path) -> dict[str, object]:
+    root = ET.fromstring(content)
     nodeids = []
     skips = []
     failure_count = 0
@@ -689,7 +735,34 @@ def _validate_pytest_args(pytest_args: Sequence[str]) -> None:
             raise CaptureError("pytest warning plugin cannot be disabled")
         if argument in {"-pno:warnings", "-p=no:warnings"}:
             raise CaptureError("pytest warning plugin cannot be disabled")
+        override = _pytest_ini_override(previous, argument)
+        if override in OWNED_PYTEST_INI_OPTIONS:
+            raise CaptureError(
+                f"pytest ini option is managed by the evidence collector: {override}"
+            )
         previous = argument
+
+
+def _pytest_ini_override(previous: str, argument: str) -> str:
+    value = ""
+    if previous in {"-o", "--override-ini"}:
+        value = argument
+    elif argument.startswith("--override-ini="):
+        value = argument.split("=", 1)[1]
+    elif argument.startswith("-o") and argument != "-o":
+        value = argument[2:]
+    if not value:
+        return ""
+    return value.split("=", 1)[0].strip()
+
+
+def _managed_pytest_ini_args() -> tuple[str, ...]:
+    return (
+        "-o",
+        "addopts=",
+        "-o",
+        "filterwarnings=default",
+    )
 
 
 def _collection_pytest_args(pytest_args: Sequence[str]) -> list[str]:
@@ -713,7 +786,7 @@ def _collection_pytest_args(pytest_args: Sequence[str]) -> list[str]:
 
 
 def _normalized_config(config: CaptureConfig) -> CaptureConfig:
-    output_dir = config.output_dir.expanduser().resolve()
+    output_dir = Path(os.path.abspath(config.output_dir.expanduser()))
     repo_root = config.repo_root.expanduser().resolve()
     suite_name = config.suite_name.strip()
     pytest_args = tuple(str(value) for value in config.pytest_args)
@@ -724,7 +797,7 @@ def _normalized_config(config: CaptureConfig) -> CaptureConfig:
         raise CaptureError("suite name contains control characters")
     if not repo_root.is_dir():
         raise CaptureError(f"repository root is not a directory: {repo_root}")
-    if output_dir.exists():
+    if os.path.lexists(output_dir):
         raise CaptureError(f"output directory already exists: {output_dir}")
     _validate_pytest_args(pytest_args)
 
@@ -778,6 +851,15 @@ def _sanitize_file(path: Path, secret_values: Sequence[str]) -> None:
     content = path.read_text(encoding="utf-8", errors="replace")
     sanitized = _sanitize_text(content, secret_values)
     path.write_text(sanitized, encoding="utf-8")
+
+
+def _sanitize_staging_files(
+    staging_dir: Path,
+    secret_values: Sequence[str],
+) -> None:
+    for path in staging_dir.rglob("*"):
+        if path.is_file():
+            _sanitize_file(path, secret_values)
 
 
 def _artifact_manifest(staging_dir: Path) -> dict:
@@ -920,6 +1002,7 @@ def _capture_into_staging(
         "pytest",
         "-p",
         "no:cacheprovider",
+        *_managed_pytest_ini_args(),
         *collection_args,
         "--collect-only",
         "-q",
@@ -934,7 +1017,6 @@ def _capture_into_staging(
         capture_errors.append(str(collect.invocation_error))
 
     nodeids_content = _nodeids_bytes(collect.stdout)
-    nodeids_hash = _sha256_bytes(nodeids_content)
     collected_nodeids = nodeids_content.decode("utf-8").splitlines()
     duplicate_nodeids = _duplicate_lines(nodeids_content)
     if duplicate_nodeids:
@@ -947,6 +1029,7 @@ def _capture_into_staging(
         raw_nodeids_text,
         secret_values,
     ).encode("utf-8")
+    nodeids_hash = _sha256_bytes(sanitized_nodeids_content)
     junit_path = staging_dir / "junit.xml"
     pytest_command = [
         sys.executable,
@@ -954,6 +1037,7 @@ def _capture_into_staging(
         "pytest",
         "-p",
         "no:cacheprovider",
+        *_managed_pytest_ini_args(),
         *config.pytest_args,
         "-ra",
         "--junitxml",
@@ -971,10 +1055,11 @@ def _capture_into_staging(
     junit_generated_by_pytest = junit_path.is_file()
     if not junit_generated_by_pytest:
         _write_placeholder_junit(junit_path, config.suite_name)
-    junit_report = _junit_report(junit_path, config.repo_root)
+    junit_content = junit_path.read_text(encoding="utf-8", errors="replace")
+    _sanitize_file(junit_path, secret_values)
+    junit_report = _junit_report_text(junit_content, config.repo_root)
     executed_nodeids = [str(nodeid) for nodeid in junit_report["nodeids"]]
     executed_nodeids_content = _nodeids_text_bytes(executed_nodeids)
-    executed_nodeids_hash = _sha256_bytes(executed_nodeids_content)
     if _contains_secret(
         executed_nodeids_content.decode("utf-8"),
         secret_values,
@@ -1002,7 +1087,11 @@ def _capture_into_staging(
         pytest_run.stdout,
         pytest_run.stderr,
     )
-    _sanitize_file(junit_path, secret_values)
+    sanitized_executed_nodeids = _sanitize_text(
+        executed_nodeids_content.decode("utf-8"),
+        secret_values,
+    ).encode("utf-8")
+    executed_nodeids_hash = _sha256_bytes(sanitized_executed_nodeids)
     collected_nodeid_count = len(collected_nodeids)
     junit_test_count = int(junit_report["test_count"])
 
@@ -1067,10 +1156,6 @@ def _capture_into_staging(
         staging_dir / "nodeids.sha256.txt",
         f"{nodeids_hash}\n",
     )
-    sanitized_executed_nodeids = _sanitize_text(
-        executed_nodeids_content.decode("utf-8"),
-        secret_values,
-    ).encode("utf-8")
     (staging_dir / "executed-nodeids.txt").write_bytes(sanitized_executed_nodeids)
     _write_text(
         staging_dir / "executed-nodeids.sha256.txt",
@@ -1193,6 +1278,7 @@ def _write_unexpected_failure(
     exc: Exception,
     secret_values: Sequence[str],
 ) -> None:
+    _sanitize_staging_files(staging_dir, secret_values)
     error_message = _sanitize_text(
         f"{type(exc).__name__}: {exc}",
         secret_values,
@@ -1236,11 +1322,13 @@ def capture_runtime_evidence(
     secret_values = _known_secret_values(environment, normalized.pytest_args)
 
     normalized.output_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_path = tempfile.mkdtemp(
-        prefix=f".{normalized.output_dir.name}.tmp-",
-        dir=normalized.output_dir.parent,
+    staging_dir = normalized.output_dir.with_name(
+        f".{normalized.output_dir.name}.payload"
     )
-    staging_dir = Path(staging_path)
+    try:
+        staging_dir.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise CaptureError(f"evidence payload already exists: {staging_dir}") from exc
 
     result_exit_code = 2
     try:
@@ -1292,12 +1380,22 @@ def _publish_staging_directory(
     try:
         os.write(lock_fd, f"{staging_dir}\n".encode())
         os.fsync(lock_fd)
-        if output_dir.exists():
-            raise CaptureError(
-                "output directory appeared during capture; staging evidence retained at "
-                f"{staging_dir}"
+        try:
+            os.symlink(
+                staging_dir.name,
+                output_dir,
+                target_is_directory=True,
             )
-        os.replace(staging_dir, output_dir)
+        except FileExistsError as exc:
+            raise CaptureError(
+                "output path appeared during capture; staging evidence retained at "
+                f"{staging_dir}"
+            ) from exc
+        parent_fd = os.open(output_dir.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
     finally:
         os.close(lock_fd)
         try:
@@ -1346,7 +1444,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     print(
-        f"WROTE {config.output_dir.expanduser().resolve()} "
+        f"WROTE {config.output_dir.expanduser().absolute()} "
         f"suite={config.suite_name} exit_code={exit_code}"
     )
     return exit_code
