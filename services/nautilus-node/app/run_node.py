@@ -49,35 +49,51 @@ def main(argv: list[str] | None = None) -> int:
         print("NODE_CONFIG_PATH or --config is required", file=sys.stderr)
         return 2
 
-    runtime = build_account_runtime(
-        Path(args.config),
-        spool_root=Path(args.spool_root),
-        build_trading_node=args.build_trading_node or not args.dry_run,
-    )
-    if args.dry_run:
-        print(
-            "assembled "
-            f"account_id={runtime.config.account_id} "
-            f"node_id={runtime.config.node_id} "
-            f"environment={runtime.config.binance.environment} "
-            f"trading_state={runtime.lifecycle.trading_state}"
+    runtime: Any = False
+    server: Any = False
+    try:
+        runtime = build_account_runtime(
+            Path(args.config),
+            spool_root=Path(args.spool_root),
+            build_trading_node=args.build_trading_node or not args.dry_run,
         )
+        if args.dry_run:
+            print(
+                "assembled "
+                f"account_id={runtime.config.account_id} "
+                f"node_id={runtime.config.node_id} "
+                f"environment={runtime.config.binance.environment} "
+                f"trading_state={runtime.lifecycle.trading_state}"
+            )
+            return 0
+
+        server = build_health_server(runtime, args.health_host, args.health_port)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        run_startup_readiness_checks(runtime)
+
+        node = runtime.trading_node
+        if node is None:
+            raise RuntimeError("TradingNode was not assembled")
+        node.build()
+        session = runtime.control_plane_session
+        if session is None:
+            raise RuntimeError("control-plane session was not assembled")
+        session.start()
+        node.run()
         return 0
-
-    server = build_health_server(runtime, args.health_host, args.health_port)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    run_startup_readiness_checks(runtime)
-
-    node = runtime.trading_node
-    if node is None:
-        raise RuntimeError("TradingNode was not assembled")
-    # Nautilus lifecycle: build the data/exec clients from the registered adapter
-    # factories before starting. Host-verify gap: the live path skipped node.build(),
-    # so node.run() raised "clients have not been built".
-    node.build()
-    node.run()
-    return 0
+    finally:
+        active_exception = sys.exc_info()[0] is not None
+        try:
+            _cleanup_runtime(runtime, server)
+        except Exception as cleanup_exc:
+            if not active_exception:
+                raise
+            print(
+                f"runtime cleanup failed: {cleanup_exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _cleanup_runtime(runtime: Any, server: Any) -> None:

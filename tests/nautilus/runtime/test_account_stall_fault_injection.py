@@ -33,20 +33,59 @@ class _Session:
         stop_results: tuple[bool, ...] = (True,),
     ) -> None:
         self._stop_results = list(stop_results)
+        self.started = False
+        self.stop_calls = 0
+
+    def start(self) -> None:
+        self.started = True
 
     def stop(self, deadline: float) -> bool:
         del deadline
+        self.stop_calls += 1
         if len(self._stop_results) > 1:
             return self._stop_results.pop(0)
         return self._stop_results[0]
 
 
 class _Node:
+    def __init__(self, *, fail_stage: str = "") -> None:
+        self._fail_stage = fail_stage
+        self.built = False
+        self.ran = False
+        self.stopped = False
+        self.disposed = False
+
+    def build(self) -> None:
+        self.built = True
+        if self._fail_stage == "build":
+            raise RuntimeError("node build failed")
+
+    def run(self) -> None:
+        self.ran = True
+        if self._fail_stage == "run":
+            raise RuntimeError("node run failed")
+
     def stop(self) -> None:
-        return
+        self.stopped = True
 
     def dispose(self) -> None:
-        return
+        self.disposed = True
+
+
+class _Server:
+    def __init__(self) -> None:
+        self.served = Event()
+        self.shutdown_called = False
+        self.closed = False
+
+    def serve_forever(self) -> None:
+        self.served.set()
+
+    def shutdown(self) -> None:
+        self.shutdown_called = True
+
+    def server_close(self) -> None:
+        self.closed = True
 
 
 class _RedisSafetyTimeoutGuard:
@@ -195,19 +234,99 @@ def test_cleanup_retries_failed_redis_client_after_guard_stops() -> None:
     assert lease_guard.closed is True
 
 
+def test_dry_run_main_releases_runtime_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_guard = _LeaseGuard()
+    runtime = _runtime(lease_guard=lease_guard)
+    monkeypatch.setattr(
+        run_node,
+        "build_account_runtime",
+        lambda *args, **kwargs: runtime,
+    )
+
+    result = run_node.main(
+        [
+            "--config",
+            "node.json",
+            "--dry-run",
+            "--build-trading-node",
+        ]
+    )
+
+    assert result == 0
+    assert runtime.control_plane_session is None
+    assert runtime.trading_node.stopped is True
+    assert runtime.trading_node.disposed is True
+    assert lease_guard.closed is True
+
+
+def test_runtime_failure_starts_session_and_cleans_all_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_guard = _LeaseGuard()
+    session = _Session()
+    node = _Node(fail_stage="run")
+    server = _Server()
+    runtime = _runtime(
+        lease_guard=lease_guard,
+        session=session,
+        node=node,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "build_account_runtime",
+        lambda *args, **kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "build_health_server",
+        lambda *args, **kwargs: server,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "run_startup_readiness_checks",
+        lambda runtime: None,
+    )
+
+    with pytest.raises(RuntimeError, match="node run failed"):
+        run_node.main(["--config", "node.json"])
+
+    assert server.served.wait(timeout=1.0)
+    assert server.shutdown_called is True
+    assert server.closed is True
+    assert session.started is True
+    assert session.stop_calls == 1
+    assert node.built is True
+    assert node.ran is True
+    assert node.stopped is True
+    assert node.disposed is True
+    assert lease_guard.closed is True
+
+
 def _runtime(
     *,
     lease_guard: _LeaseGuard,
     session: _Session | None = None,
     redis_guard: object | None = None,
     redis_client: object | None = None,
+    node: _Node | None = None,
 ) -> SimpleNamespace:
     active_session = session
     if active_session is None:
         active_session = _Session()
+    active_node = node
+    if active_node is None:
+        active_node = _Node()
     return SimpleNamespace(
+        config=SimpleNamespace(
+            account_id="account-a",
+            node_id="node-a",
+            binance=SimpleNamespace(environment="testnet"),
+        ),
+        lifecycle=SimpleNamespace(trading_state="HALTED"),
         control_plane_session=active_session,
-        trading_node=_Node(),
+        trading_node=active_node,
         background_workers=[],
         redis_runtime_safety_guard=redis_guard,
         redis_runtime_safety_client=redis_client,
