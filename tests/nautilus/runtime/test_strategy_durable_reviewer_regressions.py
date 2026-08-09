@@ -279,6 +279,117 @@ def test_superseded_version_for_same_logical_intent_runs_latest_only(
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
 
 
+def test_immediate_tp_fallback_is_not_superseded_by_protection_schedule(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent_id = UUID("d1111111-1111-4111-8111-111111111111")
+    intent_key = str(intent_id)
+    fallback_id = encode_client_order_id(
+        intent_id,
+        sequence=91,
+    )
+    source_client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=11,
+    )
+    fallback_plan = OrderPlan(
+        intent_id=intent_id,
+        client_order_id=fallback_id,
+        tags=(
+            f"intent_id={intent_id}",
+            "lifecycle_role=take_profit",
+        ),
+        instrument_id="BTCUSDT-PERP.BINANCE",
+        side="SELL",
+        order_type="MARKET",
+        quantity="0.1",
+        price=None,
+        time_in_force="GTC",
+        reduce_only=True,
+    )
+    strategy._entry_protection_stash[intent_key] = {
+        "instrument_id": fallback_plan.instrument_id,
+        "entry_side": "BUY",
+        "protection_ids": (source_client_order_id,),
+        "protection_roles": {},
+        "pending_cancel_ids": (),
+        "protection_revision": 1,
+        "tp_market_fallbacks": {
+            fallback_id: {
+                "source_client_order_id": source_client_order_id,
+                "client_order_id": fallback_id,
+                "tp_price": "27000",
+                "quantity": "0.1",
+                "remaining_quantity": "0.1",
+                "side": "SELL",
+                "status": "submitting",
+                "event_key": (
+                    f"{intent_key}:{source_client_order_id}:"
+                    f"{fallback_id}"
+                ),
+                "event_sent": False,
+            }
+        },
+    }
+    first_started = Event()
+    first_release = Event()
+    original_write = strategy._write_entry_protection_stash
+    writes = 0
+
+    def blocked_first_write(payload: Any) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            first_started.set()
+            first_release.wait(timeout=5.0)
+        original_write(payload)
+
+    strategy._write_entry_protection_stash = blocked_first_write  # type: ignore[method-assign]
+    strategy._start_durable_io_lane()
+    try:
+        assert strategy._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "immediate_tp_market_fallback",
+                "intent_key": intent_key,
+                "fallback_id": fallback_id,
+                "source_client_order_id": source_client_order_id,
+                "tp_price": "27000",
+                "event_key": (
+                    f"{intent_key}:{source_client_order_id}:"
+                    f"{fallback_id}"
+                ),
+                "plan": fallback_plan,
+            },
+            changed_intent_keys=intent_key,
+        )
+        assert first_started.wait(timeout=1.0)
+        assert strategy._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "protection_schedule",
+                "intent_key": intent_key,
+            },
+            changed_intent_keys=intent_key,
+        )
+
+        first_release.set()
+        _drain_until_idle(strategy)
+
+        assert strategy.submitted == [fallback_id]
+        assert strategy.scheduled == [intent_key]
+        fallback_state = strategy._entry_protection_stash[
+            intent_key
+        ]["tp_market_fallbacks"][fallback_id]
+        assert fallback_state["status"] == "submitted"
+        assert strategy.durable_io_halted_reason == ""
+    finally:
+        first_release.set()
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
 def test_opening_without_protection_waits_for_durable_prepare(
     tmp_path: Path,
 ) -> None:
@@ -842,6 +953,179 @@ def test_external_queue_backpressure_is_soft_degraded(
     finally:
         first_release.set()
         second_release.set()
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_external_cancel_results_wait_for_actor_drain_without_halt(
+    tmp_path: Path,
+) -> None:
+    strategy = _SmallExternalQueueProbeStrategy(tmp_path)
+    cancel_calls: list[str] = []
+    second_cancel_called = Event()
+
+    class Adapter:
+        def cancel(self, _operation: str, request: Any) -> Any:
+            client_order_id = str(request.client_order_id)
+            cancel_calls.append(client_order_id)
+            if len(cancel_calls) == 2:
+                second_cancel_called.set()
+            return SimpleNamespace(terminal_status="CANCELED")
+
+    class Mirror:
+        def find_order(
+            self,
+            _instrument_id: str,
+            client_order_id: str,
+        ) -> Any:
+            return SimpleNamespace(
+                account_id="account-a",
+                symbol="BTCUSDT",
+                position_side="LONG",
+                order_kind="regular",
+                venue_order_id=f"venue-{client_order_id}",
+            )
+
+    opening_plan = _order_plan(
+        UUID("a1111111-1111-4111-8111-111111111111"),
+        "entry-during-external-result-pressure",
+    )
+    strategy.set_exchange_cancel_adapter(Adapter(), Mirror())
+    strategy._entry_protection_stash["durable-fill"] = {
+        "state": "pending",
+    }
+    strategy._start_durable_io_lane()
+    try:
+        assert strategy._queue_entry_protection_stash_persist(
+            changed_intent_keys="durable-fill"
+        )
+        assert strategy.durable_io_cleanup_worker().wait_empty(
+            timeout_seconds=1.0
+        )
+        assert strategy._durable_io_mailbox.qsize() == 1
+
+        assert strategy._queue_exchange_cancel(
+            instrument_id=opening_plan.instrument_id,
+            cancel_order_ids=("cancel-1",),
+            success_continuation={
+                "kind": "protection_schedule",
+                "intent_key": "cancel-result-1",
+            },
+        )
+        deadline = time.monotonic() + 1.0
+        while (
+            strategy._external_cancel_result_mailbox.qsize() < 1
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.001)
+        assert strategy._external_cancel_result_mailbox.qsize() == 1
+
+        assert strategy._queue_exchange_cancel(
+            instrument_id=opening_plan.instrument_id,
+            cancel_order_ids=("cancel-2",),
+            success_continuation={
+                "kind": "protection_schedule",
+                "intent_key": "cancel-result-2",
+            },
+        )
+        assert second_cancel_called.wait(timeout=1.0)
+        time.sleep(0.06)
+
+        assert strategy._opening_side_effect_allowed(opening_plan) is True
+        assert strategy.drain_durable_io_mailbox(
+            max_results=1
+        ) == 1
+        _drain_until_idle(strategy)
+
+        assert cancel_calls == ["cancel-1", "cancel-2"]
+        assert strategy.scheduled == [
+            "cancel-result-1",
+            "cancel-result-2",
+        ]
+        denial_reasons = {
+            denial.reason for denial in strategy.denials
+        }
+        assert "strategy_external_io_backpressure" in denial_reasons
+        assert strategy.durable_io_halted_reason == ""
+        assert strategy._opening_side_effect_allowed(opening_plan) is True
+    finally:
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_external_refresh_result_is_latest_wins_under_durable_pressure(
+    tmp_path: Path,
+) -> None:
+    class RefreshProbeStrategy(_SmallExternalQueueProbeStrategy):
+        def __init__(self, state_dir: Path) -> None:
+            self.refresh_markers: list[str] = []
+            super().__init__(state_dir)
+
+        def _on_exchange_refresh_result(self, result: Any) -> None:
+            continuation = result.task.success_continuation
+            self.refresh_markers.append(
+                str(continuation.get("marker") or "")
+            )
+
+    refresh_calls = 0
+
+    class Mirror:
+        def refresh(self) -> None:
+            nonlocal refresh_calls
+            refresh_calls += 1
+
+    strategy = RefreshProbeStrategy(tmp_path)
+    opening_plan = _order_plan(
+        UUID("a2222222-2222-4222-8222-222222222222"),
+        "entry-during-refresh-result-pressure",
+    )
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy._entry_protection_stash["durable-fill"] = {
+        "state": "pending",
+    }
+    strategy._start_durable_io_lane()
+    try:
+        assert strategy._queue_entry_protection_stash_persist(
+            changed_intent_keys="durable-fill"
+        )
+        assert strategy.durable_io_cleanup_worker().wait_empty(
+            timeout_seconds=1.0
+        )
+        assert strategy._durable_io_mailbox.qsize() == 1
+
+        assert strategy._queue_exchange_refresh(
+            success_continuation={
+                "kind": "protection_schedule",
+                "intent_key": "refresh-owner",
+                "marker": "stale",
+            }
+        )
+        assert strategy.external_io_cleanup_worker().wait_empty(
+            timeout_seconds=1.0
+        )
+        assert strategy._queue_exchange_refresh(
+            success_continuation={
+                "kind": "protection_schedule",
+                "intent_key": "refresh-owner",
+                "marker": "latest",
+            }
+        )
+        assert strategy.external_io_cleanup_worker().wait_empty(
+            timeout_seconds=1.0
+        )
+
+        assert refresh_calls == 2
+        assert strategy._opening_side_effect_allowed(opening_plan) is True
+        _drain_until_idle(strategy)
+
+        assert strategy.refresh_markers == ["latest"]
+        assert strategy.durable_io_halted_reason == ""
+        assert strategy._opening_side_effect_allowed(opening_plan) is True
+    finally:
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
         strategy.external_io_cleanup_worker().stop(
             timeout_seconds=1.0

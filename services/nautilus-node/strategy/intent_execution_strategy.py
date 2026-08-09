@@ -148,6 +148,15 @@ class IntentExecutionStrategy(Strategy):
     _DURABLE_IO_QUEUE_CAPACITY = 128
     _DURABLE_IO_TASK_TIMEOUT_SECONDS = 1.0
     _DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS = 2.0
+    _LATEST_WINS_PROTECTION_CONTINUATIONS = frozenset(
+        {
+            "entry_submit",
+            "protection_cancel_timer",
+            "protection_schedule",
+            "zone_stash_ready",
+            "zone_submit",
+        }
+    )
 
     def __init__(self, config: IntentExecutionStrategyConfig) -> None:
         try:
@@ -199,6 +208,18 @@ class IntentExecutionStrategy(Strategy):
         self._durable_io_mailbox: Queue[Any] = Queue(
             maxsize=self._DURABLE_IO_QUEUE_CAPACITY
         )
+        self._external_cancel_result_mailbox: Queue[
+            _ExchangeCancelResult
+        ] = Queue(maxsize=self._DURABLE_IO_QUEUE_CAPACITY)
+        self._external_result_lock = Lock()
+        self._external_refresh_results: dict[
+            str,
+            _ExchangeRefreshResult,
+        ] = {}
+        self._external_degraded_result: (
+            _ExternalIoDegradedResult | bool
+        ) = False
+        self._prefer_external_io_result = True
         self._durable_io_fatal_mailbox: Queue[str] = Queue(maxsize=1)
         worker_name = str(
             getattr(config, "node_id", "")
@@ -759,12 +780,7 @@ class IntentExecutionStrategy(Strategy):
             task=task,
             denial=denial,
         )
-        try:
-            self._durable_io_mailbox.put_nowait(result)
-        except Full:
-            self._request_durable_io_halt(
-                "strategy external I/O result mailbox capacity exceeded"
-            )
+        self._queue_external_cancel_result(result)
 
     def _process_exchange_refresh_task(
         self,
@@ -790,12 +806,89 @@ class IntentExecutionStrategy(Strategy):
             task=task,
             denial=denial,
         )
-        try:
-            self._durable_io_mailbox.put_nowait(result)
-        except Full:
-            self._request_durable_io_halt(
-                "strategy external I/O result mailbox capacity exceeded"
-            )
+        self._queue_external_refresh_result(result)
+
+    def _queue_external_cancel_result(
+        self,
+        result: _ExchangeCancelResult,
+    ) -> bool:
+        backpressure_reported = False
+        while not self._strategy_stopping:
+            try:
+                self._external_cancel_result_mailbox.put(
+                    result,
+                    timeout=0.05,
+                )
+                return True
+            except Full:
+                if backpressure_reported:
+                    continue
+                backpressure_reported = True
+                self._queue_external_io_degraded(
+                    OrderDenied(
+                        "strategy_external_io_backpressure",
+                        (
+                            "strategy external cancel result mailbox "
+                            "capacity exceeded; waiting for actor drain"
+                        ),
+                    )
+                )
+        return False
+
+    def _queue_external_refresh_result(
+        self,
+        result: _ExchangeRefreshResult,
+    ) -> bool:
+        result_key = self._external_refresh_result_key(result)
+        backpressure_reported = False
+        while not self._strategy_stopping:
+            with self._external_result_lock:
+                can_store = (
+                    result_key in self._external_refresh_results
+                    or len(self._external_refresh_results)
+                    < self._DURABLE_IO_QUEUE_CAPACITY
+                )
+                if can_store:
+                    self._external_refresh_results[result_key] = result
+                    return True
+            if not backpressure_reported:
+                backpressure_reported = True
+                self._queue_external_io_degraded(
+                    OrderDenied(
+                        "strategy_external_io_backpressure",
+                        (
+                            "strategy external refresh result ledger "
+                            "capacity exceeded; waiting for actor drain"
+                        ),
+                    )
+                )
+            time.sleep(0.01)
+        return False
+
+    def _external_refresh_result_key(
+        self,
+        result: _ExchangeRefreshResult,
+    ) -> str:
+        task = result.task
+        success_key = self._external_continuation_key(
+            task.success_continuation
+        )
+        failure_key = self._external_continuation_key(
+            task.failure_continuation
+        )
+        return f"refresh:{success_key}:{failure_key}"
+
+    def _external_continuation_key(
+        self,
+        continuation: Mapping[str, Any] | bool,
+    ) -> str:
+        if not isinstance(continuation, Mapping):
+            return "none"
+        kind = str(continuation.get("kind") or "anonymous")
+        identity = self._continuation_identity(continuation)
+        if identity:
+            return f"{kind}:{identity}"
+        return kind
 
     def drain_durable_io_mailbox(
         self,
@@ -829,41 +922,82 @@ class IntentExecutionStrategy(Strategy):
         while drained < item_limit:
             if drained > 0 and time.monotonic() >= deadline:
                 break
-            try:
-                result = self._durable_io_mailbox.get_nowait()
-            except Empty:
+            pending = self._take_next_io_result()
+            if pending is False:
                 break
+            result, result_source = pending
             try:
                 if (
                     self._strategy_stopping
                     or self._durable_io_halted_reason
                 ):
                     self._discard_durable_io_result(result)
-                else:
+                elif result_source == "durable":
                     self._on_durable_io_result(result)
+                else:
+                    self._on_external_io_result(result)
             except Exception as exc:
                 self._halt_durable_io(
-                    "strategy durable I/O continuation failed: "
+                    "strategy I/O continuation failed: "
                     f"{exc!r}"
                 )
             finally:
-                self._durable_io_mailbox.task_done()
+                if result_source == "durable":
+                    self._durable_io_mailbox.task_done()
+                elif result_source == "external_cancel":
+                    self._external_cancel_result_mailbox.task_done()
             drained += 1
         return drained
+
+    def _take_next_io_result(
+        self,
+    ) -> tuple[Any, str] | bool:
+        if self._prefer_external_io_result:
+            external = self._take_external_io_result()
+            if external is not False:
+                self._prefer_external_io_result = False
+                return external
+        try:
+            durable = self._durable_io_mailbox.get_nowait()
+        except Empty:
+            durable = False
+        if durable is not False:
+            self._prefer_external_io_result = True
+            return durable, "durable"
+        external = self._take_external_io_result()
+        if external is not False:
+            self._prefer_external_io_result = False
+            return external
+        return False
+
+    def _take_external_io_result(
+        self,
+    ) -> tuple[Any, str] | bool:
+        try:
+            cancel_result = (
+                self._external_cancel_result_mailbox.get_nowait()
+            )
+        except Empty:
+            cancel_result = False
+        if cancel_result is not False:
+            return cancel_result, "external_cancel"
+        with self._external_result_lock:
+            if self._external_refresh_results:
+                result_key = next(iter(self._external_refresh_results))
+                refresh_result = self._external_refresh_results.pop(
+                    result_key
+                )
+                return refresh_result, "external_refresh"
+            degraded_result = self._external_degraded_result
+            self._external_degraded_result = False
+        if degraded_result is not False:
+            return degraded_result, "external_degraded"
+        return False
 
     def _on_durable_io_result(
         self,
         result: Any,
     ) -> None:
-        if isinstance(result, _ExternalIoDegradedResult):
-            self._record_denial(result.denial)
-            return
-        if isinstance(result, _ExchangeCancelResult):
-            self._on_exchange_cancel_result(result)
-            return
-        if isinstance(result, _ExchangeRefreshResult):
-            self._on_exchange_refresh_result(result)
-            return
         if not isinstance(result, _ProtectionStashResult):
             raise TypeError(
                 "unsupported strategy durable I/O result"
@@ -886,6 +1020,21 @@ class IntentExecutionStrategy(Strategy):
         if isinstance(continuation, Mapping):
             self._run_protection_continuation(continuation)
 
+    def _on_external_io_result(
+        self,
+        result: Any,
+    ) -> None:
+        if isinstance(result, _ExternalIoDegradedResult):
+            self._record_denial(result.denial)
+            return
+        if isinstance(result, _ExchangeCancelResult):
+            self._on_exchange_cancel_result(result)
+            return
+        if isinstance(result, _ExchangeRefreshResult):
+            self._on_exchange_refresh_result(result)
+            return
+        raise TypeError("unsupported strategy external I/O result")
+
     def _protection_continuation_key(
         self,
         continuation: Mapping[str, Any] | bool,
@@ -893,11 +1042,23 @@ class IntentExecutionStrategy(Strategy):
     ) -> str:
         if not isinstance(continuation, Mapping):
             return f"persist:{version}"
+        kind = str(continuation.get("kind") or "").strip()
+        if kind not in self._LATEST_WINS_PROTECTION_CONTINUATIONS:
+            return f"continuation:{kind or 'anonymous'}:{version}"
+        identity = self._continuation_identity(continuation)
+        if not identity:
+            return f"continuation:{kind}:{version}"
+        return f"latest:{kind}:{identity}"
+
+    def _continuation_identity(
+        self,
+        continuation: Mapping[str, Any],
+    ) -> str:
         explicit_key = str(
             continuation.get("logical_intent_key") or ""
         ).strip()
         if explicit_key:
-            return explicit_key
+            return f"logical:{explicit_key}"
         for field_name in ("plan", "source_intent", "intent"):
             value = continuation.get(field_name)
             intent_id = str(
@@ -905,17 +1066,24 @@ class IntentExecutionStrategy(Strategy):
             ).strip()
             if intent_id:
                 return f"intent:{intent_id}"
-        intent_key = str(
-            continuation.get("intent_key") or ""
-        ).strip()
-        if intent_key:
-            return f"intent:{intent_key}"
-        event_key = str(
-            continuation.get("event_key") or ""
-        ).strip()
-        if event_key:
-            return f"event:{event_key}"
-        return f"persist:{version}"
+        plans = continuation.get("plans")
+        if isinstance(plans, tuple) and plans:
+            intent_id = str(
+                getattr(plans[0], "intent_id", "") or ""
+            ).strip()
+            if intent_id:
+                return f"intent:{intent_id}"
+        for field_name in (
+            "intent_key",
+            "event_key",
+            "fallback_id",
+        ):
+            value = str(
+                continuation.get(field_name) or ""
+            ).strip()
+            if value:
+                return f"{field_name}:{value}"
+        return ""
 
     def _discard_durable_io_result(
         self,
@@ -1052,13 +1220,9 @@ class IntentExecutionStrategy(Strategy):
         )
 
     def _queue_external_io_degraded(self, denial: OrderDenied) -> None:
-        try:
-            self._durable_io_mailbox.put_nowait(
+        with self._external_result_lock:
+            self._external_degraded_result = (
                 _ExternalIoDegradedResult(denial=denial)
-            )
-        except Full:
-            self._request_durable_io_halt(
-                "strategy external I/O result mailbox capacity exceeded"
             )
 
     def _run_protection_continuation(
@@ -2455,7 +2619,9 @@ class IntentExecutionStrategy(Strategy):
             timeout_seconds=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
         )
         self.drain_durable_io_mailbox(
-            max_results=self._DURABLE_IO_QUEUE_CAPACITY
+            max_results=(
+                (self._DURABLE_IO_QUEUE_CAPACITY * 3) + 1
+            )
         )
 
     def on_event(self, event: Any) -> None:
