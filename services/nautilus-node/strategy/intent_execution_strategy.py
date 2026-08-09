@@ -5,9 +5,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import pickle
 import re
 import sys
 import tempfile
+import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from queue import Empty, Full, Queue
 from threading import Lock, get_ident
@@ -51,12 +53,39 @@ from strategy.intent_execution_planner import (
 @dataclass(frozen=True)
 class _ProtectionStashTask:
     version: int
-    payload: Mapping[str, Any]
+    payload: bytes
+    continuation: Mapping[str, Any] | bool = False
 
 
 @dataclass(frozen=True)
 class _ProtectionStashResult:
     task: _ProtectionStashTask
+
+
+@dataclass(frozen=True)
+class _ExchangeCancelTask:
+    instrument_id: str
+    cancel_order_ids: tuple[str, ...]
+    success_continuation: Mapping[str, Any] | bool = False
+    failure_continuation: Mapping[str, Any] | bool = False
+
+
+@dataclass(frozen=True)
+class _ExchangeCancelResult:
+    task: _ExchangeCancelTask
+    denial: Any = False
+
+
+@dataclass(frozen=True)
+class _ExchangeRefreshTask:
+    success_continuation: Mapping[str, Any] | bool = False
+    failure_continuation: Mapping[str, Any] | bool = False
+
+
+@dataclass(frozen=True)
+class _ExchangeRefreshResult:
+    task: _ExchangeRefreshTask
+    denial: Any = False
 
 
 try:  # pragma: no cover - Nautilus is unavailable on local Py3.14 dev hosts.
@@ -129,19 +158,20 @@ class IntentExecutionStrategy(Strategy):
         self._durable_io_active = False
         self._durable_io_actor_thread_id: int | bool = False
         self._durable_io_halted_reason = ""
+        self._durable_io_halt_requested_reason = ""
         self._durable_io_halt_lock = Lock()
         self._durable_io_fatal_handler: Optional[
             Callable[[str], None]
         ] = None
+        self._intent_receipt_handler: Optional[
+            Callable[[Any, str, str], bool]
+        ] = None
         self._protection_stash_version = 0
         self._protection_stash_persisted_version = 0
-        self._protection_durable_continuations: dict[
-            int,
-            list[Mapping[str, Any]],
-        ] = {}
-        self._durable_io_mailbox: Queue[_ProtectionStashResult] = Queue(
+        self._durable_io_mailbox: Queue[Any] = Queue(
             maxsize=self._DURABLE_IO_QUEUE_CAPACITY
         )
+        self._durable_io_fatal_mailbox: Queue[str] = Queue(maxsize=1)
         worker_name = str(
             getattr(config, "node_id", "")
             or getattr(config, "account_id", "")
@@ -152,9 +182,16 @@ class IntentExecutionStrategy(Strategy):
             self._process_durable_io_task,
             capacity=self._DURABLE_IO_QUEUE_CAPACITY,
             task_timeout_seconds=self._DURABLE_IO_TASK_TIMEOUT_SECONDS,
-            on_overflow=self._halt_durable_io,
-            on_error=self._halt_durable_io,
-            on_timeout=self._halt_durable_io,
+            on_overflow=self._request_durable_io_halt,
+            on_error=self._request_durable_io_halt,
+            on_timeout=self._request_durable_io_halt,
+        )
+        self._external_io_worker = BoundedTaskWorker(
+            f"{worker_name}.exchange-io",
+            self._process_external_io_task,
+            capacity=self._DURABLE_IO_QUEUE_CAPACITY,
+            task_timeout_seconds=False,
+            on_overflow=self._request_durable_io_halt,
         )
 
     def set_trading_state_getter(self, getter: Optional[Callable[[], Any]]) -> None:
@@ -168,10 +205,21 @@ class IntentExecutionStrategy(Strategy):
     ) -> None:
         self._durable_io_fatal_handler = handler
 
+    def set_intent_receipt_handler(
+        self,
+        handler: Optional[Callable[[Any, str, str], bool]],
+    ) -> None:
+        self._intent_receipt_handler = handler
+
     def durable_io_cleanup_worker(
         self,
     ) -> BoundedTaskWorker[_ProtectionStashTask]:
         return self._durable_io_worker
+
+    def external_io_cleanup_worker(
+        self,
+    ) -> BoundedTaskWorker[Any]:
+        return self._external_io_worker
 
     def set_denial_reporter(self, reporter: Optional[Callable[[Any, OrderDenied], None]]) -> None:
         """Inject best-effort denial reporting without making StrategyConfig carry
@@ -208,14 +256,18 @@ class IntentExecutionStrategy(Strategy):
         )
         self._entry_protection_stash = self._load_entry_protection_stash()
         self._schedule_startup_protection_syncs()
-        if self._refresh_exchange_state():
-            self._retry_pending_take_profit_disables()
+        self._queue_exchange_refresh(
+            success_continuation={
+                "kind": "retry_pending_take_profit_disables",
+            }
+        )
         self._register_exchange_state_timer()
 
     def _start_durable_io_lane(self) -> None:
         self._durable_io_actor_thread_id = get_ident()
         self._durable_io_active = True
         self._durable_io_worker.start()
+        self._external_io_worker.start()
 
     def _register_durable_io_mailbox_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -265,8 +317,11 @@ class IntentExecutionStrategy(Strategy):
         set_timer("exchange-state.reconcile", interval, self._on_exchange_state_timer)
 
     def _on_exchange_state_timer(self, *_args: Any, **_kwargs: Any) -> None:
-        if self._refresh_exchange_state():
-            self._retry_pending_take_profit_disables()
+        self._queue_exchange_refresh(
+            success_continuation={
+                "kind": "retry_pending_take_profit_disables",
+            }
+        )
 
     def _refresh_exchange_state(self) -> bool:
         mirror = self._exchange_state_mirror
@@ -392,7 +447,9 @@ class IntentExecutionStrategy(Strategy):
     def _persist_entry_protection_stash(self) -> bool:
         try:
             self._write_entry_protection_stash(
-                self._entry_protection_stash_payload()
+                self._decode_entry_protection_stash_snapshot(
+                    self._entry_protection_stash_snapshot()
+                )
             )
             return True
         except Exception as exc:
@@ -405,18 +462,32 @@ class IntentExecutionStrategy(Strategy):
             return False
 
     def _entry_protection_stash_payload(self) -> Mapping[str, Any]:
-        serializable = {
+        snapshot = self._entry_protection_stash_snapshot()
+        return _freeze_durable_value(
+            self._decode_entry_protection_stash_snapshot(snapshot)
+        )
+
+    def _entry_protection_stash_snapshot(self) -> bytes:
+        serializable: dict[str, dict[str, Any]] = {
             str(intent_key): self._jsonable_protection_stash_value(value)
             for intent_key, value in self._entry_protection_stash.items()
             if isinstance(value, dict)
         }
-        encoded = json.dumps(
+        return pickle.dumps(
             serializable,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
+            protocol=pickle.HIGHEST_PROTOCOL,
         )
-        return _freeze_durable_value(json.loads(encoded))
+
+    def _decode_entry_protection_stash_snapshot(
+        self,
+        snapshot: bytes,
+    ) -> Mapping[str, Any]:
+        payload = pickle.loads(snapshot)
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "protection stash snapshot must decode to an object"
+            )
+        return payload
 
     def _write_entry_protection_stash(
         self,
@@ -468,27 +539,19 @@ class IntentExecutionStrategy(Strategy):
             if isinstance(continuation, Mapping):
                 self._run_protection_continuation(continuation)
             return True
-        if self._strategy_stopping or self._durable_io_halted_reason:
+        if (
+            self._strategy_stopping
+            or self._durable_io_halted_reason
+            or self._durable_io_halt_requested_reason
+        ):
             return False
 
-        payload = self._entry_protection_stash_payload()
+        payload = self._entry_protection_stash_snapshot()
         self._protection_stash_version += 1
         version = self._protection_stash_version
-        pending_continuations: list[Mapping[str, Any]] = []
-        for queued_version in tuple(
-            self._protection_durable_continuations
-        ):
-            pending_continuations.extend(
-                self._protection_durable_continuations.pop(
-                    queued_version
-                )
-            )
+        task_continuation: Mapping[str, Any] | bool = False
         if isinstance(continuation, Mapping):
-            pending_continuations.append(dict(continuation))
-        if pending_continuations:
-            self._protection_durable_continuations[
-                version
-            ] = pending_continuations
+            task_continuation = copy.deepcopy(dict(continuation))
 
         if not self._durable_io_worker.snapshot().running:
             self._durable_io_worker.start()
@@ -496,6 +559,7 @@ class IntentExecutionStrategy(Strategy):
             _ProtectionStashTask(
                 version=version,
                 payload=payload,
+                continuation=task_continuation,
             )
         )
 
@@ -507,22 +571,93 @@ class IntentExecutionStrategy(Strategy):
             raise ValueError(
                 "protection stash task requires a positive version"
             )
-        self._write_entry_protection_stash(task.payload)
+        payload = self._decode_entry_protection_stash_snapshot(
+            task.payload
+        )
+        self._write_entry_protection_stash(payload)
         result = _ProtectionStashResult(task=task)
         try:
             self._durable_io_mailbox.put_nowait(result)
         except Full:
-            self._halt_durable_io(
+            self._request_durable_io_halt(
                 "strategy durable I/O result mailbox capacity exceeded"
+            )
+
+    def _process_external_io_task(
+        self,
+        task: Any,
+    ) -> None:
+        if isinstance(task, _ExchangeRefreshTask):
+            self._process_exchange_refresh_task(task)
+            return
+        if not isinstance(task, _ExchangeCancelTask):
+            raise TypeError("unsupported strategy external I/O task")
+        denial: Any = False
+        for client_order_id in task.cancel_order_ids:
+            succeeded, failure = self._perform_exchange_cancel(
+                task.instrument_id,
+                client_order_id,
+            )
+            if succeeded:
+                continue
+            denial = failure
+            break
+        result = _ExchangeCancelResult(
+            task=task,
+            denial=denial,
+        )
+        try:
+            self._durable_io_mailbox.put_nowait(result)
+        except Full:
+            self._request_durable_io_halt(
+                "strategy external I/O result mailbox capacity exceeded"
+            )
+
+    def _process_exchange_refresh_task(
+        self,
+        task: _ExchangeRefreshTask,
+    ) -> None:
+        denial: Any = False
+        mirror = self._exchange_state_mirror
+        refresh = getattr(mirror, "refresh", None) if mirror else None
+        if not callable(refresh):
+            denial = OrderDenied(
+                "exchange_state_refresh_failed",
+                "exchange state mirror is unavailable",
+            )
+        else:
+            try:
+                refresh()
+            except Exception as exc:
+                denial = OrderDenied(
+                    "exchange_state_refresh_failed",
+                    repr(exc),
+                )
+        result = _ExchangeRefreshResult(
+            task=task,
+            denial=denial,
+        )
+        try:
+            self._durable_io_mailbox.put_nowait(result)
+        except Full:
+            self._request_durable_io_halt(
+                "strategy external I/O result mailbox capacity exceeded"
             )
 
     def drain_durable_io_mailbox(
         self,
         *,
         max_results: int = 16,
+        max_items: int | bool = False,
+        time_budget_ms: float = 8.0,
     ) -> int:
         if max_results < 1:
             raise ValueError("max_results must be positive")
+        if max_items is not False:
+            if isinstance(max_items, bool) or max_items < 1:
+                raise ValueError("max_items must be positive or False")
+        if time_budget_ms <= 0:
+            raise ValueError("time_budget_ms must be positive")
         actor_thread_id = self._durable_io_actor_thread_id
         if (
             self._durable_io_active
@@ -532,8 +667,15 @@ class IntentExecutionStrategy(Strategy):
             raise RuntimeError(
                 "durable I/O continuations require the actor thread"
             )
+        self._drain_durable_io_fatal_mailbox()
+        item_limit = max_results
+        if max_items is not False:
+            item_limit = min(item_limit, int(max_items))
+        deadline = time.monotonic() + (time_budget_ms / 1000.0)
         drained = 0
-        while drained < max_results:
+        while drained < item_limit:
+            if drained > 0 and time.monotonic() >= deadline:
+                break
             try:
                 result = self._durable_io_mailbox.get_nowait()
             except Empty:
@@ -558,30 +700,130 @@ class IntentExecutionStrategy(Strategy):
 
     def _on_durable_io_result(
         self,
-        result: _ProtectionStashResult,
+        result: Any,
     ) -> None:
+        if isinstance(result, _ExchangeCancelResult):
+            self._on_exchange_cancel_result(result)
+            return
+        if isinstance(result, _ExchangeRefreshResult):
+            self._on_exchange_refresh_result(result)
+            return
+        if not isinstance(result, _ProtectionStashResult):
+            raise TypeError(
+                "unsupported strategy durable I/O result"
+            )
         version = result.task.version
         self._protection_stash_persisted_version = max(
             self._protection_stash_persisted_version,
             version,
         )
         if version != self._protection_stash_version:
-            self._protection_durable_continuations.pop(version, None)
             return
-        continuations = self._protection_durable_continuations.pop(
-            version,
-            [],
-        )
-        for continuation in continuations:
+        continuation = result.task.continuation
+        if isinstance(continuation, Mapping):
             self._run_protection_continuation(continuation)
 
     def _discard_durable_io_result(
         self,
-        result: _ProtectionStashResult,
+        result: Any,
     ) -> None:
-        self._protection_durable_continuations.pop(
-            result.task.version,
-            None,
+        del result
+
+    def _on_exchange_cancel_result(
+        self,
+        result: _ExchangeCancelResult,
+    ) -> None:
+        task = result.task
+        if result.denial is not False:
+            denial = result.denial
+            if isinstance(denial, OrderDenied):
+                self._record_denial(denial)
+            continuation = task.failure_continuation
+            if isinstance(continuation, Mapping):
+                self._run_protection_continuation(continuation)
+            return
+        continuation = task.success_continuation
+        if isinstance(continuation, Mapping):
+            self._run_protection_continuation(continuation)
+
+    def _on_exchange_refresh_result(
+        self,
+        result: _ExchangeRefreshResult,
+    ) -> None:
+        task = result.task
+        if result.denial is not False:
+            denial = result.denial
+            if isinstance(denial, OrderDenied):
+                self._record_denial(denial)
+            continuation = task.failure_continuation
+            if isinstance(continuation, Mapping):
+                self._run_protection_continuation(continuation)
+            return
+        continuation = task.success_continuation
+        if isinstance(continuation, Mapping):
+            self._run_protection_continuation(continuation)
+
+    def _queue_exchange_refresh(
+        self,
+        *,
+        success_continuation: Mapping[str, Any] | bool = False,
+        failure_continuation: Mapping[str, Any] | bool = False,
+    ) -> bool:
+        if not self._durable_io_active:
+            if self._refresh_exchange_state():
+                if isinstance(success_continuation, Mapping):
+                    self._run_protection_continuation(
+                        success_continuation
+                    )
+                return True
+            if isinstance(failure_continuation, Mapping):
+                self._run_protection_continuation(
+                    failure_continuation
+                )
+            return False
+        if not self._external_io_worker.snapshot().running:
+            self._external_io_worker.start()
+        return self._external_io_worker.submit(
+            _ExchangeRefreshTask(
+                success_continuation=success_continuation,
+                failure_continuation=failure_continuation,
+            )
+        )
+
+    def _queue_exchange_cancel(
+        self,
+        *,
+        instrument_id: str,
+        cancel_order_ids: tuple[str, ...],
+        success_continuation: Mapping[str, Any] | bool = False,
+        failure_continuation: Mapping[str, Any] | bool = False,
+    ) -> bool:
+        if not self._durable_io_active:
+            for client_order_id in cancel_order_ids:
+                if self._cancel_via_exchange_adapter(
+                    instrument_id,
+                    client_order_id,
+                ):
+                    continue
+                if isinstance(failure_continuation, Mapping):
+                    self._run_protection_continuation(
+                        failure_continuation
+                    )
+                return False
+            if isinstance(success_continuation, Mapping):
+                self._run_protection_continuation(
+                    success_continuation
+                )
+            return True
+        if not self._external_io_worker.snapshot().running:
+            self._external_io_worker.start()
+        return self._external_io_worker.submit(
+            _ExchangeCancelTask(
+                instrument_id=str(instrument_id),
+                cancel_order_ids=cancel_order_ids,
+                success_continuation=success_continuation,
+                failure_continuation=failure_continuation,
+            )
         )
 
     def _run_protection_continuation(
@@ -636,9 +878,30 @@ class IntentExecutionStrategy(Strategy):
             )
         if kind == "management_dispatch":
             return self._continue_management_dispatch(continuation)
+        if kind == "management_failed":
+            return self._complete_plan_submission(
+                continuation.get("plan"),
+                continuation.get("source_intent", False),
+                False,
+            )
         if kind == "take_profit_disable_cancel":
             return self._continue_take_profit_disable_cancel(
                 continuation
+            )
+        if kind == "finalize_take_profit_disable":
+            plan = continuation.get("plan")
+            if not isinstance(plan, ManagementPlan):
+                return False
+            return self._finalize_take_profit_disable(
+                plan,
+                continuation={
+                    "kind": "management_complete",
+                    "plan": plan,
+                    "source_intent": continuation.get(
+                        "source_intent",
+                        False,
+                    ),
+                },
             )
         if kind == "management_complete":
             return self._complete_plan_submission(
@@ -650,6 +913,27 @@ class IntentExecutionStrategy(Strategy):
             return self._continue_retry_take_profit_disable(
                 continuation
             )
+        if kind == "retry_take_profit_disable_complete":
+            return self._complete_retry_take_profit_disable(
+                continuation
+            )
+        if kind == "retry_pending_take_profit_disables":
+            self._retry_pending_take_profit_disables()
+            return True
+        if kind == "handle_intent_after_exchange_refresh":
+            self._handle_intent(
+                continuation.get("intent"),
+                exchange_state_ready=True,
+            )
+            return True
+        if kind == "intent_exchange_refresh_failed":
+            intent = continuation.get("intent")
+            denial = self.denials[-1] if self.denials else OrderDenied(
+                "exchange_state_refresh_failed",
+                str(getattr(intent, "intent_id", "")),
+            )
+            self._report_denial(intent, denial)
+            return False
         self._halt_durable_io(
             f"unsupported protection continuation: {kind}"
         )
@@ -664,6 +948,11 @@ class IntentExecutionStrategy(Strategy):
         intent_id = getattr(plan, "intent_id", "")
         if submitted:
             self._processed_intent_ids.add(str(intent_id))
+            self._record_intent_terminal(
+                source_intent,
+                "DISPATCHED",
+                "",
+            )
             return True
         denial = self.denials[-1] if self.denials else OrderDenied(
             "order_submit_failed",
@@ -684,6 +973,28 @@ class IntentExecutionStrategy(Strategy):
             )
             return False
         source_intent = continuation.get("source_intent", False)
+        if not self._opening_side_effect_allowed(plan):
+            state = self._trading_state().upper()
+            self._record_denial(
+                OrderDenied("trading_not_active", state)
+            )
+            preimage = continuation.get("protection_preimage")
+            if isinstance(preimage, dict):
+                self._entry_protection_stash = copy.deepcopy(preimage)
+            queued = self._queue_entry_protection_stash_persist(
+                continuation={
+                    "kind": "entry_submit_failed",
+                    "plan": plan,
+                    "source_intent": source_intent,
+                }
+            )
+            if queued:
+                return True
+            return self._complete_plan_submission(
+                plan,
+                source_intent,
+                False,
+            )
         if self._submit_order_plan(plan):
             return self._complete_plan_submission(
                 plan,
@@ -737,6 +1048,10 @@ class IntentExecutionStrategy(Strategy):
                         "source_intent",
                         False,
                     ),
+                    "protection_preimage": continuation.get(
+                        "protection_preimage",
+                        False,
+                    ),
                 }
             )
             if queued:
@@ -777,6 +1092,31 @@ class IntentExecutionStrategy(Strategy):
                 "zone submit continuation requires order plans"
             )
             return False
+        if not self._opening_side_effect_allowed(first_plan):
+            state = self._trading_state().upper()
+            self._record_denial(
+                OrderDenied("trading_not_active", state)
+            )
+            preimage = continuation.get("protection_preimage")
+            if isinstance(preimage, dict):
+                self._entry_protection_stash = copy.deepcopy(preimage)
+            queued = self._queue_entry_protection_stash_persist(
+                continuation={
+                    "kind": "entry_submit_failed",
+                    "plan": first_plan,
+                    "source_intent": continuation.get(
+                        "source_intent",
+                        False,
+                    ),
+                }
+            )
+            if queued:
+                return True
+            return self._complete_plan_submission(
+                first_plan,
+                continuation.get("source_intent", False),
+                False,
+            )
         submitted_plans: list[OrderPlan] = []
         for plan in plans:
             if not isinstance(plan, OrderPlan):
@@ -803,19 +1143,65 @@ class IntentExecutionStrategy(Strategy):
         )
 
     def wait_for_durable_io(self, *, timeout_seconds: float) -> bool:
-        return self._durable_io_worker.wait_empty(
+        started_at = time.monotonic()
+        durable_empty = self._durable_io_worker.wait_empty(
             timeout_seconds=timeout_seconds
         )
+        elapsed = time.monotonic() - started_at
+        remaining = max(0.0, timeout_seconds - elapsed)
+        external_empty = self._external_io_worker.wait_empty(
+            timeout_seconds=remaining
+        )
+        return durable_empty and external_empty
 
     @property
     def durable_io_halted_reason(self) -> str:
         return self._durable_io_halted_reason
 
     def _halt_durable_io(self, reason: str) -> None:
+        actor_thread_id = self._durable_io_actor_thread_id
+        if (
+            actor_thread_id is not False
+            and actor_thread_id != get_ident()
+        ):
+            self._request_durable_io_halt(reason)
+            return
+        self._apply_durable_io_halt(reason)
+
+    def _request_durable_io_halt(self, reason: str) -> None:
         halt_reason = f"strategy durable I/O failed: {str(reason).strip()}"
+        with self._durable_io_halt_lock:
+            if (
+                self._durable_io_halted_reason
+                or self._durable_io_halt_requested_reason
+            ):
+                return
+            self._durable_io_halt_requested_reason = halt_reason
+        try:
+            self._durable_io_fatal_mailbox.put_nowait(halt_reason)
+        except Full:
+            pass
+
+    def _drain_durable_io_fatal_mailbox(self) -> None:
+        try:
+            halt_reason = self._durable_io_fatal_mailbox.get_nowait()
+        except Empty:
+            return
+        try:
+            self._apply_durable_io_halt(halt_reason)
+        finally:
+            self._durable_io_fatal_mailbox.task_done()
+
+    def _apply_durable_io_halt(self, reason: str) -> None:
+        halt_reason = str(reason).strip()
+        if not halt_reason.startswith("strategy durable I/O failed:"):
+            halt_reason = (
+                "strategy durable I/O failed: " + halt_reason
+            )
         with self._durable_io_halt_lock:
             if self._durable_io_halted_reason:
                 return
+            self._durable_io_halt_requested_reason = halt_reason
             self._durable_io_halted_reason = halt_reason
         self._record_denial(
             OrderDenied(
@@ -826,6 +1212,11 @@ class IntentExecutionStrategy(Strategy):
         handler = self._durable_io_fatal_handler
         if handler is not None:
             handler(halt_reason)
+
+    def _opening_side_effect_allowed(self, plan: OrderPlan) -> bool:
+        if plan.reduce_only:
+            return True
+        return self._trading_state().upper() == "ACTIVE"
 
     def _jsonable_protection_stash_value(self, value: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -928,7 +1319,14 @@ class IntentExecutionStrategy(Strategy):
             return
         self._handle_intent(intent)
 
-    def _handle_intent(self, intent: Any) -> None:
+    def _handle_intent(
+        self,
+        intent: Any,
+        *,
+        exchange_state_ready: bool = False,
+    ) -> None:
+        if intent is None:
+            return
         raw_action = getattr(intent, "action", "")
         action = str(getattr(raw_action, "value", raw_action))
         raw_order_plan = getattr(intent, "order_plan", {}) or {}
@@ -944,19 +1342,28 @@ class IntentExecutionStrategy(Strategy):
             "move_stop_to_entry",
             "replace_take_profits",
         }
-        exchange_state_ready = False
-        if needs_exchange_state and not disabling_take_profits:
-            exchange_state_ready = self._refresh_exchange_state()
         if (
             needs_exchange_state
             and not disabling_take_profits
             and not exchange_state_ready
         ):
-            denial = self.denials[-1] if self.denials else OrderDenied(
-                "exchange_state_refresh_failed",
-                str(intent.intent_id),
+            queued = self._queue_exchange_refresh(
+                success_continuation={
+                    "kind": "handle_intent_after_exchange_refresh",
+                    "intent": intent,
+                },
+                failure_continuation={
+                    "kind": "intent_exchange_refresh_failed",
+                    "intent": intent,
+                },
             )
-            self._report_denial(intent, denial)
+            if not queued:
+                denial = OrderDenied(
+                    "exchange_state_refresh_failed",
+                    str(intent.intent_id),
+                )
+                self._record_denial(denial)
+                self._report_denial(intent, denial)
             return
         context = PlannerContext(
             account_id=self.config.account_id,
@@ -1479,6 +1886,9 @@ class IntentExecutionStrategy(Strategy):
         for intent_key in tuple(self._entry_protection_stash):
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
         self._durable_io_worker.stop(
+            timeout_seconds=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
+        )
+        self._external_io_worker.stop(
             timeout_seconds=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
         )
         self.drain_durable_io_mailbox(
@@ -3208,18 +3618,20 @@ class IntentExecutionStrategy(Strategy):
             )
             return False
         if plan.action == CANCEL_ORDER:
-            for client_order_id in plan.cancel_order_ids:
-                if not self._cancel_via_exchange_adapter(
-                    plan.instrument_id,
-                    client_order_id,
-                ):
-                    return False
-            self._complete_plan_submission(
-                plan,
-                source_intent,
-                True,
+            return self._queue_exchange_cancel(
+                instrument_id=plan.instrument_id,
+                cancel_order_ids=tuple(plan.cancel_order_ids),
+                success_continuation={
+                    "kind": "management_complete",
+                    "plan": plan,
+                    "source_intent": source_intent,
+                },
+                failure_continuation={
+                    "kind": "management_failed",
+                    "plan": plan,
+                    "source_intent": source_intent,
+                },
             )
-            return True
         disabling_take_profits = (
             str(plan.action) == "replace_take_profits"
             and plan.disable_take_profits
@@ -3262,11 +3674,22 @@ class IntentExecutionStrategy(Strategy):
         source_intent = continuation.get("source_intent", False)
         mode = str(continuation.get("mode") or "")
         if mode == "disable_take_profits":
-            if not self._refresh_exchange_state():
-                return self._complete_plan_submission(
-                    plan,
-                    source_intent,
-                    False,
+            if not bool(
+                continuation.get("exchange_state_ready", False)
+            ):
+                return self._queue_exchange_refresh(
+                    success_continuation={
+                        "kind": "management_dispatch",
+                        "mode": mode,
+                        "plan": plan,
+                        "source_intent": source_intent,
+                        "exchange_state_ready": True,
+                    },
+                    failure_continuation={
+                        "kind": "management_failed",
+                        "plan": plan,
+                        "source_intent": source_intent,
+                    },
                 )
             cancel_order_ids = self._management_cancel_order_ids(plan)
             if cancel_order_ids is None:
@@ -3309,16 +3732,36 @@ class IntentExecutionStrategy(Strategy):
                     source_intent,
                     False,
                 )
+        external_cancel_ids: list[str] = []
         for client_order_id in cancel_order_ids:
-            if not self._cancel_management_order(
+            local_result = self._cancel_management_order(
                 plan.instrument_id,
                 client_order_id,
-            ):
+            )
+            if local_result is None:
+                external_cancel_ids.append(client_order_id)
+                continue
+            if not local_result:
                 return self._complete_plan_submission(
                     plan,
                     source_intent,
                     False,
                 )
+        if external_cancel_ids:
+            return self._queue_exchange_cancel(
+                instrument_id=plan.instrument_id,
+                cancel_order_ids=tuple(external_cancel_ids),
+                success_continuation={
+                    "kind": "management_complete",
+                    "plan": plan,
+                    "source_intent": source_intent,
+                },
+                failure_continuation={
+                    "kind": "management_failed",
+                    "plan": plan,
+                    "source_intent": source_intent,
+                },
+            )
         return self._complete_plan_submission(
             plan,
             source_intent,
@@ -3343,20 +3786,25 @@ class IntentExecutionStrategy(Strategy):
                 (),
             )
         )
-        for client_order_id in cancel_order_ids:
-            if not self._cancel_via_exchange_adapter(
-                plan.instrument_id,
-                client_order_id,
-            ):
-                return self._complete_plan_submission(
-                    plan,
-                    source_intent,
-                    False,
-                )
-        return self._finalize_take_profit_disable(
-            plan,
-            continuation={
-                "kind": "management_complete",
+        if not cancel_order_ids:
+            return self._finalize_take_profit_disable(
+                plan,
+                continuation={
+                    "kind": "management_complete",
+                    "plan": plan,
+                    "source_intent": source_intent,
+                },
+            )
+        return self._queue_exchange_cancel(
+            instrument_id=plan.instrument_id,
+            cancel_order_ids=cancel_order_ids,
+            success_continuation={
+                "kind": "finalize_take_profit_disable",
+                "plan": plan,
+                "source_intent": source_intent,
+            },
+            failure_continuation={
+                "kind": "management_failed",
                 "plan": plan,
                 "source_intent": source_intent,
             },
@@ -3427,7 +3875,7 @@ class IntentExecutionStrategy(Strategy):
         self,
         instrument_id: str,
         client_order_id: str,
-    ) -> bool:
+    ) -> Optional[bool]:
         for order in self._cache_orders(instrument_id):
             if str(getattr(order, "client_order_id", "")) != client_order_id:
                 continue
@@ -3437,68 +3885,89 @@ class IntentExecutionStrategy(Strategy):
             except Exception as exc:
                 self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
                 return False
-        return self._cancel_via_exchange_adapter(
-            instrument_id,
-            client_order_id,
-        )
+        return None
 
     def _cancel_via_exchange_adapter(
         self,
         instrument_id: str,
         client_order_id: str,
     ) -> bool:
+        succeeded, denial = self._perform_exchange_cancel(
+            instrument_id,
+            client_order_id,
+        )
+        if succeeded:
+            return True
+        if isinstance(denial, OrderDenied):
+            self._record_denial(denial)
+        return False
+
+    def _perform_exchange_cancel(
+        self,
+        instrument_id: str,
+        client_order_id: str,
+    ) -> tuple[bool, OrderDenied | bool]:
         if not self._exchange_cancel_adapter or not self._exchange_state_mirror:
-            self._record_denial(
-                OrderDenied("exchange_cancel_adapter_unavailable", client_order_id)
+            return False, OrderDenied(
+                "exchange_cancel_adapter_unavailable",
+                client_order_id,
             )
-            return False
         find_order = getattr(self._exchange_state_mirror, "find_order", None)
         if not callable(find_order):
-            self._record_denial(OrderDenied("order_cancel_not_found", client_order_id))
-            return False
+            return False, OrderDenied(
+                "order_cancel_not_found",
+                client_order_id,
+            )
         try:
             order = find_order(instrument_id, client_order_id)
         except Exception as exc:
-            self._record_denial(
-                OrderDenied("exchange_state_refresh_failed", repr(exc))
+            return False, OrderDenied(
+                "exchange_state_refresh_failed",
+                repr(exc),
             )
-            return False
         if not order:
-            self._record_denial(OrderDenied("order_cancel_not_found", client_order_id))
-            return False
+            return False, OrderDenied(
+                "order_cancel_not_found",
+                client_order_id,
+            )
         from runtime.exchange_cancel_adapter import (
             CancelOrderRequest,
             OrderAlreadyFilledError,
         )
 
-        request = CancelOrderRequest(
-            account_id=str(getattr(order, "account_id", "")),
-            symbol=str(getattr(order, "symbol", "")),
-            position_side=str(getattr(order, "position_side", "")),
-            order_kind=str(getattr(order, "order_kind", "")),
-            venue_order_id=_optional_str(getattr(order, "venue_order_id", None)),
-            client_order_id=client_order_id,
-        )
         try:
+            request = CancelOrderRequest(
+                account_id=str(getattr(order, "account_id", "")),
+                symbol=str(getattr(order, "symbol", "")),
+                position_side=str(
+                    getattr(order, "position_side", "")
+                ),
+                order_kind=str(getattr(order, "order_kind", "")),
+                venue_order_id=_optional_str(
+                    getattr(order, "venue_order_id", None)
+                ),
+                client_order_id=client_order_id,
+            )
             result = self._exchange_cancel_adapter.cancel("cancel_order", request)
             terminal_status = str(
                 getattr(result, "terminal_status", "")
             ).upper()
             if terminal_status not in {"CANCELED", "CANCELLED"}:
-                self._record_denial(
-                    OrderDenied(
-                        "order_cancel_unconfirmed",
-                        f"{client_order_id}:{terminal_status or 'UNKNOWN'}",
-                    )
+                return False, OrderDenied(
+                    "order_cancel_unconfirmed",
+                    f"{client_order_id}:{terminal_status or 'UNKNOWN'}",
                 )
-                return False
-            return True
+            return True, False
         except OrderAlreadyFilledError as exc:
-            self._record_denial(OrderDenied("order_already_filled", str(exc)))
-            return False
+            return False, OrderDenied(
+                "order_already_filled",
+                str(exc),
+            )
         except Exception as exc:
-            self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
-            return False
+            return False, OrderDenied(
+                "order_cancel_failed",
+                repr(exc),
+            )
 
     def _absorb_management_plan(
         self,
@@ -3738,15 +4207,54 @@ class IntentExecutionStrategy(Strategy):
         tombstone = stash.get("take_profit_tombstone")
         if not isinstance(tombstone, dict):
             return False
-        for client_order_id in sorted(tuple(pending_ids)):
+        cancel_order_ids = tuple(
+            sorted(pending_ids.intersection(live_ids))
+        )
+        for client_order_id in tuple(pending_ids):
             if client_order_id not in live_ids:
                 pending_ids.discard(client_order_id)
-                continue
-            if self._cancel_via_exchange_adapter(
-                instrument_id,
-                client_order_id,
-            ):
-                pending_ids.discard(client_order_id)
+        if cancel_order_ids:
+            return self._queue_exchange_cancel(
+                instrument_id=instrument_id,
+                cancel_order_ids=cancel_order_ids,
+                success_continuation={
+                    "kind": "retry_take_profit_disable_complete",
+                    "intent_key": intent_key,
+                    "canceled_ids": cancel_order_ids,
+                },
+            )
+        tombstone["pending_cancel_ids"] = sorted(pending_ids)
+        if not pending_ids:
+            tombstone["state"] = "disabled"
+            tombstone["completed_at"] = self._now().isoformat()
+        return self._queue_entry_protection_stash_persist()
+
+    def _complete_retry_take_profit_disable(
+        self,
+        continuation: Mapping[str, Any],
+    ) -> bool:
+        intent_key = str(continuation.get("intent_key") or "")
+        canceled_ids = {
+            str(client_order_id)
+            for client_order_id in continuation.get(
+                "canceled_ids",
+                (),
+            )
+        }
+        stash = self._entry_protection_stash.get(intent_key)
+        if not isinstance(stash, dict):
+            return False
+        tombstone = stash.get("take_profit_tombstone")
+        if not isinstance(tombstone, dict):
+            return False
+        pending_ids = {
+            str(client_order_id)
+            for client_order_id in tombstone.get(
+                "pending_cancel_ids",
+                (),
+            )
+        }
+        pending_ids.difference_update(canceled_ids)
         tombstone["pending_cancel_ids"] = sorted(pending_ids)
         if not pending_ids:
             tombstone["state"] = "disabled"
@@ -3894,6 +4402,11 @@ class IntentExecutionStrategy(Strategy):
             log.error(f"OrderDenied reason={denial.reason} detail={denial.detail}")
 
     def _report_denial(self, intent: Any, denial: OrderDenied) -> None:
+        self._record_intent_terminal(
+            intent,
+            "REJECTED",
+            f"{denial.reason}:{denial.detail}",
+        )
         if self._denial_reporter is None:
             return
         try:
@@ -3905,6 +4418,31 @@ class IntentExecutionStrategy(Strategy):
                     f"OrderDenied reporter failed reason={denial.reason} "
                     f"detail={denial.detail}"
                 )
+
+    def _record_intent_terminal(
+        self,
+        intent: Any,
+        status: str,
+        detail: str,
+    ) -> bool:
+        if intent is False or intent is None:
+            return False
+        handler = self._intent_receipt_handler
+        if handler is None:
+            return False
+        intent_id = getattr(intent, "intent_id", False)
+        if intent_id is False:
+            return False
+        try:
+            return bool(handler(intent_id, status, detail))
+        except Exception as exc:
+            self._record_denial(
+                OrderDenied(
+                    "intent_receipt_enqueue_failed",
+                    repr(exc),
+                )
+            )
+            return False
 
 
 def _event_client_order_id(event: Any) -> Optional[str]:

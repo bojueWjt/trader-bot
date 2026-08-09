@@ -9,15 +9,14 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
 sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
-from strategy.intent_execution_planner import ManagementPlan, OrderPlan  # noqa: E402
-from strategy.intent_execution_strategy import (  # noqa: E402
+from strategy.intent_execution_planner import ManagementPlan, OrderPlan
+from strategy.intent_execution_strategy import (
     IntentExecutionStrategy,
     IntentExecutionStrategyConfig,
 )
@@ -312,7 +311,7 @@ def test_exchange_cancel_continuation_runs_on_worker_lane(
                 account_id="account-a",
                 symbol="BTCUSDT",
                 position_side="LONG",
-                order_kind="TAKE_PROFIT_MARKET",
+                order_kind="regular",
                 venue_order_id="123",
             )
 

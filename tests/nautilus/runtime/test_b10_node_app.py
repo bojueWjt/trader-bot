@@ -178,11 +178,16 @@ class NodeAppAssemblyTest(unittest.TestCase):
             strategy.durable_io_fatal_handler,
             fatal_callback,
         )
-        self.assertEqual(len(runtime.background_workers), 1)
+        self.assertEqual(len(runtime.background_workers), 3)
         self.assertIs(
             strategy.durable_io_cleanup_worker(),
             runtime.background_workers[0],
         )
+        self.assertIs(
+            strategy.external_io_cleanup_worker(),
+            runtime.background_workers[1],
+        )
+        self.assertTrue(callable(strategy.intent_receipt_handler))
         self.assertTrue(callable(strategy.denial_reporter))
         self.assertTrue(callable(strategy.protection_event_reporter))
         self.assertEqual(
@@ -538,11 +543,15 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
         def __init__(self, config: Any) -> None:
             self.config = config
             self.durable_io_fatal_handler: Any = None
+            self.intent_receipt_handler: Any = None
             self.trading_state_getter: Any = None
             self.denial_reporter: Any = None
             self.protection_event_reporter: Any = None
             self.exchange_cancel_dependencies: Any = None
             self.cleanup_worker = types.SimpleNamespace(stop=lambda: True)
+            self.external_cleanup_worker = types.SimpleNamespace(
+                stop=lambda: True
+            )
 
         def set_durable_io_fatal_handler(
             self,
@@ -552,6 +561,15 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
 
         def durable_io_cleanup_worker(self) -> Any:
             return self.cleanup_worker
+
+        def external_io_cleanup_worker(self) -> Any:
+            return self.external_cleanup_worker
+
+        def set_intent_receipt_handler(
+            self,
+            handler: Any,
+        ) -> None:
+            self.intent_receipt_handler = handler
 
         def set_trading_state_getter(self, getter: Any) -> None:
             self.trading_state_getter = getter

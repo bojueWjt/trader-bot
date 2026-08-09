@@ -193,7 +193,6 @@ def test_stale_version_result_waits_for_latest_persist_before_continuations(
         assert strategy.scheduled == []
         assert strategy.drain_durable_io_mailbox() == 1
         assert [item[0] for item in strategy.scheduled] == [
-            "intent-a",
             "intent-latest",
         ]
         assert strategy._protection_stash_persisted_version == 2
@@ -407,6 +406,7 @@ def test_queue_overflow_enters_sticky_fatal_handler(tmp_path: Path) -> None:
         assert writer_started.wait(timeout=1.0)
         assert strategy._queue_entry_protection_stash_persist()
         assert strategy._queue_entry_protection_stash_persist() is False
+        strategy.drain_durable_io_mailbox()
         assert len(fatal_reasons) == 1
         assert "queue capacity exceeded" in fatal_reasons[0]
 
@@ -456,6 +456,7 @@ def test_handler_error_enters_sticky_fatal_handler(tmp_path: Path) -> None:
     try:
         assert strategy._queue_entry_protection_stash_persist()
         assert strategy.wait_for_durable_io(timeout_seconds=1.0)
+        strategy.drain_durable_io_mailbox()
         assert len(fatal_reasons) == 1
         assert "handler failed" in fatal_reasons[0]
 
@@ -487,7 +488,11 @@ def test_task_timeout_enters_sticky_fatal_handler(tmp_path: Path) -> None:
     try:
         assert strategy._queue_entry_protection_stash_persist()
         assert writer_started.wait(timeout=1.0)
-        assert fatal_called.wait(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while not fatal_called.is_set() and time.monotonic() < deadline:
+            strategy.drain_durable_io_mailbox()
+            time.sleep(0.001)
+        assert fatal_called.is_set()
         assert len(fatal_reasons) == 1
         assert "task timeout" in fatal_reasons[0]
     finally:

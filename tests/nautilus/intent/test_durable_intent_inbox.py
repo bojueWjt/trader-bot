@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import sys
-from hashlib import sha256
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
-from threading import Event
+from threading import Event, get_ident
 from typing import Any
 from uuid import uuid4
-
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
@@ -16,23 +15,22 @@ EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
 sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
-from data_client.approved_intent_client import (  # noqa: E402
+from data_client.approved_intent_client import (
     ApprovedIntentDataClient,
     JsonIntentOffsetStore,
 )
-from data_client.durable_intent_inbox import JsonDurableIntentInbox  # noqa: E402
-from execution_domain.contracts import (  # noqa: E402
+from data_client.durable_intent_inbox import JsonDurableIntentInbox
+from execution_domain.contracts import (
     ApprovedTradeIntentV1,
     IntentAction,
     RiskBudget,
 )
-from execution_domain.control_plane import (  # noqa: E402
+from execution_domain.control_plane import (
     IntentAckStatus,
     IntentItem,
     TradingState,
 )
-from execution_domain.testing import InMemoryControlPlane  # noqa: E402
-
+from execution_domain.testing import InMemoryControlPlane
 
 NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
 
@@ -60,6 +58,12 @@ class _BlockingInbox(JsonDurableIntentInbox):
         self._started.set()
         self._release.wait(timeout=5.0)
         super()._write_records(records)
+
+
+class _FailingInbox(JsonDurableIntentInbox):
+    def _write_records(self, records: dict[str, Any]) -> None:
+        del records
+        raise OSError("disk unavailable")
 
 
 def test_accepted_ack_and_cursor_follow_durable_inbox_receipt(
@@ -195,6 +199,84 @@ def test_actor_terminal_receipt_removes_replay_record_on_worker(
             tmp_path / "intent-inbox.json"
         )
         assert inbox.pending() == ()
+    finally:
+        client.durable_inbox_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_ack_timeout_is_degraded_and_does_not_block_delivery(
+    tmp_path: Path,
+) -> None:
+    control_plane = InMemoryControlPlane(now=lambda: NOW)
+    intent = _intent()
+    control_plane.add_intent(
+        "account-a",
+        IntentItem(cursor="cursor-1", intent=intent),
+    )
+
+    def failing_ack(**_kwargs: Any) -> None:
+        raise TimeoutError("temporary ACK timeout")
+
+    control_plane.ack_intent = failing_ack  # type: ignore[method-assign]
+    publisher = _RecordingPublisher()
+    client = _client(tmp_path, control_plane, publisher)
+    try:
+        assert client.poll_once() == 1
+        assert client.wait_for_durable_inbox(
+            timeout_seconds=1.0
+        )
+        assert client.drain_intent_delivery_mailbox() == 1
+
+        assert publisher.published == [intent]
+        assert any(
+            "ACK failed and remains recoverable" in reason
+            for reason in client.degraded_reasons
+        )
+    finally:
+        client.durable_inbox_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_durable_inbox_write_failure_is_fatal_on_actor_thread(
+    tmp_path: Path,
+) -> None:
+    control_plane = InMemoryControlPlane(now=lambda: NOW)
+    intent = _intent()
+    control_plane.add_intent(
+        "account-a",
+        IntentItem(cursor="cursor-1", intent=intent),
+    )
+    actor_thread_id = get_ident()
+    fatal_threads: list[int] = []
+    client = ApprovedIntentDataClient(
+        account_id="account-a",
+        node_id="node-a",
+        source=control_plane,
+        publisher=_RecordingPublisher(),
+        offset_store=JsonIntentOffsetStore(
+            tmp_path / "intent-offset.json"
+        ),
+        intent_inbox=_FailingInbox(
+            tmp_path / "intent-inbox.json"
+        ),
+        now=lambda: NOW,
+        trading_state=lambda: TradingState.ACTIVE,
+    )
+    client.set_durable_inbox_fatal_handler(
+        lambda _reason: fatal_threads.append(get_ident())
+    )
+    try:
+        assert client.poll_once() == 1
+        assert client.wait_for_durable_inbox(
+            timeout_seconds=1.0
+        )
+        assert fatal_threads == []
+
+        client.drain_intent_delivery_mailbox()
+
+        assert fatal_threads == [actor_thread_id]
     finally:
         client.durable_inbox_cleanup_worker().stop(
             timeout_seconds=1.0

@@ -44,6 +44,7 @@ def test_schema_mismatch_rejects_without_publish(tmp_path: Path) -> None:
     client = _client(tmp_path, control_plane, publisher)
 
     assert client.poll_once() == 1
+    _flush(client)
     assert publisher.published == []
     assert control_plane.intent_acks == [
         (ACCOUNT_ID, NODE_ID, intent.intent_id, IntentAckStatus.REJECTED, "schema_mismatch")
@@ -59,6 +60,7 @@ def test_expired_intent_acks_expired_without_publish(tmp_path: Path) -> None:
     client = _client(tmp_path, control_plane, publisher)
 
     assert client.poll_once() == 1
+    _flush(client)
     assert publisher.published == []
     assert control_plane.intent_acks == [
         (ACCOUNT_ID, NODE_ID, intent.intent_id, IntentAckStatus.EXPIRED, "expired")
@@ -74,6 +76,7 @@ def test_wrong_account_rejects_without_publish(tmp_path: Path) -> None:
     client = _client(tmp_path, control_plane, publisher)
 
     assert client.poll_once() == 1
+    _flush(client)
     assert publisher.published == []
     assert control_plane.intent_acks == [
         (ACCOUNT_ID, NODE_ID, intent.intent_id, IntentAckStatus.REJECTED, "wrong_account")
@@ -94,6 +97,7 @@ def test_halted_node_rejects_new_position_intent(tmp_path: Path) -> None:
     )
 
     assert client.poll_once() == 1
+    _flush(client)
     assert publisher.published == []
     assert control_plane.intent_acks == [
         (ACCOUNT_ID, NODE_ID, intent.intent_id, IntentAckStatus.REJECTED, "halted")
@@ -115,6 +119,7 @@ def test_duplicate_intent_id_or_idempotency_key_does_not_publish_twice(
     client = _client(tmp_path, control_plane, publisher)
 
     assert client.poll_once(limit=10) == 3
+    _flush(client)
     assert [intent.intent_id for intent in publisher.published] == [first.intent_id]
     assert [ack[3] for ack in control_plane.intent_acks] == [
         IntentAckStatus.ACCEPTED,
@@ -125,7 +130,9 @@ def test_duplicate_intent_id_or_idempotency_key_does_not_publish_twice(
     assert control_plane.intent_acks[2][4] == "duplicate_idempotency_key"
 
 
-def test_restart_resumes_after_safe_cursor_without_republishing(tmp_path: Path) -> None:
+def test_restart_replays_pending_receipt_then_resumes_after_cursor(
+    tmp_path: Path,
+) -> None:
     control_plane = InMemoryControlPlane(now=lambda: NOW)
     first = _intent()
     second = _intent()
@@ -135,15 +142,22 @@ def test_restart_resumes_after_safe_cursor_without_republishing(tmp_path: Path) 
 
     first_client = _client(tmp_path, control_plane, publisher)
     assert first_client.poll_once(limit=1) == 1
+    _flush(first_client)
+    first_client.durable_inbox_cleanup_worker().stop(
+        timeout_seconds=1.0
+    )
 
     restarted_client = _client(tmp_path, control_plane, publisher)
     assert restarted_client.poll_once(limit=10) == 1
+    _flush(restarted_client)
 
     assert [intent.intent_id for intent in publisher.published] == [
+        first.intent_id,
         first.intent_id,
         second.intent_id,
     ]
     assert [ack[2] for ack in control_plane.intent_acks] == [
+        first.intent_id,
         first.intent_id,
         second.intent_id,
     ]
@@ -197,3 +211,8 @@ class _RecordingPublisher:
 
     def publish(self, intent: ApprovedTradeIntentV1) -> None:
         self.published.append(intent)
+
+
+def _flush(client: ApprovedIntentDataClient) -> None:
+    assert client.wait_for_durable_inbox(timeout_seconds=1.0)
+    client.drain_intent_delivery_mailbox()

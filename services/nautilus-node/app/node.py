@@ -538,13 +538,20 @@ def _build_intent_data_client(
             ApprovedIntentDataClient,
             JsonIntentOffsetStore,
         )
+        from data_client.durable_intent_inbox import (
+            JsonDurableIntentInbox,
+        )
 
+        offset_path = route.spool_path.with_suffix(".offset.json")
         return ApprovedIntentDataClient(
             account_id=config.account_id,
             node_id=config.node_id,
             source=control_plane,
             publisher=_NautilusIntentPublisher(),
-            offset_store=JsonIntentOffsetStore(route.spool_path.with_suffix(".offset.json")),
+            offset_store=JsonIntentOffsetStore(offset_path),
+            intent_inbox=JsonDurableIntentInbox(
+                route.spool_path.with_suffix(".intent-inbox.json")
+            ),
             trading_state=lambda: lifecycle.trading_state,
         )
     except ModuleNotFoundError:
@@ -632,6 +639,38 @@ def _build_strategy(
         strategy,
         "durable_io_cleanup_worker",
     )
+    _register_background_cleanup_worker(
+        runtime,
+        strategy,
+        "external_io_cleanup_worker",
+    )
+    intent_receipt_handler = getattr(
+        runtime.intent_data_client,
+        "record_execution_terminal",
+        None,
+    )
+    if callable(intent_receipt_handler):
+        strategy.set_intent_receipt_handler(
+            intent_receipt_handler
+        )
+    inbox_fatal_setter = getattr(
+        runtime.intent_data_client,
+        "set_durable_inbox_fatal_handler",
+        None,
+    )
+    if callable(inbox_fatal_setter):
+        inbox_fatal_setter(fatal_callback)
+    durable_inbox_worker = getattr(
+        runtime.intent_data_client,
+        "durable_inbox_cleanup_worker",
+        None,
+    )
+    if callable(durable_inbox_worker):
+        _register_background_cleanup_worker(
+            runtime,
+            runtime.intent_data_client,
+            "durable_inbox_cleanup_worker",
+        )
     strategy.set_trading_state_getter(lambda: runtime.lifecycle.trading_state)
     strategy.set_denial_reporter(_build_denial_reporter(runtime))
     strategy.set_protection_event_reporter(
