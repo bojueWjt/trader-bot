@@ -5,7 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
 from queue import Empty, Full, Queue
-from threading import Event
+from threading import Event, RLock, Thread
 from typing import Any, Callable, Iterable
 
 try:  # pragma: no cover - Nautilus is unavailable on local dev hosts.
@@ -40,6 +40,8 @@ DEFAULT_COMMAND_ACK_BATCH_SIZE = 16
 DEFAULT_WORKER_SHUTDOWN_WAIT_SECONDS = 0.5
 DEFAULT_CALLBACK_MAX_ITEMS = 16
 DEFAULT_CALLBACK_TIME_BUDGET_SECONDS = 0.005
+DEFAULT_EXECUTION_EVENT_QUEUE_CAPACITY = 1024
+DEFAULT_PROJECTION_DURABLE_INGRESS_DEADLINE_SECONDS = 0.5
 
 
 @dataclass
@@ -63,6 +65,15 @@ class _SessionCommandPublication:
     completed: Event = field(default_factory=Event)
     cancelled: Event = field(default_factory=Event)
     acknowledgement: _PendingCommandAck | None = None
+    error: Exception | None = None
+
+
+@dataclass
+class _ProjectionPublication:
+    event: Any = None
+    flush_only: bool = False
+    deadline_at: float | None = None
+    completed: Event = field(default_factory=Event)
     error: Exception | None = None
 
 
@@ -597,33 +608,623 @@ class ExecutionProjectionActor(Actor):
         projection_actor: Any,
         *,
         event_topics: Iterable[str] = DEFAULT_EXECUTION_EVENT_TOPICS,
+        event_queue_capacity: int = DEFAULT_EXECUTION_EVENT_QUEUE_CAPACITY,
+        worker_shutdown_wait_seconds: float = (
+            DEFAULT_WORKER_SHUTDOWN_WAIT_SECONDS
+        ),
+        callback_time_budget_seconds: float = (
+            DEFAULT_CALLBACK_TIME_BUDGET_SECONDS
+        ),
+        durable_ingress_deadline_seconds: float = (
+            DEFAULT_PROJECTION_DURABLE_INGRESS_DEADLINE_SECONDS
+        ),
+        fatal_callback: Callable[[str], None] | None = None,
+        control_plane_session: Any = None,
+        manage_control_plane_session: bool = True,
     ) -> None:
         _init_actor_base(self)
+        if event_queue_capacity < 1:
+            raise ValueError("event_queue_capacity must be positive")
+        if callback_time_budget_seconds <= 0:
+            raise ValueError(
+                "callback_time_budget_seconds must be positive"
+            )
+        if durable_ingress_deadline_seconds <= 0:
+            raise ValueError(
+                "durable_ingress_deadline_seconds must be positive"
+            )
+        if (
+            callback_time_budget_seconds
+            > durable_ingress_deadline_seconds
+        ):
+            raise ValueError(
+                "callback_time_budget_seconds cannot exceed "
+                "durable_ingress_deadline_seconds"
+            )
         self._projection_actor = projection_actor
         self._event_topics = tuple(event_topics)
+        self._worker_shutdown_wait_seconds = max(
+            float(worker_shutdown_wait_seconds),
+            0.0,
+        )
+        self._callback_time_budget_seconds = float(
+            callback_time_budget_seconds
+        )
+        self._durable_ingress_deadline_seconds = float(
+            durable_ingress_deadline_seconds
+        )
+        self._event_queue: Queue[_ProjectionPublication] = Queue(
+            maxsize=int(event_queue_capacity)
+        )
+        self._worker_stop = Event()
+        self._worker_started = Event()
+        self._worker_thread: Thread | None = None
+        self._worker_stop_deadline: float | None = None
+        self._pending_publications: dict[
+            int,
+            _ProjectionPublication,
+        ] = {}
+        self._pending_lock = RLock()
+        self._deadline_stop = Event()
+        self._deadline_wake = Event()
+        self._deadline_started = Event()
+        self._deadline_thread: Thread | None = None
+        self._flush_stop = Event()
+        self._flush_wake = Event()
+        self._flush_started = Event()
+        self._flush_thread: Thread | None = None
+        self._flush_stop_deadline: float | None = None
+        self._halt_lock = RLock()
+        self._halted_reason = ""
+        self._fatal_callback = fatal_callback
+        self._fatal_reported = False
+        self._control_plane_session = control_plane_session
+        self._manage_control_plane_session = bool(
+            manage_control_plane_session
+        )
+        self._session_started = False
+        self._durable_ingress = callable(
+            getattr(self._projection_actor, "ingest_event", None)
+        )
+
+    @property
+    def halted_reason(self) -> str:
+        return self._halted_reason
 
     def on_start(self) -> None:
+        if not self._durable_ingress:
+            for topic in self._event_topics:
+                self._subscribe_execution_topic(topic)
+            self._flush_projection_once()
+            return
+        deadline = (
+            time.monotonic() + self._worker_shutdown_wait_seconds
+        )
+        self._start_worker()
+        if self._durable_ingress:
+            self._start_deadline_worker()
+        session = self._control_plane_session
+        if session is not None:
+            if self._manage_control_plane_session:
+                session.start()
+                self._session_started = True
+        elif self._durable_ingress:
+            self._start_flush_worker()
+        self._await_worker_start(deadline)
+        if self._durable_ingress:
+            if session is not None:
+                if not self._submit_flush_wake(False):
+                    return
+            else:
+                self._flush_wake.set()
+        else:
+            self._enqueue_startup_flush()
         for topic in self._event_topics:
             self._subscribe_execution_topic(topic)
+
+    def on_stop(self) -> None:
+        if not self._durable_ingress:
+            return
+        deadline = (
+            time.monotonic() + self._worker_shutdown_wait_seconds
+        )
+        self._worker_stop_deadline = deadline
+        self._worker_stop.set()
+        worker = self._worker_thread
+        if worker is not None:
+            worker.join(timeout=max(deadline - time.monotonic(), 0.0))
+            if worker.is_alive():
+                self._halt_egress(
+                    "execution projection stopped with durable ingress pending"
+                )
+            else:
+                self._worker_thread = None
+        if self._has_pending_publications() or not self._event_queue.empty():
+            self._halt_egress(
+                "execution projection stopped with durable ingress pending"
+            )
+        self._stop_deadline_worker(deadline)
+
+        session = self._control_plane_session
+        if (
+            session is not None
+            and self._manage_control_plane_session
+            and self._session_started
+        ):
+            try:
+                stopped = bool(session.stop(deadline))
+            except Exception as exc:
+                stopped = False
+                self._halt_egress(
+                    "execution projection session stop failed: "
+                    f"{exc!r}"
+                )
+            self._session_started = False
+            if not stopped:
+                self._halt_egress(
+                    "execution projection session shutdown "
+                    "deadline exceeded"
+                )
+        if session is None and self._durable_ingress:
+            self._stop_flush_worker(deadline)
+
+    def on_event(self, event: Any) -> Any:
+        if not self._durable_ingress:
+            self._attach_order_payload_fields(event)
+            return self._projection_actor.on_event(event)
+        if self._worker_stop.is_set() or self._halted_reason:
+            return False
+        worker = self._worker_thread
+        if worker is None or not worker.is_alive():
+            self._halt_egress(
+                "execution projection persistence worker is not running"
+            )
+            return False
+        deadline_at = None
+        if self._durable_ingress:
+            deadline_at = (
+                time.monotonic()
+                + self._durable_ingress_deadline_seconds
+            )
+        publication = _ProjectionPublication(
+            event=event,
+            deadline_at=deadline_at,
+        )
+        if self._durable_ingress:
+            self._register_publication(publication)
+        try:
+            self._event_queue.put_nowait(publication)
+        except Full:
+            self._complete_publication(publication)
+            self._halt_egress(
+                "execution projection persistence queue capacity exceeded"
+            )
+            return False
+        return True
+
+    def session_flush_execution_event(self, event: Any) -> None:
+        del event
+        self._drain_durable_spool()
+
+    def _enqueue_startup_flush(self) -> None:
+        try:
+            self._event_queue.put_nowait(
+                _ProjectionPublication(flush_only=True)
+            )
+        except Full:
+            self._halt_egress(
+                "execution projection startup flush queue capacity exceeded"
+            )
+
+    def _start_worker(self) -> None:
+        worker = self._worker_thread
+        if worker is not None and worker.is_alive():
+            return
+        self._worker_stop.clear()
+        self._worker_started.clear()
+        worker = Thread(
+            target=self._run_worker,
+            name="execution-projection.ingress",
+            daemon=True,
+        )
+        self._worker_thread = worker
+        worker.start()
+
+    def _run_worker(self) -> None:
+        self._worker_started.set()
+        while True:
+            if self._worker_should_stop():
+                return
+            try:
+                publication = self._event_queue.get(
+                    timeout=self._worker_poll_timeout()
+                )
+            except Empty:
+                continue
+            try:
+                if publication.flush_only:
+                    self._flush_projection_once()
+                    continue
+                if self._durable_ingress:
+                    if not self._persist_durable_event(publication):
+                        return
+                    if self._control_plane_session is not None:
+                        if not self._submit_flush_wake(publication.event):
+                            return
+                    else:
+                        self._flush_wake.set()
+                    continue
+                self._project_legacy_event(publication.event)
+            except Exception as exc:
+                publication.error = exc
+                self._halt_egress(
+                    "execution projection persistence worker failed: "
+                    f"{exc!r}"
+                )
+                return
+            finally:
+                publication.completed.set()
+                self._complete_publication(publication)
+                self._event_queue.task_done()
+
+    def _persist_durable_event(
+        self,
+        publication: _ProjectionPublication,
+    ) -> bool:
+        self._attach_order_payload_fields(publication.event)
+        ingest = getattr(self._projection_actor, "ingest_event")
+        try:
+            result = ingest(publication.event)
+        except Exception as exc:
+            publication.error = exc
+            self._halt_egress(
+                "execution projection durable ingress failed: "
+                f"{exc!r}"
+            )
+            return False
+        outcome = self._projection_ingest_outcome(result)
+        if outcome == "IGNORED":
+            self._halt_egress(
+                "execution projection ignored subscribed execution event"
+            )
+            return False
+        if outcome not in {"DURABLE", "DEDUPED"}:
+            self._halt_egress(
+                "execution projection durable ingress returned "
+                f"invalid outcome: {outcome or 'missing'}"
+            )
+            return False
+        deadline_at = publication.deadline_at
+        if (
+            deadline_at is not None
+            and time.monotonic() >= deadline_at
+        ):
+            self._halt_egress(
+                "execution projection durable ingress deadline exceeded"
+            )
+            return False
+        return True
+
+    def _projection_ingest_outcome(self, result: Any) -> str:
+        outcome = getattr(result, "outcome", result)
+        value = getattr(outcome, "value", outcome)
+        return str(value or "").strip().upper()
+
+    def _project_legacy_event(self, event: Any) -> None:
+        self._attach_order_payload_fields(event)
+        self._projection_actor.on_event(event)
+
+    def _attach_order_payload_fields(self, event: Any) -> None:
+        extra = order_event_payload_fields(event, self._cache())
+        if not extra:
+            return
+        attach = getattr(
+            self._projection_actor,
+            "attach_order_payload_fields",
+            None,
+        )
+        if callable(attach):
+            try:
+                attach(event, extra)
+            except Exception:
+                return
+            return
+        try:
+            setattr(event, "_projection_payload_extra", extra)
+        except Exception:
+            return
+
+    def _submit_flush_wake(self, event: Any) -> bool:
+        session = self._control_plane_session
+        if session is None:
+            self._flush_wake.set()
+            return True
+        try:
+            result = session.submit_execution_event(event)
+        except Exception as exc:
+            self._halt_egress(
+                "execution projection session wake failed: "
+                f"{exc!r}"
+            )
+            return False
+        if _submission_was_accepted(result):
+            return True
+        self._halt_egress(
+            "execution projection session wake backpressured"
+        )
+        return False
+
+    def _start_deadline_worker(self) -> None:
+        worker = self._deadline_thread
+        if worker is not None and worker.is_alive():
+            return
+        self._deadline_stop.clear()
+        self._deadline_wake.clear()
+        self._deadline_started.clear()
+        worker = Thread(
+            target=self._run_deadline_worker,
+            name="execution-projection.ingress-deadline",
+            daemon=True,
+        )
+        self._deadline_thread = worker
+        worker.start()
+
+    def _run_deadline_worker(self) -> None:
+        self._deadline_started.set()
+        while not self._deadline_stop.is_set():
+            publication = self._next_pending_publication()
+            if publication is None:
+                self._deadline_wake.wait(timeout=0.05)
+                self._deadline_wake.clear()
+                continue
+            deadline_at = publication.deadline_at
+            if deadline_at is None or publication.completed.is_set():
+                self._complete_publication(publication)
+                continue
+            remaining = float(deadline_at) - time.monotonic()
+            if remaining <= 0:
+                self._halt_egress(
+                    "execution projection durable ingress deadline exceeded"
+                )
+                return
+            self._deadline_wake.wait(timeout=min(remaining, 0.05))
+            self._deadline_wake.clear()
+
+    def _stop_deadline_worker(self, deadline: float) -> None:
+        worker = self._deadline_thread
+        if worker is None:
+            return
+        self._deadline_stop.set()
+        self._deadline_wake.set()
+        worker.join(timeout=max(deadline - time.monotonic(), 0.0))
+        if worker.is_alive():
+            self._halt_egress(
+                "execution projection deadline worker shutdown "
+                "deadline exceeded"
+            )
+            return
+        self._deadline_thread = None
+
+    def _register_publication(
+        self,
+        publication: _ProjectionPublication,
+    ) -> None:
+        with self._pending_lock:
+            self._pending_publications[id(publication)] = publication
+        self._deadline_wake.set()
+
+    def _complete_publication(
+        self,
+        publication: _ProjectionPublication,
+    ) -> None:
+        with self._pending_lock:
+            self._pending_publications.pop(id(publication), None)
+        self._deadline_wake.set()
+
+    def _next_pending_publication(
+        self,
+    ) -> _ProjectionPublication | None:
+        with self._pending_lock:
+            publications = tuple(self._pending_publications.values())
+        pending = [
+            publication
+            for publication in publications
+            if not publication.completed.is_set()
+            and publication.deadline_at is not None
+        ]
+        if not pending:
+            return None
+        return min(
+            pending,
+            key=lambda publication: float(
+                publication.deadline_at
+                if publication.deadline_at is not None
+                else float("inf")
+            ),
+        )
+
+    def _has_pending_publications(self) -> bool:
+        with self._pending_lock:
+            return bool(self._pending_publications)
+
+    def _start_flush_worker(self) -> None:
+        worker = self._flush_thread
+        if worker is not None and worker.is_alive():
+            return
+        self._flush_stop.clear()
+        self._flush_wake.clear()
+        self._flush_started.clear()
+        worker = Thread(
+            target=self._run_flush_worker,
+            name="execution-projection.flush",
+            daemon=True,
+        )
+        self._flush_thread = worker
+        worker.start()
+
+    def _run_flush_worker(self) -> None:
+        self._flush_started.set()
+        while True:
+            if self._flush_should_stop():
+                return
+            if not self._flush_wake.wait(
+                timeout=self._flush_poll_timeout()
+            ):
+                continue
+            self._flush_wake.clear()
+            try:
+                self._drain_durable_spool()
+            except Exception as exc:
+                self._halt_egress(
+                    "execution projection flush worker failed: "
+                    f"{exc!r}"
+                )
+                return
+
+    def _stop_flush_worker(self, deadline: float) -> None:
+        worker = self._flush_thread
+        if worker is None:
+            return
+        self._flush_stop_deadline = deadline
+        self._flush_stop.set()
+        self._flush_wake.set()
+        worker.join(timeout=max(deadline - time.monotonic(), 0.0))
+        if worker.is_alive():
+            self._halt_egress(
+                "execution projection flush worker shutdown "
+                "deadline exceeded"
+            )
+            return
+        self._flush_thread = None
+        pending_count = self._durable_pending_count()
+        if pending_count is not None and pending_count > 0:
+            self._halt_egress(
+                "execution projection stopped with flush pending"
+            )
+
+    def _drain_durable_spool(self) -> None:
+        while True:
+            before = self._durable_pending_count()
+            self._flush_projection_once()
+            after = self._durable_pending_count()
+            if before is None or after is None:
+                return
+            if after <= 0 or after >= before:
+                return
+            if self._flush_deadline_reached():
+                return
+
+    def _flush_projection_once(self) -> None:
         flush = getattr(self._projection_actor, "flush", None)
         if callable(flush):
             flush()
 
-    def on_event(self, event: Any) -> Any:
-        extra = order_event_payload_fields(event, self._cache())
-        if extra:
-            attach = getattr(self._projection_actor, "attach_order_payload_fields", None)
-            if callable(attach):
-                try:
-                    attach(event, extra)
-                except Exception:
-                    pass
-            else:
-                try:
-                    setattr(event, "_projection_payload_extra", extra)
-                except Exception:
-                    pass
-        return self._projection_actor.on_event(event)
+    def _durable_pending_count(self) -> int | None:
+        spool = getattr(self._projection_actor, "spool", None)
+        pending_count = getattr(spool, "pending_count", None)
+        if pending_count is None:
+            return None
+        return int(pending_count)
+
+    def _flush_should_stop(self) -> bool:
+        if not self._flush_stop.is_set():
+            return False
+        pending_count = self._durable_pending_count()
+        if pending_count is None or pending_count <= 0:
+            return True
+        return self._flush_deadline_reached()
+
+    def _flush_deadline_reached(self) -> bool:
+        deadline = self._flush_stop_deadline
+        if deadline is None:
+            return False
+        return time.monotonic() >= deadline
+
+    def _flush_poll_timeout(self) -> float:
+        timeout = 0.05
+        if not self._flush_stop.is_set():
+            return timeout
+        deadline = self._flush_stop_deadline
+        if deadline is None:
+            return 0.0
+        return min(timeout, max(deadline - time.monotonic(), 0.0))
+
+    def _worker_should_stop(self) -> bool:
+        if not self._worker_stop.is_set():
+            return False
+        if self._event_queue.empty():
+            return True
+        deadline = self._worker_stop_deadline
+        if deadline is None:
+            return True
+        return time.monotonic() >= deadline
+
+    def _worker_poll_timeout(self) -> float:
+        timeout = 0.05
+        if not self._worker_stop.is_set():
+            return timeout
+        deadline = self._worker_stop_deadline
+        if deadline is None:
+            return 0.0
+        return min(timeout, max(deadline - time.monotonic(), 0.0))
+
+    def _await_worker_start(self, deadline: float) -> None:
+        lanes = [
+            ("persistence", self._worker_started, self._worker_thread),
+        ]
+        if self._durable_ingress:
+            lanes.append(
+                ("deadline", self._deadline_started, self._deadline_thread)
+            )
+            if self._control_plane_session is None:
+                lanes.append(
+                    ("flush", self._flush_started, self._flush_thread)
+                )
+        for name, started, worker in lanes:
+            remaining = max(deadline - time.monotonic(), 0.0)
+            if not started.wait(timeout=remaining):
+                reason = (
+                    f"execution projection {name} startup barrier timed out"
+                )
+                self._halt_egress(reason)
+                raise RuntimeError(reason)
+            if worker is None or not worker.is_alive():
+                reason = (
+                    f"execution projection {name} worker exited at startup"
+                )
+                self._halt_egress(reason)
+                raise RuntimeError(reason)
+
+    def _mark_sticky_halt(self, reason: str) -> None:
+        halt_projection = False
+        with self._halt_lock:
+            if not self._halted_reason:
+                self._halted_reason = reason
+                halt_projection = True
+        if not halt_projection:
+            return
+        halt = getattr(self._projection_actor, "halt_egress", None)
+        if callable(halt):
+            try:
+                halt(reason)
+            except Exception:
+                return
+
+    def _report_fatal(self) -> None:
+        callback = None
+        reason = ""
+        with self._halt_lock:
+            if self._fatal_reported:
+                return
+            self._fatal_reported = True
+            callback = self._fatal_callback
+            reason = self._halted_reason
+        if callback is not None:
+            callback(reason)
+
+    def _halt_egress(self, reason: str) -> None:
+        self._mark_sticky_halt(reason)
+        self._report_fatal()
 
     def _cache(self) -> Any:
         return _first_attr(self, ("cache", "_cache")) or _first_attr(
@@ -1343,6 +1944,11 @@ def _shutdown_executor(
     if executor is None:
         return
     executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _submission_was_accepted(result: Any) -> bool:
+    value = getattr(result, "value", result)
+    return str(value or "").strip().lower() == "accepted"
 
 
 def _dependency_by_value(value: str) -> Any:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
+from threading import RLock
 from typing import Any, Callable, Protocol, Sequence
 
 from .contracts import ExecutionEventEnvelopeV1
@@ -22,6 +25,18 @@ class ProjectionHealth(Protocol):
     def mark_projection_ready(self) -> None: ...
 
     def mark_projection_failed(self, reason: str) -> None: ...
+
+
+class ProjectionIngestOutcome(str, Enum):
+    DURABLE = "DURABLE"
+    DEDUPED = "DEDUPED"
+    IGNORED = "IGNORED"
+
+
+@dataclass(frozen=True)
+class ProjectionIngestResult:
+    outcome: ProjectionIngestOutcome
+    event_id: str | None
 
 
 class ProjectionActor:
@@ -46,19 +61,44 @@ class ProjectionActor:
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._mapper = mapper or ProjectionEventMapper(config, now=self._now)
         self._health = health
+        self._spool_lock = RLock()
+        self._egress_halted_reason = ""
+
+    @property
+    def egress_halted_reason(self) -> str:
+        return self._egress_halted_reason
 
     def on_event(self, event: Any) -> str | None:
+        result = self.ingest_event(event)
+        if result.outcome is ProjectionIngestOutcome.IGNORED:
+            return None
+        self.flush()
+        return result.event_id
+
+    def ingest_event(self, event: Any) -> ProjectionIngestResult:
         envelope = self._mapper.to_envelope(event)
         if envelope is None:
-            return None
-        appended = self.spool.append_once(envelope)
+            return ProjectionIngestResult(
+                outcome=ProjectionIngestOutcome.IGNORED,
+                event_id=None,
+            )
+        with self._spool_lock:
+            appended = self.spool.append_once(envelope)
         if appended:
             self._record_projection_progress(envelope)
-        self.flush()
-        return envelope.event_id
+            outcome = ProjectionIngestOutcome.DURABLE
+        else:
+            outcome = ProjectionIngestOutcome.DEDUPED
+        return ProjectionIngestResult(
+            outcome=outcome,
+            event_id=envelope.event_id,
+        )
 
     def flush(self) -> list[str]:
-        pending = self.spool.pending_events(limit=self.config.max_flush_batch_size)
+        with self._spool_lock:
+            pending = self.spool.pending_events(
+                limit=self.config.max_flush_batch_size
+            )
         if not pending:
             return []
         try:
@@ -66,15 +106,23 @@ class ProjectionActor:
         except Exception:
             self._mark_projection_failed("control-plane execution-event sink unavailable")
             return []
-        self.spool.mark_acked(acked)
+        with self._spool_lock:
+            self.spool.mark_acked(acked)
+            pending_count = self.spool.pending_count
         if acked:
             last_event_id = acked[-1]
             last_event = _find_event(pending, last_event_id)
             if last_event is not None:
                 self._record_projection_progress(last_event)
-        if self.spool.pending_count == 0:
+        if pending_count == 0:
             self._mark_projection_ready()
         return acked
+
+    def halt_egress(self, reason: str) -> None:
+        if self._egress_halted_reason:
+            return
+        self._egress_halted_reason = reason
+        self._mark_projection_failed(reason)
 
     def _record_projection_progress(self, envelope: ExecutionEventEnvelopeV1) -> None:
         lag_ms = _lag_ms(now=self._now(), ts_event=envelope.ts_event)
@@ -89,8 +137,11 @@ class ProjectionActor:
                 self._health.mark_projection_ready()
 
     def _mark_projection_ready(self) -> None:
-        if self._health is not None:
-            self._health.mark_projection_ready()
+        if self._health is None:
+            return
+        if self._egress_halted_reason:
+            return
+        self._health.mark_projection_ready()
 
     def _mark_projection_failed(self, reason: str) -> None:
         if self._health is not None:
