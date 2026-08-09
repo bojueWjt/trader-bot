@@ -235,14 +235,18 @@ class NautilusActorAdapterTest(unittest.TestCase):
         from app.nautilus_actors import IntentPublisherActor
 
         client = _PlainIntentClient()
-        actor = IntentPublisherActor(
+        message_bus = _RecordingMessageBus()
+
+        class _BoundIntentPublisherActor(IntentPublisherActor):
+            def _message_bus(self) -> Any:
+                return message_bus
+
+        actor = _BoundIntentPublisherActor(
             client,
             poll_limit=7,
             wait_ms=11,
             custom_data_builder=lambda intent: _CustomData(data_type="intent-type", data=intent),
         )
-        message_bus = _RecordingMessageBus()
-        actor.msgbus = message_bus
 
         self.assertEqual(actor.poll_once(), 1)
 

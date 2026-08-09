@@ -172,7 +172,7 @@ class IntentPublisherActor(Actor):
         # C-08 host-verify fix: deliver the approved intent over the msgbus on the
         # per-account topic the IntentExecutionStrategy subscribes to. publish_data +
         # subscribe_data does not route clientless custom data in Nautilus 1.227.0.
-        message_bus = _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
+        message_bus = self._message_bus()
         if message_bus is not None and hasattr(message_bus, "publish"):
             account_id = getattr(intent, "account_id", None)
             message_bus.publish(topic=f"intents.{account_id}", msg=intent)
@@ -227,7 +227,7 @@ class IntentPublisherActor(Actor):
             NautilusCustomDataPublisher(data_engine=data_engine).publish(intent)
             return
 
-        message_bus = _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
+        message_bus = self._message_bus()
         if message_bus is not None:
             # TODO(host-verify): confirm whether direct MessageBus.publish(CustomData)
             # is accepted for custom data in Nautilus 1.227.0. Actor.publish_data is
@@ -236,6 +236,9 @@ class IntentPublisherActor(Actor):
             return
 
         raise RuntimeError("no Nautilus publish_data/data_engine/message_bus available")
+
+    def _message_bus(self) -> Any:
+        return _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
 
 
 class ExecutionProjectionActor(Actor):
