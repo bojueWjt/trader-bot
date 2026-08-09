@@ -43,8 +43,8 @@ DEFAULT_LIVE_PERMIT_LEDGER_PATH = Path(
 )
 LIVE_PERMIT_STORE_ID = "trader-v3-account-a-live-permit-store/v1"
 PINNED_REVIEWER_PUBLIC_KEY_SHA256 = (
-    "4cb49406eed7b529caefec7cafbb32df"
-    "9a92b24b226d12e3e288318a146e1bee"
+    "010261af290c41cd19d25c233fbb18e0"
+    "cbcb23ee36db52eea0053d30e5837ede"
 )
 PINNED_OPENSSL_PATH = Path("/usr/bin/openssl")
 
