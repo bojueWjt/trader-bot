@@ -10,7 +10,7 @@
 |---|---|
 | HEAD | `7368641e98c410b3c6edbe4ab3ea8f72cf5efe1d` |
 | Branch | `codex/account-stall-hardening` |
-| Worktree | 61 tracked changes，107 untracked，168 status entries |
+| Worktree | 测试摘要采样时 61 tracked changes、107 untracked directory entries、168 directory-collapsed status entries |
 | Host | Darwin 25.5.0 arm64 |
 | uv | 0.11.26 |
 | Python | 3.12.13 |
@@ -139,7 +139,9 @@ python -m pytest -p no:cacheprovider --collect-only -q
 随后生成稳定的排序 node-id inventory：
 
 ```bash
-LC_ALL=C rg '^tests/.*::' /tmp/<suite>.collect.txt \
+set -o pipefail
+export LC_ALL=C
+rg '^tests/.*::' /tmp/<suite>.collect.txt \
   | sort > /tmp/<suite>.nodeids.txt
 shasum -a 256 /tmp/<suite>.nodeids.txt
 ```
@@ -159,6 +161,9 @@ Phase A 已将 node-id inventory 保存到干净 worktree：
 - `docs/evidence/inventory/2026-08-09-account-stall-fence-rollout.nodeids.txt`
 
 后续结果只有在 inventory hash 相同或差异已逐项解释时，才能与本基线比较。
+这些 inventory 证明测试选择范围。完整结果重放仍需版本化 source overlay、继承环境、
+依赖制品 hash、collect/run 原始输出、exit code、JUnit XML、warning/skip 报告和 subtest
+插件版本。
 
 ## 7. 491 与 523 的边界
 

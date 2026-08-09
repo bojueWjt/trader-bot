@@ -24,10 +24,12 @@ Attention、Hermes 通知、channel strategy、普通业务功能和非 account-
 ## 2. 当前证据
 
 基线 HEAD 为 `7368641e98c410b3c6edbe4ab3ea8f72cf5efe1d`，分支为
-`codex/account-stall-hardening`。工作树包含 168 个修改或未跟踪文件，其中 61 个 tracked
-修改、107 个 untracked 文件，已混入其他任务。
+`codex/account-stall-hardening`。测试结果摘要采样时有 168 个 directory-collapsed status
+entries；后续 source freeze 有 169 个，其中 61 个 tracked 修改、108 个 untracked
+directory entries。`--untracked-files=all` 展开后是 373 个 status entries。该工作树已混入
+其他任务。
 
-2026-08-09 可复现基线见
+2026-08-09 已冻结的测试选择范围和结果摘要见
 `docs/evidence/2026-08-09-account-stall-test-baseline.md`：
 
 | 验证面 | 结果 | 判定 |
@@ -50,7 +52,7 @@ Attention、Hermes 通知、channel strategy、普通业务功能和非 account-
 | Redis 变更 lineage | `81f356a` 于 2026-06-19 21:08:21 UTC 引入持久 Redis cache/message bus 与 per-account prefix 派生 |
 | 历史生产直接根因 | 旧生产运行字节在 Nautilus actor callback 中执行同步 HTTP/外部 I/O，生产 traceback 已证实 |
 | 当前工作树状态 | heartbeat、command、ACK、terminal 等外部 I/O 已进入专用 executor/worker |
-| 当前残余 stall 机制 | 未证实；线程池饱和、队列背压、shutdown 等仅为待检验假设 |
+| 当前 cleanup/fencing 缺陷 | shared-session terminal executor 泄漏和 durable worker `stop(False)` 传播缺口已有确定性 red/green 验证；它们与生产 account stall 的直接因果仍待 A7 审查 |
 | 历史放大因素 | 随机 Redis namespace、无界 streams、内存/swap/AOF/I/O 压力 |
 | 历史发布因素 | bind-mounted hotpatch、deleted inode、A/B 运行字节漂移 |
 
@@ -108,7 +110,7 @@ maintenance fence 进入实现后，旧 fixture 继续构造 v2/部分资源对�
 
 | ID | 类型 | 根因 | 影响 |
 |---|---|---|---|
-| GAP-0 | 诊断缺口 | 历史同步 callback I/O 已在当前代码中 offload，当前残余 stall 机制没有 red-capable repro | 无法验证“stall 主路径无回归”，任何 stall 修复缺少目标 |
+| GAP-0 | 诊断与因果缺口 | 当前代码已复现两个 shutdown/fencing 缺陷；生产 stall 因果、actor tick/progress freeze 与完整 cleanup order 仍待版本化证据和 A7 审查 | 允许修复已证实的 cleanup/fencing 缺陷；禁止宣称生产 stall 主路径已闭环 |
 | GAP-1 | 产品/契约缺陷 | Node 使用环境变量推导 strict live context，并与 manifest 存在 resource group 必填/可选分歧 | 4 个 runtime 失败；可能绕过 release-bound 容量限制或形成反向契约漂移 |
 | GAP-2 | 产品缺陷 | Redis rebaseline 的 `$SCRIPT_DIR/infra/...` 默认值解析到不存在的 `scripts/infra/...` | Redis rebaseline 大量级联失败；真实脚本无法读取仓库根目录的资源契约 |
 | GAP-3 | 契约缺陷 | systemd parser、consumer type 和实际 drop-in 应用方式未统一 | release builder 在生成 source manifest 前失败 |
@@ -117,7 +119,8 @@ maintenance fence 进入实现后，旧 fixture 继续构造 v2/部分资源对�
 | GAP-6 | 接口断点 | rollout mutation 新增 operation lock 和 maintenance fence，直接调用测试未提供 | 8 个 control-plane rollout 失败 |
 | GAP-7 | Harness 结构漂移 | deployment Shell fixture 缺真实 migration runner、真实 `flock` 与 fence env，假二进制可能掩盖失败 | 需要一次真实 red run 后才能确定级联范围 |
 
-修复时先关闭 GAP-0，再按 GAP-1 到 GAP-7 逐组归零。禁止按单个失败逐条打补丁。
+先由 A7 对 GAP-0 的机制证据和因果边界给出结论，再按 GAP-1 到 GAP-7 逐组归零。禁止按
+单个失败逐条打补丁。
 
 ## 5. 目标架构调整
 
@@ -133,9 +136,10 @@ maintenance fence 进入实现后，旧 fixture 继续构造 v2/部分资源对�
 | Host systemd-to-Docker schema、constraints 和 projection | `make_account_stall_release.py`、`release_manifest.py`、测试 parser | builder 暴露归一化 host resource model；manifest 与测试共同消费 |
 
 Phase B 行为修改前先提取共享 required/allowed field sets，并建立 Node/manifest
-parity matrix。归一化 hash 属于拟新增产物，完成共享模块后由该模块统一提供。测试通过
-统一 fixture factory 生成合法 strict v3 物料，再对单一字段做负向变异。禁止在测试文件
-内继续手写一套 runtime resource defaults。
+parity matrix。`release_manifest.py` 已有 manifest-local normalization/hash；Node 当前
+没有该能力。拟新增的是双方共同消费的 normalization/hash owner。测试通过统一 fixture
+factory 生成合法 strict v3 物料，再对单一字段做负向变异。禁止在测试文件内继续手写一套
+runtime resource defaults。
 
 systemd projection 只消费 systemd parser 生成的归一化 host resource model，不重复声明
 字段 schema 或 constraints。应用 runtime resources 和 host systemd resources 保持两个
@@ -175,7 +179,9 @@ manifest 路径从 validated source manifest 解析。禁止使用 `SCRIPT_DIR` 
 和 drift comparator；它只用于取证与差异验证，任何迁移都需要独立范围和 review。
 
 测试使用显式 test mode 与临时 `TRADER_ROOT`。`hk-deploy-20260803.sh` 的
-`/srv/trader-v3` 默认值只服务生产入口，测试 fixture 不读取或写入共享生产根目录。
+`T=/srv/trader-v3` 当前是硬编码生产根。Phase A 必须明确让完整脚本支持受控
+`TRADER_ROOT` override，或将完整脚本排除出本地执行范围；测试 fixture 不读取或写入共享
+生产根目录。
 
 ## 6. 执行计划
 
@@ -187,8 +193,8 @@ manifest 路径从 validated source manifest 解析。禁止使用 `SCRIPT_DIR` 
 |---|---|---|
 | A1 | 从 `7368641` 创建干净 worktree/分支 | 新 worktree `git status` 为空 |
 | A2 | 建立 source authority 与 in-scope 文件清单 | `services/` 标记为 canonical；`.live-mirror/` 标记为生产证据/drift comparator；每个文件标记所属域 |
-| A3 | 固定测试环境、命令、inventory、hash 与现有契约差异矩阵 | 保存依赖版本、四组 path list、`pytest --collect-only` node-id 清单、SHA-256、Node/manifest 必填差异 |
-| A4 | 隔离测试根目录 | 显式 test mode 与临时 `TRADER_ROOT`；测试不接触共享 `/srv/trader-v3` |
+| A3 | 固定测试环境、命令、inventory、hash、replay package 与现有契约差异矩阵 | 保存依赖制品及 hash、继承环境清单、四组 path list、collect/run 原始输出、exit code、JUnit、warning/skip 报告、node-id SHA-256、Node/manifest 必填差异 |
+| A4 | 隔离测试根目录 | 显式 test mode；完整部署脚本支持受控 `TRADER_ROOT` override 或退出本地执行范围；测试不接触共享 `/srv/trader-v3` |
 | A5 | 构建当前代码 stall fault-injection loop | 阻塞 HTTP、饱和 executor/queue、并发 shutdown 与 terminal worker；独立观测 actor tick 和各 lane progress |
 | A6 | 对同时包含其他任务的文件做 hunk 审计 | Attention/Hermes/channel 变更不进入 account-stall patch |
 | A7 | 按模块导入现有实现 | 每个模块形成独立 commit，禁止一次导入全部工作树 |
@@ -200,7 +206,8 @@ command poll、ACK、intent 任一 progress clock 在 worker 可恢复后持续�
 退出条件：
 
 1. 干净分支包含可解释的原子提交，当前混合工作树保持不变。
-2. 四组测试 inventory、hash、命令、版本和失败映射已保存。
+2. 四组测试 inventory、hash、命令、依赖制品、继承环境、原始输出、exit code、JUnit、
+   warning/skip 报告和失败映射已保存。
 3. 当前 stall 机制得到可重复 red 证据，或明确记录为“当前残余机制未证实”。
 4. Reviewer 对 GAP-0 给出结论后，才授权 Phase B 或条件式 Phase B-S。
 
@@ -254,9 +261,9 @@ Phase B-S 保持未授权。
 | C1 | 定义 canonical fixture factory | 所有 release/rollout 测试共享合法 strict v3 base fixture |
 | C2 | 统一 systemd resource parser、schema/constraints 和 consumer enum | 四个资源文件均可生成确定性 Docker/systemd contract |
 | C3 | 将归一化与 hash 收入共享 runtime resource 模块 | Node 与 manifest 对同一输入产生同一归一化结果和 hash |
-| C4 | 绑定 reviewed payload root | lock、migration、SBOM、source manifest 和 checksums 必须来自同一 release root |
+| C4 | 绑定 reviewed payload root | lock、migration、SBOM、source manifest 和 checksums 必须来自同一 release root；source inventory 显式拒绝 `.live-mirror/**` |
 | C5 | 纳入 migration `0012_control_plane_maintenance_fence` | migration exact-set 和 up/down hash PASS |
-| C6 | 完成 build attestation 和 reviewer trust proof | 任一 source/image/lock/migration/SBOM 漂移均 fail-closed |
+| C6 | 完成 build attestation 和 reviewer trust proof | 任一 source/image/lock/migration/SBOM 漂移或 `.live-mirror/**` 注入均 fail-closed |
 | C7 | 复跑 release 聚焦套件 | 0 failed，测试清单无永久 skip |
 
 退出条件：release builder 可生成完整 payload；strict v3 verifier 对合法物料 PASS，对每类
@@ -354,7 +361,8 @@ PostgreSQL 或生产证据。
 
 - 工作树重新混入无关功能。
 - GAP-0 缺少当前代码的可重复诊断结论。
-- 测试结果缺命令、依赖版本、inventory 或 hash。
+- 测试结果缺命令、依赖制品 hash、继承环境、inventory、原始输出、exit code、JUnit 或
+  warning/skip 报告。
 - canonical contract 出现第二套字段定义。
 - Node 与 manifest 对 resource group 的必填/可选结论不同。
 - live hardening 仍依赖环境变量猜测 release context。
@@ -370,7 +378,8 @@ PostgreSQL 或生产证据。
 
 1. 创建干净 worktree。
 2. 冻结 source authority、文件范围、临时测试根和四组测试 inventory。
-3. 固化环境、命令、collection hash、失败清单与 `491 -> 523` 的证据边界。
+3. 固化环境、依赖制品 hash、命令、collection hash、原始输出、exit code、JUnit、
+   warning/skip 报告、失败清单与 `491 -> 523` 的证据边界。
 4. 对当前 executor/worker 接线建立 stall fault-injection loop。
 5. 对 GAP-0 给出“已复现机制”或“当前残余机制未证实”的 Reviewer 结论。
 6. 形成独立 commit 和 Phase B/Phase B-S 授权建议。

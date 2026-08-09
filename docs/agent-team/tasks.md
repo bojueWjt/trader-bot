@@ -10,12 +10,13 @@
 | ID | Owner | Status | Deliverable | Evidence / Next Gate |
 |---|---|---|---|---|
 | A0 | planner | done | 从 `7368641` 创建干净 worktree `codex/account-stall-phase-a` | `/Users/balen/projects/trader-bot-account-stall-phase-a` 初始 status 为空 |
-| A1 | planner | done | 冻结 169 项 source status、tracked patch、domain hashes 与四组 test inventory | `docs/evidence/2026-08-09-account-stall-phase-a-source-freeze.md`；`docs/evidence/inventory/` |
-| A2 | scope-integration-auditor | in_progress | in-scope dependency closure、混合 hunk、导入顺序 | 等待 agent finding |
-| A3 | runtime-diagnostician | in_progress | 当前代码 stall red-capable seam 与假设排序 | 等待 agent finding |
-| A4 | runtime-resource-contract-auditor | in_progress | Node/manifest optionality matrix 与 Phase B interface | 等待 agent finding |
-| A5 | historical-evidence-auditor | in_progress | 历史/offload lineage、Redis 强度、mirror drift、test inventory 审核 | 等待 agent finding |
-| A6 | planner/integrator | pending | 导入最小 runtime dependency closure，实现并运行 fault-injection loop | A2、A3 |
+| A1 | planner | done | 冻结 169 项 directory-collapsed source status、373 项展开 status、tracked patch、domain hashes 与四组 test inventory | `docs/evidence/2026-08-09-account-stall-phase-a-source-freeze.md`；`docs/evidence/inventory/` |
+| A2 | scope-integration-auditor | done | in-scope dependency closure、混合 hunk、导入顺序 | `docs/evidence/2026-08-09-account-stall-scope-integration-audit.md`；A6 使用符号级最小 runtime closure |
+| A3 | runtime-diagnostician | done | 当前代码 stall red-capable seam 与假设排序 | `docs/evidence/2026-08-09-account-stall-runtime-diagnosis.md` |
+| A4 | runtime-resource-contract-auditor | done | Node/manifest optionality matrix 与 Phase B interface | `docs/evidence/2026-08-09-account-stall-runtime-resource-contract-audit.md` |
+| A5 | historical-evidence-auditor | done | 历史/offload lineage、Redis 强度、mirror drift、test inventory 审核 | `docs/evidence/2026-08-09-account-stall-history-and-evidence-audit.md` |
+| A5-T | planner/integrator | pending | 固化完整 replay package 与部署脚本测试根策略 | 依赖制品 hash、继承环境、raw output、exit code、JUnit、warning/skip；`TRADER_ROOT` override 或完整入口排除 |
+| A6 | planner/integrator | in_progress | 导入最小 runtime dependency closure，实现并运行 fault-injection loop | A2、A3 |
 | A7 | reviewer | pending | GAP-0 结论与 Phase B/Phase B-S 授权 | A3、A4、A5、A6 |
 
 ## 历史任务记录

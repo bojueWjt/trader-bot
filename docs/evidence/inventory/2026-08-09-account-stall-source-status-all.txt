@@ -1,0 +1,373 @@
+ M .live-mirror/api/read_api.py
+ M .live-mirror/scripts/hermes_signal_feeder.py
+ M .live-mirror/scripts/order_lifecycle_monitor.py
+ M .live-mirror/tests/test_hermes_signal_feeder.py
+ M docs/runbooks/2026-07-24-hk-deployment-baseline.md
+ M packages/contracts/v1/.snapshot.json
+ M packages/contracts/v1/approved_trade_intent.v1.json
+ M packages/contracts/v1/examples/valid/index.json
+ M packages/contracts/v1/system_snapshot.v1.json
+ M packages/execution-domain/execution_domain/control_plane.py
+ M packages/execution-domain/execution_domain/http_client.py
+ M scripts/hermes_signal_feeder.py
+ M scripts/hk-deploy-20260803.sh
+ M scripts/hk-gen-recreate-patched.py
+ M scripts/make_container_bundle.py
+ M scripts/order_lifecycle_monitor.py
+ M scripts/verify_hk_deployment.sh
+ M services/control-plane/api/read_api.py
+ M services/control-plane/api/snapshot.py
+ M services/control-plane/db/migrate.py
+ M services/control-plane/risk_state/risk_state.py
+ M services/nautilus-node/app/health_server.py
+ M services/nautilus-node/app/nautilus_actors.py
+ M services/nautilus-node/app/node.py
+ M services/nautilus-node/app/run_node.py
+ M services/nautilus-node/config/node_config.py
+ M services/nautilus-node/data_client/approved_intent_client.py
+ M services/nautilus-node/persistence/RECOVERY.md
+ M services/nautilus-node/persistence/__init__.py
+ M services/nautilus-node/persistence/nautilus_config.py
+ M services/nautilus-node/projection/actor.py
+ M services/nautilus-node/projection/spool.py
+ M services/nautilus-node/risk/__init__.py
+ M services/nautilus-node/risk/config.py
+ M services/nautilus-node/runtime/exchange_cancel_adapter.py
+ M services/nautilus-node/runtime/health.py
+ M services/nautilus-node/runtime/lifecycle.py
+ M services/nautilus-node/strategy/intent_execution_strategy.py
+ M tests/contracts/test_contracts_v1.py
+ M tests/control-plane/api/test_intent_authorization_downlink.py
+ M tests/control-plane/api/test_snapshot_and_api.py
+ M tests/control-plane/db/test_canonical_schema.py
+ M tests/control-plane/risk/test_gateway.py
+ M tests/deployment/test_hk_deployment_fail_closed.sh
+ M tests/deployment/test_hk_gen_recreate_patched.py
+ M tests/deployment/test_make_container_bundle.py
+ M tests/deployment/test_node_patch_mount_contract.py
+ M tests/execution/manage/test_exchange_cancel_adapter.py
+ M tests/execution/manage/test_intent_execution_strategy_manage_hk.py
+ M tests/execution/manage/test_intent_execution_strategy_manage_shell.py
+ M tests/execution/manage/test_take_profit_tombstone.py
+ M tests/execution/open/test_intent_execution_strategy_hk.py
+ M tests/execution/open/test_intent_execution_strategy_shell.py
+ M tests/nautilus/intent/test_approved_intent_data_client.py
+ M tests/nautilus/projection/test_projection_actor.py
+ M tests/nautilus/projection/test_projection_hk.py
+ M tests/nautilus/reconciliation/test_persistence_config.py
+ M tests/nautilus/risk/test_nautilus_integration_hk.py
+ M tests/nautilus/runtime/test_b01_lifecycle.py
+ M tests/nautilus/runtime/test_b10_node_app.py
+ M tests/nautilus/runtime/test_control_plane_http_identity.py
+?? .agent-team/attention-service/team-proposal.json
+?? .agent-team/attention-service/team-selection.json
+?? .agent-team/team-proposal.json
+?? .agent-team/team-selection.json
+?? .codex/agents/account-stall-hardening-architect.toml
+?? .codex/agents/account-stall-hardening-chaos-tester.toml
+?? .codex/agents/account-stall-hardening-control-plane-executor.toml
+?? .codex/agents/account-stall-hardening-documenter.toml
+?? .codex/agents/account-stall-hardening-evidence-auditor.toml
+?? .codex/agents/account-stall-hardening-live-trade-verifier.toml
+?? .codex/agents/account-stall-hardening-node-runtime-executor.toml
+?? .codex/agents/account-stall-hardening-planner.toml
+?? .codex/agents/account-stall-hardening-redis-release-executor.toml
+?? .codex/agents/account-stall-hardening-reviewer.toml
+?? .codex/agents/attention-service-android-app-executor.toml
+?? .codex/agents/attention-service-architect.toml
+?? .codex/agents/attention-service-channel-integration-executor.toml
+?? .codex/agents/attention-service-documenter.toml
+?? .codex/agents/attention-service-planner.toml
+?? .codex/agents/attention-service-platform-executor.toml
+?? .codex/agents/attention-service-security-reviewer.toml
+?? .codex/agents/attention-service-tester.toml
+?? .codex/config.toml
+?? CONTEXT.md
+?? apps/attention-android/.eslintrc.js
+?? apps/attention-android/.gitignore
+?? apps/attention-android/.prettierrc.js
+?? apps/attention-android/.watchmanconfig
+?? apps/attention-android/App.tsx
+?? apps/attention-android/Gemfile
+?? apps/attention-android/README.md
+?? apps/attention-android/__tests__/App.test.tsx
+?? apps/attention-android/__tests__/appReducer.test.ts
+?? apps/attention-android/__tests__/attentionApi.test.ts
+?? apps/attention-android/__tests__/deepLink.test.ts
+?? apps/attention-android/__tests__/pushDedupe.test.ts
+?? apps/attention-android/__tests__/validation.test.ts
+?? apps/attention-android/android/app/build.gradle
+?? apps/attention-android/android/app/debug.keystore
+?? apps/attention-android/android/app/google-services.json.example
+?? apps/attention-android/android/app/proguard-rules.pro
+?? apps/attention-android/android/app/src/main/AndroidManifest.xml
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/AttentionAlertActivity.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/MainActivity.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/MainApplication.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/nativebridge/AttentionNativeModule.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/nativebridge/AttentionNativePackage.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/push/AttentionFirebaseMessagingService.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/push/AttentionNotificationManager.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/push/PushDeduplicator.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/push/PushEnvelope.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/push/PushRegistrationStore.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/security/DeviceKeyManager.kt
+?? apps/attention-android/android/app/src/main/java/com/pudutech/attention/security/SecureStore.kt
+?? apps/attention-android/android/app/src/main/res/drawable/ic_attention_notification.xml
+?? apps/attention-android/android/app/src/main/res/drawable/rn_edit_text_material.xml
+?? apps/attention-android/android/app/src/main/res/mipmap-hdpi/ic_launcher.png
+?? apps/attention-android/android/app/src/main/res/mipmap-hdpi/ic_launcher_round.png
+?? apps/attention-android/android/app/src/main/res/mipmap-mdpi/ic_launcher.png
+?? apps/attention-android/android/app/src/main/res/mipmap-mdpi/ic_launcher_round.png
+?? apps/attention-android/android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+?? apps/attention-android/android/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
+?? apps/attention-android/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+?? apps/attention-android/android/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+?? apps/attention-android/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+?? apps/attention-android/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+?? apps/attention-android/android/app/src/main/res/values/strings.xml
+?? apps/attention-android/android/app/src/main/res/values/styles.xml
+?? apps/attention-android/android/build.gradle
+?? apps/attention-android/android/gradle.properties
+?? apps/attention-android/android/gradle/wrapper/gradle-wrapper.jar
+?? apps/attention-android/android/gradle/wrapper/gradle-wrapper.properties
+?? apps/attention-android/android/gradlew
+?? apps/attention-android/android/gradlew.bat
+?? apps/attention-android/android/settings.gradle
+?? apps/attention-android/app.json
+?? apps/attention-android/babel.config.js
+?? apps/attention-android/index.js
+?? apps/attention-android/ios/.xcode.env
+?? apps/attention-android/ios/AttentionAndroid.xcodeproj/project.pbxproj
+?? apps/attention-android/ios/AttentionAndroid.xcodeproj/xcshareddata/xcschemes/AttentionAndroid.xcscheme
+?? apps/attention-android/ios/AttentionAndroid/AppDelegate.swift
+?? apps/attention-android/ios/AttentionAndroid/Images.xcassets/AppIcon.appiconset/Contents.json
+?? apps/attention-android/ios/AttentionAndroid/Images.xcassets/Contents.json
+?? apps/attention-android/ios/AttentionAndroid/Info.plist
+?? apps/attention-android/ios/AttentionAndroid/LaunchScreen.storyboard
+?? apps/attention-android/ios/AttentionAndroid/PrivacyInfo.xcprivacy
+?? apps/attention-android/ios/Podfile
+?? apps/attention-android/jest.config.js
+?? apps/attention-android/metro.config.js
+?? apps/attention-android/package-lock.json
+?? apps/attention-android/package.json
+?? apps/attention-android/src/native/attentionNative.ts
+?? apps/attention-android/src/navigation/linking.ts
+?? apps/attention-android/src/screens/HomeScreen.tsx
+?? apps/attention-android/src/screens/PairingScreen.tsx
+?? apps/attention-android/src/screens/RequestScreen.tsx
+?? apps/attention-android/src/screens/SettingsScreen.tsx
+?? apps/attention-android/src/screens/SetupScreen.tsx
+?? apps/attention-android/src/services/attentionApi.ts
+?? apps/attention-android/src/services/pushDedupe.ts
+?? apps/attention-android/src/services/secureStorage.ts
+?? apps/attention-android/src/state/AppContext.tsx
+?? apps/attention-android/src/state/appReducer.ts
+?? apps/attention-android/src/types.ts
+?? apps/attention-android/src/ui/ActionButton.tsx
+?? apps/attention-android/src/ui/FormField.tsx
+?? apps/attention-android/src/ui/RequestCard.tsx
+?? apps/attention-android/src/ui/SeverityMark.tsx
+?? apps/attention-android/src/ui/theme.ts
+?? apps/attention-android/src/utils/id.ts
+?? apps/attention-android/src/utils/time.ts
+?? apps/attention-android/src/utils/validation.ts
+?? apps/attention-android/tsconfig.json
+?? db/migrations/0010_live_safety.down.sql
+?? db/migrations/0010_live_safety.up.sql
+?? db/migrations/0011_attention_loss_limit_reset.down.sql
+?? db/migrations/0011_attention_loss_limit_reset.up.sql
+?? db/migrations/0012_control_plane_maintenance_fence.down.sql
+?? db/migrations/0012_control_plane_maintenance_fence.up.sql
+?? docs/adr/2026-08-08-account-node-stall-hardening.md
+?? docs/agent-team/account-stall-hardening-live-trade-policy.md
+?? docs/agent-team/account-stall-hardening-roster.md
+?? docs/agent-team/account-stall-hardening-workflow-protocol.md
+?? docs/agent-team/attention-service-roster.md
+?? docs/agent-team/attention-service-tasks.md
+?? docs/agent-team/attention-service-workflow-protocol.md
+?? docs/agent-team/tasks.md
+?? docs/evidence/2026-08-09-account-stall-test-baseline.md
+?? docs/incidents/2026-08-08-account-node-stall.md
+?? docs/plans/2026-08-08-channel-strategy-and-user-confirmation-design.md
+?? docs/plans/2026-08-08-confirmation-notification-research.md
+?? docs/plans/2026-08-08-hermes-feishu-single-recipient-security-design.md
+?? docs/plans/2026-08-08-strong-notification-service-design.md
+?? docs/plans/2026-08-09-account-stall-recovery-replan.md
+?? docs/reviews/2026-08-09-account-stall-replan-claude-meta-review.md
+?? docs/reviews/2026-08-09-account-stall-replan-claude-review.md
+?? docs/runbooks/2026-08-08-attention-feishu-bridge-deployment.md
+?? docs/runbooks/2026-08-08-attention-service-deployment.md
+?? infra/systemd/account-stall-account-node.conf
+?? infra/systemd/account-stall-control-plane-reader.conf
+?? infra/systemd/account-stall-control-plane-writer.conf
+?? infra/systemd/account-stall-redis.conf
+?? infra/systemd/attention-feishu-bridge.service
+?? infra/systemd/attention-service-api.service
+?? infra/systemd/attention-service-worker.service
+?? infra/systemd/hermes-gateway.service.d/attention-bridge.conf
+?? packages/contracts/attention/README.md
+?? packages/contracts/attention/pyproject.toml
+?? packages/contracts/attention/src/attention_contracts/__init__.py
+?? packages/contracts/attention/src/attention_contracts/canonical.py
+?? packages/contracts/attention/src/attention_contracts/mobile_models.py
+?? packages/contracts/attention/src/attention_contracts/models.py
+?? packages/contracts/attention/src/attention_contracts/provider_models.py
+?? packages/execution-domain/tests/test_control_plane_portfolio_baseline.py
+?? scripts/account_a_live_trade_executor.py
+?? scripts/build_immutable_node_image.py
+?? scripts/hk-control-plane-isolation.sh
+?? scripts/hk-redis-rebaseline.sh
+?? scripts/live_node_config.py
+?? scripts/make_account_stall_release.py
+?? scripts/redis_capacity_config.py
+?? scripts/redis_namespace_janitor.py
+?? scripts/redis_namespace_registry.py
+?? scripts/release_manifest.py
+?? scripts/reviewed_release_rollout.py
+?? services/attention-feishu-bridge/.gitignore
+?? services/attention-feishu-bridge/README.md
+?? services/attention-feishu-bridge/attention_feishu_bridge/__init__.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/bridge.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/callbacks.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/config.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/crypto.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/errors.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/feishu.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/hermes_ingress.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/models.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/pairing.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/runtime.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/state.py
+?? services/attention-feishu-bridge/attention_feishu_bridge/transport.py
+?? services/attention-feishu-bridge/deploy/bridge.env.example
+?? services/attention-feishu-bridge/deploy/hermes.env.example
+?? services/attention-feishu-bridge/hermes_plugin/__init__.py
+?? services/attention-feishu-bridge/hermes_plugin/plugin.yaml
+?? services/attention-feishu-bridge/pyproject.toml
+?? services/attention-feishu-bridge/uv.lock
+?? services/attention-service/.gitignore
+?? services/attention-service/README.md
+?? services/attention-service/deploy/attention.env.example
+?? services/attention-service/migrations/0001_attention_mvp.down.sql
+?? services/attention-service/migrations/0001_attention_mvp.up.sql
+?? services/attention-service/migrations/0002_mobile_bridge_contracts.down.sql
+?? services/attention-service/migrations/0002_mobile_bridge_contracts.up.sql
+?? services/attention-service/migrations/0003_provider_http_jose.down.sql
+?? services/attention-service/migrations/0003_provider_http_jose.up.sql
+?? services/attention-service/pyproject.toml
+?? services/attention-service/sql/leases.sql
+?? services/attention-service/src/attention_service/__init__.py
+?? services/attention-service/src/attention_service/api.py
+?? services/attention-service/src/attention_service/auth.py
+?? services/attention-service/src/attention_service/config.py
+?? services/attention-service/src/attention_service/database.py
+?? services/attention-service/src/attention_service/errors.py
+?? services/attention-service/src/attention_service/jose.py
+?? services/attention-service/src/attention_service/main.py
+?? services/attention-service/src/attention_service/mobile.py
+?? services/attention-service/src/attention_service/pairing.py
+?? services/attention-service/src/attention_service/ports.py
+?? services/attention-service/src/attention_service/provider.py
+?? services/attention-service/src/attention_service/repository.py
+?? services/attention-service/src/attention_service/schema.py
+?? services/attention-service/src/attention_service/secrets.py
+?? services/attention-service/src/attention_service/service.py
+?? services/attention-service/src/attention_service/signing.py
+?? services/attention-service/src/attention_service/transports.py
+?? services/attention-service/src/attention_service/worker_main.py
+?? services/attention-service/src/attention_service/workers.py
+?? services/attention-service/uv.lock
+?? services/control-plane/api/app_roles.py
+?? services/control-plane/attention/__init__.py
+?? services/control-plane/attention/domain.py
+?? services/control-plane/attention/publisher.py
+?? services/control-plane/attention/resolution.py
+?? services/control-plane/attention/security.py
+?? services/control-plane/attention/service.py
+?? services/control-plane/db/pools.py
+?? services/nautilus-node/config/live-risk-policy.json
+?? services/nautilus-node/persistence/redis_namespace_lease.py
+?? services/nautilus-node/persistence/redis_resp_client.py
+?? services/nautilus-node/runtime/bounded_task_worker.py
+?? services/nautilus-node/runtime/control_plane_session.py
+?? services/nautilus-node/runtime/intent_execution_inbox.py
+?? services/nautilus-node/runtime/live_canary_execution.py
+?? services/nautilus-node/runtime/reconciliation.py
+?? services/nautilus-node/runtime/redis_safety.py
+?? tests/attention/feishu_bridge/__init__.py
+?? tests/attention/feishu_bridge/conftest.py
+?? tests/attention/feishu_bridge/test_callback_verifier.py
+?? tests/attention/feishu_bridge/test_crypto.py
+?? tests/attention/feishu_bridge/test_delivery.py
+?? tests/attention/feishu_bridge/test_encrypted_pairing.py
+?? tests/attention/feishu_bridge/test_hermes_ingress.py
+?? tests/attention/feishu_bridge/test_hermes_plugin.py
+?? tests/attention/feishu_bridge/test_pairing.py
+?? tests/attention/feishu_bridge/test_state_and_poller.py
+?? tests/attention/service/conftest.py
+?? tests/attention/service/helpers.py
+?? tests/attention/service/test_contracts_and_auth.py
+?? tests/attention/service/test_mobile_api.py
+?? tests/attention/service/test_pairing.py
+?? tests/attention/service/test_postgres_contract.py
+?? tests/attention/service/test_provider_api.py
+?? tests/attention/service/test_requests.py
+?? tests/attention/service/test_resolution.py
+?? tests/attention/service/test_runtime_security.py
+?? tests/attention/service/test_workers.py
+?? tests/control-plane/api/test_control_plane_role_isolation.py
+?? tests/control-plane/api/test_live_safety_gates.py
+?? tests/control-plane/api/test_node_command_poll_limit.py
+?? tests/control-plane/api/test_node_incident_reporting.py
+?? tests/control-plane/api/test_node_writer_fencing.py
+?? tests/control-plane/api/test_portfolio_baseline_contract.py
+?? tests/control-plane/api/test_reviewed_release_rollout.py
+?? tests/control-plane/attention/conftest.py
+?? tests/control-plane/attention/test_attention_security.py
+?? tests/control-plane/attention/test_loss_limit_reset_integration.py
+?? tests/control-plane/db/test_maintenance_fence.py
+?? tests/control-plane/db/test_migrate.py
+?? tests/deployment/test_account_a_live_trade_executor.py
+?? tests/deployment/test_account_stall_operation_lock.py
+?? tests/deployment/test_account_stall_systemd_resources.py
+?? tests/deployment/test_build_immutable_node_image.py
+?? tests/deployment/test_hk_control_plane_isolation.py
+?? tests/deployment/test_hk_deploy_control_plane_roles.py
+?? tests/deployment/test_hk_deploy_evidence_gate.py
+?? tests/deployment/test_hk_deploy_redis_v2_gate.py
+?? tests/deployment/test_hk_redis_rebaseline.py
+?? tests/deployment/test_live_node_config.py
+?? tests/deployment/test_make_account_stall_release.py
+?? tests/deployment/test_redis_namespace_janitor_lock.py
+?? tests/deployment/test_release_manifest.py
+?? tests/deployment/test_reviewed_release_rollout.py
+?? tests/execution/manage/test_terminal_command_strategy.py
+?? tests/execution/test_release_rollout_receipt.py
+?? tests/nautilus/persistence/test_redis_namespace_lease.py
+?? tests/nautilus/persistence/test_redis_namespace_lease_guard.py
+?? tests/nautilus/persistence/test_redis_namespace_lease_real.py
+?? tests/nautilus/persistence/test_redis_resp_client.py
+?? tests/nautilus/reconciliation/test_projection_egress.py
+?? tests/nautilus/reconciliation/test_runtime_reconciliation_wiring.py
+?? tests/nautilus/runtime/test_actor_callback_budget.py
+?? tests/nautilus/runtime/test_bounded_task_worker.py
+?? tests/nautilus/runtime/test_command_journal.py
+?? tests/nautilus/runtime/test_command_poller_lease.py
+?? tests/nautilus/runtime/test_control_plane_session.py
+?? tests/nautilus/runtime/test_health_server_version.py
+?? tests/nautilus/runtime/test_intent_execution_inbox.py
+?? tests/nautilus/runtime/test_live_canary_execution.py
+?? tests/nautilus/runtime/test_live_entry_notional_inventory.py
+?? tests/nautilus/runtime/test_node_config_risk.py
+?? tests/nautilus/runtime/test_redis_lease_builder.py
+?? tests/nautilus/runtime/test_redis_runtime_safety.py
+?? tests/nautilus/runtime/test_run_node_lease_lifecycle.py
+?? tests/nautilus/runtime/test_runtime_incident_reporting.py
+?? tests/nautilus/runtime/test_strategy_reporter_workers.py
+?? tests/nautilus/runtime/test_terminal_command_state.py
+?? tests/nautilus_simulated_harness.py
+?? tests/test_redis_capacity_config.py
+?? tests/test_redis_namespace_janitor.py
+?? tests/test_redis_namespace_registry.py
+?? tests/test_signal_feeder_delivery.py

@@ -18,19 +18,21 @@ manifest and hash verification.
 ## Frozen Source Snapshot
 
 The source snapshot was taken after the meta-review documents were added. It
-contains 169 status entries. The earlier test-baseline document records 168
-entries from the immediately preceding snapshot; the additional entry is the
-new evidence document.
+contains 169 directory-collapsed status entries. The earlier test-baseline
+document records 168 entries from the immediately preceding snapshot; the
+additional entry is the new evidence directory entry.
 
 | Artifact | SHA-256 | Meaning |
 |---|---|---|
 | `/tmp/account-stall-phase-a-status.z` | `5f7c58290fac0a6337e6390ea8b81f64ad347a76d22b2f273da4a01eeca198a0` | NUL-delimited `git status --porcelain=v1` |
 | `/tmp/account-stall-phase-a-status.tsv` | `2f5e62b313956fb7dbad6ae5a665e033cf95de17a06d121f84d6a17eab7a4941` | Sorted human-readable status inventory |
+| normalized `git status --porcelain=v1 --untracked-files=normal` | `843168a314f8e03790aed3ef836cc332468d2bdb1cba52c700f4fadfd5d484b1` | Sorted command output using Git's directory-collapsed display |
+| `docs/evidence/inventory/2026-08-09-account-stall-source-status-all.txt` | `56788ad7e1c57af4cc8e806dff7b36b1703db0d27d7781b56ec775bf24a690fd` | 373 sorted status entries using `--untracked-files=all` |
 | `/tmp/account-stall-phase-a-tracked.patch` | `19ac81ad6160e15caf553be1a6af54f31be8e75f5678c96dffa34bbfcda2c106` | Binary-safe tracked diff from HEAD |
 | `/tmp/account-stall-phase-a-domain-sha256.txt` | `81a7389547d8e327067ec7bcfce360025537ae4f3172f464315173592fdcada9` | Sorted hashes under runtime, scripts, and focused tests |
 
-The snapshot contains 61 tracked modifications and 108 untracked status
-entries at freeze time.
+The snapshot contains 61 tracked modifications and 108 untracked
+directory-collapsed status entries at freeze time.
 
 ## Source Authority
 
@@ -40,8 +42,9 @@ entries at freeze time.
 - `.live-mirror/` is production-byte evidence and a drift comparator.
 - `infra/systemd/*.conf` contains concrete host resource values.
 - Tests use temporary roots and explicit test mode.
-- `/srv/trader-v3` remains a production default and is outside local test
-  mutation scope.
+- `scripts/hk-deploy-20260803.sh` currently hardcodes
+  `T=/srv/trader-v3`; that production root is outside local test mutation
+  scope.
 
 ## Import Rules
 
