@@ -3340,8 +3340,12 @@ class IntentExecutionStrategy(Strategy):
 
     def _now(self) -> datetime:
         clock = getattr(self, "clock", None)
-        if clock is not None and hasattr(clock, "utc_now"):
-            return clock.utc_now()
+        utc_now = getattr(clock, "utc_now", None) if clock is not None else None
+        if callable(utc_now):
+            try:
+                return utc_now()
+            except NotImplementedError:
+                pass
         return datetime.now(timezone.utc)
 
     def _instrument_spec(self, instrument_id: str) -> Optional[InstrumentSpec]:
