@@ -212,35 +212,31 @@ class StrategyShellTest(unittest.TestCase):
 
     def test_revisions_exhausted_emits_one_protection_frozen_event(self) -> None:
         intent_id = uuid4()
-        strategy = IntentExecutionStrategy(
-            IntentExecutionStrategyConfig(
-                account_id="account-a",
-                trading_state="ACTIVE",
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _ProtectionTerminalStrategy(Path(state_dir))
+            reported_events: list[dict] = []
+            strategy.set_protection_event_reporter(
+                lambda event: reported_events.append(event) is None or True
             )
-        )
-        reported_events: list[dict] = []
-        strategy.set_protection_event_reporter(
-            lambda event: reported_events.append(event) is None or True
-        )
-        stash = {
-            "instrument_id": "ATOMUSDT-PERP.BINANCE",
-            "protection_revision": strategy._PROTECTION_MAX_REVISION,
-        }
+            stash = {
+                "instrument_id": "ATOMUSDT-PERP.BINANCE",
+                "protection_revision": strategy._PROTECTION_MAX_REVISION,
+            }
 
-        strategy._normalize_protection_stash(str(intent_id), stash)
-        strategy._normalize_protection_stash(str(intent_id), stash)
+            strategy._normalize_protection_stash(str(intent_id), stash)
+            strategy._normalize_protection_stash(str(intent_id), stash)
 
-        self.assertEqual(stash["protection_frozen"], "revisions_exhausted")
-        self.assertEqual(
-            stash["protection_freeze_denial_reason"],
-            "protection_revisions_exhausted",
-        )
-        self.assertEqual(len(reported_events), 1)
-        self.assertEqual(reported_events[0]["event_type"], "ProtectionFrozen")
-        self.assertEqual(
-            reported_events[0]["payload"]["reason"],
-            "revisions_exhausted",
-        )
+            self.assertEqual(stash["protection_frozen"], "revisions_exhausted")
+            self.assertEqual(
+                stash["protection_freeze_denial_reason"],
+                "protection_revisions_exhausted",
+            )
+            self.assertEqual(len(reported_events), 1)
+            self.assertEqual(reported_events[0]["event_type"], "ProtectionFrozen")
+            self.assertEqual(
+                reported_events[0]["payload"]["reason"],
+                "revisions_exhausted",
+            )
 
 
 class _ProtectionTerminalStrategy(IntentExecutionStrategy):

@@ -78,7 +78,6 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             Path(tempfile.mkdtemp()),
             orders=_live_protection_orders(),
         )
-        strategy.cache = SimpleNamespace(orders_open=lambda: strategy._orders)
 
         strategy._on_node_command(
             SimpleNamespace(type="cancel_all", args={})
@@ -91,7 +90,6 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             Path(tempfile.mkdtemp()),
             orders=_live_protection_orders(),
         )
-        strategy.cache = SimpleNamespace(orders_open=lambda: strategy._orders)
 
         strategy._on_node_command(
             SimpleNamespace(
@@ -1235,6 +1233,9 @@ class _Strategy(IntentExecutionStrategy):
         return self._orders
 
     def _cache_orders_all(self, _instrument_id: str) -> tuple[Any, ...]:
+        return tuple(self._orders)
+
+    def _all_open_orders(self) -> tuple[Any, ...]:
         return tuple(self._orders)
 
     def _submit_order_plan(self, plan: Any) -> bool:
