@@ -9,7 +9,7 @@ import stat
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -28,6 +28,9 @@ import account_a_live_trade_executor as executor
 NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
 LIVE_ADAPTER_BYTES = b"#!/bin/sh\nexit 0\n"
 LIVE_ADAPTER_SHA256 = hashlib.sha256(LIVE_ADAPTER_BYTES).hexdigest()
+LIVE_EXECUTOR_SHA256 = hashlib.sha256(
+    Path(executor.__file__).read_bytes()
+).hexdigest()
 PINNED_REVIEWER_PUBLIC_KEY = b"""-----BEGIN PUBLIC KEY-----
 MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA08wadHyjJ2AenrOJY8aw
 m0DHvWF69RlHWHyZNd890fK6ezMdASWlok8H2+1y4E56HMXkEJt74g3OZ+ZNyEtg
@@ -159,6 +162,14 @@ class FakeAdapter:
         observation_price: str = "100",
         observation_status: str = "FILLED",
         observation_times: Mapping[str, datetime] | None = None,
+        loss_monitor_source: str = "exchange_mirror+node",
+        exchange_evidence_state: str = "confirmed_executed",
+        preflight_failures: int = 0,
+        preflight_position_quantity: str = "0",
+        preflight_position_side: str = "FLAT",
+        preflight_regular_order_count: int = 0,
+        preflight_algo_order_count: int = 0,
+        preflight_baseline_sha256: str = "",
         signal_number: int | None = None,
         position_failures: int = 0,
         close_failures: int = 0,
@@ -178,6 +189,9 @@ class FakeAdapter:
         final_failures: int = 0,
         post_halt_final_failures: int = 0,
         post_halt_final_fetched_at: datetime | None = None,
+        final_enrichment_degraded: bool = False,
+        final_warnings: Sequence[str] | None = None,
+        open_fill_attempts: Sequence[bool] | None = None,
         operation_lock: executor.LiveOperationLock | None = None,
     ) -> None:
         self.authorization = authorization
@@ -186,6 +200,14 @@ class FakeAdapter:
         self.observation_price = observation_price
         self.observation_status = observation_status
         self.observation_times = dict(observation_times or {})
+        self.loss_monitor_source = loss_monitor_source
+        self.exchange_evidence_state = exchange_evidence_state
+        self.preflight_failures = preflight_failures
+        self.preflight_position_quantity = preflight_position_quantity
+        self.preflight_position_side = preflight_position_side
+        self.preflight_regular_order_count = preflight_regular_order_count
+        self.preflight_algo_order_count = preflight_algo_order_count
+        self.preflight_baseline_sha256 = preflight_baseline_sha256
         self.signal_number = signal_number
         self.position_failures = position_failures
         self.close_failures = close_failures
@@ -205,12 +227,57 @@ class FakeAdapter:
         self.final_failures = final_failures
         self.post_halt_final_failures = post_halt_final_failures
         self.post_halt_final_fetched_at = post_halt_final_fetched_at
+        self.final_enrichment_degraded = final_enrichment_degraded
+        self.final_warnings = tuple(final_warnings or ())
+        self.open_fill_attempts = tuple(open_fill_attempts or ())
         self.operation_lock = operation_lock
         self.calls: list[str] = []
         self.requests: dict[str, list[dict[str, Any]]] = {}
         self.close_requests: list[Mapping[str, Any]] = []
         self.position_quantity = Decimal(0)
         self.position_side = "FLAT"
+
+    def preflight(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        self._require_operation_lock()
+        self._record_call("preflight", request)
+        if self.calls.count("preflight") <= self.preflight_failures:
+            raise TimeoutError("injected preflight response timeout")
+        baseline = self.preflight_baseline_sha256
+        if not baseline:
+            baseline = self.authorization.portfolio_baseline_sha256
+        payload = self._identity()
+        payload.update(
+            {
+                "action": "preflight",
+                "source": executor.EXCHANGE_EVIDENCE_SOURCE,
+                "fetched_at": NOW.isoformat(),
+                "mirror_stale": False,
+                "target_position_side": self.preflight_position_side,
+                "target_position_quantity": (
+                    self.preflight_position_quantity
+                ),
+                "target_regular_order_count": (
+                    self.preflight_regular_order_count
+                ),
+                "target_algo_order_count": (
+                    self.preflight_algo_order_count
+                ),
+                "non_target_portfolio_baseline_sha256": baseline,
+                "node_snapshot": {
+                    "account_id": self.authorization.account_id,
+                    "trading_state": "HALTED",
+                    "process_liveness": True,
+                    "actor_tick_at": NOW.isoformat(),
+                    "loss_monitor_healthy": True,
+                    "loss_monitor_at": NOW.isoformat(),
+                },
+                "evidence_sha256": _digest("preflight"),
+            }
+        )
+        return payload
 
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         self._require_operation_lock()
@@ -230,10 +297,18 @@ class FakeAdapter:
     ) -> Mapping[str, Any]:
         self._require_operation_lock()
         self._record_call("open", request)
-        self.position_quantity = self.authorization.quantity
-        self.position_side = "LONG"
-        if self.authorization.open_side == "SELL":
-            self.position_side = "SHORT"
+        open_attempt = self.calls.count("open")
+        should_fill = True
+        if open_attempt <= len(self.open_fill_attempts):
+            should_fill = self.open_fill_attempts[open_attempt - 1]
+        if should_fill:
+            self.position_quantity = self.authorization.quantity
+            self.position_side = "LONG"
+            if self.authorization.open_side == "SELL":
+                self.position_side = "SHORT"
+        else:
+            self.position_quantity = Decimal(0)
+            self.position_side = "FLAT"
         error = self.open_error_after_effect
         if error is not None:
             self.open_error_after_effect = None
@@ -263,16 +338,20 @@ class FakeAdapter:
             "loss_monitor_at",
             NOW,
         )
+        open_status = self.observation_status
+        exchange_evidence_state = self.exchange_evidence_state
+        if self.position_quantity == 0 and self.open_fill_attempts:
+            open_status = "EXPIRED"
+            if exchange_evidence_state == "confirmed_executed":
+                exchange_evidence_state = "definitively_absent"
         payload = self._identity()
         payload.update(
             {
                 "open_client_order_id": (
                     self.authorization.open_client_order_id
                 ),
-                "open_status": self.observation_status,
-                "filled_quantity": str(
-                    self.authorization.quantity
-                ),
+                "open_status": open_status,
+                "filled_quantity": str(self.position_quantity),
                 "average_fill_price_usdt": self.observation_price,
                 "cumulative_net_loss_usdt": self.observation_loss,
                 "mark_fresh": True,
@@ -280,6 +359,8 @@ class FakeAdapter:
                 "observed_at": observed_at.isoformat(),
                 "mark_at": mark_at.isoformat(),
                 "loss_monitor_at": loss_monitor_at.isoformat(),
+                "loss_monitor_source": self.loss_monitor_source,
+                "exchange_evidence_state": exchange_evidence_state,
                 "evidence_sha256": _digest("observe"),
             }
         )
@@ -393,6 +474,11 @@ class FakeAdapter:
                 ),
                 "source": self.final_source,
                 "fetched_at": fetched_at.isoformat(),
+                "enrichment_degraded": self.final_enrichment_degraded,
+                "financial_proof_complete": (
+                    not self.final_enrichment_degraded
+                ),
+                "warnings": list(self.final_warnings),
                 "evidence_sha256": _digest(evidence_label),
             }
         )
@@ -724,6 +810,48 @@ def test_authorization_accepts_stale_soft_safety_timestamp_with_warning(
     )
 
 
+def test_authorization_accepts_120_second_exchange_window(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].update(
+            {"exchange_max_age_seconds": "120"}
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert authorization.exchange_max_age_seconds == Decimal(120)
+
+
+def test_authorization_rejects_exchange_window_over_180_seconds(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].update(
+            {"exchange_max_age_seconds": "181"}
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="exchange max age exceeds 180 seconds",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
 def test_authorization_soft_safety_truths_become_warnings(
     tmp_path: Path,
 ) -> None:
@@ -946,6 +1074,39 @@ def test_live_adapter_rejects_group_writable_file(
         )
 
 
+def test_live_executor_accepts_only_signed_canonical_bytes(
+    tmp_path: Path,
+) -> None:
+    executor_path = (tmp_path / "reviewed-live-executor").resolve()
+    payload = Path(executor.__file__).read_bytes()
+    executor_path.write_bytes(payload)
+    executor_path.chmod(0o500)
+
+    actual_sha256 = executor.validate_live_executor(
+        executor_path,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert actual_sha256 == hashlib.sha256(payload).hexdigest()
+
+
+def test_live_executor_rejects_hash_drift(
+    tmp_path: Path,
+) -> None:
+    executor_path = (tmp_path / "reviewed-live-executor").resolve()
+    executor_path.write_bytes(Path(executor.__file__).read_bytes())
+    executor_path.chmod(0o500)
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="live executor hash differs from signed release",
+    ):
+        executor.validate_live_executor(
+            executor_path,
+            expected_sha256="f" * 64,
+        )
+
+
 def test_json_adapter_caps_action_timeout_to_recovery_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -982,6 +1143,93 @@ def test_json_adapter_caps_action_timeout_to_recovery_deadline(
         )
 
     assert observed_timeouts == [2.5]
+
+
+@pytest.mark.parametrize(
+    ("method_name", "payload_fields", "expected_code"),
+    [
+        (
+            "resume",
+            {"error_class": "http_timeout"},
+            "HTTP_TIMEOUT",
+        ),
+        (
+            "submit_open",
+            {"code": "HTTP_501"},
+            "HTTP_5XX",
+        ),
+        (
+            "observe",
+            {"status_code": 599},
+            "HTTP_5XX",
+        ),
+        (
+            "cancel_open",
+            {"code": 425},
+            "HTTP_425",
+        ),
+        (
+            "current_position",
+            {"code": "HTTP_429"},
+            "HTTP_429",
+        ),
+        (
+            "submit_close",
+            {"error_class": "circuit_open"},
+            "CIRCUIT_OPEN",
+        ),
+        (
+            "final_snapshot",
+            {"code": "resource_pressure"},
+            "RESOURCE_PRESSURE",
+        ),
+        (
+            "halt",
+            {"error_class": "reconciliation_pressure"},
+            "RECONCILIATION_PRESSURE",
+        ),
+    ],
+)
+def test_json_adapter_raises_soft_failure_for_structured_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    payload_fields: Mapping[str, Any],
+    expected_code: str,
+) -> None:
+    adapter_path = _write_live_adapter(tmp_path)
+    validated = executor.validate_live_adapter(
+        adapter_path,
+        expected_sha256=LIVE_ADAPTER_SHA256,
+    )
+    payload = {
+        "accepted": False,
+        "reason": "temporary adapter pressure",
+        **payload_fields,
+    }
+
+    def rejected_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=_json_bytes(payload),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(executor.subprocess, "run", rejected_run)
+
+    with executor.JsonCommandAdapter(
+        validated,
+        timeout_seconds=15,
+        live_authorized=True,
+        operation_lock=AlwaysHeldOperationLock(),
+    ) as adapter, pytest.raises(
+        executor.SoftActionFailure,
+    ) as raised:
+        method = getattr(adapter, method_name)
+        method({})
+
+    assert raised.value.code == expected_code
 
 
 def test_live_store_rejects_nonfixed_path_without_testing_override(
@@ -1156,13 +1404,14 @@ def test_open_exception_still_closes_exact_position_then_halts(
             "reduce_only": True,
             "reason": "failure-cleanup",
             "attempt": 1,
-            "side_effect_id": executor.deterministic_side_effect_id(
-                authorization,
-                "CLOSE",
-            ),
-            "hard_timeout_seconds": 20.0,
-        }
-    ]
+                "side_effect_id": executor.deterministic_side_effect_id(
+                    authorization,
+                    "CLOSE",
+                ),
+                "hard_timeout_seconds": 20.0,
+                "exchange_not_before": NOW.isoformat(),
+            }
+        ]
     evidence = json.loads(evidence_path.read_text(encoding="ascii"))
     assert evidence["passed"] is False
     assert evidence["finished_halted"] is True
@@ -1218,14 +1467,16 @@ def test_journal_fsync_failure_cannot_block_emergency_close_or_halt(
     assert adapter.calls.count("open") <= 1
     assert adapter.calls.count("close") == expected_close_count
     assert adapter.calls.count("halt") == 1
-    assert adapter.calls.index("position") < adapter.calls.index("halt")
     if expected_close_count == 1:
+        assert adapter.calls.index("position") < adapter.calls.index("halt")
         assert adapter.calls.index("position") < adapter.calls.index(
             "close"
         )
         assert adapter.calls.index("close") < adapter.calls.index(
             "halt"
         )
+    else:
+        assert "position" not in adapter.calls
     evidence = json.loads(evidence_path.read_text(encoding="ascii"))
     assert evidence["passed"] is False
     assert evidence["finished_halted"] is True
@@ -1308,10 +1559,8 @@ def test_stalled_journal_write_times_out_before_emergency_recovery(
         result.failure_reason
     )
     assert adapter.calls == [
+        "preflight",
         "resume",
-        "cancel-open",
-        "position",
-        "final-snapshot",
         "halt",
         "final-snapshot",
     ]
@@ -1343,15 +1592,22 @@ def test_open_timeout_after_exchange_acceptance_recovers_exchange_first(
 
     result = live_executor.execute(authorization)
 
-    assert result.status == "BLOCKED"
-    assert result.passed is False
-    assert result.error_code == "OPEN_RESULT_AMBIGUOUS"
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.error_code == "SOFT_TRANSPORT_DEGRADED"
     assert result.retryable is False
-    assert "injected open response timeout" in result.failure_reason
+    assert result.failure_reason == ""
+    assert any(
+        "OPEN response unavailable" in reason
+        for reason in result.degraded_reasons
+    )
     assert adapter.calls.count("open") == 1
     assert adapter.calls == [
+        "preflight",
         "resume",
+        "preflight",
         "open",
+        "observe",
         "cancel-open",
         "position",
         "close",
@@ -1362,6 +1618,297 @@ def test_open_timeout_after_exchange_acceptance_recovers_exchange_first(
     ]
     assert result.close_submitted is True
     assert result.finished_halted is True
+
+
+def test_open_timeout_recovers_when_position_confirms_execution(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        open_error_after_effect=TimeoutError(
+            "injected open response timeout"
+        ),
+        observe_failures=3,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "open-timeout-position-proof.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.error_code == "SOFT_TRANSPORT_DEGRADED"
+    assert result.failure_reason == ""
+    assert adapter.calls.count("open") == 1
+    assert adapter.calls.count("observe") == 3
+    assert adapter.calls.count("position") == 2
+    assert adapter.calls.count("close") == 1
+    assert result.close_submitted is True
+    assert any(
+        "confirmed executed by exchange position" in reason
+        for reason in result.degraded_reasons
+    )
+
+
+def test_open_timeout_stays_blocked_while_exchange_result_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        observe_failures=3,
+    )
+
+    def timeout_before_exchange_effect(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        adapter._require_operation_lock()
+        adapter._record_call("open", request)
+        raise TimeoutError("injected open response timeout")
+
+    monkeypatch.setattr(
+        adapter,
+        "submit_open",
+        timeout_before_exchange_effect,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "open-timeout-unknown.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.error_code == "OPEN_RESULT_AMBIGUOUS"
+    assert "exchange result remained unknown" in result.failure_reason
+    assert adapter.calls.count("open") == 1
+    assert adapter.calls.count("observe") == 3
+    assert adapter.calls.count("close") == 0
+    assert result.finished_halted is True
+
+
+def test_terminal_ioc_no_fill_requires_a_new_signed_permit(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        open_fill_attempts=(False, True),
+    )
+    evidence_path = tmp_path / "ioc-no-fill-retry.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.retryable is True
+    assert result.error_code == "DEGRADED_NO_FILL"
+    assert "new signed permit" in result.failure_reason
+    assert adapter.calls.count("open") == 1
+    assert adapter.calls.count("observe") == 1
+    assert adapter.requests["open"][0]["intent_id"] == (
+        authorization.intent_id
+    )
+    assert adapter.requests["open"][0]["side_effect_id"] == (
+        executor.deterministic_side_effect_id(
+            authorization,
+            "OPEN",
+        )
+    )
+    assert result.close_submitted is False
+    assert result.finished_halted is True
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert evidence["round_trip_count"] == 0
+    assert evidence["retryable"] is True
+
+
+def test_terminal_ioc_no_fill_never_proves_round_trip_completion(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        open_fill_attempts=(False, False),
+    )
+    evidence_path = tmp_path / "ioc-no-fill-exhausted.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.retryable is True
+    assert result.error_code == "DEGRADED_NO_FILL"
+    assert adapter.calls.count("open") == 1
+    assert adapter.calls.count("observe") == 1
+    assert adapter.calls.count("close") == 0
+    assert result.close_submitted is False
+    assert result.finished_halted is True
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert evidence["round_trip_count"] == 0
+    assert evidence["target_symbol_flat"] is True
+
+
+def test_terminal_ioc_no_fill_requires_definitive_exchange_absence(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        observation_status="EXPIRED",
+        exchange_evidence_state="unknown",
+        open_fill_attempts=(False,),
+    )
+    evidence_path = tmp_path / "ioc-no-fill-ambiguous.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.retryable is False
+    assert result.error_code == "OPEN_RESULT_AMBIGUOUS"
+    assert "definitive exchange absence proof" in result.failure_reason
+    assert result.finished_halted is True
+
+
+def test_live_preflight_blocks_existing_position_without_closing_it(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        preflight_position_quantity="0.1",
+        preflight_position_side="LONG",
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-position.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert "preflight target position is not flat" in (
+        result.failure_reason
+    )
+    assert adapter.calls.count("preflight") == 1
+    assert "resume" not in adapter.calls
+    assert "open" not in adapter.calls
+    assert "close" not in adapter.calls
+    assert result.finished_halted is True
+
+
+def test_live_preflight_transport_failure_degrades_and_continues(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        preflight_failures=6,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-degraded.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert adapter.calls.count("preflight") == 6
+    assert adapter.calls.count("open") == 1
+    assert any(
+        "PREFLIGHT soft failure budget exhausted" in reason
+        for reason in result.degraded_reasons
+    )
+
+
+def test_live_preflight_rechecks_funds_immediately_before_open(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+
+    def expose_position_after_resume() -> None:
+        adapter.preflight_position_quantity = "0.1"
+        adapter.preflight_position_side = "LONG"
+
+    adapter.on_resume = expose_position_after_resume
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-before-open.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "preflight target position is not flat" in (
+        result.failure_reason
+    )
+    assert adapter.calls.count("preflight") == 2
+    assert adapter.calls.count("resume") == 1
+    assert "open" not in adapter.calls
+
+
+def test_financial_enrichment_failure_degrades_without_blocking_flat_proof(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        final_enrichment_degraded=True,
+        final_warnings=("operator projection unavailable",),
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "financial-degraded.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.close_submitted is True
+    assert result.finished_halted is True
+    assert any(
+        "FINANCIAL_PROOF_DEGRADED" in reason
+        for reason in result.degraded_reasons
+    )
 
 
 def test_resume_timeout_recovers_as_degraded_with_bounded_retry(
@@ -1502,10 +2049,102 @@ def test_close_timeout_after_exchange_acceptance_queries_before_retry(
         "CLOSE transport failure" in reason
         for reason in result.degraded_reasons
     )
-    assert adapter.calls.count("close") == 1
+    assert adapter.calls.count("close") == 2
     close_index = adapter.calls.index("close")
     assert adapter.calls[close_index + 1] == "position"
+    first_close = adapter.requests["close"][0]
+    second_close = adapter.requests["close"][1]
+    for field_name in (
+        "intent_id",
+        "client_order_id",
+        "side_effect_id",
+        "quantity",
+        "reduce_only",
+    ):
+        assert first_close[field_name] == second_close[field_name]
     assert result.close_submitted is True
+    assert result.finished_halted is True
+
+
+def test_flat_position_without_exact_close_fill_proof_stays_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+
+    def ambiguous_close(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        adapter._require_operation_lock()
+        adapter._record_call("close", request)
+        adapter.position_quantity = Decimal(0)
+        adapter.position_side = "FLAT"
+        raise TimeoutError("injected close response timeout")
+
+    monkeypatch.setattr(adapter, "submit_close", ambiguous_close)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "close-flat-unproven.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.error_code == "EXACT_CLOSE_UNPROVEN"
+    assert "close" in result.failure_reason.lower()
+    assert adapter.calls.count("close") == 3
+    assert result.close_submitted is False
+    assert result.finished_halted is True
+
+
+def test_pre_open_flat_exchange_sample_cannot_bypass_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+
+    def pre_open_flat_position(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        adapter._require_operation_lock()
+        adapter._record_call("position", request)
+        payload = adapter._identity()
+        payload.update(
+            {
+                "position_side": "FLAT",
+                "position_quantity": "0",
+                "source": executor.EXCHANGE_EVIDENCE_SOURCE,
+                "fetched_at": (
+                    NOW - timedelta(seconds=1)
+                ).isoformat(),
+                "evidence_sha256": _digest("pre-open-flat"),
+            }
+        )
+        return payload
+
+    monkeypatch.setattr(
+        adapter,
+        "current_position",
+        pre_open_flat_position,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "pre-open-flat.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert "predates required exchange progress" in result.failure_reason
+    assert adapter.calls.count("close") == 0
     assert result.finished_halted is True
 
 
@@ -1567,7 +2206,7 @@ def test_stale_post_halt_snapshot_blocks_final_pass(
     assert result.passed is False
     assert result.finished_halted is True
     assert result.error_code == "POST_HALT_SNAPSHOT_UNPROVEN"
-    assert "final snapshot fetched_at is stale" in result.failure_reason
+    assert "predates required exchange progress" in result.failure_reason
     assert adapter.calls[-1] == "final-snapshot"
 
 
@@ -1692,7 +2331,9 @@ def test_cleanup_orchestration_exception_still_halts_and_writes_evidence(
 
     assert result.passed is False
     assert "cleanup orchestration failed" in result.failure_reason
-    assert adapter.calls[-1] == "halt"
+    assert adapter.calls.index("halt") < adapter.calls.index(
+        "final-snapshot"
+    )
     evidence = json.loads(evidence_path.read_text(encoding="ascii"))
     assert evidence["passed"] is False
     assert evidence["finished_halted"] is True
@@ -1825,7 +2466,9 @@ def test_loss_threshold_reached_closes_and_halts_immediately(
     )
     assert result.close_submitted is True
     assert adapter.calls == [
+        "preflight",
         "resume",
+        "preflight",
         "open",
         "observe",
         "cancel-open",
@@ -1963,22 +2606,23 @@ def test_soft_health_staleness_after_resume_continues_open(
 
 
 @pytest.mark.parametrize(
-    "field_name",
+    ("field_name", "age_seconds"),
     [
-        "observed_at",
-        "mark_at",
-        "loss_monitor_at",
+        ("observed_at", 6),
+        ("mark_at", 121),
+        ("loss_monitor_at", 6),
     ],
 )
 def test_stale_trade_observation_closes_and_halts(
     tmp_path: Path,
     field_name: str,
+    age_seconds: int,
 ) -> None:
     authorization = _authorization(tmp_path)
     adapter = FakeAdapter(
         authorization,
         observation_times={
-            field_name: NOW - timedelta(seconds=6),
+            field_name: NOW - timedelta(seconds=age_seconds),
         },
     )
     live_executor = _executor(
@@ -2003,21 +2647,21 @@ def test_stale_trade_observation_closes_and_halts(
             {"position_source": "projection"},
             "position source must be exchange",
         ),
-        (
-            {
-                "position_fetched_at": NOW - timedelta(seconds=6),
-            },
-            "position fetched_at is stale",
+            (
+                {
+                    "position_fetched_at": NOW - timedelta(seconds=121),
+                },
+                "position fetched_at is stale",
         ),
         (
             {"final_source": "projection"},
             "final snapshot source must be exchange",
         ),
-        (
-            {
-                "final_fetched_at": NOW - timedelta(seconds=6),
-            },
-            "final snapshot fetched_at is stale",
+            (
+                {
+                    "final_fetched_at": NOW - timedelta(seconds=121),
+                },
+                "final snapshot fetched_at is stale",
         ),
     ],
 )
@@ -2901,6 +3545,7 @@ def _documents() -> dict[str, dict[str, Any]]:
         "image_digest": "sha256:" + ("1" * 64),
         "config_sha256": "2" * 64,
         "dependency_lock_sha256": "3" * 64,
+        "live_executor_sha256": LIVE_EXECUTOR_SHA256,
         "live_adapter_sha256": LIVE_ADAPTER_SHA256,
         "permit_store_id": executor.LIVE_PERMIT_STORE_ID,
         "permit_store_path": str(
@@ -2937,6 +3582,7 @@ def _documents() -> dict[str, dict[str, Any]]:
         "reconciliation_at": NOW.isoformat(),
         "loss_monitor_at": NOW.isoformat(),
         "health_max_age_seconds": "5",
+        "exchange_max_age_seconds": "120",
         **window,
     }
     safety_hash = _digest_json(safety_gate)

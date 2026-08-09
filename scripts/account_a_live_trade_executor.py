@@ -29,7 +29,10 @@ SYMBOL = "SOLUSDT"
 MAX_ACTUAL_OPEN_NOTIONAL_USDT = Decimal(12)
 ABSOLUTE_LOSS_CAP_USDT = Decimal("1.5")
 MAX_CLOCK_SKEW = timedelta(seconds=60)
-DEFAULT_HEALTH_MAX_AGE_SECONDS = Decimal("5")
+DEFAULT_HEALTH_MAX_AGE_SECONDS = Decimal(5)
+MAX_HEALTH_MAX_AGE_SECONDS = Decimal(30)
+DEFAULT_EXCHANGE_MAX_AGE_SECONDS = Decimal(120)
+MAX_EXCHANGE_MAX_AGE_SECONDS = Decimal(180)
 EXCHANGE_EVIDENCE_SOURCE = "exchange"
 NODE_STATE_EVIDENCE_SOURCE = "node"
 DEFAULT_OPERATION_LOCK_PATH = Path(
@@ -73,6 +76,11 @@ TERMINAL_OPEN_STATUSES = {
     "CANCELED",
     "REJECTED",
 }
+TERMINAL_NO_FILL_OPEN_STATUSES = {
+    "EXPIRED",
+    "CANCELED",
+    "REJECTED",
+}
 RESULT_PASSED = "PASSED"
 RESULT_DEGRADED = "DEGRADED"
 RESULT_BLOCKED = "BLOCKED"
@@ -92,13 +100,18 @@ HARD_HEALTH_FIELDS = (
 )
 SOFT_ADAPTER_ERROR_RE = re.compile(
     r"(?:"
-    r"\b5\d\d\b|"
+    r"(?<!\d)(?:408|425|429|5\d\d)(?!\d)|"
     r"timeout|timed out|"
     r"circuit(?:[-_ ]?open)?|"
     r"queue(?:[-_ ]?(?:pressure|full))?|"
     r"memory(?:[-_ ]?queue)?[-_ ]?pressure|"
+    r"resource(?:[-_ ]?(?:pressure|exhausted|busy))|"
+    r"reconciliation(?:[-_ ]?(?:pressure|backlog|busy))|"
+    r"exchange(?:[-_ ]?(?:mirror|state))?[-_ ]?"
+    r"(?:lag|stale|pending)|"
+    r"rate[-_ ]?limit|too many requests|"
     r"readiness|heartbeat|projection|"
-    r"service unavailable|temporar"
+    r"service unavailable|temporar|overload"
     r")",
     re.IGNORECASE,
 )
@@ -143,6 +156,12 @@ class ClassifiedExecutionError(LiveTradeExecutionError):
 
 
 class TradeAdapter(Protocol):
+    def preflight(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        ...
+
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         ...
 
@@ -215,6 +234,7 @@ class ReleaseIdentity:
     image_digest: str
     config_sha256: str
     dependency_lock_sha256: str
+    live_executor_sha256: str
     live_adapter_sha256: str
     permit_store_id: str
     permit_store_path: str
@@ -246,6 +266,7 @@ class CanaryAuthorization:
     reconciliation_at: datetime
     loss_monitor_at: datetime
     health_max_age_seconds: Decimal
+    exchange_max_age_seconds: Decimal
     document_sha256: Mapping[str, str]
     authorization_sha256: str
     signatures_verified: bool
@@ -259,6 +280,7 @@ class CanaryAuthorization:
 @dataclass(frozen=True)
 class TradeObservation:
     open_status: str
+    exchange_evidence_state: str
     filled_quantity: Decimal
     average_fill_price_usdt: Decimal
     cumulative_net_loss_usdt: Decimal
@@ -565,6 +587,12 @@ class JsonCommandAdapter:
     def __exit__(self, *_args) -> None:
         self.close()
 
+    def preflight(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return self._invoke("preflight", request)
+
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._invoke("resume", request)
 
@@ -629,8 +657,9 @@ class JsonCommandAdapter:
                 timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
-            raise LiveTradeExecutionError(
-                f"adapter action timed out: {action}"
+            raise SoftActionFailure(
+                f"adapter action timed out: {action}",
+                code="HTTP_TIMEOUT",
             ) from exc
         except OSError as exc:
             raise LiveTradeExecutionError(
@@ -650,6 +679,13 @@ class JsonCommandAdapter:
             raise LiveTradeExecutionError(
                 f"adapter action returned a non-object: {action}"
             )
+        if payload.get("accepted") is False:
+            soft_failure = _soft_adapter_rejection(
+                payload,
+                action=action,
+            )
+            if soft_failure is not None:
+                raise soft_failure
         return payload
 
 
@@ -660,6 +696,45 @@ class DryRunAdapter:
         self._authorization = authorization
         self._position_quantity = Decimal(0)
         self._position_side = "FLAT"
+
+    def preflight(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = self._identity_payload()
+        payload.update(
+            {
+                "action": "preflight",
+                "source": EXCHANGE_EVIDENCE_SOURCE,
+                "fetched_at": (
+                    self._authorization.actor_tick_at.isoformat()
+                ),
+                "mirror_stale": False,
+                "target_position_side": "FLAT",
+                "target_position_quantity": "0",
+                "target_regular_order_count": 0,
+                "target_algo_order_count": 0,
+                "non_target_portfolio_baseline_sha256": (
+                    self._authorization.portfolio_baseline_sha256
+                ),
+                "node_snapshot": {
+                    "account_id": self._authorization.account_id,
+                    "trading_state": "HALTED",
+                    "process_liveness": True,
+                    "actor_tick_at": (
+                        self._authorization.actor_tick_at.isoformat()
+                    ),
+                    "loss_monitor_healthy": True,
+                    "loss_monitor_at": (
+                        self._authorization.loss_monitor_at.isoformat()
+                    ),
+                },
+                "evidence_sha256": _synthetic_hash(
+                    "dry-run-preflight"
+                ),
+            }
+        )
+        return payload
 
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._ack("resume", request)
@@ -705,6 +780,8 @@ class DryRunAdapter:
                 "loss_monitor_at": (
                     self._authorization.loss_monitor_at.isoformat()
                 ),
+                "loss_monitor_source": "exchange_mirror+node",
+                "exchange_evidence_state": "confirmed_executed",
                 "evidence_sha256": _synthetic_hash("dry-run-observe"),
             }
         )
@@ -1604,6 +1681,7 @@ class AccountALiveTradeExecutor:
         journal_enabled = False
         pending_evidence: Mapping[str, Any] | None = None
         cleanup_complete = False
+        cleanup_required = False
         cleanup_result = CleanupResult(
             safe=False,
             close_submitted=False,
@@ -1616,11 +1694,13 @@ class AccountALiveTradeExecutor:
         peak_cumulative_loss = Decimal(0)
         open_filled_quantity = Decimal(0)
         round_trip_complete = False
+        open_result_unknown = False
         failure_reason = ""
         error_code = ""
         retryable = False
         finished_halted = False
         halt_observed_at: datetime | None = None
+        open_dispatched_at: datetime | None = None
 
         try:
             claim_outcome = self._permit_store.claim_or_recover(
@@ -1631,6 +1711,7 @@ class AccountALiveTradeExecutor:
                 claim_outcome.newly_authorized
                 or claim_outcome.recovery_required
             )
+            cleanup_required = claim_outcome.recovery_required
             pending_evidence = claim_outcome.pending_evidence
             if claim_outcome.terminal:
                 raise DuplicatePermitError(
@@ -1679,6 +1760,11 @@ class AccountALiveTradeExecutor:
                     ),
                 },
             )
+            self._run_live_preflight(
+                authorization,
+                trail,
+                phase="before-resume",
+            )
             health_warnings = _validate_health_freshness(
                 authorization,
                 now=_utc_now(self._clock),
@@ -1716,6 +1802,7 @@ class AccountALiveTradeExecutor:
                     ],
                 ),
             )
+            open_journal_fallback_state = "AUTHORIZED"
             if resume_hash is False:
                 self._journal_continue_after_soft_failure(
                     authorization,
@@ -1732,6 +1819,7 @@ class AccountALiveTradeExecutor:
                     },
                 )
             else:
+                open_journal_fallback_state = "RESUMED"
                 self._journal_complete(
                     authorization,
                     enabled=journal_enabled,
@@ -1752,6 +1840,11 @@ class AccountALiveTradeExecutor:
                 )
 
             open_now = _utc_now(self._clock)
+            self._run_live_preflight(
+                authorization,
+                trail,
+                phase="before-open",
+            )
             health_warnings = _validate_health_freshness(
                 authorization,
                 now=open_now,
@@ -1787,66 +1880,68 @@ class AccountALiveTradeExecutor:
                     ),
                 }
             )
-            self._journal_prepare(
+            open_dispatched_at = _utc_now(self._clock)
+            cleanup_required = True
+            open_acknowledged = self._dispatch_open(
                 authorization,
-                enabled=journal_enabled,
-                action="OPEN",
+                trail,
                 request=open_request,
-            )
-            try:
-                open_ack = self._adapter.submit_open(open_request)
-                open_hash = _validate_ack(
-                    open_ack,
-                    authorization,
-                    action="open",
-                    expected_client_order_id=(
-                        authorization.open_client_order_id
-                    ),
-                    expected_side_effect_id=open_request[
-                        "side_effect_id"
-                    ],
-                )
-            except BaseException as exc:  # noqa: BLE001
-                raise ClassifiedExecutionError(
-                    (
-                        "OPEN result is ambiguous after dispatch: "
-                        f"{_exception_text(exc)}"
-                    ),
-                    code="OPEN_RESULT_AMBIGUOUS",
-                ) from exc
-            self._journal_complete(
-                authorization,
                 enabled=journal_enabled,
-                action="OPEN",
-                state="OPEN_SUBMITTED",
-                result={
-                    "adapter_evidence_sha256": open_hash,
-                    "client_order_id": (
-                        authorization.open_client_order_id
-                    ),
-                },
+                journal_fallback_state=open_journal_fallback_state,
+                attempt=1,
             )
-            trail.record(
-                "open_submitted",
-                {
-                    "adapter_evidence_sha256": open_hash,
-                    "client_order_id": (
-                        authorization.open_client_order_id
-                    ),
-                    "requested_notional_usdt": _decimal_text(
-                        authorization.requested_open_notional_usdt
-                    ),
-                    "side_effect_id": open_request[
-                        "side_effect_id"
-                    ],
-                },
-            )
-
-            observation = self._wait_for_open_terminal(
+            observation = self._observe_open_after_dispatch(
                 authorization,
                 trail,
                 journal_enabled=journal_enabled,
+                dispatch_acknowledged=open_acknowledged,
+                journal_fallback_state=open_journal_fallback_state,
+                exchange_not_before=open_dispatched_at,
             )
+            open_result_unknown = (
+                observation is False and not open_acknowledged
+            )
+            if (
+                observation is not False
+                and _is_terminal_ioc_zero_fill(observation)
+                and not _is_terminal_ioc_no_fill(observation)
+            ):
+                raise ClassifiedExecutionError(
+                    (
+                        "terminal IOC open produced no fill without "
+                        "definitive exchange absence proof"
+                    ),
+                    code="OPEN_RESULT_AMBIGUOUS",
+                )
+            if (
+                observation is not False
+                and _is_terminal_ioc_no_fill(observation)
+            ):
+                retryable = True
+                self._add_degraded(
+                    "DEGRADED_NO_FILL: terminal IOC open produced "
+                    "no fill; a new signed permit and intent may retry"
+                )
+                trail.record(
+                    "open_terminal_no_fill",
+                    {
+                        "open_status": observation.open_status,
+                        "client_order_id": (
+                            authorization.open_client_order_id
+                        ),
+                        "intent_id": authorization.intent_id,
+                        "side_effect_id": open_request[
+                            "side_effect_id"
+                        ],
+                    },
+                )
+                raise ClassifiedExecutionError(
+                    (
+                        "terminal IOC open produced no fill; "
+                        "retry requires a new signed permit and intent"
+                    ),
+                    code="DEGRADED_NO_FILL",
+                )
             if observation is not False:
                 open_filled_quantity = observation.filled_quantity
                 actual_open_notional = (
@@ -1882,25 +1977,61 @@ class AccountALiveTradeExecutor:
                 trail,
                 reason="round-trip-close",
                 journal_enabled=journal_enabled,
+                exchange_not_before=open_dispatched_at,
             )
             cleanup_complete = True
-            if cleanup_result.close_submitted is not True:
-                raise LiveTradeExecutionError(
-                    "round trip requires an exact reduce-only close"
-                )
-            if observation is not False:
-                if cleanup_result.close_quantity != (
-                    observation.filled_quantity
-                ):
+            if (
+                open_result_unknown
+                and cleanup_result.close_submitted is not True
+            ):
+                if cleanup_result.safe is not True:
                     raise LiveTradeExecutionError(
-                        "close quantity differs from open filled quantity"
+                        _join_errors(
+                            "target risk cleanup failed",
+                            cleanup_result.errors,
+                        )
                     )
+                raise ClassifiedExecutionError(
+                    (
+                        "OPEN exchange result remained unknown after "
+                        "bounded reconciliation"
+                    ),
+                    code="OPEN_RESULT_AMBIGUOUS",
+                )
+            if open_result_unknown:
+                self._add_degraded(
+                    "OPEN confirmed executed by exchange position; "
+                    "exact close reconciled the missing response"
+                )
+                trail.record(
+                    "open_confirmed_executed_by_position",
+                    {
+                        "close_quantity": _decimal_text(
+                            cleanup_result.close_quantity
+                        ),
+                        "client_order_id": (
+                            authorization.open_client_order_id
+                        ),
+                    },
+                )
             if cleanup_result.safe is not True:
                 raise LiveTradeExecutionError(
                     _join_errors(
                         "target risk cleanup failed",
                         cleanup_result.errors,
                     )
+                )
+            if (
+                observation is not False
+                and cleanup_result.close_quantity
+                != observation.filled_quantity
+            ):
+                raise LiveTradeExecutionError(
+                    "close quantity differs from open filled quantity"
+                )
+            if cleanup_result.close_submitted is not True:
+                raise LiveTradeExecutionError(
+                    "round trip requires an exact reduce-only close"
                 )
             if cleanup_result.pre_halt_snapshot is None:
                 raise LiveTradeExecutionError(
@@ -1940,13 +2071,18 @@ class AccountALiveTradeExecutor:
                 },
             )
         finally:
-            if failure_reason and not cleanup_complete:
+            if (
+                failure_reason
+                and cleanup_required
+                and not cleanup_complete
+            ):
                 try:
                     emergency_result = self._flatten_target_risk(
                         authorization,
                         trail,
                         reason="failure-cleanup",
                         journal_enabled=journal_enabled,
+                        exchange_not_before=open_dispatched_at,
                     )
                     cleanup_result = emergency_result
                     cleanup_complete = True
@@ -2009,7 +2145,6 @@ class AccountALiveTradeExecutor:
                 error_code = "HALT_UNPROVEN"
             if (
                 finished_halted
-                and cleanup_result.safe
                 and halt_observed_at is not None
             ):
                 post_halt_snapshot, snapshot_error = (
@@ -2132,16 +2267,199 @@ class AccountALiveTradeExecutor:
             retry_counts=dict(self._retry_counts),
         )
 
+    def _run_live_preflight(
+        self,
+        authorization: CanaryAuthorization,
+        trail: AuditTrail,
+        *,
+        phase: str,
+    ) -> None:
+        preflight_request = self._base_request(authorization)
+        preflight_request["phase"] = phase
+        preflight_result = self._run_soft_action(
+            action="PREFLIGHT",
+            trail=trail,
+            operation=lambda: _validate_live_preflight(
+                self._adapter.preflight(preflight_request),
+                authorization,
+                now=_utc_now(self._clock),
+                phase=phase,
+            ),
+        )
+        if preflight_result is False:
+            trail.record(
+                "live_preflight_degraded_continue",
+                {
+                    "phase": phase,
+                    "reason": (
+                        "live preflight transport evidence was unavailable"
+                    ),
+                },
+            )
+            return
+        preflight_hash, preflight_warnings = preflight_result
+        for warning in preflight_warnings:
+            self._add_warning(warning)
+        trail.record(
+            "live_preflight_confirmed",
+            {
+                "phase": phase,
+                "adapter_evidence_sha256": preflight_hash,
+                "warning_count": len(preflight_warnings),
+            },
+        )
+
+    def _dispatch_open(
+        self,
+        authorization: CanaryAuthorization,
+        trail: AuditTrail,
+        *,
+        request: Mapping[str, Any],
+        enabled: bool,
+        journal_fallback_state: str,
+        attempt: int,
+    ) -> bool:
+        self._journal_prepare(
+            authorization,
+            enabled=enabled,
+            action="OPEN",
+            request=request,
+        )
+        try:
+            open_ack = self._adapter.submit_open(request)
+            open_hash = _validate_ack(
+                open_ack,
+                authorization,
+                action="open",
+                expected_client_order_id=(
+                    authorization.open_client_order_id
+                ),
+                expected_side_effect_id=request["side_effect_id"],
+            )
+        except BaseException as exc:
+            if not _is_soft_action_failure(exc):
+                raise ClassifiedExecutionError(
+                    (
+                        "OPEN result is ambiguous after dispatch: "
+                        f"{_exception_text(exc)}"
+                    ),
+                    code="OPEN_RESULT_AMBIGUOUS",
+                ) from exc
+            error_code = _soft_failure_code(_exception_text(exc))
+            if isinstance(exc, SoftActionFailure):
+                error_code = exc.code
+            self._journal_continue_after_soft_failure(
+                authorization,
+                enabled=enabled,
+                action="OPEN",
+                state=journal_fallback_state,
+            )
+            self._add_degraded(
+                "OPEN response unavailable; exchange "
+                f"reconciliation required: {error_code}: "
+                f"{_exception_text(exc)}"
+            )
+            trail.record(
+                "open_dispatch_degraded_reconcile",
+                {
+                    "attempt": attempt,
+                    "error_code": error_code,
+                    "reason": _exception_text(exc),
+                    "client_order_id": (
+                        authorization.open_client_order_id
+                    ),
+                    "side_effect_id": request["side_effect_id"],
+                },
+            )
+            return False
+        self._journal_complete(
+            authorization,
+            enabled=enabled,
+            action="OPEN",
+            state="OPEN_SUBMITTED",
+            result={
+                "adapter_evidence_sha256": open_hash,
+                "client_order_id": (
+                    authorization.open_client_order_id
+                ),
+                "attempt": attempt,
+            },
+        )
+        trail.record(
+            "open_submitted",
+            {
+                "adapter_evidence_sha256": open_hash,
+                "attempt": attempt,
+                "client_order_id": (
+                    authorization.open_client_order_id
+                ),
+                "requested_notional_usdt": _decimal_text(
+                    authorization.requested_open_notional_usdt
+                ),
+                "side_effect_id": request["side_effect_id"],
+            },
+        )
+        return True
+
+    def _observe_open_after_dispatch(
+        self,
+        authorization: CanaryAuthorization,
+        trail: AuditTrail,
+        *,
+        journal_enabled: bool,
+        dispatch_acknowledged: bool,
+        journal_fallback_state: str,
+        exchange_not_before: datetime,
+    ) -> TradeObservation | bool:
+        soft_failure_state = "OPEN_SUBMITTED"
+        if not dispatch_acknowledged:
+            soft_failure_state = journal_fallback_state
+        try:
+            observation = self._wait_for_open_terminal(
+                authorization,
+                trail,
+                journal_enabled=journal_enabled,
+                soft_failure_state=soft_failure_state,
+                exchange_not_before=exchange_not_before,
+            )
+        except LiveTradeExecutionError as exc:
+            if dispatch_acknowledged:
+                raise
+            if "did not reach a terminal state" not in str(exc):
+                raise
+            trail.record(
+                "open_exchange_result_unknown",
+                {
+                    "reason": _exception_text(exc),
+                    "source": "terminal-observation-budget",
+                },
+            )
+            return False
+        if observation is False and not dispatch_acknowledged:
+            trail.record(
+                "open_exchange_result_unknown",
+                {
+                    "reason": (
+                        "soft observation recovery was exhausted"
+                    ),
+                    "source": "soft-observation-budget",
+                },
+            )
+        return observation
+
     def _wait_for_open_terminal(
         self,
         authorization: CanaryAuthorization,
         trail: AuditTrail,
         *,
         journal_enabled: bool,
+        exchange_not_before: datetime,
+        soft_failure_state: str = "OPEN_SUBMITTED",
     ) -> TradeObservation | bool:
         initial_time = _utc_now(self._clock)
         latest = TradeObservation(
             open_status="UNKNOWN",
+            exchange_evidence_state="unknown",
             filled_quantity=Decimal(0),
             average_fill_price_usdt=Decimal(0),
             cumulative_net_loss_usdt=Decimal(0),
@@ -2161,6 +2479,9 @@ class AccountALiveTradeExecutor:
                     "max_cumulative_net_loss_usdt": _decimal_text(
                         authorization.max_cumulative_net_loss_usdt
                     ),
+                    "exchange_not_before": (
+                        exchange_not_before.isoformat()
+                    ),
                 }
             )
             self._journal_prepare(
@@ -2172,10 +2493,11 @@ class AccountALiveTradeExecutor:
             observed = self._run_soft_action(
                 action="OBSERVE",
                 trail=trail,
-                operation=lambda: _parse_observation(
-                    self._adapter.observe(observe_request),
+                operation=lambda request=observe_request: _parse_observation(
+                    self._adapter.observe(request),
                     authorization,
                     now=_utc_now(self._clock),
+                    exchange_not_before=exchange_not_before,
                 ),
             )
             if observed is False:
@@ -2183,7 +2505,7 @@ class AccountALiveTradeExecutor:
                     authorization,
                     enabled=journal_enabled,
                     action="OBSERVE",
-                    state="OPEN_SUBMITTED",
+                    state=soft_failure_state,
                 )
                 trail.record(
                     "observation_degraded_continue_to_close",
@@ -2264,6 +2586,7 @@ class AccountALiveTradeExecutor:
         *,
         reason: str,
         journal_enabled: bool,
+        exchange_not_before: datetime | None,
     ) -> CleanupResult:
         cancel_started_at = self._monotonic()
         last_errors: list[str] = []
@@ -2272,7 +2595,9 @@ class AccountALiveTradeExecutor:
         final_snapshot: Mapping[str, Any] | None = None
         close_attempted = False
         close_confirmed = False
+        pending_close_request: dict[str, Any] | None = None
         quantity_violation = False
+        causal_exchange_not_before = exchange_not_before
 
         for attempt in range(1, self._recovery_max_attempts + 1):
             if not self._recovery_budget_available(
@@ -2390,6 +2715,10 @@ class AccountALiveTradeExecutor:
                     ),
                 }
             )
+            if causal_exchange_not_before is not None:
+                position_request["exchange_not_before"] = (
+                    causal_exchange_not_before.isoformat()
+                )
             position_journal_prepared = (
                 self._recovery_journal_prepare(
                     authorization,
@@ -2412,6 +2741,7 @@ class AccountALiveTradeExecutor:
                     raw_position,
                     authorization,
                     now=_utc_now(self._clock),
+                    exchange_not_before=causal_exchange_not_before,
                 )
                 self._recovery_journal_complete(
                     authorization,
@@ -2473,23 +2803,103 @@ class AccountALiveTradeExecutor:
 
             if position.quantity == 0:
                 flat_confirmed = True
-                last_errors = []
                 if close_attempted and not close_confirmed:
-                    close_confirmed = True
-                    close_submitted = True
-                    self._recovery_journal_mark_state(
-                        authorization,
-                        trail,
-                        enabled=journal_enabled,
-                        state="CLOSE_CONFIRMED",
-                        event_type="CLOSE_RECONCILED_FLAT",
-                        payload={
-                            "quantity": _decimal_text(
-                                close_quantity
-                            ),
-                            "attempt": attempt,
-                        },
+                    if pending_close_request is None:
+                        last_errors = [
+                            "exact close request is unavailable for "
+                            "reconciliation"
+                        ]
+                        break
+                    reconcile_request = dict(pending_close_request)
+                    reconcile_request["attempt"] = attempt
+                    reconcile_request["hard_timeout_seconds"] = (
+                        self._recovery_seconds_remaining(
+                            close_started_at
+                        )
                     )
+                    if not self._refresh_hard_timeout(
+                        reconcile_request,
+                        close_started_at,
+                    ):
+                        break
+                    try:
+                        close_ack = self._adapter.submit_close(
+                            reconcile_request
+                        )
+                        close_hash = _validate_exact_close_ack(
+                            close_ack,
+                            authorization,
+                            expected_quantity=close_quantity,
+                            expected_side_effect_id=reconcile_request[
+                                "side_effect_id"
+                            ],
+                        )
+                        close_confirmed = True
+                        close_submitted = True
+                        last_errors = []
+                        self._recovery_journal_mark_state(
+                            authorization,
+                            trail,
+                            enabled=journal_enabled,
+                            state="CLOSE_CONFIRMED",
+                            event_type="CLOSE_RECONCILED_EXACT_FILL",
+                            payload={
+                                "adapter_evidence_sha256": close_hash,
+                                "quantity": _decimal_text(
+                                    close_quantity
+                                ),
+                                "attempt": attempt,
+                                "reconciled": True,
+                            },
+                        )
+                        trail.record(
+                            "reduce_only_close_reconciled",
+                            {
+                                "adapter_evidence_sha256": close_hash,
+                                "client_order_id": (
+                                    authorization.close_client_order_id
+                                ),
+                                "quantity": _decimal_text(
+                                    close_quantity
+                                ),
+                                "reduce_only": True,
+                                "attempt": attempt,
+                                "side_effect_id": reconcile_request[
+                                    "side_effect_id"
+                                ],
+                            },
+                        )
+                    except BaseException as exc:  # noqa: BLE001
+                        close_error = (
+                            "exact close reconciliation attempt "
+                            f"{attempt} failed: {_exception_text(exc)}"
+                        )
+                        last_errors = [close_error]
+                        trail.record(
+                            "reduce_only_close_reconciliation_failed",
+                            {
+                                "reason": close_error,
+                                "quantity": _decimal_text(
+                                    close_quantity
+                                ),
+                                "attempt": attempt,
+                                "side_effect_id": reconcile_request[
+                                    "side_effect_id"
+                                ],
+                            },
+                        )
+                        if _is_soft_action_failure(exc):
+                            self._add_degraded(
+                                (
+                                    "CLOSE transport failure required "
+                                    "idempotent exact-fill reconciliation: "
+                                    f"{_exception_text(exc)}"
+                                )
+                            )
+                        self._recovery_sleep(close_started_at)
+                        continue
+                else:
+                    last_errors = []
                 break
 
             close_quantity = position.quantity
@@ -2508,6 +2918,8 @@ class AccountALiveTradeExecutor:
                     },
                 )
             close_request = self._base_request(authorization)
+            close_dispatched_at = _utc_now(self._clock)
+            causal_exchange_not_before = close_dispatched_at
             close_request.update(
                 {
                     "intent_id": authorization.close_intent_id,
@@ -2531,6 +2943,9 @@ class AccountALiveTradeExecutor:
                             close_started_at
                         )
                     ),
+                    "exchange_not_before": (
+                        close_dispatched_at.isoformat()
+                    ),
                 }
             )
             close_journal_prepared = (
@@ -2543,6 +2958,7 @@ class AccountALiveTradeExecutor:
                     state="CLOSE_PENDING",
                 )
             )
+            pending_close_request = dict(close_request)
             if not self._refresh_hard_timeout(
                 close_request,
                 close_started_at,
@@ -2550,27 +2966,14 @@ class AccountALiveTradeExecutor:
                 break
             try:
                 close_ack = self._adapter.submit_close(close_request)
-                close_hash = _validate_ack(
+                close_hash = _validate_exact_close_ack(
                     close_ack,
                     authorization,
-                    action="close",
-                    expected_client_order_id=(
-                        authorization.close_client_order_id
-                    ),
+                    expected_quantity=position.quantity,
                     expected_side_effect_id=close_request[
                         "side_effect_id"
                     ],
-                    expected_intent_id=authorization.close_intent_id,
                 )
-                filled_quantity = _decimal(
-                    close_ack.get("filled_quantity"),
-                    "close filled_quantity",
-                    positive=True,
-                )
-                if filled_quantity != position.quantity:
-                    raise LiveTradeExecutionError(
-                        "close filled quantity differs from position"
-                    )
                 close_confirmed = True
                 close_submitted = True
                 self._recovery_journal_complete(
@@ -2651,6 +3054,10 @@ class AccountALiveTradeExecutor:
                         ),
                     }
                 )
+                if causal_exchange_not_before is not None:
+                    final_request["exchange_not_before"] = (
+                        causal_exchange_not_before.isoformat()
+                    )
                 final_journal_prepared = (
                     self._recovery_journal_prepare(
                         authorization,
@@ -2673,6 +3080,14 @@ class AccountALiveTradeExecutor:
                         raw_final,
                         authorization,
                         now=_utc_now(self._clock),
+                        exchange_not_before=(
+                            causal_exchange_not_before
+                        ),
+                    )
+                    self._record_final_snapshot_degradation(
+                        final_snapshot,
+                        trail,
+                        phase="pre-halt-close-proof",
                     )
                     self._recovery_journal_complete(
                         authorization,
@@ -2891,6 +3306,9 @@ class AccountALiveTradeExecutor:
                     "phase": "post-halt-final",
                     "attempt": attempt,
                     "halt_observed_at": halt_observed_at.isoformat(),
+                    "exchange_not_before": (
+                        halt_observed_at.isoformat()
+                    ),
                     "hard_timeout_seconds": (
                         self._recovery_seconds_remaining(started_at)
                     ),
@@ -2911,18 +3329,13 @@ class AccountALiveTradeExecutor:
                     raw_snapshot,
                     authorization,
                     now=_utc_now(self._clock),
+                    exchange_not_before=halt_observed_at,
                 )
-                fetched_at = _timestamp(
-                    snapshot.get("fetched_at"),
-                    "post-HALT final snapshot fetched_at",
+                self._record_final_snapshot_degradation(
+                    snapshot,
+                    trail,
+                    phase="post-halt-final",
                 )
-                if fetched_at < halt_observed_at:
-                    raise LiveTradeExecutionError(
-                        (
-                            "post-HALT final snapshot predates "
-                            "HALT acknowledgement"
-                        )
-                    )
                 self._recovery_journal_complete(
                     authorization,
                     trail,
@@ -3268,12 +3681,15 @@ class AccountALiveTradeExecutor:
         for attempt in range(1, self._soft_action_max_attempts + 1):
             try:
                 result = operation()
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 if not _is_soft_action_failure(exc):
                     raise
                 failures += 1
                 last_error = _exception_text(exc)
-                last_code = _soft_failure_code(last_error)
+                if isinstance(exc, SoftActionFailure):
+                    last_code = exc.code
+                else:
+                    last_code = _soft_failure_code(last_error)
                 self._retry_counts[action] = failures
                 trail.record(
                     "soft_action_retry",
@@ -3344,6 +3760,30 @@ class AccountALiveTradeExecutor:
             self._warnings.append(normalized)
         self._add_degraded(f"soft gate: {normalized}")
 
+    def _record_final_snapshot_degradation(
+        self,
+        snapshot: Mapping[str, Any],
+        trail: AuditTrail,
+        *,
+        phase: str,
+    ) -> None:
+        if snapshot.get("financial_proof_complete") is not False:
+            return
+        warnings = snapshot.get("warnings")
+        warning_text = "financial enrichment unavailable"
+        if isinstance(warnings, list) and warnings:
+            warning_text = "; ".join(str(item) for item in warnings)
+        self._add_degraded(
+            f"FINANCIAL_PROOF_DEGRADED: {phase}: {warning_text}"
+        )
+        trail.record(
+            "final_financial_proof_degraded",
+            {
+                "phase": phase,
+                "reason": warning_text,
+            },
+        )
+
     def _add_degraded(self, reason: str) -> None:
         normalized = _required_text(reason, "degraded reason")
         if normalized in self._degraded_reasons:
@@ -3351,6 +3791,9 @@ class AccountALiveTradeExecutor:
         self._degraded_reasons.append(normalized)
 
     def _degraded_error_code(self) -> str:
+        for reason in self._degraded_reasons:
+            if "DEGRADED_NO_FILL" in reason:
+                return "DEGRADED_NO_FILL"
         if self._retry_counts:
             return "SOFT_TRANSPORT_DEGRADED"
         for reason in self._degraded_reasons:
@@ -3875,6 +4318,10 @@ def _validate_authorization_documents(
             release_gate.get("dependency_lock_sha256"),
             "release gate dependency_lock_sha256",
         ),
+        live_executor_sha256=_required_sha256(
+            release_gate.get("live_executor_sha256"),
+            "release gate live_executor_sha256",
+        ),
         live_adapter_sha256=_required_sha256(
             release_gate.get("live_adapter_sha256"),
             "release gate live_adapter_sha256",
@@ -3991,9 +4438,21 @@ def _validate_authorization_documents(
         "safety gate health_max_age_seconds",
         positive=True,
     )
-    if health_max_age_seconds > Decimal(30):
+    if health_max_age_seconds > MAX_HEALTH_MAX_AGE_SECONDS:
         raise LiveTradeExecutionError(
             "safety gate health max age exceeds 30 seconds"
+        )
+    exchange_max_age_seconds = _decimal(
+        safety_gate.get(
+            "exchange_max_age_seconds",
+            DEFAULT_EXCHANGE_MAX_AGE_SECONDS,
+        ),
+        "safety gate exchange_max_age_seconds",
+        positive=True,
+    )
+    if exchange_max_age_seconds > MAX_EXCHANGE_MAX_AGE_SECONDS:
+        raise LiveTradeExecutionError(
+            "safety gate exchange max age exceeds 180 seconds"
         )
     health_timestamps = {
         "actor_tick_at": _timestamp(
@@ -4269,6 +4728,9 @@ def _validate_authorization_documents(
         "health_max_age_seconds": _decimal_text(
             health_max_age_seconds
         ),
+        "exchange_max_age_seconds": _decimal_text(
+            exchange_max_age_seconds
+        ),
         "document_sha256": normalized_hashes,
         "signatures_verified": signatures_verified,
     }
@@ -4304,6 +4766,7 @@ def _validate_authorization_documents(
         ],
         loss_monitor_at=health_timestamps["loss_monitor_at"],
         health_max_age_seconds=health_max_age_seconds,
+        exchange_max_age_seconds=exchange_max_age_seconds,
         document_sha256=normalized_hashes,
         authorization_sha256=authorization_sha256,
         signatures_verified=signatures_verified,
@@ -4389,11 +4852,149 @@ def _validate_authorization_for_execution(
     return warnings
 
 
+def _validate_live_preflight(
+    payload: Mapping[str, Any],
+    authorization: CanaryAuthorization,
+    *,
+    now: datetime,
+    phase: str = "before-resume",
+) -> tuple[str, tuple[str, ...]]:
+    _validate_adapter_identity(payload, authorization)
+    if payload.get("action") != "preflight":
+        raise LiveTradeExecutionError(
+            "preflight adapter action identity mismatch"
+        )
+    _require_evidence_source(
+        payload,
+        expected=EXCHANGE_EVIDENCE_SOURCE,
+        label="preflight",
+    )
+    fetched_at = _timestamp(
+        payload.get("fetched_at"),
+        "preflight fetched_at",
+    )
+    _require_fresh_timestamp(
+        fetched_at,
+        now=now,
+        max_age_seconds=authorization.exchange_max_age_seconds,
+        label="preflight fetched_at",
+    )
+    if payload.get("mirror_stale") is True:
+        raise LiveTradeExecutionError(
+            "preflight exchange mirror is stale"
+        )
+    position_side = _required_text(
+        payload.get("target_position_side"),
+        "preflight target_position_side",
+    ).upper()
+    position_quantity = _decimal(
+        payload.get("target_position_quantity"),
+        "preflight target_position_quantity",
+        non_negative=True,
+    )
+    if position_side != "FLAT" or position_quantity != 0:
+        raise LiveTradeExecutionError(
+            "preflight target position is not flat"
+        )
+    for field_name in (
+        "target_regular_order_count",
+        "target_algo_order_count",
+    ):
+        value = payload.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise LiveTradeExecutionError(
+                f"preflight {field_name} must be an integer"
+            )
+        if value != 0:
+            raise LiveTradeExecutionError(
+                f"preflight {field_name} must be zero"
+            )
+    baseline = _required_sha256(
+        payload.get("non_target_portfolio_baseline_sha256"),
+        "preflight non-target portfolio baseline",
+    )
+    if baseline != authorization.portfolio_baseline_sha256:
+        raise LiveTradeExecutionError(
+            "preflight non-target portfolio baseline changed"
+        )
+    node_snapshot = payload.get("node_snapshot")
+    if not isinstance(node_snapshot, Mapping):
+        raise LiveTradeExecutionError(
+            "preflight node snapshot is invalid"
+        )
+    if node_snapshot.get("account_id") != authorization.account_id:
+        raise LiveTradeExecutionError(
+            "preflight node account identity mismatch"
+        )
+    trading_state = _required_text(
+        node_snapshot.get("trading_state"),
+        "preflight trading_state",
+    ).upper()
+    allowed_trading_states = {"HALTED", "STOPPED"}
+    if phase == "before-open":
+        allowed_trading_states.update({"RUNNING", "RESUMED"})
+    if trading_state not in allowed_trading_states:
+        raise LiveTradeExecutionError(
+            f"preflight node state is invalid for {phase}"
+        )
+    if node_snapshot.get("process_liveness") is False:
+        raise LiveTradeExecutionError(
+            "preflight process liveness is false"
+        )
+    if node_snapshot.get("loss_monitor_healthy") is False:
+        raise LiveTradeExecutionError(
+            "preflight loss monitor is unhealthy"
+        )
+    warnings: list[str] = []
+    if phase == "before-resume":
+        hard_progress_fields = (
+            "actor_tick_at",
+            "loss_monitor_at",
+        )
+        for field_name in hard_progress_fields:
+            raw_timestamp = node_snapshot.get(field_name)
+            if raw_timestamp is None or raw_timestamp == "":
+                warnings.append(
+                    f"PREFLIGHT_NODE_PROGRESS_MISSING: {field_name}"
+                )
+                continue
+            timestamp = _timestamp(
+                raw_timestamp,
+                f"preflight {field_name}",
+            )
+            _require_fresh_timestamp(
+                timestamp,
+                now=now,
+                max_age_seconds=authorization.health_max_age_seconds,
+                label=f"preflight {field_name}",
+            )
+    if node_snapshot.get("readiness") is False:
+        warnings.append("PREFLIGHT_READINESS_DEGRADED")
+    reconciliation_state = str(
+        node_snapshot.get("reconciliation_state") or ""
+    ).lower()
+    if reconciliation_state and reconciliation_state not in {
+        "healthy",
+        "ready",
+        "ok",
+    }:
+        warnings.append(
+            "PREFLIGHT_RECONCILIATION_DEGRADED: "
+            f"{reconciliation_state}"
+        )
+    evidence_sha256 = _required_sha256(
+        payload.get("evidence_sha256"),
+        "preflight evidence_sha256",
+    )
+    return evidence_sha256, tuple(warnings)
+
+
 def _parse_observation(
     payload: Mapping[str, Any],
     authorization: CanaryAuthorization,
     *,
     now: datetime,
+    exchange_not_before: datetime | None = None,
 ) -> TradeObservation:
     _validate_adapter_identity(payload, authorization)
     if payload.get("open_client_order_id") != (
@@ -4417,6 +5018,18 @@ def _parse_observation(
     if re.fullmatch(r"[A-Z_]{3,32}", open_status) is None:
         raise LiveTradeExecutionError(
             "open_status is invalid"
+        )
+    exchange_evidence_state = _required_text(
+        payload.get("exchange_evidence_state", "unknown"),
+        "exchange_evidence_state",
+    ).lower()
+    if exchange_evidence_state not in {
+        "confirmed_executed",
+        "definitively_absent",
+        "unknown",
+    }:
+        raise LiveTradeExecutionError(
+            "exchange_evidence_state is invalid"
         )
     filled_quantity = _decimal(
         payload.get("filled_quantity"),
@@ -4453,23 +5066,43 @@ def _parse_observation(
         payload.get("loss_monitor_at"),
         "observation loss_monitor_at",
     )
-    for field_name, timestamp in {
-        "observed_at": observed_at,
-        "mark_at": mark_at,
-        "loss_monitor_at": loss_monitor_at,
-    }.items():
-        _require_fresh_timestamp(
-            timestamp,
-            now=now,
-            max_age_seconds=authorization.health_max_age_seconds,
-            label=f"observation {field_name}",
-        )
+    _require_fresh_timestamp(
+        observed_at,
+        now=now,
+        max_age_seconds=authorization.health_max_age_seconds,
+        label="observation observed_at",
+    )
+    _require_fresh_timestamp(
+        mark_at,
+        now=now,
+        max_age_seconds=authorization.exchange_max_age_seconds,
+        label="observation mark_at",
+    )
+    loss_monitor_source = _required_text(
+        payload.get("loss_monitor_source"),
+        "loss_monitor_source",
+    ).lower()
+    loss_monitor_max_age = authorization.exchange_max_age_seconds
+    if "node" in loss_monitor_source:
+        loss_monitor_max_age = authorization.health_max_age_seconds
+    _require_fresh_timestamp(
+        loss_monitor_at,
+        now=now,
+        max_age_seconds=loss_monitor_max_age,
+        label="observation loss_monitor_at",
+    )
+    _require_timestamp_not_before(
+        mark_at,
+        not_before=exchange_not_before,
+        label="observation mark_at",
+    )
     evidence_sha256 = _required_sha256(
         payload.get("evidence_sha256"),
         "observation evidence_sha256",
     )
     return TradeObservation(
         open_status=open_status,
+        exchange_evidence_state=exchange_evidence_state,
         filled_quantity=filled_quantity,
         average_fill_price_usdt=average_fill_price,
         cumulative_net_loss_usdt=cumulative_loss,
@@ -4480,11 +5113,28 @@ def _parse_observation(
     )
 
 
+def _is_terminal_ioc_no_fill(
+    observation: TradeObservation,
+) -> bool:
+    if not _is_terminal_ioc_zero_fill(observation):
+        return False
+    return observation.exchange_evidence_state == "definitively_absent"
+
+
+def _is_terminal_ioc_zero_fill(
+    observation: TradeObservation,
+) -> bool:
+    if observation.open_status not in TERMINAL_NO_FILL_OPEN_STATUSES:
+        return False
+    return observation.filled_quantity == 0
+
+
 def _parse_position(
     payload: Mapping[str, Any],
     authorization: CanaryAuthorization,
     *,
     now: datetime,
+    exchange_not_before: datetime | None = None,
 ) -> PositionSnapshot:
     _validate_adapter_identity(payload, authorization)
     _require_evidence_source(
@@ -4499,7 +5149,12 @@ def _parse_position(
     _require_fresh_timestamp(
         fetched_at,
         now=now,
-        max_age_seconds=authorization.health_max_age_seconds,
+        max_age_seconds=authorization.exchange_max_age_seconds,
+        label="position fetched_at",
+    )
+    _require_timestamp_not_before(
+        fetched_at,
+        not_before=exchange_not_before,
         label="position fetched_at",
     )
     side = _required_text(
@@ -4546,6 +5201,7 @@ def _validate_final_snapshot(
     authorization: CanaryAuthorization,
     *,
     now: datetime,
+    exchange_not_before: datetime | None = None,
 ) -> Mapping[str, Any]:
     _validate_adapter_identity(payload, authorization)
     _require_evidence_source(
@@ -4560,7 +5216,12 @@ def _validate_final_snapshot(
     _require_fresh_timestamp(
         fetched_at,
         now=now,
-        max_age_seconds=authorization.health_max_age_seconds,
+        max_age_seconds=authorization.exchange_max_age_seconds,
+        label="final snapshot fetched_at",
+    )
+    _require_timestamp_not_before(
+        fetched_at,
+        not_before=exchange_not_before,
         label="final snapshot fetched_at",
     )
     required_truths = (
@@ -4612,6 +5273,24 @@ def _validate_final_snapshot(
         "final cumulative_net_loss_usdt",
         non_negative=True,
     )
+    enrichment_degraded = payload.get("enrichment_degraded") is True
+    financial_proof_complete = payload.get(
+        "financial_proof_complete",
+        not enrichment_degraded,
+    )
+    if not isinstance(financial_proof_complete, bool):
+        raise LiveTradeExecutionError(
+            "final financial_proof_complete must be boolean"
+        )
+    if enrichment_degraded and financial_proof_complete:
+        raise LiveTradeExecutionError(
+            "degraded enrichment cannot claim complete financial proof"
+        )
+    warnings = payload.get("warnings", [])
+    if not isinstance(warnings, list):
+        raise LiveTradeExecutionError(
+            "final snapshot warnings must be a list"
+        )
     if net_pnl != gross_pnl - fees:
         raise LiveTradeExecutionError(
             "final net PnL does not equal gross PnL minus fees"
@@ -4628,6 +5307,8 @@ def _validate_final_snapshot(
     normalized["cumulative_net_loss_usdt"] = _decimal_text(
         cumulative_loss
     )
+    normalized["financial_proof_complete"] = financial_proof_complete
+    normalized["warnings"] = [str(item) for item in warnings]
     normalized["source"] = EXCHANGE_EVIDENCE_SOURCE
     normalized["fetched_at"] = fetched_at.isoformat()
     return normalized
@@ -4680,13 +5361,42 @@ def _validate_ack(
     )
 
 
+def _validate_exact_close_ack(
+    payload: Mapping[str, Any],
+    authorization: CanaryAuthorization,
+    *,
+    expected_quantity: Decimal,
+    expected_side_effect_id: str,
+) -> str:
+    evidence_sha256 = _validate_ack(
+        payload,
+        authorization,
+        action="close",
+        expected_client_order_id=authorization.close_client_order_id,
+        expected_side_effect_id=expected_side_effect_id,
+        expected_intent_id=authorization.close_intent_id,
+    )
+    filled_quantity = _decimal(
+        payload.get("filled_quantity"),
+        "close filled_quantity",
+        positive=True,
+    )
+    if filled_quantity != expected_quantity:
+        raise LiveTradeExecutionError(
+            "close filled quantity differs from position"
+        )
+    return evidence_sha256
+
+
 def _soft_adapter_rejection(
     payload: Mapping[str, Any],
     *,
     action: str,
 ) -> SoftActionFailure | None:
     parts = [
+        str(payload.get("error_class") or ""),
         str(payload.get("error_code") or ""),
+        str(payload.get("code") or ""),
         str(payload.get("reason") or ""),
         str(payload.get("message") or ""),
         str(payload.get("status_code") or ""),
@@ -4714,18 +5424,44 @@ def _is_soft_action_failure(exc: BaseException) -> bool:
 
 def _soft_failure_code(value: Any) -> str:
     text = str(value)
-    if re.search(r"timeout|timed out", text, re.IGNORECASE):
+    if re.search(
+        r"timeout|timed out|(?<!\d)408(?!\d)",
+        text,
+        re.IGNORECASE,
+    ):
         return "HTTP_TIMEOUT"
-    if re.search(r"\b5\d\d\b|service unavailable", text, re.IGNORECASE):
+    if re.search(r"(?<!\d)425(?!\d)", text):
+        return "HTTP_425"
+    if re.search(
+        r"(?<!\d)429(?!\d)|rate[-_ ]?limit|too many requests",
+        text,
+        re.IGNORECASE,
+    ):
+        return "HTTP_429"
+    if re.search(
+        r"(?<!\d)5\d\d(?!\d)|service unavailable",
+        text,
+        re.IGNORECASE,
+    ):
         return "HTTP_5XX"
     if re.search(r"circuit", text, re.IGNORECASE):
         return "CIRCUIT_OPEN"
     if re.search(
-        r"queue|memory(?:[-_ ]?queue)?[-_ ]?pressure",
+        r"reconciliation(?:[-_ ]?(?:pressure|backlog|busy))",
         text,
         re.IGNORECASE,
     ):
-        return "MEMORY_QUEUE_PRESSURE"
+        return "RECONCILIATION_PRESSURE"
+    if re.search(
+        (
+            r"queue|memory(?:[-_ ]?queue)?[-_ ]?pressure|"
+            r"resource(?:[-_ ]?(?:pressure|exhausted|busy))|"
+            r"overload"
+        ),
+        text,
+        re.IGNORECASE,
+    ):
+        return "RESOURCE_PRESSURE"
     if re.search(r"readiness", text, re.IGNORECASE):
         return "READINESS_DEGRADED"
     if re.search(r"heartbeat", text, re.IGNORECASE):
@@ -4998,6 +5734,39 @@ def validate_live_adapter(
     )
 
 
+def validate_live_executor(
+    path: Path,
+    *,
+    expected_sha256: str,
+) -> str:
+    target = _required_absolute_path(path, "live executor path")
+    try:
+        resolved = target.resolve(strict=True)
+    except OSError as exc:
+        raise LiveTradeExecutionError(
+            f"cannot resolve live executor path: {target}"
+        ) from exc
+    if resolved != target:
+        raise LiveTradeExecutionError(
+            "live executor path must be canonical and contain no symlinks"
+        )
+    payload = _read_protected_file(
+        target,
+        "live executor",
+        live=True,
+    )
+    normalized_hash = _required_sha256(
+        expected_sha256,
+        "signed live executor sha256",
+    )
+    actual_hash = _sha256_bytes(payload)
+    if actual_hash != normalized_hash:
+        raise LiveTradeExecutionError(
+            "live executor hash differs from signed release"
+        )
+    return actual_hash
+
+
 def _validate_system_executable(path: Path, label: str) -> Path:
     target = _required_absolute_path(path, f"{label} path")
     try:
@@ -5084,6 +5853,20 @@ def _freshness_warning(
     except LiveTradeExecutionError as exc:
         return _exception_text(exc)
     return ""
+
+
+def _require_timestamp_not_before(
+    timestamp: datetime,
+    *,
+    not_before: datetime | None,
+    label: str,
+) -> None:
+    if not_before is None:
+        return
+    if timestamp < not_before:
+        raise LiveTradeExecutionError(
+            f"{label} predates required exchange progress"
+        )
 
 
 def _require_fresh_timestamp(
@@ -5536,7 +6319,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--adapter-timeout-seconds",
         type=float,
-        default=15.0,
+        default=130.0,
     )
     parser.add_argument(
         "--max-observations",
@@ -5556,7 +6339,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--recovery-deadline-seconds",
         type=float,
-        default=20.0,
+        default=150.0,
     )
     parser.add_argument(
         "--recovery-retry-interval-seconds",
@@ -5678,6 +6461,12 @@ def _execute_live_from_args(
                 execute_live=True,
                 signature_verifier=verifier,
                 operation_lock=operation_lock,
+            )
+            validate_live_executor(
+                Path(__file__).resolve(),
+                expected_sha256=(
+                    authorization.release.live_executor_sha256
+                ),
             )
             validated_adapter = validate_live_adapter(
                 live_adapter_path,

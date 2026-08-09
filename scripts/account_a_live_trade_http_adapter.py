@@ -34,7 +34,7 @@ TERMINAL_ORDER_STATUSES = {
     "FILLED",
     "REJECTED",
 }
-SOFT_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+SOFT_HTTP_STATUSES = {408, 425, 429}
 IDENTITY_FIELDS = (
     "account_id",
     "symbol",
@@ -85,7 +85,8 @@ class Config:
     http_max_attempts: int
     poll_interval_seconds: float
     action_timeout_seconds: float
-    freshness_seconds: float
+    exchange_freshness_seconds: float
+    node_freshness_seconds: float
 
     @classmethod
     def from_environment(cls) -> Config:
@@ -140,16 +141,23 @@ class Config:
             action_timeout_seconds=_positive_float(
                 os.environ.get(
                     "ACCOUNT_A_LIVE_TRADE_ACTION_TIMEOUT_SECONDS",
-                    "45",
+                    "120",
                 ),
                 "action timeout",
             ),
-            freshness_seconds=_positive_float(
+            exchange_freshness_seconds=_positive_float(
                 os.environ.get(
                     "ACCOUNT_A_LIVE_TRADE_FRESHNESS_SECONDS",
-                    "30",
+                    "120",
                 ),
-                "freshness threshold",
+                "exchange freshness threshold",
+            ),
+            node_freshness_seconds=_positive_float(
+                os.environ.get(
+                    "ACCOUNT_A_LIVE_TRADE_NODE_FRESHNESS_SECONDS",
+                    "10",
+                ),
+                "node freshness threshold",
             ),
         )
 
@@ -257,7 +265,7 @@ class ControlPlaneClient:
                     raise AdapterError(
                         f"ownership/fencing conflict: HTTP 409 {detail}"
                     ) from exc
-                if exc.code in SOFT_HTTP_STATUSES:
+                if _is_soft_http_status(exc.code):
                     last_error = SoftAdapterError(
                         f"HTTP {exc.code} {detail}",
                         code=f"HTTP_{exc.code}",
@@ -439,7 +447,7 @@ class AccountALiveTradeHttpAdapter:
             request.get("max_actual_open_notional_usdt"),
             "max_actual_open_notional_usdt",
         )
-        if notional > max_notional or notional > Decimal("12"):
+        if notional > max_notional or notional > Decimal(12):
             raise AdapterError("OPEN requested notional exceeds 12 USDT")
         side_name = "long"
         if side == "SELL":
@@ -493,8 +501,14 @@ class AccountALiveTradeHttpAdapter:
             request.get("open_client_order_id"),
             "open_client_order_id",
         )
+        deadline = self._deadline(request)
+        exchange_not_before = _exchange_not_before(request)
         status = self._operator_status(str(request["intent_id"]))
-        mirror = self._exchange_state((open_client_order_id,))
+        mirror = self._exchange_state_after(
+            (open_client_order_id,),
+            not_before=exchange_not_before,
+            deadline=deadline,
+        )
         summary = _execution_summary(
             status,
             expected_client_order_id=open_client_order_id,
@@ -513,6 +527,19 @@ class AccountALiveTradeHttpAdapter:
         net_pnl = summary["realized_pnl"] + unrealized_pnl - fees
         cumulative_loss = max(Decimal(0), -net_pnl)
         fetched_at = _mirror_fetched_at(mirror)
+        node_snapshot, health_warnings = (
+            self._optional_node_snapshot()
+        )
+        loss_monitor = _loss_monitor_evidence(
+            mirror,
+            node_snapshot=node_snapshot,
+            exchange_freshness_seconds=(
+                self._config.exchange_freshness_seconds
+            ),
+            node_freshness_seconds=(
+                self._config.node_freshness_seconds
+            ),
+        )
         payload = {
             **_identity(request),
             "open_client_order_id": open_client_order_id,
@@ -526,16 +553,22 @@ class AccountALiveTradeHttpAdapter:
             "cumulative_net_loss_usdt": _decimal_text(
                 cumulative_loss
             ),
-            "mark_fresh": mirror.get("stale") is not True,
-            "loss_monitor_healthy": True,
+            "mark_fresh": loss_monitor["mirror_fresh"],
+            "loss_monitor_healthy": loss_monitor["healthy"],
             "observed_at": _now(),
             "mark_at": fetched_at,
-            "loss_monitor_at": _now(),
+            "loss_monitor_at": loss_monitor["observed_at"],
+            "loss_monitor_source": loss_monitor["source"],
+            "loss_monitor_evidence": loss_monitor["evidence"],
+            "health_evidence_degraded": bool(health_warnings),
+            "warnings": health_warnings,
             "exchange_evidence_state": evidence_state,
             "fees_usdt": _decimal_text(fees),
             "unrealized_pnl_usdt": _decimal_text(unrealized_pnl),
             "mark_price_usdt": _decimal_text(mark_price),
         }
+        if node_snapshot is not False:
+            payload["node_snapshot"] = node_snapshot
         return _with_evidence(payload)
 
     def _cancel_open(
@@ -592,7 +625,11 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
-        mirror = self._exchange_state(())
+        mirror = self._exchange_state_after(
+            (),
+            not_before=_exchange_not_before(request),
+            deadline=self._deadline(request),
+        )
         position = _target_position(mirror)
         payload = {
             **_identity(request),
@@ -665,6 +702,14 @@ class AccountALiveTradeHttpAdapter:
             "source": "control-plane",
             "valid_seconds": 300,
         }
+        close_dispatched_at = datetime.now(timezone.utc)
+        requested_not_before = _exchange_not_before(request)
+        exchange_not_before = close_dispatched_at
+        if (
+            requested_not_before is not False
+            and requested_not_before > exchange_not_before
+        ):
+            exchange_not_before = requested_not_before
         response = self._client.risk_post(
             "/v1/operator/orders",
             body,
@@ -676,7 +721,11 @@ class AccountALiveTradeHttpAdapter:
         last_reason = "close evidence pending"
         while time.monotonic() < deadline:
             status = self._operator_status(close_intent_id)
-            mirror = self._exchange_state((client_order_id,))
+            mirror = self._exchange_state_after(
+                (client_order_id,),
+                not_before=exchange_not_before,
+                deadline=deadline,
+            )
             position = _target_position(mirror)
             summary = _execution_summary(
                 status,
@@ -687,12 +736,9 @@ class AccountALiveTradeHttpAdapter:
                 client_order_id,
             )
             exact_fill = summary["filled_quantity"] == quantity
-            exchange_confirmed = (
-                evidence_state == "confirmed_executed"
-            )
             if (
                 position["quantity"] == 0
-                and (exact_fill or exchange_confirmed)
+                and exact_fill
             ):
                 payload = {
                     **_identity(
@@ -719,7 +765,11 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
-        mirror = self._exchange_state(())
+        mirror = self._exchange_state_after(
+            (),
+            not_before=_exchange_not_before(request),
+            deadline=self._deadline(request),
+        )
         exchange_payload = _exchange_payload(mirror)
         position = _target_position(mirror)
         regular_orders = _target_orders(
@@ -731,19 +781,26 @@ class AccountALiveTradeHttpAdapter:
         baseline = _portfolio_baseline_sha256(exchange_payload)
         open_intent_id = str(request["intent_id"])
         close_intent_id = _close_intent_id(open_intent_id)
-        open_status = self._operator_status_or_empty(open_intent_id)
-        close_status = self._operator_status_or_empty(close_intent_id)
-        open_summary = _execution_summary(
-            open_status,
-            expected_client_order_id=_open_client_order_id(
-                open_intent_id
-            ),
+        warnings: list[str] = []
+        open_status, open_summary = (
+            self._operator_execution_enrichment(
+                open_intent_id,
+                client_order_id=_open_client_order_id(
+                    open_intent_id
+                ),
+                label="open",
+                warnings=warnings,
+            )
         )
-        close_summary = _execution_summary(
-            close_status,
-            expected_client_order_id=_open_client_order_id(
-                close_intent_id
-            ),
+        _close_status, close_summary = (
+            self._operator_execution_enrichment(
+                close_intent_id,
+                client_order_id=_open_client_order_id(
+                    close_intent_id
+                ),
+                label="close",
+                warnings=warnings,
+            )
         )
         fees = open_summary["fees"] + close_summary["fees"]
         gross_pnl = (
@@ -775,8 +832,37 @@ class AccountALiveTradeHttpAdapter:
             "fetched_at": _mirror_fetched_at(mirror),
             "regular_order_count": len(regular_orders),
             "algo_order_count": len(algo_orders),
+            "enrichment_degraded": bool(warnings),
+            "financial_proof_complete": not warnings,
+            "warnings": warnings,
         }
         return _with_evidence(payload)
+
+    def _operator_execution_enrichment(
+        self,
+        intent_id: str,
+        *,
+        client_order_id: str,
+        label: str,
+        warnings: list[str],
+    ) -> tuple[dict[str, Any], dict[str, Decimal | str]]:
+        try:
+            status = self._operator_status(intent_id)
+            summary = _execution_summary(
+                status,
+                expected_client_order_id=client_order_id,
+            )
+            return status, summary
+        except AdapterError as exc:
+            if _is_ownership_error(exc):
+                raise
+            warnings.append(
+                _enrichment_warning(
+                    f"{label} operator projection",
+                    exc,
+                )
+            )
+            return {}, _empty_execution_summary()
 
     def _preflight(
         self,
@@ -787,6 +873,10 @@ class AccountALiveTradeHttpAdapter:
         position = _target_position(mirror)
         nodes = self._client.risk_get("/v1/nodes")
         node = _find_node(nodes, self._config.node_id)
+        if node.get("account_id") != ACCOUNT_ID:
+            raise AdapterError(
+                "ownership/fencing conflict: node account mismatch"
+            )
         payload = {
             **_identity(request),
             "action": "preflight",
@@ -831,6 +921,36 @@ class AccountALiveTradeHttpAdapter:
         _exchange_payload(response)
         return response
 
+    def _exchange_state_after(
+        self,
+        client_order_ids: tuple[str, ...],
+        *,
+        not_before: datetime | bool,
+        deadline: float,
+    ) -> dict[str, Any]:
+        last_code = "EXCHANGE_MIRROR_LAG"
+        last_reason = (
+            "exchange mirror did not advance past the required action boundary"
+        )
+        while True:
+            mirror = self._exchange_state(client_order_ids)
+            fetched_at = _mirror_fetched_datetime(mirror)
+            mirror_stale = mirror.get("stale") is True
+            causal_sample = (
+                not_before is False or fetched_at >= not_before
+            )
+            if causal_sample and not mirror_stale:
+                return mirror
+            if mirror_stale:
+                last_code = "EXCHANGE_MIRROR_STALE"
+                last_reason = "exchange mirror remained stale"
+            if time.monotonic() >= deadline:
+                raise SoftAdapterError(
+                    last_reason,
+                    code=last_code,
+                )
+            time.sleep(self._config.poll_interval_seconds)
+
     def _operator_status(
         self,
         intent_id: str,
@@ -839,16 +959,25 @@ class AccountALiveTradeHttpAdapter:
             f"/v1/operator/orders/{intent_id}"
         )
 
-    def _operator_status_or_empty(
+    def _optional_node_snapshot(
         self,
-        intent_id: str,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any] | bool, list[str]]:
+        warnings: list[str] = []
         try:
-            return self._operator_status(intent_id)
+            response = self._client.risk_get("/v1/nodes")
+            node = _find_node(response, self._config.node_id)
         except AdapterError as exc:
-            if "HTTP 404" in str(exc):
-                return {}
-            raise
+            if _is_ownership_error(exc):
+                raise
+            warnings.append(
+                _enrichment_warning("node health evidence", exc)
+            )
+            return False, warnings
+        if node.get("account_id") != ACCOUNT_ID:
+            raise AdapterError(
+                "ownership/fencing conflict: node account mismatch"
+            )
+        return _redacted_node_snapshot(node), warnings
 
     def _deadline(self, request: Mapping[str, Any]) -> float:
         timeout = self._config.action_timeout_seconds
@@ -896,6 +1025,21 @@ def _mirror_fetched_at(mirror: Mapping[str, Any]) -> str:
     payload = _exchange_payload(mirror)
     fetched_at = payload.get("fetched_at") or mirror.get("updated_at")
     return _timestamp_text(fetched_at, "exchange mirror fetched_at")
+
+
+def _mirror_fetched_datetime(
+    mirror: Mapping[str, Any],
+) -> datetime:
+    return _timestamp_datetime(_mirror_fetched_at(mirror))
+
+
+def _exchange_not_before(
+    request: Mapping[str, Any],
+) -> datetime | bool:
+    raw_value = request.get("exchange_not_before")
+    if raw_value is None or raw_value == "":
+        return False
+    return _timestamp_datetime(raw_value)
 
 
 def _target_position(mirror: Mapping[str, Any]) -> dict[str, Any]:
@@ -997,7 +1141,6 @@ def _execution_summary(
             )
             if (
                 expected_client_order_id
-                and client_order_id
                 and client_order_id != expected_client_order_id
             ):
                 continue
@@ -1029,7 +1172,6 @@ def _execution_summary(
             )
             if (
                 expected_client_order_id
-                and event_client_order_id
                 and event_client_order_id != expected_client_order_id
             ):
                 continue
@@ -1069,6 +1211,16 @@ def _execution_summary(
         "fees": fees,
         "realized_pnl": realized_pnl,
         "status": order_status,
+    }
+
+
+def _empty_execution_summary() -> dict[str, Decimal | str]:
+    return {
+        "filled_quantity": Decimal(0),
+        "average_fill_price": Decimal(0),
+        "fees": Decimal(0),
+        "realized_pnl": Decimal(0),
+        "status": "UNKNOWN",
     }
 
 
@@ -1218,9 +1370,130 @@ def _redacted_node_snapshot(
             "projection_lag_ms",
             "reconciliation_state",
             "version",
+            "process_liveness",
+            "actor_tick_at",
+            "loss_monitor_healthy",
+            "loss_monitor_at",
         )
         if key in node
     }
+
+
+def _loss_monitor_evidence(
+    mirror: Mapping[str, Any],
+    *,
+    node_snapshot: Mapping[str, Any] | bool,
+    exchange_freshness_seconds: float,
+    node_freshness_seconds: float,
+) -> dict[str, Any]:
+    fetched_at = _mirror_fetched_at(mirror)
+    mirror_stale = mirror.get("stale") is True
+    mirror_fresh = (
+        not mirror_stale
+        and _timestamp_is_fresh(
+            fetched_at,
+            freshness_seconds=exchange_freshness_seconds,
+        )
+    )
+    healthy = mirror_fresh
+    progress_timestamps = [fetched_at]
+    source_parts = ["exchange_mirror"]
+    evidence: dict[str, Any] = {
+        "exchange_mirror_fetched_at": fetched_at,
+        "exchange_mirror_stale": mirror_stale,
+        "node_snapshot_available": node_snapshot is not False,
+    }
+    if isinstance(node_snapshot, Mapping):
+        node_progress_available = False
+        node_progress_fields = (
+            ("actor_tick_at", "actor_tick_at"),
+            ("loss_monitor_at", "node_loss_monitor_at"),
+        )
+        for node_field, evidence_field in node_progress_fields:
+            value = node_snapshot.get(node_field)
+            if value is None or value == "":
+                continue
+            timestamp = _timestamp_text(
+                value,
+                f"node {node_field}",
+            )
+            evidence[evidence_field] = timestamp
+            progress_timestamps.append(timestamp)
+            node_progress_available = True
+            if not _timestamp_is_fresh(
+                timestamp,
+                freshness_seconds=node_freshness_seconds,
+            ):
+                healthy = False
+        if node_snapshot.get("loss_monitor_healthy") is False:
+            healthy = False
+        if node_snapshot.get("process_liveness") is False:
+            healthy = False
+        if node_progress_available:
+            source_parts.append("node")
+    observed_at = min(
+        progress_timestamps,
+        key=_timestamp_datetime,
+    )
+    return {
+        "healthy": healthy,
+        "mirror_fresh": mirror_fresh,
+        "observed_at": observed_at,
+        "source": "+".join(source_parts),
+        "evidence": evidence,
+    }
+
+
+def _timestamp_is_fresh(
+    value: Any,
+    *,
+    freshness_seconds: float,
+) -> bool:
+    observed_at = _timestamp_datetime(value)
+    age_seconds = (
+        datetime.now(timezone.utc) - observed_at
+    ).total_seconds()
+    return 0 <= age_seconds <= freshness_seconds
+
+
+def _timestamp_datetime(value: Any) -> datetime:
+    text = _required_text(value, "timestamp")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AdapterError("timestamp must be an ISO timestamp") from exc
+    if parsed.tzinfo is None:
+        raise AdapterError("timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _enrichment_warning(
+    label: str,
+    error: AdapterError,
+) -> str:
+    code = "ADAPTER_ERROR"
+    if isinstance(error, SoftAdapterError):
+        code = error.code
+    else:
+        match = re.search(r"\bHTTP (\d{3})\b", str(error))
+        if match is not None:
+            code = f"HTTP_{match.group(1)}"
+    reason = re.sub(r"\s+", " ", str(error)).strip()
+    return f"{label} degraded: {code} {reason}"[:500]
+
+
+def _is_ownership_error(error: AdapterError) -> bool:
+    return re.search(
+        r"ownership|fencing",
+        str(error),
+        re.IGNORECASE,
+    ) is not None
+
+
+def _is_soft_http_status(status_code: int) -> bool:
+    if status_code in SOFT_HTTP_STATUSES:
+        return True
+    return 500 <= status_code <= 599
 
 
 def _read_token_file(environment_name: str) -> str:
@@ -1467,6 +1740,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     action = arguments[0]
+    request: dict[str, Any] | bool = False
     try:
         request = _decode_object(
             sys.stdin.buffer.read(),
@@ -1477,9 +1751,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         payload = adapter.dispatch(action, request)
     except SoftAdapterError as exc:
-        try:
-            request
-        except UnboundLocalError:
+        if request is False:
             print(str(exc), file=sys.stderr)
             return 1
         payload = _soft_error_payload(action, request, exc)
