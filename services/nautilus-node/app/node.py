@@ -71,11 +71,13 @@ class AccountRuntime:
     control_plane_session: Any = None
     background_workers: list[Any] = field(default_factory=list)
     trading_node: Any = None
+    background_workers: list[Any] = field(default_factory=list)
     components: tuple[NodeComponent, ...] = ()
     nautilus_api_todos: tuple[str, ...] = NAUTILUS_API_TODOS
 
 
 TradingNodeBuilder = Callable[[AccountRuntime], Any]
+RuntimeFatalCallback = Callable[[str], None]
 
 
 def build_account_runtime(
@@ -132,7 +134,11 @@ def build_account_runtime(
     return runtime
 
 
-def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
+def build_nautilus_trading_node(
+    runtime: AccountRuntime,
+    *,
+    runtime_fatal_callback: RuntimeFatalCallback | None = None,
+) -> Any:
     """Build a Nautilus ``TradingNode`` for a fully assembled account runtime.
 
     This is intentionally host-only. The local development host does not have
@@ -168,6 +174,10 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
     from runtime.binance_adapter_config import build_binance_client_configs
     from runtime.control_plane_session import NodeControlPlaneSession
 
+    fatal_callback = runtime_fatal_callback
+    if fatal_callback is None:
+        fatal_callback = lambda _reason: os._exit(75)
+
     data_client_config, exec_client_config = build_binance_client_configs(runtime.config)
     node_config = TradingNodeConfig(
         # NOTE: instance_id is intentionally omitted. Nautilus 1.227.0 requires a
@@ -185,7 +195,10 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
     node = TradingNode(config=node_config)
     node.add_data_client_factory("BINANCE", BinanceLiveDataClientFactory)
     node.add_exec_client_factory("BINANCE", BinanceLiveExecClientFactory)
-    strategy = _build_strategy(runtime)
+    strategy = _build_strategy(
+        runtime,
+        fatal_callback=fatal_callback,
+    )
     node.trader.add_strategy(strategy)
     actor_holder: dict[str, Any] = {}
     session_config = runtime.config.control_plane.session
@@ -605,10 +618,20 @@ def _build_strategy_config(config: NodeConfig, lifecycle: Any) -> Any:
     return IntentExecutionStrategyConfig(**kwargs)
 
 
-def _build_strategy(runtime: AccountRuntime) -> Any:
+def _build_strategy(
+    runtime: AccountRuntime,
+    *,
+    fatal_callback: RuntimeFatalCallback,
+) -> Any:
     from strategy.intent_execution_strategy import IntentExecutionStrategy
 
     strategy = IntentExecutionStrategy(runtime.strategy_config)
+    strategy.set_durable_io_fatal_handler(fatal_callback)
+    _register_background_cleanup_worker(
+        runtime,
+        strategy,
+        "durable_io_cleanup_worker",
+    )
     strategy.set_trading_state_getter(lambda: runtime.lifecycle.trading_state)
     strategy.set_denial_reporter(_build_denial_reporter(runtime))
     strategy.set_protection_event_reporter(
@@ -753,6 +776,27 @@ def _stop_control_plane_session(runtime: Any) -> None:
             "control-plane session failed to drain before deadline"
         )
     runtime.control_plane_session = None
+
+
+def _register_background_cleanup_worker(
+    runtime: AccountRuntime,
+    owner: Any,
+    provider_name: str,
+) -> Any:
+    provider = getattr(owner, provider_name, None)
+    if not callable(provider):
+        raise RuntimeError(
+            f"runtime component lacks cleanup provider {provider_name}"
+        )
+    worker = provider()
+    stop = getattr(worker, "stop", None)
+    if not callable(stop):
+        raise RuntimeError(
+            f"runtime cleanup provider {provider_name} lacks stop"
+        )
+    if all(existing is not worker for existing in runtime.background_workers):
+        runtime.background_workers.append(worker)
+    return worker
 
 
 def _stop_background_workers(runtime: Any) -> None:

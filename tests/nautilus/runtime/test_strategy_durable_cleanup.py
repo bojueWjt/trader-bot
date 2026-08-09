@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, get_ident
 from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -22,6 +24,10 @@ from strategy.intent_execution_strategy import (  # noqa: E402
     IntentExecutionStrategy,
     IntentExecutionStrategyConfig,
 )
+from strategy.intent_execution_planner import (  # noqa: E402
+    ManagementPlan,
+    OrderPlan,
+)
 
 
 class _LeaseGuard:
@@ -36,6 +42,8 @@ class _RecordingStrategy(IntentExecutionStrategy):
     def __init__(self, state_dir: Path) -> None:
         self._state_dir = state_dir
         self.scheduled: list[tuple[str, int]] = []
+        self.submitted_plans: list[OrderPlan] = []
+        self.cancelled_client_order_ids: list[str] = []
         super().__init__(
             IntentExecutionStrategyConfig(
                 account_id="account-a",
@@ -47,6 +55,9 @@ class _RecordingStrategy(IntentExecutionStrategy):
     def _protection_stash_path(self) -> str:
         return str(self._state_dir / self._PROTECTION_STASH_FILENAME)
 
+    def _now(self) -> datetime:
+        return datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+
     def _schedule_protection_sync(
         self,
         intent_key: str,
@@ -54,6 +65,19 @@ class _RecordingStrategy(IntentExecutionStrategy):
     ) -> None:
         del delay_seconds
         self.scheduled.append((intent_key, get_ident()))
+
+    def _submit_order_plan(self, plan: OrderPlan) -> bool:
+        self.submitted_plans.append(plan)
+        return True
+
+    def _cancel_management_order(
+        self,
+        instrument_id: str,
+        client_order_id: str,
+    ) -> bool:
+        del instrument_id
+        self.cancelled_client_order_ids.append(client_order_id)
+        return True
 
 
 class _SmallQueueStrategy(_RecordingStrategy):
@@ -178,6 +202,131 @@ def test_stale_version_result_waits_for_latest_persist_before_continuations(
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
 
 
+def test_entry_submit_waits_for_actor_consumed_durable_result(
+    tmp_path: Path,
+) -> None:
+    strategy = _RecordingStrategy(tmp_path)
+    strategy._start_durable_io_lane()
+    writer_started = Event()
+    writer_release = Event()
+    original_write = strategy._write_entry_protection_stash
+    plan = _order_plan(
+        UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "entry-order",
+        order_type="LIMIT",
+    )
+
+    def blocking_write(payload: Any) -> None:
+        writer_started.set()
+        writer_release.wait(timeout=5.0)
+        original_write(payload)
+
+    strategy._write_entry_protection_stash = blocking_write  # type: ignore[method-assign]
+    strategy._entry_protection_stash[str(plan.intent_id)] = {
+        "instrument_id": plan.instrument_id,
+        "entry_side": plan.side,
+    }
+    try:
+        assert strategy._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "entry_submit",
+                "plan": plan,
+                "source_intent": False,
+                "protection_preimage": {},
+            }
+        )
+        assert writer_started.wait(timeout=1.0)
+        assert strategy.submitted_plans == []
+
+        writer_release.set()
+        assert strategy.wait_for_durable_io(timeout_seconds=1.0)
+        assert strategy.submitted_plans == []
+
+        assert strategy.drain_durable_io_mailbox() == 1
+        assert strategy.submitted_plans == [plan]
+        assert str(plan.intent_id) in strategy._processed_intent_ids
+    finally:
+        writer_release.set()
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+
+
+def test_management_side_effects_wait_for_actor_consumed_durable_result(
+    tmp_path: Path,
+) -> None:
+    strategy = _RecordingStrategy(tmp_path)
+    strategy._start_durable_io_lane()
+    writer_started = Event()
+    writer_release = Event()
+    original_write = strategy._write_entry_protection_stash
+    owner_intent_id = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    management_intent_id = UUID(
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    )
+    replacement = _order_plan(
+        management_intent_id,
+        "replacement-stop",
+        order_type="STOP_MARKET",
+    )
+    plan = ManagementPlan(
+        intent_id=management_intent_id,
+        action="move_stop_loss",
+        instrument_id=replacement.instrument_id,
+        target_position_id="BTCUSDT-PERP.BINANCE-LONG",
+        target_position_side="LONG",
+        cancel_order_ids=("old-stop",),
+        orders=(replacement,),
+        authorization={
+            "authorized_by_type": "user",
+            "authorized_by_id": "risk-admin",
+            "source_message_id": "management-1",
+            "parent_intent_id": str(owner_intent_id),
+        },
+    )
+
+    def blocking_write(payload: Any) -> None:
+        writer_started.set()
+        writer_release.wait(timeout=5.0)
+        original_write(payload)
+
+    strategy._write_entry_protection_stash = blocking_write  # type: ignore[method-assign]
+    strategy._entry_protection_stash[str(owner_intent_id)] = {
+        "instrument_id": replacement.instrument_id,
+        "entry_side": "BUY",
+        "entry_tags": (),
+        "stop_loss": "25000",
+        "protection_roles": {},
+        "tp_consumed": {},
+        "pending_cancel_ids": (),
+    }
+    try:
+        assert strategy._absorb_management_plan(
+            plan,
+            continuation={
+                "kind": "management_dispatch",
+                "mode": "replace_protection",
+                "plan": plan,
+                "source_intent": False,
+                "cancel_order_ids": ("old-stop",),
+            },
+        )
+        assert writer_started.wait(timeout=1.0)
+        assert strategy.submitted_plans == []
+        assert strategy.cancelled_client_order_ids == []
+
+        writer_release.set()
+        assert strategy.wait_for_durable_io(timeout_seconds=1.0)
+        assert strategy.submitted_plans == []
+        assert strategy.cancelled_client_order_ids == []
+
+        assert strategy.drain_durable_io_mailbox() == 1
+        assert strategy.submitted_plans == [replacement]
+        assert strategy.cancelled_client_order_ids == ["old-stop"]
+        assert str(plan.intent_id) in strategy._processed_intent_ids
+    finally:
+        writer_release.set()
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+
+
 def test_strategy_cleanup_retries_same_worker_before_lease_release(
     tmp_path: Path,
 ) -> None:
@@ -266,6 +415,32 @@ def test_queue_overflow_enters_sticky_fatal_handler(tmp_path: Path) -> None:
     finally:
         writer_release.set()
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+
+
+def _order_plan(
+    intent_id: UUID,
+    client_order_id: str,
+    *,
+    order_type: str,
+) -> OrderPlan:
+    trigger_price = None
+    price = "26000"
+    if order_type == "STOP_MARKET":
+        trigger_price = "25000"
+        price = None
+    return OrderPlan(
+        intent_id=intent_id,
+        client_order_id=client_order_id,
+        tags=(f"intent_id={intent_id}",),
+        instrument_id="BTCUSDT-PERP.BINANCE",
+        side="BUY",
+        order_type=order_type,
+        quantity="0.1",
+        price=price,
+        time_in_force="GTC",
+        reduce_only=order_type == "STOP_MARKET",
+        trigger_price=trigger_price,
+    )
 
 
 def test_handler_error_enters_sticky_fatal_handler(tmp_path: Path) -> None:
