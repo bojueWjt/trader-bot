@@ -515,14 +515,12 @@ def _stop_control_plane_session(runtime: Any) -> None:
     session = getattr(runtime, "control_plane_session", None)
     if session is None:
         return
-    try:
-        stopped = bool(session.stop(time.monotonic() + 1.0))
-        if not stopped:
-            raise RuntimeError(
-                "control-plane session failed to drain before deadline"
-            )
-    finally:
-        runtime.control_plane_session = None
+    stopped = bool(session.stop(time.monotonic() + 1.0))
+    if not stopped:
+        raise RuntimeError(
+            "control-plane session failed to drain before deadline"
+        )
+    runtime.control_plane_session = None
 
 
 def _stop_background_workers(runtime: Any) -> None:
@@ -551,23 +549,42 @@ def _stop_background_workers(runtime: Any) -> None:
 def _stop_redis_runtime_safety(runtime: Any) -> None:
     guard = getattr(runtime, "redis_runtime_safety_guard", None)
     client = getattr(runtime, "redis_runtime_safety_client", None)
-    errors: list[Exception] = []
     if guard is not None:
         try:
-            guard.stop()
+            stopped = guard.stop()
+            if (
+                stopped is False
+                and not _cleanup_target_confirms_stopped(guard)
+            ):
+                raise RuntimeError(
+                    "Redis runtime safety guard remained alive after stop"
+                )
         except Exception as exc:
-            errors.append(exc)
+            raise RuntimeError(
+                "Redis runtime safety cleanup failed"
+            ) from exc
         runtime.redis_runtime_safety_guard = None
     if client is not None:
         try:
             client.close()
         except Exception as exc:
-            errors.append(exc)
+            raise RuntimeError(
+                "Redis runtime safety cleanup failed"
+            ) from exc
         runtime.redis_runtime_safety_client = None
-    if errors:
-        raise RuntimeError(
-            "Redis runtime safety cleanup failed"
-        ) from errors[0]
+
+
+def _cleanup_target_confirms_stopped(target: Any) -> bool:
+    snapshot = getattr(target, "snapshot", None)
+    if not callable(snapshot):
+        return False
+    try:
+        state = snapshot()
+    except Exception:
+        return False
+    if not isinstance(state, dict):
+        return False
+    return state.get("running") is False
 
 
 class _NautilusIntentPublisher:
