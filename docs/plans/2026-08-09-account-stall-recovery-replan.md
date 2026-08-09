@@ -407,3 +407,30 @@ Claude Opus 于 2026-08-09 使用只读方式核验计划、事故记录、关�
 6. rollout 的 8 个失败按调用 fixture 漂移处理。
 7. 首轮使用共享 Shell guard helper，Python guard CLI 延后。
 8. GO gate 使用零失败、无新增回归、skip 有解释和 inventory 可比性。
+
+## 12. Runtime Validation 状态
+
+验证分支 `codex/account-stall-runtime-validation` 已提交
+`ffc14e559afdf7b56bf245d8cadbea1d3013e609`，完成当前已证实的 bounded
+cleanup/fencing 修复：
+
+- 104 项 runtime 广域选择通过
+- 62 项冻结 focused 选择通过
+- b10 node assembly 42 项通过
+- fault injection 四项连续 50 个独立进程通过
+- 两位 Codex reviewer 均给出 P0/P1/P2 为零的 `PASS`
+
+该结果吸收 Claude M1：它只证明当前 cleanup/fencing 缺陷闭环，不证明历史生产 stall
+因果，也不满足 Phase B-S 的 actor tick/progress freeze 授权条件。
+
+该结果部分满足 Claude M2：runtime 子集已有精确 commit、依赖版本、命令、collection
+hash、文件 hash 和 review。全四组套件的原始输出、JUnit、继承环境和依赖制品 hash
+仍需补齐，A3 保持未完成。
+
+Claude M3 对应的 runtime resource 单一 owner、Node/manifest parity 和 live
+fail-closed 仍属 Phase B，当前验证提交未修改相关 owner。
+
+A7 直接导入被依赖闭包阻断。Phase A 与验证分支在七个目标文件上相差 15,543 行新增和
+2,274 行删除，Strategy 单文件相差 8,383 行。下一步必须先形成 hunk-level
+dependency-closed import manifest，再决定可导入的原子批次。验证提交不作为 release
+source，生产和真实交易继续 `NO-GO`。

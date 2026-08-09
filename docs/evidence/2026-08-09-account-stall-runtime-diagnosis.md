@@ -187,3 +187,27 @@ GAP-0 closure, direct causality with the production account stall, and Phase
 B-S authorization remain pending until the versioned fault-injection test and
 A7 review are complete. The verified defects may receive a narrowly scoped
 fix; that fix does not establish that the production stall path is closed.
+
+## 2026-08-09 Validation Addendum
+
+Commit `ffc14e559afdf7b56bf245d8cadbea1d3013e609` on
+`codex/account-stall-runtime-validation` fixes and validates the two proven
+cleanup/fencing defects:
+
+- bounded actor cleanup retains failed executor/future references and the
+  namespace lease until a later successful retry
+- strategy durable I/O cleanup participates in the same app-owned writer
+  shutdown gate
+
+The final fault-injection file contains four deterministic cases covering
+terminal verification shutdown, command resubmit race, repeated actor stop,
+and an uncooperative durable worker. It passed in 50 independent pytest
+processes. The broad runtime selection passed 104 tests.
+
+This evidence supersedes the earlier expected-red description for these two
+cleanup defects. It does not reproduce the Phase A actor tick/progress freeze
+criterion and does not establish production stall causality. Phase B-S remains
+unauthorized.
+
+See `docs/evidence/2026-08-09-account-stall-runtime-validation.md` for exact
+commands, hashes, review results, and the A7 import boundary.

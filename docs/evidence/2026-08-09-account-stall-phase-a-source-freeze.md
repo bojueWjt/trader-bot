@@ -69,3 +69,21 @@ directory-collapsed status entries at freeze time.
 
 Production access, restart, data mutation, deployment, and trading remain
 frozen throughout Phase A.
+
+## Runtime Validation Overlay
+
+A separate clean validation worktree now records the bounded cleanup/fencing
+fix:
+
+| Worktree | Branch | Commit |
+|---|---|---|
+| `/Users/balen/projects/trader-bot-account-stall-runtime-validation` | `codex/account-stall-runtime-validation` | `ffc14e559afdf7b56bf245d8cadbea1d3013e609` |
+
+The overlay passed the 104-test runtime selection and 50 independent
+fault-injection processes. Its source and test dependency closure differs from
+the Phase A branch by 15,543 insertions and 2,274 deletions across the seven
+validated files. It remains evidence for A7 planning and is not a release
+source.
+
+Exact commands, hashes, semantics, and reviewer results are recorded in
+`docs/evidence/2026-08-09-account-stall-runtime-validation.md`.
