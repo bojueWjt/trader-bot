@@ -108,6 +108,11 @@ class GenRecreatePatchedTest(unittest.TestCase):
                         "RW": False,
                     },
                     {
+                        "Source": "/legacy/commands_init.py",
+                        "Destination": "/app/commands/__init__.py",
+                        "RW": False,
+                    },
+                    {
                         "Source": str(
                             self.trader_root / "config" / "node-a.json"
                         ),
@@ -219,6 +224,10 @@ class GenRecreatePatchedTest(unittest.TestCase):
             self.assertEqual(mounts.count(mount), 1)
         self.assertNotIn(
             f"{self.patch_dir}/commands_init.py:/app/commands/__init__.py:ro",
+            mounts,
+        )
+        self.assertNotIn(
+            "/legacy/commands_init.py:/app/commands/__init__.py:ro",
             mounts,
         )
         self.assertNotIn(

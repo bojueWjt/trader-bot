@@ -52,6 +52,11 @@ PATCH_MOUNT_TARGETS = (
         "/app/commands/durable_command_journal.py",
     ),
 )
+RETIRED_MOUNT_DESTINATIONS = frozenset(
+    {
+        "/app/commands/__init__.py",
+    }
+)
 _RESOURCE_RE = re.compile(r"^[1-9][0-9]*(?:[bkmg])?$", re.IGNORECASE)
 
 
@@ -178,6 +183,8 @@ def append_inherited_mounts(
         destination = str(mount.get("Destination") or "")
         if not source or not destination:
             raise DeploymentConfigError("inherited mount is incomplete")
+        if destination in RETIRED_MOUNT_DESTINATIONS:
+            continue
         if source in explicit_sources or destination in explicit_destinations:
             continue
         mode = "rw"
