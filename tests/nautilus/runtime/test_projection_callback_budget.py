@@ -205,9 +205,38 @@ def test_projection_durable_ingress_error_is_sticky_fatal() -> None:
     actor.on_stop()
 
 
-def test_projection_session_backpressure_after_ingest_is_sticky_fatal() -> None:
+def test_projection_session_backpressure_after_ingest_is_recoverable() -> None:
     projection = _DurableProjection()
     session = _BackpressuredAfterStartupSession()
+    fatal_reasons: list[str] = []
+    degraded_reasons: list[str] = []
+    actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+        fatal_callback=fatal_reasons.append,
+        degraded_callback=degraded_reasons.append,
+    )
+    actor.on_start()
+
+    assert actor.on_event("fill-backpressured") is True
+    assert _wait_until(lambda: bool(degraded_reasons))
+
+    assert projection.ingested == ["fill-backpressured"]
+    assert session.submitted[:2] == [False, "fill-backpressured"]
+    assert "session wake backpressured" in degraded_reasons[0]
+    assert fatal_reasons == []
+    assert actor.halted_reason == ""
+    assert actor.on_event("fill-during-backpressure") is True
+
+    session.release_backpressure.set()
+    assert session.wake_accepted.wait(timeout=1.0)
+    assert _wait_until(lambda: actor.degraded_reason == "")
+    actor.on_stop()
+
+
+def test_projection_session_queue_full_after_ingest_is_sticky_fatal() -> None:
+    projection = _DurableProjection()
+    session = _FullExecutionEventSession()
     fatal_reasons: list[str] = []
     actor = ExecutionProjectionActor(
         projection,
@@ -216,13 +245,13 @@ def test_projection_session_backpressure_after_ingest_is_sticky_fatal() -> None:
     )
     actor.on_start()
 
-    assert actor.on_event("fill-backpressured") is True
+    assert actor.on_event("fill-queue-full") is True
     assert _wait_until(lambda: bool(fatal_reasons))
 
-    assert projection.ingested == ["fill-backpressured"]
-    assert session.submitted == [False, "fill-backpressured"]
-    assert "session wake backpressured" in fatal_reasons[0]
-    assert actor.on_event("fill-after-backpressure") is False
+    assert projection.ingested == ["fill-queue-full"]
+    assert "queue capacity exceeded" in fatal_reasons[0]
+    assert actor.halted_reason == fatal_reasons[0]
+    assert actor.on_event("fill-after-queue-full") is False
     actor.on_stop()
 
 
@@ -338,6 +367,8 @@ class _BackpressuredAfterStartupSession:
         self.submitted: list[Any] = []
         self.started = False
         self.stopped = False
+        self.release_backpressure = Event()
+        self.wake_accepted = Event()
 
     def start(self) -> None:
         self.started = True
@@ -349,15 +380,32 @@ class _BackpressuredAfterStartupSession:
 
     def submit_execution_event(self, event: Any) -> str:
         self.submitted.append(event)
-        if event is False:
+        if len(self.submitted) == 1 and event is False:
             return "accepted"
-        return "backpressured"
+        if not self.release_backpressure.is_set():
+            return "backpressured"
+        self.wake_accepted.set()
+        return "accepted"
 
 
 class _AcceptingSession(_BackpressuredAfterStartupSession):
     def submit_execution_event(self, event: Any) -> str:
         self.submitted.append(event)
         return "accepted"
+
+
+class _FullExecutionEventSession(_BackpressuredAfterStartupSession):
+    def snapshot(self) -> Any:
+        execution_lane = SimpleNamespace(
+            failure="execution_event queue capacity exceeded",
+            fatal_failure="execution_event queue capacity exceeded",
+            circuit_state="closed",
+            queue_pressure="full",
+        )
+        return SimpleNamespace(
+            stopped=False,
+            lanes={"execution_event": execution_lane},
+        )
 
 
 class _LegacyProjection:

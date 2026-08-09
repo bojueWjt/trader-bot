@@ -334,11 +334,16 @@ class IntentPublisherActor(Actor):
         self._last_poll_success_at: float | None = None
         self._intent_stream_failed = False
         self._failure_reason = ""
+        self._degraded_reason = ""
         self._attach_to_plain_client_publisher(self._queued_publisher)
 
     @property
     def failure_reason(self) -> str:
         return self._failure_reason
+
+    @property
+    def degraded_reason(self) -> str:
+        return self._degraded_reason
 
     @property
     def pending_intent_count(self) -> int:
@@ -454,7 +459,9 @@ class IntentPublisherActor(Actor):
         try:
             future.result()
         except Exception as exc:
-            self._record_failure(f"approved intent poll failed: {exc!r}")
+            self._record_degraded(
+                f"approved intent poll failed: {exc!r}"
+            )
             return
         self._record_poll_progress()
 
@@ -503,20 +510,32 @@ class IntentPublisherActor(Actor):
         try:
             snapshot = session.snapshot()
         except Exception as exc:
-            self._record_failure(
+            self._record_degraded(
                 f"control-plane session snapshot failed: {exc!r}"
             )
+            self._evaluate_poll_staleness()
             return
         lanes = getattr(snapshot, "lanes", {})
-        fetch_lane = lanes.get("intent_fetch")
-        delivery_lane = lanes.get("intent_delivery")
-        for lane in (fetch_lane, delivery_lane):
-            failure = str(
-                getattr(lane, "failure", "") or ""
-            ).strip()
+        intent_lanes = (
+            ("intent_fetch", lanes.get("intent_fetch")),
+            ("intent_delivery", lanes.get("intent_delivery")),
+        )
+        for lane_name, lane in intent_lanes:
+            failure = _lane_hard_failure(lane_name, lane)
             if failure:
                 self._record_failure(failure)
                 return
+        for lane_name, lane in intent_lanes:
+            failure = _lane_degraded_failure(lane_name, lane)
+            if failure:
+                self._record_degraded(failure)
+                self._evaluate_poll_staleness()
+                return
+        if bool(getattr(snapshot, "degraded", False)):
+            self._record_degraded("control-plane intent session degraded")
+            self._evaluate_poll_staleness()
+            return
+        fetch_lane = lanes.get("intent_fetch")
         last_success = getattr(fetch_lane, "last_success_at", False)
         if last_success is not False:
             self._record_poll_progress()
@@ -525,11 +544,19 @@ class IntentPublisherActor(Actor):
 
     def _record_poll_progress(self) -> None:
         self._last_poll_success_at = time.monotonic()
+        self._degraded_reason = ""
         self._mark_dependency_ready("intent_stream")
 
     def _record_failure(self, reason: str) -> None:
         self._failure_reason = reason
+        self._degraded_reason = ""
         self._mark_dependency_failed("intent_stream", reason)
+
+    def _record_degraded(self, reason: str) -> None:
+        if self._intent_stream_failed:
+            return
+        self._degraded_reason = reason
+        self._mark_dependency_degraded("intent_stream", reason)
 
     def _register_poll_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -611,6 +638,20 @@ class IntentPublisherActor(Actor):
             marker(dependency, reason)
         self._intent_stream_failed = True
 
+    def _mark_dependency_degraded(
+        self,
+        dependency_value: str,
+        reason: str,
+    ) -> None:
+        dependency = _dependency_by_value(dependency_value)
+        marker = getattr(
+            self._lifecycle,
+            "mark_dependency_degraded",
+            None,
+        )
+        if dependency is not None and callable(marker):
+            marker(dependency, reason)
+
 
 class ExecutionProjectionActor(Actor):
     """Nautilus ``Actor`` wrapper around the plain execution ``ProjectionActor``."""
@@ -631,6 +672,7 @@ class ExecutionProjectionActor(Actor):
             DEFAULT_PROJECTION_DURABLE_INGRESS_DEADLINE_SECONDS
         ),
         fatal_callback: Callable[[str], None] | None = None,
+        degraded_callback: Callable[[str], None] | None = None,
         control_plane_session: Any = None,
         manage_control_plane_session: bool = True,
     ) -> None:
@@ -688,8 +730,11 @@ class ExecutionProjectionActor(Actor):
         self._flush_stop_deadline: float | None = None
         self._halt_lock = RLock()
         self._halted_reason = ""
+        self._degraded_reason = ""
         self._fatal_callback = fatal_callback
+        self._degraded_callback = degraded_callback
         self._fatal_reported = False
+        self._session_wake_pending = Event()
         self._control_plane_session = control_plane_session
         self._manage_control_plane_session = bool(
             manage_control_plane_session
@@ -702,6 +747,10 @@ class ExecutionProjectionActor(Actor):
     @property
     def halted_reason(self) -> str:
         return self._halted_reason
+
+    @property
+    def degraded_reason(self) -> str:
+        return self._degraded_reason
 
     def on_start(self) -> None:
         if not self._durable_ingress:
@@ -751,7 +800,11 @@ class ExecutionProjectionActor(Actor):
                 )
             else:
                 self._worker_thread = None
-        if self._has_pending_publications() or not self._event_queue.empty():
+        if (
+            self._has_pending_publications()
+            or not self._event_queue.empty()
+            or self._session_wake_pending.is_set()
+        ):
             self._halt_egress(
                 "execution projection stopped with durable ingress pending"
             )
@@ -852,6 +905,8 @@ class ExecutionProjectionActor(Actor):
                     timeout=self._worker_poll_timeout()
                 )
             except Empty:
+                if not self._retry_session_flush_wake():
+                    return
                 continue
             try:
                 if publication.flush_only:
@@ -949,22 +1004,58 @@ class ExecutionProjectionActor(Actor):
     def _submit_flush_wake(self, event: Any) -> bool:
         session = self._control_plane_session
         if session is None:
+            self._session_wake_pending.clear()
+            self._clear_degraded()
             self._flush_wake.set()
             return True
+        self._session_wake_pending.set()
         try:
             result = session.submit_execution_event(event)
         except Exception as exc:
-            self._halt_egress(
+            self._degrade_egress(
                 "execution projection session wake failed: "
                 f"{exc!r}"
             )
-            return False
-        if _submission_was_accepted(result):
             return True
-        self._halt_egress(
+        if _submission_was_accepted(result):
+            self._session_wake_pending.clear()
+            self._clear_degraded()
+            return True
+        hard_failure = self._session_wake_hard_failure()
+        if hard_failure:
+            self._halt_egress(
+                "execution projection session wake failed hard: "
+                f"{hard_failure}"
+            )
+            return False
+        self._degrade_egress(
             "execution projection session wake backpressured"
         )
-        return False
+        return True
+
+    def _retry_session_flush_wake(self) -> bool:
+        if not self._session_wake_pending.is_set():
+            return True
+        if self._worker_stop.is_set() or self._halted_reason:
+            return True
+        return self._submit_flush_wake(False)
+
+    def _session_wake_hard_failure(self) -> str:
+        session = self._control_plane_session
+        snapshot = getattr(session, "snapshot", None)
+        if not callable(snapshot):
+            return ""
+        try:
+            health = snapshot()
+        except Exception:
+            return ""
+        if bool(getattr(health, "stopped", False)):
+            return "control-plane session is stopped"
+        lanes = getattr(health, "lanes", {})
+        return _lane_hard_failure(
+            "execution_event",
+            lanes.get("execution_event"),
+        )
 
     def _start_deadline_worker(self) -> None:
         worker = self._deadline_thread
@@ -1212,6 +1303,7 @@ class ExecutionProjectionActor(Actor):
         with self._halt_lock:
             if not self._halted_reason:
                 self._halted_reason = reason
+                self._degraded_reason = ""
                 halt_projection = True
         if not halt_projection:
             return
@@ -1221,6 +1313,22 @@ class ExecutionProjectionActor(Actor):
                 halt(reason)
             except Exception:
                 return
+
+    def _degrade_egress(self, reason: str) -> None:
+        callback = None
+        with self._halt_lock:
+            if self._halted_reason:
+                return
+            if self._degraded_reason == reason:
+                return
+            self._degraded_reason = reason
+            callback = self._degraded_callback
+        if callback is not None:
+            callback(reason)
+
+    def _clear_degraded(self) -> None:
+        with self._halt_lock:
+            self._degraded_reason = ""
 
     def _report_fatal(self) -> None:
         callback = None
@@ -1235,6 +1343,7 @@ class ExecutionProjectionActor(Actor):
             callback(reason)
 
     def _halt_egress(self, reason: str) -> None:
+        self._session_wake_pending.clear()
         self._mark_sticky_halt(reason)
         self._report_fatal()
 
@@ -1404,6 +1513,7 @@ class CommandPollerActor(Actor):
         self._last_command_success_at: float | None = None
         self._failed_dependencies: set[str] = set()
         self._failure_reason = ""
+        self._degraded_reasons: dict[str, str] = {}
 
     @property
     def pending_command_count(self) -> int:
@@ -1416,6 +1526,10 @@ class CommandPollerActor(Actor):
     @property
     def failure_reason(self) -> str:
         return self._failure_reason
+
+    @property
+    def degraded_reason(self) -> str:
+        return "; ".join(self._degraded_reasons.values())
 
     def on_start(self) -> None:
         self._started_at = time.monotonic()
@@ -1729,7 +1843,7 @@ class CommandPollerActor(Actor):
         try:
             future.result()
         except Exception as exc:
-            self._mark_dependency_failed(
+            self._mark_dependency_degraded(
                 "control_plane",
                 f"control-plane heartbeat failed: {exc!r}",
             )
@@ -1755,7 +1869,8 @@ class CommandPollerActor(Actor):
         try:
             commands = future.result()
         except Exception as exc:
-            self._fail_command_stream(
+            self._mark_dependency_degraded(
+                "command_stream",
                 f"operator command poll failed: {exc!r}"
             )
             return
@@ -1830,7 +1945,8 @@ class CommandPollerActor(Actor):
         try:
             acknowledged = future.result()
         except Exception as exc:
-            self._fail_command_stream(
+            self._mark_dependency_degraded(
+                "command_stream",
                 f"operator command ACK failed: {exc!r}"
             )
             return
@@ -1861,43 +1977,69 @@ class CommandPollerActor(Actor):
             snapshot = session.snapshot()
         except Exception as exc:
             reason = f"control-plane session snapshot failed: {exc!r}"
-            self._mark_dependency_failed("control_plane", reason)
-            self._fail_command_stream(reason)
+            self._mark_dependency_degraded("control_plane", reason)
+            self._mark_dependency_degraded("command_stream", reason)
+            self._evaluate_poll_staleness()
             return
         lanes = getattr(snapshot, "lanes", {})
         heartbeat_lane = lanes.get("heartbeat")
-        heartbeat_failure = str(
-            getattr(heartbeat_lane, "failure", "") or ""
-        ).strip()
-        if heartbeat_failure:
+        heartbeat_hard_failure = _lane_hard_failure(
+            "heartbeat",
+            heartbeat_lane,
+        )
+        heartbeat_degraded_failure = _lane_degraded_failure(
+            "heartbeat",
+            heartbeat_lane,
+        )
+        if heartbeat_hard_failure:
             self._mark_dependency_failed(
                 "control_plane",
-                heartbeat_failure,
+                heartbeat_hard_failure,
+            )
+        elif heartbeat_degraded_failure:
+            self._mark_dependency_degraded(
+                "control_plane",
+                heartbeat_degraded_failure,
             )
         heartbeat_success = getattr(
             heartbeat_lane,
             "last_success_at",
             False,
         )
-        if not heartbeat_failure and heartbeat_success is not False:
+        if (
+            not heartbeat_hard_failure
+            and not heartbeat_degraded_failure
+            and heartbeat_success is not False
+        ):
             self._last_heartbeat_success_at = float(heartbeat_success)
             self._mark_dependency_ready("control_plane")
 
         command_lanes = (
-            lanes.get("command_poll"),
-            lanes.get("command_delivery"),
-            lanes.get("command_ack"),
+            ("command_poll", lanes.get("command_poll")),
+            ("command_delivery", lanes.get("command_delivery")),
+            ("command_ack", lanes.get("command_ack")),
         )
-        command_failures = [
-            str(getattr(lane, "failure", "") or "").strip()
-            for lane in command_lanes
-            if lane is not None
+        command_hard_failures = [
+            _lane_hard_failure(lane_name, lane)
+            for lane_name, lane in command_lanes
         ]
-        command_failures = [
-            failure for failure in command_failures if failure
+        command_hard_failures = [
+            failure for failure in command_hard_failures if failure
         ]
-        if command_failures:
-            self._fail_command_stream(command_failures[0])
+        command_degraded_failures = [
+            _lane_degraded_failure(lane_name, lane)
+            for lane_name, lane in command_lanes
+        ]
+        command_degraded_failures = [
+            failure for failure in command_degraded_failures if failure
+        ]
+        if command_hard_failures:
+            self._fail_command_stream(command_hard_failures[0])
+        elif command_degraded_failures:
+            self._mark_dependency_degraded(
+                "command_stream",
+                command_degraded_failures[0],
+            )
         command_lane = lanes.get("command_poll")
         command_success = getattr(
             command_lane,
@@ -1905,7 +2047,8 @@ class CommandPollerActor(Actor):
             False,
         )
         if (
-            not command_failures
+            not command_hard_failures
+            and not command_degraded_failures
             and command_success is not False
             and not self._failure_reason
         ):
@@ -1936,6 +2079,24 @@ class CommandPollerActor(Actor):
         if dependency is not None and callable(marker):
             marker(dependency)
         self._failed_dependencies.discard(dependency_value)
+        self._degraded_reasons.pop(dependency_value, None)
+
+    def _mark_dependency_degraded(
+        self,
+        dependency_value: str,
+        reason: str,
+    ) -> None:
+        if dependency_value in self._failed_dependencies:
+            return
+        self._degraded_reasons[dependency_value] = reason
+        dependency = _dependency_by_value(dependency_value)
+        marker = getattr(
+            self._lifecycle,
+            "mark_dependency_degraded",
+            None,
+        )
+        if dependency is not None and callable(marker):
+            marker(dependency, reason)
 
     def _mark_dependency_failed(
         self,
@@ -1949,6 +2110,7 @@ class CommandPollerActor(Actor):
         if dependency is not None and callable(marker):
             marker(dependency, reason)
         self._failed_dependencies.add(dependency_value)
+        self._degraded_reasons.pop(dependency_value, None)
 
     def _apply(self, cmd: Any):
         from execution_domain.control_plane import (  # type: ignore
@@ -2000,6 +2162,44 @@ def _first_attr(source: Any, names: tuple[str, ...]) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _lane_hard_failure(lane_name: str, lane: Any) -> str:
+    if lane is None:
+        return ""
+    fatal_failure = str(
+        getattr(lane, "fatal_failure", "") or ""
+    ).strip()
+    if fatal_failure:
+        return fatal_failure
+    queue_pressure = str(
+        getattr(lane, "queue_pressure", "") or ""
+    ).strip().lower()
+    if queue_pressure != "full":
+        return ""
+    failure = str(getattr(lane, "failure", "") or "").strip()
+    if failure:
+        return failure
+    return f"{lane_name} queue capacity exceeded"
+
+
+def _lane_degraded_failure(lane_name: str, lane: Any) -> str:
+    if lane is None or _lane_hard_failure(lane_name, lane):
+        return ""
+    failure = str(getattr(lane, "failure", "") or "").strip()
+    if failure:
+        return failure
+    circuit_state = str(
+        getattr(lane, "circuit_state", "") or ""
+    ).strip().lower()
+    if circuit_state and circuit_state != "closed":
+        return f"{lane_name} circuit state is {circuit_state}"
+    queue_pressure = str(
+        getattr(lane, "queue_pressure", "") or ""
+    ).strip().lower()
+    if queue_pressure == "degraded":
+        return f"{lane_name} queue pressure is degraded"
+    return ""
 
 
 def _shutdown_executor(

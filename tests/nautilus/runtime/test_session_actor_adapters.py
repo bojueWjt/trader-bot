@@ -690,6 +690,103 @@ def test_stale_session_lanes_fail_closed_without_control_plane_calls() -> None:
     }
 
 
+def test_recoverable_intent_session_failure_is_degraded_until_recovery() -> None:
+    lifecycle = _Lifecycle()
+    session = _LocalSession()
+    fetch_lane = session._snapshot.lanes["intent_fetch"]
+    fetch_lane.failure = "intent fetch HTTP 503"
+    fetch_lane.circuit_state = "open"
+    actor = IntentPublisherActor(
+        _IntentClient(),
+        lifecycle=lifecycle,
+        control_plane_session=session,
+        stale_after_seconds=10.0,
+    )
+
+    actor._on_poll_timer()
+
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
+        "intent_stream": "intent fetch HTTP 503",
+    }
+    assert actor.degraded_reason == "intent fetch HTTP 503"
+
+    fetch_lane.failure = False
+    fetch_lane.circuit_state = "closed"
+    fetch_lane.last_success_at = time.monotonic()
+    actor._on_poll_timer()
+    actor.on_stop()
+
+    assert _degraded_reasons(lifecycle) == {}
+    assert actor.degraded_reason == ""
+
+
+def test_recoverable_command_session_failure_is_degraded_until_recovery() -> None:
+    lifecycle = _Lifecycle()
+    session = _LocalSession()
+    heartbeat_lane = session._snapshot.lanes["heartbeat"]
+    heartbeat_lane.last_success_at = time.monotonic()
+    command_lane = session._snapshot.lanes["command_poll"]
+    command_lane.last_success_at = time.monotonic()
+    ack_lane = session._snapshot.lanes["command_ack"]
+    ack_lane.failure = "command ACK HTTP 503"
+    ack_lane.circuit_state = "open"
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        stale_after_seconds=10.0,
+    )
+
+    actor._on_poll_timer()
+
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
+        "command_stream": "command ACK HTTP 503",
+    }
+    assert actor.degraded_reason == "command ACK HTTP 503"
+
+    ack_lane.failure = False
+    ack_lane.circuit_state = "closed"
+    ack_lane.last_success_at = time.monotonic()
+    actor._on_poll_timer()
+    actor.on_stop()
+
+    assert _degraded_reasons(lifecycle) == {}
+    assert actor.degraded_reason == ""
+
+
+def test_fatal_session_queue_state_remains_hard_failure() -> None:
+    lifecycle = _Lifecycle()
+    session = _LocalSession()
+    heartbeat_lane = session._snapshot.lanes["heartbeat"]
+    heartbeat_lane.last_success_at = time.monotonic()
+    command_lane = session._snapshot.lanes["command_poll"]
+    command_lane.last_success_at = time.monotonic()
+    ack_lane = session._snapshot.lanes["command_ack"]
+    ack_lane.failure = "command ACK queue capacity exceeded"
+    ack_lane.fatal_failure = "command ACK queue capacity exceeded"
+    ack_lane.queue_pressure = "full"
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        stale_after_seconds=10.0,
+    )
+
+    actor._on_poll_timer()
+    actor.on_stop()
+
+    assert _failed_reasons(lifecycle) == {
+        "command_stream": "command ACK queue capacity exceeded",
+    }
+    assert _degraded_reasons(lifecycle) == {}
+
+
 def _pump_actor_until(
     actor: Any,
     predicate: Any,
@@ -739,6 +836,13 @@ def _failed_reasons(lifecycle: _Lifecycle) -> dict[str, str]:
     return {
         dependency.value: reason
         for dependency, reason in lifecycle.failed_dependencies
+    }
+
+
+def _degraded_reasons(lifecycle: _Lifecycle) -> dict[str, str]:
+    return {
+        dependency.value: reason
+        for dependency, reason in lifecycle.degraded_dependencies.items()
     }
 
 
@@ -827,6 +931,7 @@ class _Lifecycle:
         self.heartbeat_thread_ids: list[int] = []
         self.ready_dependencies: list[Any] = []
         self.failed_dependencies: list[tuple[Any, str]] = []
+        self.degraded_dependencies: dict[Any, str] = {}
 
     def send_heartbeat(self) -> None:
         self.heartbeat_thread_ids.append(get_ident())
@@ -837,9 +942,18 @@ class _Lifecycle:
 
     def mark_dependency_ready(self, dependency: Any) -> None:
         self.ready_dependencies.append(dependency)
+        self.degraded_dependencies.pop(dependency, None)
 
     def mark_dependency_failed(self, dependency: Any, reason: str) -> None:
         self.failed_dependencies.append((dependency, reason))
+        self.degraded_dependencies.pop(dependency, None)
+
+    def mark_dependency_degraded(
+        self,
+        dependency: Any,
+        reason: str,
+    ) -> None:
+        self.degraded_dependencies[dependency] = reason
 
 
 class _LocalSession:
@@ -849,16 +963,25 @@ class _LocalSession:
         self._stop_result = stop_result
         empty_lane = SimpleNamespace(
             failure=False,
+            fatal_failure=False,
             last_success_at=False,
+            circuit_state="closed",
+            queue_pressure="normal",
         )
         self._snapshot = SimpleNamespace(
+            degraded=False,
+            stopped=False,
             lanes={
-                "heartbeat": empty_lane,
-                "command_poll": empty_lane,
-                "command_delivery": empty_lane,
-                "command_ack": empty_lane,
-                "intent_fetch": empty_lane,
-                "intent_delivery": empty_lane,
+                name: SimpleNamespace(**vars(empty_lane))
+                for name in (
+                    "heartbeat",
+                    "command_poll",
+                    "command_delivery",
+                    "command_ack",
+                    "intent_fetch",
+                    "intent_delivery",
+                    "execution_event",
+                )
             }
         )
 
