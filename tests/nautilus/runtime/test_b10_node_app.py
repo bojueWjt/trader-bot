@@ -92,7 +92,15 @@ class NodeAppAssemblyTest(unittest.TestCase):
         self.assertEqual(ready.status_code, 503)
         self.assertEqual(
             set(ready.body["missing"]),
-            {"instruments", "redis", "control_plane", "reconciliation", "projection"},
+            {
+                "instruments",
+                "redis",
+                "control_plane",
+                "intent_stream",
+                "command_stream",
+                "reconciliation",
+                "projection",
+            },
         )
 
     def test_nautilus_build_step_uses_injected_builder_and_keeps_host_verify_todos(self) -> None:
