@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
@@ -20,6 +21,8 @@ OTHER_ACCOUNT_CLIENT_ORDER_ID = "B5555555555555555555555555555555501"
 EXCHANGE_REJECTED_CLIENT_ORDER_ID = (
     "B8888888888888888888888888888888801"
 )
+ABSENT_CLIENT_ORDER_ID = "Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01"
+ABSENT_INTENT_ID = UUID(hex=ABSENT_CLIENT_ORDER_ID[1:33])
 
 
 def test_exchange_state_returns_account_scoped_historical_opening_evidence(
@@ -163,6 +166,154 @@ def test_stale_exchange_state_keeps_durable_evidence_authoritative(
     assert surface["items"][0]["state"] == "confirmed_executed"
 
 
+def test_targeted_miss_is_definitively_absent_after_complete_history_search(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    conn = _FakeConnection(
+        mirror_row={
+            "account_id": ACCOUNT_ID,
+            "updated_at": now,
+            "stale": False,
+            "payload": {
+                "fetched_at": now.isoformat(),
+                "open_orders": [],
+                "algo_orders": [],
+                "recent_order_history": [],
+                "recent_algo_order_history": [],
+                "recent_order_history_coverage": {
+                    "searched_symbols": ["BTCUSDT"],
+                    "regular_history_complete_symbols": ["BTCUSDT"],
+                    "algo_history_complete_symbols": ["BTCUSDT"],
+                    "history_complete_symbols": ["BTCUSDT"],
+                },
+            },
+        },
+        projection_rows=[],
+        event_rows=[],
+        intent_rows=[
+            {
+                "intent_id": str(ABSENT_INTENT_ID),
+                "instrument_id": "BTCUSDT-PERP.BINANCE",
+            }
+        ],
+    )
+    _configure(monkeypatch, conn)
+
+    response = _client().get(
+        f"/v1/nodes/{NODE_ID}/exchange-state",
+        params=_evidence_params(ABSENT_CLIENT_ORDER_ID),
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    surface = response.json()["opening_execution_evidence"]
+    assert surface["authoritative"] is True
+    assert surface["items"] == [
+        {
+            "account_id": ACCOUNT_ID,
+            "client_order_id": ABSENT_CLIENT_ORDER_ID,
+            "state": "definitively_absent",
+            "order_status": None,
+            "instrument_id": "BTCUSDT-PERP.BINANCE",
+            "venue_order_id": None,
+            "filled_quantity": None,
+            "sources": ["exchange_state.history_enrichment"],
+            "observed_at": now.isoformat(),
+            "reason": "fresh_complete_exchange_history_has_no_record",
+        }
+    ]
+
+
+def test_targeted_miss_stays_unknown_when_one_history_lane_is_incomplete(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    conn = _FakeConnection(
+        mirror_row={
+            "account_id": ACCOUNT_ID,
+            "updated_at": now,
+            "stale": False,
+            "payload": {
+                "fetched_at": now.isoformat(),
+                "open_orders": [],
+                "algo_orders": [],
+                "recent_order_history": [],
+                "recent_algo_order_history": [],
+                "recent_order_history_coverage": {
+                    "searched_symbols": ["BTCUSDT"],
+                    "regular_history_complete_symbols": ["BTCUSDT"],
+                    "algo_history_complete_symbols": [],
+                    "history_complete_symbols": [],
+                    "degraded": True,
+                },
+            },
+        },
+        projection_rows=[],
+        event_rows=[],
+        intent_rows=[
+            {
+                "intent_id": str(ABSENT_INTENT_ID),
+                "instrument_id": "BTCUSDT-PERP.BINANCE",
+            }
+        ],
+    )
+    _configure(monkeypatch, conn)
+
+    response = _client().get(
+        f"/v1/nodes/{NODE_ID}/exchange-state",
+        params=_evidence_params(ABSENT_CLIENT_ORDER_ID),
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    surface = response.json()["opening_execution_evidence"]
+    assert surface["authoritative"] is True
+    assert surface["items"] == []
+
+
+def test_targeted_miss_requires_fresh_mirror(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    conn = _FakeConnection(
+        mirror_row={
+            "account_id": ACCOUNT_ID,
+            "updated_at": now,
+            "stale": True,
+            "payload": {
+                "fetched_at": now.isoformat(),
+                "recent_order_history_coverage": {
+                    "searched_symbols": ["BTCUSDT"],
+                    "regular_history_complete_symbols": ["BTCUSDT"],
+                    "algo_history_complete_symbols": ["BTCUSDT"],
+                    "history_complete_symbols": ["BTCUSDT"],
+                },
+            },
+        },
+        projection_rows=[],
+        event_rows=[],
+        intent_rows=[
+            {
+                "intent_id": str(ABSENT_INTENT_ID),
+                "instrument_id": "BTCUSDT-PERP.BINANCE",
+            }
+        ],
+    )
+    _configure(monkeypatch, conn)
+
+    response = _client().get(
+        f"/v1/nodes/{NODE_ID}/exchange-state",
+        params=_evidence_params(ABSENT_CLIENT_ORDER_ID),
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    surface = response.json()["opening_execution_evidence"]
+    assert surface["authoritative"] is True
+    assert surface["items"] == []
+
+
 def test_projection_query_failure_uses_fresh_exchange_evidence(
     monkeypatch,
 ) -> None:
@@ -207,6 +358,56 @@ def test_projection_query_failure_uses_fresh_exchange_evidence(
     assert surface["items"][0]["client_order_id"] == client_order_id
     assert surface["items"][0]["state"] == "confirmed_executed"
     assert conn.rollback_count == 1
+
+
+def test_targeted_miss_requires_successful_durable_query(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    conn = _FakeConnection(
+        mirror_row={
+            "account_id": ACCOUNT_ID,
+            "updated_at": now,
+            "stale": False,
+            "payload": {
+                "fetched_at": now.isoformat(),
+                "open_orders": [],
+                "algo_orders": [],
+                "recent_order_history": [],
+                "recent_algo_order_history": [],
+                "recent_order_history_coverage": {
+                    "searched_symbols": ["BTCUSDT"],
+                    "regular_history_complete_symbols": ["BTCUSDT"],
+                    "algo_history_complete_symbols": ["BTCUSDT"],
+                    "history_complete_symbols": ["BTCUSDT"],
+                },
+            },
+        },
+        projection_rows=[],
+        event_rows=[],
+        intent_rows=[
+            {
+                "intent_id": str(ABSENT_INTENT_ID),
+                "instrument_id": "BTCUSDT-PERP.BINANCE",
+            }
+        ],
+        fail_projection_query=True,
+    )
+    _configure(monkeypatch, conn)
+
+    response = _client().get(
+        f"/v1/nodes/{NODE_ID}/exchange-state",
+        params=_evidence_params(ABSENT_CLIENT_ORDER_ID),
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    surface = response.json()["opening_execution_evidence"]
+    assert surface["authoritative"] is True
+    assert surface["reason"] == (
+        "fresh_exchange_evidence_durable_query_failed"
+    )
+    assert surface["items"] == []
 
 
 def test_stale_mirror_and_durable_query_failure_are_unknown(
@@ -274,6 +475,52 @@ def test_opening_evidence_rejects_unbounded_target_query(
     assert response.status_code == 422
 
 
+def test_legacy_request_without_targets_returns_at_most_recent_limit(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    history = [
+        {
+            "symbol": "BTCUSDT",
+            "client_order_id": f"B{index:032x}01",
+            "venue_order_id": f"venue-{index}",
+            "status": "FILLED",
+            "executed_quantity": "0.01",
+        }
+        for index in range(
+            read_api._OPENING_EVIDENCE_TARGET_LIMIT + 44
+        )
+    ]
+    conn = _FakeConnection(
+        mirror_row={
+            "account_id": ACCOUNT_ID,
+            "updated_at": now,
+            "stale": False,
+            "payload": {
+                "fetched_at": now.isoformat(),
+                "open_orders": [],
+                "algo_orders": [],
+                "recent_order_history": history,
+                "recent_algo_order_history": [],
+            },
+        },
+        projection_rows=[],
+        event_rows=[],
+    )
+    _configure(monkeypatch, conn)
+
+    response = _client().get(
+        f"/v1/nodes/{NODE_ID}/exchange-state",
+        params={"account_id": ACCOUNT_ID},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    items = response.json()["opening_execution_evidence"]["items"]
+    assert len(items) == read_api._OPENING_EVIDENCE_TARGET_LIMIT
+    assert all(item["state"] == "confirmed_executed" for item in items)
+
+
 class _FakeConnection:
     def __init__(
         self,
@@ -281,11 +528,13 @@ class _FakeConnection:
         mirror_row: dict[str, Any],
         projection_rows: list[dict[str, Any]],
         event_rows: list[dict[str, Any]],
+        intent_rows: list[dict[str, Any]] | None = None,
         fail_projection_query: bool = False,
     ) -> None:
         self.mirror_row = mirror_row
         self.projection_rows = projection_rows
         self.event_rows = event_rows
+        self.intent_rows = list(intent_rows or [])
         self.fail_projection_query = fail_projection_query
         self.rollback_count = 0
         self.closed = False
@@ -325,6 +574,9 @@ class _FakeCursor:
             return
         if "FROM execution_events" in sql:
             self.rows = self.conn.event_rows
+            return
+        if "FROM trade_intents" in sql:
+            self.rows = self.conn.intent_rows
             return
         raise AssertionError(f"unexpected SQL: {sql}")
 

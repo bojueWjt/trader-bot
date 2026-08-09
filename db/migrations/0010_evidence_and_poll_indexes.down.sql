@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS idx_command_node_acks_pending_poll;
+DROP INDEX IF EXISTS idx_trade_intents_pending_opening_symbols;
+DROP INDEX IF EXISTS idx_execution_events_targeted_opening_evidence;

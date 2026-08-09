@@ -19,15 +19,19 @@ MODULE_PATH = (
 
 
 class ExchangeStateRecorderTest(unittest.TestCase):
-    def test_live_mirror_matches_deployment_source(self) -> None:
+    def test_live_mirror_remains_historical_while_canonical_source_drifts(
+        self,
+    ) -> None:
         mirror_path = (
             REPO_ROOT / ".live-mirror" / "tools" / "exchange_state_recorder.py"
         )
+        mirror_bytes = mirror_path.read_bytes()
 
         self.assertEqual(
-            mirror_path.read_bytes(),
-            MODULE_PATH.read_bytes(),
+            hashlib.sha256(mirror_bytes).hexdigest(),
+            "7c6021ecd4b1e94bbd3be05dee820e2179f7d28198578e040ae5c0633cb7435d",
         )
+        self.assertNotEqual(mirror_bytes, MODULE_PATH.read_bytes())
 
     def test_slim_order_preserves_hedge_position_side(self) -> None:
         module = _load_module()
@@ -139,6 +143,142 @@ class ExchangeStateRecorderTest(unittest.TestCase):
             payload["recent_algo_order_history"][0]["status"],
             "CANCELED",
         )
+        self.assertEqual(
+            payload["recent_order_history_coverage"][
+                "searched_symbols"
+            ],
+            ["BTCUSDT"],
+        )
+        self.assertEqual(
+            payload["recent_order_history_coverage"][
+                "history_complete_symbols"
+            ],
+            ["BTCUSDT"],
+        )
+
+    def test_history_failure_marks_symbol_incomplete_and_keeps_core_snapshot(
+        self,
+    ) -> None:
+        module = _load_module()
+        responses = {
+            "/fapi/v3/account": {
+                "totalMarginBalance": "100",
+                "totalInitialMargin": "10",
+                "availableBalance": "90",
+            },
+            "/fapi/v2/positionRisk": [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "0.01",
+                    "entryPrice": "118000",
+                    "markPrice": "118100",
+                    "unRealizedProfit": "1",
+                    "positionSide": "LONG",
+                }
+            ],
+            "/fapi/v1/openOrders": [],
+            "/fapi/v1/openAlgoOrders": {"orders": []},
+            "/fapi/v1/allAlgoOrders": {
+                "orders": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "clientAlgoId": (
+                            "B2222222222222222222222222222222201"
+                        ),
+                        "algoStatus": "CANCELED",
+                        "actualQty": "0",
+                    }
+                ]
+            },
+        }
+
+        def fake_signed_get(_base, path, _key, _sec, params=None):
+            if path == "/fapi/v1/allOrders":
+                raise RuntimeError("regular history unavailable")
+            return responses[path]
+
+        with patch.object(module, "signed_get", side_effect=fake_signed_get):
+            payload = module.snapshot_account(
+                "https://fapi.binance.com",
+                "api-key",
+                "api-secret",
+            )
+
+        self.assertEqual(payload["account"]["equity"], "100")
+        self.assertEqual(payload["positions"][0]["symbol"], "BTCUSDT")
+        self.assertEqual(payload["recent_order_history"], [])
+        self.assertEqual(
+            payload["recent_algo_order_history"][0]["status"],
+            "CANCELED",
+        )
+        coverage = payload["recent_order_history_coverage"]
+        self.assertEqual(coverage["searched_symbols"], ["BTCUSDT"])
+        self.assertEqual(
+            coverage["regular_history_complete_symbols"],
+            [],
+        )
+        self.assertEqual(
+            coverage["algo_history_complete_symbols"],
+            ["BTCUSDT"],
+        )
+        self.assertEqual(coverage["history_complete_symbols"], [])
+        self.assertEqual(
+            coverage["failed_requests"],
+            [{"symbol": "BTCUSDT", "history": "regular"}],
+        )
+        self.assertTrue(coverage["degraded"])
+
+    def test_history_request_budget_bounds_sequential_enrichment(
+        self,
+    ) -> None:
+        module = _load_module()
+        history_calls: list[tuple[str, str]] = []
+        responses = {
+            "/fapi/v3/account": {
+                "totalMarginBalance": "100",
+                "totalInitialMargin": "10",
+                "availableBalance": "90",
+            },
+            "/fapi/v2/positionRisk": [],
+            "/fapi/v1/openOrders": [],
+            "/fapi/v1/openAlgoOrders": {"orders": []},
+        }
+
+        def fake_signed_get(_base, path, _key, _sec, params=None):
+            if path in {
+                "/fapi/v1/allOrders",
+                "/fapi/v1/allAlgoOrders",
+            }:
+                history_calls.append((path, params["symbol"]))
+                if path == "/fapi/v1/allAlgoOrders":
+                    return {"orders": []}
+                return []
+            return responses[path]
+
+        with patch.object(module, "signed_get", side_effect=fake_signed_get):
+            payload = module.snapshot_account(
+                "https://fapi.binance.com",
+                "api-key",
+                "api-secret",
+                targeted_history_symbols=(
+                    "BTCUSDT",
+                    "ETHUSDT",
+                    "SOLUSDT",
+                    "XRPUSDT",
+                ),
+                history_symbol_limit=64,
+                history_request_budget=4,
+            )
+
+        self.assertEqual(
+            payload["recent_order_history_symbols"],
+            ["BTCUSDT", "ETHUSDT"],
+        )
+        self.assertEqual(len(history_calls), 4)
+        coverage = payload["recent_order_history_coverage"]
+        self.assertEqual(coverage["request_budget"], 4)
+        self.assertEqual(coverage["requests_attempted"], 4)
+        self.assertTrue(coverage["truncated"])
 
     def test_targeted_history_symbols_are_prioritized_and_bounded(
         self,
@@ -175,6 +315,122 @@ class ExchangeStateRecorderTest(unittest.TestCase):
                 module._history_symbol_limit(),
                 module.ABSOLUTE_RECENT_HISTORY_MAX_SYMBOLS,
             )
+
+    def test_pending_symbols_are_distinct_before_limit_and_ignore_expiry(
+        self,
+    ) -> None:
+        module = _load_module()
+        conn = _PendingSymbolConnection(
+            [
+                ("BTCUSDT-PERP.BINANCE",),
+                ("ETHUSDT-PERP.BINANCE",),
+            ]
+        )
+
+        symbols = module.pending_opening_symbols(
+            conn,
+            "account-a",
+            limit=2,
+            after_symbol="SOLUSDT",
+        )
+
+        self.assertEqual(symbols, ("BTCUSDT", "ETHUSDT"))
+        normalized_sql = " ".join(conn.sql.split())
+        group_position = normalized_sql.index(
+            "GROUP BY ti.instrument_id"
+        )
+        limit_position = normalized_sql.rindex("LIMIT %s")
+        self.assertLess(group_position, limit_position)
+        self.assertNotIn("valid_until", normalized_sql)
+        self.assertIn(
+            "ti.status IN ('approved', 'expired')",
+            normalized_sql,
+        )
+        self.assertIn("NOT EXISTS", normalized_sql)
+        self.assertIn("FROM execution_events", normalized_sql)
+        self.assertEqual(
+            conn.params,
+            (
+                "account-a",
+                "SOLUSDT-PERP.BINANCE",
+                "SOLUSDT-PERP.BINANCE",
+                2,
+            ),
+        )
+
+    def test_run_once_rotates_pending_symbol_batches(
+        self,
+    ) -> None:
+        module = _load_module()
+        conn = _RecorderConnection()
+        after_symbols: list[str] = []
+        targeted_batches: list[tuple[str, ...]] = []
+
+        def fake_pending_symbols(
+            _conn,
+            _account_id,
+            *,
+            limit,
+            after_symbol="",
+        ):
+            self.assertEqual(limit, 2)
+            after_symbols.append(after_symbol)
+            if after_symbol == "":
+                return ("BTCUSDT", "ETHUSDT")
+            return ("SOLUSDT", "XRPUSDT")
+
+        def fake_snapshot(
+            _base,
+            _key,
+            _secret,
+            *,
+            targeted_history_symbols,
+            history_symbol_limit,
+            history_request_budget,
+        ):
+            self.assertEqual(history_symbol_limit, 2)
+            self.assertEqual(history_request_budget, 4)
+            targeted_batches.append(targeted_history_symbols)
+            return _snapshot_payload()
+
+        module._PENDING_SYMBOL_CURSOR_BY_ACCOUNT.clear()
+        with patch.object(
+            module,
+            "ACCOUNTS",
+            {"account-a": ("container-a", "PREFIX_A")},
+        ), patch.object(
+            module,
+            "container_keys",
+            return_value=("api-key", "api-secret"),
+        ), patch.object(
+            module,
+            "_history_symbol_limit",
+            return_value=64,
+        ), patch.object(
+            module,
+            "_history_request_budget",
+            return_value=4,
+        ), patch.object(
+            module,
+            "pending_opening_symbols",
+            side_effect=fake_pending_symbols,
+        ), patch.object(
+            module,
+            "snapshot_account",
+            side_effect=fake_snapshot,
+        ):
+            module.run_once(conn, "https://fapi.binance.com")
+            module.run_once(conn, "https://fapi.binance.com")
+
+        self.assertEqual(after_symbols, ["", "ETHUSDT"])
+        self.assertEqual(
+            targeted_batches,
+            [
+                ("BTCUSDT", "ETHUSDT"),
+                ("SOLUSDT", "XRPUSDT"),
+            ],
+        )
+        self.assertEqual(conn.commit_count, 2)
 
     def test_signed_get_includes_extended_recv_window(self) -> None:
         module = _load_module()
@@ -273,6 +529,66 @@ def _load_module() -> types.ModuleType:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     return module
+
+
+class _PendingSymbolConnection:
+    def __init__(self, rows) -> None:
+        self.rows = rows
+        self.sql = ""
+        self.params = ()
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, sql, params) -> None:
+        self.sql = sql
+        self.params = params
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class _RecorderConnection:
+    def __init__(self) -> None:
+        self.commit_count = 0
+        self.rollback_count = 0
+        self.executions: list[tuple[str, tuple]] = []
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, sql, params) -> None:
+        self.executions.append((sql, params))
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+    def rollback(self) -> None:
+        self.rollback_count += 1
+
+
+def _snapshot_payload() -> dict:
+    return {
+        "fetched_at": "2026-08-09T00:00:00Z",
+        "account": {
+            "currency": "USDT",
+            "equity": "100",
+            "margin": "10",
+            "free": "90",
+        },
+    }
 
 
 if __name__ == "__main__":

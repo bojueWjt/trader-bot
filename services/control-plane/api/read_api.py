@@ -1334,10 +1334,11 @@ def _opening_execution_surface(
 ) -> dict[str, Any]:
     projection_rows: list[dict[str, Any]] = []
     event_rows: list[dict[str, Any]] = []
+    target_instruments: dict[str, str] = {}
     durable_evidence_available = True
-    if target_client_order_ids:
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if target_client_order_ids:
                 cur.execute(
                     """
                     SELECT account_id, instrument_id, client_order_id,
@@ -1379,11 +1380,79 @@ def _opening_execution_surface(
                 event_rows = [
                     dict(row) for row in cur.fetchall()
                 ]
-        except psycopg2.Error:
-            conn.rollback()
-            durable_evidence_available = False
-            projection_rows = []
-            event_rows = []
+                intent_ids: list[str] = []
+                for client_order_id in target_client_order_ids:
+                    intent_id = _opening_intent_id(client_order_id)
+                    if intent_id is False:
+                        continue
+                    intent_ids.append(intent_id)
+                cur.execute(
+                    """
+                    SELECT intent_id::text AS intent_id, instrument_id
+                    FROM trade_intents
+                    WHERE account_id=%s
+                      AND intent_id = ANY(%s::uuid[])
+                    """,
+                    (account_id, intent_ids),
+                )
+                target_instruments = {
+                    str(row["intent_id"]): str(row["instrument_id"])
+                    for row in cur.fetchall()
+                }
+            else:
+                cur.execute(
+                    """
+                    SELECT account_id, instrument_id, client_order_id,
+                           venue_order_id, status, filled_quantity,
+                           ts_event, updated_at, payload
+                    FROM orders_projection
+                    WHERE account_id=%s
+                      AND client_order_id ~ %s
+                    ORDER BY updated_at DESC, client_order_id
+                    LIMIT %s
+                    """,
+                    (
+                        account_id,
+                        _OPENING_CLIENT_ORDER_ID_RE.pattern,
+                        _OPENING_EVIDENCE_TARGET_LIMIT,
+                    ),
+                )
+                projection_rows = [
+                    dict(row) for row in cur.fetchall()
+                ]
+                cur.execute(
+                    """
+                    SELECT account_id, client_order_id, venue_order_id,
+                           trade_id, event_type, ts_event, payload
+                    FROM (
+                        SELECT DISTINCT ON (client_order_id)
+                               account_id, client_order_id,
+                               venue_order_id, trade_id, event_type,
+                               ts_event, created_at, payload
+                        FROM execution_events
+                        WHERE account_id=%s
+                          AND client_order_id ~ %s
+                        ORDER BY client_order_id, ts_event DESC,
+                                 created_at DESC
+                    ) AS latest_events
+                    ORDER BY ts_event DESC, client_order_id
+                    LIMIT %s
+                    """,
+                    (
+                        account_id,
+                        _OPENING_CLIENT_ORDER_ID_RE.pattern,
+                        _OPENING_EVIDENCE_TARGET_LIMIT,
+                    ),
+                )
+                event_rows = [
+                    dict(row) for row in cur.fetchall()
+                ]
+    except psycopg2.Error:
+        conn.rollback()
+        durable_evidence_available = False
+        projection_rows = []
+        event_rows = []
+        target_instruments = {}
 
     trusted_exchange_payload: Mapping[str, Any] = exchange_payload
     if mirror_stale:
@@ -1403,6 +1472,20 @@ def _opening_execution_surface(
         event_rows=event_rows,
         target_client_order_ids=target_client_order_ids,
     )
+    if (
+        target_client_order_ids
+        and durable_evidence_available
+        and not mirror_stale
+    ):
+        items = _add_complete_history_absences(
+            account_id=account_id,
+            exchange_payload=trusted_exchange_payload,
+            items=items,
+            target_client_order_ids=target_client_order_ids,
+            target_instruments=target_instruments,
+        )
+    if not target_client_order_ids:
+        items = _recent_opening_evidence(items)
     reason = "fresh_account_scoped_evidence"
     if mirror_stale:
         reason = "durable_evidence_only_exchange_mirror_stale"
@@ -1427,18 +1510,18 @@ def _merge_opening_execution_evidence(
     target_ids = set(target_client_order_ids)
     for row in projection_rows:
         candidate = _projection_opening_evidence(account_id, row)
-        if (
-            candidate is not False
-            and candidate["client_order_id"] in target_ids
-        ):
-            _record_opening_evidence(evidence_by_id, candidate)
+        if candidate is False:
+            continue
+        if target_ids and candidate["client_order_id"] not in target_ids:
+            continue
+        _record_opening_evidence(evidence_by_id, candidate)
     for row in event_rows:
         candidate = _event_opening_evidence(account_id, row)
-        if (
-            candidate is not False
-            and candidate["client_order_id"] in target_ids
-        ):
-            _record_opening_evidence(evidence_by_id, candidate)
+        if candidate is False:
+            continue
+        if target_ids and candidate["client_order_id"] not in target_ids:
+            continue
+        _record_opening_evidence(evidence_by_id, candidate)
     for collection_name in (
         "open_orders",
         "algo_orders",
@@ -1457,12 +1540,125 @@ def _merge_opening_execution_evidence(
                 source=f"exchange_state.{collection_name}",
                 observed_at=exchange_payload.get("fetched_at"),
             )
-            if (
-                candidate is not False
-                and candidate["client_order_id"] in target_ids
-            ):
-                _record_opening_evidence(evidence_by_id, candidate)
+            if candidate is False:
+                continue
+            if target_ids and candidate["client_order_id"] not in target_ids:
+                continue
+            _record_opening_evidence(evidence_by_id, candidate)
     return [evidence_by_id[key] for key in sorted(evidence_by_id)]
+
+
+def _add_complete_history_absences(
+    *,
+    account_id: str,
+    exchange_payload: Mapping[str, Any],
+    items: list[dict[str, Any]],
+    target_client_order_ids: tuple[str, ...],
+    target_instruments: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    evidence_by_id = {
+        str(item["client_order_id"]): item
+        for item in items
+    }
+    coverage = exchange_payload.get(
+        "recent_order_history_coverage"
+    )
+    if not isinstance(coverage, Mapping):
+        return items
+    searched_symbols = _opening_coverage_symbols(
+        coverage.get("searched_symbols")
+    )
+    regular_complete_symbols = _opening_coverage_symbols(
+        coverage.get("regular_history_complete_symbols")
+    )
+    algo_complete_symbols = _opening_coverage_symbols(
+        coverage.get("algo_history_complete_symbols")
+    )
+    complete_symbols = _opening_coverage_symbols(
+        coverage.get("history_complete_symbols")
+    )
+    for client_order_id in target_client_order_ids:
+        if client_order_id in evidence_by_id:
+            continue
+        intent_id = _opening_intent_id(client_order_id)
+        if intent_id is False:
+            continue
+        instrument_id = target_instruments.get(intent_id)
+        if not instrument_id:
+            continue
+        symbol = _opening_instrument_symbol(instrument_id)
+        if symbol is False:
+            continue
+        required_coverages = (
+            searched_symbols,
+            regular_complete_symbols,
+            algo_complete_symbols,
+            complete_symbols,
+        )
+        if not all(symbol in symbols for symbols in required_coverages):
+            continue
+        evidence_by_id[client_order_id] = _opening_evidence_item(
+            account_id=account_id,
+            client_order_id=client_order_id,
+            state=_OPENING_DEFINITIVELY_ABSENT,
+            order_status=None,
+            instrument_id=instrument_id,
+            venue_order_id=None,
+            filled_quantity=None,
+            source="exchange_state.history_enrichment",
+            observed_at=exchange_payload.get("fetched_at"),
+            reason="fresh_complete_exchange_history_has_no_record",
+        )
+    return [
+        evidence_by_id[key]
+        for key in sorted(evidence_by_id)
+    ]
+
+
+def _opening_coverage_symbols(value: Any) -> frozenset[str]:
+    if not isinstance(value, list):
+        return frozenset()
+    symbols: set[str] = set()
+    for item in value:
+        symbol = _opening_instrument_symbol(item)
+        if symbol is False:
+            continue
+        symbols.add(symbol)
+    return frozenset(symbols)
+
+
+def _opening_instrument_symbol(value: Any) -> str | bool:
+    text = str(value or "").strip().upper()
+    if not text:
+        return False
+    if "-PERP." in text:
+        text = text.split("-", 1)[0]
+    if not re.fullmatch(r"[A-Z0-9]{3,24}", text):
+        return False
+    return text
+
+
+def _opening_intent_id(client_order_id: str) -> str | bool:
+    if not _OPENING_CLIENT_ORDER_ID_RE.fullmatch(client_order_id):
+        return False
+    try:
+        return str(UUID(hex=client_order_id[1:33]))
+    except ValueError:
+        return False
+
+
+def _recent_opening_evidence(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            str(item.get("observed_at") or ""),
+            str(item.get("client_order_id") or ""),
+        ),
+        reverse=True,
+    )
+    return ordered[:_OPENING_EVIDENCE_TARGET_LIMIT]
 
 
 def _projection_opening_evidence(

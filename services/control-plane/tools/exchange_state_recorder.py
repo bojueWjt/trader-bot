@@ -6,8 +6,9 @@ orders (STOP_MARKET / TAKE_PROFIT) to the algo-order system on 2025-12-09 —
 they are invisible to /fapi/v1/openOrders and to the projections. This recorder
 polls the exchange directly (read-only, signed GET only) and atomically upserts
 exchange_state_mirror plus accounts_projection for each account. It never
-touches the trading path; on any exchange error it logs and skips the cycle,
-letting the existing rows go stale.
+touches the trading path. Core snapshot errors leave existing rows stale;
+history enrichment errors are recorded as degraded coverage while the fresh
+core snapshot is still persisted.
 
 API keys are read from the running node containers' env (single source of
 truth; survives key rotation via the recreate scripts).
@@ -38,6 +39,10 @@ ACCOUNTS = {
 BINANCE_RECV_WINDOW_MS = 30_000
 DEFAULT_RECENT_HISTORY_MAX_SYMBOLS = 16
 ABSOLUTE_RECENT_HISTORY_MAX_SYMBOLS = 64
+DEFAULT_HISTORY_REQUEST_BUDGET = 32
+ABSOLUTE_HISTORY_REQUEST_BUDGET = 32
+HISTORY_REQUESTS_PER_SYMBOL = 2
+_PENDING_SYMBOL_CURSOR_BY_ACCOUNT: dict[str, str] = {}
 
 UPSERT_SQL = """
 INSERT INTO exchange_state_mirror (account_id, payload, updated_at)
@@ -259,6 +264,23 @@ def _history_symbol_limit() -> int:
     )
 
 
+def _history_request_budget() -> int:
+    raw = os.environ.get(
+        "EXCHANGE_STATE_HISTORY_REQUEST_BUDGET",
+        str(DEFAULT_HISTORY_REQUEST_BUDGET),
+    )
+    try:
+        requested = int(raw)
+    except ValueError:
+        requested = DEFAULT_HISTORY_REQUEST_BUDGET
+    bounded = max(
+        HISTORY_REQUESTS_PER_SYMBOL,
+        min(requested, ABSOLUTE_HISTORY_REQUEST_BUDGET),
+    )
+    remainder = bounded % HISTORY_REQUESTS_PER_SYMBOL
+    return bounded - remainder
+
+
 def _configured_history_symbols(
     account_id: str,
 ) -> tuple[str, ...]:
@@ -289,20 +311,94 @@ def pending_opening_symbols(
     account_id: str,
     *,
     limit: int,
+    after_symbol: str = "",
 ) -> tuple[str, ...]:
+    after_instrument_id = ""
+    normalized_after = _normalized_symbols((after_symbol,))
+    if normalized_after:
+        after_instrument_id = (
+            f"{normalized_after[0]}-PERP.BINANCE"
+        )
     with conn.cursor() as cur:
         cur.execute(
             """
+            WITH unresolved_opening_symbols AS (
+                SELECT ti.instrument_id, max(ti.updated_at) AS updated_at
+                FROM trade_intents ti
+                WHERE ti.account_id=%s
+                  AND ti.status IN ('approved', 'expired')
+                  AND ti.action IN ('open_position', 'add_position')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM execution_events ee
+                      WHERE ee.account_id=ti.account_id
+                        AND ee.intent_id=ti.intent_id
+                        AND (
+                            ee.event_type IN (
+                                'OrderAccepted',
+                                'OrderFilled',
+                                'OrderCanceled',
+                                'OrderExpired',
+                                'OrderUpdated',
+                                'OrderPendingUpdate',
+                                'OrderPendingCancel',
+                                'OrderRejected',
+                                'OrderDenied',
+                                'OrderSubmitFailed',
+                                'ExecutionFailed'
+                            )
+                            OR (
+                                ee.event_type='OrderSubmitted'
+                                AND (
+                                    ee.venue_order_id IS NOT NULL
+                                    OR ee.trade_id IS NOT NULL
+                                )
+                            )
+                        )
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM orders_projection op
+                      WHERE op.account_id=ti.account_id
+                        AND op.intent_id=ti.intent_id
+                        AND (
+                            op.filled_quantity > 0
+                            OR op.venue_order_id IS NOT NULL
+                            OR lower(op.status) IN (
+                                'accepted',
+                                'working',
+                                'partially_filled',
+                                'filled',
+                                'pending_cancel',
+                                'cancelled',
+                                'canceled',
+                                'expired',
+                                'closed',
+                                'done',
+                                'rejected',
+                                'denied',
+                                'failed'
+                            )
+                        )
+                  )
+                GROUP BY ti.instrument_id
+            )
             SELECT instrument_id
-            FROM trade_intents
-            WHERE account_id=%s
-              AND status='approved'
-              AND valid_until > now()
-              AND action IN ('open_position', 'add_position')
-            ORDER BY updated_at DESC, intent_id
+            FROM unresolved_opening_symbols
+            ORDER BY
+                CASE
+                    WHEN %s = '' OR instrument_id > %s THEN 0
+                    ELSE 1
+                END,
+                instrument_id
             LIMIT %s
             """,
-            (account_id, limit),
+            (
+                account_id,
+                after_instrument_id,
+                after_instrument_id,
+                limit,
+            ),
         )
         rows = cur.fetchall()
     return _normalized_symbols(
@@ -315,32 +411,93 @@ def recent_order_history(
     key: str,
     sec: str,
     symbols: tuple[str, ...],
-) -> tuple[list[dict], list[dict]]:
+    *,
+    request_budget: int,
+) -> tuple[list[dict], list[dict], dict]:
     regular_history: list[dict] = []
     algo_history: list[dict] = []
+    searched_symbols: list[str] = []
+    regular_complete_symbols: list[str] = []
+    algo_complete_symbols: list[str] = []
+    failed_requests: list[dict[str, str]] = []
+    requests_attempted = 0
     for symbol in symbols:
-        regular_rows = _order_rows(
-            signed_get(
-                base,
-                "/fapi/v1/allOrders",
-                key,
-                sec,
-                {"symbol": symbol, "limit": 1000},
+        if (
+            requests_attempted + HISTORY_REQUESTS_PER_SYMBOL
+            > request_budget
+        ):
+            break
+        searched_symbols.append(symbol)
+        requests_attempted += 1
+        try:
+            regular_rows = _order_rows(
+                signed_get(
+                    base,
+                    "/fapi/v1/allOrders",
+                    key,
+                    sec,
+                    {"symbol": symbol, "limit": 1000},
+                )
             )
-        )
-        regular_history.extend(slim_order(row, "regular") for row in regular_rows)
+        except Exception as exc:  # noqa: BLE001 - enrichment is soft evidence
+            failed_requests.append(
+                {"symbol": symbol, "history": "regular"}
+            )
+            log(
+                f"history enrichment degraded symbol={symbol} "
+                f"history=regular: {exc}"
+            )
+        else:
+            regular_complete_symbols.append(symbol)
+            regular_history.extend(
+                slim_order(row, "regular")
+                for row in regular_rows
+            )
 
-        algo_rows = _order_rows(
-            signed_get(
-                base,
-                "/fapi/v1/allAlgoOrders",
-                key,
-                sec,
-                {"symbol": symbol, "limit": 1000},
+        requests_attempted += 1
+        try:
+            algo_rows = _order_rows(
+                signed_get(
+                    base,
+                    "/fapi/v1/allAlgoOrders",
+                    key,
+                    sec,
+                    {"symbol": symbol, "limit": 1000},
+                )
             )
-        )
-        algo_history.extend(slim_order(row, "algo") for row in algo_rows)
-    return regular_history, algo_history
+        except Exception as exc:  # noqa: BLE001 - enrichment is soft evidence
+            failed_requests.append(
+                {"symbol": symbol, "history": "algo"}
+            )
+            log(
+                f"history enrichment degraded symbol={symbol} "
+                f"history=algo: {exc}"
+            )
+        else:
+            algo_complete_symbols.append(symbol)
+            algo_history.extend(
+                slim_order(row, "algo")
+                for row in algo_rows
+            )
+    regular_complete = set(regular_complete_symbols)
+    algo_complete = set(algo_complete_symbols)
+    history_complete_symbols = [
+        symbol
+        for symbol in searched_symbols
+        if symbol in regular_complete and symbol in algo_complete
+    ]
+    coverage = {
+        "searched_symbols": searched_symbols,
+        "regular_history_complete_symbols": (
+            regular_complete_symbols
+        ),
+        "algo_history_complete_symbols": algo_complete_symbols,
+        "history_complete_symbols": history_complete_symbols,
+        "failed_requests": failed_requests,
+        "requests_attempted": requests_attempted,
+        "degraded": bool(failed_requests),
+    }
+    return regular_history, algo_history, coverage
 
 
 def snapshot_account(
@@ -350,6 +507,7 @@ def snapshot_account(
     *,
     targeted_history_symbols: tuple[str, ...] = (),
     history_symbol_limit: int = DEFAULT_RECENT_HISTORY_MAX_SYMBOLS,
+    history_request_budget: int = DEFAULT_HISTORY_REQUEST_BUDGET,
 ) -> dict:
     account_info = signed_get(base, "/fapi/v3/account", key, sec)
     if not isinstance(account_info, dict):
@@ -364,12 +522,20 @@ def snapshot_account(
     algo_raw = signed_get(base, "/fapi/v1/openAlgoOrders", key, sec)
     algo_rows = algo_raw.get("orders", algo_raw) if isinstance(algo_raw, dict) else algo_raw
     algo = [slim_order(o, "algo") for o in algo_rows]
+    request_bounded_symbol_limit = max(
+        1,
+        history_request_budget // HISTORY_REQUESTS_PER_SYMBOL,
+    )
+    effective_symbol_limit = min(
+        history_symbol_limit,
+        request_bounded_symbol_limit,
+    )
     history_symbols = _recent_history_symbols(
         positions,
         regular,
         algo,
         targeted_history_symbols,
-        max_symbols=history_symbol_limit,
+        max_symbols=effective_symbol_limit,
     )
     all_history_symbols = _recent_history_symbols(
         positions,
@@ -378,11 +544,30 @@ def snapshot_account(
         targeted_history_symbols,
         max_symbols=ABSOLUTE_RECENT_HISTORY_MAX_SYMBOLS,
     )
-    regular_history, algo_history = recent_order_history(
+    (
+        regular_history,
+        algo_history,
+        history_coverage,
+    ) = recent_order_history(
         base,
         key,
         sec,
         history_symbols,
+        request_budget=history_request_budget,
+    )
+    searched_symbols = history_coverage["searched_symbols"]
+    history_coverage.update(
+        {
+            "max_symbols": effective_symbol_limit,
+            "request_budget": history_request_budget,
+            "targeted_symbols": list(
+                _normalized_symbols(targeted_history_symbols)
+            ),
+            "queried_symbols": list(searched_symbols),
+            "truncated": len(all_history_symbols) > len(
+                searched_symbols
+            ),
+        }
     )
     return {
         "source": "binance_fapi",
@@ -399,32 +584,36 @@ def snapshot_account(
         "algo_orders": algo,
         "recent_order_history": regular_history,
         "recent_algo_order_history": algo_history,
-        "recent_order_history_symbols": list(history_symbols),
-        "recent_order_history_coverage": {
-            "max_symbols": history_symbol_limit,
-            "targeted_symbols": list(
-                _normalized_symbols(targeted_history_symbols)
-            ),
-            "queried_symbols": list(history_symbols),
-            "truncated": len(all_history_symbols) > len(
-                history_symbols
-            ),
-        },
+        "recent_order_history_symbols": list(searched_symbols),
+        "recent_order_history_coverage": history_coverage,
         "protections": protections(positions, algo, regular),
     }
 
 
 def run_once(conn, base: str) -> None:
-    history_symbol_limit = _history_symbol_limit()
+    history_request_budget = _history_request_budget()
+    request_bounded_symbol_limit = max(
+        1,
+        history_request_budget // HISTORY_REQUESTS_PER_SYMBOL,
+    )
+    history_symbol_limit = min(
+        _history_symbol_limit(),
+        request_bounded_symbol_limit,
+    )
     for account_id, (container, prefix) in ACCOUNTS.items():
         creds = container_keys(container, prefix)
         if not creds:
             continue
+        after_symbol = _PENDING_SYMBOL_CURSOR_BY_ACCOUNT.get(
+            account_id,
+            "",
+        )
         try:
             pending_symbols = pending_opening_symbols(
                 conn,
                 account_id,
                 limit=history_symbol_limit,
+                after_symbol=after_symbol,
             )
         except psycopg2.Error as exc:
             conn.rollback()
@@ -435,6 +624,10 @@ def run_once(conn, base: str) -> None:
             )
         else:
             conn.rollback()
+            if pending_symbols:
+                _PENDING_SYMBOL_CURSOR_BY_ACCOUNT[account_id] = (
+                    pending_symbols[-1]
+                )
         targeted_symbols = tuple(
             dict.fromkeys(
                 pending_symbols
@@ -447,6 +640,7 @@ def run_once(conn, base: str) -> None:
                 *creds,
                 targeted_history_symbols=targeted_symbols,
                 history_symbol_limit=history_symbol_limit,
+                history_request_budget=history_request_budget,
             )
         except Exception as exc:  # noqa: BLE001 - stale row is the failure signal
             log(f"{account_id}: exchange fetch failed, leaving row stale: {exc}")
