@@ -7,10 +7,10 @@
 | ID | Owner | Status | Deliverable | Evidence / Next Gate |
 |---|---|---|---|---|
 | C-P2 | planner/runtime | done | FILTERED/HALTED 优先级、pending session wake、公平清理 wrapper degradation | projection 37 passed/4 skipped；调度竞态 50/50 |
-| C-GATE | planner/live-trade-verifier | done | 可用性 gate 分层、节点遥测与交易所 authority 解耦、独立 loss monitor、身份重验、完整财务证明 | executor+adapter 301 passed；runtime/projection/http focused 73 passed；heartbeat API 14 passed；execution+nautilus 422 passed/11 skipped/2 subtests；deployment 387 passed；control-plane API 86 passed；双 reviewer `P0=0 P1=0 P2=0` |
+| C-GATE | planner/live-trade-verifier | done | 可用性 gate 分层、节点遥测与交易所 authority 解耦、独立 loss monitor、身份重验、完整财务证明 | 当前 executor 191 passed、adapter 129 passed、recorder/deployment 6-file selection 45 passed；close ACK 累计 cap、post-HALT recoverable、recoverable evidence atomic replace 和 preflight phase-bound drift 回归通过；runtime/projection/http focused 73 passed；heartbeat API 14 passed；execution+nautilus 422 passed/11 skipped/2 subtests；deployment 387 passed；control-plane API 86 passed |
 | C-BASELINE | planner/runtime | done | 非目标组合基线按明确结构字段 allowlist 计算，行情刷新和未知扩展字段不阻断；recorder 保留杠杆、保证金模式与自动追加保证金配置 | deployment + recorder 421 passed；双独立 reviewer `P0=0 P1=0` |
-| C-DEPLOY | planner | in_progress | 提交并部署新 recorder 与 adapter bundle，保持 account-a HALTED | 当前生产仍为 commit `fbcadf2`；等待 reviewer PASS 与新 commit-bound bundle |
-| C-PREFLIGHT | live-trade-verifier | pending | deployed adapter preflight 与 canonical non-target baseline | 等待 C-DEPLOY；随后跨至少两次 exchange refresh 验证结构基线稳定 |
+| C-DEPLOY | planner | in_progress | 提交并部署新 executor、adapter 与 recorder bundle，保持 account-a HALTED | 当前生产 commit `8a77a50`，部署时间 2026-08-09 21:59:07 UTC；等待 reviewer PASS 与新 commit-bound bundle |
+| C-PREFLIGHT | live-trade-verifier | pending | deployed adapter preflight、目标归零和非目标组合审计快照 | 等待 C-DEPLOY；现场读取当前 Redis instrument 原始字节、当前 book 和新鲜 exchange snapshot |
 | C-LIVE | live-trade-verifier | pending | 单次 `0.07 SOLUSDT LIMIT + IOC` 往返、精确平仓、最终 HALT | 等待签名 gate 与 dry-run |
 | C-REVIEW | reviewer/evidence-auditor | pending | 最终 P0/P1、交易所证据、组合基线和损益复核 | 等待 C-LIVE |
 

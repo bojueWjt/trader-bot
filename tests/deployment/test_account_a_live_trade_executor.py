@@ -70,6 +70,7 @@ class CrashBeforePublishEvidenceWriter(executor.AtomicEvidenceWriter):
         *,
         evidence_sha256: str,
         allow_existing: bool,
+        replace_existing: bool = False,
     ) -> str:
         if self.crash_pending:
             self.crash_pending = False
@@ -78,6 +79,31 @@ class CrashBeforePublishEvidenceWriter(executor.AtomicEvidenceWriter):
             evidence,
             evidence_sha256=evidence_sha256,
             allow_existing=allow_existing,
+            replace_existing=replace_existing,
+        )
+
+
+class CrashBeforeReplaceEvidenceWriter(executor.AtomicEvidenceWriter):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.crash_pending = True
+
+    def commit_prepared(
+        self,
+        evidence: Mapping[str, Any],
+        *,
+        evidence_sha256: str,
+        allow_existing: bool,
+        replace_existing: bool = False,
+    ) -> str:
+        if replace_existing and self.crash_pending:
+            self.crash_pending = False
+            raise InjectedCrash("before recoverable evidence replacement")
+        return super().commit_prepared(
+            evidence,
+            evidence_sha256=evidence_sha256,
+            allow_existing=allow_existing,
+            replace_existing=replace_existing,
         )
 
 
@@ -103,12 +129,14 @@ class LockCheckingEvidenceWriter(executor.AtomicEvidenceWriter):
         *,
         evidence_sha256: str,
         allow_existing: bool,
+        replace_existing: bool = False,
     ) -> str:
         self.operation_lock.require_held()
         return super().commit_prepared(
             evidence,
             evidence_sha256=evidence_sha256,
             allow_existing=allow_existing,
+            replace_existing=replace_existing,
         )
 
 
@@ -195,6 +223,9 @@ class FakeAdapter:
         post_halt_final_fetched_at: datetime | None = None,
         final_enrichment_degraded: bool = False,
         final_warnings: Sequence[str] | None = None,
+        final_baseline_sha256: str = "",
+        final_open_filled_quantity: str = "0.07",
+        final_open_average_fill_price_usdt: str = "",
         close_enrichment_degraded: bool = False,
         close_warnings: Sequence[str] | None = None,
         open_fill_attempts: Sequence[bool] | None = None,
@@ -243,6 +274,12 @@ class FakeAdapter:
         self.post_halt_final_fetched_at = post_halt_final_fetched_at
         self.final_enrichment_degraded = final_enrichment_degraded
         self.final_warnings = tuple(final_warnings or ())
+        self.final_baseline_sha256 = final_baseline_sha256
+        self.final_open_filled_quantity = final_open_filled_quantity
+        final_open_price = final_open_average_fill_price_usdt
+        if not final_open_price:
+            final_open_price = observation_price
+        self.final_open_average_fill_price_usdt = final_open_price
         self.close_enrichment_degraded = close_enrichment_degraded
         self.close_warnings = tuple(close_warnings or ())
         self.open_fill_attempts = tuple(open_fill_attempts or ())
@@ -250,6 +287,8 @@ class FakeAdapter:
         self.calls: list[str] = []
         self.requests: dict[str, list[dict[str, Any]]] = {}
         self.close_requests: list[Mapping[str, Any]] = []
+        self.close_effect_quantities: list[Decimal] = []
+        self.close_acks: dict[str, Mapping[str, Any]] = {}
         self.position_quantity = Decimal(0)
         self.position_side = "FLAT"
         self.trading_state = "HALTED"
@@ -448,15 +487,20 @@ class FakeAdapter:
         self._require_operation_lock()
         self._record_call("close", request)
         self.close_requests.append(dict(request))
+        side_effect_id = str(request["side_effect_id"])
+        cached_ack = self.close_acks.get(side_effect_id)
+        if cached_ack is not None:
+            return dict(cached_ack)
         if self.calls.count("close") <= self.close_failures:
             raise RuntimeError("injected close failure")
         filled_quantity = str(request["quantity"])
-        self.position_quantity = Decimal(0)
-        self.position_side = "FLAT"
-        error = self.close_error_after_effect
-        if error is not None:
-            self.close_error_after_effect = None
-            raise error
+        self.close_effect_quantities.append(Decimal(filled_quantity))
+        self.position_quantity = max(
+            Decimal(0),
+            self.position_quantity - Decimal(filled_quantity),
+        )
+        if self.position_quantity == 0:
+            self.position_side = "FLAT"
         payload = self._ack(
             "close",
             client_order_id=(
@@ -470,6 +514,11 @@ class FakeAdapter:
             self.close_enrichment_degraded
         )
         payload["warnings"] = list(self.close_warnings)
+        self.close_acks[side_effect_id] = dict(payload)
+        error = self.close_error_after_effect
+        if error is not None:
+            self.close_error_after_effect = None
+            raise error
         return payload
 
     def final_snapshot(
@@ -502,6 +551,9 @@ class FakeAdapter:
             post_halt_fetched_at = self.post_halt_final_fetched_at
             if post_halt_fetched_at is not None:
                 fetched_at = post_halt_fetched_at
+        baseline = self.final_baseline_sha256
+        if not baseline:
+            baseline = self.authorization.portfolio_baseline_sha256
         payload = self._identity()
         payload.update(
             {
@@ -509,8 +561,10 @@ class FakeAdapter:
                 "target_symbol_regular_orders_zero": True,
                 "target_symbol_algo_orders_zero": True,
                 "position_quantity": str(self.position_quantity),
-                "non_target_portfolio_baseline_sha256": (
-                    self.authorization.portfolio_baseline_sha256
+                "non_target_portfolio_baseline_sha256": baseline,
+                "open_filled_quantity": self.final_open_filled_quantity,
+                "open_average_fill_price_usdt": (
+                    self.final_open_average_fill_price_usdt
                 ),
                 "gross_pnl_usdt": str(gross_pnl),
                 "fees_usdt": str(fees),
@@ -1850,6 +1904,7 @@ def test_duplicate_permit_execution_halts_and_writes_failure_evidence(
         result.failure_reason
     )
     assert adapter.calls == [
+        "halt",
         "cancel-open",
         "position",
         "final-snapshot",
@@ -1883,7 +1938,7 @@ def test_open_exception_still_closes_exact_position_then_halts(
     assert "injected observation failure" in result.failure_reason
     assert result.close_submitted is True
     assert result.close_quantity == Decimal("0.07")
-    assert adapter.calls.index("close") < adapter.calls.index("halt")
+    assert adapter.calls.index("halt") < adapter.calls.index("close")
     assert adapter.close_requests == [
         {
             **_base_request(authorization),
@@ -1968,15 +2023,20 @@ def test_journal_fsync_failure_cannot_block_emergency_close_or_halt(
     assert "No space left on device" in result.failure_reason
     assert adapter.calls.count("open") <= 1
     assert adapter.calls.count("close") == expected_close_count
-    assert adapter.calls.count("halt") == 1
+    expected_halt_count = 1
     if expected_close_count == 1:
-        assert adapter.calls.index("position") < adapter.calls.index("halt")
+        expected_halt_count = 2
+    assert adapter.calls.count("halt") == expected_halt_count
+    if expected_close_count == 1:
+        first_halt = adapter.calls.index("halt")
+        last_halt = len(adapter.calls) - 1 - adapter.calls[::-1].index(
+            "halt"
+        )
+        assert first_halt < adapter.calls.index("position")
         assert adapter.calls.index("position") < adapter.calls.index(
             "close"
         )
-        assert adapter.calls.index("close") < adapter.calls.index(
-            "halt"
-        )
+        assert adapter.calls.index("close") < last_halt
     else:
         assert "position" not in adapter.calls
     evidence = json.loads(evidence_path.read_text(encoding="ascii"))
@@ -2121,6 +2181,7 @@ def test_open_timeout_after_exchange_acceptance_recovers_exchange_first(
         "preflight",
         "open",
         "observe",
+        "halt",
         "cancel-open",
         "position",
         "close",
@@ -2906,6 +2967,95 @@ def test_before_open_preflight_rejects_snapshot_from_before_resume(
     assert before_open_request["exchange_not_before"] == NOW.isoformat()
 
 
+def test_non_target_portfolio_drift_is_advisory_for_round_trip(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    drifted_baseline = _digest("unrelated-account-activity")
+    adapter = FakeAdapter(
+        authorization,
+        preflight_baseline_sha256=drifted_baseline,
+        final_baseline_sha256=drifted_baseline,
+    )
+    evidence_path = tmp_path / "non-target-portfolio-drift.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.close_submitted is True
+    assert result.finished_halted is True
+    assert adapter.calls.count("open") == 1
+    assert adapter.calls.count("close") == 1
+    assert adapter.calls.count("halt") == 2
+    assert any(
+        "NON_TARGET_PORTFOLIO_DRIFT" in warning
+        for warning in result.warnings
+    )
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert evidence["non_target_portfolio_before_sha256"] == (
+        authorization.portfolio_baseline_sha256
+    )
+    assert evidence["non_target_portfolio_after_sha256"] == (
+        drifted_baseline
+    )
+    assert evidence["target_symbol_flat"] is True
+    assert evidence["target_symbol_regular_orders_zero"] is True
+    assert evidence["target_symbol_algo_orders_zero"] is True
+
+
+def test_preflight_only_portfolio_drift_records_phase_bound_hashes(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    drifted_baseline = _digest("transient-unrelated-account-activity")
+    adapter = FakeAdapter(
+        authorization,
+        preflight_baseline_sha256=drifted_baseline,
+    )
+    evidence_path = tmp_path / "preflight-only-portfolio-drift.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert evidence["non_target_portfolio_before_sha256"] == (
+        authorization.portfolio_baseline_sha256
+    )
+    assert evidence["non_target_portfolio_after_sha256"] == (
+        authorization.portfolio_baseline_sha256
+    )
+    drift_events = [
+        event
+        for event in evidence["events"]
+        if event["event_type"] == "non_target_portfolio_drift_observed"
+    ]
+    assert [event["payload"]["phase"] for event in drift_events] == [
+        "before-resume",
+        "before-open",
+    ]
+    for event in drift_events:
+        assert event["payload"]["signed_baseline_sha256"] == (
+            authorization.portfolio_baseline_sha256
+        )
+        assert event["payload"]["observed_baseline_sha256"] == (
+            drifted_baseline
+        )
+
+
 def test_financial_enrichment_failure_blocks_final_certification_only(
     tmp_path: Path,
 ) -> None:
@@ -3243,7 +3393,59 @@ def test_close_timeout_after_exchange_acceptance_queries_before_retry(
         "reduce_only",
     ):
         assert first_close[field_name] == second_close[field_name]
+    assert adapter.close_effect_quantities == [Decimal("0.07")]
     assert result.close_submitted is True
+    assert result.finished_halted is True
+
+
+def test_ambiguous_close_ack_cannot_expand_cumulative_close_quantity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        close_error_after_effect=TimeoutError(
+            "injected close response timeout"
+        ),
+    )
+    original_current_position = adapter.current_position
+    injected = False
+
+    def current_position(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        nonlocal injected
+        if not injected:
+            adapter.position_quantity = Decimal("0.10")
+            adapter.position_side = "LONG"
+            injected = True
+        return original_current_position(request)
+
+    monkeypatch.setattr(
+        adapter,
+        "current_position",
+        current_position,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "close-ack-cumulative-cap.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert adapter.close_effect_quantities == [Decimal("0.07")]
+    assert [request["quantity"] for request in adapter.close_requests] == [
+        "0.07",
+        "0.07",
+    ]
+    assert adapter.position_quantity == Decimal("0.03")
+    assert "target position remains after the authorized close" in (
+        result.failure_reason
+    )
     assert result.finished_halted is True
 
 
@@ -3351,9 +3553,15 @@ def test_final_pass_uses_fresh_post_halt_exchange_snapshot(
         for index, action in enumerate(adapter.calls)
         if action == "final-snapshot"
     ]
-    halt_index = adapter.calls.index("halt")
+    halt_indexes = [
+        index
+        for index, action in enumerate(adapter.calls)
+        if action == "halt"
+    ]
     assert len(final_indexes) == 2
-    assert final_indexes[0] < halt_index < final_indexes[1]
+    assert len(halt_indexes) == 2
+    assert halt_indexes[0] < final_indexes[0]
+    assert final_indexes[0] < halt_indexes[1] < final_indexes[1]
     final_requests = adapter.requests["final-snapshot"]
     assert final_requests[0]["phase"] == "pre-halt-close-proof"
     assert final_requests[1]["phase"] == "post-halt-final"
@@ -3483,6 +3691,112 @@ def test_stale_post_halt_snapshot_blocks_final_pass(
     assert result.error_code == "POST_HALT_SNAPSHOT_UNPROVEN"
     assert "predates required exchange progress" in result.failure_reason
     assert adapter.calls[-1] == "final-snapshot"
+
+
+def test_post_halt_residual_position_keeps_permit_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    store = _permit_store(tmp_path / "post-halt-residual-ledger.json")
+    original_final_snapshot = adapter.final_snapshot
+
+    def final_snapshot(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if request.get("phase") == "post-halt-final":
+            adapter.position_quantity = Decimal("0.01")
+            adapter.position_side = "LONG"
+        return original_final_snapshot(request)
+
+    monkeypatch.setattr(adapter, "final_snapshot", final_snapshot)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "post-halt-residual.json",
+        permit_store=store,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.finished_halted is True
+    assert adapter.calls.count("close") == 1
+    assert adapter.close_effect_quantities == [Decimal("0.07")]
+    assert "final snapshot requires target_symbol_flat=true" in (
+        result.failure_reason
+    )
+    outcome = store.claim_or_recover(
+        authorization,
+        mode="live",
+    )
+    assert outcome.recovery_required is True
+    assert outcome.terminal is False
+    assert outcome.state != "EVIDENCE_COMMITTED"
+    first_evidence_sha256 = hashlib.sha256(
+        (tmp_path / "post-halt-residual.json").read_bytes()
+    ).hexdigest()
+
+    restart_store = _permit_store(
+        tmp_path / "post-halt-residual-ledger.json"
+    )
+    restart_adapter = FakeAdapter(authorization)
+    crashing_writer = CrashBeforeReplaceEvidenceWriter(
+        tmp_path / "post-halt-residual.json"
+    )
+    restart_executor = _executor(
+        tmp_path,
+        authorization,
+        restart_adapter,
+        evidence_path=tmp_path / "post-halt-residual.json",
+        permit_store=restart_store,
+        evidence_writer=crashing_writer,
+    )
+
+    with pytest.raises(
+        InjectedCrash,
+        match="before recoverable evidence replacement",
+    ):
+        restart_executor.execute(authorization)
+
+    prepared = restart_store.claim_or_recover(
+        authorization,
+        mode="live",
+    )
+    assert prepared.terminal is False
+    assert prepared.recovery_required is True
+    assert prepared.pending_evidence is not None
+    pending_hash = prepared.pending_evidence["sha256"]
+    assert pending_hash != first_evidence_sha256
+
+    final_store = _permit_store(
+        tmp_path / "post-halt-residual-ledger.json"
+    )
+    final_adapter = FakeAdapter(authorization)
+    final_executor = _executor(
+        tmp_path,
+        authorization,
+        final_adapter,
+        evidence_path=tmp_path / "post-halt-residual.json",
+        permit_store=final_store,
+    )
+
+    recovered = final_executor.execute(authorization)
+
+    assert recovered.status == "BLOCKED"
+    assert recovered.finished_halted is True
+    assert recovered.evidence_sha256 == pending_hash
+    finalized = final_store.claim_or_recover(
+        authorization,
+        mode="live",
+    )
+    assert finalized.terminal is True
+    assert finalized.recovery_required is False
+    snapshot = final_store.snapshot(authorization, mode="live")
+    assert snapshot is not None
+    assert snapshot["state"] == "EVIDENCE_COMMITTED"
 
 
 def test_close_request_uses_independent_derived_intent(
@@ -3717,6 +4031,101 @@ def test_actual_open_notional_breach_closes_and_halts(
     )
 
 
+def test_final_fill_price_enforces_notional_when_observation_is_missing(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        observe_failures=3,
+        final_open_average_fill_price_usdt="200",
+    )
+    evidence_path = tmp_path / "final-fill-notional.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "final actual open notional exceeds permit" in (
+        result.failure_reason
+    )
+    assert result.close_submitted is True
+    assert result.finished_halted is True
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert (
+        evidence["mainnet_round_trip"]["actual_open_notional_usdt"]
+        == "14.00"
+    )
+
+
+def test_halt_precedes_target_risk_cleanup(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "halt-before-cleanup.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.passed is True
+    halt_index = adapter.calls.index("halt")
+    assert halt_index < adapter.calls.index("cancel-open")
+    assert halt_index < adapter.calls.index("close")
+
+
+def test_concurrent_target_position_does_not_expand_close_quantity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_current_position = adapter.current_position
+    injected = False
+
+    def current_position(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        nonlocal injected
+        if not injected:
+            adapter.position_quantity = Decimal("0.10")
+            adapter.position_side = "LONG"
+            injected = True
+        return original_current_position(request)
+
+    monkeypatch.setattr(
+        adapter,
+        "current_position",
+        current_position,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "concurrent-target-position.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "target position exceeded authorized close quantity" in (
+        result.failure_reason
+    )
+    assert len(adapter.close_requests) == 1
+    assert adapter.close_requests[0]["quantity"] == "0.07"
+    assert result.close_quantity == Decimal("0.07")
+    assert result.finished_halted is True
+
+
 def test_loss_threshold_reached_closes_and_halts_immediately(
     tmp_path: Path,
 ) -> None:
@@ -3746,6 +4155,7 @@ def test_loss_threshold_reached_closes_and_halts_immediately(
         "preflight",
         "open",
         "observe",
+        "halt",
         "cancel-open",
         "position",
         "close",
@@ -3923,7 +4333,7 @@ def test_stale_trade_observation_closes_and_halts(
     assert result.passed is False
     assert f"observation {field_name} is stale" in result.failure_reason
     assert result.close_submitted is True
-    assert adapter.calls.index("close") < adapter.calls.index("halt")
+    assert adapter.calls.index("halt") < adapter.calls.index("close")
 
 
 def test_stale_loss_monitor_observation_is_advisory(
@@ -4051,7 +4461,10 @@ def test_halt_requires_fresh_node_state_proof(
 
     assert result.passed is False
     assert result.finished_halted is False
-    assert adapter.calls.count("halt") == 3
+    assert adapter.calls.count("halt") == 6
+    assert adapter.calls.index("close") < (
+        len(adapter.calls) - 1 - adapter.calls[::-1].index("halt")
+    )
     assert expected_error in result.failure_reason
 
 
@@ -4085,7 +4498,7 @@ def test_termination_signal_runs_recovery_cleanup_and_halt(
     assert result.passed is False
     assert "termination signal received" in result.failure_reason
     assert result.close_submitted is True
-    assert adapter.calls.index("close") < adapter.calls.index("halt")
+    assert adapter.calls.index("halt") < adapter.calls.index("close")
     _assert_single_side_effect_identity(authorization, adapter)
     snapshot = store.snapshot(authorization, mode="live")
     assert snapshot is not None
@@ -4118,6 +4531,7 @@ def test_incomplete_open_journal_recovers_without_resume_or_open_replay(
     assert "resume" not in adapter.calls
     assert "open" not in adapter.calls
     assert adapter.calls == [
+        "halt",
         "cancel-open",
         "position",
         "close",
@@ -4167,7 +4581,7 @@ def test_close_retry_exhaustion_keeps_journal_recoverable(
     assert outcome.state != "EVIDENCE_COMMITTED"
 
 
-def test_halt_retry_exhaustion_keeps_journal_recoverable(
+def test_final_halt_retries_after_initial_halt_exhaustion(
     tmp_path: Path,
 ) -> None:
     authorization = _authorization(tmp_path)
@@ -4188,8 +4602,11 @@ def test_halt_retry_exhaustion_keeps_journal_recoverable(
     result = live_executor.execute(authorization)
 
     assert result.passed is False
-    assert result.finished_halted is False
-    assert adapter.calls.count("halt") == 3
+    assert result.finished_halted is True
+    assert adapter.calls.count("halt") == 4
+    assert adapter.calls.index("close") < (
+        len(adapter.calls) - 1 - adapter.calls[::-1].index("halt")
+    )
     assert "unable to prove HALTED within recovery budget" in (
         result.failure_reason
     )
@@ -4197,8 +4614,8 @@ def test_halt_retry_exhaustion_keeps_journal_recoverable(
         authorization,
         mode="live",
     )
-    assert outcome.recovery_required is True
-    assert outcome.terminal is False
+    assert outcome.recovery_required is False
+    assert outcome.terminal is True
 
 
 def test_successful_round_trip_binds_ids_and_evidence_chain(
@@ -4273,20 +4690,16 @@ def test_successful_round_trip_binds_ids_and_evidence_chain(
     history_states = [
         entry["state"] for entry in snapshot["history"]
     ]
-    required_states = [
-        "AUTHORIZED",
-        "RESUMED",
-        "OPEN_SUBMITTED",
-        "OPEN_OBSERVED",
-        "CLOSE_PENDING",
-        "CLOSE_CONFIRMED",
-        "HALTED",
-        "EVIDENCE_COMMITTED",
-    ]
-    state_indexes = [
-        history_states.index(state) for state in required_states
-    ]
-    assert state_indexes == sorted(state_indexes)
+    first_halt = history_states.index("HALTED")
+    close_pending = history_states.index("CLOSE_PENDING")
+    close_confirmed = history_states.index("CLOSE_CONFIRMED")
+    final_halt = len(history_states) - 1 - history_states[::-1].index(
+        "HALTED"
+    )
+    evidence_committed = history_states.index("EVIDENCE_COMMITTED")
+    assert history_states.index("OPEN_OBSERVED") < first_halt
+    assert first_halt < close_pending < close_confirmed
+    assert close_confirmed < final_halt < evidence_committed
 
 
 def test_successful_short_round_trip_closes_buy_reduce_only(

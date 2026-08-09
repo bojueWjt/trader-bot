@@ -324,6 +324,15 @@ class PositionSnapshot:
 
 
 @dataclass(frozen=True)
+class LivePreflightEvidence:
+    evidence_sha256: str
+    fetched_at: datetime
+    warnings: tuple[str, ...]
+    observed_portfolio_baseline_sha256: str
+    portfolio_drifted: bool
+
+
+@dataclass(frozen=True)
 class CleanupResult:
     safe: bool
     close_submitted: bool
@@ -877,6 +886,12 @@ class DryRunAdapter:
                 ),
                 "non_target_portfolio_baseline_sha256": (
                     self._authorization.portfolio_baseline_sha256
+                ),
+                "open_filled_quantity": _decimal_text(
+                    self._authorization.quantity
+                ),
+                "open_average_fill_price_usdt": _decimal_text(
+                    self._authorization.limit_price_usdt
                 ),
                 "gross_pnl_usdt": "0",
                 "fees_usdt": "0",
@@ -1571,6 +1586,7 @@ class AtomicEvidenceWriter:
         *,
         evidence_sha256: str,
         allow_existing: bool,
+        replace_existing: bool = False,
     ) -> str:
         normalized_hash = _required_sha256(
             evidence_sha256,
@@ -1590,14 +1606,15 @@ class AtomicEvidenceWriter:
                 )
                 if _sha256_bytes(existing) == normalized_hash:
                     return normalized_hash
-            raise LiveTradeExecutionError(
-                f"evidence path already exists: {self._path}"
-            )
+            if not replace_existing:
+                raise LiveTradeExecutionError(
+                    f"evidence path already exists: {self._path}"
+                )
         _atomic_write_bytes(
             self._path,
             payload,
             mode=0o400,
-            replace_existing=False,
+            replace_existing=replace_existing,
         )
         return normalized_hash
 
@@ -1706,6 +1723,7 @@ class AccountALiveTradeExecutor:
         trail = AuditTrail(clock=self._clock)
         journal_enabled = False
         pending_evidence: Mapping[str, Any] | None = None
+        recovery_started = False
         cleanup_complete = False
         cleanup_required = False
         cleanup_result = CleanupResult(
@@ -1725,6 +1743,7 @@ class AccountALiveTradeExecutor:
         error_code = ""
         retryable = False
         finished_halted = False
+        halt_attempted = False
         halt_observed_at: datetime | None = None
         open_dispatched_at: datetime | None = None
 
@@ -1739,6 +1758,7 @@ class AccountALiveTradeExecutor:
             )
             cleanup_required = claim_outcome.recovery_required
             pending_evidence = claim_outcome.pending_evidence
+            recovery_started = claim_outcome.recovery_required
             if claim_outcome.terminal:
                 raise DuplicatePermitError(
                     "single-use permit is already terminal"
@@ -2011,12 +2031,32 @@ class AccountALiveTradeExecutor:
                         "cumulative net loss threshold reached"
                     )
 
+            (
+                finished_halted,
+                halt_error,
+                halt_observed_at,
+            ) = self._halt_with_recovery(
+                authorization,
+                trail,
+                reason="open-risk-window-closed",
+                journal_enabled=journal_enabled,
+            )
+            halt_attempted = True
+            if not finished_halted:
+                raise ClassifiedExecutionError(
+                    halt_error,
+                    code="HALT_UNPROVEN",
+                )
+            expected_close_quantity = authorization.quantity
+            if observation is not False:
+                expected_close_quantity = observation.filled_quantity
             cleanup_result = self._flatten_target_risk(
                 authorization,
                 trail,
                 reason="round-trip-close",
                 journal_enabled=journal_enabled,
                 exchange_not_before=open_dispatched_at,
+                expected_close_quantity=expected_close_quantity,
             )
             cleanup_complete = True
             if (
@@ -2095,10 +2135,6 @@ class AccountALiveTradeExecutor:
                 )
             if observation is False:
                 open_filled_quantity = cleanup_result.close_quantity
-                actual_open_notional = (
-                    cleanup_result.close_quantity
-                    * authorization.limit_price_usdt
-                )
             round_trip_complete = True
         except BaseException as exc:  # noqa: BLE001
             failure_reason = _exception_text(exc)
@@ -2110,6 +2146,38 @@ class AccountALiveTradeExecutor:
                 },
             )
         finally:
+            halt_reason = failure_reason
+            for journal_failure in self._journal_failures:
+                if journal_failure in halt_reason:
+                    continue
+                halt_reason = _join_errors(
+                    halt_reason,
+                    (journal_failure,),
+                )
+            if not halt_reason:
+                halt_reason = "canary-round-trip-complete"
+            if (
+                cleanup_required
+                and not finished_halted
+                and not halt_attempted
+            ):
+                (
+                    finished_halted,
+                    halt_error,
+                    halt_observed_at,
+                ) = self._halt_with_recovery(
+                    authorization,
+                    trail,
+                    reason=halt_reason,
+                    journal_enabled=journal_enabled,
+                )
+                halt_attempted = True
+                if not finished_halted:
+                    failure_reason = _join_errors(
+                        failure_reason,
+                        (halt_error,),
+                    )
+                    error_code = "HALT_UNPROVEN"
             if (
                 failure_reason
                 and cleanup_required
@@ -2122,6 +2190,11 @@ class AccountALiveTradeExecutor:
                         reason="failure-cleanup",
                         journal_enabled=journal_enabled,
                         exchange_not_before=open_dispatched_at,
+                        expected_close_quantity=(
+                            open_filled_quantity
+                            if open_filled_quantity > 0
+                            else authorization.quantity
+                        ),
                     )
                     cleanup_result = emergency_result
                     cleanup_complete = True
@@ -2156,32 +2229,26 @@ class AccountALiveTradeExecutor:
                             "reason": cleanup_error,
                         },
                     )
-            halt_reason = failure_reason
-            for journal_failure in self._journal_failures:
-                if journal_failure in halt_reason:
-                    continue
-                halt_reason = _join_errors(
-                    halt_reason,
-                    (journal_failure,),
+            final_halt_required = cleanup_required
+            first_halt_required = not halt_attempted
+            if final_halt_required or first_halt_required:
+                (
+                    finished_halted,
+                    halt_error,
+                    halt_observed_at,
+                ) = self._halt_with_recovery(
+                    authorization,
+                    trail,
+                    reason=halt_reason,
+                    journal_enabled=journal_enabled,
                 )
-            if not halt_reason:
-                halt_reason = "canary-round-trip-complete"
-            (
-                finished_halted,
-                halt_error,
-                halt_observed_at,
-            ) = self._halt_with_recovery(
-                authorization,
-                trail,
-                reason=halt_reason,
-                journal_enabled=journal_enabled,
-            )
-            if not finished_halted:
-                failure_reason = _join_errors(
-                    failure_reason,
-                    (halt_error,),
-                )
-                error_code = "HALT_UNPROVEN"
+                halt_attempted = True
+                if not finished_halted:
+                    failure_reason = _join_errors(
+                        failure_reason,
+                        (halt_error,),
+                    )
+                    error_code = "HALT_UNPROVEN"
             if (
                 finished_halted
                 and halt_observed_at is not None
@@ -2200,6 +2267,18 @@ class AccountALiveTradeExecutor:
                         (snapshot_error,),
                     )
                     error_code = "POST_HALT_SNAPSHOT_UNPROVEN"
+                    cleanup_result = replace(
+                        cleanup_result,
+                        safe=False,
+                        errors=tuple(
+                            dict.fromkeys(
+                                (
+                                    *cleanup_result.errors,
+                                    snapshot_error,
+                                )
+                            )
+                        ),
+                    )
                 else:
                     cleanup_result = replace(
                         cleanup_result,
@@ -2249,6 +2328,54 @@ class AccountALiveTradeExecutor:
                 ),
             )
             error_code = "FINANCIAL_PROOF_INCOMPLETE"
+        if (
+            final_snapshot is not None
+            and final_snapshot.get("financial_proof_complete") is True
+        ):
+            final_open_quantity = _decimal(
+                final_snapshot.get("open_filled_quantity"),
+                "post-HALT open_filled_quantity",
+                positive=True,
+            )
+            final_open_average_price = _decimal(
+                final_snapshot.get("open_average_fill_price_usdt"),
+                "post-HALT open_average_fill_price_usdt",
+                positive=True,
+            )
+            final_actual_open_notional = (
+                final_open_quantity * final_open_average_price
+            )
+            open_filled_quantity = final_open_quantity
+            actual_open_notional = final_actual_open_notional
+            if (
+                cleanup_result.close_submitted
+                and final_open_quantity != cleanup_result.close_quantity
+            ):
+                failure_reason = _join_errors(
+                    failure_reason,
+                    (
+                        (
+                            "final open filled quantity differs from exact "
+                            "close quantity"
+                        ),
+                    ),
+                )
+                error_code = "EXACT_CLOSE_UNPROVEN"
+            if final_actual_open_notional > authorization.max_notional_usdt:
+                failure_reason = _join_errors(
+                    failure_reason,
+                    ("final actual open notional exceeds permit",),
+                )
+                error_code = "NOTIONAL_LIMIT_REACHED"
+            if (
+                final_actual_open_notional
+                > MAX_ACTUAL_OPEN_NOTIONAL_USDT
+            ):
+                failure_reason = _join_errors(
+                    failure_reason,
+                    ("final actual open notional exceeds 12 USDT",),
+                )
+                error_code = "NOTIONAL_LIMIT_REACHED"
 
         hard_completion_proved = (
             round_trip_complete
@@ -2314,10 +2441,21 @@ class AccountALiveTradeExecutor:
                 evidence_sha256=prepared_hash,
                 passed=passed,
             )
+        replace_recoverable_evidence = (
+            evidence_can_finalize
+            and recovery_started
+            and pending_evidence is None
+            and os.path.lexists(self._evidence_writer.path)
+        )
+        if replace_recoverable_evidence:
+            self._validate_recoverable_evidence_for_replacement(
+                authorization
+            )
         evidence_sha256 = self._evidence_writer.commit_prepared(
             prepared_evidence,
             evidence_sha256=prepared_hash,
             allow_existing=False,
+            replace_existing=replace_recoverable_evidence,
         )
         if evidence_can_finalize:
             self._permit_store.commit_evidence(
@@ -2394,16 +2532,40 @@ class AccountALiveTradeExecutor:
                 },
             )
             return
-        preflight_hash, fetched_at, preflight_warnings = preflight_result
-        for warning in preflight_warnings:
+        for warning in preflight_result.warnings:
             self._add_warning(warning)
+        if preflight_result.portfolio_drifted:
+            trail.record(
+                "non_target_portfolio_drift_observed",
+                {
+                    "phase": phase,
+                    "signed_baseline_sha256": (
+                        authorization.portfolio_baseline_sha256
+                    ),
+                    "observed_baseline_sha256": (
+                        preflight_result
+                        .observed_portfolio_baseline_sha256
+                    ),
+                },
+            )
         trail.record(
             "live_preflight_confirmed",
             {
                 "phase": phase,
-                "adapter_evidence_sha256": preflight_hash,
-                "fetched_at": fetched_at.isoformat(),
-                "warning_count": len(preflight_warnings),
+                "adapter_evidence_sha256": (
+                    preflight_result.evidence_sha256
+                ),
+                "fetched_at": preflight_result.fetched_at.isoformat(),
+                "warning_count": len(preflight_result.warnings),
+                "signed_non_target_portfolio_baseline_sha256": (
+                    authorization.portfolio_baseline_sha256
+                ),
+                "observed_non_target_portfolio_baseline_sha256": (
+                    preflight_result.observed_portfolio_baseline_sha256
+                ),
+                "non_target_portfolio_drifted": (
+                    preflight_result.portfolio_drifted
+                ),
                 "quantity": _decimal_text(authorization.quantity),
                 "limit_price_usdt": _decimal_text(
                     authorization.limit_price_usdt
@@ -2695,6 +2857,7 @@ class AccountALiveTradeExecutor:
         reason: str,
         journal_enabled: bool,
         exchange_not_before: datetime | None,
+        expected_close_quantity: Decimal,
     ) -> CleanupResult:
         cancel_started_at = self._monotonic()
         last_errors: list[str] = []
@@ -2909,129 +3072,142 @@ class AccountALiveTradeExecutor:
                 self._recovery_sleep(close_started_at)
                 continue
 
-            if position.quantity == 0:
-                flat_confirmed = True
-                if close_attempted and not close_confirmed:
-                    if pending_close_request is None:
-                        last_errors = [
+            if close_attempted and not close_confirmed:
+                if pending_close_request is None:
+                    last_errors = [
+                        (
                             "exact close request is unavailable for "
                             "reconciliation"
-                        ]
-                        break
-                    reconcile_request = dict(pending_close_request)
-                    reconcile_request["attempt"] = attempt
-                    reconcile_request["hard_timeout_seconds"] = (
-                        self._recovery_seconds_remaining(
-                            close_started_at
+                        )
+                    ]
+                    break
+                reconcile_request = dict(pending_close_request)
+                reconcile_request["attempt"] = attempt
+                reconcile_request["hard_timeout_seconds"] = (
+                    self._recovery_seconds_remaining(
+                        close_started_at
+                    )
+                )
+                if not self._refresh_hard_timeout(
+                    reconcile_request,
+                    close_started_at,
+                ):
+                    break
+                try:
+                    close_ack = self._adapter.submit_close(
+                        reconcile_request
+                    )
+                    close_hash, close_warnings = (
+                        _validate_exact_close_ack(
+                            close_ack,
+                            authorization,
+                            expected_quantity=close_quantity,
+                            expected_side_effect_id=reconcile_request[
+                                "side_effect_id"
+                            ],
                         )
                     )
-                    if not self._refresh_hard_timeout(
-                        reconcile_request,
-                        close_started_at,
-                    ):
-                        break
-                    try:
-                        close_ack = self._adapter.submit_close(
-                            reconcile_request
+                    for warning in close_warnings:
+                        self._add_degraded(
+                            "CLOSE_ENRICHMENT_DEGRADED: "
+                            f"{warning}"
                         )
-                        close_hash, close_warnings = (
-                            _validate_exact_close_ack(
-                                close_ack,
-                                authorization,
-                                expected_quantity=close_quantity,
-                                expected_side_effect_id=reconcile_request[
-                                    "side_effect_id"
-                                ],
-                            )
-                        )
-                        for warning in close_warnings:
-                            self._add_degraded(
-                                "CLOSE_ENRICHMENT_DEGRADED: "
-                                f"{warning}"
-                            )
-                        close_confirmed = True
-                        close_submitted = True
-                        last_errors = []
-                        self._recovery_journal_mark_state(
-                            authorization,
-                            trail,
-                            enabled=journal_enabled,
-                            state="CLOSE_CONFIRMED",
-                            event_type="CLOSE_RECONCILED_EXACT_FILL",
-                            payload={
-                                "adapter_evidence_sha256": close_hash,
-                                "quantity": _decimal_text(
-                                    close_quantity
-                                ),
-                                "attempt": attempt,
-                                "reconciled": True,
-                                "enrichment_warnings": list(
-                                    close_warnings
-                                ),
-                            },
-                        )
-                        trail.record(
-                            "reduce_only_close_reconciled",
-                            {
-                                "adapter_evidence_sha256": close_hash,
-                                "client_order_id": (
-                                    authorization.close_client_order_id
-                                ),
-                                "quantity": _decimal_text(
-                                    close_quantity
-                                ),
-                                "reduce_only": True,
-                                "attempt": attempt,
-                                "side_effect_id": reconcile_request[
-                                    "side_effect_id"
-                                ],
-                                "enrichment_warnings": list(
-                                    close_warnings
-                                ),
-                            },
-                        )
-                    except BaseException as exc:  # noqa: BLE001
-                        close_error = (
-                            "exact close reconciliation attempt "
-                            f"{attempt} failed: {_exception_text(exc)}"
-                        )
-                        last_errors = [close_error]
-                        trail.record(
-                            "reduce_only_close_reconciliation_failed",
-                            {
-                                "reason": close_error,
-                                "quantity": _decimal_text(
-                                    close_quantity
-                                ),
-                                "attempt": attempt,
-                                "side_effect_id": reconcile_request[
-                                    "side_effect_id"
-                                ],
-                            },
-                        )
-                        if _is_soft_action_failure(exc):
-                            self._add_degraded(
-                                (
-                                    "CLOSE transport failure required "
-                                    "idempotent exact-fill reconciliation: "
-                                    f"{_exception_text(exc)}"
-                                )
-                            )
-                        self._recovery_sleep(close_started_at)
-                        continue
-                else:
+                    close_confirmed = True
+                    close_submitted = True
                     last_errors = []
+                    self._recovery_journal_mark_state(
+                        authorization,
+                        trail,
+                        enabled=journal_enabled,
+                        state="CLOSE_CONFIRMED",
+                        event_type="CLOSE_RECONCILED_EXACT_FILL",
+                        payload={
+                            "adapter_evidence_sha256": close_hash,
+                            "quantity": _decimal_text(
+                                close_quantity
+                            ),
+                            "attempt": attempt,
+                            "reconciled": True,
+                            "enrichment_warnings": list(
+                                close_warnings
+                            ),
+                        },
+                    )
+                    trail.record(
+                        "reduce_only_close_reconciled",
+                        {
+                            "adapter_evidence_sha256": close_hash,
+                            "client_order_id": (
+                                authorization.close_client_order_id
+                            ),
+                            "quantity": _decimal_text(
+                                close_quantity
+                            ),
+                            "reduce_only": True,
+                            "attempt": attempt,
+                            "side_effect_id": reconcile_request[
+                                "side_effect_id"
+                            ],
+                            "enrichment_warnings": list(
+                                close_warnings
+                            ),
+                        },
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    close_error = (
+                        "exact close reconciliation attempt "
+                        f"{attempt} failed: {_exception_text(exc)}"
+                    )
+                    last_errors = [close_error]
+                    trail.record(
+                        "reduce_only_close_reconciliation_failed",
+                        {
+                            "reason": close_error,
+                            "quantity": _decimal_text(
+                                close_quantity
+                            ),
+                            "attempt": attempt,
+                            "side_effect_id": reconcile_request[
+                                "side_effect_id"
+                            ],
+                        },
+                    )
+                    if _is_soft_action_failure(exc):
+                        self._add_degraded(
+                            (
+                                "CLOSE transport failure required "
+                                "idempotent exact-fill reconciliation: "
+                                f"{_exception_text(exc)}"
+                            )
+                        )
+                self._recovery_sleep(close_started_at)
+                continue
+
+            if position.quantity == 0:
+                flat_confirmed = True
+                last_errors = []
                 break
 
-            close_quantity = position.quantity
+            if close_confirmed:
+                last_errors = [
+                    (
+                        "target position remains after the authorized "
+                        "close quantity was filled"
+                    )
+                ]
+                break
+            close_quantity = min(
+                position.quantity,
+                expected_close_quantity,
+            )
             close_attempted = True
-            if position.quantity > authorization.quantity:
+            if position.quantity > expected_close_quantity:
                 quantity_violation = True
                 trail.record(
                     "position_quantity_exceeded",
                     {
-                        "authorized_quantity": _decimal_text(
-                            authorization.quantity
+                        "authorized_close_quantity": _decimal_text(
+                            expected_close_quantity
                         ),
                         "position_quantity": _decimal_text(
                             position.quantity
@@ -3051,7 +3227,7 @@ class AccountALiveTradeExecutor:
                     "side": _close_side(position.side),
                     "position_side": position.side,
                     "order_type": "MARKET",
-                    "quantity": _decimal_text(position.quantity),
+                    "quantity": _decimal_text(close_quantity),
                     "reduce_only": True,
                     "reason": reason,
                     "attempt": attempt,
@@ -3090,7 +3266,7 @@ class AccountALiveTradeExecutor:
                 close_hash, close_warnings = _validate_exact_close_ack(
                     close_ack,
                     authorization,
-                    expected_quantity=position.quantity,
+                    expected_quantity=close_quantity,
                     expected_side_effect_id=close_request["side_effect_id"],
                 )
                 for warning in close_warnings:
@@ -3108,7 +3284,7 @@ class AccountALiveTradeExecutor:
                     state="CLOSE_CONFIRMED",
                     result={
                         "adapter_evidence_sha256": close_hash,
-                        "quantity": _decimal_text(position.quantity),
+                        "quantity": _decimal_text(close_quantity),
                         "attempt": attempt,
                         "enrichment_warnings": list(close_warnings),
                     },
@@ -3121,7 +3297,7 @@ class AccountALiveTradeExecutor:
                             authorization.close_client_order_id
                         ),
                         "side": _close_side(position.side),
-                        "quantity": _decimal_text(position.quantity),
+                        "quantity": _decimal_text(close_quantity),
                         "reduce_only": True,
                         "attempt": attempt,
                         "side_effect_id": close_request[
@@ -3129,7 +3305,7 @@ class AccountALiveTradeExecutor:
                         ],
                         "enrichment_warnings": list(close_warnings),
                     },
-                )
+            )
             except BaseException as exc:  # noqa: BLE001
                 close_error = (
                     f"reduce-only close attempt {attempt} failed: "
@@ -3140,7 +3316,7 @@ class AccountALiveTradeExecutor:
                     "reduce_only_close_failed",
                     {
                         "reason": close_error,
-                        "quantity": _decimal_text(position.quantity),
+                        "quantity": _decimal_text(close_quantity),
                         "attempt": attempt,
                         "side_effect_id": close_request[
                             "side_effect_id"
@@ -3247,8 +3423,14 @@ class AccountALiveTradeExecutor:
                             "target_symbol_regular_orders_zero": True,
                             "target_symbol_algo_orders_zero": True,
                             "non_target_portfolio_baseline_sha256": (
-                                authorization
-                                .portfolio_baseline_sha256
+                                final_snapshot[
+                                    "non_target_portfolio_baseline_sha256"
+                                ]
+                            ),
+                            "non_target_portfolio_drifted": (
+                                final_snapshot[
+                                    "non_target_portfolio_drifted"
+                                ]
                             ),
                             "source": EXCHANGE_EVIDENCE_SOURCE,
                             "fetched_at": final_snapshot["fetched_at"],
@@ -3289,7 +3471,7 @@ class AccountALiveTradeExecutor:
             )
         if quantity_violation:
             last_errors.append(
-                "target position exceeded authorized quantity"
+                "target position exceeded authorized close quantity"
             )
         safe = (
             flat_confirmed
@@ -3497,6 +3679,14 @@ class AccountALiveTradeExecutor:
                         "halt_observed_at": (
                             halt_observed_at.isoformat()
                         ),
+                        "non_target_portfolio_baseline_sha256": (
+                            snapshot[
+                                "non_target_portfolio_baseline_sha256"
+                            ]
+                        ),
+                        "non_target_portfolio_drifted": snapshot[
+                            "non_target_portfolio_drifted"
+                        ],
                         "attempt": attempt,
                     },
                 )
@@ -3912,6 +4102,30 @@ class AccountALiveTradeExecutor:
         *,
         phase: str,
     ) -> None:
+        if snapshot.get("non_target_portfolio_drifted") is True:
+            signed_baseline = _required_sha256(
+                snapshot.get(
+                    "signed_non_target_portfolio_baseline_sha256"
+                ),
+                "signed non-target portfolio baseline",
+            )
+            observed_baseline = _required_sha256(
+                snapshot.get("non_target_portfolio_baseline_sha256"),
+                "final non-target portfolio baseline",
+            )
+            warning = _non_target_portfolio_drift_warning(
+                expected=signed_baseline,
+                observed=observed_baseline,
+            )
+            self._add_warning(warning)
+            trail.record(
+                "non_target_portfolio_drift_observed",
+                {
+                    "phase": phase,
+                    "signed_baseline_sha256": signed_baseline,
+                    "observed_baseline_sha256": observed_baseline,
+                },
+            )
         if snapshot.get("financial_proof_complete") is not False:
             return
         warnings = snapshot.get("warnings")
@@ -4005,10 +4219,23 @@ class AccountALiveTradeExecutor:
             "prepared recovery evidence sha256",
         )
         self._require_live_operation_lock()
+        replace_existing = False
+        if os.path.lexists(self._evidence_writer.path):
+            existing = _read_protected_file(
+                self._evidence_writer.path,
+                "existing recovery evidence",
+                live=self._mode == "live",
+            )
+            if _sha256_bytes(existing) != pending_hash:
+                self._validate_recoverable_evidence_for_replacement(
+                    authorization
+                )
+                replace_existing = True
         evidence_sha256 = self._evidence_writer.commit_prepared(
             payload,
             evidence_sha256=pending_hash,
             allow_existing=True,
+            replace_existing=replace_existing,
         )
         self._permit_store.commit_evidence(
             authorization,
@@ -4065,6 +4292,50 @@ class AccountALiveTradeExecutor:
                 ).items()
             },
         )
+
+    def _validate_recoverable_evidence_for_replacement(
+        self,
+        authorization: CanaryAuthorization,
+    ) -> None:
+        raw = _read_protected_file(
+            self._evidence_writer.path,
+            "recoverable existing evidence",
+            live=self._mode == "live",
+        )
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LiveTradeExecutionError(
+                "recoverable existing evidence is invalid"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LiveTradeExecutionError(
+                "recoverable existing evidence must be an object"
+            )
+        expected_identity = {
+            "schema_version": EVIDENCE_SCHEMA,
+            "mode": self._mode,
+            "permit_id": authorization.permit_id,
+            "authorization_sha256": (
+                authorization.authorization_sha256
+            ),
+        }
+        for field_name, expected_value in expected_identity.items():
+            if payload.get(field_name) != expected_value:
+                raise LiveTradeExecutionError(
+                    "recoverable existing evidence identity mismatch: "
+                    f"{field_name}"
+                )
+        result_status = payload.get("result_status")
+        if result_status is None:
+            result_status = payload.get("status")
+        if (
+            result_status != RESULT_BLOCKED
+            or payload.get("passed") is not False
+        ):
+            raise LiveTradeExecutionError(
+                "recoverable existing evidence is terminal"
+            )
 
     def _base_request(
         self,
@@ -5098,7 +5369,7 @@ def _validate_live_preflight(
     now: datetime,
     phase: str = "before-resume",
     exchange_not_before: datetime | None = None,
-) -> tuple[str, datetime, tuple[str, ...]]:
+) -> LivePreflightEvidence:
     _validate_adapter_identity(payload, authorization)
     if payload.get("action") != "preflight":
         raise LiveTradeExecutionError(
@@ -5170,8 +5441,11 @@ def _validate_live_preflight(
         "preflight non-target portfolio baseline",
     )
     if baseline != authorization.portfolio_baseline_sha256:
-        raise LiveTradeExecutionError(
-            "preflight non-target portfolio baseline changed"
+        warnings.append(
+            _non_target_portfolio_drift_warning(
+                expected=authorization.portfolio_baseline_sha256,
+                observed=baseline,
+            )
         )
     node_snapshot = payload.get("node_snapshot")
     if (
@@ -5292,10 +5566,14 @@ def _validate_live_preflight(
         payload.get("evidence_sha256"),
         "preflight evidence_sha256",
     )
-    return (
-        evidence_sha256,
-        fetched_at,
-        tuple(dict.fromkeys(warnings)),
+    return LivePreflightEvidence(
+        evidence_sha256=evidence_sha256,
+        fetched_at=fetched_at,
+        warnings=tuple(dict.fromkeys(warnings)),
+        observed_portfolio_baseline_sha256=baseline,
+        portfolio_drifted=(
+            baseline != authorization.portfolio_baseline_sha256
+        ),
     )
 
 
@@ -5313,6 +5591,17 @@ def _validated_payload_warnings(
         _required_text(item, f"{label} warning")
         for item in raw_warnings
     ]
+
+
+def _non_target_portfolio_drift_warning(
+    *,
+    expected: str,
+    observed: str,
+) -> str:
+    return (
+        "NON_TARGET_PORTFOLIO_DRIFT: unrelated account activity "
+        f"changed signed baseline {expected} to {observed}"
+    )
 
 
 def _observation_warnings(
@@ -5598,14 +5887,23 @@ def _validate_final_snapshot(
         raise LiveTradeExecutionError(
             "final target position is not flat"
         )
+    open_filled_quantity = _decimal(
+        payload.get("open_filled_quantity"),
+        "final open_filled_quantity",
+        non_negative=True,
+    )
+    open_average_fill_price = _decimal(
+        payload.get("open_average_fill_price_usdt"),
+        "final open_average_fill_price_usdt",
+        non_negative=True,
+    )
     baseline = _required_sha256(
         payload.get("non_target_portfolio_baseline_sha256"),
         "final non-target portfolio baseline",
     )
-    if baseline != authorization.portfolio_baseline_sha256:
-        raise LiveTradeExecutionError(
-            "non-target portfolio baseline changed"
-        )
+    portfolio_drifted = (
+        baseline != authorization.portfolio_baseline_sha256
+    )
     _required_sha256(
         payload.get("evidence_sha256"),
         "final snapshot evidence_sha256",
@@ -5657,6 +5955,19 @@ def _validate_final_snapshot(
         raise LiveTradeExecutionError(
             "final warnings and financial proof state differ"
         )
+    if financial_proof_complete:
+        if open_filled_quantity <= 0:
+            raise LiveTradeExecutionError(
+                "final financial proof requires open filled quantity"
+            )
+        if open_average_fill_price <= 0:
+            raise LiveTradeExecutionError(
+                "final financial proof requires open average fill price"
+            )
+        if open_filled_quantity > authorization.quantity:
+            raise LiveTradeExecutionError(
+                "final open filled quantity exceeds authorization"
+            )
     if net_pnl != gross_pnl - fees:
         raise LiveTradeExecutionError(
             "final net PnL does not equal gross PnL minus fees"
@@ -5673,9 +5984,19 @@ def _validate_final_snapshot(
     normalized["cumulative_net_loss_usdt"] = _decimal_text(
         cumulative_loss
     )
+    normalized["open_filled_quantity"] = _decimal_text(
+        open_filled_quantity
+    )
+    normalized["open_average_fill_price_usdt"] = _decimal_text(
+        open_average_fill_price
+    )
     normalized["financial_proof_complete"] = financial_proof_complete
     normalized["enrichment_degraded"] = enrichment_degraded
     normalized["warnings"] = normalized_warnings
+    normalized["non_target_portfolio_drifted"] = portfolio_drifted
+    normalized["signed_non_target_portfolio_baseline_sha256"] = (
+        authorization.portfolio_baseline_sha256
+    )
     normalized["source"] = EXCHANGE_EVIDENCE_SOURCE
     normalized["fetched_at"] = fetched_at.isoformat()
     return normalized

@@ -949,6 +949,12 @@ class AccountALiveTradeHttpAdapter:
             "target_symbol_algo_orders_zero": not algo_orders,
             "position_quantity": _decimal_text(position["quantity"]),
             "non_target_portfolio_baseline_sha256": baseline,
+            "open_filled_quantity": _decimal_text(
+                open_summary["order_filled_quantity"]
+            ),
+            "open_average_fill_price_usdt": _decimal_text(
+                open_summary["order_average_fill_price"]
+            ),
             "gross_pnl_usdt": _decimal_text(gross_pnl),
             "fees_usdt": _decimal_text(fees),
             "net_pnl_usdt": _decimal_text(net_pnl),

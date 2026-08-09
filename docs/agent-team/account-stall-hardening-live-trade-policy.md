@@ -22,18 +22,10 @@
 - 目标 symbol 在系统既有允许列表内；交易所 filters 可用时，已知值支持在 12 USDT 内
   构造合法数量。
 - 目标 symbol 当前无持仓、无普通挂单、无 algo 挂单。
-- 非目标持仓、普通挂单和 algo 挂单已规范化并冻结为签名的
-  `portfolio_baseline_sha256`。
-- 非目标持仓基线只包含 `symbol`、`position_side`、`position_amt`、`entry_price`、
-  `leverage`、`margin_type`、`isolated_margin` 和 `is_auto_add_margin`。
-  `mark_price`、`unrealized_pnl`、`notional`、`liquidation_price`、其他行情派生字段和
-  未知扩展字段不进入阻断哈希。
-- 非目标普通挂单和 algo 挂单继续完整进入阻断哈希。
 - durable journal、intent、outbox 和 evidence store 可写且有剩余容量。
 - rollout phase 为 `account_a_canary`，受限 canary RESUME gate 已绑定当前 release。
 - `process_liveness=false` 或 `loss_monitor_healthy=false` 未出现。
-- `RESUME` 后、`OPEN` 前取得同一轮新鲜交易所快照，确认目标仓位和订单归零、非目标
-  组合基线未变化。
+- `RESUME` 后、`OPEN` 前取得同一轮新鲜交易所快照，确认目标仓位和订单归零。
 - before-open 节点状态存在明确值时，`ACTIVE`、`RUNNING` 或 `RESUMED` 允许新增风险；
   `HALTED` 和 `STOPPED` 阻断新增风险。
 - 可用 USDT 余额存在明确值时，该值覆盖
@@ -46,7 +38,7 @@
 
 - heartbeat、readiness、projection 或 reconciliation 超过健康阈值。
 - 控制面 HTTP timeout、普通 5xx、circuit open 或瞬态 poll/ACK 失败。
-- 新鲜交易所 preflight 已确认目标归零和组合基线后，`/v1/nodes` timeout、普通 5xx 或
+- 新鲜交易所 preflight 已确认目标归零后，`/v1/nodes` timeout、普通 5xx 或
   node snapshot 缺失。
 - heartbeat、execution-event 或 loss-monitor 纯遥测发布失败，包括普通永久 4xx 拒绝；
   本地 durable spool 保留，401/403/409 与 identity/fencing 冲突继续硬阻断。
@@ -60,8 +52,10 @@
   exchange filter 遥测缺失；后续一旦取得明确值，任何显式 unhealthy、identity
   mismatch、余额不足、filter 违规或 durable failure 立即转为硬阻断。
 - actor/loss monitor 签名时间戳或节点 progress 时间戳陈旧。
-- `exchange_authoritative` 标记缺失或为 false，同时 exchange source、freshness、目标归零和
-  组合基线证据有效。
+- `exchange_authoritative` 标记缺失或为 false，同时 exchange source、freshness 和目标归零
+  证据有效。
+- 非目标持仓、普通挂单或 algo 挂单相对签名审计快照发生变化。执行器记录签名哈希、
+  实时哈希和发生阶段，目标交易继续执行。
 
 ## Symbol 选择
 
@@ -82,8 +76,8 @@
 1. **执行契约验证**：验证同形状 `LIMIT + IOC` 开仓、订单查询、撤单和独立 client ID
    的 exact reduce-only close 请求。新鲜 testnet execution 可直接进入证据；
    `contract_replay` 以签名降级告警进入证据。
-2. **冻结基线**：确认 `SOLUSDT` 无持仓和订单，签名冻结全部非 `SOLUSDT` 的
-   `portfolio_baseline_sha256`。
+2. **记录审计快照**：确认 `SOLUSDT` 无持仓和订单，签名记录全部非 `SOLUSDT` 的
+   `portfolio_baseline_sha256`。该快照仅承担同账户并发活动审计职责。
 3. **审计放行**：确认节点仍为 HALTED，创建单次 canary permit，通过 operator command
    将 account-a 单节点切换到 ACTIVE。
 4. **开仓路径验证**：提交一个显式 quantity 和 limit price 的 `LIMIT + IOC` 开仓单；
@@ -93,15 +87,22 @@
    observed_at 给出因果绑定的成交证据。节点事件与 PostgreSQL projection 作为 enrichment
    记录延迟和差异。IOC 未成交时禁止追加风险；只有交易所明确确认订单不存在时才允许使用
    相同 deterministic client order ID 进行幂等恢复。
-6. **平仓路径验证**：按实际 filled quantity 提交 reduce-only MARKET 平仓。
-7. **恢复安全态**：立即通过 operator command 将 account-a 切回 HALTED。
-8. **目标归零确认**：以 CLOSE 派发后的新鲜交易所镜像确认 `SOLUSDT` 仓位为零、普通挂单
+6. **关闭新增风险窗口**：OPEN 进入终态、返回异常或结果不明确后，立即通过 operator
+   command 将 account-a 切回 HALTED。首次 HALT 全部重试失败时仍推进撤单和平仓。
+7. **平仓路径验证**：撤销残余 OPEN，查询当前目标仓位，按本轮实际 filled quantity
+   和授权上限提交 capped exact reduce-only MARKET 平仓。本轮 close quantity 固定为
+   当前目标仓位、本轮实际成交量和授权上限的最小值。ACK 丢失后的 reconciliation
+   重放同一 close identity 和首次 quantity。残余仓位进入 BLOCKED 证据。
+8. **确认最终安全态**：平仓流程结束后再次幂等 HALT，确保 durable ledger 最终记录
+   HALTED。
+9. **目标归零确认**：以最终 HALT 后的新鲜交易所镜像确认 `SOLUSDT` 仓位为零、普通挂单
    为零、algo 挂单为零。节点缓存与 PostgreSQL 投影差异进入 enrichment 告警。
-9. **组合保护确认**：重新计算非 `SOLUSDT` 的 `portfolio_baseline_sha256`，要求与交易前
-   签名基线完全一致。
-10. **财务证明**：open/close 订单、唯一 trade ID 成交集合、成交数量守恒、逐 fill
+   post-HALT 目标归零证明失败时，permit ledger 保持 recoverable，等待同一授权恢复流程。
+10. **组合活动审计**：重新计算非 `SOLUSDT` 的 `portfolio_baseline_sha256`，记录与交易前
+    签名快照的差异。
+11. **财务证明**：open/close 订单、唯一 trade ID 成交集合、成交数量守恒、逐 fill
     commission、开仓方向、signed realized PnL 与成交价全部完整后，才认证手续费和净损益。
-11. **事故关闭**：记录费用、滑点、时间线和 release metadata，关闭验证 incident。
+12. **事故关闭**：记录费用、滑点、时间线和 release metadata，关闭验证 incident。
 
 ## 自动停止条件
 
@@ -115,7 +116,6 @@
 - 订单数量、方向、position side、reduce-only 或 client order ID 与计划不一致。
 - 累计净亏损达到 permit 阈值；permit 阈值严格低于 `1.5 USDT`。
 - 出现额外目标仓位、额外目标挂单、重复 intent、重复 order 或跨账户数据。
-- 非目标结构 `portfolio_baseline_sha256` 发生变化。
 - exact reduce-only close 无法按实际成交数量提交或确认。
 - 最终 HALT 或 HALT 后交易所归零快照无法证明。
 - 最终手续费、滑点和净损益证明缺失，无法认证累计净亏损低于 permit 阈值。

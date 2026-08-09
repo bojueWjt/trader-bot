@@ -1,9 +1,9 @@
 # Account Stall 修复重新复盘与收敛计划
 
 日期：2026-08-09
-状态：Claude 元复核与最终 reviewer 发现已吸收；生产仍运行 `fbcadf2` 并保持 HALTED；
-放宽后的结构基线与 recorder 部署补丁已通过 `421 passed` 和双独立 reviewer
-`P0=0 P1=0`，等待新 commit-bound 部署
+状态：Claude 元复核与 reviewer 发现已吸收；生产运行 `8a77a50` 并保持 HALTED；
+本地放宽补丁已完成 executor、adapter 和 deployment 聚焦验证，等待最新双 reviewer
+`P0=0 P1=0` 后生成新 commit-bound 部署
 生产结论：account-a 保持 HALTED；真实交易 permit 在 `C-GATE=done`、`C-DEPLOY=done`
 且 deployed commit/hash 复核完成后生效，目标为一次
 `0.07 SOLUSDT LIMIT + IOC` 小额往返
@@ -56,11 +56,20 @@ directory entries。`--untracked-files=all` 展开后是 373 个 status entries�
 | filtered-event 调度竞态独立进程循环 | 50/50 passed | PASS |
 | `tests/deployment` | 387 passed | PASS |
 | `tests/control-plane/api` | 86 passed | PASS |
-| live executor + adapter 聚焦 | 301 passed | PASS |
+| 当前 live executor + adapter | 320 passed | PASS |
+| recorder / deployment bundle 聚焦 | 45 passed | PASS |
 | heartbeat persistence 聚焦 | 14 passed | PASS |
 | reviewer red-suite + projection mapper 聚焦 | 284 passed | PASS |
 | Python compile + `git diff --check` | PASS | PASS |
 | 双 Codex reviewer | `P0=0 P1=0 P2=0` / `P0=0 P1=0 P2=0` | PASS |
+
+`recorder / deployment bundle 聚焦` 的 `45 passed` 对应以下六文件选择范围：
+`tests/control-plane/tools/test_exchange_state_recorder.py`、
+`tests/deployment/test_verify_exchange_state_recorder.py`、
+`tests/deployment/test_hk_deploy_account_stall_availability.py`、
+`tests/deployment/test_make_container_bundle.py`、
+`tests/deployment/test_node_patch_mount_contract.py` 和
+`tests/deployment/test_hk_gen_recreate_patched.py`。
 
 2026-08-08 incident 中的 `491 passed, 21 skipped` 与上述数字对应不同日期、不同工作树和
 不同测试 inventory。2026-08-08 没有保存 collect-only 清单，两个结果只能分别证明各自
@@ -79,7 +88,7 @@ directory entries。`--untracked-files=all` 展开后是 373 个 status entries�
 | 历史放大因素 | 随机 Redis namespace、无界 streams、内存/swap/AOF/I/O 压力 |
 | 历史发布因素 | bind-mounted hotpatch、deleted inode、A/B 运行字节漂移 |
 | 当前生产可用性回归 | `OrderInitialized` 被错误提升为 durable fatal；与 Redis lineage 无直接因果 |
-| 当前生产状态 | `/ready` 返回 HALTED，account-a release `fbcadf2` 已完成 bind-mount hash/inode 校验 |
+| 当前生产状态 | 2026-08-09 21:59:07 UTC 部署 `8a77a50`；`/ready` 返回 HALTED，restart=0，bind-mount hash/inode 校验通过 |
 | 新鲜 exchange filter | 2026-08-09 20:39 UTC 活跃 Redis generation 的 `SOLUSDT` instrument 为 `min_notional=5`、tick/step=`0.01`、min quantity=`0.01`；`0.07 SOL` 在当前价格下满足 |
 | 冲突 filter 处置 | 公网 `exchangeInfo` 同时返回 `minNotional=50`、`minPrice=556.8` 和约 `77.24` 的市场价格，证据内部冲突；gate 采用节点刚启动加载的活跃 instrument cache |
 
@@ -94,7 +103,7 @@ projection/canary 变更选择面。
 |---|---|---|
 | Soft | readiness、heartbeat、projection、reconciliation stale/false | 签名告警，继续 |
 | Soft | HTTP timeout、5xx、circuit open、普通 queue/resource pressure | bounded retry 或降级继续 |
-| Soft | 新鲜 exchange preflight 已证明目标归零和组合基线后，`/v1/nodes` timeout、普通 5xx 或 snapshot 缺失 | 保留 exchange authority，记录 warning，继续 OPEN |
+| Soft | 新鲜 exchange preflight 已证明目标归零后，`/v1/nodes` timeout、普通 5xx 或 snapshot 缺失 | 保留 exchange authority，记录 warning，继续 OPEN |
 | Soft | heartbeat、execution-event、loss-monitor 纯遥测发布普通永久 4xx；本地 durable spool 完整 | 有界降级，不终止进程 |
 | Soft | emergency-close 只有确定性 `contract_replay`，缺少新鲜 testnet execution | 明确记录 `EMERGENCY_CLOSE_CONTRACT_REPLAY_ONLY`，继续 |
 | Soft | `risk_healthy` 缺失/false；actor/loss progress 陈旧；ownership/fencing/durability、writer/lease、余额、filter 遥测缺失 | 记录精确 warning，继续 |
@@ -105,14 +114,30 @@ projection/canary 变更选择面。
 | Hard | quantity 固定 `0.07`、notional、已知 exchange filter、已知余额不足、single-use permit、loss cap | 阻断 |
 | Hard | `RESUME` 后、`OPEN` 前的新鲜 exchange preflight | 缺失时停止新增风险 |
 | Hard | durable journal/订单副作用身份/执行结果唯一性 | 阻断或进入恢复 |
-| Hard | 目标最终平仓、目标订单归零、非目标组合 baseline 不变、最终 HALT | 阻断最终 PASS |
+| Hard | 目标最终平仓、目标订单归零、最终 HALT | 阻断最终 PASS |
 | Hard completion | open/close 唯一成交集合数量守恒、逐 fill commission、成交价、方向和 signed PnL 完整 | 缺失时交易仍完成平仓与 HALT，最终结果为 BLOCKED |
 
-非目标组合基线使用明确 allowlist。持仓只绑定 `symbol`、`position_side`、
+非目标组合基线保留为签名审计快照。持仓只记录 `symbol`、`position_side`、
 `position_amt`、`entry_price`、`leverage`、`margin_type`、`isolated_margin` 和
-`is_auto_add_margin`；行情价格、浮盈、名义价值、强平价与未知扩展字段不进入阻断哈希。
-普通挂单和 algo 挂单继续完整绑定。该规则把市场刷新归为可用性软变化，把真实敞口、
-杠杆、保证金模式、自动追加保证金配置和订单结构变化保留为硬阻断。
+`is_auto_add_margin`；普通挂单和 algo 挂单完整记录。该快照发生变化时执行器输出
+`NON_TARGET_PORTFOLIO_DRIFT`、签名哈希、实时哈希和发生阶段，交易继续执行。硬门聚焦
+account-a 的 `SOLUSDT` 目标仓位、目标订单、唯一 permit、名义金额、累计损失、精确
+reduce-only close 和最终 HALT。
+
+交易执行顺序固定为：
+
+1. OPEN 终态、异常或结果不明确。
+2. 首次 HALT，关闭新增风险窗口。
+3. 撤单、查询目标仓位、按本轮实际成交量和授权上限执行 capped exact close。
+4. 证明目标仓位和目标订单归零。
+5. 再次幂等 HALT，将 durable ledger 收口到 HALTED。
+6. 获取 post-HALT 新鲜交易所快照。
+7. 使用最终成交集合认证实际名义金额、手续费和净 PnL。
+
+close ACK 丢失时只重放首次 close identity 和 quantity，累计实际 close effect 保持在
+本轮授权量内。post-HALT 目标归零证明失败时，evidence 保持未提交，permit ledger 保持
+recoverable。后续恢复成功时，只允许同 permit、同 authorization、旧结果为 BLOCKED 的
+evidence 通过原子替换完成终结。
 
 ## 3. 为什么持续返工
 
@@ -396,7 +421,7 @@ Phase B-S 保持未授权。
 | G2 | HALTED soak 和故障注入 | 显式 process/loss unhealthy、identity conflict、durable failure 可硬停；遥测缺失可降级 |
 | G3 | emergency close contract | 新鲜 testnet execution 或签名 `contract_replay` 覆盖 `LIMIT + IOC` 与 reduce-only close |
 | G4 | 单次 permit、restricted RESUME 和 round trip | quantity=`0.07`，名义金额不超过 12 USDT，净亏损低于 1.5 USDT |
-| G5 | 精确平仓、HALT、目标归零、组合签名复核 | SOLUSDT position/orders 为零，非目标组合不变 |
+| G5 | 精确平仓、HALT、目标归零、组合活动审计 | SOLUSDT position/orders 为零，非目标组合差异完整记录 |
 | G6 | account-b rollout | account-a 证据签名后才允许进入 fleet complete |
 
 退出条件：四层证据齐全，A/B 运行同一 digest，目标账户恢复期望 HALTED/ACTIVE 状态。

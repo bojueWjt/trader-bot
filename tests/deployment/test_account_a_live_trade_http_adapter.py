@@ -2257,6 +2257,8 @@ def test_final_snapshot_preserves_signed_pnl_and_dedupes_fill_fees(
 
     assert completed.returncode == 0, completed.stderr
     assert payload["financial_proof_complete"] is True
+    assert payload["open_filled_quantity"] == "0.07"
+    assert payload["open_average_fill_price_usdt"] == "100"
     assert payload["gross_pnl_usdt"] == "-0.05"
     assert payload["fees_usdt"] == "0.02"
     assert payload["net_pnl_usdt"] == "-0.07"
