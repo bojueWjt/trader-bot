@@ -125,6 +125,10 @@ Hard stop 进入 sticky HALTED 或触发单次 fatal process termination：
 - actor tick 或 durable actor continuation 的真实 progress freeze；
 - release identity、Redis writer identity 或 reconciliation 证明所有权冲突。
 
+启动 replay 的 memory queue 满载属于 soft degradation。replay 必须分页搬运，
+只有成功进入 delivery lane 后才推进 cursor；内存容量只限制单批吞吐，不能丢弃
+durable receipt，也不能触发 startup fatal termination。
+
 ### Timeout And Retry
 
 - 每次网络调用必须有 connect/read/total deadline。
@@ -188,8 +192,12 @@ timestamps，不执行控制面网络调用。
   writer conflict 会将 `trading_state` 转为 sticky `HALTED`。
 - soft dependency 恢复会清除 degraded/readiness 原因并保留当前 trading state；hard stop
   恢复只更新 readiness，trading state 继续 HALTED。
-- `RESUME` 需要显式 operator command、有效审计身份、fresh heartbeat、健康 reconciliation、
-  无 P0/P1 incident、release gate PASS。
+- `RESUME` 需要显式 operator command、有效审计身份和未过期 command/permit。常规
+  `RESUME` 继续要求 release identity、owner/fence、reconciliation 与 durable state
+  无硬冲突。
+- restricted canary `RESUME` 只受 hard-safety incident 阻断。HTTP timeout、5xx、
+  circuit open、memory queue pressure、历史 enrich 和瞬态 publication 等 soft incident
+  作为 degraded warning 记录；提交开仓和精确平仓的当下路径必须可用。
 - HALTED 允许 cancel、reduce、close 等风险降低动作；open/add 始终拒绝。
 - watchdog 自动重启进程时，节点启动默认 HALTED，并执行 exchange-first reconciliation。
 - readiness endpoint 同时返回状态值与年龄，禁止只返回布尔值。
@@ -324,8 +332,9 @@ permit downlink 包含绝对 `expires_at`，control plane、data client 和 stra
    的冻结节点执行 fail-closed stop。
 5. **Canary gate**：先发布 `account-a`，启动保持 HALTED；验证 `/version`、无 deleted inode、
    heartbeat/tick、exchange-first reconciliation、orders/positions 对齐。
-6. **Soak gate**：HALTED canary 观察至少 30 分钟，并执行 control-plane timeout 与 Redis
-   短时故障验证。
+6. **Stability gate**：使用事件型新鲜度门替代固定 30 分钟等待。account-a 连续 30 个
+   2 秒采样满足 actor progress、exchange mirror、reconciliation 和 owner identity
+   新鲜即可进入 restricted canary；期间 soft degradation 记入证据并允许自动恢复。
 7. **Emergency-close gate**：同 release、同 order shape 的 emergency reduce-only close
    路径完成测试网验证，证据绑定 release ID、symbol、position side 和实际 filled quantity。
 8. **Account-a canary authority gate**：rollout phase 为 `account_a_canary` 时，
@@ -345,7 +354,9 @@ permit downlink 包含绝对 `expires_at`，control plane、data client 和 stra
 12. **Close gate**：两节点回到期望 trading state，证据包包含 version、metrics、commands、
     reconciliation、trade、目标 symbol flat/zero-orders、非目标组合基线和 rollback 验证。
 
-任一 gate 失败都会保持 HALTED，并执行上一不可变 image digest 的 rollback。
+hard gate 失败会保持 HALTED，并执行上一不可变 image digest 的 rollback。soft gate
+失败会保持当前 trading state，标记 degraded，并在恢复后自动清除；restricted canary
+在开仓与平仓所需路径当前可用时可以继续。
 
 ## Consequences
 
