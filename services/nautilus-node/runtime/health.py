@@ -35,6 +35,13 @@ class HealthService:
             body={
                 "ready": readiness.ready,
                 "missing": [dependency.value for dependency in readiness.missing],
+                "degraded": [
+                    {
+                        "dependency": dependency.value,
+                        "reason": reason,
+                    }
+                    for dependency, reason in readiness.degraded
+                ],
                 "trading_state": self._lifecycle.trading_state.value,
                 "halt_reason": self._lifecycle.halt_reason,
             },

@@ -34,6 +34,7 @@ class DependencyName(str, Enum):
 class ReadinessStatus:
     ready: bool
     missing: tuple[DependencyName, ...]
+    degraded: tuple[tuple[DependencyName, str], ...]
 
 
 class NodeLifecycle:
@@ -49,6 +50,7 @@ class NodeLifecycle:
         self._clock = clock or SystemClock()
         self._control_plane = control_plane
         self._ready_dependencies: set[DependencyName] = set()
+        self._degraded_dependencies: dict[DependencyName, str] = {}
         # HALTED is the safe default (PLAN: live off by default). Testnet acceptance
         # may override until the operator RESUME command path is wired into the node.
         self._trading_state = TradingState(
@@ -75,17 +77,37 @@ class NodeLifecycle:
             for dependency in DependencyName
             if dependency not in self._ready_dependencies
         )
-        return ReadinessStatus(ready=not missing, missing=missing)
+        degraded = tuple(
+            (dependency, self._degraded_dependencies[dependency])
+            for dependency in DependencyName
+            if dependency in self._degraded_dependencies
+        )
+        return ReadinessStatus(
+            ready=not missing,
+            missing=missing,
+            degraded=degraded,
+        )
 
     def mark_dependency_ready(self, dependency: DependencyName) -> None:
         self._ready_dependencies.add(dependency)
+        self._degraded_dependencies.pop(dependency, None)
         if dependency is DependencyName.CONTROL_PLANE:
             self._last_control_plane_ok_at = self._clock.now()
         if dependency is DependencyName.RECONCILIATION:
             self._reconciliation_state = ReconciliationState.HEALTHY
 
+    def mark_dependency_degraded(
+        self,
+        dependency: DependencyName,
+        reason: str,
+    ) -> None:
+        self._degraded_dependencies[dependency] = str(reason)
+        if dependency is DependencyName.RECONCILIATION:
+            self._reconciliation_state = ReconciliationState.DEGRADED
+
     def mark_dependency_failed(self, dependency: DependencyName, reason: str) -> None:
         self._ready_dependencies.discard(dependency)
+        self._degraded_dependencies.pop(dependency, None)
         if dependency is DependencyName.RECONCILIATION:
             self._reconciliation_state = ReconciliationState.FAILED
         self._halt(f"{dependency.value} failed: {reason}")

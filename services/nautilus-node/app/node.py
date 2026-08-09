@@ -67,6 +67,8 @@ class AccountRuntime:
     exchange_cancel_adapter: Any
     strategy_config: Any
     trading_node_config_kwargs: dict[str, Any]
+    control_plane_session: Any = None
+    background_workers: list[Any] = field(default_factory=list)
     trading_node: Any = None
     components: tuple[NodeComponent, ...] = ()
     nautilus_api_todos: tuple[str, ...] = NAUTILUS_API_TODOS
@@ -136,6 +138,11 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
     Nautilus installed; hk must execute this path against the pinned wheel.
     """
 
+    if runtime.control_plane_session is not None:
+        raise RuntimeError(
+            "control-plane session owner is already assembled"
+        )
+
     from nautilus_trader.adapters.binance.factories import (  # type: ignore[import-not-found]
         BinanceLiveDataClientFactory,
         BinanceLiveExecClientFactory,
@@ -155,6 +162,7 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
     )
     from risk.config import build_live_risk_engine_config
     from runtime.binance_adapter_config import build_binance_client_configs
+    from runtime.control_plane_session import NodeControlPlaneSession
 
     data_client_config, exec_client_config = build_binance_client_configs(runtime.config)
     node_config = TradingNodeConfig(
@@ -175,16 +183,113 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
     node.add_exec_client_factory("BINANCE", BinanceLiveExecClientFactory)
     strategy = _build_strategy(runtime)
     node.trader.add_strategy(strategy)
-    node.trader.add_actor(IntentPublisherActor(runtime.intent_data_client))
-    node.trader.add_actor(ExecutionProjectionActor(runtime.projection_actor))
-    node.trader.add_actor(
-        CommandPollerActor(
-            runtime.control_plane,
-            runtime.lifecycle,
-            runtime.config.node_id,
-            account_id=runtime.config.account_id,
-        )
+    actor_holder: dict[str, Any] = {}
+    session_config = runtime.config.control_plane.session
+    session = NodeControlPlaneSession(
+        heartbeat=lambda: actor_holder[
+            "command"
+        ].session_send_heartbeat(),
+        command_poll=lambda capacity: actor_holder[
+            "command"
+        ].session_poll_commands(capacity),
+        command_apply=lambda command: actor_holder[
+            "command"
+        ].session_apply_command(command),
+        command_ack=lambda acknowledgement: actor_holder[
+            "command"
+        ].session_ack_command(acknowledgement),
+        intent_replay=_intent_replay_callback(
+            runtime.intent_data_client
+        ),
+        intent_fetch=lambda capacity: runtime.intent_data_client.fetch_once(
+            limit=capacity,
+            wait_ms=0,
+        ),
+        intent_deliver=runtime.intent_data_client.deliver,
+        execution_event_sink=lambda event: actor_holder[
+            "projection"
+        ].session_flush_execution_event(event),
+        command_delivery_capacity=(
+            session_config.command_delivery_capacity
+        ),
+        command_ack_capacity=session_config.command_ack_capacity,
+        intent_delivery_capacity=(
+            session_config.intent_delivery_capacity
+        ),
+        execution_event_capacity=(
+            session_config.execution_event_capacity
+        ),
+        queue_degraded_ratio=session_config.queue_degraded_ratio,
+        retry_budget=session_config.retry_budget,
+        retry_base_delay_seconds=(
+            session_config.retry_base_delay_seconds
+        ),
+        retry_max_delay_seconds=(
+            session_config.retry_max_delay_seconds
+        ),
+        retry_jitter_ratio=session_config.retry_jitter_ratio,
+        circuit_reset_seconds=session_config.circuit_reset_seconds,
+        operation_timeout_seconds=(
+            session_config.operation_timeout_seconds
+        ),
+        fatal_termination_hook=lambda reason: (
+            _mark_control_plane_session_fatal(runtime, reason)
+        ),
+        thread_name_prefix=(
+            f"node-control-plane.{runtime.config.account_id}"
+        ),
     )
+    intent_actor = IntentPublisherActor(
+        runtime.intent_data_client,
+        lifecycle=runtime.lifecycle,
+        control_plane_session=session,
+        manage_control_plane_session=False,
+        worker_shutdown_wait_seconds=(
+            session_config.shutdown_timeout_seconds
+        ),
+    )
+    projection_actor = ExecutionProjectionActor(
+        runtime.projection_actor,
+        control_plane_session=session,
+        manage_control_plane_session=False,
+        worker_shutdown_wait_seconds=(
+            session_config.shutdown_timeout_seconds
+        ),
+        fatal_callback=lambda reason: _mark_dependency_reason(
+            runtime,
+            "projection",
+            reason,
+            hard=True,
+        ),
+        degraded_callback=lambda reason: _mark_dependency_reason(
+            runtime,
+            "projection",
+            reason,
+            hard=False,
+        ),
+    )
+    command_actor = CommandPollerActor(
+        runtime.control_plane,
+        runtime.lifecycle,
+        runtime.config.node_id,
+        account_id=runtime.config.account_id,
+        control_plane_session=session,
+        manage_control_plane_session=False,
+        worker_shutdown_wait_seconds=(
+            session_config.shutdown_timeout_seconds
+        ),
+    )
+    actor_holder.update(
+        {
+            "command": command_actor,
+            "intent": intent_actor,
+            "projection": projection_actor,
+        }
+    )
+    runtime.control_plane_session = session
+    node.trader.add_actor(intent_actor)
+    node.trader.add_actor(projection_actor)
+    node.trader.add_actor(command_actor)
     return node
 
 
@@ -211,8 +316,50 @@ def _component_list(runtime: AccountRuntime) -> tuple[NodeComponent, ...]:
         NodeComponent("exchange_cancel_adapter", runtime.exchange_cancel_adapter),
         NodeComponent("intent_execution_strategy", runtime.strategy_config),
         NodeComponent("trading_node_config", runtime.trading_node_config_kwargs),
+        NodeComponent(
+            "control_plane_session",
+            runtime.control_plane_session,
+        ),
         NodeComponent("trading_node", runtime.trading_node),
     )
+
+
+def _intent_replay_callback(intent_data_client: Any) -> Callable[[], Any] | None:
+    for name in ("replay_pending", "replay_durable_inbox"):
+        callback = getattr(intent_data_client, name, None)
+        if callable(callback):
+            return callback
+    return None
+
+
+def _mark_control_plane_session_fatal(
+    runtime: AccountRuntime,
+    reason: str,
+) -> None:
+    _mark_dependency_reason(
+        runtime,
+        "control_plane",
+        f"control-plane session fatal: {reason}",
+        hard=True,
+    )
+
+
+def _mark_dependency_reason(
+    runtime: AccountRuntime,
+    dependency_name: str,
+    reason: str,
+    *,
+    hard: bool,
+) -> None:
+    dependency = _dependency_by_value(dependency_name)
+    if dependency is None:
+        return
+    method_name = "mark_dependency_degraded"
+    if hard:
+        method_name = "mark_dependency_failed"
+    marker = getattr(runtime.lifecycle, method_name, None)
+    if callable(marker):
+        marker(dependency, reason)
 
 
 def _build_control_plane_client(config: NodeConfig) -> Any:
@@ -655,6 +802,15 @@ class _LocalHealthService:
                     str(getattr(dependency, "value", dependency))
                     for dependency in readiness.missing
                 ],
+                "degraded": [
+                    {
+                        "dependency": str(
+                            getattr(dependency, "value", dependency)
+                        ),
+                        "reason": reason,
+                    }
+                    for dependency, reason in readiness.degraded
+                ],
                 "trading_state": str(
                     getattr(self._lifecycle.trading_state, "value", self._lifecycle.trading_state)
                 ),
@@ -675,8 +831,13 @@ class _LocalTradingState:
 
 
 class _LocalReadiness:
-    def __init__(self, missing: Iterable[str]) -> None:
+    def __init__(
+        self,
+        missing: Iterable[str],
+        degraded: Iterable[tuple[str, str]],
+    ) -> None:
         self.missing = tuple(missing)
+        self.degraded = tuple(degraded)
         self.ready = not self.missing
 
 
@@ -686,30 +847,53 @@ class _LocalLifecycle:
         self.trading_state = _LocalTradingState.HALTED
         self.halt_reason = "startup"
         self._ready: set[str] = set()
+        self._degraded: dict[str, str] = {}
         self._projection_lag_ms = 0
         self._last_event_id: str | None = None
 
     @property
     def readiness(self) -> _LocalReadiness:
+        dependencies = (
+            "instruments",
+            "redis",
+            "control_plane",
+            "intent_stream",
+            "command_stream",
+            "reconciliation",
+            "projection",
+        )
         return _LocalReadiness(
-            dependency
-            for dependency in (
-                "instruments",
-                "redis",
-                "control_plane",
-                "reconciliation",
-                "projection",
-            )
-            if dependency not in self._ready
+            (
+                dependency
+                for dependency in dependencies
+                if dependency not in self._ready
+            ),
+            (
+                (dependency, self._degraded[dependency])
+                for dependency in dependencies
+                if dependency in self._degraded
+            ),
         )
 
     def mark_dependency_ready(self, dependency: Any) -> None:
-        self._ready.add(str(getattr(dependency, "value", dependency)))
+        value = str(getattr(dependency, "value", dependency))
+        self._ready.add(value)
+        self._degraded.pop(value, None)
+
+    def mark_dependency_degraded(
+        self,
+        dependency: Any,
+        reason: str,
+    ) -> None:
+        value = str(getattr(dependency, "value", dependency))
+        self._degraded[value] = str(reason)
 
     def mark_dependency_failed(self, dependency: Any, reason: str) -> None:
-        self._ready.discard(str(getattr(dependency, "value", dependency)))
+        value = str(getattr(dependency, "value", dependency))
+        self._ready.discard(value)
+        self._degraded.pop(value, None)
         self.trading_state = _LocalTradingState.HALTED
-        self.halt_reason = f"{getattr(dependency, 'value', dependency)} failed: {reason}"
+        self.halt_reason = f"{value} failed: {reason}"
 
     def record_projection_progress(
         self, projection_lag_ms: int, last_event_id: str | None = None

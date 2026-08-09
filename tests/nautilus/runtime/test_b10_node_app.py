@@ -62,6 +62,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
                 "exchange_cancel_adapter",
                 "intent_execution_strategy",
                 "trading_node_config",
+                "control_plane_session",
                 "trading_node",
             ),
         )
@@ -180,8 +181,30 @@ class NodeAppAssemblyTest(unittest.TestCase):
             [type(actor).__name__ for actor in node.trader.actors],
             ["IntentPublisherActor", "ExecutionProjectionActor", "CommandPollerActor"],
         )
+        session = runtime.control_plane_session
+        self.assertIsNotNone(session)
+        self.assertFalse(session.snapshot().started)
+        for actor in node.trader.actors:
+            self.assertIs(actor._control_plane_session, session)
+            self.assertFalse(actor._manage_control_plane_session)
         self.assertEqual(node.config.kwargs["trader_id"], runtime.config.trader_id)
         self.assertNotIn("instance_id", node.config.kwargs)
+
+    def test_host_trading_node_builder_rejects_duplicate_session_owner(self) -> None:
+        from app.node import build_account_runtime, build_nautilus_trading_node
+
+        with tempfile.TemporaryDirectory() as tmp, _fake_nautilus_modules():
+            runtime = build_account_runtime(
+                SERVICE_ROOT / "config" / "examples" / "account-a.sandbox.json",
+                spool_root=Path(tmp),
+            )
+            build_nautilus_trading_node(runtime)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "session owner is already assembled",
+            ):
+                build_nautilus_trading_node(runtime)
 
 
 class NautilusActorAdapterTest(unittest.TestCase):

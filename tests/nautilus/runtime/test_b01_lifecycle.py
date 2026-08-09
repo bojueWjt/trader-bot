@@ -228,6 +228,60 @@ def test_readiness_requires_intent_and_command_stream_dependencies(
     assert lifecycle.readiness.ready is True
 
 
+def test_recoverable_dependency_degradation_preserves_active_trading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    for dependency in DependencyName:
+        lifecycle.mark_dependency_ready(dependency)
+    lifecycle.apply_operator_state(
+        TradingState.ACTIVE,
+        reason="operator resume",
+    )
+
+    lifecycle.mark_dependency_degraded(
+        DependencyName.COMMAND_STREAM,
+        "command ACK HTTP 503",
+    )
+
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.readiness.ready is True
+    assert lifecycle.readiness.missing == ()
+    assert lifecycle.readiness.degraded == (
+        (
+            DependencyName.COMMAND_STREAM,
+            "command ACK HTTP 503",
+        ),
+    )
+
+    lifecycle.mark_dependency_ready(DependencyName.COMMAND_STREAM)
+
+    assert lifecycle.readiness.degraded == ()
+
+
+def test_startup_degradation_remains_unready_without_sticky_halt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+
+    lifecycle.mark_dependency_degraded(
+        DependencyName.CONTROL_PLANE,
+        "heartbeat HTTP 503",
+    )
+
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.halt_reason == "startup"
+    assert DependencyName.CONTROL_PLANE in lifecycle.readiness.missing
+    assert lifecycle.readiness.degraded == (
+        (
+            DependencyName.CONTROL_PLANE,
+            "heartbeat HTTP 503",
+        ),
+    )
+
+
 def test_heartbeat_carries_the_runtime_account_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

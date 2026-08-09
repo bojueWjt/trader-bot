@@ -24,6 +24,8 @@ class ProjectionHealth(Protocol):
 
     def mark_projection_ready(self) -> None: ...
 
+    def mark_projection_degraded(self, reason: str) -> None: ...
+
     def mark_projection_failed(self, reason: str) -> None: ...
 
 
@@ -104,7 +106,9 @@ class ProjectionActor:
         try:
             acked = self._sink.post_events(self.config.node_id, pending)
         except Exception:
-            self._mark_projection_failed("control-plane execution-event sink unavailable")
+            self._mark_projection_degraded(
+                "control-plane execution-event sink unavailable"
+            )
             return []
         with self._spool_lock:
             self.spool.mark_acked(acked)
@@ -129,7 +133,7 @@ class ProjectionActor:
         if self._health is not None:
             self._health.record_projection_progress(lag_ms, envelope.event_id)
             if lag_ms > self.config.lag_degrade_threshold_ms:
-                self._health.mark_projection_failed(
+                self._health.mark_projection_degraded(
                     "projection lag "
                     f"{lag_ms}ms exceeds {self.config.lag_degrade_threshold_ms}ms"
                 )
@@ -146,6 +150,10 @@ class ProjectionActor:
     def _mark_projection_failed(self, reason: str) -> None:
         if self._health is not None:
             self._health.mark_projection_failed(reason)
+
+    def _mark_projection_degraded(self, reason: str) -> None:
+        if self._health is not None:
+            self._health.mark_projection_degraded(reason)
 
 
 class LifecycleProjectionHealth:
@@ -165,6 +173,19 @@ class LifecycleProjectionHealth:
         except ModuleNotFoundError:
             return
         self._lifecycle.mark_dependency_ready(DependencyName.PROJECTION)
+
+    def mark_projection_degraded(self, reason: str) -> None:
+        try:
+            from runtime.lifecycle import DependencyName
+        except ModuleNotFoundError:
+            return
+        marker = getattr(
+            self._lifecycle,
+            "mark_dependency_degraded",
+            None,
+        )
+        if callable(marker):
+            marker(DependencyName.PROJECTION, reason)
 
     def mark_projection_failed(self, reason: str) -> None:
         try:

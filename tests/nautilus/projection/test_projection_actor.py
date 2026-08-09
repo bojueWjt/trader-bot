@@ -132,6 +132,29 @@ class ProjectionActorTests(unittest.TestCase):
         actor.flush()
         self.assertEqual(actor.spool.pending_count, 0)
 
+    def test_offline_sink_failure_marks_projection_degraded(self) -> None:
+        sink = _RecordingSink(fail=True)
+        health = _RecordingHealth()
+        actor = _actor(
+            self._tmp_spool(),
+            sink=sink,
+            health=health,
+        )
+
+        actor.on_event(
+            _Event(
+                "OrderAccepted",
+                ts_event=30,
+                client_order_id="coid-2",
+            )
+        )
+
+        self.assertEqual(
+            health.degraded,
+            ["control-plane execution-event sink unavailable"],
+        )
+        self.assertEqual(health.failed, [])
+
     def test_out_of_order_duplicate_delivery_keeps_single_pending_update(self) -> None:
         sink = _RecordingSink(fail=True)
         actor = _actor(self._tmp_spool(), sink=sink)
@@ -174,7 +197,11 @@ class ProjectionActorTests(unittest.TestCase):
         )
 
         self.assertEqual(health.progress[-1], (6, event_id))
-        self.assertIn("projection lag 6ms exceeds 5ms", health.failed)
+        self.assertIn(
+            "projection lag 6ms exceeds 5ms",
+            health.degraded,
+        )
+        self.assertEqual(health.failed, [])
 
     def test_event_mapping_catalog_lists_required_families(self) -> None:
         self.assertIn("OrderFilled", EVENT_MAPPING_CATALOG)
@@ -252,6 +279,7 @@ class _RecordingHealth:
     def __init__(self) -> None:
         self.progress: list[tuple[int, str | None]] = []
         self.ready = 0
+        self.degraded: list[str] = []
         self.failed: list[str] = []
 
     def record_projection_progress(
@@ -261,6 +289,9 @@ class _RecordingHealth:
 
     def mark_projection_ready(self) -> None:
         self.ready += 1
+
+    def mark_projection_degraded(self, reason: str) -> None:
+        self.degraded.append(reason)
 
     def mark_projection_failed(self, reason: str) -> None:
         self.failed.append(reason)
