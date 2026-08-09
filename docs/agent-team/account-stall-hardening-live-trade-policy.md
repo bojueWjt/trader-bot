@@ -15,23 +15,29 @@
 
 ## 交易前置门
 
-以下条件必须同时满足：
+以下条件属于硬阻断：
 
 - 当前 release commit、image digest、config hash 与已审查物料一致。
-- account-a 节点 HALTED，actor tick age 小于 2 秒，heartbeat age 小于 5 秒。
-- readiness 完整，reconciliation 为 HEALTHY，projection lag 小于 5 秒。
-- 目标 symbol 在系统既有允许列表内。
-- 交易所当前 filters 允许在 12 USDT 内构造合法最小数量。
+- account-a 节点处于 HALTED，当前 writer ownership、lease 和 fencing identity 一致。
+- 目标 symbol 在系统既有允许列表内，交易所 filters 支持在 12 USDT 内构造合法数量。
 - 目标 symbol 当前无持仓、无普通挂单、无 algo 挂单。
 - 非目标持仓、普通挂单和 algo 挂单已规范化并冻结为签名的
   `portfolio_baseline_sha256`。
-- account-a 没有开放 P0/P1 incident。
-- Redis、PostgreSQL、控制面和节点资源均在验收阈值内。
-- emergency reduce-only close 路径已在 testnet 对相同 order shape 验证。
-- rollout phase 为 `account_a_canary`，受限 canary RESUME gate 已绑定当前 release；
-  常规 RESUME 继续保持关闭。
-- 独立 mark-to-market loss monitor 正常运行，mark freshness、position quantity、
-  fees 和 cumulative PnL 可观测。
+- durable journal、intent、outbox 和 evidence store 可写且有剩余容量。
+- rollout phase 为 `account_a_canary`，受限 canary RESUME gate 已绑定当前 release。
+- actor progress 与独立 mark-to-market loss monitor 正常推进。
+- 当前控制面路径可提交 canonical intent，并可按实际成交量构造独立 client ID 的
+  reduce-only close。
+
+以下条件记录为 `DEGRADED` 并继续交易：
+
+- heartbeat、readiness、projection 或 reconciliation 超过健康阈值。
+- 控制面 HTTP timeout、5xx、circuit open 或瞬态 poll/ACK 失败。
+- Redis、PostgreSQL、控制面或节点资源超过告警阈值，同时 durable 写入仍可完成。
+- account-a 存在与本次 ownership、目标仓位和 loss monitor 无关的历史 incident。
+- testnet emergency-close 证据陈旧，同时当前 adapter contract、数量精度和
+  reduce-only 请求可在本地确定性验证。
+- 普通 queue pressure、历史 enrich 延迟或 exchange mirror 的非目标字段延迟。
 
 ## Symbol 选择
 
@@ -46,8 +52,8 @@
 
 ## 执行顺序
 
-1. **测试网闭环**：验证同形状 `LIMIT + IOC` 开仓、订单查询、撤单和 emergency
-   reduce-only close 路径。
+1. **执行契约验证**：验证同形状 `LIMIT + IOC` 开仓、订单查询、撤单和独立 client ID
+   的 exact reduce-only close 请求；testnet 结果进入证据并允许陈旧状态降级继续。
 2. **冻结基线**：确认 `SOLUSDT` 无持仓和订单，签名冻结全部非 `SOLUSDT` 的
    `portfolio_baseline_sha256`。
 3. **审计放行**：确认节点仍为 HALTED，创建单次 canary permit，通过 operator command
@@ -69,15 +75,20 @@
 
 任一条件触发后立即停止新增风险并执行精确 reduce-only 平仓：
 
-- 任一身份字段不一致。
-- A/B image digest 或 config hash 发生变化。
-- actor tick、heartbeat、projection 或 reconciliation 变 stale。
-- 请求结果存在超时歧义，且交易所查询无法确认订单状态。
+- account、node、release、writer、lease 或 fencing identity 不一致。
+- durable journal、intent、outbox 或 evidence 写入失败或容量耗尽。
+- actor progress 或持仓期间的 loss monitor 停止推进。
+- OPEN 请求结果存在歧义，且交易所查询无法确认唯一订单状态。
 - 订单数量、方向、position side、reduce-only 或 client order ID 与计划不一致。
 - 累计净亏损达到 1.5 USDT。
-- mark price 缺失、陈旧，或持仓期间 loss monitor 停止推进。
-- 出现额外仓位、额外挂单、重复 intent、重复 order 或跨账户数据。
+- 出现额外目标仓位、额外目标挂单、重复 intent、重复 order 或跨账户数据。
 - 非目标 `portfolio_baseline_sha256` 发生变化。
+- exact reduce-only close 无法按实际成交数量提交或确认。
+- 最终 HALT 或 HALT 后交易所归零快照无法证明。
+
+heartbeat、readiness、projection、reconciliation、HTTP、circuit、资源压力和历史
+incident 的软异常持续写入审计轨迹。执行器使用有界重试推进 RESUME、OBSERVE、查询和
+证据采集，交易保护动作保持最高优先级。
 
 ## 证据要求
 

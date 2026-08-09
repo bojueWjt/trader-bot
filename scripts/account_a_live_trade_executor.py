@@ -2511,6 +2511,7 @@ class AccountALiveTradeExecutor:
             close_request.update(
                 {
                     "intent_id": authorization.close_intent_id,
+                    "open_intent_id": authorization.intent_id,
                     "client_order_id": (
                         authorization.close_client_order_id
                     ),

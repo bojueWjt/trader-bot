@@ -1148,6 +1148,7 @@ def test_open_exception_still_closes_exact_position_then_halts(
                 authorization.close_client_order_id
             ),
             "intent_id": authorization.close_intent_id,
+            "open_intent_id": authorization.intent_id,
             "side": "SELL",
             "position_side": "LONG",
             "order_type": "MARKET",
