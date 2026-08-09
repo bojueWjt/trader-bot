@@ -2,20 +2,20 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
 import hashlib
-from importlib import metadata
 import json
 import os
-from pathlib import Path
 import platform
 import re
 import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from importlib import metadata
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 SCHEMA_VERSION = "1.0"
 REDACTED = "[REDACTED]"
@@ -28,10 +28,13 @@ ENVIRONMENT_ALLOWLIST = frozenset(
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
+        "PATH",
         "PYTHONDONTWRITEBYTECODE",
         "PYTHONHASHSEED",
         "PYTHONUNBUFFERED",
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+        "SYSTEMROOT",
+        "TMPDIR",
         "TZ",
         "VIRTUAL_ENV",
     }
@@ -44,6 +47,22 @@ SECRET_NAME_PATTERN = re.compile(
     r")(?:$|[-_])",
     re.IGNORECASE,
 )
+SECRET_NAME_EXACT = frozenset(
+    {
+        "MYSQL_PWD",
+        "PGPASSFILE",
+        "PGPASSWORD",
+        "GITHUB_PAT",
+    }
+)
+DIST_INFO_EVIDENCE_FILES = frozenset(
+    {
+        "METADATA",
+        "RECORD",
+        "WHEEL",
+        "direct_url.json",
+    }
+)
 OPTION_PATTERN = re.compile(r"^--([A-Za-z0-9][A-Za-z0-9_-]*)(?:=(.*))?$")
 ASSIGNMENT_PATTERN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 OWNED_PYTEST_OPTIONS = frozenset(
@@ -54,6 +73,22 @@ OWNED_PYTEST_OPTIONS = frozenset(
         "--junitxml",
     }
 )
+FORBIDDEN_PYTEST_OPTIONS = frozenset(
+    {
+        "--disable-pytest-warnings",
+        "--disable-warnings",
+        "--pythonwarnings",
+        "-W",
+    }
+)
+CHILD_ENVIRONMENT_OVERRIDES = {
+    "LC_ALL": "C",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONHASHSEED": "0",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    "PYTHONWARNINGS": "default",
+    "TZ": "UTC",
+}
 
 
 class CaptureError(ValueError):
@@ -131,7 +166,7 @@ def _run_command(
             errors="replace",
             check=False,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - invocation failures are evidence.
         message = f"{type(exc).__name__}: {exc}\n"
         return CommandResult(
             command=command_tuple,
@@ -150,6 +185,8 @@ def _run_command(
 
 
 def _is_secret_name(name: str) -> bool:
+    if name.upper() in SECRET_NAME_EXACT:
+        return True
     return SECRET_NAME_PATTERN.search(name) is not None
 
 
@@ -199,8 +236,29 @@ def _known_secret_values(
             continue
         values.append(value)
     values.extend(_secret_argument_values(pytest_args))
-    unique_values = set(values)
+    expanded_values = []
+    for value in values:
+        expanded_values.append(value)
+        expanded_values.extend(_secret_fragments(value))
+    unique_values = set(expanded_values)
     return tuple(sorted(unique_values, key=len, reverse=True))
+
+
+def _secret_fragments(value: str) -> tuple[str, ...]:
+    fragments = []
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        parsed = False
+    if parsed is not False and parsed.password:
+        fragments.append(parsed.password)
+        fragments.append(unquote(parsed.password))
+    assignment_pattern = re.compile(
+        r"(?:^|[;,\s])(?:pass(?:word|wd)?|pwd|secret|token)=([^;,\s]+)",
+        re.IGNORECASE,
+    )
+    fragments.extend(match.group(1) for match in assignment_pattern.finditer(value))
+    return tuple(fragment for fragment in fragments if len(fragment) >= 3)
 
 
 def _sanitize_text(value: str, secret_values: Sequence[str]) -> str:
@@ -259,6 +317,7 @@ def _redact_command(
 
 def _environment_manifest(
     environ: Mapping[str, str],
+    child_environment: Mapping[str, str],
     secret_values: Sequence[str],
 ) -> dict:
     inherited = {}
@@ -273,8 +332,24 @@ def _environment_manifest(
         "schema_version": SCHEMA_VERSION,
         "allowlist": sorted(ENVIRONMENT_ALLOWLIST),
         "inherited": inherited,
+        "child": {
+            name: _sanitize_text(value, secret_values)
+            for name, value in sorted(child_environment.items())
+        },
         "omitted_names": omitted_names,
     }
+
+
+def _child_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    child = {
+        name: value
+        for name, value in environ.items()
+        if name in ENVIRONMENT_ALLOWLIST and not _is_secret_name(name)
+    }
+    if not child.get("PATH"):
+        child["PATH"] = os.defpath
+    child.update(CHILD_ENVIRONMENT_OVERRIDES)
+    return child
 
 
 def _python_platform_manifest() -> dict:
@@ -303,6 +378,62 @@ def _installed_distributions() -> list[tuple[str, str]]:
             name = "unknown-distribution"
         installed.append((name, distribution.version))
     return installed
+
+
+def _distribution_artifact_records() -> list[dict[str, object]]:
+    records = []
+    for distribution in metadata.distributions():
+        name = distribution.metadata.get("Name")
+        if not name:
+            name = "unknown-distribution"
+        canonical_name = _normalize_distribution_name(str(name))
+        version = str(distribution.version).strip()
+        evidence_files = []
+        editable = False
+        for package_file in distribution.files or ():
+            evidence_name = Path(str(package_file)).name
+            if evidence_name not in DIST_INFO_EVIDENCE_FILES:
+                continue
+            path = Path(distribution.locate_file(package_file))
+            if not path.is_file():
+                continue
+            if evidence_name == "direct_url.json":
+                try:
+                    direct_url = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, TypeError, ValueError):
+                    direct_url = {}
+                dir_info = direct_url.get("dir_info")
+                if isinstance(dir_info, dict):
+                    editable = bool(dir_info.get("editable"))
+            evidence_files.append(
+                {
+                    "name": evidence_name,
+                    "sha256": _sha256_path(path),
+                    "size": path.stat().st_size,
+                }
+            )
+        evidence_files.sort(key=lambda item: str(item["name"]).encode("utf-8"))
+        records.append(
+            {
+                "name": canonical_name,
+                "version": version,
+                "editable": editable,
+                "metadata_files": evidence_files,
+            }
+        )
+    records.sort(
+        key=lambda item: (
+            str(item["name"]).encode("utf-8"),
+            str(item["version"]).encode("utf-8"),
+        )
+    )
+    return records
+
+
+def _distribution_artifact_bytes(records: Sequence[Mapping[str, object]]) -> bytes:
+    return (json.dumps(records, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
 
 
 def _normalize_distribution_name(name: str) -> str:
@@ -347,7 +478,199 @@ def _nodeids_bytes(collect_stdout: str) -> bytes:
     return ("\n".join(nodeids) + "\n").encode("utf-8")
 
 
+def _nodeids_text_bytes(nodeids: Sequence[str]) -> bytes:
+    normalized = sorted(
+        (str(nodeid).strip() for nodeid in nodeids if str(nodeid).strip()),
+        key=lambda value: value.encode("utf-8"),
+    )
+    if not normalized:
+        return b""
+    return ("\n".join(normalized) + "\n").encode("utf-8")
+
+
+def _duplicate_lines(content: bytes) -> tuple[str, ...]:
+    lines = content.decode("utf-8").splitlines()
+    seen = set()
+    duplicates = set()
+    for line in lines:
+        if line in seen:
+            duplicates.add(line)
+            continue
+        seen.add(line)
+    return tuple(sorted(duplicates, key=lambda value: value.encode("utf-8")))
+
+
+def _contains_secret(value: str, secret_values: Sequence[str]) -> bool:
+    return any(secret and secret in value for secret in secret_values)
+
+
+def _junit_report(path: Path, repo_root: Path) -> dict[str, object]:
+    root = ET.parse(path).getroot()
+    nodeids = []
+    skips = []
+    failure_count = 0
+    error_count = 0
+    for testcase in root.iter("testcase"):
+        nodeid = _junit_testcase_nodeid(testcase, repo_root)
+        nodeids.append(nodeid)
+        skipped = testcase.find("skipped")
+        if skipped is not None:
+            skips.append(
+                {
+                    "nodeid": nodeid,
+                    "message": str(skipped.attrib.get("message") or ""),
+                    "detail": str(skipped.text or ""),
+                }
+            )
+        if testcase.find("failure") is not None:
+            failure_count += 1
+        if testcase.find("error") is not None:
+            error_count += 1
+    nodeids.sort(key=lambda value: value.encode("utf-8"))
+    skips.sort(key=lambda item: str(item["nodeid"]).encode("utf-8"))
+    return {
+        "nodeids": nodeids,
+        "test_count": len(nodeids),
+        "skipped_count": len(skips),
+        "failure_count": failure_count,
+        "error_count": error_count,
+        "skips": skips,
+    }
+
+
+def _junit_testcase_nodeid(testcase: ET.Element, repo_root: Path) -> str:
+    classname = str(testcase.attrib.get("classname") or "").strip()
+    name = str(testcase.attrib.get("name") or "").strip()
+    parts = [part for part in classname.split(".") if part]
+    module_parts = []
+    class_parts = []
+    for index in range(len(parts), 0, -1):
+        candidate = repo_root.joinpath(*parts[:index]).with_suffix(".py")
+        if candidate.is_file():
+            module_parts = parts[:index]
+            class_parts = parts[index:]
+            break
+    if not module_parts:
+        split_at = len(parts)
+        for index, part in enumerate(parts):
+            if part[:1].isupper():
+                split_at = index
+                break
+        module_parts = parts[:split_at]
+        class_parts = parts[split_at:]
+    path = "/".join(module_parts) + ".py"
+    identifiers = [*class_parts, name]
+    suffix = "::".join(identifier for identifier in identifiers if identifier)
+    if path == ".py":
+        return f"junit://{classname}::{name}"
+    if not suffix:
+        return path
+    return f"{path}::{suffix}"
+
+
+def _inventory_coverage_errors(
+    collected: Sequence[str],
+    executed: Sequence[str],
+) -> tuple[str, ...]:
+    errors = []
+    for nodeid in collected:
+        if any(_executed_matches_collected(item, nodeid) for item in executed):
+            continue
+        errors.append(f"collected node-id was not executed: {nodeid}")
+    for nodeid in executed:
+        if any(_executed_matches_collected(nodeid, item) for item in collected):
+            continue
+        errors.append(f"executed node-id was not collected: {nodeid}")
+    return tuple(errors)
+
+
+def _executed_matches_collected(executed: str, collected: str) -> bool:
+    if executed == collected:
+        return True
+    return executed.startswith(
+        (
+            f"{collected}[",
+            f"{collected} ",
+            f"{collected}::",
+        )
+    )
+
+
+def _warning_report(stdout: str, stderr: str) -> dict[str, object]:
+    combined = f"{stdout}\n{stderr}"
+    warning_counts = [
+        int(match.group(1)) for match in re.finditer(r"\b(\d+) warnings?\b", combined)
+    ]
+    summary = []
+    in_summary = False
+    for raw_line in combined.splitlines():
+        line = raw_line.rstrip()
+        if " warnings summary " in line:
+            in_summary = True
+            continue
+        if not in_summary:
+            continue
+        if line.startswith("-- Docs:"):
+            break
+        if re.fullmatch(r"=+[^=]+=+", line):
+            break
+        if line:
+            summary.append(line)
+    count = 0
+    if warning_counts:
+        count = warning_counts[-1]
+    return {
+        "count": count,
+        "summary": summary,
+    }
+
+
+def _sanitized_test_report(
+    *,
+    junit_report: Mapping[str, object],
+    warning_report: Mapping[str, object],
+    secret_values: Sequence[str],
+) -> dict[str, object]:
+    skips = []
+    for raw_skip in junit_report["skips"]:
+        skip = dict(raw_skip)
+        skips.append(
+            {
+                "nodeid": _sanitize_text(
+                    str(skip["nodeid"]),
+                    secret_values,
+                ),
+                "message": _sanitize_text(
+                    str(skip["message"]),
+                    secret_values,
+                ),
+                "detail": _sanitize_text(
+                    str(skip["detail"]),
+                    secret_values,
+                ),
+            }
+        )
+    warning_summary = [
+        _sanitize_text(str(line), secret_values) for line in warning_report["summary"]
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "junit": {
+            "test_count": int(junit_report["test_count"]),
+            "skipped_count": int(junit_report["skipped_count"]),
+            "failure_count": int(junit_report["failure_count"]),
+            "error_count": int(junit_report["error_count"]),
+            "skips": skips,
+        },
+        "warnings": {
+            "count": int(warning_report["count"]),
+            "summary": warning_summary,
+        },
+    }
+
+
 def _validate_pytest_args(pytest_args: Sequence[str]) -> None:
+    previous = ""
     for argument in pytest_args:
         if "\x00" in argument:
             raise CaptureError("pytest argument contains a NUL byte")
@@ -358,6 +681,15 @@ def _validate_pytest_args(pytest_args: Sequence[str]) -> None:
             raise CaptureError(
                 f"pytest option is managed by the evidence collector: {option_name}"
             )
+        if option_name in FORBIDDEN_PYTEST_OPTIONS:
+            raise CaptureError(f"pytest option can hide evidence: {option_name}")
+        if argument.startswith("-W"):
+            raise CaptureError("pytest warning filters are managed by the collector")
+        if previous == "-p" and argument == "no:warnings":
+            raise CaptureError("pytest warning plugin cannot be disabled")
+        if argument in {"-pno:warnings", "-p=no:warnings"}:
+            raise CaptureError("pytest warning plugin cannot be disabled")
+        previous = argument
 
 
 def _collection_pytest_args(pytest_args: Sequence[str]) -> list[str]:
@@ -517,9 +849,7 @@ def _capture_into_staging(
     distributions: Iterable[tuple[str, str]] | None,
 ) -> int:
     secret_values = _known_secret_values(environ, config.pytest_args)
-    child_environment = dict(environ)
-    child_environment["LC_ALL"] = "C"
-    child_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    child_environment = _child_environment(environ)
 
     git_head = _run_command(
         ["git", "rev-parse", "--verify", "HEAD"],
@@ -547,21 +877,41 @@ def _capture_into_staging(
         capture_errors.append(str(git_status.invocation_error))
 
     python_platform = _python_platform_manifest()
-    environment_manifest = _environment_manifest(environ, secret_values)
+    environment_manifest = _environment_manifest(
+        environ,
+        child_environment,
+        secret_values,
+    )
 
     distribution_values: Iterable[tuple[str, str]]
     distribution_values = []
+    distribution_artifact_records: list[dict[str, object]] = []
     if distributions is not None:
         distribution_values = distributions
     else:
         try:
             distribution_values = _installed_distributions()
-        except Exception as exc:
+            distribution_artifact_records = _distribution_artifact_records()
+            editable_names = [
+                f"{item['name']}=={item['version']}"
+                for item in distribution_artifact_records
+                if item["editable"] is True
+            ]
+            if editable_names:
+                capture_errors.append(
+                    "editable dependencies cannot be content-addressed: "
+                    + ", ".join(editable_names)
+                )
+        except Exception as exc:  # noqa: BLE001 - metadata failures are evidence.
             message = f"{type(exc).__name__}: {exc}"
             capture_errors.append(message)
 
     distributions_content = _normalized_distributions_bytes(distribution_values)
     distributions_hash = _sha256_bytes(distributions_content)
+    distribution_artifact_content = _distribution_artifact_bytes(
+        distribution_artifact_records
+    )
+    distribution_artifact_hash = _sha256_bytes(distribution_artifact_content)
 
     collection_args = _collection_pytest_args(config.pytest_args)
     collect_command = [
@@ -583,9 +933,20 @@ def _capture_into_staging(
     if collect.invocation_error:
         capture_errors.append(str(collect.invocation_error))
 
-    sanitized_collect_stdout = _sanitize_text(collect.stdout, secret_values)
-    nodeids_content = _nodeids_bytes(sanitized_collect_stdout)
+    nodeids_content = _nodeids_bytes(collect.stdout)
     nodeids_hash = _sha256_bytes(nodeids_content)
+    collected_nodeids = nodeids_content.decode("utf-8").splitlines()
+    duplicate_nodeids = _duplicate_lines(nodeids_content)
+    if duplicate_nodeids:
+        capture_errors.append("collected inventory contains duplicate node-id values")
+    raw_nodeids_text = nodeids_content.decode("utf-8")
+    if _contains_secret(raw_nodeids_text, secret_values):
+        capture_errors.append("collected node-id inventory contains a secret value")
+    sanitized_collect_stdout = _sanitize_text(collect.stdout, secret_values)
+    sanitized_nodeids_content = _sanitize_text(
+        raw_nodeids_text,
+        secret_values,
+    ).encode("utf-8")
     junit_path = staging_dir / "junit.xml"
     pytest_command = [
         sys.executable,
@@ -594,6 +955,7 @@ def _capture_into_staging(
         "-p",
         "no:cacheprovider",
         *config.pytest_args,
+        "-ra",
         "--junitxml",
         str(junit_path),
     ]
@@ -609,7 +971,40 @@ def _capture_into_staging(
     junit_generated_by_pytest = junit_path.is_file()
     if not junit_generated_by_pytest:
         _write_placeholder_junit(junit_path, config.suite_name)
+    junit_report = _junit_report(junit_path, config.repo_root)
+    executed_nodeids = [str(nodeid) for nodeid in junit_report["nodeids"]]
+    executed_nodeids_content = _nodeids_text_bytes(executed_nodeids)
+    executed_nodeids_hash = _sha256_bytes(executed_nodeids_content)
+    if _contains_secret(
+        executed_nodeids_content.decode("utf-8"),
+        secret_values,
+    ):
+        capture_errors.append("executed node-id inventory contains a secret value")
+    duplicate_executed_nodeids = _duplicate_lines(executed_nodeids_content)
+    if duplicate_executed_nodeids:
+        capture_errors.append("executed inventory contains duplicate node-id values")
+    if collect.exit_code == 0 and pytest_run.exit_code == 0:
+        if not collected_nodeids:
+            capture_errors.append(
+                "pytest reported success with an empty collected inventory"
+            )
+        if not executed_nodeids:
+            capture_errors.append(
+                "pytest reported success with an empty executed inventory"
+            )
+        capture_errors.extend(
+            _inventory_coverage_errors(
+                collected_nodeids,
+                executed_nodeids,
+            )
+        )
+    warning_report = _warning_report(
+        pytest_run.stdout,
+        pytest_run.stderr,
+    )
     _sanitize_file(junit_path, secret_values)
+    collected_nodeid_count = len(collected_nodeids)
+    junit_test_count = int(junit_report["test_count"])
 
     _write_text(
         staging_dir / "git-head.txt",
@@ -648,6 +1043,13 @@ def _capture_into_staging(
         staging_dir / "distributions.sha256.txt",
         f"{distributions_hash}\n",
     )
+    (staging_dir / "distribution-artifacts.json").write_bytes(
+        distribution_artifact_content
+    )
+    _write_text(
+        staging_dir / "distribution-artifacts.sha256.txt",
+        f"{distribution_artifact_hash}\n",
+    )
     _write_text(
         staging_dir / "collect.stdout.txt",
         sanitized_collect_stdout,
@@ -660,10 +1062,19 @@ def _capture_into_staging(
         staging_dir / "collect.exit-code.txt",
         f"{collect.exit_code}\n",
     )
-    (staging_dir / "nodeids.txt").write_bytes(nodeids_content)
+    (staging_dir / "nodeids.txt").write_bytes(sanitized_nodeids_content)
     _write_text(
         staging_dir / "nodeids.sha256.txt",
         f"{nodeids_hash}\n",
+    )
+    sanitized_executed_nodeids = _sanitize_text(
+        executed_nodeids_content.decode("utf-8"),
+        secret_values,
+    ).encode("utf-8")
+    (staging_dir / "executed-nodeids.txt").write_bytes(sanitized_executed_nodeids)
+    _write_text(
+        staging_dir / "executed-nodeids.sha256.txt",
+        f"{executed_nodeids_hash}\n",
     )
     _write_text(
         staging_dir / "pytest.stdout.txt",
@@ -676,6 +1087,14 @@ def _capture_into_staging(
     _write_text(
         staging_dir / "pytest.exit-code.txt",
         f"{pytest_run.exit_code}\n",
+    )
+    _write_json(
+        staging_dir / "test-report.json",
+        _sanitized_test_report(
+            junit_report=junit_report,
+            warning_report=warning_report,
+            secret_values=secret_values,
+        ),
     )
 
     path_replacements = {
@@ -731,8 +1150,7 @@ def _capture_into_staging(
     if result_exit_code == 0:
         status = "passed"
     sanitized_errors = [
-        _sanitize_text(message, secret_values)
-        for message in capture_errors
+        _sanitize_text(message, secret_values) for message in capture_errors
     ]
     _write_json(
         staging_dir / "result.json",
@@ -745,17 +1163,23 @@ def _capture_into_staging(
             "git_status_exit_code": git_status.exit_code,
             "collect_exit_code": collect.exit_code,
             "pytest_exit_code": pytest_run.exit_code,
-            "nodeid_count": len(nodeids_content.splitlines()),
+            "nodeid_count": collected_nodeid_count,
             "nodeids_sha256": nodeids_hash,
+            "executed_nodeid_count": len(executed_nodeids),
+            "executed_nodeids_sha256": executed_nodeids_hash,
             "distribution_count": len(distributions_content.splitlines()),
             "distributions_sha256": distributions_hash,
+            "distribution_artifact_count": len(distribution_artifact_records),
+            "distribution_artifacts_sha256": distribution_artifact_hash,
             "junit_generated_by_pytest": junit_generated_by_pytest,
+            "junit_test_count": junit_test_count,
+            "warning_count": int(warning_report["count"]),
+            "skipped_count": int(junit_report["skipped_count"]),
+            "failure_count": int(junit_report["failure_count"]),
+            "error_count": int(junit_report["error_count"]),
             "capture_errors": sanitized_errors,
-            "captured_outputs_are_secret_sanitized": True,
-            "child_environment_overrides": {
-                "LC_ALL": "C",
-                "PYTHONDONTWRITEBYTECODE": "1",
-            },
+            "known_secret_values_are_sanitized": True,
+            "child_environment_overrides": CHILD_ENVIRONMENT_OVERRIDES,
         },
     )
     _write_artifact_manifest(staging_dir)
@@ -789,7 +1213,7 @@ def _write_unexpected_failure(
             "status": "capture-error",
             "exit_code": 2,
             "capture_errors": [error_message],
-            "captured_outputs_are_secret_sanitized": True,
+            "known_secret_values_are_sanitized": True,
         },
     )
     _write_artifact_manifest(staging_dir)
@@ -807,8 +1231,7 @@ def capture_runtime_evidence(
     if inherited_environment is None:
         inherited_environment = os.environ
     environment = {
-        str(name): str(value)
-        for name, value in inherited_environment.items()
+        str(name): str(value) for name, value in inherited_environment.items()
     }
     secret_values = _known_secret_values(environment, normalized.pytest_args)
 
@@ -828,7 +1251,7 @@ def capture_runtime_evidence(
             environ=environment,
             distributions=distributions,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - preserve unexpected capture evidence.
         try:
             _write_unexpected_failure(
                 staging_dir=staging_dir,
@@ -842,13 +1265,45 @@ def capture_runtime_evidence(
                 f"completed: {staging_dir}: {type(write_exc).__name__}"
             ) from write_exc
 
-    if normalized.output_dir.exists():
-        raise CaptureError(
-            "output directory appeared during capture; staging evidence retained at "
-            f"{staging_dir}"
-        )
-    os.replace(staging_dir, normalized.output_dir)
+    _publish_staging_directory(
+        staging_dir=staging_dir,
+        output_dir=normalized.output_dir,
+    )
     return result_exit_code
+
+
+def _publish_staging_directory(
+    *,
+    staging_dir: Path,
+    output_dir: Path,
+) -> None:
+    lock_path = output_dir.with_name(f".{output_dir.name}.publish.lock")
+    try:
+        lock_fd = os.open(
+            lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise CaptureError(
+            "evidence publication lock already exists; staging evidence retained at "
+            f"{staging_dir}"
+        ) from exc
+    try:
+        os.write(lock_fd, f"{staging_dir}\n".encode())
+        os.fsync(lock_fd)
+        if output_dir.exists():
+            raise CaptureError(
+                "output directory appeared during capture; staging evidence retained at "
+                f"{staging_dir}"
+            )
+        os.replace(staging_dir, output_dir)
+    finally:
+        os.close(lock_fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _parse_args(argv: Sequence[str] | None) -> CaptureConfig:
