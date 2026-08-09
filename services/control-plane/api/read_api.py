@@ -1213,6 +1213,9 @@ def node_commands(
         for row in rows:
             args = dict(row[2] or {})
             args["account_id"] = bound_account_id
+            expires_at = row[4]
+            if expires_at is not None:
+                args["command_expires_at"] = expires_at.isoformat()
             commands.append(
                 {
                     "command_id": row[0],
@@ -1260,12 +1263,19 @@ def _pending_node_commands(
         cur.execute(
             """
             SELECT oc.command_id::text, oc.command_type, oc.scope,
-                   oc.created_at
+                   oc.created_at, na.expires_at
             FROM operator_commands oc
             JOIN command_node_acks na
               ON na.command_id=oc.command_id
             WHERE na.node_id=%s
               AND na.status='pending'
+              AND (
+                    oc.command_type <> 'RESUME'
+                    OR (
+                        na.expires_at IS NOT NULL
+                        AND na.expires_at > now()
+                    )
+                  )
             """
             + keyset_sql
             + """

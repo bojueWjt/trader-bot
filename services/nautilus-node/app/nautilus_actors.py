@@ -4,7 +4,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from queue import Empty, Full, Queue
 from threading import Event, RLock, Thread
@@ -2725,6 +2725,9 @@ class CommandPollerActor(Actor):
             if cmd.type == CommandType.HALT:
                 self._lifecycle.apply_operator_state(TradingState.HALTED, "operator_command")
             elif cmd.type == CommandType.RESUME:
+                expiry_error = _resume_command_expiry_error(cmd)
+                if expiry_error is not False:
+                    return CommandAckStatus.FAILED, expiry_error
                 self._lifecycle.apply_operator_state(TradingState.ACTIVE, "operator_command")
             elif cmd.type == CommandType.SET_REDUCING:
                 self._lifecycle.apply_operator_state(TradingState.REDUCING, "operator_command")
@@ -2869,3 +2872,28 @@ def _node_command_account_id(cmd: Any) -> str:
     if not isinstance(args, dict):
         return ""
     return str(args.get("account_id") or "").strip()
+
+
+def _resume_command_expiry_error(cmd: Any) -> str | bool:
+    args = getattr(cmd, "args", {})
+    if not isinstance(args, dict):
+        return "command_expiry_required"
+    raw_expires_at = args.get("command_expires_at")
+    if raw_expires_at is None:
+        return "command_expiry_required"
+    if isinstance(raw_expires_at, datetime):
+        expires_at = raw_expires_at
+    elif isinstance(raw_expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(
+                raw_expires_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return "command_expiry_invalid"
+    else:
+        return "command_expiry_invalid"
+    if expires_at.tzinfo is None:
+        return "command_expiry_invalid"
+    if expires_at <= datetime.now(timezone.utc):
+        return "command_expired"
+    return False

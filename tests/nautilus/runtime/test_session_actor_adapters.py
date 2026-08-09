@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Queue
 from threading import Event, Thread, get_ident
@@ -640,6 +641,107 @@ def test_plain_command_checks_ack_capacity_before_apply() -> None:
     }
     assert lifecycle.trading_state is TradingState.ACTIVE
     assert lifecycle.readiness.ready is True
+
+
+def test_fetched_expired_resume_is_failed_before_actor_applies_it() -> None:
+    lifecycle = _StateTrackingLifecycle(TradingState.HALTED)
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+    )
+    actor._pending_commands = (
+        NodeCommand(
+            command_id="expired-resume",
+            type=CommandType.RESUME,
+            args={
+                "command_expires_at": (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat()
+            },
+        ),
+    )
+
+    applied = actor._drain_pending_commands()
+
+    acknowledgement = actor._pending_acks["expired-resume"]
+    assert applied == 1
+    assert acknowledgement.status is CommandAckStatus.FAILED
+    assert acknowledgement.error == "command_expired"
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.apply_thread_ids == []
+
+
+def test_unexpired_resume_still_applies() -> None:
+    lifecycle = _StateTrackingLifecycle(TradingState.HALTED)
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+    )
+    actor._pending_commands = (
+        NodeCommand(
+            command_id="active-resume",
+            type=CommandType.RESUME,
+            args={
+                "command_expires_at": (
+                    datetime.now(timezone.utc) + timedelta(seconds=30)
+                ).isoformat()
+            },
+        ),
+    )
+
+    applied = actor._drain_pending_commands()
+
+    acknowledgement = actor._pending_acks["active-resume"]
+    assert applied == 1
+    assert acknowledgement.status is CommandAckStatus.COMPLETED
+    assert acknowledgement.error is None
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert len(lifecycle.apply_thread_ids) == 1
+
+
+@pytest.mark.parametrize(
+    ("command_type", "expected_state"),
+    (
+        (CommandType.HALT, TradingState.HALTED),
+        (CommandType.SET_REDUCING, TradingState.REDUCING),
+    ),
+)
+def test_expired_risk_reduction_command_still_applies(
+    command_type: CommandType,
+    expected_state: TradingState,
+) -> None:
+    lifecycle = _StateTrackingLifecycle(TradingState.ACTIVE)
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+    )
+    actor._pending_commands = (
+        NodeCommand(
+            command_id=f"expired-{command_type.value}",
+            type=command_type,
+            args={
+                "command_expires_at": (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat()
+            },
+        ),
+    )
+
+    applied = actor._drain_pending_commands()
+
+    command_id = f"expired-{command_type.value}"
+    acknowledgement = actor._pending_acks[command_id]
+    assert applied == 1
+    assert acknowledgement.status is CommandAckStatus.COMPLETED
+    assert acknowledgement.error is None
+    assert lifecycle.trading_state is expected_state
+    assert len(lifecycle.apply_thread_ids) == 1
 
 
 def test_poll_once_retries_ack_without_reapplying_command() -> None:
@@ -2092,6 +2194,20 @@ class _ActiveLifecycle(_Lifecycle):
         super().mark_dependency_failed(dependency, reason)
         self.trading_state = TradingState.HALTED
         self.readiness.ready = False
+
+
+class _StateTrackingLifecycle(_Lifecycle):
+    def __init__(self, trading_state: TradingState) -> None:
+        super().__init__()
+        self.trading_state = trading_state
+
+    def apply_operator_state(
+        self,
+        state: TradingState,
+        reason: str,
+    ) -> None:
+        self.trading_state = state
+        super().apply_operator_state(state, reason)
 
 
 class _BlockingApplyLifecycle(_Lifecycle):
