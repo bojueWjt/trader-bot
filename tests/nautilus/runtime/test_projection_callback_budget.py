@@ -45,6 +45,81 @@ def test_projection_core_ingest_is_durable_without_inline_flush(
     assert sink.calls == []
 
 
+def test_projection_filters_order_initialized_without_halting_durable_lane(
+    tmp_path: Path,
+) -> None:
+    sink = _RecordingSink()
+    spool = JsonExecutionSpool(
+        tmp_path / "execution-events-filtered.json"
+    )
+    projection = ProjectionActor(
+        ProjectionConfig(node_id="node-a", account_id="account-a"),
+        sink,
+        spool,
+    )
+    fatal_reasons: list[str] = []
+    degraded_reasons: list[str] = []
+    actor = ExecutionProjectionActor(
+        projection,
+        fatal_callback=fatal_reasons.append,
+        degraded_callback=degraded_reasons.append,
+    )
+    actor.on_start()
+
+    accepted = actor.on_event(
+        {
+            "event_type": "OrderInitialized",
+            "client_order_id": "restored-protection-order",
+            "instrument_id": "GOOGLUSDT-PERP.BINANCE",
+            "ts_event": 1_786_000_000_000_000_000,
+        }
+    )
+
+    assert accepted is True
+    assert _wait_until(
+        lambda: bool(actor.halted_reason or actor.degraded_reason)
+    )
+    assert actor.halted_reason == ""
+    assert "filtered subscribed event" in actor.degraded_reason
+    assert degraded_reasons == [actor.degraded_reason]
+    assert fatal_reasons == []
+    assert spool.pending_count == 0
+
+    assert actor.on_event(_execution_event("event-after-filter")) is True
+    assert _wait_until(lambda: bool(sink.calls))
+    assert actor.halted_reason == ""
+    assert fatal_reasons == []
+    assert actor.on_stop() is True
+
+
+def test_projection_halted_core_remains_sticky_fatal(
+    tmp_path: Path,
+) -> None:
+    projection = ProjectionActor(
+        ProjectionConfig(node_id="node-a", account_id="account-a"),
+        _RecordingSink(),
+        JsonExecutionSpool(
+            tmp_path / "execution-events-halted-core.json"
+        ),
+    )
+    projection.halt_egress("durable spool unavailable")
+    fatal_reasons: list[str] = []
+    actor = ExecutionProjectionActor(
+        projection,
+        fatal_callback=fatal_reasons.append,
+    )
+    actor.on_start()
+
+    assert actor.on_event(_execution_event("event-after-core-halt")) is True
+    assert _wait_until(lambda: bool(fatal_reasons))
+    assert actor.halted_reason == (
+        "execution projection durable ingress is halted"
+    )
+    assert fatal_reasons == [actor.halted_reason]
+    assert actor.on_event("event-after-wrapper-halt") is False
+    actor.on_stop()
+
+
 def test_projection_sink_http_failure_is_recoverable_degradation(
     tmp_path: Path,
 ) -> None:
@@ -492,7 +567,7 @@ def test_projection_core_halt_is_final_health_and_admission_barrier() -> None:
         _execution_event("event-after-halt")
     )
 
-    assert rejected.outcome.value == "IGNORED"
+    assert rejected.outcome.value == "HALTED"
     assert spool.append_count == 1
 
 

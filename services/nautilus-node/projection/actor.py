@@ -32,7 +32,8 @@ class ProjectionHealth(Protocol):
 class ProjectionIngestOutcome(str, Enum):
     DURABLE = "DURABLE"
     DEDUPED = "DEDUPED"
-    IGNORED = "IGNORED"
+    FILTERED = "FILTERED"
+    HALTED = "HALTED"
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,10 @@ class ProjectionActor:
 
     def on_event(self, event: Any) -> str | None:
         result = self.ingest_event(event)
-        if result.outcome is ProjectionIngestOutcome.IGNORED:
+        if result.outcome not in {
+            ProjectionIngestOutcome.DURABLE,
+            ProjectionIngestOutcome.DEDUPED,
+        }:
             return None
         self.flush()
         return result.event_id
@@ -83,13 +87,13 @@ class ProjectionActor:
         envelope = self._mapper.to_envelope(event)
         if envelope is None:
             return ProjectionIngestResult(
-                outcome=ProjectionIngestOutcome.IGNORED,
+                outcome=ProjectionIngestOutcome.FILTERED,
                 event_id=None,
             )
         with self._spool_lock:
             if self._egress_halted_reason:
                 return ProjectionIngestResult(
-                    outcome=ProjectionIngestOutcome.IGNORED,
+                    outcome=ProjectionIngestOutcome.HALTED,
                     event_id=None,
                 )
             appended = self.spool.append_once(envelope)

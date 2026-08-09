@@ -103,6 +103,12 @@ class _ProjectionPublication:
     error: Exception | None = None
 
 
+class _ProjectionPersistenceState(str, Enum):
+    PERSISTED = "PERSISTED"
+    FILTERED = "FILTERED"
+    FAILED = "FAILED"
+
+
 class _QueueingIntentPublisher:
     def __init__(
         self,
@@ -1082,8 +1088,19 @@ class ExecutionProjectionActor(Actor):
                     self._flush_projection_once()
                     continue
                 if self._durable_ingress:
-                    if not self._persist_durable_event(publication):
+                    persistence_outcome = self._persist_durable_event(
+                        publication
+                    )
+                    if (
+                        persistence_outcome
+                        is _ProjectionPersistenceState.FAILED
+                    ):
                         return
+                    if (
+                        persistence_outcome
+                        is _ProjectionPersistenceState.FILTERED
+                    ):
+                        continue
                     if self._control_plane_session is not None:
                         if not self._submit_flush_wake(publication.event):
                             return
@@ -1106,7 +1123,7 @@ class ExecutionProjectionActor(Actor):
     def _persist_durable_event(
         self,
         publication: _ProjectionPublication,
-    ) -> bool:
+    ) -> _ProjectionPersistenceState:
         self._attach_order_payload_fields(publication.event)
         ingest = getattr(self._projection_actor, "ingest_event")
         try:
@@ -1117,19 +1134,30 @@ class ExecutionProjectionActor(Actor):
                 "execution projection durable ingress failed: "
                 f"{exc!r}"
             )
-            return False
+            return _ProjectionPersistenceState.FAILED
         outcome = self._projection_ingest_outcome(result)
-        if outcome == "IGNORED":
-            self._halt_egress(
-                "execution projection ignored subscribed execution event"
+        if outcome == "FILTERED":
+            event_type = publication.event.__class__.__name__
+            if isinstance(publication.event, dict):
+                event_type = str(
+                    publication.event.get("event_type") or event_type
+                )
+            self._degrade_egress(
+                "execution projection filtered subscribed event: "
+                f"{event_type}"
             )
-            return False
+            return _ProjectionPersistenceState.FILTERED
+        if outcome in {"HALTED", "IGNORED"}:
+            self._halt_egress(
+                "execution projection durable ingress is halted"
+            )
+            return _ProjectionPersistenceState.FAILED
         if outcome not in {"DURABLE", "DEDUPED"}:
             self._halt_egress(
                 "execution projection durable ingress returned "
                 f"invalid outcome: {outcome or 'missing'}"
             )
-            return False
+            return _ProjectionPersistenceState.FAILED
         deadline_at = publication.deadline_at
         if (
             deadline_at is not None
@@ -1138,8 +1166,8 @@ class ExecutionProjectionActor(Actor):
             self._halt_egress(
                 "execution projection durable ingress deadline exceeded"
             )
-            return False
-        return True
+            return _ProjectionPersistenceState.FAILED
+        return _ProjectionPersistenceState.PERSISTED
 
     def _projection_ingest_outcome(self, result: Any) -> str:
         outcome = getattr(result, "outcome", result)
