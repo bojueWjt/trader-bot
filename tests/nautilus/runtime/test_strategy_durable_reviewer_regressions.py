@@ -5,7 +5,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Event, get_ident
+from threading import Event, Thread, get_ident
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -325,6 +325,39 @@ def test_worker_failure_is_applied_by_actor_mailbox_thread(
 
         assert denial_threads == [actor_thread_id]
         assert fatal_threads == [actor_thread_id]
+    finally:
+        strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
+
+
+def test_timer_callback_claims_runtime_actor_thread(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    startup_thread_id = get_ident()
+    callback_thread_ids: list[int] = []
+    callback_errors: list[BaseException] = []
+    strategy._start_durable_io_lane()
+
+    def invoke_timer() -> None:
+        callback_thread_ids.append(get_ident())
+        try:
+            strategy._on_durable_io_mailbox_timer()
+        except BaseException as exc:
+            callback_errors.append(exc)
+
+    try:
+        timer_thread = Thread(target=invoke_timer)
+        timer_thread.start()
+        timer_thread.join(timeout=1.0)
+
+        assert not timer_thread.is_alive()
+        assert callback_errors == []
+        assert callback_thread_ids
+        assert callback_thread_ids[0] != startup_thread_id
+        assert (
+            strategy._durable_io_actor_thread_id
+            == callback_thread_ids[0]
+        )
     finally:
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
 
