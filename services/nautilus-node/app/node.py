@@ -156,6 +156,9 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
         ExecutionProjectionActor,
         IntentPublisherActor,
     )
+    from commands.durable_command_journal import (
+        DurableCommandJournal,
+    )
     from persistence.nautilus_config import (  # lazy: imports Nautilus config classes
         build_cache_config,
         build_live_exec_engine_config,
@@ -280,6 +283,13 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
         runtime.lifecycle,
         runtime.config.node_id,
         account_id=runtime.config.account_id,
+        command_journal=DurableCommandJournal(
+            runtime.route.spool_path.with_name(
+                "operator-command-journal.json"
+            ),
+            account_id=runtime.config.account_id,
+            node_id=runtime.config.node_id,
+        ),
         control_plane_session=session,
         manage_control_plane_session=False,
         worker_shutdown_wait_seconds=(

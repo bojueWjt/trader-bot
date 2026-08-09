@@ -20,7 +20,13 @@ from app.nautilus_actors import (  # noqa: E402
     CommandPollerActor,
     IntentPublisherActor,
 )
+from commands.durable_command_journal import (  # noqa: E402
+    CommandJournalPhase,
+    DurableCommandJournal,
+    InMemoryCommandJournal,
+)
 from execution_domain.control_plane import (  # noqa: E402
+    CommandAckStatus,
     CommandType,
     NodeCommand,
     TradingState,
@@ -556,7 +562,7 @@ def test_plain_command_dedupes_while_ack_is_blocked() -> None:
 
 def test_plain_command_checks_ack_capacity_before_apply() -> None:
     command = NodeCommand(command_id="command-1", type=CommandType.HALT)
-    lifecycle = _Lifecycle()
+    lifecycle = _ActiveLifecycle()
     actor = CommandPollerActor(
         control_plane=object(),
         lifecycle=lifecycle,
@@ -575,9 +581,14 @@ def test_plain_command_checks_ack_capacity_before_apply() -> None:
     assert lifecycle.apply_thread_ids == []
     assert actor._pending_command_index == 0
     assert actor.pending_command_count == 2
-    assert _failed_reasons(lifecycle)["command_stream"] == (
-        "operator command ACK backlog capacity exceeded"
-    )
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
+        "command_stream": (
+            "operator command ACK backlog capacity exceeded"
+        ),
+    }
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.readiness.ready is True
 
 
 def test_poll_once_retries_ack_without_reapplying_command() -> None:
@@ -604,6 +615,7 @@ def test_session_command_apply_runs_on_actor_thread_and_ack_runs_on_worker() -> 
     command = NodeCommand(command_id="command-1", type=CommandType.HALT)
     control_plane = _OneCommandControlPlane(command)
     lifecycle = _Lifecycle()
+    command_journal = _ThreadRecordingCommandJournal()
     actor_holder: dict[str, CommandPollerActor] = {}
     session = NodeControlPlaneSession(
         command_poll=lambda capacity: actor_holder[
@@ -623,6 +635,7 @@ def test_session_command_apply_runs_on_actor_thread_and_ack_runs_on_worker() -> 
         node_id="node-a",
         account_id="account-a",
         control_plane_session=session,
+        command_journal=command_journal,
     )
     actor_holder["actor"] = actor
     actor_thread_id = get_ident()
@@ -636,6 +649,125 @@ def test_session_command_apply_runs_on_actor_thread_and_ack_runs_on_worker() -> 
     assert control_plane.poll_thread_id != actor_thread_id
     assert control_plane.ack_thread_id is not None
     assert control_plane.ack_thread_id != actor_thread_id
+    assert {
+        operation
+        for operation, _thread_id in command_journal.write_calls
+    } == {"begin", "complete", "mark_acked"}
+    assert all(
+        thread_id != actor_thread_id
+        for _operation, thread_id in command_journal.write_calls
+    )
+
+
+def test_blocked_command_journal_complete_keeps_actor_callbacks_bounded() -> None:
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+    control_plane = _OneCommandControlPlane(command)
+    lifecycle = _Lifecycle()
+    command_journal = _BlockingCompleteCommandJournal()
+    actor_holder: dict[str, CommandPollerActor] = {}
+    session = NodeControlPlaneSession(
+        command_poll=lambda capacity: actor_holder[
+            "actor"
+        ].session_poll_commands(capacity),
+        command_apply=lambda item: actor_holder[
+            "actor"
+        ].session_apply_command(item),
+        command_ack=lambda acknowledgement: actor_holder[
+            "actor"
+        ].session_ack_command(acknowledgement),
+        command_poll_interval_seconds=0.01,
+        operation_timeout_seconds=5.0,
+    )
+    actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        command_journal=command_journal,
+        command_journal_deadline_seconds=5.0,
+        worker_shutdown_wait_seconds=1.0,
+    )
+    actor_holder["actor"] = actor
+    actor_thread_id = get_ident()
+    callback_durations: list[float] = []
+    actor.on_start()
+
+    try:
+        assert _pump_actor_until(
+            actor,
+            command_journal.complete_started.is_set,
+        )
+        for _index in range(2048):
+            started_at = time.monotonic()
+            actor._on_poll_timer()
+            callback_durations.append(
+                time.monotonic() - started_at
+            )
+        assert command_journal.complete_thread_id is not None
+        assert command_journal.complete_thread_id != actor_thread_id
+        assert max(callback_durations) < MAX_CALLBACK_SECONDS
+        assert lifecycle.apply_thread_ids == [actor_thread_id]
+    finally:
+        command_journal.release_complete.set()
+
+    assert _pump_actor_until(actor, control_plane.acked.is_set)
+    assert actor.on_stop() is True
+    assert lifecycle.apply_thread_ids == [actor_thread_id]
+
+
+def test_cancelled_session_command_discards_journal_off_actor_thread() -> None:
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+    command_journal = _ThreadRecordingCommandJournal()
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=_Lifecycle(),
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        command_journal=command_journal,
+        session_completion_timeout_seconds=1.0,
+    )
+    errors: list[BaseException] = []
+
+    def apply_command() -> None:
+        try:
+            actor.session_apply_command(command)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = Thread(target=apply_command)
+    worker.start()
+    assert _wait_until(
+        lambda: (
+            actor._command_states.get("command-1") is not None
+            and actor._command_states[
+                "command-1"
+            ].publication is not None
+        )
+    )
+    publication = actor._command_states[
+        "command-1"
+    ].publication
+    assert publication is not None
+    publication.cancelled.set()
+    actor_thread_id = get_ident()
+
+    actor._drain_session_commands()
+    worker.join(timeout=1.0)
+    actor.on_stop()
+
+    assert worker.is_alive() is False
+    assert len(errors) == 1
+    assert "cancelled before apply" in str(errors[0])
+    assert {
+        operation
+        for operation, _thread_id in command_journal.write_calls
+    } == {"begin", "discard"}
+    assert all(
+        thread_id != actor_thread_id
+        for _operation, thread_id in command_journal.write_calls
+    )
 
 
 def test_session_command_repoll_does_not_reapply_while_ack_is_blocked() -> None:
@@ -699,6 +831,194 @@ def test_session_command_ack_failure_keeps_process_local_apply_result() -> None:
 
     assert second_ack is first_ack
     assert len(lifecycle.apply_thread_ids) == 1
+
+
+def test_session_command_restart_recovers_ack_without_reapplying(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "command-journal.json"
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+    first_control_plane = _FailingAckControlPlane()
+    first_lifecycle = _Lifecycle()
+    first_actor = CommandPollerActor(
+        control_plane=first_control_plane,
+        lifecycle=first_lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        command_journal=DurableCommandJournal(
+            path,
+            account_id="account-a",
+            node_id="node-a",
+        ),
+    )
+
+    acknowledgement = _apply_session_command(first_actor, command)
+    with pytest.raises(RuntimeError, match="ACK unavailable"):
+        first_actor.session_ack_command(acknowledgement)
+    first_actor.on_stop()
+
+    second_control_plane = _AckRecordingControlPlane()
+    second_lifecycle = _Lifecycle()
+    second_journal = DurableCommandJournal(
+        path,
+        account_id="account-a",
+        node_id="node-a",
+    )
+    second_actor = CommandPollerActor(
+        control_plane=second_control_plane,
+        lifecycle=second_lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        command_journal=second_journal,
+    )
+    second_actor.on_start()
+
+    assert _pump_actor_until(
+        second_actor,
+        lambda: second_control_plane.ack_count == 1,
+    )
+    second_actor.on_stop()
+
+    assert len(first_lifecycle.apply_thread_ids) == 1
+    assert second_lifecycle.apply_thread_ids == []
+    assert second_journal.get("command-1").phase is (
+        CommandJournalPhase.ACKED
+    )
+
+
+def test_session_command_restart_acks_ambiguous_apply_without_replay(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "command-journal.json"
+    journal = DurableCommandJournal(
+        path,
+        account_id="account-a",
+        node_id="node-a",
+    )
+    journal.begin("command-1", "close_all")
+    control_plane = _AckRecordingControlPlane()
+    lifecycle = _Lifecycle()
+    actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        command_journal=DurableCommandJournal(
+            path,
+            account_id="account-a",
+            node_id="node-a",
+        ),
+    )
+    actor.on_start()
+
+    assert _pump_actor_until(
+        actor,
+        lambda: control_plane.ack_count == 1,
+    )
+    actor.on_stop()
+
+    assert lifecycle.apply_thread_ids == []
+    args, kwargs = control_plane.acks[0]
+    assert args[1] == "command-1"
+    assert args[2] is CommandAckStatus.FAILED
+    assert kwargs["error"] == (
+        "ambiguous_apply_after_restart:close_all"
+    )
+
+
+def test_durable_command_journal_requires_control_plane_session(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="durable command journal requires control_plane_session",
+    ):
+        CommandPollerActor(
+            control_plane=object(),
+            lifecycle=_Lifecycle(),
+            node_id="node-a",
+            account_id="account-a",
+            command_journal=DurableCommandJournal(
+                tmp_path / "command-journal.json",
+                account_id="account-a",
+                node_id="node-a",
+            ),
+        )
+
+
+def test_session_command_journal_write_failure_is_hard() -> None:
+    lifecycle = _ActiveLifecycle()
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        command_journal=_FailingBeginCommandJournal(),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="journal APPLYING write failed",
+    ):
+        actor.session_apply_command(
+            NodeCommand(
+                command_id="command-1",
+                type=CommandType.HALT,
+            )
+        )
+
+    assert "command_stream" in _failed_reasons(lifecycle)
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.readiness.ready is False
+
+
+def test_session_command_journal_deadline_is_hard() -> None:
+    lifecycle = _ActiveLifecycle()
+    command_journal = _BlockingBeginCommandJournal()
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        command_journal=command_journal,
+        command_journal_deadline_seconds=0.01,
+    )
+    errors: list[BaseException] = []
+
+    def apply_command() -> None:
+        try:
+            actor.session_apply_command(
+                NodeCommand(
+                    command_id="command-1",
+                    type=CommandType.HALT,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = Thread(target=apply_command)
+    worker.start()
+    assert command_journal.begin_started.wait(timeout=1.0)
+    time.sleep(0.02)
+
+    actor._on_poll_timer()
+
+    assert "command_stream" in _failed_reasons(lifecycle)
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.readiness.ready is False
+
+    command_journal.release_begin.set()
+    worker.join(timeout=1.0)
+    actor.on_stop()
+
+    assert worker.is_alive() is False
+    assert len(errors) == 1
+    assert "exceeded 0.010s deadline" in str(errors[0])
 
 
 def test_session_command_ack_queue_full_eventually_acks_without_reapply() -> None:
@@ -904,8 +1224,8 @@ def test_session_command_apply_timeout_shares_in_flight_result_and_queues_ack_on
     actor.on_stop()
 
 
-def test_command_mailbox_full_fails_stream_and_stop_releases_waiter() -> None:
-    lifecycle = _Lifecycle()
+def test_command_mailbox_full_degrades_and_stop_releases_waiter() -> None:
+    lifecycle = _ActiveLifecycle()
     actor = CommandPollerActor(
         control_plane=object(),
         lifecycle=lifecycle,
@@ -940,9 +1260,14 @@ def test_command_mailbox_full_fails_stream_and_stop_releases_waiter() -> None:
     assert worker.is_alive() is False
     assert len(first_errors) == 1
     assert "stopped" in str(first_errors[0])
-    assert _failed_reasons(lifecycle)["command_stream"] == (
-        "operator command actor mailbox capacity exceeded"
-    )
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
+        "command_stream": (
+            "operator command actor mailbox capacity exceeded"
+        ),
+    }
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.readiness.ready is True
 
 
 def test_command_stop_rejects_delivery_admitted_during_stop_race() -> None:
@@ -1030,10 +1355,11 @@ def test_command_stop_deadline_includes_admission_lock_wait() -> None:
     assert actor.on_stop() is True
 
 
-def test_command_apply_timeout_cancels_late_actor_apply() -> None:
-    lifecycle = _Lifecycle()
+def test_command_apply_timeout_degrades_and_late_completion_acks() -> None:
+    lifecycle = _ActiveLifecycle()
+    control_plane = _AckRecordingControlPlane()
     actor = CommandPollerActor(
-        control_plane=object(),
+        control_plane=control_plane,
         lifecycle=lifecycle,
         node_id="node-a",
         account_id="account-a",
@@ -1046,12 +1372,15 @@ def test_command_apply_timeout_cancels_late_actor_apply() -> None:
         actor.session_apply_command(command)
 
     actor._on_poll_timer()
+    acknowledgement = actor.session_apply_command(command)
+    actor.session_ack_command(acknowledgement)
     actor.on_stop()
 
-    assert lifecycle.apply_thread_ids == []
-    assert _failed_reasons(lifecycle)["command_stream"] == (
-        "operator command apply timed out waiting for actor thread"
-    )
+    assert len(lifecycle.apply_thread_ids) == 1
+    assert control_plane.ack_count == 1
+    assert _failed_reasons(lifecycle) == {}
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.readiness.ready is True
 
 
 def test_stopped_command_actor_rejects_session_delivery() -> None:
@@ -1203,6 +1532,66 @@ def test_stopped_session_immediately_hard_fails_command_dependencies_sticky() ->
     assert lifecycle.trading_state is TradingState.HALTED
     assert lifecycle.readiness.ready is False
     actor.on_stop()
+
+
+@pytest.mark.parametrize(
+    ("lane_name", "reason", "dependency"),
+    (
+        (
+            "heartbeat",
+            "heartbeat HTTP 503",
+            "control_plane",
+        ),
+        (
+            "command_poll",
+            "command poll HTTP 503",
+            "command_stream",
+        ),
+        (
+            "command_ack",
+            "command ACK HTTP 503",
+            "command_stream",
+        ),
+        (
+            "command_delivery",
+            "command apply operation exceeded deadline",
+            "command_stream",
+        ),
+    ),
+)
+def test_recoverable_command_control_plane_failures_keep_active(
+    lane_name: str,
+    reason: str,
+    dependency: str,
+) -> None:
+    lifecycle = _ActiveLifecycle()
+    session = _LocalSession()
+    success_at = time.monotonic()
+    session._snapshot.lanes[
+        "heartbeat"
+    ].last_success_at = success_at
+    session._snapshot.lanes[
+        "command_poll"
+    ].last_success_at = success_at
+    lane = session._snapshot.lanes[lane_name]
+    lane.failure = reason
+    lane.circuit_state = "open"
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        stale_after_seconds=10.0,
+    )
+
+    actor._on_poll_timer()
+    actor.on_stop()
+
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle)[dependency] == reason
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.readiness.ready is True
 
 
 def test_recoverable_intent_session_failure_is_degraded_until_recovery() -> None:
@@ -1710,10 +2099,100 @@ class _FailingAckControlPlane:
 class _AckRecordingControlPlane:
     def __init__(self) -> None:
         self.ack_count = 0
+        self.acks: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     def ack_command(self, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
         self.ack_count += 1
+        self.acks.append((args, kwargs))
+
+
+class _FailingBeginCommandJournal:
+    def recover(self) -> tuple[Any, ...]:
+        return ()
+
+    def begin(
+        self,
+        command_id: str,
+        command_type: str,
+    ) -> Any:
+        del command_id, command_type
+        raise OSError("disk full")
+
+
+class _BlockingBeginCommandJournal(InMemoryCommandJournal):
+    def __init__(self) -> None:
+        super().__init__()
+        self.begin_started = Event()
+        self.release_begin = Event()
+
+    def begin(
+        self,
+        command_id: str,
+        command_type: str,
+    ) -> Any:
+        self.begin_started.set()
+        self.release_begin.wait(timeout=1.0)
+        return super().begin(command_id, command_type)
+
+
+class _BlockingCompleteCommandJournal(InMemoryCommandJournal):
+    def __init__(self) -> None:
+        super().__init__()
+        self.complete_started = Event()
+        self.release_complete = Event()
+        self.complete_thread_id: int | None = None
+
+    def complete(
+        self,
+        command_id: str,
+        *,
+        status: str,
+        error: str | bool,
+    ) -> Any:
+        self.complete_thread_id = get_ident()
+        self.complete_started.set()
+        self.release_complete.wait(timeout=5.0)
+        return super().complete(
+            command_id,
+            status=status,
+            error=error,
+        )
+
+
+class _ThreadRecordingCommandJournal(InMemoryCommandJournal):
+    def __init__(self) -> None:
+        super().__init__()
+        self.write_calls: list[tuple[str, int]] = []
+
+    def begin(
+        self,
+        command_id: str,
+        command_type: str,
+    ) -> Any:
+        self.write_calls.append(("begin", get_ident()))
+        return super().begin(command_id, command_type)
+
+    def complete(
+        self,
+        command_id: str,
+        *,
+        status: str,
+        error: str | bool,
+    ) -> Any:
+        self.write_calls.append(("complete", get_ident()))
+        return super().complete(
+            command_id,
+            status=status,
+            error=error,
+        )
+
+    def mark_acked(self, command_id: str) -> Any:
+        self.write_calls.append(("mark_acked", get_ident()))
+        return super().mark_acked(command_id)
+
+    def discard_unapplied(self, command_id: str) -> bool:
+        self.write_calls.append(("discard", get_ident()))
+        return super().discard_unapplied(command_id)
 
 
 class _MutableCommandControlPlane(_AckRecordingControlPlane):

@@ -189,6 +189,13 @@ class NodeAppAssemblyTest(unittest.TestCase):
         for actor in node.trader.actors:
             self.assertIs(actor._control_plane_session, session)
             self.assertFalse(actor._manage_control_plane_session)
+        command_actor = node.trader.actors[2]
+        self.assertEqual(
+            command_actor._command_journal.path,
+            runtime.route.spool_path.with_name(
+                "operator-command-journal.json"
+            ),
+        )
         self.assertEqual(node.config.kwargs["trader_id"], runtime.config.trader_id)
         self.assertNotIn("instance_id", node.config.kwargs)
 

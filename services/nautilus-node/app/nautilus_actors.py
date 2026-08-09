@@ -10,6 +10,11 @@ from queue import Empty, Full, Queue
 from threading import Event, RLock, Thread
 from typing import Any, Callable, Iterable
 
+from commands.durable_command_journal import (
+    CommandJournalPhase,
+    InMemoryCommandJournal,
+)
+
 try:  # pragma: no cover - Nautilus is unavailable on local dev hosts.
     from nautilus_trader.common.actor import Actor  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover
@@ -44,6 +49,7 @@ DEFAULT_CALLBACK_MAX_ITEMS = 16
 DEFAULT_CALLBACK_TIME_BUDGET_SECONDS = 0.005
 DEFAULT_EXECUTION_EVENT_QUEUE_CAPACITY = 1024
 DEFAULT_PROJECTION_DURABLE_INGRESS_DEADLINE_SECONDS = 0.5
+DEFAULT_COMMAND_JOURNAL_DEADLINE_SECONDS = 5.0
 
 
 @dataclass
@@ -66,6 +72,8 @@ class _SessionCommandPublication:
     command: Any
     completed: Event = field(default_factory=Event)
     cancelled: Event = field(default_factory=Event)
+    apply_started: Event = field(default_factory=Event)
+    claim_lock: Any = field(default_factory=RLock)
     acknowledgement: _PendingCommandAck | None = None
     error: Exception | None = None
 
@@ -169,6 +177,15 @@ def _string_value(value: Any) -> str | None:
     if hasattr(value, "value"):
         value = value.value
     return str(value)
+
+
+def _journal_error(value: Any) -> str | None:
+    if value is False or value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    return normalized
 
 
 def _safe_attr(source: Any, names: tuple[str, ...]) -> Any:
@@ -1525,6 +1542,10 @@ class CommandPollerActor(Actor):
         session_completion_timeout_seconds: float = (
             CONTROL_PLANE_STALE_AFTER_SECONDS
         ),
+        command_journal: Any = None,
+        command_journal_deadline_seconds: float = (
+            DEFAULT_COMMAND_JOURNAL_DEADLINE_SECONDS
+        ),
     ) -> None:
         _init_actor_base(self)
         if max_pending_commands < 1:
@@ -1546,6 +1567,10 @@ class CommandPollerActor(Actor):
         if session_completion_timeout_seconds <= 0:
             raise ValueError(
                 "session_completion_timeout_seconds must be positive"
+            )
+        if command_journal_deadline_seconds <= 0:
+            raise ValueError(
+                "command_journal_deadline_seconds must be positive"
             )
         self._control_plane = control_plane
         self._lifecycle = lifecycle
@@ -1586,8 +1611,25 @@ class CommandPollerActor(Actor):
             maxsize=self._max_pending_commands
         )
         self._session_admission_lock = RLock()
-        # Process-local command identity is retained through ACKED. Restart
-        # durability belongs to the command journal outside this adapter.
+        if command_journal is None:
+            command_journal = InMemoryCommandJournal()
+        if (
+            self._control_plane_session is None
+            and bool(getattr(command_journal, "durable", False))
+        ):
+            raise ValueError(
+                "durable command journal requires "
+                "control_plane_session"
+            )
+        self._command_journal = command_journal
+        self._command_journal_deadline_seconds = float(
+            command_journal_deadline_seconds
+        )
+        self._command_journal_operation_lock = RLock()
+        self._command_journal_operations: dict[
+            object,
+            tuple[str, float],
+        ] = {}
         self._command_states: dict[str, _CommandState] = {}
         self._consumer_ready = Event()
         self._consumer_progress_lock = RLock()
@@ -1608,6 +1650,7 @@ class CommandPollerActor(Actor):
         self._failed_dependencies: set[str] = set()
         self._failure_reason = ""
         self._degraded_reasons: dict[str, str] = {}
+        self._recover_command_journal()
 
     @property
     def pending_command_count(self) -> int:
@@ -1768,8 +1811,13 @@ class CommandPollerActor(Actor):
         if self._stopped.is_set():
             return
         self._record_consumer_progress()
+        self._evaluate_command_journal_deadline()
+        if "command_stream" in self._failed_dependencies:
+            return
         if self._control_plane_session is not None:
             self._drain_session_commands()
+            self._harvest_acks()
+            self._submit_acks()
             self._evaluate_session_health()
             return
         self._harvest_heartbeat()
@@ -1799,11 +1847,13 @@ class CommandPollerActor(Actor):
                 if command_id in self._command_states:
                     continue
             if len(self._pending_acks) >= self._max_pending_acks:
-                self._fail_command_stream(
-                    "operator command ACK backlog capacity exceeded"
+                self._mark_dependency_degraded(
+                    "command_stream",
+                    "operator command ACK backlog capacity exceeded",
                 )
                 break
             with self._session_admission_lock:
+                self._begin_command(cmd)
                 self._command_states[command_id] = _CommandState(
                     phase=_CommandPhase.APPLYING,
                 )
@@ -1814,10 +1864,7 @@ class CommandPollerActor(Actor):
                 error=error,
             )
             self._pending_acks[command_id] = acknowledgement
-            with self._session_admission_lock:
-                state = self._command_states[command_id]
-                state.acknowledgement = acknowledgement
-                state.phase = _CommandPhase.ACK_QUEUED
+            self._queue_command_ack(command_id, acknowledgement)
             try:
                 self.session_ack_command(acknowledgement)
             except Exception:
@@ -1899,6 +1946,7 @@ class CommandPollerActor(Actor):
                     )
                     raise RuntimeError(reason)
                 publication = _SessionCommandPublication(command=command)
+                self._begin_command(command)
                 state = _CommandState(
                     phase=_CommandPhase.APPLYING,
                     publication=publication,
@@ -1921,22 +1969,41 @@ class CommandPollerActor(Actor):
                     reason = (
                         "operator command actor mailbox capacity exceeded"
                     )
-                    self._fail_command_stream(reason)
+                    self._discard_unapplied_command(command_id)
+                    self._mark_dependency_degraded(
+                        "command_stream",
+                        reason,
+                    )
                     raise RuntimeError(reason) from exc
 
         while not publication.completed.wait(timeout=0.01):
             if self._stopped.is_set():
-                publication.cancelled.set()
-                raise RuntimeError(
-                    "command poller actor stopped before apply"
-                )
+                with publication.claim_lock:
+                    if not publication.apply_started.is_set():
+                        publication.cancelled.set()
+                        if publication.error is None:
+                            publication.error = RuntimeError(
+                                "command poller actor stopped "
+                                "before apply"
+                            )
+                        publication.completed.set()
             if time.monotonic() >= deadline:
                 reason = (
                     "operator command apply timed out waiting for actor thread"
                 )
-                publication.cancelled.set()
-                self._fail_command_stream(reason)
+                self._mark_dependency_degraded(
+                    "command_stream",
+                    reason,
+                )
                 raise RuntimeError(reason)
+        if (
+            publication.cancelled.is_set()
+            and not publication.apply_started.is_set()
+        ):
+            self._discard_cancelled_session_command(
+                command_id,
+                publication,
+            )
         if publication.error is not None:
             raise publication.error
         acknowledgement = publication.acknowledgement
@@ -1957,9 +2024,10 @@ class CommandPollerActor(Actor):
                         "operator command ACK ledger is incomplete"
                     )
                 return queued_acknowledgement
-            state.acknowledgement = acknowledgement
-            state.phase = _CommandPhase.ACK_QUEUED
-            return acknowledgement
+            return self._queue_command_ack(
+                command_id,
+                acknowledgement,
+            )
 
     def session_ack_command(
         self,
@@ -1976,6 +2044,7 @@ class CommandPollerActor(Actor):
             acknowledgement.status,
             error=acknowledgement.error,
         )
+        self._mark_command_acked(command_id)
         with self._session_admission_lock:
             state = self._command_states.get(command_id)
             if state is None:
@@ -1997,7 +2066,18 @@ class CommandPollerActor(Actor):
             except Empty:
                 break
             try:
-                if not publication.cancelled.is_set():
+                should_apply = False
+                with publication.claim_lock:
+                    if publication.cancelled.is_set():
+                        if publication.error is None:
+                            publication.error = RuntimeError(
+                                "operator command cancelled "
+                                "before apply"
+                            )
+                    else:
+                        publication.apply_started.set()
+                        should_apply = True
+                if should_apply:
                     status, error = self._apply(publication.command)
                     acknowledgement = _PendingCommandAck(
                         command_id=publication.command.command_id,
@@ -2005,11 +2085,6 @@ class CommandPollerActor(Actor):
                         error=error,
                     )
                     publication.acknowledgement = acknowledgement
-                    command_id = str(publication.command.command_id)
-                    with self._session_admission_lock:
-                        state = self._command_states.get(command_id)
-                        if state is not None:
-                            state.acknowledgement = acknowledgement
             except Exception as exc:
                 publication.error = exc
                 self._fail_command_stream(
@@ -2027,9 +2102,11 @@ class CommandPollerActor(Actor):
                 publication = self._session_commands.get_nowait()
             except Empty:
                 return
-            publication.cancelled.set()
-            publication.error = RuntimeError(reason)
-            publication.completed.set()
+            with publication.claim_lock:
+                publication.cancelled.set()
+                if publication.error is None:
+                    publication.error = RuntimeError(reason)
+                publication.completed.set()
             self._session_commands.task_done()
 
     def _ensure_executors(
@@ -2136,11 +2213,13 @@ class CommandPollerActor(Actor):
                     self._pending_command_index += 1
                     continue
             if len(self._pending_acks) >= self._max_pending_acks:
-                self._fail_command_stream(
-                    "operator command ACK backlog capacity exceeded"
+                self._mark_dependency_degraded(
+                    "command_stream",
+                    "operator command ACK backlog capacity exceeded",
                 )
                 break
             with self._session_admission_lock:
+                self._begin_command(command)
                 self._command_states[command_id] = _CommandState(
                     phase=_CommandPhase.APPLYING,
                 )
@@ -2151,10 +2230,7 @@ class CommandPollerActor(Actor):
                 error=error,
             )
             self._pending_acks[command_id] = acknowledgement
-            with self._session_admission_lock:
-                state = self._command_states[command_id]
-                state.acknowledgement = acknowledgement
-                state.phase = _CommandPhase.ACK_QUEUED
+            self._queue_command_ack(command_id, acknowledgement)
             self._pending_command_index += 1
             applied += 1
         if self._pending_command_index >= len(self._pending_commands):
@@ -2335,6 +2411,252 @@ class CommandPollerActor(Actor):
             return
         register(lambda: open_orders_snapshot(self._cache()))
         self._oo_provider_registered = True
+
+    def _recover_command_journal(self) -> None:
+        try:
+            records = self._run_command_journal_operation(
+                "recovery",
+                self._command_journal.recover,
+            )
+        except Exception as exc:
+            reason = (
+                "operator command journal recovery failed: "
+                f"{exc!r}"
+            )
+            self._fail_command_stream(reason)
+            raise RuntimeError(reason) from exc
+
+        from execution_domain.control_plane import (  # type: ignore
+            CommandAckStatus,
+        )
+
+        for record in records:
+            phase = CommandJournalPhase(record.phase)
+            if phase is CommandJournalPhase.APPLYING:
+                reason = (
+                    "operator command journal recovery left "
+                    "an ambiguous APPLYING record"
+                )
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason)
+            status = record.status
+            if status is False:
+                reason = (
+                    "operator command journal recovery produced "
+                    "an incomplete ACK"
+                )
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason)
+            try:
+                acknowledgement = _PendingCommandAck(
+                    command_id=record.command_id,
+                    status=CommandAckStatus(str(status)),
+                    error=_journal_error(record.error),
+                )
+            except Exception as exc:
+                reason = (
+                    "operator command journal recovery produced "
+                    f"an invalid ACK: {exc!r}"
+                )
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason) from exc
+            command_phase = _CommandPhase(phase.value)
+            self._command_states[record.command_id] = _CommandState(
+                phase=command_phase,
+                acknowledgement=acknowledgement,
+            )
+            if phase is CommandJournalPhase.ACK_QUEUED:
+                self._pending_acks[
+                    record.command_id
+                ] = acknowledgement
+
+    def _begin_command(self, command: Any) -> None:
+        command_id = str(command.command_id)
+        command_type = _string_value(command.type)
+        if not command_type:
+            reason = "operator command type is required"
+            self._fail_command_stream(reason)
+            raise RuntimeError(reason)
+        try:
+            record = self._run_command_journal_operation(
+                "APPLYING write",
+                lambda: self._command_journal.begin(
+                    command_id,
+                    command_type,
+                ),
+            )
+        except Exception as exc:
+            reason = (
+                "operator command journal APPLYING write failed: "
+                f"{exc!r}"
+            )
+            self._fail_command_stream(reason)
+            raise RuntimeError(reason) from exc
+        if record.phase is CommandJournalPhase.APPLYING:
+            return
+        reason = (
+            "operator command journal admission found terminal "
+            f"state {record.phase.value}"
+        )
+        self._fail_command_stream(reason)
+        raise RuntimeError(reason)
+
+    def _queue_command_ack(
+        self,
+        command_id: str,
+        acknowledgement: _PendingCommandAck,
+    ) -> _PendingCommandAck:
+        with self._session_admission_lock:
+            state = self._command_states.get(command_id)
+            if state is None:
+                reason = (
+                    "operator command ACK has no admitted state"
+                )
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason)
+            if state.phase is _CommandPhase.ACKED:
+                return acknowledgement
+            if state.phase is _CommandPhase.ACK_QUEUED:
+                existing = state.acknowledgement
+                if existing is None:
+                    reason = (
+                        "operator command ACK ledger is incomplete"
+                    )
+                    self._fail_command_stream(reason)
+                    raise RuntimeError(reason)
+                return existing
+            status = _string_value(acknowledgement.status)
+            if not status:
+                reason = "operator command ACK status is required"
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason)
+            error: str | bool = False
+            if acknowledgement.error is not None:
+                error = str(acknowledgement.error)
+            try:
+                self._run_command_journal_operation(
+                    "ACK_QUEUED write",
+                    lambda: self._command_journal.complete(
+                        command_id,
+                        status=status,
+                        error=error,
+                    ),
+                )
+            except Exception as exc:
+                reason = (
+                    "operator command journal ACK_QUEUED write "
+                    f"failed: {exc!r}"
+                )
+                self._fail_command_stream(reason)
+                raise RuntimeError(reason) from exc
+            state.acknowledgement = acknowledgement
+            state.phase = _CommandPhase.ACK_QUEUED
+            return acknowledgement
+
+    def _mark_command_acked(self, command_id: str) -> None:
+        try:
+            self._run_command_journal_operation(
+                "ACKED write",
+                lambda: self._command_journal.mark_acked(
+                    command_id
+                ),
+            )
+        except Exception as exc:
+            reason = (
+                "operator command journal ACKED write failed: "
+                f"{exc!r}"
+            )
+            self._fail_command_stream(reason)
+            raise RuntimeError(reason) from exc
+
+    def _discard_unapplied_command(self, command_id: str) -> None:
+        try:
+            discarded = self._run_command_journal_operation(
+                "rollback",
+                lambda: self._command_journal.discard_unapplied(
+                    command_id
+                ),
+            )
+        except Exception as exc:
+            reason = (
+                "operator command journal rollback failed: "
+                f"{exc!r}"
+            )
+            self._fail_command_stream(reason)
+            raise RuntimeError(reason) from exc
+        if discarded:
+            return
+        reason = (
+            "operator command journal rollback found no "
+            "APPLYING record"
+        )
+        self._fail_command_stream(reason)
+        raise RuntimeError(reason)
+
+    def _discard_cancelled_session_command(
+        self,
+        command_id: str,
+        publication: _SessionCommandPublication,
+    ) -> None:
+        should_discard = False
+        with self._session_admission_lock:
+            state = self._command_states.get(command_id)
+            if (
+                state is not None
+                and state.phase is _CommandPhase.APPLYING
+                and state.publication is publication
+            ):
+                self._command_states.pop(command_id, None)
+                should_discard = True
+        if should_discard:
+            self._discard_unapplied_command(command_id)
+
+    def _run_command_journal_operation(
+        self,
+        name: str,
+        operation: Callable[[], Any],
+    ) -> Any:
+        token = object()
+        started_at = time.monotonic()
+        with self._command_journal_operation_lock:
+            self._command_journal_operations[token] = (
+                name,
+                started_at,
+            )
+        try:
+            result = operation()
+        finally:
+            with self._command_journal_operation_lock:
+                self._command_journal_operations.pop(token, None)
+        elapsed = time.monotonic() - started_at
+        if elapsed <= self._command_journal_deadline_seconds:
+            return result
+        raise TimeoutError(
+            "operator command journal "
+            f"{name} exceeded "
+            f"{self._command_journal_deadline_seconds:.3f}s deadline"
+        )
+
+    def _evaluate_command_journal_deadline(self) -> None:
+        now = time.monotonic()
+        with self._command_journal_operation_lock:
+            operations = tuple(
+                self._command_journal_operations.values()
+            )
+        if not operations:
+            return
+        name, started_at = min(
+            operations,
+            key=lambda item: item[1],
+        )
+        elapsed = now - started_at
+        if elapsed <= self._command_journal_deadline_seconds:
+            return
+        self._fail_command_stream(
+            "operator command journal "
+            f"{name} exceeded "
+            f"{self._command_journal_deadline_seconds:.3f}s deadline"
+        )
 
     def _fail_command_stream(self, reason: str) -> None:
         if "command_stream" in self._failed_dependencies:
