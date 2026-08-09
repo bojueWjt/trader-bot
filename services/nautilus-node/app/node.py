@@ -43,6 +43,7 @@ NAUTILUS_API_TODOS: tuple[str, ...] = (
     "TODO(host-verify): confirm Trader.add_strategy/add_actor direct object "
     "registration behavior for live TradingNode assembly.",
 )
+_CONSUMER_PROGRESS_UNAVAILABLE = object()
 
 
 @dataclass(frozen=True)
@@ -235,6 +236,12 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
         fatal_termination_hook=lambda reason: (
             _mark_control_plane_session_fatal(runtime, reason)
         ),
+        consumer_ready=lambda: _control_plane_consumers_ready(
+            actor_holder
+        ),
+        consumer_progress=lambda: _control_plane_consumer_progress(
+            actor_holder
+        ),
         thread_name_prefix=(
             f"node-control-plane.{runtime.config.account_id}"
         ),
@@ -287,6 +294,7 @@ def build_nautilus_trading_node(runtime: AccountRuntime) -> Any:
         }
     )
     runtime.control_plane_session = session
+    _wire_control_plane_session_liveness(runtime, session)
     node.trader.add_actor(intent_actor)
     node.trader.add_actor(projection_actor)
     node.trader.add_actor(command_actor)
@@ -342,6 +350,73 @@ def _mark_control_plane_session_fatal(
         f"control-plane session fatal: {reason}",
         hard=True,
     )
+
+
+def _control_plane_consumers_ready(
+    actor_holder: dict[str, Any],
+) -> bool:
+    for name in ("intent", "projection", "command"):
+        actor = actor_holder.get(name)
+        if actor is None:
+            return False
+        if not _actor_consumer_ready(actor):
+            return False
+    return True
+
+
+def _actor_consumer_ready(actor: Any) -> bool:
+    explicit = getattr(
+        actor,
+        "control_plane_consumer_ready",
+        None,
+    )
+    if callable(explicit):
+        return bool(explicit())
+    if explicit is not None:
+        return bool(explicit)
+    running = getattr(actor, "is_running", False)
+    if callable(running):
+        return bool(running())
+    return bool(running)
+
+
+def _control_plane_consumer_progress(
+    actor_holder: dict[str, Any],
+) -> float | bool | None:
+    actor = actor_holder.get("command")
+    if actor is None:
+        return False
+    progress = getattr(
+        actor,
+        "control_plane_consumer_last_progress_at",
+        _CONSUMER_PROGRESS_UNAVAILABLE,
+    )
+    if progress is _CONSUMER_PROGRESS_UNAVAILABLE:
+        return True
+    if callable(progress):
+        return progress()
+    return progress
+
+
+def _wire_control_plane_session_liveness(
+    runtime: AccountRuntime,
+    session: Any,
+) -> None:
+    setter = getattr(
+        runtime.health,
+        "set_process_liveness_provider",
+        None,
+    )
+    if not callable(setter):
+        return
+    setter(lambda: _session_process_liveness(session))
+
+
+def _session_process_liveness(session: Any) -> bool:
+    snapshot = session.snapshot()
+    if not snapshot.started and not snapshot.stopped:
+        return True
+    return bool(snapshot.process_liveness)
 
 
 def _mark_dependency_reason(
@@ -778,12 +853,20 @@ class _LocalHealthResponse:
 class _LocalHealthService:
     def __init__(self, lifecycle: Any) -> None:
         self._lifecycle = lifecycle
+        self._process_liveness: Callable[[], bool] | None = None
+
+    def set_process_liveness_provider(
+        self,
+        provider: Callable[[], bool],
+    ) -> None:
+        self._process_liveness = provider
 
     def liveness(self) -> _LocalHealthResponse:
+        live = self._resolve_process_liveness()
         return _LocalHealthResponse(
-            status_code=200,
+            status_code=200 if live else 503,
             body={
-                "live": True,
+                "live": live,
                 "account_id": self._lifecycle.config.account_id,
                 "node_id": self._lifecycle.config.node_id,
                 "trading_state": str(
@@ -817,6 +900,15 @@ class _LocalHealthService:
                 "halt_reason": self._lifecycle.halt_reason,
             },
         )
+
+    def _resolve_process_liveness(self) -> bool:
+        provider = self._process_liveness
+        if provider is None:
+            return True
+        try:
+            return bool(provider())
+        except Exception:
+            return False
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from .lifecycle import NodeLifecycle
 
@@ -14,14 +15,26 @@ class HealthResponse:
 class HealthService:
     """Separate liveness and readiness surfaces for process supervisors."""
 
-    def __init__(self, lifecycle: NodeLifecycle) -> None:
+    def __init__(
+        self,
+        lifecycle: NodeLifecycle,
+        process_liveness: Callable[[], bool] | None = None,
+    ) -> None:
         self._lifecycle = lifecycle
+        self._process_liveness = process_liveness
+
+    def set_process_liveness_provider(
+        self,
+        provider: Callable[[], bool],
+    ) -> None:
+        self._process_liveness = provider
 
     def liveness(self) -> HealthResponse:
+        live = self._resolve_process_liveness()
         return HealthResponse(
-            status_code=200,
+            status_code=200 if live else 503,
             body={
-                "live": True,
+                "live": live,
                 "account_id": self._lifecycle.config.account_id,
                 "node_id": self._lifecycle.config.node_id,
                 "trading_state": self._lifecycle.trading_state.value,
@@ -46,3 +59,12 @@ class HealthService:
                 "halt_reason": self._lifecycle.halt_reason,
             },
         )
+
+    def _resolve_process_liveness(self) -> bool:
+        provider = self._process_liveness
+        if provider is None:
+            return True
+        try:
+            return bool(provider())
+        except Exception:
+            return False

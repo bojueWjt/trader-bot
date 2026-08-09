@@ -16,6 +16,8 @@ from .node import (
     run_startup_readiness_checks,
 )
 
+SESSION_TERMINATED_EXIT_CODE = 75
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
@@ -80,8 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         if session is None:
             raise RuntimeError("control-plane session was not assembled")
         session.start()
-        node.run()
-        return 0
+        return _run_node_until_session_termination(node, session)
     finally:
         active_exception = sys.exc_info()[0] is not None
         try:
@@ -141,6 +142,92 @@ def _cleanup_runtime(runtime: Any, server: Any) -> None:
         raise RuntimeError(
             f"runtime cleanup failed with {len(errors)} error(s)"
         ) from errors[0]
+
+
+def _run_node_until_session_termination(
+    node: Any,
+    session: Any,
+) -> int:
+    wait_for_termination = getattr(
+        session,
+        "wait_for_termination",
+        None,
+    )
+    if not callable(wait_for_termination):
+        node.run()
+        return 0
+
+    node_finished = threading.Event()
+    session_terminated = threading.Event()
+    monitor_errors: list[Exception] = []
+
+    def monitor_session() -> None:
+        while not node_finished.is_set():
+            if not wait_for_termination(timeout=0.05):
+                continue
+            session_terminated.set()
+            if node_finished.is_set():
+                return
+            try:
+                _request_node_stop(node)
+            except Exception as exc:
+                monitor_errors.append(exc)
+            return
+
+    monitor = threading.Thread(
+        target=monitor_session,
+        name="control-plane-session.termination-monitor",
+        daemon=True,
+    )
+    monitor.start()
+    try:
+        node.run()
+    finally:
+        node_finished.set()
+        monitor.join(timeout=0.2)
+    if monitor_errors:
+        raise RuntimeError(
+            "failed to request node stop after control-plane "
+            "session termination"
+        ) from monitor_errors[0]
+    terminated = session_terminated.is_set()
+    if not terminated:
+        terminated = bool(wait_for_termination(timeout=0))
+    if terminated:
+        return SESSION_TERMINATED_EXIT_CODE
+    return 0
+
+
+def _request_node_stop(node: Any) -> None:
+    stop = getattr(node, "stop", None)
+    kernel = getattr(node, "kernel", None)
+    loop = getattr(kernel, "loop", None)
+    is_running = getattr(loop, "is_running", None)
+    call_soon_threadsafe = getattr(
+        loop,
+        "call_soon_threadsafe",
+        None,
+    )
+    create_task = getattr(loop, "create_task", None)
+    stop_async = getattr(node, "stop_async", None)
+    loop_running = False
+    if callable(is_running):
+        try:
+            loop_running = bool(is_running())
+        except Exception:
+            loop_running = False
+    if (
+        loop_running
+        and callable(call_soon_threadsafe)
+        and callable(create_task)
+        and callable(stop_async)
+    ):
+        call_soon_threadsafe(
+            lambda: create_task(stop_async())
+        )
+        return
+    if callable(stop):
+        stop()
 
 
 def _call_cleanup(

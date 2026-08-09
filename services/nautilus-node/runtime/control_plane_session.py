@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 import time
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ DEFAULT_RETRY_MAX_DELAY_SECONDS = 1.0
 DEFAULT_RETRY_JITTER_RATIO = 0.2
 DEFAULT_CIRCUIT_RESET_SECONDS = 5.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 15.0
+DEFAULT_CONSUMER_FREEZE_THRESHOLD_SECONDS = 60.0
 DEFAULT_RETRY_DELAY_SECONDS = DEFAULT_RETRY_BASE_DELAY_SECONDS
 _POLL_TOKEN = object()
 
@@ -74,6 +76,7 @@ class LaneHealth:
 class SessionHealth:
     started: bool
     stopped: bool
+    consumers_ready: bool
     process_liveness: bool
     ready: bool
     degraded: bool
@@ -336,6 +339,12 @@ class NodeControlPlaneSession:
         failure_callback: Callable[[str, str], None] | None = None,
         success_callback: Callable[[str], None] | None = None,
         fatal_termination_hook: Callable[[str], None] | None = None,
+        consumer_ready: Callable[[], bool] | None = None,
+        consumer_progress: Callable[[], float | bool | None] | None = None,
+        consumer_freeze_threshold_seconds: float = (
+            DEFAULT_CONSUMER_FREEZE_THRESHOLD_SECONDS
+        ),
+        monotonic_clock: Callable[[], float] | None = None,
         random_source: Callable[[], float] | None = None,
         thread_name_prefix: str = "node-control-plane",
     ) -> None:
@@ -368,6 +377,10 @@ class NodeControlPlaneSession:
         _require_positive_interval(
             "operation_timeout_seconds",
             operation_timeout_seconds,
+        )
+        _require_positive_interval(
+            "consumer_freeze_threshold_seconds",
+            consumer_freeze_threshold_seconds,
         )
         if retry_max_delay_seconds < retry_base_delay_seconds:
             raise ValueError(
@@ -422,6 +435,12 @@ class NodeControlPlaneSession:
         self._failure_callback = failure_callback
         self._success_callback = success_callback
         self._fatal_termination_hook = fatal_termination_hook
+        self._consumer_ready_check = consumer_ready
+        self._consumer_progress_check = consumer_progress
+        self._consumer_freeze_threshold_seconds = float(
+            consumer_freeze_threshold_seconds
+        )
+        self._monotonic_clock = monotonic_clock or time.monotonic
         self._random_source = random_source or random.random
         self._thread_name_prefix = str(thread_name_prefix).strip()
         if not self._thread_name_prefix:
@@ -478,6 +497,13 @@ class NodeControlPlaneSession:
             ),
         }
         self._stop = Event()
+        self._termination = Event()
+        self._consumers_ready = Event()
+        if self._consumer_ready_check is None:
+            self._consumers_ready.set()
+        self._consumer_progress_lock = Lock()
+        self._consumer_progress_value: float | None = None
+        self._consumer_progress_observed_at: float | None = None
         self._stop_deadline_lock = Lock()
         self._stop_deadline: float | bool = False
         self._drain_failed = Event()
@@ -501,16 +527,22 @@ class NodeControlPlaneSession:
                 raise RuntimeError(
                     "control-plane session cannot restart after stop"
                 )
+            watchdog = self._thread("watchdog", self._run_watchdog)
+            startup_thread = self._thread(
+                "startup",
+                self._run_startup,
+            )
+            self._threads = [watchdog]
+            self._startup_thread = startup_thread
             self._started = True
-        watchdog = self._thread("watchdog", self._run_watchdog)
-        self._threads = [watchdog]
-        watchdog.start()
-        startup_thread = self._thread(
-            "startup",
-            self._run_startup,
-        )
-        self._startup_thread = startup_thread
-        startup_thread.start()
+            watchdog.start()
+            startup_thread.start()
+
+    def mark_consumers_ready(self) -> None:
+        self._consumers_ready.set()
+
+    def wait_for_termination(self, timeout: float | None = None) -> bool:
+        return self._termination.wait(timeout=timeout)
 
     def stop(self, deadline: float) -> bool:
         cutoff = float(deadline)
@@ -524,14 +556,14 @@ class NodeControlPlaneSession:
                     cutoff,
                 )
         self._stop.set()
-        if not self._fatal_process.is_set():
-            startup_thread = self._startup_thread
-            if startup_thread is not None:
-                remaining = max(cutoff - time.monotonic(), 0.0)
-                startup_thread.join(timeout=remaining)
-            for thread in tuple(self._threads):
-                remaining = max(cutoff - time.monotonic(), 0.0)
-                thread.join(timeout=remaining)
+        self._termination.set()
+        startup_thread = self._startup_thread
+        if startup_thread is not None:
+            remaining = max(cutoff - time.monotonic(), 0.0)
+            startup_thread.join(timeout=remaining)
+        for thread in tuple(self._threads):
+            remaining = max(cutoff - time.monotonic(), 0.0)
+            thread.join(timeout=remaining)
         startup_thread = self._startup_thread
         startup_stopped = (
             startup_thread is None
@@ -569,20 +601,37 @@ class NodeControlPlaneSession:
             name: lane.snapshot(now)
             for name, lane in self._lanes.items()
         }
+        with self._lifecycle_lock:
+            started = self._started
+            stopped = self._stopped
+            startup_complete = self._startup_complete
+            startup_thread = self._startup_thread
+            threads = tuple(self._threads)
+        startup_running = (
+            startup_complete
+            or (
+                startup_thread is not None
+                and startup_thread.is_alive()
+            )
+        )
         process_liveness = (
-            self._started
-            and self._startup_complete
-            and not self._stopped
+            started
+            and startup_running
+            and not stopped
             and not self._stop.is_set()
             and not self._fatal_process.is_set()
-            and all(thread.is_alive() for thread in self._threads)
+            and all(thread.is_alive() for thread in threads)
         )
         failure_reasons = _lane_failure_reasons(lanes)
-        degraded = any(
-            lane.queue_pressure == QueuePressure.DEGRADED.value
-            for lane in lanes.values()
+        degraded = any(_lane_is_degraded(lane) for lane in lanes.values())
+        consumers_ready = self._consumers_ready.is_set()
+        ready = (
+            process_liveness
+            and startup_complete
+            and consumers_ready
+            and not failure_reasons
+            and not degraded
         )
-        ready = process_liveness and not failure_reasons and not degraded
         configuration = MappingProxyType(
             {
                 "queue_degraded_ratio": self._queue_degraded_ratio,
@@ -598,11 +647,15 @@ class NodeControlPlaneSession:
                 "operation_timeout_seconds": (
                     self._operation_timeout_seconds
                 ),
+                "consumer_freeze_threshold_seconds": (
+                    self._consumer_freeze_threshold_seconds
+                ),
             }
         )
         return SessionHealth(
-            started=self._started,
-            stopped=self._stopped,
+            started=started,
+            stopped=stopped,
+            consumers_ready=consumers_ready,
             process_liveness=process_liveness,
             ready=ready,
             degraded=degraded,
@@ -612,6 +665,8 @@ class NodeControlPlaneSession:
         )
 
     def _run_startup(self) -> None:
+        if not self._wait_for_consumers_ready():
+            return
         try:
             self._run_startup_barriers()
         except BaseException as exc:
@@ -628,6 +683,22 @@ class NodeControlPlaneSession:
                 thread.start()
             self._startup_complete = True
 
+    def _wait_for_consumers_ready(self) -> bool:
+        while not self._stop.is_set():
+            if self._consumers_ready.is_set():
+                return True
+            ready_check = self._consumer_ready_check
+            if ready_check is not None:
+                try:
+                    ready = bool(ready_check())
+                except Exception:
+                    ready = False
+                if ready:
+                    self._consumers_ready.set()
+                    return True
+            self._stop.wait(0.01)
+        return False
+
     def _seed_periodic_tokens(self) -> None:
         if self._heartbeat is not None:
             self._offer_token(self._lanes["heartbeat"])
@@ -637,12 +708,6 @@ class NodeControlPlaneSession:
             self._offer_token(self._lanes["intent_fetch"])
 
     def _run_startup_barriers(self) -> None:
-        heartbeat = self._heartbeat
-        if heartbeat is not None:
-            self._require_startup_action(
-                self._lanes["heartbeat"],
-                heartbeat,
-            )
         replay = self._intent_replay
         if replay is None or self._intent_replayed:
             return
@@ -812,6 +877,8 @@ class NodeControlPlaneSession:
                 )
                 if delivered:
                     break
+                if self._fatal_process.is_set():
+                    break
                 if not self._wait_for_circuit(
                     lane,
                     drain_on_stop=True,
@@ -939,21 +1006,11 @@ class NodeControlPlaneSession:
         except Full:
             self._mark_lane_capacity_failure(lane)
             return False
-        if (
-            lane.pressure_enabled
-            and lane.queue.qsize() >= lane.capacity
-            and lane.is_in_flight()
-        ):
-            self._mark_lane_capacity_failure(lane)
         return True
 
     def _mark_lane_capacity_failure(self, lane: _Lane) -> None:
         reason = f"{lane.name} queue capacity exceeded"
-        if lane.mark_fatal(reason):
-            self._report_failure(
-                lane.name,
-                RuntimeError(reason),
-            )
+        self._trigger_fatal_termination(lane, reason)
 
     def _offer_token(self, lane: _Lane) -> None:
         try:
@@ -993,6 +1050,64 @@ class NodeControlPlaneSession:
                     continue
                 detail, _opened = expired
                 self._trigger_fatal_termination(lane, detail)
+            self._check_consumer_progress()
+
+    def _check_consumer_progress(self) -> None:
+        callback = self._consumer_progress_check
+        if callback is None:
+            return
+        if not self._consumers_ready.is_set():
+            return
+        if self._stop.is_set() or self._fatal_process.is_set():
+            return
+
+        now = float(self._monotonic_clock())
+        try:
+            progress = callback()
+        except Exception:
+            progress = False
+
+        observed_progress = False
+        progress_value: float | None = None
+        if isinstance(progress, bool):
+            observed_progress = progress
+        else:
+            try:
+                progress_value = float(progress)
+            except (TypeError, ValueError):
+                progress_value = None
+            if (
+                progress_value is not None
+                and not math.isfinite(progress_value)
+            ):
+                progress_value = None
+
+        with self._consumer_progress_lock:
+            if observed_progress:
+                self._consumer_progress_observed_at = now
+                return
+            if progress_value is not None:
+                previous = self._consumer_progress_value
+                if previous is None or progress_value != previous:
+                    self._consumer_progress_value = progress_value
+                    self._consumer_progress_observed_at = now
+                    return
+            observed_at = self._consumer_progress_observed_at
+            if observed_at is None:
+                self._consumer_progress_observed_at = now
+                return
+            frozen_for = max(now - observed_at, 0.0)
+
+        if frozen_for <= self._consumer_freeze_threshold_seconds:
+            return
+        reason = (
+            "control-plane consumer progress frozen for more than "
+            f"{self._consumer_freeze_threshold_seconds:.3f}s"
+        )
+        self._trigger_fatal_termination(
+            self._lanes["command_poll"],
+            reason,
+        )
 
     def _wait_for_circuit(
         self,
@@ -1089,6 +1204,7 @@ class NodeControlPlaneSession:
             lane.mark_fatal(reason)
             self._fatal_process.set()
             self._stop.set()
+            self._termination.set()
         self._report_failure(
             lane.name,
             TimeoutError(reason),
@@ -1139,6 +1255,16 @@ def _lane_failure_reasons(
         if lane.fatal_failure:
             reasons.append(f"{name}.fatal_failure={lane.fatal_failure}")
     return tuple(reasons)
+
+
+def _lane_is_degraded(lane: LaneHealth) -> bool:
+    if lane.fatal_failure:
+        return False
+    if lane.failure:
+        return True
+    if lane.circuit_state != CircuitState.CLOSED.value:
+        return True
+    return lane.queue_pressure == QueuePressure.DEGRADED.value
 
 
 def _take_bounded(

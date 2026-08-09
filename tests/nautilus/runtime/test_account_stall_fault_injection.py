@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Thread, get_ident
 from types import SimpleNamespace
 from typing import Any
 
@@ -48,6 +48,7 @@ class _Session:
         self._stop_results = list(stop_results)
         self.started = False
         self.stop_calls = 0
+        self.terminated = Event()
 
     def start(self) -> None:
         self.started = True
@@ -55,9 +56,13 @@ class _Session:
     def stop(self, deadline: float) -> bool:
         del deadline
         self.stop_calls += 1
+        self.terminated.set()
         if len(self._stop_results) > 1:
             return self._stop_results.pop(0)
         return self._stop_results[0]
+
+    def wait_for_termination(self, timeout: float | None = None) -> bool:
+        return self.terminated.wait(timeout=timeout)
 
 
 class _Node:
@@ -83,6 +88,76 @@ class _Node:
 
     def dispose(self) -> None:
         self.disposed = True
+
+
+class _BlockingNode(_Node):
+    def __init__(self) -> None:
+        super().__init__()
+        self.run_started = Event()
+        self.stop_requested = Event()
+
+    def run(self) -> None:
+        self.ran = True
+        self.run_started.set()
+        self.stop_requested.wait(timeout=2.0)
+
+    def stop(self) -> None:
+        super().stop()
+        self.stop_requested.set()
+
+
+class _ThreadSafeLoop:
+    def __init__(self) -> None:
+        self.callback_ready = Event()
+        self.callback: Any = None
+        self.scheduling_thread_id: int | None = None
+        self.create_task_thread_id: int | None = None
+
+    def is_running(self) -> bool:
+        return True
+
+    def call_soon_threadsafe(self, callback: Any) -> None:
+        self.scheduling_thread_id = get_ident()
+        self.callback = callback
+        self.callback_ready.set()
+
+    def create_task(self, coroutine: Any) -> None:
+        self.create_task_thread_id = get_ident()
+        try:
+            coroutine.send(None)
+        except StopIteration:
+            return
+
+
+class _LoopBackedBlockingNode(_BlockingNode):
+    def __init__(self) -> None:
+        super().__init__()
+        self.loop = _ThreadSafeLoop()
+        self.kernel = SimpleNamespace(loop=self.loop)
+        self.run_thread_id: int | None = None
+        self.stop_thread_id: int | None = None
+        self.stop_async_thread_id: int | None = None
+
+    def run(self) -> None:
+        self.ran = True
+        self.run_thread_id = get_ident()
+        self.run_started.set()
+        deadline = time.monotonic() + 2.0
+        while not self.stop_requested.is_set():
+            if self.loop.callback_ready.wait(timeout=0.01):
+                self.loop.callback()
+                break
+            if time.monotonic() >= deadline:
+                break
+        self.stop_requested.wait(timeout=2.0)
+
+    def stop(self) -> None:
+        self.stop_thread_id = get_ident()
+        super().stop()
+
+    async def stop_async(self) -> None:
+        self.stop_async_thread_id = get_ident()
+        super().stop()
 
 
 class _Server:
@@ -468,6 +543,97 @@ def test_runtime_failure_starts_session_and_cleans_all_owners(
     assert node.ran is True
     assert node.stopped is True
     assert node.disposed is True
+    assert lease_guard.closed is True
+
+
+def test_session_termination_stops_blocked_node_and_returns_restart_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_guard = _LeaseGuard()
+    session = _Session()
+    node = _BlockingNode()
+    server = _Server()
+    runtime = _runtime(
+        lease_guard=lease_guard,
+        session=session,
+        node=node,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "build_account_runtime",
+        lambda *args, **kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "build_health_server",
+        lambda *args, **kwargs: server,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "run_startup_readiness_checks",
+        lambda runtime: None,
+    )
+
+    def terminate_session() -> None:
+        assert node.run_started.wait(timeout=1.0)
+        session.terminated.set()
+
+    terminator = Thread(target=terminate_session)
+    terminator.start()
+    result = run_node.main(["--config", "node.json"])
+    terminator.join(timeout=1.0)
+
+    assert result == run_node.SESSION_TERMINATED_EXIT_CODE
+    assert terminator.is_alive() is False
+    assert node.stopped is True
+    assert node.disposed is True
+    assert session.stop_calls == 1
+    assert lease_guard.closed is True
+
+
+def test_session_termination_schedules_nautilus_stop_on_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_guard = _LeaseGuard()
+    session = _Session()
+    node = _LoopBackedBlockingNode()
+    server = _Server()
+    runtime = _runtime(
+        lease_guard=lease_guard,
+        session=session,
+        node=node,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "build_account_runtime",
+        lambda *args, **kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "build_health_server",
+        lambda *args, **kwargs: server,
+    )
+    monkeypatch.setattr(
+        run_node,
+        "run_startup_readiness_checks",
+        lambda runtime: None,
+    )
+
+    def terminate_session() -> None:
+        assert node.run_started.wait(timeout=1.0)
+        session.terminated.set()
+
+    terminator = Thread(target=terminate_session)
+    terminator.start()
+    result = run_node.main(["--config", "node.json"])
+    terminator.join(timeout=1.0)
+
+    assert result == run_node.SESSION_TERMINATED_EXIT_CODE
+    assert node.loop.scheduling_thread_id is not None
+    assert node.loop.scheduling_thread_id != node.run_thread_id
+    assert node.loop.create_task_thread_id == node.run_thread_id
+    assert node.stop_async_thread_id == node.run_thread_id
+    assert node.stop_thread_id == node.run_thread_id
     assert lease_guard.closed is True
 
 

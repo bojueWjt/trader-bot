@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from contextlib import contextmanager
@@ -184,6 +185,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
         session = runtime.control_plane_session
         self.assertIsNotNone(session)
         self.assertFalse(session.snapshot().started)
+        self.assertFalse(session.snapshot().consumers_ready)
         for actor in node.trader.actors:
             self.assertIs(actor._control_plane_session, session)
             self.assertFalse(actor._manage_control_plane_session)
@@ -205,6 +207,67 @@ class NodeAppAssemblyTest(unittest.TestCase):
                 "session owner is already assembled",
             ):
                 build_nautilus_trading_node(runtime)
+
+    def test_shared_session_liveness_wiring_preserves_readiness_dependencies(self) -> None:
+        from app.node import build_account_runtime, build_nautilus_trading_node
+
+        with tempfile.TemporaryDirectory() as tmp, _fake_nautilus_modules():
+            runtime = build_account_runtime(
+                SERVICE_ROOT / "config" / "examples" / "account-a.sandbox.json",
+                spool_root=Path(tmp),
+            )
+            build_nautilus_trading_node(runtime)
+            session = runtime.control_plane_session
+            session.start()
+            try:
+                live = runtime.health.liveness()
+                ready = runtime.health.readiness()
+
+                self.assertEqual(live.status_code, 200)
+                self.assertTrue(live.body["live"])
+                self.assertFalse(session.snapshot().consumers_ready)
+                self.assertEqual(
+                    set(ready.body["missing"]),
+                    {
+                        "instruments",
+                        "redis",
+                        "control_plane",
+                        "intent_stream",
+                        "command_stream",
+                        "reconciliation",
+                        "projection",
+                    },
+                )
+            finally:
+                self.assertTrue(session.stop(time.monotonic() + 1.0))
+
+            dead = runtime.health.liveness()
+            self.assertEqual(dead.status_code, 503)
+            self.assertFalse(dead.body["live"])
+
+    def test_consumer_progress_wiring_reads_actor_progress_property(self) -> None:
+        from app.node import _control_plane_consumer_progress
+
+        missing_property = {"command": types.SimpleNamespace()}
+        stalled = {
+            "command": types.SimpleNamespace(
+                control_plane_consumer_last_progress_at=False
+            )
+        }
+        progressing = {
+            "command": types.SimpleNamespace(
+                control_plane_consumer_last_progress_at=123.5
+            )
+        }
+
+        self.assertTrue(
+            _control_plane_consumer_progress(missing_property)
+        )
+        self.assertFalse(_control_plane_consumer_progress(stalled))
+        self.assertEqual(
+            _control_plane_consumer_progress(progressing),
+            123.5,
+        )
 
 
 class NautilusActorAdapterTest(unittest.TestCase):
