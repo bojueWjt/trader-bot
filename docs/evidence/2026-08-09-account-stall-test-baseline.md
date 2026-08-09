@@ -151,8 +151,14 @@ shasum -a 256 /tmp/<suite>.nodeids.txt
 | deployment focused | 72 | `2a33079315e1520c59d83651b375d30df08edfc6dec6915dc10f43acfaa4117e` |
 | fence/rollout | 16 | `5ce8c43f005275304392788bd001953643c90fa5687b5ea18c3d6bd82a76e5cd` |
 
-Phase A 必须将 node-id inventory 作为版本化证据保存到干净 worktree。后续结果只有在
-inventory hash 相同或差异已逐项解释时，才能与本基线比较。
+Phase A 已将 node-id inventory 保存到干净 worktree：
+
+- `docs/evidence/inventory/2026-08-09-account-stall-runtime.nodeids.txt`
+- `docs/evidence/inventory/2026-08-09-account-stall-release.nodeids.txt`
+- `docs/evidence/inventory/2026-08-09-account-stall-deployment.nodeids.txt`
+- `docs/evidence/inventory/2026-08-09-account-stall-fence-rollout.nodeids.txt`
+
+后续结果只有在 inventory hash 相同或差异已逐项解释时，才能与本基线比较。
 
 ## 7. 491 与 523 的边界
 

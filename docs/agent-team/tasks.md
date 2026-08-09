@@ -10,7 +10,7 @@
 | ID | Owner | Status | Deliverable | Evidence / Next Gate |
 |---|---|---|---|---|
 | A0 | planner | done | 从 `7368641` 创建干净 worktree `codex/account-stall-phase-a` | `/Users/balen/projects/trader-bot-account-stall-phase-a` 初始 status 为空 |
-| A1 | planner | done | 冻结 169 项 source status、tracked patch 与 domain hashes | `docs/evidence/2026-08-09-account-stall-phase-a-source-freeze.md` |
+| A1 | planner | done | 冻结 169 项 source status、tracked patch、domain hashes 与四组 test inventory | `docs/evidence/2026-08-09-account-stall-phase-a-source-freeze.md`；`docs/evidence/inventory/` |
 | A2 | scope-integration-auditor | in_progress | in-scope dependency closure、混合 hunk、导入顺序 | 等待 agent finding |
 | A3 | runtime-diagnostician | in_progress | 当前代码 stall red-capable seam 与假设排序 | 等待 agent finding |
 | A4 | runtime-resource-contract-auditor | in_progress | Node/manifest optionality matrix 与 Phase B interface | 等待 agent finding |
