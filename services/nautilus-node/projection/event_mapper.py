@@ -162,6 +162,7 @@ def _payload(event: Any, *, instrument_id: str | None) -> dict[str, Any]:
         "last_qty",
         "position_id",
         "realized_pnl",
+        "commission",
         "currency",
         "balance",
         "margin_balance",

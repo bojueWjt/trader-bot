@@ -51,6 +51,7 @@ class ProjectionActorTests(unittest.TestCase):
             instrument_id="BTCUSDT-PERP.BINANCE",
             quantity="0.25",
             price="65000",
+            commission="0.004 USDT",
             id="nautilus-emission-a",
         )
         replay = _Event(
@@ -62,6 +63,7 @@ class ProjectionActorTests(unittest.TestCase):
             instrument_id="BTCUSDT-PERP.BINANCE",
             quantity="0.25",
             price="65000",
+            commission="0.004 USDT",
             id="nautilus-emission-b",
         )
 
@@ -79,6 +81,7 @@ class ProjectionActorTests(unittest.TestCase):
         self.assertEqual(envelope.event_type, "OrderFilled")
         self.assertEqual(envelope.ts_ingest, NOW)
         self.assertEqual(envelope.payload["instrument_id"], "BTCUSDT-PERP.BINANCE")
+        self.assertEqual(envelope.payload["commission"], "0.004 USDT")
         self.assertNotIn("nautilus-emission", envelope.event_id)
 
     def test_duplicate_business_event_is_spooled_and_posted_once(self) -> None:
@@ -262,6 +265,7 @@ class _Event:
     instrument_id: str | None = None
     quantity: str | None = None
     price: str | None = None
+    commission: str | None = None
     id: str = "ignored-nautilus-id"
 
     @property
