@@ -89,6 +89,7 @@ def validate(instance, schema):
             error = errors[0]
             location = "$" + "".join(f".{part}" for part in error.path)
             raise ContractValidationError(f"{location}: {error.validator} {error.message}")
+        validate_minimal(instance, schema)
         return
 
     validate_minimal(instance, schema)
