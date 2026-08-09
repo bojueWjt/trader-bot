@@ -113,8 +113,16 @@ class ProjectionActorTests(unittest.TestCase):
         spool = self._tmp_spool()
         actor = _actor(spool, sink=sink)
 
-        later = _Event("OrderAccepted", ts_event=30, client_order_id="coid-2")
-        earlier = _Event("OrderSubmitted", ts_event=10, client_order_id="coid-1")
+        later = _Event(
+            "OrderAccepted",
+            ts_event=_ns(NOW - timedelta(milliseconds=1)),
+            client_order_id="coid-2",
+        )
+        earlier = _Event(
+            "OrderSubmitted",
+            ts_event=_ns(NOW - timedelta(milliseconds=2)),
+            client_order_id="coid-1",
+        )
         actor.on_event(later)
         actor.on_event(earlier)
         self.assertEqual(actor.spool.pending_count, 2)
@@ -160,12 +168,16 @@ class ProjectionActorTests(unittest.TestCase):
         actor = _actor(self._tmp_spool(), sink=sink)
         fill = _Event(
             "OrderFilled",
-            ts_event=20,
+            ts_event=_ns(NOW - timedelta(milliseconds=2)),
             client_order_id=CLIENT_ORDER_ID,
             venue_order_id="venue-42",
             trade_id="trade-7",
         )
-        cancel = _Event("OrderCanceled", ts_event=30, client_order_id=CLIENT_ORDER_ID)
+        cancel = _Event(
+            "OrderCanceled",
+            ts_event=_ns(NOW - timedelta(milliseconds=1)),
+            client_order_id=CLIENT_ORDER_ID,
+        )
 
         actor.on_event(cancel)
         actor.on_event(fill)
