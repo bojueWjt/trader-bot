@@ -7,6 +7,7 @@ from threading import Event
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
@@ -14,6 +15,10 @@ EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
 sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
+from execution_domain.http_client import (  # noqa: E402
+    ControlPlaneFenceConflictError,
+    ControlPlaneHttpError,
+)
 from runtime.control_plane_session import NodeControlPlaneSession  # noqa: E402
 from runtime.health import HealthService  # noqa: E402
 
@@ -106,7 +111,10 @@ def test_startup_heartbeat_http_failure_degrades_then_recovers() -> None:
     def heartbeat() -> None:
         if not recover.is_set():
             failed.set()
-            raise RuntimeError("heartbeat HTTP 503")
+            raise ControlPlaneHttpError(
+                "heartbeat HTTP 503",
+                status_code=503,
+            )
         succeeded.set()
 
     session = NodeControlPlaneSession(
@@ -147,6 +155,72 @@ def test_startup_heartbeat_http_failure_degrades_then_recovers() -> None:
     assert recovered.lanes["heartbeat"].failure is False
     assert recovered.lanes["heartbeat"].circuit_state == "closed"
     assert fatal_reasons == []
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+@pytest.mark.parametrize(
+    "lane_name",
+    (
+        "heartbeat",
+        "command_poll",
+        "command_apply",
+        "command_ack",
+        "intent_fetch",
+        "intent_deliver",
+        "execution_event_sink",
+    ),
+)
+def test_fence_conflict_marks_lane_fatal_and_terminates_once(
+    lane_name: str,
+) -> None:
+    fatal_reasons: list[str] = []
+    conflict = ControlPlaneFenceConflictError(
+        f"{lane_name} HTTP 409 lease owner conflict",
+        status_code=409,
+    )
+    options: dict[str, Any] = {
+        "operation_timeout_seconds": 1.0,
+        "retry_budget": 3,
+        "fatal_termination_hook": fatal_reasons.append,
+    }
+    if lane_name == "heartbeat":
+        options["heartbeat"] = lambda: _raise(conflict)
+    elif lane_name == "command_poll":
+        options["command_poll"] = lambda capacity: _raise(conflict)
+    elif lane_name == "command_apply":
+        options["command_poll"] = lambda capacity: ("command-1",)
+        options["command_apply"] = lambda command: _raise(conflict)
+    elif lane_name == "command_ack":
+        options["command_poll"] = lambda capacity: ("command-1",)
+        options["command_apply"] = lambda command: "ack-1"
+        options["command_ack"] = lambda acknowledgement: _raise(conflict)
+    elif lane_name == "intent_fetch":
+        options["intent_fetch"] = lambda capacity: _raise(conflict)
+    elif lane_name == "intent_deliver":
+        options["intent_fetch"] = lambda capacity: ("intent-1",)
+        options["intent_deliver"] = lambda intent: _raise(conflict)
+    else:
+        options["execution_event_sink"] = lambda event: _raise(conflict)
+
+    session = NodeControlPlaneSession(**options)
+    session.start()
+    if lane_name == "execution_event_sink":
+        assert _wait_until(lambda: session.snapshot().ready)
+        session.submit_execution_event("fill-1")
+
+    assert session.wait_for_termination(timeout=1.0) is True
+    fatal = session.snapshot()
+
+    expected_lane_name = lane_name
+    if lane_name == "command_apply":
+        expected_lane_name = "command_delivery"
+    elif lane_name == "intent_deliver":
+        expected_lane_name = "intent_delivery"
+    elif lane_name == "execution_event_sink":
+        expected_lane_name = "execution_event"
+    assert fatal.process_liveness is False
+    assert fatal.lanes[expected_lane_name].fatal_failure == str(conflict)
+    assert fatal_reasons == [str(conflict)]
     assert session.stop(time.monotonic() + 1.0) is True
 
 
@@ -315,6 +389,10 @@ def _record_poll(
     assert capacity > 0
     calls.append(name)
     return ()
+
+
+def _raise(exc: BaseException) -> Any:
+    raise exc
 
 
 def _wait_until(predicate: Any, timeout: float = 1.0) -> bool:

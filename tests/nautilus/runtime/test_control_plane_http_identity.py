@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import sys
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
@@ -17,6 +18,8 @@ import execution_domain.http_client as http_client_module  # noqa: E402
 from execution_domain.contracts import ReconciliationState  # noqa: E402
 from execution_domain.control_plane import Heartbeat, TradingState  # noqa: E402
 from execution_domain.http_client import (  # noqa: E402
+    ControlPlaneFenceConflictError,
+    ControlPlaneHttpError,
     ControlPlaneIdentityError,
     HttpControlPlaneClient,
 )
@@ -96,6 +99,49 @@ def test_commands_and_heartbeat_carry_account_identity(
     assert command_query["account_id"] == ["account-a"]
     assert heartbeat_body["account_id"] == "account-a"
     assert requests[1].get_header("X-account-id") == "account-a"
+
+
+def test_http_409_raises_typed_fence_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def urlopen(request, timeout):
+        del timeout
+        raise HTTPError(
+            request.full_url,
+            409,
+            "Conflict",
+            hdrs={},
+            fp=BytesIO(b'{"detail":"lease owner conflict"}'),
+        )
+
+    monkeypatch.setattr(http_client_module, "urlopen", urlopen)
+
+    with pytest.raises(ControlPlaneFenceConflictError) as captured:
+        _client().poll_commands("node-a", None)
+
+    assert captured.value.status_code == 409
+
+
+def test_http_503_preserves_status_as_recoverable_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def urlopen(request, timeout):
+        del timeout
+        raise HTTPError(
+            request.full_url,
+            503,
+            "Service Unavailable",
+            hdrs={},
+            fp=BytesIO(b'{"detail":"store unavailable"}'),
+        )
+
+    monkeypatch.setattr(http_client_module, "urlopen", urlopen)
+
+    with pytest.raises(ControlPlaneHttpError) as captured:
+        _client().poll_commands("node-a", None)
+
+    assert type(captured.value) is ControlPlaneHttpError
+    assert captured.value.status_code == 503
 
 
 def test_client_rejects_cross_account_request_before_network(

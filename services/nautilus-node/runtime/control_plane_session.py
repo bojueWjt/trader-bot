@@ -10,7 +10,6 @@ from threading import Event, Lock, Thread
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
 
-
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 2.0
 DEFAULT_COMMAND_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_INTENT_FETCH_INTERVAL_SECONDS = 1.0
@@ -916,6 +915,9 @@ class NodeControlPlaneSession:
                 action()
             except BaseException as exc:
                 detail, deadline_reported = lane.fail(exc)
+                if _is_fence_conflict(exc):
+                    self._trigger_fatal_termination(lane, detail)
+                    return False
                 if deadline_reported:
                     return False
                 attempt += 1
@@ -1242,6 +1244,13 @@ def _exception_detail(exc: BaseException) -> str:
     if detail:
         return detail
     return type(exc).__name__
+
+
+def _is_fence_conflict(exc: BaseException) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code != 409:
+        return False
+    return getattr(exc, "is_fence_conflict", False) is True
 
 
 def _monotonic_age_ms(

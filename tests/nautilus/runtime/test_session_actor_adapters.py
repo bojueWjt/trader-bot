@@ -697,8 +697,81 @@ def test_session_command_ack_failure_keeps_process_local_apply_result() -> None:
     second_ack = actor.session_apply_command(command)
     actor.on_stop()
 
-    assert second_ack is False
+    assert second_ack is first_ack
     assert len(lifecycle.apply_thread_ids) == 1
+
+
+def test_session_command_ack_queue_full_eventually_acks_without_reapply() -> None:
+    commands = tuple(
+        NodeCommand(
+            command_id=f"command-{index}",
+            type=CommandType.HALT,
+        )
+        for index in range(1, 4)
+    )
+    control_plane = _BackloggedBlockingAckControlPlane(commands)
+    lifecycle = _Lifecycle()
+    actor_holder: dict[str, CommandPollerActor] = {}
+    session = NodeControlPlaneSession(
+        command_poll=lambda capacity: actor_holder[
+            "actor"
+        ].session_poll_commands(capacity),
+        command_apply=lambda command: actor_holder[
+            "actor"
+        ].session_apply_command(command),
+        command_ack=lambda acknowledgement: actor_holder[
+            "actor"
+        ].session_ack_command(acknowledgement),
+        command_poll_interval_seconds=0.005,
+        command_delivery_capacity=3,
+        command_ack_capacity=1,
+        retry_budget=1,
+        circuit_reset_seconds=0.005,
+        operation_timeout_seconds=1.0,
+    )
+    actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        worker_shutdown_wait_seconds=1.0,
+    )
+    actor_holder["actor"] = actor
+    actor.on_start()
+
+    assert _pump_actor_until(
+        actor,
+        control_plane.first_ack_started.is_set,
+    )
+    assert _pump_actor_until(
+        actor,
+        lambda: (
+            len(lifecycle.apply_thread_ids) == len(commands)
+            and actor._command_states["command-3"].phase.value
+            == "ACK_QUEUED"
+        ),
+    )
+    pressured = session.snapshot()
+    assert pressured.process_liveness is True
+    assert pressured.lanes["command_ack"].fatal_failure is False
+
+    control_plane.release_first_ack.set()
+    assert _pump_actor_until(
+        actor,
+        lambda: control_plane.acked_command_ids == {
+            command.command_id for command in commands
+        },
+        timeout=2.0,
+    )
+
+    assert len(lifecycle.apply_thread_ids) == len(commands)
+    assert all(
+        state.phase.value == "ACKED"
+        for state in actor._command_states.values()
+    )
+    assert _failed_reasons(lifecycle) == {}
+    assert actor.on_stop() is True
 
 
 def test_session_poll_excludes_tracked_command_before_capacity_check() -> None:
@@ -728,6 +801,46 @@ def test_session_poll_excludes_tracked_command_before_capacity_check() -> None:
     assert polled == (new_command,)
     assert _failed_reasons(lifecycle) == {}
     actor.on_stop()
+
+
+def test_session_command_backlog_drains_in_capacity_bounded_batches() -> None:
+    commands = tuple(
+        NodeCommand(
+            command_id=f"command-{index}",
+            type=CommandType.HALT,
+        )
+        for index in range(1, 6)
+    )
+    control_plane = _MutableCommandControlPlane()
+    control_plane.commands = commands
+    lifecycle = _Lifecycle()
+    actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+    )
+
+    batches: list[tuple[str, ...]] = []
+    while True:
+        batch = actor.session_poll_commands(2)
+        if not batch:
+            break
+        batches.append(tuple(command.command_id for command in batch))
+        for command in batch:
+            acknowledgement = _apply_session_command(actor, command)
+            actor.session_ack_command(acknowledgement)
+
+    actor.on_stop()
+
+    assert batches == [
+        ("command-1", "command-2"),
+        ("command-3", "command-4"),
+        ("command-5",),
+    ]
+    assert len(lifecycle.apply_thread_ids) == len(commands)
+    assert _failed_reasons(lifecycle) == {}
 
 
 def test_session_command_apply_timeout_shares_in_flight_result_and_queues_ack_once() -> None:
@@ -781,7 +894,7 @@ def test_session_command_apply_timeout_shares_in_flight_result_and_queues_ack_on
     assert actor._command_states["command-1"].phase.value == (
         "ACK_QUEUED"
     )
-    assert actor.session_apply_command(command) is False
+    assert actor.session_apply_command(command) is acknowledgement
 
     actor.session_ack_command(acknowledgement)
 
@@ -1611,6 +1724,38 @@ class _MutableCommandControlPlane(_AckRecordingControlPlane):
     def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
         del node_id, after
         return self.commands
+
+
+class _BackloggedBlockingAckControlPlane:
+    def __init__(self, commands: tuple[Any, ...]) -> None:
+        self._commands = commands
+        self.first_ack_started = Event()
+        self.release_first_ack = Event()
+        self.acked_command_ids: set[str] = set()
+        self._ack_count = 0
+
+    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
+        del node_id, after
+        return tuple(
+            command
+            for command in self._commands
+            if command.command_id not in self.acked_command_ids
+        )
+
+    def ack_command(
+        self,
+        node_id: str,
+        command_id: str,
+        status: Any,
+        *,
+        error: Any,
+    ) -> None:
+        del node_id, status, error
+        self._ack_count += 1
+        if self._ack_count == 1:
+            self.first_ack_started.set()
+            self.release_first_ack.wait(timeout=2.0)
+        self.acked_command_ids.add(command_id)
 
 
 class _FailOnceAckControlPlane(_AckRecordingControlPlane):

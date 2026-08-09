@@ -23,11 +23,22 @@ from .control_plane import (
 
 
 class ControlPlaneHttpError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ControlPlaneIdentityError(ControlPlaneHttpError):
     pass
+
+
+class ControlPlaneFenceConflictError(ControlPlaneHttpError):
+    is_fence_conflict = True
 
 
 class HttpControlPlaneClient(ControlPlaneClient):
@@ -216,8 +227,15 @@ class HttpControlPlaneClient(ControlPlaneClient):
                 raw = response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise ControlPlaneHttpError(
+            message = (
                 f"{method} {path} failed with HTTP {exc.code}: {detail}"
+            )
+            error_type = ControlPlaneHttpError
+            if exc.code == 409:
+                error_type = ControlPlaneFenceConflictError
+            raise error_type(
+                message,
+                status_code=exc.code,
             ) from exc
         except URLError as exc:
             raise ControlPlaneHttpError(f"{method} {path} failed: {exc.reason}") from exc

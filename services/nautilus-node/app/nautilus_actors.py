@@ -1859,9 +1859,7 @@ class CommandPollerActor(Actor):
                 if command_id in self._command_states:
                     continue
             if len(commands) >= capacity:
-                reason = "operator command delivery capacity exceeded"
-                self._fail_command_stream(reason)
-                raise RuntimeError(reason)
+                break
             seen_command_ids.add(command_id)
             commands.append(command)
         self._last_command_success_at = time.monotonic()
@@ -1882,8 +1880,15 @@ class CommandPollerActor(Actor):
                 raise RuntimeError("command poller actor is stopped")
             state = self._command_states.get(command_id)
             if state is not None:
-                if state.phase is not _CommandPhase.APPLYING:
+                if state.phase is _CommandPhase.ACKED:
                     return False
+                if state.phase is _CommandPhase.ACK_QUEUED:
+                    acknowledgement = state.acknowledgement
+                    if acknowledgement is None:
+                        raise RuntimeError(
+                            "operator command ACK ledger is incomplete"
+                        )
+                    return acknowledgement
                 publication = state.publication
                 if publication is None:
                     return False
@@ -1943,8 +1948,15 @@ class CommandPollerActor(Actor):
             state = self._command_states.get(command_id)
             if state is None:
                 return False
-            if state.phase is not _CommandPhase.APPLYING:
+            if state.phase is _CommandPhase.ACKED:
                 return False
+            if state.phase is _CommandPhase.ACK_QUEUED:
+                queued_acknowledgement = state.acknowledgement
+                if queued_acknowledgement is None:
+                    raise RuntimeError(
+                        "operator command ACK ledger is incomplete"
+                    )
+                return queued_acknowledgement
             state.acknowledgement = acknowledgement
             state.phase = _CommandPhase.ACK_QUEUED
             return acknowledgement
