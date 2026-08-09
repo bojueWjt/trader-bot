@@ -144,6 +144,30 @@ def test_http_503_preserves_status_as_recoverable_http_error(
     assert captured.value.status_code == 503
 
 
+def test_non_fencing_http_409_remains_recoverable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def urlopen(request, timeout):
+        del timeout
+        raise HTTPError(
+            request.full_url,
+            409,
+            "Conflict",
+            hdrs={},
+            fp=BytesIO(
+                b'{"detail":"release version conflict"}'
+            ),
+        )
+
+    monkeypatch.setattr(http_client_module, "urlopen", urlopen)
+
+    with pytest.raises(ControlPlaneHttpError) as captured:
+        _client().poll_commands("node-a", None)
+
+    assert type(captured.value) is ControlPlaneHttpError
+    assert captured.value.status_code == 409
+
+
 def test_client_rejects_cross_account_request_before_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

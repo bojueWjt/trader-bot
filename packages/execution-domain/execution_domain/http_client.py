@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Optional, Sequence
@@ -39,6 +40,17 @@ class ControlPlaneIdentityError(ControlPlaneHttpError):
 
 class ControlPlaneFenceConflictError(ControlPlaneHttpError):
     is_fence_conflict = True
+
+
+_FENCE_CONFLICT_CODE_RE = re.compile(
+    (
+        r"(?:\bfenc(?:e|ed|ing)\b|\blease\b|"
+        r"\bstale[_ -]?writer\b|"
+        r"\b(?:writer|lease)[_ -]?owner\b|"
+        r"\bowner[_ -]?(?:conflict|mismatch)\b)"
+    ),
+    re.IGNORECASE,
+)
 
 
 class HttpControlPlaneClient(ControlPlaneClient):
@@ -231,7 +243,10 @@ class HttpControlPlaneClient(ControlPlaneClient):
                 f"{method} {path} failed with HTTP {exc.code}: {detail}"
             )
             error_type = ControlPlaneHttpError
-            if exc.code == 409:
+            if (
+                exc.code == 409
+                and _is_fence_conflict_response(detail)
+            ):
                 error_type = ControlPlaneFenceConflictError
             raise error_type(
                 message,
@@ -245,6 +260,36 @@ class HttpControlPlaneClient(ControlPlaneClient):
                 return {}
             raise ControlPlaneHttpError(f"{method} {path} returned an empty response")
         return json.loads(raw.decode("utf-8"))
+
+
+def _is_fence_conflict_response(raw_detail: str) -> bool:
+    candidates: list[str] = []
+    try:
+        payload = json.loads(raw_detail)
+    except json.JSONDecodeError:
+        payload = raw_detail
+    if isinstance(payload, dict):
+        for field_name in ("code", "error_code", "type", "detail"):
+            value = payload.get(field_name)
+            if isinstance(value, dict):
+                for nested_name in (
+                    "code",
+                    "type",
+                    "reason",
+                    "message",
+                ):
+                    nested_value = value.get(nested_name)
+                    if nested_value is not None:
+                        candidates.append(str(nested_value))
+                continue
+            if value is not None:
+                candidates.append(str(value))
+    else:
+        candidates.append(str(payload))
+    return any(
+        _FENCE_CONFLICT_CODE_RE.search(candidate)
+        for candidate in candidates
+    )
 
 
 def _heartbeat_dump(hb: Heartbeat) -> dict[str, Any]:
