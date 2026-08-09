@@ -326,6 +326,85 @@ def test_intent_delivery_timeout_cancels_late_publication() -> None:
     assert lifecycle.trading_state is TradingState.ACTIVE
 
 
+def test_started_intent_publication_timeout_shares_final_result() -> None:
+    client = _IntentClient()
+    lifecycle = _ActiveLifecycle()
+    actor = IntentPublisherActor(
+        client,
+        lifecycle=lifecycle,
+        control_plane_session=_LocalSession(),
+        publication_completion_timeout_seconds=0.02,
+    )
+    intent = SimpleNamespace(
+        account_id="account-a",
+        intent_id="intent-1",
+    )
+    publish_started = Event()
+    release_publish = Event()
+    publish_count = 0
+    order_effects: list[str] = []
+    errors: list[BaseException] = []
+
+    def publish(item: Any) -> None:
+        nonlocal publish_count
+        publish_count += 1
+        order_effects.append(str(item.intent_id))
+        publish_started.set()
+        release_publish.wait(timeout=1.0)
+
+    def deliver() -> None:
+        try:
+            client.deliver(intent)
+        except BaseException as exc:
+            errors.append(exc)
+
+    actor.publish = publish
+    actor.on_start()
+    first_delivery = Thread(target=deliver)
+    first_delivery.start()
+    assert _wait_until(lambda: actor.pending_intent_count == 1)
+
+    actor_callback = Thread(target=actor._on_poll_timer)
+    actor_callback.start()
+    assert publish_started.wait(timeout=1.0)
+    assert _wait_until(
+        lambda: "timed out" in actor.degraded_reason,
+    )
+    first_waiter_shared_result = first_delivery.is_alive()
+
+    second_delivery = Thread(target=deliver)
+    second_delivery.start()
+    time.sleep(0.03)
+    second_waiter_shared_result = second_delivery.is_alive()
+
+    release_publish.set()
+    actor_callback.join(timeout=1.0)
+    actor._on_poll_timer()
+    first_delivery.join(timeout=1.0)
+    second_delivery.join(timeout=1.0)
+
+    completed_retry = Thread(target=deliver)
+    completed_retry.start()
+    completed_retry.join(timeout=0.1)
+    completed_retry_shared_result = not completed_retry.is_alive()
+    pending_after_completed_retry = actor.pending_intent_count
+    actor.on_stop()
+
+    assert actor_callback.is_alive() is False
+    assert first_delivery.is_alive() is False
+    assert second_delivery.is_alive() is False
+    assert completed_retry.is_alive() is False
+    assert first_waiter_shared_result is True
+    assert second_waiter_shared_result is True
+    assert completed_retry_shared_result is True
+    assert pending_after_completed_retry == 0
+    assert errors == []
+    assert publish_count == 1
+    assert order_effects == ["intent-1"]
+    assert _failed_reasons(lifecycle) == {}
+    assert lifecycle.trading_state is TradingState.ACTIVE
+
+
 def test_intent_publication_error_degrades_without_halting() -> None:
     client = _IntentClient()
     lifecycle = _ActiveLifecycle()

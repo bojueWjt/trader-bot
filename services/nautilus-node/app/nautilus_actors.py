@@ -62,8 +62,11 @@ class _PendingCommandAck:
 @dataclass
 class _IntentPublication:
     intent: Any
+    key: str | bool = False
     completed: Event = field(default_factory=Event)
     cancelled: Event = field(default_factory=Event)
+    publish_started: Event = field(default_factory=Event)
+    claim_lock: Any = field(default_factory=RLock)
     error: Exception | None = None
 
 
@@ -115,6 +118,8 @@ class _QueueingIntentPublisher:
         self._failure_callback = failure_callback
         self._stopped = Event()
         self._admission_lock = RLock()
+        self._publications: dict[str, _IntentPublication] = {}
+        self._published_intent_keys: set[str] = set()
 
     def stop(self, deadline: float) -> bool:
         self._stopped.set()
@@ -129,46 +134,117 @@ class _QueueingIntentPublisher:
                     publication = self._pending.get_nowait()
                 except Empty:
                     return True
-                publication.cancelled.set()
-                publication.error = RuntimeError(
+                error = RuntimeError(
                     "intent publisher actor stopped before publication"
                 )
-                publication.completed.set()
+                self._cancel_before_publish(publication, error)
+                self.complete(publication)
                 self._pending.task_done()
         finally:
             self._admission_lock.release()
 
     def publish(self, intent: Any) -> None:
-        publication = _IntentPublication(intent=intent)
+        key = _intent_publication_key(intent)
         with self._admission_lock:
             if self._stopped.is_set():
                 raise RuntimeError("intent publisher actor is stopped")
-            try:
-                self._pending.put(
-                    publication,
-                    timeout=self._enqueue_timeout_seconds,
+            if key is not False and key in self._published_intent_keys:
+                return
+            publication = False
+            if key is not False:
+                publication = self._publications.get(key, False)
+            if publication is False:
+                publication = _IntentPublication(
+                    intent=intent,
+                    key=key,
                 )
-            except Full as exc:
-                reason = "intent publication backlog full"
-                self._failure_callback(reason)
-                raise RuntimeError(reason) from exc
+                if key is not False:
+                    self._publications[key] = publication
+                try:
+                    self._pending.put(
+                        publication,
+                        timeout=self._enqueue_timeout_seconds,
+                    )
+                except Full as exc:
+                    if key is not False:
+                        current = self._publications.get(key)
+                        if current is publication:
+                            self._publications.pop(key, None)
+                    reason = "intent publication backlog full"
+                    self._failure_callback(reason)
+                    raise RuntimeError(reason) from exc
 
         deadline = time.monotonic() + self._completion_timeout_seconds
+        timeout_reported = False
         while not publication.completed.wait(timeout=0.01):
             if self._stopped.is_set():
-                publication.cancelled.set()
-                raise RuntimeError(
+                error = RuntimeError(
                     "intent publisher actor stopped before publication"
                 )
-            if time.monotonic() >= deadline:
+                if self._cancel_before_publish(publication, error):
+                    self.complete(publication)
+                    raise error
+            if (
+                time.monotonic() >= deadline
+                and not timeout_reported
+            ):
                 reason = (
                     "intent publication timed out waiting for actor thread"
                 )
-                publication.cancelled.set()
                 self._failure_callback(reason)
-                raise RuntimeError(reason)
+                timeout_reported = True
+                error = RuntimeError(reason)
+                if self._cancel_before_publish(publication, error):
+                    self.complete(publication)
+                    raise error
         if publication.error is not None:
             raise publication.error
+
+    def complete(self, publication: _IntentPublication) -> None:
+        with self._admission_lock:
+            key = publication.key
+            if key is not False:
+                current = self._publications.get(key)
+                if current is publication:
+                    self._publications.pop(key, None)
+                if (
+                    publication.error is None
+                    and publication.publish_started.is_set()
+                    and not publication.cancelled.is_set()
+                ):
+                    self._published_intent_keys.add(key)
+            publication.completed.set()
+
+    @staticmethod
+    def _cancel_before_publish(
+        publication: _IntentPublication,
+        error: Exception,
+    ) -> bool:
+        with publication.claim_lock:
+            if publication.completed.is_set():
+                return False
+            if publication.publish_started.is_set():
+                return False
+            publication.cancelled.set()
+            if publication.error is None:
+                publication.error = error
+            return True
+
+
+def _intent_publication_key(intent: Any) -> str | bool:
+    if isinstance(intent, dict):
+        account_id = intent.get("account_id")
+        intent_id = intent.get("intent_id")
+    else:
+        account_id = getattr(intent, "account_id", None)
+        intent_id = getattr(intent, "intent_id", None)
+    if intent_id is None:
+        return False
+    normalized_intent_id = str(intent_id).strip()
+    if not normalized_intent_id:
+        return False
+    normalized_account_id = str(account_id or "").strip()
+    return f"{normalized_account_id}:{normalized_intent_id}"
 
 
 def _string_value(value: Any) -> str | None:
@@ -536,20 +612,27 @@ class IntentPublisherActor(Actor):
             except Empty:
                 return published
             inspected += 1
+            publish_succeeded = False
             try:
-                if publication.cancelled.is_set():
-                    continue
-                self.publish(publication.intent)
-                published += 1
-                self._record_poll_progress()
+                should_publish = False
+                with publication.claim_lock:
+                    if not publication.cancelled.is_set():
+                        publication.publish_started.set()
+                        should_publish = True
+                if should_publish:
+                    self.publish(publication.intent)
+                    published += 1
+                    publish_succeeded = True
             except Exception as exc:
                 publication.error = exc
                 self._record_degraded(
                     f"intent publication failed: {exc!r}"
                 )
             finally:
-                publication.completed.set()
+                self._queued_publisher.complete(publication)
                 self._pending_intents.task_done()
+            if publish_succeeded:
+                self._record_poll_progress()
         return published
 
     def _evaluate_poll_staleness(self) -> None:
