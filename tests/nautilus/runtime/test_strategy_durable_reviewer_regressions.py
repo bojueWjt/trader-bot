@@ -26,6 +26,7 @@ from execution_domain.contracts import (
 )
 from strategy.intent_execution_planner import (
     ManagementPlan,
+    OrderDenied,
     OrderPlan,
     encode_client_order_id,
 )
@@ -66,6 +67,12 @@ class _ProbeStrategy(IntentExecutionStrategy):
 
 class _SmallExternalQueueProbeStrategy(_ProbeStrategy):
     _DURABLE_IO_QUEUE_CAPACITY = 1
+    _EXTERNAL_REFRESH_QUEUE_CAPACITY = 1
+    _EXTERNAL_CANCEL_QUEUE_CAPACITY = 1
+
+
+class _ShortExternalTimeoutProbeStrategy(_ProbeStrategy):
+    _EXTERNAL_IO_TASK_TIMEOUT_SECONDS = 0.02
 
 
 class _ResubmitCrashProbeStrategy(_ProbeStrategy):
@@ -93,7 +100,7 @@ class _ResubmitCrashProbeStrategy(_ProbeStrategy):
         *,
         exchange_state_ready: bool = False,
         exchange_refresh_degraded: bool = False,
-        opening_resubmit_authorized: bool = False,
+        opening_resubmit_authorized: Any = False,
     ) -> None:
         del exchange_state_ready, exchange_refresh_degraded
         if not opening_resubmit_authorized:
@@ -115,6 +122,9 @@ class _ResubmitCrashProbeStrategy(_ProbeStrategy):
                     "plans": plans,
                     "source_intent": intent,
                     "preserve_resubmitting_receipt": True,
+                    "opening_resubmit_claim": (
+                        opening_resubmit_authorized
+                    ),
                 }
             )
             return
@@ -127,8 +137,27 @@ class _ResubmitCrashProbeStrategy(_ProbeStrategy):
                 "plan": plan,
                 "source_intent": intent,
                 "preserve_resubmitting_receipt": True,
+                "opening_resubmit_claim": (
+                    opening_resubmit_authorized
+                ),
             }
         )
+
+
+class _AmbiguousResubmitProbeStrategy(_ResubmitCrashProbeStrategy):
+    def _submit_order_plan(self, plan: OrderPlan) -> bool:
+        client_order_id = str(plan.client_order_id)
+        self.submit_counts[client_order_id] = (
+            self.submit_counts.get(client_order_id, 0) + 1
+        )
+        self.submitted.append(client_order_id)
+        self._record_denial(
+            OrderDenied(
+                "order_submit_failed",
+                "TimeoutError('ambiguous submit result')",
+            )
+        )
+        return False
 
 
 def test_entry_fsync_continuation_rechecks_live_halt_before_opening(
@@ -860,7 +889,7 @@ def test_authoritative_absence_requires_separate_durable_authority(
 
 
 @pytest.mark.parametrize("zone", [False, True])
-def test_resubmit_success_keeps_receipt_resubmitting_across_restart(
+def test_crash_after_submit_retries_same_deterministic_ids_after_absence(
     tmp_path: Path,
     zone: bool,
 ) -> None:
@@ -917,23 +946,34 @@ def test_resubmit_success_keeps_receipt_resubmitting_across_restart(
         tmp_path / "restart",
         zone=zone,
     )
-    restarted.set_intent_receipt_status_getter(
-        restarted_inbox.status
-    )
+    _wire_resubmit_receipt(restarted, restarted_inbox)
+    restarted._start_durable_io_lane()
+    try:
+        assert not restarted._opening_reconciliation_allows_execution(
+            intent,
+            receipt_status="RESUBMITTING",
+            reconciled=False,
+            resubmit_authorized=False,
+        )
+        _drain_until_idle(restarted)
 
-    assert not restarted._opening_reconciliation_allows_execution(
-        intent,
-        receipt_status="RESUBMITTING",
-        reconciled=False,
-        resubmit_authorized=False,
-    )
-    assert restarted.submit_counts == {}
-    assert JsonDurableIntentInbox(inbox_path).status(
-        intent_id
-    ) == "RESUBMITTING"
+        assert restarted.submit_counts == {
+            client_order_id: 1
+            for client_order_id in expected_ids
+        }
+        persisted = JsonDurableIntentInbox(inbox_path).pending()[0]
+        assert persisted.status == "RESUBMITTING"
+        assert persisted.resubmit_attempt_count == 2
+    finally:
+        restarted.durable_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+        restarted.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
 
 
-def test_crash_after_resubmitting_persist_before_authority_never_replays(
+def test_crash_before_submit_recovers_once_with_same_client_id(
     tmp_path: Path,
 ) -> None:
     intent_id = UUID("f5858585-5858-4585-8585-585858585858")
@@ -968,17 +1008,164 @@ def test_crash_after_resubmitting_persist_before_authority_never_replays(
     restarted = _ResubmitCrashProbeStrategy(
         tmp_path / "restart"
     )
-    restarted.set_intent_receipt_status_getter(
-        restarted_inbox.status
+    _wire_resubmit_receipt(restarted, restarted_inbox)
+    restarted._start_durable_io_lane()
+    expected_client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
     )
+    try:
+        assert not restarted._opening_reconciliation_allows_execution(
+            intent,
+            receipt_status="RESUBMITTING",
+            reconciled=False,
+            resubmit_authorized=False,
+        )
+        _drain_until_idle(restarted)
 
-    assert not restarted._opening_reconciliation_allows_execution(
-        intent,
-        receipt_status="RESUBMITTING",
-        reconciled=False,
-        resubmit_authorized=False,
+        assert restarted.submit_counts == {
+            expected_client_order_id: 1,
+        }
+        persisted = JsonDurableIntentInbox(inbox_path).pending()[0]
+        assert persisted.resubmit_attempt_count == 2
+    finally:
+        restarted.durable_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+        restarted.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_terminal_receipt_race_revokes_claim_before_submit(
+    tmp_path: Path,
+) -> None:
+    intent_id = UUID("f5959595-5959-4595-8595-595959595959")
+    intent = _durable_replayed_opening_intent(intent_id)
+    inbox_path = tmp_path / "intent-inbox.json"
+    inbox = _seed_dispatched_receipt(inbox_path, intent)
+    strategy = _ResubmitCrashProbeStrategy(tmp_path)
+    _wire_resubmit_receipt(strategy, inbox)
+    strategy._start_durable_io_lane()
+    try:
+        assert not strategy._opening_reconciliation_allows_execution(
+            intent,
+            receipt_status="DISPATCHED",
+            reconciled=False,
+            resubmit_authorized=False,
+        )
+        assert strategy.durable_io_cleanup_worker().wait_empty(
+            timeout_seconds=1.0
+        )
+
+        inbox.complete(intent_id, "CONFIRMED", "accepted")
+        strategy.drain_durable_io_mailbox()
+
+        assert strategy.submit_counts == {}
+        assert inbox.status(intent_id) is False
+    finally:
+        strategy.durable_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_ambiguous_resubmit_returns_to_evidence_with_same_client_id(
+    tmp_path: Path,
+) -> None:
+    intent_id = UUID("f5a5a5a5-5a5a-45a5-85a5-a5a5a5a5a5a5")
+    intent = _durable_replayed_opening_intent(intent_id)
+    inbox_path = tmp_path / "intent-inbox.json"
+    inbox = _seed_dispatched_receipt(inbox_path, intent)
+    strategy = _AmbiguousResubmitProbeStrategy(tmp_path)
+    _wire_resubmit_receipt(strategy, inbox)
+    strategy._start_durable_io_lane()
+    client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
     )
-    assert restarted.submit_counts == {}
+    try:
+        assert not strategy._opening_reconciliation_allows_execution(
+            intent,
+            receipt_status="DISPATCHED",
+            reconciled=False,
+            resubmit_authorized=False,
+        )
+        _drain_until_idle(strategy)
+
+        assert strategy.submit_counts == {client_order_id: 1}
+        assert str(intent_id) in (
+            strategy._pending_opening_reconciliations
+        )
+
+        assert not strategy._opening_reconciliation_allows_execution(
+            intent,
+            receipt_status="RESUBMITTING",
+            reconciled=False,
+            resubmit_authorized=False,
+        )
+        _drain_until_idle(strategy)
+
+        assert strategy.submit_counts == {client_order_id: 2}
+        assert set(strategy.submit_counts) == {client_order_id}
+        assert str(intent_id) in (
+            strategy._pending_opening_reconciliations
+        )
+    finally:
+        strategy.durable_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
+def test_resubmit_attempt_budget_exhaustion_is_durable_hard_failure(
+    tmp_path: Path,
+) -> None:
+    intent_id = UUID("f5b5b5b5-5b5b-45b5-85b5-b5b5b5b5b5b5")
+    intent = _durable_replayed_opening_intent(intent_id)
+    inbox = _seed_dispatched_receipt(
+        tmp_path / "intent-inbox.json",
+        intent,
+    )
+    inbox._RESUBMIT_MAX_ATTEMPTS = 1
+    strategy = _ResubmitCrashProbeStrategy(tmp_path)
+    _wire_resubmit_receipt(strategy, inbox)
+    strategy._start_durable_io_lane()
+    try:
+        assert not strategy._opening_reconciliation_allows_execution(
+            intent,
+            receipt_status="DISPATCHED",
+            reconciled=False,
+            resubmit_authorized=False,
+        )
+        _drain_until_idle(strategy)
+        assert strategy.submit_counts
+
+        assert not strategy._opening_reconciliation_allows_execution(
+            intent,
+            receipt_status="RESUBMITTING",
+            reconciled=False,
+            resubmit_authorized=False,
+        )
+        assert strategy.durable_io_cleanup_worker().wait_empty(
+            timeout_seconds=1.0
+        )
+        strategy.drain_durable_io_mailbox()
+
+        assert "attempt budget exceeded" in (
+            strategy.durable_io_halted_reason
+        )
+    finally:
+        strategy.durable_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
 
 
 def test_dispatched_opening_unknown_evidence_remains_pending(
@@ -1161,6 +1348,49 @@ def test_unknown_evidence_retry_is_deduplicated_and_backoff_advances(
         initial_attempt
     )
     assert strategy.durable_io_halted_reason == ""
+
+
+def test_opening_recovery_accepts_5000_intents_then_overflow_halts(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+
+    for index in range(5000):
+        intent = _replayed_opening_intent(UUID(int=index + 1))
+        strategy._defer_opening_reconciliation(intent)
+
+    assert len(strategy._pending_opening_reconciliations) == 5000
+    assert strategy.durable_io_halted_reason == ""
+
+    overflow = _replayed_opening_intent(UUID(int=5001))
+    strategy._defer_opening_reconciliation(overflow)
+
+    assert len(strategy._pending_opening_reconciliations) == 5000
+    assert "capacity exceeded" in strategy.durable_io_halted_reason
+
+
+def test_opening_recovery_age_budget_exhaustion_halts(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent = _replayed_opening_intent(
+        UUID("f6a6a6a6-6a6a-46a6-86a6-a6a6a6a6a6a6")
+    )
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    strategy._now = lambda: now  # type: ignore[method-assign]
+    strategy._defer_opening_reconciliation(intent)
+
+    now += timedelta(
+        seconds=(
+            strategy._OPENING_RECONCILIATION_MAX_AGE_SECONDS
+            + 1
+        )
+    )
+    strategy._retry_pending_opening_reconciliations()
+
+    assert "age budget exceeded" in (
+        strategy.durable_io_halted_reason
+    )
 
 
 def test_stop_cancels_opening_reconcile_without_hard_callback(
@@ -1362,6 +1592,142 @@ def test_exchange_cancel_continuation_runs_on_worker_lane(
         strategy.durable_io_cleanup_worker().stop(timeout_seconds=1.0)
 
 
+def test_refresh_backlog_does_not_delay_cancel_lane(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    refresh_started = Event()
+    refresh_release = Event()
+    cancel_called = Event()
+
+    class Adapter:
+        def cancel(self, _operation: str, _request: Any) -> Any:
+            cancel_called.set()
+            return SimpleNamespace(terminal_status="CANCELED")
+
+    class Mirror:
+        def refresh(self) -> None:
+            refresh_started.set()
+            refresh_release.wait(timeout=5.0)
+
+        def find_order(
+            self,
+            _instrument_id: str,
+            _client_order_id: str,
+        ) -> Any:
+            return SimpleNamespace(
+                account_id="account-a",
+                symbol="BTCUSDT",
+                position_side="LONG",
+                order_kind="regular",
+                venue_order_id="123",
+            )
+
+    strategy.set_exchange_cancel_adapter(Adapter(), Mirror())
+    strategy._start_durable_io_lane()
+    try:
+        assert strategy._queue_exchange_refresh()
+        assert refresh_started.wait(timeout=1.0)
+        assert strategy._queue_exchange_cancel(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            cancel_order_ids=("urgent-cancel",),
+        )
+
+        assert cancel_called.wait(timeout=0.2)
+        assert refresh_release.is_set() is False
+    finally:
+        refresh_release.set()
+        strategy.on_stop()
+
+    assert (
+        strategy.external_refresh_cleanup_worker().snapshot().running
+        is False
+    )
+    assert (
+        strategy.external_cancel_cleanup_worker().snapshot().running
+        is False
+    )
+
+
+def test_refresh_and_cancel_worker_timeouts_are_soft_degraded(
+    tmp_path: Path,
+) -> None:
+    strategy = _ShortExternalTimeoutProbeStrategy(tmp_path)
+    refresh_started = Event()
+    refresh_release = Event()
+    cancel_started = Event()
+    cancel_release = Event()
+    opening_plan = _order_plan(
+        UUID("a9a9a9a9-a9a9-49a9-89a9-a9a9a9a9a9a9"),
+        "entry-after-external-timeouts",
+    )
+
+    class Adapter:
+        def cancel(self, _operation: str, _request: Any) -> Any:
+            cancel_started.set()
+            cancel_release.wait(timeout=5.0)
+            return SimpleNamespace(terminal_status="CANCELED")
+
+    class Mirror:
+        def refresh(self) -> None:
+            refresh_started.set()
+            refresh_release.wait(timeout=5.0)
+
+        def find_order(
+            self,
+            _instrument_id: str,
+            _client_order_id: str,
+        ) -> Any:
+            return SimpleNamespace(
+                account_id="account-a",
+                symbol="BTCUSDT",
+                position_side="LONG",
+                order_kind="regular",
+                venue_order_id="123",
+            )
+
+    strategy.set_exchange_cancel_adapter(Adapter(), Mirror())
+    strategy._start_durable_io_lane()
+    try:
+        assert strategy._queue_exchange_refresh()
+        assert strategy._queue_exchange_cancel(
+            instrument_id=opening_plan.instrument_id,
+            cancel_order_ids=("old-order",),
+        )
+        assert refresh_started.wait(timeout=1.0)
+        assert cancel_started.wait(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            strategy.drain_durable_io_mailbox()
+            refresh_error = (
+                strategy.external_refresh_cleanup_worker()
+                .snapshot()
+                .last_error
+            )
+            cancel_error = (
+                strategy.external_cancel_cleanup_worker()
+                .snapshot()
+                .last_error
+            )
+            if (
+                "task timeout" in refresh_error
+                and "task timeout" in cancel_error
+            ):
+                break
+            time.sleep(0.001)
+
+        denial_reasons = {
+            denial.reason for denial in strategy.denials
+        }
+        assert "strategy_external_io_degraded" in denial_reasons
+        assert strategy.durable_io_halted_reason == ""
+        assert strategy._opening_side_effect_allowed(opening_plan)
+    finally:
+        refresh_release.set()
+        cancel_release.set()
+        strategy.on_stop()
+
+
 def test_recoverable_external_errors_keep_active_opening_admission(
     tmp_path: Path,
 ) -> None:
@@ -1425,6 +1791,10 @@ def test_external_queue_backpressure_is_soft_degraded(
     second_started = Event()
     second_release = Event()
     refresh_calls = 0
+    intent = _replayed_opening_intent(
+        UUID("a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0")
+    )
+    admitted: list[tuple[Any, dict[str, Any]]] = []
 
     class Mirror:
         def refresh(self) -> None:
@@ -1438,17 +1808,36 @@ def test_external_queue_backpressure_is_soft_degraded(
             second_release.wait(timeout=5.0)
 
     strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_status_getter(
+        lambda _intent_id: "PREPARED"
+    )
+    strategy._handle_intent = (  # type: ignore[method-assign]
+        lambda opening, **kwargs: admitted.append(
+            (opening, kwargs)
+        )
+    )
     strategy._start_durable_io_lane()
     try:
         assert strategy._queue_exchange_refresh()
         assert first_started.wait(timeout=1.0)
         assert strategy._queue_exchange_refresh()
-        assert strategy._queue_exchange_refresh() is False
+        assert strategy._queue_exchange_refresh(
+            failure_continuation={
+                "kind": "intent_exchange_refresh_failed",
+                "intent": intent,
+            }
+        ) is False
         strategy.drain_durable_io_mailbox()
 
         denial_reasons = {denial.reason for denial in strategy.denials}
         assert "strategy_external_io_backpressure" in denial_reasons
         assert strategy.durable_io_halted_reason == ""
+        assert admitted == [
+            (
+                intent,
+                {"exchange_refresh_degraded": True},
+            )
+        ]
 
         first_release.set()
         assert second_started.wait(timeout=1.0)

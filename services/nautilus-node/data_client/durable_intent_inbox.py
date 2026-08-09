@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from threading import RLock
-from typing import Any
-from uuid import UUID
+from threading import Lock, RLock
+from typing import Any, Callable
+from uuid import UUID, uuid4
 
 from data_client.atomic_json import write_json_atomic
 from execution_domain.contracts import ApprovedTradeIntentV1
@@ -17,12 +18,29 @@ class DurableIntentReceipt:
     intent: ApprovedTradeIntentV1
     status: str
     detail: str
+    resubmit_attempt_count: int = 0
+    resubmit_started_at: str | bool = False
+
+
+@dataclass(frozen=True)
+class DurableIntentResubmitClaim:
+    intent_id: str
+    token: str
+    attempt_count: int
+    _consume: Callable[[str, str], bool]
+
+    def consume(self, intent_id: UUID | str) -> bool:
+        if str(intent_id) != self.intent_id:
+            return False
+        return bool(self._consume(self.intent_id, self.token))
 
 
 class JsonDurableIntentInbox:
     """Restart-persistent receipt store for accepted intent delivery."""
 
-    _SCHEMA_VERSION = 3
+    _SCHEMA_VERSION = 4
+    _RESUBMIT_MAX_ATTEMPTS = 3
+    _RESUBMIT_MAX_AGE_SECONDS = 15 * 60
     _INTERMEDIATE_STATUSES = frozenset({
         "RECEIVED",
         "PREPARED",
@@ -45,9 +63,19 @@ class JsonDurableIntentInbox:
         "RESUBMITTING": 4,
     }
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
         self._path = Path(path)
         self._lock = RLock()
+        self._claim_lock = Lock()
+        self._resubmit_claim_tokens: dict[str, str] = {}
+        self._now = now or (
+            lambda: datetime.now(timezone.utc)
+        )
         self._records = self._load_records()
 
     @property
@@ -74,6 +102,8 @@ class JsonDurableIntentInbox:
                 "intent": intent.model_dump(mode="json"),
                 "status": "RECEIVED",
                 "detail": "",
+                "resubmit_attempt_count": 0,
+                "resubmit_started_at": False,
             }
             self._write_records(records)
             self._records = records
@@ -85,7 +115,7 @@ class JsonDurableIntentInbox:
         expected_status: str,
         status: str,
         detail: str,
-    ) -> bool:
+    ) -> DurableIntentResubmitClaim | bool:
         with self._lock:
             key = str(intent_id)
             record = self._records.get(key)
@@ -104,9 +134,57 @@ class JsonDurableIntentInbox:
             updated = dict(record)
             updated["status"] = normalized_status
             updated["detail"] = str(detail)
+            attempt_count = int(
+                updated.get("resubmit_attempt_count", 0)
+            )
+            started_at: str | bool = updated.get(
+                "resubmit_started_at",
+                False,
+            )
+            claim_token = ""
+            if normalized_status == "RESUBMITTING":
+                now = self._aware_now()
+                if attempt_count >= self._RESUBMIT_MAX_ATTEMPTS:
+                    raise RuntimeError(
+                        "durable opening resubmit attempt budget "
+                        f"exceeded: {key}"
+                    )
+                if started_at is not False:
+                    started = self._parse_aware_datetime(
+                        started_at
+                    )
+                    age_seconds = (
+                        now - started
+                    ).total_seconds()
+                    if age_seconds > (
+                        self._RESUBMIT_MAX_AGE_SECONDS
+                    ):
+                        raise RuntimeError(
+                            "durable opening resubmit age budget "
+                            f"exceeded: {key}"
+                        )
+                else:
+                    started_at = now.isoformat()
+                attempt_count += 1
+                updated[
+                    "resubmit_attempt_count"
+                ] = attempt_count
+                updated["resubmit_started_at"] = started_at
+                claim_token = uuid4().hex
             records[key] = updated
             self._write_records(records)
             self._records = records
+            if claim_token:
+                with self._claim_lock:
+                    self._resubmit_claim_tokens[
+                        key
+                    ] = claim_token
+                return DurableIntentResubmitClaim(
+                    intent_id=key,
+                    token=claim_token,
+                    attempt_count=attempt_count,
+                    _consume=self._consume_resubmit_claim,
+                )
             return True
 
     def complete(
@@ -123,6 +201,11 @@ class JsonDurableIntentInbox:
             normalized_detail = str(detail)
             records = dict(self._records)
             if normalized_status in self._TERMINAL_STATUSES:
+                with self._claim_lock:
+                    self._resubmit_claim_tokens.pop(
+                        key,
+                        None,
+                    )
                 records.pop(key, None)
             else:
                 if normalized_status not in self._INTERMEDIATE_STATUSES:
@@ -163,11 +246,11 @@ class JsonDurableIntentInbox:
         self,
         intent_id: UUID | str,
     ) -> str | bool:
-        with self._lock:
-            record = self._records.get(str(intent_id))
-            if record is None:
-                return False
-            return self._validated_status(record["status"])
+        records = self._records
+        record = records.get(str(intent_id))
+        if record is None:
+            return False
+        return self._validated_status(record["status"])
 
     def pending(self) -> tuple[DurableIntentReceipt, ...]:
         with self._lock:
@@ -186,7 +269,12 @@ class JsonDurableIntentInbox:
         if not isinstance(raw, dict):
             raise TypeError("durable intent inbox must be an object")
         schema_version = raw.get("schema_version")
-        if schema_version not in {1, 2, self._SCHEMA_VERSION}:
+        if schema_version not in {
+            1,
+            2,
+            3,
+            self._SCHEMA_VERSION,
+        }:
             raise ValueError(
                 "durable intent inbox schema version mismatch"
             )
@@ -212,6 +300,24 @@ class JsonDurableIntentInbox:
                 raise ValueError(
                     "durable intent inbox intent id mismatch"
                 )
+            attempt_count = int(
+                record.get("resubmit_attempt_count", 0)
+            )
+            if attempt_count < 0:
+                raise ValueError(
+                    "durable intent inbox resubmit attempt count "
+                    "must be non-negative"
+                )
+            started_at = record.get(
+                "resubmit_started_at",
+                False,
+            )
+            if started_at is not False:
+                started_at = (
+                    self._parse_aware_datetime(
+                        started_at
+                    ).isoformat()
+                )
             validated[str(key)] = {
                 "cursor": cursor,
                 "intent": intent.model_dump(mode="json"),
@@ -219,6 +325,8 @@ class JsonDurableIntentInbox:
                     record.get("status", "RECEIVED")
                 ),
                 "detail": str(record.get("detail", "")),
+                "resubmit_attempt_count": attempt_count,
+                "resubmit_started_at": started_at,
             }
         return validated
 
@@ -233,7 +341,45 @@ class JsonDurableIntentInbox:
             ),
             status=self._validated_status(record["status"]),
             detail=str(record.get("detail", "")),
+            resubmit_attempt_count=int(
+                record.get("resubmit_attempt_count", 0)
+            ),
+            resubmit_started_at=record.get(
+                "resubmit_started_at",
+                False,
+            ),
         )
+
+    def _consume_resubmit_claim(
+        self,
+        intent_id: str,
+        token: str,
+    ) -> bool:
+        with self._claim_lock:
+            current = self._resubmit_claim_tokens.get(intent_id)
+            if current != token:
+                return False
+            self._resubmit_claim_tokens.pop(intent_id, None)
+            records = self._records
+            record = records.get(intent_id)
+            if record is None:
+                return False
+            return (
+                self._validated_status(record["status"])
+                == "RESUBMITTING"
+            )
+
+    def _aware_now(self) -> datetime:
+        value = self._now()
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def _parse_aware_datetime(self, value: Any) -> datetime:
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _validated_status(self, status: Any) -> str:
         normalized = str(status).strip().upper()

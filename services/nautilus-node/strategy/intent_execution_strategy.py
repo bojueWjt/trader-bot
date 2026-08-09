@@ -83,6 +83,7 @@ class _IntentReceiptTransitionTask:
 class _IntentReceiptTransitionResult:
     task: _IntentReceiptTransitionTask
     transitioned: bool
+    claim: Any = False
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,82 @@ class _ExchangeRefreshResult:
 @dataclass(frozen=True)
 class _ExternalIoDegradedResult:
     denial: OrderDenied
+
+
+@dataclass(frozen=True)
+class _OpeningReconciliationBudget:
+    attempts: int
+    started_at: datetime
+
+
+@dataclass(frozen=True)
+class _ExternalIoCleanupSnapshot:
+    name: str
+    running: bool
+    in_flight: bool
+    queue_depth: int
+    queue_capacity: int
+    last_error: str
+
+
+class _ExternalIoCleanupGroup:
+    def __init__(
+        self,
+        refresh_worker: BoundedTaskWorker[Any],
+        cancel_worker: BoundedTaskWorker[Any],
+    ) -> None:
+        self._refresh_worker = refresh_worker
+        self._cancel_worker = cancel_worker
+
+    def submit(self, task: Any) -> bool:
+        if isinstance(task, _ExchangeCancelTask):
+            return self._cancel_worker.submit(task)
+        return self._refresh_worker.submit(task)
+
+    def wait_empty(self, *, timeout_seconds: float) -> bool:
+        started_at = time.monotonic()
+        refresh_empty = self._refresh_worker.wait_empty(
+            timeout_seconds=timeout_seconds
+        )
+        elapsed = time.monotonic() - started_at
+        remaining = max(0.0, timeout_seconds - elapsed)
+        cancel_empty = self._cancel_worker.wait_empty(
+            timeout_seconds=remaining
+        )
+        return refresh_empty and cancel_empty
+
+    def stop(self, *, timeout_seconds: float = 5.0) -> bool:
+        refresh_stopped = self._refresh_worker.stop(
+            timeout_seconds=timeout_seconds
+        )
+        cancel_stopped = self._cancel_worker.stop(
+            timeout_seconds=timeout_seconds
+        )
+        return refresh_stopped and cancel_stopped
+
+    def snapshot(self) -> _ExternalIoCleanupSnapshot:
+        refresh = self._refresh_worker.snapshot()
+        cancel = self._cancel_worker.snapshot()
+        errors = tuple(
+            error
+            for error in (
+                refresh.last_error,
+                cancel.last_error,
+            )
+            if error
+        )
+        return _ExternalIoCleanupSnapshot(
+            name="strategy.exchange-io",
+            running=refresh.running or cancel.running,
+            in_flight=refresh.in_flight or cancel.in_flight,
+            queue_depth=(
+                refresh.queue_depth + cancel.queue_depth
+            ),
+            queue_capacity=(
+                refresh.queue_capacity + cancel.queue_capacity
+            ),
+            last_error="; ".join(errors),
+        )
 
 
 try:  # pragma: no cover - Nautilus is unavailable on local Py3.14 dev hosts.
@@ -164,7 +241,13 @@ class IntentExecutionStrategy(Strategy):
     _DURABLE_IO_QUEUE_CAPACITY = 128
     _DURABLE_IO_TASK_TIMEOUT_SECONDS = 1.0
     _DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS = 2.0
+    _EXTERNAL_IO_TASK_TIMEOUT_SECONDS = 1.0
+    _EXTERNAL_REFRESH_QUEUE_CAPACITY = 128
+    _EXTERNAL_CANCEL_QUEUE_CAPACITY = 128
     _DENIAL_HISTORY_LIMIT = 1024
+    _OPENING_RECONCILIATION_CAPACITY = 5000
+    _OPENING_RECONCILIATION_MAX_ATTEMPTS = 32
+    _OPENING_RECONCILIATION_MAX_AGE_SECONDS = 15 * 60
     _OPENING_RECONCILIATION_DENIAL_LIMIT = 256
     _OPENING_EVIDENCE_TARGET_LIMIT = 256
     _LATEST_WINS_PROTECTION_CONTINUATIONS = frozenset(
@@ -203,6 +286,10 @@ class IntentExecutionStrategy(Strategy):
             str,
             bool,
         ] = {}
+        self._opening_reconciliation_budgets: dict[
+            str,
+            _OpeningReconciliationBudget,
+        ] = {}
         self._opening_reconciliation_attempt = 0
         self._opening_reconciliation_retry_scheduled = False
         self._strategy_stopping = False
@@ -218,7 +305,7 @@ class IntentExecutionStrategy(Strategy):
             Callable[[Any, str, str], bool]
         ] = None
         self._intent_receipt_transition_handler: Optional[
-            Callable[[Any, str, str, str], bool]
+            Callable[[Any, str, str, str], Any]
         ] = None
         self._intent_receipt_status_getter: Optional[
             Callable[[Any], Any]
@@ -243,7 +330,9 @@ class IntentExecutionStrategy(Strategy):
         )
         self._external_cancel_result_mailbox: Queue[
             _ExchangeCancelResult
-        ] = Queue(maxsize=self._DURABLE_IO_QUEUE_CAPACITY)
+        ] = Queue(
+            maxsize=self._EXTERNAL_CANCEL_QUEUE_CAPACITY
+        )
         self._external_result_lock = Lock()
         self._external_refresh_results: dict[
             str,
@@ -268,13 +357,33 @@ class IntentExecutionStrategy(Strategy):
             on_error=self._request_durable_io_halt,
             on_timeout=self._request_durable_io_halt,
         )
-        self._external_io_worker = BoundedTaskWorker(
-            f"{worker_name}.exchange-io",
-            self._process_external_io_task,
-            capacity=self._DURABLE_IO_QUEUE_CAPACITY,
-            task_timeout_seconds=False,
+        self._external_refresh_worker = BoundedTaskWorker(
+            f"{worker_name}.exchange-refresh-io",
+            self._process_external_refresh_task,
+            capacity=self._EXTERNAL_REFRESH_QUEUE_CAPACITY,
+            task_timeout_seconds=(
+                self._EXTERNAL_IO_TASK_TIMEOUT_SECONDS
+            ),
             on_overflow=self._classify_external_io_worker_issue,
             on_error=self._classify_external_io_worker_issue,
+            on_timeout=self._classify_external_io_worker_issue,
+        )
+        self._external_cancel_worker = BoundedTaskWorker(
+            f"{worker_name}.exchange-cancel-io",
+            self._process_external_cancel_task,
+            capacity=self._EXTERNAL_CANCEL_QUEUE_CAPACITY,
+            task_timeout_seconds=(
+                self._EXTERNAL_IO_TASK_TIMEOUT_SECONDS
+            ),
+            on_overflow=self._classify_external_io_worker_issue,
+            on_error=self._classify_external_io_worker_issue,
+            on_timeout=self._classify_external_io_worker_issue,
+        )
+        self._external_io_cleanup_group = (
+            _ExternalIoCleanupGroup(
+                self._external_refresh_worker,
+                self._external_cancel_worker,
+            )
         )
 
     def set_trading_state_getter(self, getter: Optional[Callable[[], Any]]) -> None:
@@ -297,7 +406,7 @@ class IntentExecutionStrategy(Strategy):
     def set_intent_receipt_transition_handler(
         self,
         handler: Optional[
-            Callable[[Any, str, str, str], bool]
+            Callable[[Any, str, str, str], Any]
         ],
     ) -> None:
         self._intent_receipt_transition_handler = handler
@@ -315,8 +424,18 @@ class IntentExecutionStrategy(Strategy):
 
     def external_io_cleanup_worker(
         self,
+    ) -> _ExternalIoCleanupGroup:
+        return self._external_io_cleanup_group
+
+    def external_refresh_cleanup_worker(
+        self,
     ) -> BoundedTaskWorker[Any]:
-        return self._external_io_worker
+        return self._external_refresh_worker
+
+    def external_cancel_cleanup_worker(
+        self,
+    ) -> BoundedTaskWorker[Any]:
+        return self._external_cancel_worker
 
     def set_denial_reporter(self, reporter: Optional[Callable[[Any, OrderDenied], None]]) -> None:
         """Inject best-effort denial reporting without making StrategyConfig carry
@@ -373,7 +492,8 @@ class IntentExecutionStrategy(Strategy):
         }
         self._durable_io_active = True
         self._durable_io_worker.start()
-        self._external_io_worker.start()
+        self._external_refresh_worker.start()
+        self._external_cancel_worker.start()
 
     def _register_durable_io_mailbox_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -438,6 +558,7 @@ class IntentExecutionStrategy(Strategy):
             },
             failure_continuation={
                 "kind": "pending_opening_refresh_failed",
+                "opening_intent_ids": target_intent_ids,
             },
         )
 
@@ -729,18 +850,17 @@ class IntentExecutionStrategy(Strategy):
                 raise RuntimeError(
                     "intent receipt transition handler is unavailable"
                 )
-            transitioned = bool(
-                handler(
-                    task.intent_id,
-                    task.expected_status,
-                    task.status,
-                    task.detail,
-                )
+            claim = handler(
+                task.intent_id,
+                task.expected_status,
+                task.status,
+                task.detail,
             )
             self._queue_durable_io_result(
                 _IntentReceiptTransitionResult(
                     task=task,
-                    transitioned=transitioned,
+                    transitioned=claim is not False,
+                    claim=claim,
                 )
             )
             return
@@ -860,15 +980,24 @@ class IntentExecutionStrategy(Strategy):
                     key
                 ] = copy.deepcopy(entry)
 
-    def _process_external_io_task(
+    def _process_external_refresh_task(
         self,
         task: Any,
     ) -> None:
-        if isinstance(task, _ExchangeRefreshTask):
-            self._process_exchange_refresh_task(task)
-            return
+        if not isinstance(task, _ExchangeRefreshTask):
+            raise TypeError(
+                "unsupported strategy exchange refresh task"
+            )
+        self._process_exchange_refresh_task(task)
+
+    def _process_external_cancel_task(
+        self,
+        task: Any,
+    ) -> None:
         if not isinstance(task, _ExchangeCancelTask):
-            raise TypeError("unsupported strategy external I/O task")
+            raise TypeError(
+                "unsupported strategy exchange cancel task"
+            )
         denial: Any = False
         for client_order_id in task.cancel_order_ids:
             succeeded, failure = self._perform_exchange_cancel(
@@ -952,7 +1081,7 @@ class IntentExecutionStrategy(Strategy):
                 can_store = (
                     result_key in self._external_refresh_results
                     or len(self._external_refresh_results)
-                    < self._DURABLE_IO_QUEUE_CAPACITY
+                    < self._EXTERNAL_REFRESH_QUEUE_CAPACITY
                 )
                 if can_store:
                     self._external_refresh_results[result_key] = result
@@ -1143,14 +1272,25 @@ class IntentExecutionStrategy(Strategy):
             )
             self._defer_opening_reconciliation(
                 task.intent,
-                allow_resubmit=receipt_status == "DISPATCHED",
+                allow_resubmit=receipt_status in {
+                    "DISPATCHED",
+                    "RESUBMITTING",
+                },
             )
             return
-        self._clear_opening_reconciliation(task.intent)
+        if not self._valid_opening_resubmit_claim(
+            task.intent,
+            result.claim,
+        ):
+            self._halt_durable_io(
+                "intent receipt transition returned no matching "
+                "resubmit claim"
+            )
+            return
         self._handle_intent(
             task.intent,
             exchange_state_ready=True,
-            opening_resubmit_authorized=True,
+            opening_resubmit_authorized=result.claim,
         )
 
     def _on_external_io_result(
@@ -1226,6 +1366,13 @@ class IntentExecutionStrategy(Strategy):
             self._opening_resubmit_transition_pending_ids.discard(
                 result.task.intent_id
             )
+            claim = result.claim
+            consume = getattr(claim, "consume", None)
+            if callable(consume):
+                try:
+                    consume(result.task.intent_id)
+                except Exception:
+                    pass
 
     def _on_exchange_cancel_result(
         self,
@@ -1298,13 +1445,22 @@ class IntentExecutionStrategy(Strategy):
             normalized_target_ids = normalized_target_ids[
                 :self._OPENING_EVIDENCE_TARGET_LIMIT
             ]
-        return self._submit_external_io_task(
+        accepted = self._submit_external_refresh_task(
             _ExchangeRefreshTask(
                 target_client_order_ids=normalized_target_ids,
                 success_continuation=success_continuation,
                 failure_continuation=failure_continuation,
             )
         )
+        if (
+            not accepted
+            and isinstance(failure_continuation, Mapping)
+            and not self._strategy_stopping
+        ):
+            self._run_protection_continuation(
+                failure_continuation
+            )
+        return accepted
 
     def _queue_exchange_cancel(
         self,
@@ -1336,7 +1492,7 @@ class IntentExecutionStrategy(Strategy):
                     success_continuation
                 )
             return True
-        return self._submit_external_io_task(
+        accepted = self._submit_external_cancel_task(
             _ExchangeCancelTask(
                 instrument_id=str(instrument_id),
                 cancel_order_ids=cancel_order_ids,
@@ -1344,23 +1500,48 @@ class IntentExecutionStrategy(Strategy):
                 failure_continuation=failure_continuation,
             )
         )
+        if (
+            not accepted
+            and isinstance(failure_continuation, Mapping)
+            and not self._strategy_stopping
+        ):
+            self._run_protection_continuation(
+                failure_continuation
+            )
+        return accepted
 
-    def _submit_external_io_task(self, task: Any) -> bool:
+    def _submit_external_refresh_task(
+        self,
+        task: _ExchangeRefreshTask,
+    ) -> bool:
         if self._strategy_stopping:
             self._request_durable_io_halt(
                 "strategy external I/O session is stopped"
             )
             return False
-        if not self._external_io_worker.snapshot().running:
-            self._external_io_worker.start()
-        return self._external_io_worker.submit(task)
+        if not self._external_refresh_worker.snapshot().running:
+            self._external_refresh_worker.start()
+        return self._external_refresh_worker.submit(task)
+
+    def _submit_external_cancel_task(
+        self,
+        task: _ExchangeCancelTask,
+    ) -> bool:
+        if self._strategy_stopping:
+            self._request_durable_io_halt(
+                "strategy external I/O session is stopped"
+            )
+            return False
+        if not self._external_cancel_worker.snapshot().running:
+            self._external_cancel_worker.start()
+        return self._external_cancel_worker.submit(task)
 
     def _classify_external_io_worker_issue(self, reason: str) -> None:
         detail = str(reason).strip()
-        if self._strategy_stopping or re.search(
-            r"\bis stopped\b|failed to stop within",
-            detail,
-        ):
+        if self._strategy_stopping:
+            self._request_durable_io_halt(detail)
+            return
+        if re.search(r"\bis stopped\b", detail):
             self._request_durable_io_halt(detail)
             return
         denial_reason = "strategy_external_io_degraded"
@@ -1482,7 +1663,9 @@ class IntentExecutionStrategy(Strategy):
             )
             return True
         if kind == "pending_opening_refresh_failed":
-            self._opening_reconciliation_attempt += 1
+            self._note_opening_reconciliation_attempts(
+                continuation.get("opening_intent_ids", ())
+            )
             self._schedule_opening_reconciliation_retry()
             return False
         if kind == "handle_intent_after_exchange_refresh":
@@ -1592,6 +1775,18 @@ class IntentExecutionStrategy(Strategy):
                 source_intent,
                 False,
             )
+        resubmit_claim = continuation.get(
+            "opening_resubmit_claim",
+            False,
+        )
+        if (
+            resubmit_claim is not False
+            and not self._consume_opening_resubmit_claim(
+                plan.intent_id,
+                resubmit_claim,
+            )
+        ):
+            return True
         if self._submit_order_plan(plan):
             return self._complete_plan_submission(
                 plan,
@@ -1604,6 +1799,12 @@ class IntentExecutionStrategy(Strategy):
                     )
                 ),
             )
+        if resubmit_claim is not False:
+            self._defer_opening_reconciliation(
+                source_intent,
+                allow_resubmit=True,
+            )
+            return True
         preimage = continuation.get("protection_preimage")
         if isinstance(preimage, dict):
             self._restore_protection_preimage(preimage)
@@ -1668,6 +1869,12 @@ class IntentExecutionStrategy(Strategy):
                             False,
                         )
                     ),
+                    "opening_resubmit_claim": (
+                        continuation.get(
+                            "opening_resubmit_claim",
+                            False,
+                        )
+                    ),
                 },
                 changed_intent_keys=intent_key,
             )
@@ -1693,6 +1900,10 @@ class IntentExecutionStrategy(Strategy):
                         "preserve_resubmitting_receipt",
                         False,
                     )
+                ),
+                "opening_resubmit_claim": continuation.get(
+                    "opening_resubmit_claim",
+                    False,
                 ),
             }
         )
@@ -1742,6 +1953,18 @@ class IntentExecutionStrategy(Strategy):
                 continuation.get("source_intent", False),
                 False,
             )
+        resubmit_claim = continuation.get(
+            "opening_resubmit_claim",
+            False,
+        )
+        if (
+            resubmit_claim is not False
+            and not self._consume_opening_resubmit_claim(
+                first_plan.intent_id,
+                resubmit_claim,
+            )
+        ):
+            return True
         submitted_plans: list[OrderPlan] = []
         for plan in plans:
             if not isinstance(plan, OrderPlan):
@@ -1779,6 +2002,12 @@ class IntentExecutionStrategy(Strategy):
                             )
                         ),
                     )
+                if resubmit_claim is not False:
+                    self._defer_opening_reconciliation(
+                        source_intent,
+                        allow_resubmit=True,
+                    )
+                    return True
                 return self._complete_plan_submission(
                     first_plan,
                     source_intent,
@@ -1804,7 +2033,7 @@ class IntentExecutionStrategy(Strategy):
         )
         elapsed = time.monotonic() - started_at
         remaining = max(0.0, timeout_seconds - elapsed)
-        external_empty = self._external_io_worker.wait_empty(
+        external_empty = self._external_io_cleanup_group.wait_empty(
             timeout_seconds=remaining
         )
         return durable_empty and external_empty
@@ -1980,7 +2209,7 @@ class IntentExecutionStrategy(Strategy):
         *,
         exchange_state_ready: bool = False,
         exchange_refresh_degraded: bool = False,
-        opening_resubmit_authorized: bool = False,
+        opening_resubmit_authorized: Any = False,
     ) -> None:
         if intent is None:
             return
@@ -2075,6 +2304,9 @@ class IntentExecutionStrategy(Strategy):
                 context,
                 action,
                 preserve_resubmitting_receipt=(
+                    bool(opening_resubmit_authorized)
+                ),
+                opening_resubmit_claim=(
                     opening_resubmit_authorized
                 ),
             )
@@ -2107,6 +2339,9 @@ class IntentExecutionStrategy(Strategy):
                     "plan": result,
                     "source_intent": intent,
                     "preserve_resubmitting_receipt": (
+                        bool(opening_resubmit_authorized)
+                    ),
+                    "opening_resubmit_claim": (
                         opening_resubmit_authorized
                     ),
                 },
@@ -2272,6 +2507,7 @@ class IntentExecutionStrategy(Strategy):
         action: str,
         *,
         preserve_resubmitting_receipt: bool = False,
+        opening_resubmit_claim: Any = False,
     ) -> None:
         plans = self._zone_ladder_order_plans(intent, order_plan, context, action)
         if isinstance(plans, OrderDenied):
@@ -2288,6 +2524,9 @@ class IntentExecutionStrategy(Strategy):
                 "source_intent": intent,
                 "preserve_resubmitting_receipt": (
                     preserve_resubmitting_receipt
+                ),
+                "opening_resubmit_claim": (
+                    opening_resubmit_claim
                 ),
             },
         ):
@@ -2667,38 +2906,62 @@ class IntentExecutionStrategy(Strategy):
         *,
         receipt_status: str,
         reconciled: bool | None,
-        resubmit_authorized: bool,
+        resubmit_authorized: Any,
     ) -> bool:
+        intent_id = str(
+            getattr(intent, "intent_id", "") or ""
+        )
         if reconciled is None:
             self._defer_opening_reconciliation(
                 intent,
-                allow_resubmit=receipt_status == "DISPATCHED",
+                allow_resubmit=receipt_status in {
+                    "DISPATCHED",
+                    "RESUBMITTING",
+                },
             )
             return False
         if reconciled:
             self._clear_opening_reconciliation(intent)
             return False
-        if receipt_status == "DISPATCHED":
-            self._queue_opening_resubmit_transition(intent)
+        if not self._opening_reconciliation_resubmit_allowed.get(
+            intent_id,
+            True,
+        ):
             self._defer_opening_reconciliation(
                 intent,
                 allow_resubmit=False,
             )
             return False
-        if receipt_status == "RESUBMITTING":
-            if not resubmit_authorized:
+        if receipt_status in {"DISPATCHED", "RESUBMITTING"}:
+            if resubmit_authorized is False:
+                self._queue_opening_resubmit_transition(
+                    intent,
+                    expected_status=receipt_status,
+                )
                 self._defer_opening_reconciliation(
                     intent,
-                    allow_resubmit=False,
+                    allow_resubmit=True,
                 )
                 return False
-        intent_id = str(
-            getattr(intent, "intent_id", "") or ""
-        )
-        if not self._opening_reconciliation_resubmit_allowed.get(
-            intent_id,
-            True,
-        ):
+            if not self._valid_opening_resubmit_claim(
+                intent,
+                resubmit_authorized,
+            ):
+                self._halt_durable_io(
+                    "opening resubmit authority requires a matching "
+                    "one-use claim"
+                )
+                return False
+            self._clear_opening_reconciliation(intent)
+            return True
+        if resubmit_authorized is not False:
+            self._consume_opening_resubmit_claim(
+                intent_id,
+                resubmit_authorized,
+            )
+            self._clear_opening_reconciliation(intent)
+            return False
+        if not intent_id:
             self._defer_opening_reconciliation(
                 intent,
                 allow_resubmit=False,
@@ -2710,6 +2973,8 @@ class IntentExecutionStrategy(Strategy):
     def _queue_opening_resubmit_transition(
         self,
         intent: Any,
+        *,
+        expected_status: str,
     ) -> bool:
         intent_id = str(
             getattr(intent, "intent_id", "") or ""
@@ -2742,7 +3007,7 @@ class IntentExecutionStrategy(Strategy):
             _IntentReceiptTransitionTask(
                 intent=intent,
                 intent_id=intent_id,
-                expected_status="DISPATCHED",
+                expected_status=str(expected_status),
                 status="RESUBMITTING",
                 detail="authoritative_absence",
             )
@@ -2753,6 +3018,48 @@ class IntentExecutionStrategy(Strategy):
             intent_id
         )
         return False
+
+    def _valid_opening_resubmit_claim(
+        self,
+        intent: Any,
+        claim: Any,
+    ) -> bool:
+        intent_id = str(
+            getattr(intent, "intent_id", intent) or ""
+        )
+        claim_intent_id = str(
+            getattr(claim, "intent_id", "") or ""
+        )
+        consume = getattr(claim, "consume", None)
+        return (
+            bool(intent_id)
+            and claim_intent_id == intent_id
+            and callable(consume)
+        )
+
+    def _consume_opening_resubmit_claim(
+        self,
+        intent_id: Any,
+        claim: Any,
+    ) -> bool:
+        if not self._valid_opening_resubmit_claim(
+            intent_id,
+            claim,
+        ):
+            self._halt_durable_io(
+                "opening resubmit continuation has no matching "
+                "one-use claim"
+            )
+            return False
+        consume = getattr(claim, "consume")
+        try:
+            return bool(consume(intent_id))
+        except Exception as exc:
+            self._halt_durable_io(
+                "opening resubmit claim consumption failed: "
+                f"{exc!r}"
+            )
+            return False
 
     def _expected_opening_client_order_ids(
         self,
@@ -2809,6 +3116,38 @@ class IntentExecutionStrategy(Strategy):
         )
         if not intent_id:
             return
+        is_new = (
+            intent_id
+            not in self._pending_opening_reconciliations
+        )
+        if (
+            is_new
+            and len(self._pending_opening_reconciliations)
+            >= self._OPENING_RECONCILIATION_CAPACITY
+        ):
+            self._halt_durable_io(
+                "opening reconciliation durable recovery "
+                "capacity exceeded"
+            )
+            return
+        now = _aware_datetime(self._now())
+        budget = self._opening_reconciliation_budgets.get(
+            intent_id
+        )
+        if budget is None:
+            budget = _OpeningReconciliationBudget(
+                attempts=1,
+                started_at=now,
+            )
+            self._opening_reconciliation_budgets[
+                intent_id
+            ] = budget
+        elif not self._opening_reconciliation_budget_available(
+            intent_id,
+            budget,
+            now,
+        ):
+            return
         self._pending_opening_reconciliations[
             intent_id
         ] = intent
@@ -2819,7 +3158,13 @@ class IntentExecutionStrategy(Strategy):
         self._opening_reconciliation_resubmit_allowed[
             intent_id
         ] = current and allow_resubmit
-        self._opening_reconciliation_attempt += 1
+        self._opening_reconciliation_attempt = min(
+            max(
+                self._opening_reconciliation_attempt,
+                budget.attempts,
+            ),
+            self._OPENING_RECONCILIATION_MAX_ATTEMPTS,
+        )
         self._schedule_opening_reconciliation_retry()
 
     def _clear_opening_reconciliation(
@@ -2843,18 +3188,102 @@ class IntentExecutionStrategy(Strategy):
             intent_id,
             None,
         )
+        self._opening_reconciliation_budgets.pop(
+            intent_id,
+            None,
+        )
         self._opening_reconciliation_denial_keys = {
             key: None
             for key in self._opening_reconciliation_denial_keys
             if key[0] != intent_id
         }
         if self._pending_opening_reconciliations:
+            self._opening_reconciliation_attempt = max(
+                budget.attempts
+                for budget in (
+                    self._opening_reconciliation_budgets.values()
+                )
+            )
             return
         self._opening_reconciliation_attempt = 0
         self._opening_reconciliation_retry_scheduled = False
         self._cancel_clock_timer(
             "intent-opening.reconcile"
         )
+
+    def _note_opening_reconciliation_attempts(
+        self,
+        intent_ids: Iterable[str] = (),
+    ) -> bool:
+        targets = tuple(
+            dict.fromkeys(
+                str(intent_id)
+                for intent_id in intent_ids
+                if str(intent_id)
+            )
+        )
+        if not targets:
+            targets = tuple(
+                self._pending_opening_reconciliations
+            )
+        now = _aware_datetime(self._now())
+        highest_attempt = self._opening_reconciliation_attempt
+        for intent_id in targets:
+            budget = self._opening_reconciliation_budgets.get(
+                intent_id
+            )
+            if budget is None:
+                continue
+            if not self._opening_reconciliation_budget_available(
+                intent_id,
+                budget,
+                now,
+            ):
+                return False
+            next_attempt = budget.attempts + 1
+            if next_attempt > (
+                self._OPENING_RECONCILIATION_MAX_ATTEMPTS
+            ):
+                self._halt_durable_io(
+                    "opening reconciliation attempt budget "
+                    f"exceeded: {intent_id}"
+                )
+                return False
+            updated = _OpeningReconciliationBudget(
+                attempts=next_attempt,
+                started_at=budget.started_at,
+            )
+            self._opening_reconciliation_budgets[
+                intent_id
+            ] = updated
+            highest_attempt = max(
+                highest_attempt,
+                next_attempt,
+            )
+        self._opening_reconciliation_attempt = min(
+            highest_attempt,
+            self._OPENING_RECONCILIATION_MAX_ATTEMPTS,
+        )
+        return True
+
+    def _opening_reconciliation_budget_available(
+        self,
+        intent_id: str,
+        budget: _OpeningReconciliationBudget,
+        now: datetime,
+    ) -> bool:
+        age_seconds = (
+            now - budget.started_at
+        ).total_seconds()
+        if age_seconds <= (
+            self._OPENING_RECONCILIATION_MAX_AGE_SECONDS
+        ):
+            return True
+        self._halt_durable_io(
+            "opening reconciliation age budget exceeded: "
+            f"{intent_id}"
+        )
+        return False
 
     def _record_opening_reconciliation_denial(
         self,
@@ -2941,6 +3370,8 @@ class IntentExecutionStrategy(Strategy):
     def _schedule_opening_reconciliation_retry(self) -> None:
         if (
             self._strategy_stopping
+            or self._durable_io_halted_reason
+            or self._durable_io_halt_requested_reason
             or not self._pending_opening_reconciliations
             or self._opening_reconciliation_retry_scheduled
         ):
@@ -2985,12 +3416,16 @@ class IntentExecutionStrategy(Strategy):
         **_kwargs: Any,
     ) -> None:
         self._opening_reconciliation_retry_scheduled = False
-        if self._strategy_stopping:
+        if (
+            self._strategy_stopping
+            or self._durable_io_halted_reason
+            or self._durable_io_halt_requested_reason
+        ):
             return
         target_intent_ids = (
             self._next_opening_evidence_intent_batch()
         )
-        queued = self._queue_exchange_refresh(
+        self._queue_exchange_refresh(
             target_client_order_ids=(
                 self._opening_client_order_ids_for_intents(
                     target_intent_ids
@@ -3002,16 +3437,20 @@ class IntentExecutionStrategy(Strategy):
             },
             failure_continuation={
                 "kind": "pending_opening_refresh_failed",
+                "opening_intent_ids": target_intent_ids,
             },
         )
-        if not queued:
-            self._opening_reconciliation_attempt += 1
-            self._schedule_opening_reconciliation_retry()
 
     def _retry_pending_opening_reconciliations(
         self,
         opening_intent_ids: Iterable[str] = (),
     ) -> None:
+        if (
+            self._strategy_stopping
+            or self._durable_io_halted_reason
+            or self._durable_io_halt_requested_reason
+        ):
+            return
         target_ids = {
             str(intent_id)
             for intent_id in opening_intent_ids
@@ -3023,6 +3462,17 @@ class IntentExecutionStrategy(Strategy):
             in self._pending_opening_reconciliations.items()
             if not target_ids or intent_id in target_ids
         )
+        pending_intent_ids = tuple(
+            str(getattr(intent, "intent_id", "") or "")
+            for intent in pending
+        )
+        if (
+            pending
+            and not self._note_opening_reconciliation_attempts(
+                pending_intent_ids
+            )
+        ):
+            return
         for intent in pending:
             receipt_status = self._intent_receipt_status(intent)
             reconciled = self._reconcile_existing_opening(
@@ -3045,7 +3495,6 @@ class IntentExecutionStrategy(Strategy):
                 exchange_state_ready=True,
             )
         if self._pending_opening_reconciliations:
-            self._opening_reconciliation_attempt += 1
             self._schedule_opening_reconciliation_retry()
 
     def _protection_role_for_order(
@@ -3240,7 +3689,7 @@ class IntentExecutionStrategy(Strategy):
         self._durable_io_worker.stop(
             timeout_seconds=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
         )
-        self._external_io_worker.stop(
+        self._external_io_cleanup_group.stop(
             timeout_seconds=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
         )
         self.drain_durable_io_mailbox(

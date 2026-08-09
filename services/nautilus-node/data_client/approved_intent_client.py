@@ -13,7 +13,10 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from data_client.atomic_json import write_json_atomic
-from data_client.durable_intent_inbox import JsonDurableIntentInbox
+from data_client.durable_intent_inbox import (
+    DurableIntentResubmitClaim,
+    JsonDurableIntentInbox,
+)
 from execution_domain.contracts import (
     ApprovedTradeIntentV1,
     IntentAction,
@@ -276,14 +279,12 @@ class ApprovedIntentDataClient:
         expected_status: str,
         status: str,
         detail: str,
-    ) -> bool:
-        return bool(
-            self._intent_inbox.transition(
-                intent_id,
-                expected_status=expected_status,
-                status=status,
-                detail=detail,
-            )
+    ) -> DurableIntentResubmitClaim | bool:
+        return self._intent_inbox.transition(
+            intent_id,
+            expected_status=expected_status,
+            status=status,
+            detail=detail,
         )
 
     def durable_inbox_cleanup_worker(

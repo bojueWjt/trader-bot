@@ -229,12 +229,15 @@ def test_receipt_compare_and_transition_persists_resubmitting(
     inbox.receive("cursor-1", intent)
     inbox.complete(intent.intent_id, "DISPATCHED", "submitted")
 
-    assert inbox.transition(
+    first_claim = inbox.transition(
         intent.intent_id,
         expected_status="DISPATCHED",
         status="RESUBMITTING",
         detail="authoritative_absence",
     )
+    assert first_claim
+    assert first_claim.consume(intent.intent_id)
+    assert not first_claim.consume(intent.intent_id)
     assert not inbox.transition(
         intent.intent_id,
         expected_status="DISPATCHED",
@@ -247,6 +250,8 @@ def test_receipt_compare_and_transition_persists_resubmitting(
     assert restarted.pending()[0].detail == (
         "authoritative_absence"
     )
+    assert restarted.pending()[0].resubmit_attempt_count == 1
+    assert restarted.pending()[0].resubmit_started_at
     restarted.complete(
         intent.intent_id,
         "DISPATCHED",
@@ -255,6 +260,109 @@ def test_receipt_compare_and_transition_persists_resubmitting(
     assert JsonDurableIntentInbox(path).status(
         intent.intent_id
     ) == "RESUBMITTING"
+
+
+def test_terminal_completion_atomically_revokes_resubmit_claim(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    intent = _intent()
+    inbox = JsonDurableIntentInbox(path)
+    inbox.receive("cursor-1", intent)
+    inbox.complete(intent.intent_id, "DISPATCHED", "submitted")
+    claim = inbox.transition(
+        intent.intent_id,
+        expected_status="DISPATCHED",
+        status="RESUBMITTING",
+        detail="authoritative_absence",
+    )
+
+    assert claim
+    inbox.complete(intent.intent_id, "CONFIRMED", "accepted")
+
+    assert not claim.consume(intent.intent_id)
+    assert inbox.status(intent.intent_id) is False
+
+
+def test_resubmit_age_budget_persists_across_claims(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    current = NOW
+    intent = _intent()
+    inbox = JsonDurableIntentInbox(
+        path,
+        now=lambda: current,
+    )
+    inbox.receive("cursor-1", intent)
+    inbox.complete(intent.intent_id, "DISPATCHED", "submitted")
+    first_claim = inbox.transition(
+        intent.intent_id,
+        expected_status="DISPATCHED",
+        status="RESUBMITTING",
+        detail="authoritative_absence",
+    )
+    assert first_claim
+    assert first_claim.consume(intent.intent_id)
+
+    current += timedelta(
+        seconds=inbox._RESUBMIT_MAX_AGE_SECONDS + 1
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="resubmit age budget exceeded",
+    ):
+        inbox.transition(
+            intent.intent_id,
+            expected_status="RESUBMITTING",
+            status="RESUBMITTING",
+            detail="authoritative_absence",
+        )
+
+
+def test_status_snapshot_does_not_wait_for_terminal_fsync(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    terminal_started = Event()
+    terminal_release = Event()
+    inbox = _BlockingTerminalInbox(
+        path,
+        terminal_started,
+        terminal_release,
+    )
+    intent = _intent()
+    inbox.receive("cursor-1", intent)
+    inbox.complete(intent.intent_id, "DISPATCHED", "submitted")
+    terminal_thread = Thread(
+        target=lambda: inbox.complete(
+            intent.intent_id,
+            "CONFIRMED",
+            "accepted",
+        )
+    )
+    status_result: list[str | bool] = []
+    status_complete = Event()
+
+    def read_status() -> None:
+        status_result.append(inbox.status(intent.intent_id))
+        status_complete.set()
+
+    status_thread = Thread(target=read_status)
+    try:
+        terminal_thread.start()
+        assert terminal_started.wait(timeout=1.0)
+        status_thread.start()
+
+        assert status_complete.wait(timeout=0.1)
+        assert status_result == ["DISPATCHED"]
+    finally:
+        terminal_release.set()
+        terminal_thread.join(timeout=1.0)
+        status_thread.join(timeout=1.0)
+
+    assert inbox.status(intent.intent_id) is False
 
 
 def test_client_sync_transition_is_owned_by_calling_worker(
@@ -285,14 +393,17 @@ def test_client_sync_transition_is_owned_by_calling_worker(
         actor_thread_id = get_ident()
         transition_threads: list[int] = []
 
+        claims: list[Any] = []
+
         def transition() -> None:
             transition_threads.append(get_ident())
-            assert client.persist_execution_receipt_transition(
+            claim = client.persist_execution_receipt_transition(
                 intent.intent_id,
                 "DISPATCHED",
                 "RESUBMITTING",
                 "authoritative_absence",
             )
+            claims.append(claim)
 
         worker = Thread(target=transition)
         worker.start()
@@ -300,6 +411,8 @@ def test_client_sync_transition_is_owned_by_calling_worker(
 
         assert transition_threads
         assert transition_threads[0] != actor_thread_id
+        assert claims
+        assert claims[0].consume(intent.intent_id)
         assert client.intent_receipt_status(
             intent.intent_id
         ) == "RESUBMITTING"
