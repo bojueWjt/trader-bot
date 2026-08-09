@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -35,7 +36,8 @@ ACCOUNTS = {
     "account-b": ("trader-v3-node-b", "BINANCE_ACCOUNT_B"),
 }
 BINANCE_RECV_WINDOW_MS = 30_000
-RECENT_HISTORY_MAX_SYMBOLS = 16
+DEFAULT_RECENT_HISTORY_MAX_SYMBOLS = 16
+ABSOLUTE_RECENT_HISTORY_MAX_SYMBOLS = 64
 
 UPSERT_SQL = """
 INSERT INTO exchange_state_mirror (account_id, payload, updated_at)
@@ -204,13 +206,108 @@ def _recent_history_symbols(
     positions: list[dict],
     regular_orders: list[dict],
     algo_orders: list[dict],
+    targeted_symbols: tuple[str, ...] = (),
+    *,
+    max_symbols: int = DEFAULT_RECENT_HISTORY_MAX_SYMBOLS,
 ) -> tuple[str, ...]:
-    symbols = {
+    active_symbols = sorted({
         str(row.get("symbol") or "").strip().upper()
         for row in positions + regular_orders + algo_orders
-    }
-    symbols.discard("")
-    return tuple(sorted(symbols)[:RECENT_HISTORY_MAX_SYMBOLS])
+        if str(row.get("symbol") or "").strip()
+    })
+    ordered = tuple(
+        dict.fromkeys(
+            symbol
+            for symbol in (
+                _normalized_symbols(targeted_symbols)
+                + tuple(active_symbols)
+            )
+            if symbol
+        )
+    )
+    return ordered[:max_symbols]
+
+
+def _normalized_symbols(
+    values: tuple[str, ...],
+) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in values:
+        symbol = str(value or "").strip().upper()
+        if not symbol:
+            continue
+        if "-PERP." in symbol:
+            symbol = symbol.split("-", 1)[0]
+        if not re.fullmatch(r"[A-Z0-9]{3,24}", symbol):
+            continue
+        normalized.append(symbol)
+    return tuple(dict.fromkeys(normalized))
+
+
+def _history_symbol_limit() -> int:
+    raw = os.environ.get(
+        "EXCHANGE_STATE_HISTORY_MAX_SYMBOLS",
+        str(DEFAULT_RECENT_HISTORY_MAX_SYMBOLS),
+    )
+    try:
+        requested = int(raw)
+    except ValueError:
+        requested = DEFAULT_RECENT_HISTORY_MAX_SYMBOLS
+    return max(
+        1,
+        min(requested, ABSOLUTE_RECENT_HISTORY_MAX_SYMBOLS),
+    )
+
+
+def _configured_history_symbols(
+    account_id: str,
+) -> tuple[str, ...]:
+    account_env = re.sub(
+        r"[^A-Z0-9]",
+        "_",
+        account_id.upper(),
+    )
+    raw_values = (
+        os.environ.get("EXCHANGE_STATE_HISTORY_SYMBOLS", ""),
+        os.environ.get(
+            f"EXCHANGE_STATE_HISTORY_SYMBOLS_{account_env}",
+            "",
+        ),
+    )
+    return _normalized_symbols(
+        tuple(
+            value
+            for raw in raw_values
+            for value in re.split(r"[\s,]+", raw)
+            if value
+        )
+    )
+
+
+def pending_opening_symbols(
+    conn,
+    account_id: str,
+    *,
+    limit: int,
+) -> tuple[str, ...]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id
+            FROM trade_intents
+            WHERE account_id=%s
+              AND status='approved'
+              AND valid_until > now()
+              AND action IN ('open_position', 'add_position')
+            ORDER BY updated_at DESC, intent_id
+            LIMIT %s
+            """,
+            (account_id, limit),
+        )
+        rows = cur.fetchall()
+    return _normalized_symbols(
+        tuple(str(row[0]) for row in rows if row)
+    )
 
 
 def recent_order_history(
@@ -246,7 +343,14 @@ def recent_order_history(
     return regular_history, algo_history
 
 
-def snapshot_account(base: str, key: str, sec: str) -> dict:
+def snapshot_account(
+    base: str,
+    key: str,
+    sec: str,
+    *,
+    targeted_history_symbols: tuple[str, ...] = (),
+    history_symbol_limit: int = DEFAULT_RECENT_HISTORY_MAX_SYMBOLS,
+) -> dict:
     account_info = signed_get(base, "/fapi/v3/account", key, sec)
     if not isinstance(account_info, dict):
         raise TypeError("account information response must be an object")
@@ -260,7 +364,20 @@ def snapshot_account(base: str, key: str, sec: str) -> dict:
     algo_raw = signed_get(base, "/fapi/v1/openAlgoOrders", key, sec)
     algo_rows = algo_raw.get("orders", algo_raw) if isinstance(algo_raw, dict) else algo_raw
     algo = [slim_order(o, "algo") for o in algo_rows]
-    history_symbols = _recent_history_symbols(positions, regular, algo)
+    history_symbols = _recent_history_symbols(
+        positions,
+        regular,
+        algo,
+        targeted_history_symbols,
+        max_symbols=history_symbol_limit,
+    )
+    all_history_symbols = _recent_history_symbols(
+        positions,
+        regular,
+        algo,
+        targeted_history_symbols,
+        max_symbols=ABSOLUTE_RECENT_HISTORY_MAX_SYMBOLS,
+    )
     regular_history, algo_history = recent_order_history(
         base,
         key,
@@ -283,17 +400,54 @@ def snapshot_account(base: str, key: str, sec: str) -> dict:
         "recent_order_history": regular_history,
         "recent_algo_order_history": algo_history,
         "recent_order_history_symbols": list(history_symbols),
+        "recent_order_history_coverage": {
+            "max_symbols": history_symbol_limit,
+            "targeted_symbols": list(
+                _normalized_symbols(targeted_history_symbols)
+            ),
+            "queried_symbols": list(history_symbols),
+            "truncated": len(all_history_symbols) > len(
+                history_symbols
+            ),
+        },
         "protections": protections(positions, algo, regular),
     }
 
 
 def run_once(conn, base: str) -> None:
+    history_symbol_limit = _history_symbol_limit()
     for account_id, (container, prefix) in ACCOUNTS.items():
         creds = container_keys(container, prefix)
         if not creds:
             continue
         try:
-            payload = snapshot_account(base, *creds)
+            pending_symbols = pending_opening_symbols(
+                conn,
+                account_id,
+                limit=history_symbol_limit,
+            )
+        except psycopg2.Error as exc:
+            conn.rollback()
+            pending_symbols = ()
+            log(
+                f"{account_id}: pending opening symbol query "
+                f"degraded: {exc}"
+            )
+        else:
+            conn.rollback()
+        targeted_symbols = tuple(
+            dict.fromkeys(
+                pending_symbols
+                + _configured_history_symbols(account_id)
+            )
+        )
+        try:
+            payload = snapshot_account(
+                base,
+                *creds,
+                targeted_history_symbols=targeted_symbols,
+                history_symbol_limit=history_symbol_limit,
+            )
         except Exception as exc:  # noqa: BLE001 - stale row is the failure signal
             log(f"{account_id}: exchange fetch failed, leaving row stale: {exc}")
             continue

@@ -328,8 +328,10 @@ class ExchangeStateMirrorTest(unittest.TestCase):
             EXCHANGE_CANCEL_ADAPTER.urllib.request,
             "urlopen",
             return_value=response,
-        ):
-            mirror.refresh()
+        ) as urlopen:
+            mirror.refresh(
+                client_order_ids=(client_order_id,)
+            )
 
         evidence = mirror.opening_execution_state(client_order_id)
         self.assertEqual(evidence.state, OPENING_CONFIRMED_EXECUTED)
@@ -343,6 +345,51 @@ class ExchangeStateMirrorTest(unittest.TestCase):
             mirror.find_order("BTCUSDT-PERP.BINANCE", client_order_id),
             False,
         )
+        request = urlopen.call_args.args[0]
+        query = EXCHANGE_CANCEL_ADAPTER.urllib.parse.parse_qs(
+            EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(
+                request.full_url
+            ).query
+        )
+        self.assertEqual(
+            query["client_order_ids"],
+            [client_order_id],
+        )
+
+    def test_stale_orders_keep_durable_opening_evidence(
+        self,
+    ) -> None:
+        client_order_id = "B1919191919191919191919191919191901"
+        mirror = _mirror()
+
+        with patch.object(
+            EXCHANGE_CANCEL_ADAPTER.urllib.request,
+            "urlopen",
+            return_value=_opening_mirror_response(
+                client_order_id=client_order_id,
+                state=OPENING_CONFIRMED_EXECUTED,
+                order_status="filled",
+                sources=["orders_projection"],
+                stale=True,
+            ),
+        ):
+            assert mirror.refresh(
+                client_order_ids=(client_order_id,)
+            ) == ()
+
+        evidence = mirror.opening_execution_state(client_order_id)
+        self.assertEqual(
+            evidence.state,
+            OPENING_CONFIRMED_EXECUTED,
+        )
+        self.assertFalse(mirror.orders_are_fresh())
+        with self.assertRaisesRegex(
+            ExchangeCancelError,
+            "not fresh",
+        ):
+            mirror.orders_for_instrument(
+                "BTCUSDT-PERP.BINANCE"
+            )
 
     def test_explicit_rejection_is_definitively_absent(self) -> None:
         client_order_id = "B2222222222222222222222222222222201"
@@ -370,7 +417,10 @@ class ExchangeStateMirrorTest(unittest.TestCase):
 
         before_refresh = mirror.opening_execution_state(client_order_id)
         self.assertEqual(before_refresh.state, OPENING_UNKNOWN)
-        self.assertEqual(before_refresh.reason, "mirror_not_fresh")
+        self.assertEqual(
+            before_refresh.reason,
+            "opening_evidence_not_loaded",
+        )
 
         with patch.object(
             EXCHANGE_CANCEL_ADAPTER.urllib.request,
@@ -399,7 +449,10 @@ class ExchangeStateMirrorTest(unittest.TestCase):
 
         failed = mirror.opening_execution_state(client_order_id)
         self.assertEqual(failed.state, OPENING_UNKNOWN)
-        self.assertEqual(failed.reason, "mirror_not_fresh")
+        self.assertEqual(
+            failed.reason,
+            "opening_evidence_not_loaded",
+        )
 
     def test_evidence_from_another_account_is_ignored(self) -> None:
         client_order_id = "B4444444444444444444444444444444401"
@@ -534,11 +587,12 @@ def _opening_mirror_response(
     sources: list[str],
     authoritative: bool = True,
     evidence_account_id: str = ACCOUNT_ID,
+    stale: bool = False,
 ) -> _JsonResponse:
     return _JsonResponse(
         {
             "account_id": ACCOUNT_ID,
-            "stale": False,
+            "stale": stale,
             "updated_at": "2026-08-09T12:00:00+00:00",
             "payload": {
                 "open_orders": [],

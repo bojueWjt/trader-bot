@@ -38,6 +38,7 @@ _OPENING_EXECUTION_STATES = frozenset(
 _DETERMINISTIC_OPENING_CLIENT_ORDER_ID = re.compile(
     r"^B[0-9a-fA-F]{32}0[0-9]$"
 )
+_OPENING_EVIDENCE_TARGET_LIMIT = 256
 DEFAULT_RECV_WINDOW_MS = 30_000
 MAX_RECV_WINDOW_MS = 60_000
 
@@ -382,12 +383,31 @@ class ControlPlaneExchangeStateMirror:
         self._orders: tuple[ExchangeOrderRef, ...] = ()
         self._opening_evidence: dict[str, OpeningExecutionEvidence] = {}
         self._opening_evidence_authoritative = False
+        self._opening_evidence_loaded = False
         self._fresh = False
         self._lock = threading.Lock()
 
-    def refresh(self) -> tuple[ExchangeOrderRef, ...]:
+    def refresh(
+        self,
+        *,
+        client_order_ids: tuple[str, ...] = (),
+    ) -> tuple[ExchangeOrderRef, ...]:
         self._invalidate()
-        query = urllib.parse.urlencode({"account_id": self._account_id})
+        normalized_ids = tuple(
+            dict.fromkeys(
+                str(client_order_id)
+                for client_order_id in client_order_ids
+                if _DETERMINISTIC_OPENING_CLIENT_ORDER_ID.fullmatch(
+                    str(client_order_id)
+                )
+            )
+        )[:_OPENING_EVIDENCE_TARGET_LIMIT]
+        query_params = {"account_id": self._account_id}
+        if normalized_ids:
+            query_params["client_order_ids"] = ",".join(
+                normalized_ids
+            )
+        query = urllib.parse.urlencode(query_params)
         request = urllib.request.Request(
             f"{self._base_url}/v1/nodes/{self._node_id}/exchange-state?{query}",
             headers={
@@ -409,20 +429,28 @@ class ControlPlaneExchangeStateMirror:
             raise WrongAccountError(
                 f"mirror returned account {response_account!r} for {self._account_id!r}"
             )
+        evidence, evidence_authoritative = _parse_opening_execution_evidence(
+            self._account_id,
+            payload.get("opening_execution_evidence"),
+            allowed_client_order_ids=normalized_ids,
+        )
         if payload.get("stale") is not False:
+            if evidence_authoritative:
+                with self._lock:
+                    self._opening_evidence = evidence
+                    self._opening_evidence_authoritative = True
+                    self._opening_evidence_loaded = True
+                return ()
             raise ExchangeCancelError("exchange state mirror is stale")
         exchange_payload = payload.get("payload")
         if not isinstance(exchange_payload, Mapping):
             raise ExchangeCancelError("exchange state mirror payload is missing")
         orders = _parse_exchange_orders(self._account_id, exchange_payload)
-        evidence, evidence_authoritative = _parse_opening_execution_evidence(
-            self._account_id,
-            payload.get("opening_execution_evidence"),
-        )
         with self._lock:
             self._orders = orders
             self._opening_evidence = evidence
             self._opening_evidence_authoritative = evidence_authoritative
+            self._opening_evidence_loaded = True
             self._fresh = True
         return orders
 
@@ -433,6 +461,10 @@ class ControlPlaneExchangeStateMirror:
                 raise ExchangeCancelError("exchange state mirror is not fresh")
             orders = self._orders
         return tuple(order for order in orders if order.instrument_id == target)
+
+    def orders_are_fresh(self) -> bool:
+        with self._lock:
+            return self._fresh
 
     def find_order(self, instrument_id: str, client_order_id: str) -> ExchangeOrderRef | bool:
         for order in self.orders_for_instrument(instrument_id):
@@ -452,14 +484,14 @@ class ControlPlaneExchangeStateMirror:
                 reason="unsupported_client_order_id",
             )
         with self._lock:
-            fresh = self._fresh
+            loaded = self._opening_evidence_loaded
             authoritative = self._opening_evidence_authoritative
             evidence = self._opening_evidence.get(normalized_id)
-        if not fresh:
+        if not loaded:
             return _unknown_opening_evidence(
                 self._account_id,
                 normalized_id,
-                reason="mirror_not_fresh",
+                reason="opening_evidence_not_loaded",
             )
         if not authoritative:
             return _unknown_opening_evidence(
@@ -480,12 +512,15 @@ class ControlPlaneExchangeStateMirror:
             self._orders = ()
             self._opening_evidence = {}
             self._opening_evidence_authoritative = False
+            self._opening_evidence_loaded = False
             self._fresh = False
 
 
 def _parse_opening_execution_evidence(
     account_id: str,
     raw_surface: Any,
+    *,
+    allowed_client_order_ids: tuple[str, ...] = (),
 ) -> tuple[dict[str, OpeningExecutionEvidence], bool]:
     if not isinstance(raw_surface, Mapping):
         return {}, False
@@ -497,6 +532,7 @@ def _parse_opening_execution_evidence(
 
     parsed: dict[str, OpeningExecutionEvidence] = {}
     conflicts: set[str] = set()
+    allowed_ids = set(allowed_client_order_ids)
     for raw_item in raw_items:
         if not isinstance(raw_item, Mapping):
             continue
@@ -506,6 +542,8 @@ def _parse_opening_execution_evidence(
         if item_account_id != account_id:
             continue
         if not _DETERMINISTIC_OPENING_CLIENT_ORDER_ID.fullmatch(client_order_id):
+            continue
+        if allowed_ids and client_order_id not in allowed_ids:
             continue
         if state not in _OPENING_EXECUTION_STATES:
             continue
@@ -526,6 +564,8 @@ def _parse_opening_execution_evidence(
             conflicts.add(client_order_id)
             continue
         parsed[client_order_id] = evidence
+        if len(parsed) >= _OPENING_EVIDENCE_TARGET_LIMIT:
+            break
 
     for client_order_id in conflicts:
         parsed[client_order_id] = _unknown_opening_evidence(

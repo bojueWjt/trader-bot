@@ -17,6 +17,9 @@ REJECTED_CLIENT_ORDER_ID = "B2222222222222222222222222222222201"
 AMBIGUOUS_CLIENT_ORDER_ID = "B3333333333333333333333333333333301"
 HISTORY_CLIENT_ORDER_ID = "B4444444444444444444444444444444401"
 OTHER_ACCOUNT_CLIENT_ORDER_ID = "B5555555555555555555555555555555501"
+EXCHANGE_REJECTED_CLIENT_ORDER_ID = (
+    "B8888888888888888888888888888888801"
+)
 
 
 def test_exchange_state_returns_account_scoped_historical_opening_evidence(
@@ -39,6 +42,14 @@ def test_exchange_state_returns_account_scoped_historical_opening_evidence(
                     "venue_order_id": "venue-history",
                     "status": "FILLED",
                     "executed_quantity": "0.02",
+                },
+                {
+                    "symbol": "BTCUSDT",
+                    "client_order_id": (
+                        EXCHANGE_REJECTED_CLIENT_ORDER_ID
+                    ),
+                    "status": "REJECTED",
+                    "executed_quantity": "0",
                 }
             ],
             "recent_algo_order_history": [],
@@ -87,7 +98,13 @@ def test_exchange_state_returns_account_scoped_historical_opening_evidence(
 
     response = _client().get(
         f"/v1/nodes/{NODE_ID}/exchange-state",
-        params={"account_id": ACCOUNT_ID},
+        params=_evidence_params(
+            FILLED_CLIENT_ORDER_ID,
+            REJECTED_CLIENT_ORDER_ID,
+            AMBIGUOUS_CLIENT_ORDER_ID,
+            HISTORY_CLIENT_ORDER_ID,
+            EXCHANGE_REJECTED_CLIENT_ORDER_ID,
+        ),
         headers=_headers(),
     )
 
@@ -99,6 +116,9 @@ def test_exchange_state_returns_account_scoped_historical_opening_evidence(
     assert evidence[REJECTED_CLIENT_ORDER_ID]["state"] == "definitively_absent"
     assert evidence[AMBIGUOUS_CLIENT_ORDER_ID]["state"] == "unknown"
     assert evidence[HISTORY_CLIENT_ORDER_ID]["state"] == "confirmed_executed"
+    assert evidence[EXCHANGE_REJECTED_CLIENT_ORDER_ID][
+        "state"
+    ] == "definitively_absent"
     assert OTHER_ACCOUNT_CLIENT_ORDER_ID not in evidence
     assert all(item["account_id"] == ACCOUNT_ID for item in surface["items"])
 
@@ -129,7 +149,7 @@ def test_stale_exchange_state_keeps_durable_evidence_authoritative(
 
     response = _client().get(
         f"/v1/nodes/{NODE_ID}/exchange-state",
-        params={"account_id": ACCOUNT_ID},
+        params=_evidence_params(client_order_id),
         headers=_headers(),
     )
 
@@ -174,7 +194,7 @@ def test_projection_query_failure_uses_fresh_exchange_evidence(
 
     response = _client().get(
         f"/v1/nodes/{NODE_ID}/exchange-state",
-        params={"account_id": ACCOUNT_ID},
+        params=_evidence_params(client_order_id),
         headers=_headers(),
     )
 
@@ -207,7 +227,9 @@ def test_stale_mirror_and_durable_query_failure_are_unknown(
 
     response = _client().get(
         f"/v1/nodes/{NODE_ID}/exchange-state",
-        params={"account_id": ACCOUNT_ID},
+        params=_evidence_params(
+            "B9999999999999999999999999999999901"
+        ),
         headers=_headers(),
     )
 
@@ -217,6 +239,39 @@ def test_stale_mirror_and_durable_query_failure_are_unknown(
         "reason": "opening_evidence_unavailable",
         "items": [],
     }
+
+
+def test_opening_evidence_rejects_unbounded_target_query(
+    monkeypatch,
+) -> None:
+    conn = _FakeConnection(
+        mirror_row={
+            "account_id": ACCOUNT_ID,
+            "updated_at": datetime.now(timezone.utc),
+            "stale": False,
+            "payload": {"open_orders": [], "algo_orders": []},
+        },
+        projection_rows=[],
+        event_rows=[],
+    )
+    _configure(monkeypatch, conn)
+    client_order_ids = ",".join(
+        f"B{index:032x}01"
+        for index in range(
+            read_api._OPENING_EVIDENCE_TARGET_LIMIT + 1
+        )
+    )
+
+    response = _client().get(
+        f"/v1/nodes/{NODE_ID}/exchange-state",
+        params={
+            "account_id": ACCOUNT_ID,
+            "client_order_ids": client_order_ids,
+        },
+        headers=_headers(),
+    )
+
+    assert response.status_code == 422
 
 
 class _FakeConnection:
@@ -329,4 +384,13 @@ def _headers() -> dict[str, str]:
         "Authorization": f"Bearer {TOKEN}",
         "X-Node-Id": NODE_ID,
         "X-Account-Id": ACCOUNT_ID,
+    }
+
+
+def _evidence_params(
+    *client_order_ids: str,
+) -> dict[str, str]:
+    return {
+        "account_id": ACCOUNT_ID,
+        "client_order_ids": ",".join(client_order_ids),
     }

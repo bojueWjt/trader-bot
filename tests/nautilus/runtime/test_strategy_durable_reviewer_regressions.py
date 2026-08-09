@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, get_ident
 from types import SimpleNamespace
@@ -17,6 +18,12 @@ EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
 sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
+from data_client.durable_intent_inbox import JsonDurableIntentInbox
+from execution_domain.contracts import (
+    ApprovedTradeIntentV1,
+    IntentAction,
+    RiskBudget,
+)
 from strategy.intent_execution_planner import (
     ManagementPlan,
     OrderPlan,
@@ -59,6 +66,69 @@ class _ProbeStrategy(IntentExecutionStrategy):
 
 class _SmallExternalQueueProbeStrategy(_ProbeStrategy):
     _DURABLE_IO_QUEUE_CAPACITY = 1
+
+
+class _ResubmitCrashProbeStrategy(_ProbeStrategy):
+    def __init__(
+        self,
+        state_dir: Path,
+        *,
+        zone: bool = False,
+    ) -> None:
+        self.zone = zone
+        self.submit_counts: dict[str, int] = {}
+        super().__init__(state_dir)
+
+    def _submit_order_plan(self, plan: OrderPlan) -> bool:
+        client_order_id = str(plan.client_order_id)
+        self.submit_counts[client_order_id] = (
+            self.submit_counts.get(client_order_id, 0) + 1
+        )
+        self.submitted.append(client_order_id)
+        return True
+
+    def _handle_intent(
+        self,
+        intent: Any,
+        *,
+        exchange_state_ready: bool = False,
+        exchange_refresh_degraded: bool = False,
+        opening_resubmit_authorized: bool = False,
+    ) -> None:
+        del exchange_state_ready, exchange_refresh_degraded
+        if not opening_resubmit_authorized:
+            return
+        intent_id = UUID(str(intent.intent_id))
+        if self.zone:
+            plans = tuple(
+                _order_plan(
+                    intent_id,
+                    encode_client_order_id(
+                        intent_id,
+                        sequence=sequence,
+                    ),
+                )
+                for sequence in range(1, 4)
+            )
+            self._continue_zone_submit(
+                {
+                    "plans": plans,
+                    "source_intent": intent,
+                    "preserve_resubmitting_receipt": True,
+                }
+            )
+            return
+        plan = _order_plan(
+            intent_id,
+            encode_client_order_id(intent_id, sequence=1),
+        )
+        self._continue_entry_submit(
+            {
+                "plan": plan,
+                "source_intent": intent,
+                "preserve_resubmitting_receipt": True,
+            }
+        )
 
 
 def test_entry_fsync_continuation_rechecks_live_halt_before_opening(
@@ -743,7 +813,7 @@ def test_dispatched_filled_opening_uses_historical_evidence(
     assert str(intent_id) in strategy._processed_intent_ids
 
 
-def test_dispatched_opening_resubmits_only_after_authoritative_absence(
+def test_authoritative_absence_requires_separate_durable_authority(
     tmp_path: Path,
 ) -> None:
     strategy = _ProbeStrategy(tmp_path)
@@ -786,7 +856,129 @@ def test_dispatched_opening_resubmits_only_after_authoritative_absence(
     )
 
     assert first is False
-    assert second is None
+    assert second is False
+
+
+@pytest.mark.parametrize("zone", [False, True])
+def test_resubmit_success_keeps_receipt_resubmitting_across_restart(
+    tmp_path: Path,
+    zone: bool,
+) -> None:
+    intent_id = UUID("f5757575-5757-4575-8575-575757575757")
+    intent = _durable_replayed_opening_intent(
+        intent_id,
+        zone=zone,
+    )
+    inbox_path = tmp_path / "intent-inbox.json"
+    inbox = _seed_dispatched_receipt(inbox_path, intent)
+    strategy = _ResubmitCrashProbeStrategy(
+        tmp_path,
+        zone=zone,
+    )
+    _wire_resubmit_receipt(strategy, inbox)
+    strategy._start_durable_io_lane()
+    try:
+        assert not strategy._opening_reconciliation_allows_execution(
+            intent,
+            receipt_status="DISPATCHED",
+            reconciled=False,
+            resubmit_authorized=False,
+        )
+        assert strategy.wait_for_durable_io(
+            timeout_seconds=1.0
+        )
+        _drain_until_idle(strategy)
+
+        restarted_inbox = JsonDurableIntentInbox(inbox_path)
+        assert restarted_inbox.status(
+            intent_id
+        ) == "RESUBMITTING"
+        expected_sequences = (1, 2, 3) if zone else (1,)
+        expected_ids = tuple(
+            encode_client_order_id(
+                intent_id,
+                sequence=sequence,
+            )
+            for sequence in expected_sequences
+        )
+        assert strategy.submit_counts == {
+            client_order_id: 1
+            for client_order_id in expected_ids
+        }
+    finally:
+        strategy.durable_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+        strategy.external_io_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+    restarted = _ResubmitCrashProbeStrategy(
+        tmp_path / "restart",
+        zone=zone,
+    )
+    restarted.set_intent_receipt_status_getter(
+        restarted_inbox.status
+    )
+
+    assert not restarted._opening_reconciliation_allows_execution(
+        intent,
+        receipt_status="RESUBMITTING",
+        reconciled=False,
+        resubmit_authorized=False,
+    )
+    assert restarted.submit_counts == {}
+    assert JsonDurableIntentInbox(inbox_path).status(
+        intent_id
+    ) == "RESUBMITTING"
+
+
+def test_crash_after_resubmitting_persist_before_authority_never_replays(
+    tmp_path: Path,
+) -> None:
+    intent_id = UUID("f5858585-5858-4585-8585-585858585858")
+    intent = _durable_replayed_opening_intent(intent_id)
+    inbox_path = tmp_path / "intent-inbox.json"
+    inbox = _seed_dispatched_receipt(inbox_path, intent)
+    strategy = _ResubmitCrashProbeStrategy(tmp_path)
+    _wire_resubmit_receipt(strategy, inbox)
+    strategy._start_durable_io_lane()
+
+    assert not strategy._opening_reconciliation_allows_execution(
+        intent,
+        receipt_status="DISPATCHED",
+        reconciled=False,
+        resubmit_authorized=False,
+    )
+    assert strategy.durable_io_cleanup_worker().wait_empty(
+        timeout_seconds=1.0
+    )
+    assert JsonDurableIntentInbox(inbox_path).status(
+        intent_id
+    ) == "RESUBMITTING"
+    assert strategy.submit_counts == {}
+    strategy.durable_io_cleanup_worker().stop(
+        timeout_seconds=1.0
+    )
+    strategy.external_io_cleanup_worker().stop(
+        timeout_seconds=1.0
+    )
+
+    restarted_inbox = JsonDurableIntentInbox(inbox_path)
+    restarted = _ResubmitCrashProbeStrategy(
+        tmp_path / "restart"
+    )
+    restarted.set_intent_receipt_status_getter(
+        restarted_inbox.status
+    )
+
+    assert not restarted._opening_reconciliation_allows_execution(
+        intent,
+        receipt_status="RESUBMITTING",
+        reconciled=False,
+        resubmit_authorized=False,
+    )
+    assert restarted.submit_counts == {}
 
 
 def test_dispatched_opening_unknown_evidence_remains_pending(
@@ -846,6 +1038,150 @@ def test_dispatched_opening_unknown_evidence_remains_pending(
         denial.reason == "opening_execution_evidence_unknown"
         for denial in strategy.denials
     )
+
+
+def test_soft_opening_refresh_failure_keeps_new_intent_admitted(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent = _replayed_opening_intent(
+        UUID("f6767676-6767-4676-8676-676767676767")
+    )
+    admitted: list[tuple[Any, dict[str, Any]]] = []
+    strategy.set_intent_receipt_status_getter(
+        lambda _intent_id: "PREPARED"
+    )
+    strategy._handle_intent = (  # type: ignore[method-assign]
+        lambda replayed, **kwargs: admitted.append(
+            (replayed, kwargs)
+        )
+    )
+
+    strategy._run_protection_continuation(
+        {
+            "kind": "intent_exchange_refresh_failed",
+            "intent": intent,
+        }
+    )
+
+    assert admitted == [
+        (
+            intent,
+            {"exchange_refresh_degraded": True},
+        )
+    ]
+    assert strategy.durable_io_halted_reason == ""
+
+
+def test_stale_order_mirror_with_durable_evidence_keeps_new_intent_admitted(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent = _replayed_opening_intent(
+        UUID("f6777777-6777-4777-8777-677777777777")
+    )
+    admitted: list[tuple[Any, dict[str, Any]]] = []
+
+    class Mirror:
+        def orders_are_fresh(self) -> bool:
+            return False
+
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_status_getter(
+        lambda _intent_id: "PREPARED"
+    )
+    strategy._handle_intent = (  # type: ignore[method-assign]
+        lambda replayed, **kwargs: admitted.append(
+            (replayed, kwargs)
+        )
+    )
+
+    strategy._run_protection_continuation(
+        {
+            "kind": "handle_intent_after_exchange_refresh",
+            "intent": intent,
+        }
+    )
+
+    assert admitted == [
+        (
+            intent,
+            {"exchange_refresh_degraded": True},
+        )
+    ]
+    assert strategy.durable_io_halted_reason == ""
+
+
+def test_unknown_evidence_retry_is_deduplicated_and_backoff_advances(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    intent_id = UUID("f6868686-6868-4686-8686-686868686868")
+    client_order_id = encode_client_order_id(
+        intent_id,
+        sequence=1,
+    )
+
+    class Mirror:
+        def orders_for_instrument(
+            self,
+            _instrument_id: str,
+        ) -> tuple[Any, ...]:
+            return ()
+
+        def opening_execution_state(
+            self,
+            _client_order_id: str,
+        ) -> Any:
+            return SimpleNamespace(
+                client_order_id=client_order_id,
+                instrument_id=None,
+                state="unknown",
+            )
+
+    intent = _replayed_opening_intent(intent_id)
+    strategy.set_exchange_cancel_adapter(False, Mirror())
+    strategy.set_intent_receipt_status_getter(
+        lambda _intent_id: "DISPATCHED"
+    )
+    strategy._defer_opening_reconciliation(intent)
+    initial_attempt = strategy._opening_reconciliation_attempt
+
+    for _ in range(20):
+        strategy._retry_pending_opening_reconciliations()
+
+    unknown_denials = [
+        denial
+        for denial in strategy.denials
+        if denial.reason
+        == "opening_execution_evidence_unknown"
+    ]
+    assert len(unknown_denials) == 1
+    assert strategy._opening_reconciliation_attempt > (
+        initial_attempt
+    )
+    assert strategy.durable_io_halted_reason == ""
+
+
+def test_stop_cancels_opening_reconcile_without_hard_callback(
+    tmp_path: Path,
+) -> None:
+    strategy = _ProbeStrategy(tmp_path)
+    canceled: list[str] = []
+    strategy._cancel_clock_timer = (  # type: ignore[method-assign]
+        canceled.append
+    )
+    strategy._opening_reconciliation_retry_scheduled = True
+
+    strategy.on_stop()
+    strategy._on_opening_reconciliation_alert()
+
+    assert "intent-opening.reconcile" in canceled
+    assert (
+        strategy._opening_reconciliation_retry_scheduled
+        is False
+    )
+    assert strategy.durable_io_halted_reason == ""
 
 
 def test_order_accepted_confirms_durable_intent_receipt(
@@ -1377,6 +1713,91 @@ def _replayed_opening_intent(intent_id: UUID) -> Any:
             "side": "buy",
             "quantity": "0.1",
         },
+    )
+
+
+def _durable_replayed_opening_intent(
+    intent_id: UUID,
+    *,
+    zone: bool = False,
+) -> ApprovedTradeIntentV1:
+    order_plan: dict[str, Any] = {
+        "type": "market",
+        "side": "buy",
+        "quantity": "0.1",
+    }
+    if zone:
+        order_plan = {
+            "type": "zone_ladder",
+            "side": "buy",
+            "tranches": [
+                {"price": "26000", "quantity": "0.03"},
+                {"price": "25900", "quantity": "0.03"},
+                {"price": "25800", "quantity": "0.04"},
+            ],
+        }
+    now = datetime(
+        2026,
+        8,
+        9,
+        12,
+        0,
+        tzinfo=timezone.utc,
+    )
+    return ApprovedTradeIntentV1.model_construct(
+        schema_version="1.0",
+        intent_id=intent_id,
+        decision_id=UUID(
+            "11111111-1111-4111-8111-111111111111"
+        ),
+        risk_decision_id=UUID(
+            "22222222-2222-4222-8222-222222222222"
+        ),
+        account_id="account-a",
+        instrument_id="BTCUSDT-PERP.BINANCE",
+        action=IntentAction.OPEN_POSITION,
+        order_plan=order_plan,
+        risk_budget=RiskBudget(
+            risk_fraction=0.01,
+            max_notional=100.0,
+            max_leverage=2.0,
+        ),
+        target_position_id=None,
+        valid_until=now + timedelta(minutes=5),
+        idempotency_key="a" * 64,
+        approved_at=now,
+    )
+
+
+def _seed_dispatched_receipt(
+    path: Path,
+    intent: ApprovedTradeIntentV1,
+) -> JsonDurableIntentInbox:
+    inbox = JsonDurableIntentInbox(path)
+    inbox.receive("cursor-1", intent)
+    inbox.complete(intent.intent_id, "DISPATCHED", "submitted")
+    return inbox
+
+
+def _wire_resubmit_receipt(
+    strategy: IntentExecutionStrategy,
+    inbox: JsonDurableIntentInbox,
+) -> None:
+    strategy.set_intent_receipt_status_getter(inbox.status)
+    strategy.set_intent_receipt_transition_handler(
+        lambda intent_id, expected, status, detail: (
+            inbox.transition(
+                intent_id,
+                expected_status=expected,
+                status=status,
+                detail=detail,
+            )
+        )
+    )
+    strategy.set_intent_receipt_handler(
+        lambda intent_id, status, detail: (
+            inbox.complete(intent_id, status, detail) is None
+        )
     )
 
 

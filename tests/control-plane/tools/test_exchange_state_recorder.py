@@ -140,6 +140,42 @@ class ExchangeStateRecorderTest(unittest.TestCase):
             "CANCELED",
         )
 
+    def test_targeted_history_symbols_are_prioritized_and_bounded(
+        self,
+    ) -> None:
+        module = _load_module()
+
+        symbols = module._recent_history_symbols(
+            [{"symbol": "SOLUSDT"}],
+            [{"symbol": "XRPUSDT"}],
+            [],
+            (
+                "ETHUSDT-PERP.BINANCE",
+                "BTCUSDT",
+                "ETHUSDT",
+            ),
+            max_symbols=3,
+        )
+
+        self.assertEqual(
+            symbols,
+            ("ETHUSDT", "BTCUSDT", "SOLUSDT"),
+        )
+
+    def test_history_symbol_limit_is_configurable_and_capped(
+        self,
+    ) -> None:
+        module = _load_module()
+
+        with patch.dict(
+            module.os.environ,
+            {"EXCHANGE_STATE_HISTORY_MAX_SYMBOLS": "999"},
+        ):
+            self.assertEqual(
+                module._history_symbol_limit(),
+                module.ABSOLUTE_RECENT_HISTORY_MAX_SYMBOLS,
+            )
+
     def test_signed_get_includes_extended_recv_window(self) -> None:
         module = _load_module()
         response = io.BytesIO(b"{}")

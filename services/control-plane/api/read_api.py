@@ -1287,6 +1287,7 @@ _OPENING_CLIENT_ORDER_ID_RE = re.compile(r"^B[0-9a-fA-F]{32}0[0-9]$")
 _OPENING_CONFIRMED_EXECUTED = "confirmed_executed"
 _OPENING_DEFINITIVELY_ABSENT = "definitively_absent"
 _OPENING_UNKNOWN = "unknown"
+_OPENING_EVIDENCE_TARGET_LIMIT = 256
 _CONFIRMED_ORDER_STATUSES = frozenset(
     {
         "accepted",
@@ -1329,39 +1330,60 @@ def _opening_execution_surface(
     account_id: str,
     exchange_payload: Mapping[str, Any],
     mirror_stale: bool,
+    target_client_order_ids: tuple[str, ...],
 ) -> dict[str, Any]:
     projection_rows: list[dict[str, Any]] = []
     event_rows: list[dict[str, Any]] = []
     durable_evidence_available = True
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT account_id, instrument_id, client_order_id, venue_order_id,
-                       status, filled_quantity, ts_event, updated_at, payload
-                FROM orders_projection
-                WHERE account_id=%s AND client_order_id ~ %s
-                ORDER BY updated_at, client_order_id
-                """,
-                (account_id, _OPENING_CLIENT_ORDER_ID_RE.pattern),
-            )
-            projection_rows = [dict(row) for row in cur.fetchall()]
-            cur.execute(
-                """
-                SELECT account_id, client_order_id, venue_order_id, trade_id,
-                       event_type, ts_event, payload
-                FROM execution_events
-                WHERE account_id=%s AND client_order_id ~ %s
-                ORDER BY ts_event, created_at
-                """,
-                (account_id, _OPENING_CLIENT_ORDER_ID_RE.pattern),
-            )
-            event_rows = [dict(row) for row in cur.fetchall()]
-    except psycopg2.Error:
-        conn.rollback()
-        durable_evidence_available = False
-        projection_rows = []
-        event_rows = []
+    if target_client_order_ids:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT account_id, instrument_id, client_order_id,
+                           venue_order_id, status, filled_quantity,
+                           ts_event, updated_at, payload
+                    FROM orders_projection
+                    WHERE account_id=%s
+                      AND client_order_id = ANY(%s)
+                    ORDER BY updated_at DESC, client_order_id
+                    LIMIT %s
+                    """,
+                    (
+                        account_id,
+                        list(target_client_order_ids),
+                        len(target_client_order_ids),
+                    ),
+                )
+                projection_rows = [
+                    dict(row) for row in cur.fetchall()
+                ]
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (client_order_id)
+                           account_id, client_order_id, venue_order_id,
+                           trade_id, event_type, ts_event, payload
+                    FROM execution_events
+                    WHERE account_id=%s
+                      AND client_order_id = ANY(%s)
+                    ORDER BY client_order_id, ts_event DESC,
+                             created_at DESC
+                    LIMIT %s
+                    """,
+                    (
+                        account_id,
+                        list(target_client_order_ids),
+                        len(target_client_order_ids),
+                    ),
+                )
+                event_rows = [
+                    dict(row) for row in cur.fetchall()
+                ]
+        except psycopg2.Error:
+            conn.rollback()
+            durable_evidence_available = False
+            projection_rows = []
+            event_rows = []
 
     trusted_exchange_payload: Mapping[str, Any] = exchange_payload
     if mirror_stale:
@@ -1379,6 +1401,7 @@ def _opening_execution_surface(
         exchange_payload=trusted_exchange_payload,
         projection_rows=projection_rows,
         event_rows=event_rows,
+        target_client_order_ids=target_client_order_ids,
     )
     reason = "fresh_account_scoped_evidence"
     if mirror_stale:
@@ -1398,15 +1421,23 @@ def _merge_opening_execution_evidence(
     exchange_payload: Mapping[str, Any],
     projection_rows: list[dict[str, Any]],
     event_rows: list[dict[str, Any]],
+    target_client_order_ids: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     evidence_by_id: dict[str, dict[str, Any]] = {}
+    target_ids = set(target_client_order_ids)
     for row in projection_rows:
         candidate = _projection_opening_evidence(account_id, row)
-        if candidate is not False:
+        if (
+            candidate is not False
+            and candidate["client_order_id"] in target_ids
+        ):
             _record_opening_evidence(evidence_by_id, candidate)
     for row in event_rows:
         candidate = _event_opening_evidence(account_id, row)
-        if candidate is not False:
+        if (
+            candidate is not False
+            and candidate["client_order_id"] in target_ids
+        ):
             _record_opening_evidence(evidence_by_id, candidate)
     for collection_name in (
         "open_orders",
@@ -1426,7 +1457,10 @@ def _merge_opening_execution_evidence(
                 source=f"exchange_state.{collection_name}",
                 observed_at=exchange_payload.get("fetched_at"),
             )
-            if candidate is not False:
+            if (
+                candidate is not False
+                and candidate["client_order_id"] in target_ids
+            ):
                 _record_opening_evidence(evidence_by_id, candidate)
     return [evidence_by_id[key] for key in sorted(evidence_by_id)]
 
@@ -1546,18 +1580,67 @@ def _exchange_opening_evidence(
         or row.get("executedQty")
         or row.get("actualQty")
     )
+    order_status = _optional_text(
+        row.get("status") or row.get("algoStatus")
+    )
+    normalized_status = str(order_status or "").strip().lower()
+    state = _OPENING_UNKNOWN
+    reason = "exchange_history_status_is_not_authoritative"
+    if normalized_status in _ABSENT_ORDER_STATUSES:
+        state = _OPENING_DEFINITIVELY_ABSENT
+        reason = f"exchange_history_status_{normalized_status}"
+    elif (
+        normalized_status in _CONFIRMED_ORDER_STATUSES
+        or _positive_decimal(filled_quantity)
+        or venue_order_id
+    ):
+        state = _OPENING_CONFIRMED_EXECUTED
+        reason = "fresh_exchange_order_history_match"
     return _opening_evidence_item(
         account_id=account_id,
         client_order_id=client_order_id,
-        state=_OPENING_CONFIRMED_EXECUTED,
-        order_status=_optional_text(row.get("status") or row.get("algoStatus")),
+        state=state,
+        order_status=order_status,
         instrument_id=instrument_id,
         venue_order_id=_optional_text(venue_order_id),
         filled_quantity=_optional_text(filled_quantity),
         source=source,
         observed_at=observed_at,
-        reason="fresh_exchange_order_history_match",
+        reason=reason,
     )
+
+
+def _opening_evidence_target_ids(
+    raw_client_order_ids: str | None,
+) -> tuple[str, ...]:
+    if raw_client_order_ids is None:
+        return ()
+    values = tuple(
+        dict.fromkeys(
+            value.strip()
+            for value in raw_client_order_ids.split(",")
+            if value.strip()
+        )
+    )
+    if len(values) > _OPENING_EVIDENCE_TARGET_LIMIT:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "client_order_ids exceeds opening evidence "
+                f"limit {_OPENING_EVIDENCE_TARGET_LIMIT}"
+            ),
+        )
+    invalid = tuple(
+        value
+        for value in values
+        if not _OPENING_CLIENT_ORDER_ID_RE.fullmatch(value)
+    )
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail="client_order_ids contains an invalid opening id",
+        )
+    return values
 
 
 def _opening_evidence_item(
@@ -1659,6 +1742,7 @@ def _iso_text(value: Any) -> str | None:
 def node_exchange_state(
     node_id: str,
     account_id: str,
+    client_order_ids: str | None = None,
     authorization: str | None = Header(default=None),
     x_node_id: str | None = Header(default=None),
     x_account_id: str | None = Header(default=None),
@@ -1670,6 +1754,9 @@ def node_exchange_state(
         account_id=account_id,
         x_node_id=x_node_id,
         x_account_id=x_account_id,
+    )
+    target_client_order_ids = _opening_evidence_target_ids(
+        client_order_ids
     )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -1700,6 +1787,7 @@ def node_exchange_state(
             account_id=account_id,
             exchange_payload=exchange_payload,
             mirror_stale=bool(response.get("stale")),
+            target_client_order_ids=target_client_order_ids,
         )
         return response
     finally:

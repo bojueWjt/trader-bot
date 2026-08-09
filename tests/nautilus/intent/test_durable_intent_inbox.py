@@ -220,6 +220,95 @@ def test_receipt_state_machine_preserves_dispatched_until_terminal(
     assert JsonDurableIntentInbox(path).pending() == ()
 
 
+def test_receipt_compare_and_transition_persists_resubmitting(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intent-inbox.json"
+    intent = _intent()
+    inbox = JsonDurableIntentInbox(path)
+    inbox.receive("cursor-1", intent)
+    inbox.complete(intent.intent_id, "DISPATCHED", "submitted")
+
+    assert inbox.transition(
+        intent.intent_id,
+        expected_status="DISPATCHED",
+        status="RESUBMITTING",
+        detail="authoritative_absence",
+    )
+    assert not inbox.transition(
+        intent.intent_id,
+        expected_status="DISPATCHED",
+        status="RESUBMITTING",
+        detail="duplicate_authority",
+    )
+
+    restarted = JsonDurableIntentInbox(path)
+    assert restarted.status(intent.intent_id) == "RESUBMITTING"
+    assert restarted.pending()[0].detail == (
+        "authoritative_absence"
+    )
+    restarted.complete(
+        intent.intent_id,
+        "DISPATCHED",
+        "late_async_completion",
+    )
+    assert JsonDurableIntentInbox(path).status(
+        intent.intent_id
+    ) == "RESUBMITTING"
+
+
+def test_client_sync_transition_is_owned_by_calling_worker(
+    tmp_path: Path,
+) -> None:
+    control_plane = InMemoryControlPlane(now=lambda: NOW)
+    intent = _intent()
+    control_plane.add_intent(
+        "account-a",
+        IntentItem(cursor="cursor-1", intent=intent),
+    )
+    client = _client(
+        tmp_path,
+        control_plane,
+        _RecordingPublisher(),
+    )
+    try:
+        assert client.poll_once() == 1
+        assert client.record_execution_terminal(
+            intent.intent_id,
+            "DISPATCHED",
+            "",
+        )
+        assert client.wait_for_durable_inbox(
+            timeout_seconds=1.0
+        )
+
+        actor_thread_id = get_ident()
+        transition_threads: list[int] = []
+
+        def transition() -> None:
+            transition_threads.append(get_ident())
+            assert client.persist_execution_receipt_transition(
+                intent.intent_id,
+                "DISPATCHED",
+                "RESUBMITTING",
+                "authoritative_absence",
+            )
+
+        worker = Thread(target=transition)
+        worker.start()
+        worker.join(timeout=1.0)
+
+        assert transition_threads
+        assert transition_threads[0] != actor_thread_id
+        assert client.intent_receipt_status(
+            intent.intent_id
+        ) == "RESUBMITTING"
+    finally:
+        client.durable_inbox_cleanup_worker().stop(
+            timeout_seconds=1.0
+        )
+
+
 def test_pending_receipts_replay_in_cursor_order(
     tmp_path: Path,
 ) -> None:

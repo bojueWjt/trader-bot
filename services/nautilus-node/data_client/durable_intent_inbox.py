@@ -22,11 +22,12 @@ class DurableIntentReceipt:
 class JsonDurableIntentInbox:
     """Restart-persistent receipt store for accepted intent delivery."""
 
-    _SCHEMA_VERSION = 2
+    _SCHEMA_VERSION = 3
     _INTERMEDIATE_STATUSES = frozenset({
         "RECEIVED",
         "PREPARED",
         "DISPATCHED",
+        "RESUBMITTING",
     })
     _TERMINAL_STATUSES = frozenset({
         "CONFIRMED",
@@ -37,6 +38,12 @@ class JsonDurableIntentInbox:
         "EXPIRED",
         "FILLED",
     })
+    _INTERMEDIATE_STATUS_RANK = {
+        "RECEIVED": 1,
+        "PREPARED": 2,
+        "DISPATCHED": 3,
+        "RESUBMITTING": 4,
+    }
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
@@ -71,6 +78,37 @@ class JsonDurableIntentInbox:
             self._write_records(records)
             self._records = records
 
+    def transition(
+        self,
+        intent_id: UUID | str,
+        *,
+        expected_status: str,
+        status: str,
+        detail: str,
+    ) -> bool:
+        with self._lock:
+            key = str(intent_id)
+            record = self._records.get(key)
+            if record is None:
+                return False
+            normalized_expected = self._validated_status(
+                expected_status
+            )
+            current_status = self._validated_status(
+                record["status"]
+            )
+            if current_status != normalized_expected:
+                return False
+            normalized_status = self._validated_status(status)
+            records = dict(self._records)
+            updated = dict(record)
+            updated["status"] = normalized_status
+            updated["detail"] = str(detail)
+            records[key] = updated
+            self._write_records(records)
+            self._records = records
+            return True
+
     def complete(
         self,
         intent_id: UUID | str,
@@ -93,6 +131,18 @@ class JsonDurableIntentInbox:
                         f"{normalized_status}"
                     )
                 record = dict(records[key])
+                current_status = self._validated_status(
+                    record["status"]
+                )
+                if (
+                    self._INTERMEDIATE_STATUS_RANK[
+                        normalized_status
+                    ]
+                    < self._INTERMEDIATE_STATUS_RANK[
+                        current_status
+                    ]
+                ):
+                    return
                 record["status"] = normalized_status
                 record["detail"] = normalized_detail
                 records[key] = record
@@ -136,7 +186,7 @@ class JsonDurableIntentInbox:
         if not isinstance(raw, dict):
             raise TypeError("durable intent inbox must be an object")
         schema_version = raw.get("schema_version")
-        if schema_version not in {1, self._SCHEMA_VERSION}:
+        if schema_version not in {1, 2, self._SCHEMA_VERSION}:
             raise ValueError(
                 "durable intent inbox schema version mismatch"
             )

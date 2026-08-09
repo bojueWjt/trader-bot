@@ -653,6 +653,23 @@ def _build_strategy(
         strategy.set_intent_receipt_handler(
             intent_receipt_handler
         )
+    intent_receipt_transition_handler = getattr(
+        runtime.intent_data_client,
+        "persist_execution_receipt_transition",
+        None,
+    )
+    intent_receipt_transition_setter = getattr(
+        strategy,
+        "set_intent_receipt_transition_handler",
+        None,
+    )
+    if (
+        callable(intent_receipt_transition_handler)
+        and callable(intent_receipt_transition_setter)
+    ):
+        intent_receipt_transition_setter(
+            intent_receipt_transition_handler
+        )
     intent_receipt_status_getter = getattr(
         runtime.intent_data_client,
         "intent_receipt_status",

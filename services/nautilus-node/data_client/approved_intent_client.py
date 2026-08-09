@@ -270,6 +270,22 @@ class ApprovedIntentDataClient:
             self._drain_hard_failure_mailbox()
         return accepted
 
+    def persist_execution_receipt_transition(
+        self,
+        intent_id: UUID | str,
+        expected_status: str,
+        status: str,
+        detail: str,
+    ) -> bool:
+        return bool(
+            self._intent_inbox.transition(
+                intent_id,
+                expected_status=expected_status,
+                status=status,
+                detail=detail,
+            )
+        )
+
     def durable_inbox_cleanup_worker(
         self,
     ) -> BoundedTaskWorker["_IntentInboxTask"]:
