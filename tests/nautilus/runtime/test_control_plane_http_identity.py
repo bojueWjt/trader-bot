@@ -111,7 +111,10 @@ def test_http_409_raises_typed_fence_conflict(
             409,
             "Conflict",
             hdrs={},
-            fp=BytesIO(b'{"detail":"lease owner conflict"}'),
+            fp=BytesIO(
+                b'{"detail":{"code":"lease_owner_conflict",'
+                b'"message":"lease owner conflict"}}'
+            ),
         )
 
     monkeypatch.setattr(http_client_module, "urlopen", urlopen)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Optional, Sequence
@@ -42,14 +41,13 @@ class ControlPlaneFenceConflictError(ControlPlaneHttpError):
     is_fence_conflict = True
 
 
-_FENCE_CONFLICT_CODE_RE = re.compile(
-    (
-        r"(?:\bfenc(?:e|ed|ing)\b|\blease\b|"
-        r"\bstale[_ -]?writer\b|"
-        r"\b(?:writer|lease)[_ -]?owner\b|"
-        r"\bowner[_ -]?(?:conflict|mismatch)\b)"
-    ),
-    re.IGNORECASE,
+_FENCE_CONFLICT_CODES = frozenset(
+    {
+        "fence_conflict",
+        "lease_owner_conflict",
+        "stale_writer",
+        "writer_identity_conflict",
+    }
 )
 
 
@@ -284,10 +282,8 @@ def _is_fence_conflict_response(raw_detail: str) -> bool:
                 continue
             if value is not None:
                 candidates.append(str(value))
-    else:
-        candidates.append(str(payload))
     return any(
-        _FENCE_CONFLICT_CODE_RE.search(candidate)
+        candidate.strip().lower() in _FENCE_CONFLICT_CODES
         for candidate in candidates
     )
 

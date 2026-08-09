@@ -181,6 +181,16 @@ def _node_bearer_token(authorization: str | None) -> str:
     return token
 
 
+def _writer_identity_conflict(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "writer_identity_conflict",
+            "message": str(message),
+        },
+    )
+
+
 def require_node(
     authorization: str | None,
     *,
@@ -222,7 +232,9 @@ def require_node(
     if requested_account_id != header_account_id:
         raise HTTPException(status_code=403, detail="node account mismatch")
     if requested_account_id != bound_account_id:
-        raise HTTPException(status_code=403, detail="node account mismatch")
+        raise _writer_identity_conflict(
+            "node account conflicts with the bound writer identity"
+        )
     return bound_account_id
 
 

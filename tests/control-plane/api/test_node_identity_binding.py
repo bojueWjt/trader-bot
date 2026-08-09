@@ -98,6 +98,29 @@ def test_strict_node_identity_rejects_wrong_token(
     assert exc_info.value.status_code == 401
 
 
+def test_bound_writer_account_conflict_has_structured_fence_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NAUTILUS_NODE_AUTH_JSON", _binding_payload())
+
+    with pytest.raises(HTTPException) as exc_info:
+        read_api.require_node(
+            _authorization(),
+            node_id=NODE_A,
+            account_id="account-b",
+            x_node_id=NODE_A,
+            x_account_id="account-b",
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {
+        "code": "writer_identity_conflict",
+        "message": (
+            "node account conflicts with the bound writer identity"
+        ),
+    }
+
+
 def test_strict_node_identity_rejects_duplicate_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
