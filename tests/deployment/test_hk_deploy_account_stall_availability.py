@@ -65,6 +65,15 @@ def test_deploy_script_keeps_lock_backup_and_precise_rollback() -> None:
     assert 'printf \'absent\\t%s\\t-\\n\'' in text
     assert 'echo "ROLLBACK: bash $ROLLBACK_PATH"' in text
     assert 'cat >"$ROLLBACK_PATH"' in text
+    assert 'rm -rf -- "$target"' in text
+
+
+def test_deploy_script_repairs_non_file_patch_sources() -> None:
+    text = _text()
+
+    assert "prepare_file_target()" in text
+    assert '[ -e "$target" ] && [ ! -f "$target" ]' in text
+    assert text.count('prepare_file_target "$target_path"') == 3
 
 
 def test_deploy_script_verifies_sha_mounts_and_deleted_inodes() -> None:

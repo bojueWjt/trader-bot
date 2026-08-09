@@ -303,6 +303,15 @@ backup_target() {
   fi
 }
 
+prepare_file_target() {
+  local target="$1"
+  if [ -L "$target" ] || {
+    [ -e "$target" ] && [ ! -f "$target" ]
+  }; then
+    rm -rf -- "$target"
+  fi
+}
+
 
 while IFS=$'\t' read -r bundle_path mount_target expected_sha; do
   : "$mount_target" "$expected_sha"
@@ -359,11 +368,12 @@ while IFS=$'\t' read -r status target backup_relative; do
   esac
   case "$status" in
     present)
+      rm -rf -- "$target"
       mkdir -p "$(dirname "$target")"
       cp -a "$BACKUP_ROOT/$backup_relative" "$target"
       ;;
     absent)
-      rm -f "$target"
+      rm -rf -- "$target"
       ;;
     *)
       echo "FATAL: invalid rollback index status: $status" >&2
@@ -503,6 +513,7 @@ echo "== backup complete: $BACKUP_ROOT"
 while IFS=$'\t' read -r bundle_path target_relative expected_sha; do
   source_path="$STAGING/$bundle_path"
   target_path="$T/$target_relative"
+  prepare_file_target "$target_path"
   install -D -m 0644 "$source_path" "$target_path"
   actual_sha="$(sha256sum "$target_path" | awk '{print $1}')"
   [ "$actual_sha" = "$expected_sha" ] \
@@ -738,6 +749,7 @@ echo "== migrations verified: exact delta 0005,0010"
 while IFS=$'\t' read -r bundle_path target_relative expected_sha; do
   source_path="$STAGING/$bundle_path"
   target_path="$T/$target_relative"
+  prepare_file_target "$target_path"
   install -D -m 0644 "$source_path" "$target_path"
   actual_sha="$(sha256sum "$target_path" | awk '{print $1}')"
   [ "$actual_sha" = "$expected_sha" ] \
@@ -781,6 +793,7 @@ while IFS=$'\t' read -r bundle_path mount_target expected_sha; do
   : "$mount_target"
   source_path="$STAGING/$bundle_path"
   target_path="$PATCH_DIR/$bundle_path"
+  prepare_file_target "$target_path"
   install -D -m 0644 "$source_path" "$target_path"
   actual_sha="$(sha256sum "$target_path" | awk '{print $1}')"
   [ "$actual_sha" = "$expected_sha" ] \
