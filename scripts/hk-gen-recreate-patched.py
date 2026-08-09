@@ -51,7 +51,6 @@ PATCH_MOUNT_TARGETS = (
         "durable_command_journal.py",
         "/app/commands/durable_command_journal.py",
     ),
-    ("commands_init.py", "/app/commands/__init__.py"),
 )
 _RESOURCE_RE = re.compile(r"^[1-9][0-9]*(?:[bkmg])?$", re.IGNORECASE)
 

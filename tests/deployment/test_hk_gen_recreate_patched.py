@@ -218,6 +218,10 @@ class GenRecreatePatchedTest(unittest.TestCase):
         for mount in expected:
             self.assertEqual(mounts.count(mount), 1)
         self.assertNotIn(
+            f"{self.patch_dir}/commands_init.py:/app/commands/__init__.py:ro",
+            mounts,
+        )
+        self.assertNotIn(
             f"{self.patch_dir}/projection_actor.py:/app/wrong/actor.py:ro",
             mounts,
         )

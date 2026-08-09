@@ -6,6 +6,7 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GENERATOR = REPO_ROOT / "scripts" / "hk-gen-recreate-patched.py"
+BUNDLE_SCRIPT = REPO_ROOT / "scripts" / "make_container_bundle.py"
 ROOT_WINDOW = REPO_ROOT / "scripts" / "hk-root-window-20260729.sh"
 ROOT_CONTINUE = REPO_ROOT / "scripts" / "hk-root-continue-20260729.sh"
 BINANCE_DST = (
@@ -16,7 +17,7 @@ BINANCE_FUTURES_DST = (
     "/usr/local/lib/python3.12/site-packages/"
     "nautilus_trader/adapters/binance/futures/execution.py"
 )
-EXPECTED_PATCH_MOUNTS = {
+EXPECTED_LEGACY_PATCH_MOUNTS = {
     "intent_execution_planner.py": "/app/strategy/intent_execution_planner.py",
     "contracts.py": "/app/execution_domain/contracts.py",
     "control_plane.py": "/app/execution_domain/control_plane.py",
@@ -35,10 +36,26 @@ EXPECTED_PATCH_MOUNTS = {
 
 
 class NodePatchMountContractTest(unittest.TestCase):
-    def test_generator_deploy_and_continuation_share_full_patch_mount_list(self):
-        self.assertEqual(_generator_mounts(), EXPECTED_PATCH_MOUNTS)
-        self.assertEqual(_shell_mounts(ROOT_WINDOW), EXPECTED_PATCH_MOUNTS)
-        self.assertEqual(_shell_mounts(ROOT_CONTINUE), EXPECTED_PATCH_MOUNTS)
+    def test_current_generator_matches_current_bundle_mount_contract(self):
+        bundle_namespace = runpy.run_path(str(BUNDLE_SCRIPT))
+        expected = {
+            item[0]: item[2]
+            for item in bundle_namespace["BUNDLE_FILES"]
+        }
+
+        self.assertEqual(_generator_mounts(), expected)
+        self.assertNotIn("commands_init.py", expected)
+        self.assertNotIn("/app/commands/__init__.py", expected.values())
+
+    def test_legacy_deploy_and_continuation_share_legacy_patch_mount_list(self):
+        self.assertEqual(
+            _shell_mounts(ROOT_WINDOW),
+            EXPECTED_LEGACY_PATCH_MOUNTS,
+        )
+        self.assertEqual(
+            _shell_mounts(ROOT_CONTINUE),
+            EXPECTED_LEGACY_PATCH_MOUNTS,
+        )
 
     def test_deploy_uses_mount_list_for_staging_backup_install_and_verification(self):
         text = ROOT_WINDOW.read_text(encoding="utf-8")

@@ -71,6 +71,8 @@ def test_bundle_writes_dependency_closed_release_identity_and_checksums(
         for item in manifest["files"]
     }
     assert REQUIRED_DEPENDENCY_CLOSURE.items() <= actual_mounts.items()
+    assert "commands_init.py" not in actual_mounts
+    assert "/app/commands/__init__.py" not in actual_mounts.values()
     assert len(actual_mounts) == len(bundle.BUNDLE_FILES)
 
     host_targets = {

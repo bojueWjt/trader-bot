@@ -134,11 +134,6 @@ BUNDLE_FILES = (
         "/app/commands/durable_command_journal.py",
     ),
     (
-        "commands_init.py",
-        "services/nautilus-node/commands/__init__.py",
-        "/app/commands/__init__.py",
-    ),
-    (
         "binance_execution.py",
         "container-patches/binance_execution.py",
         (
