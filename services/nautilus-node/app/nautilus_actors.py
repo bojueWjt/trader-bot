@@ -2423,6 +2423,7 @@ def _first_attr(source: Any, names: tuple[str, ...]) -> Any:
 
 
 def _lane_hard_failure(lane_name: str, lane: Any) -> str:
+    del lane_name
     if lane is None:
         return ""
     fatal_failure = str(
@@ -2430,15 +2431,7 @@ def _lane_hard_failure(lane_name: str, lane: Any) -> str:
     ).strip()
     if fatal_failure:
         return fatal_failure
-    queue_pressure = str(
-        getattr(lane, "queue_pressure", "") or ""
-    ).strip().lower()
-    if queue_pressure != "full":
-        return ""
-    failure = str(getattr(lane, "failure", "") or "").strip()
-    if failure:
-        return failure
-    return f"{lane_name} queue capacity exceeded"
+    return ""
 
 
 def _lane_degraded_failure(lane_name: str, lane: Any) -> str:
@@ -2455,8 +2448,8 @@ def _lane_degraded_failure(lane_name: str, lane: Any) -> str:
     queue_pressure = str(
         getattr(lane, "queue_pressure", "") or ""
     ).strip().lower()
-    if queue_pressure == "degraded":
-        return f"{lane_name} queue pressure is degraded"
+    if queue_pressure in {"degraded", "full"}:
+        return f"{lane_name} queue pressure is {queue_pressure}"
     return ""
 
 

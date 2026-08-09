@@ -1255,7 +1255,7 @@ def test_command_poll_progress_refreshes_while_ack_is_degraded() -> None:
     actor.on_stop()
 
 
-def test_fatal_session_queue_state_remains_hard_failure() -> None:
+def test_session_queue_pressure_remains_recoverable_degradation() -> None:
     lifecycle = _Lifecycle()
     session = _LocalSession()
     heartbeat_lane = session._snapshot.lanes["heartbeat"]
@@ -1264,7 +1264,7 @@ def test_fatal_session_queue_state_remains_hard_failure() -> None:
     command_lane.last_success_at = time.monotonic()
     ack_lane = session._snapshot.lanes["command_ack"]
     ack_lane.failure = "command ACK queue capacity exceeded"
-    ack_lane.fatal_failure = "command ACK queue capacity exceeded"
+    ack_lane.fatal_failure = False
     ack_lane.queue_pressure = "full"
     actor = CommandPollerActor(
         control_plane=object(),
@@ -1278,10 +1278,10 @@ def test_fatal_session_queue_state_remains_hard_failure() -> None:
     actor._on_poll_timer()
     actor.on_stop()
 
-    assert _failed_reasons(lifecycle) == {
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
         "command_stream": "command ACK queue capacity exceeded",
     }
-    assert _degraded_reasons(lifecycle) == {}
 
 
 def _pump_actor_until(

@@ -150,13 +150,20 @@ def test_startup_heartbeat_http_failure_degrades_then_recovers() -> None:
     assert session.stop(time.monotonic() + 1.0) is True
 
 
-def test_fatal_deadline_publishes_termination_and_process_dead() -> None:
+def test_operation_deadline_degrades_without_terminating_and_recovers() -> None:
     blocked = Event()
     release = Event()
+    recovered = Event()
     fatal_reasons: list[str] = []
+    calls = 0
 
     def sink(event: Any) -> None:
+        nonlocal calls
         del event
+        calls += 1
+        if calls > 1:
+            recovered.set()
+            return
         blocked.set()
         release.wait(timeout=1.0)
 
@@ -164,6 +171,7 @@ def test_fatal_deadline_publishes_termination_and_process_dead() -> None:
         execution_event_sink=sink,
         operation_timeout_seconds=0.02,
         retry_budget=1,
+        circuit_reset_seconds=0.01,
         fatal_termination_hook=fatal_reasons.append,
     )
     session.start()
@@ -171,20 +179,22 @@ def test_fatal_deadline_publishes_termination_and_process_dead() -> None:
     session.submit_execution_event("fill-1")
 
     assert blocked.wait(timeout=1.0)
-    assert session.wait_for_termination(timeout=1.0) is True
-    fatal = session.snapshot()
+    assert _wait_until(lambda: session.snapshot().degraded)
+    degraded = session.snapshot()
 
-    assert fatal.process_liveness is False
-    assert fatal.ready is False
-    assert fatal_reasons == [
-        "execution_event operation exceeded 0.020s deadline"
-    ]
+    assert degraded.process_liveness is True
+    assert degraded.ready is False
+    assert degraded.lanes["execution_event"].fatal_failure is False
+    assert fatal_reasons == []
+    assert session.wait_for_termination(timeout=0.01) is False
 
     release.set()
+    assert recovered.wait(timeout=1.0)
+    assert _wait_until(lambda: session.snapshot().degraded is False)
     assert session.stop(time.monotonic() + 1.0) is True
 
 
-def test_queue_capacity_fatal_publishes_termination_and_process_dead() -> None:
+def test_queue_capacity_backpressures_without_terminating_and_recovers() -> None:
     blocked = Event()
     release = Event()
     fatal_reasons: list[str] = []
@@ -207,16 +217,23 @@ def test_queue_capacity_fatal_publishes_termination_and_process_dead() -> None:
 
     assert session.submit_execution_event("fill-2").value == "accepted"
     assert session.submit_execution_event("fill-3").value == "backpressured"
-    assert session.wait_for_termination(timeout=1.0) is True
-    fatal = session.snapshot()
+    degraded = session.snapshot()
 
-    assert fatal.process_liveness is False
-    assert fatal.ready is False
-    assert fatal_reasons == [
-        "execution_event queue capacity exceeded"
-    ]
+    assert degraded.process_liveness is True
+    assert degraded.ready is False
+    assert degraded.degraded is True
+    assert degraded.lanes["execution_event"].queue_pressure == "full"
+    assert degraded.lanes["execution_event"].fatal_failure is False
+    assert fatal_reasons == []
+    assert session.wait_for_termination(timeout=0.01) is False
 
     release.set()
+    assert _wait_until(
+        lambda: (
+            session.snapshot().lanes["execution_event"].queue_depth == 0
+            and session.snapshot().degraded is False
+        )
+    )
     assert session.stop(time.monotonic() + 1.0) is True
 
 

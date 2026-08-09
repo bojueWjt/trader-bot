@@ -237,6 +237,15 @@ class _Lane:
             self.failure = reason
             return True
 
+    def mark_backpressured(self, reason: str) -> bool:
+        with self.lock:
+            if self.fatal_failure is not False:
+                return False
+            self.failure = str(reason)
+            self.consecutive_failures += 1
+            self.error_count += 1
+            return True
+
     def accepts_submissions(self) -> bool:
         with self.lock:
             return self.fatal_failure is False
@@ -929,8 +938,9 @@ class NodeControlPlaneSession:
                     f"{lane.name} operation exceeded "
                     f"{lane.operation_timeout_seconds:.3f}s deadline"
                 )
-                detail, _opened = lane.complete_timeout(exc)
-                self._trigger_fatal_termination(lane, detail)
+                _detail, opened = lane.complete_timeout(exc)
+                if opened:
+                    self._report_failure(lane.name, exc)
                 return False
             lane.succeed()
             self._report_success(lane.name)
@@ -1010,7 +1020,7 @@ class NodeControlPlaneSession:
 
     def _mark_lane_capacity_failure(self, lane: _Lane) -> None:
         reason = f"{lane.name} queue capacity exceeded"
-        self._trigger_fatal_termination(lane, reason)
+        lane.mark_backpressured(reason)
 
     def _offer_token(self, lane: _Lane) -> None:
         try:
@@ -1048,8 +1058,12 @@ class NodeControlPlaneSession:
                 expired = lane.expire_if_overdue(now)
                 if expired is False:
                     continue
-                detail, _opened = expired
-                self._trigger_fatal_termination(lane, detail)
+                detail, opened = expired
+                if opened:
+                    self._report_failure(
+                        lane.name,
+                        TimeoutError(detail),
+                    )
             self._check_consumer_progress()
 
     def _check_consumer_progress(self) -> None:
@@ -1264,7 +1278,10 @@ def _lane_is_degraded(lane: LaneHealth) -> bool:
         return True
     if lane.circuit_state != CircuitState.CLOSED.value:
         return True
-    return lane.queue_pressure == QueuePressure.DEGRADED.value
+    return lane.queue_pressure in {
+        QueuePressure.DEGRADED.value,
+        QueuePressure.FULL.value,
+    }
 
 
 def _take_bounded(
