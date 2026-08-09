@@ -82,7 +82,7 @@ def test_deploy_script_verifies_sha_mounts_and_deleted_inodes() -> None:
     assert "account-a Docker memory-swap limit mismatch" in text
 
 
-def test_deploy_script_backs_up_and_applies_exact_schema_delta() -> None:
+def test_deploy_script_backs_up_and_applies_idempotent_schema_transition() -> None:
     text = _text()
 
     backup = text.index('DB_DUMP="$BACKUP_ROOT/postgres-pre-migration.dump"')
@@ -103,7 +103,9 @@ def test_deploy_script_backs_up_and_applies_exact_schema_delta() -> None:
     assert "postgres-pre-migration.dump.list" in text
     assert "schema-migrations-before.json" in text
     assert "schema-migrations-after.json" in text
-    assert 'delta != {"0005", "0010"}' in text
+    assert "versions not in (legacy, target)" in text
+    assert "expected_delta = set(expected_after) - before_versions" in text
+    assert "delta != expected_delta" in text
     assert "unexpected pre-migration exact set" in text
     assert "unexpected post-migration exact set" in text
     assert "0005 trigger/function verification failed" in text

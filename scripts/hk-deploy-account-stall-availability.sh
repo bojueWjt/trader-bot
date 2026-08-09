@@ -448,7 +448,7 @@ import sys
 
 import psycopg2
 
-expected = [
+legacy = [
     "0001",
     "0002",
     "0003",
@@ -457,6 +457,18 @@ expected = [
     "0007",
     "0008",
     "0009",
+]
+target = [
+    "0001",
+    "0002",
+    "0003",
+    "0004",
+    "0005",
+    "0006",
+    "0007",
+    "0008",
+    "0009",
+    "0010",
 ]
 with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
     with conn.cursor() as cursor:
@@ -472,7 +484,7 @@ payload = [
 with open(sys.argv[1], "w", encoding="utf-8") as output:
     json.dump(payload, output, indent=2, sort_keys=True)
     output.write("\n")
-if versions != expected:
+if versions not in (legacy, target):
     raise SystemExit(
         f"unexpected pre-migration exact set: {versions}"
     )
@@ -550,7 +562,8 @@ if after_versions != expected_after:
         f"unexpected post-migration exact set: {after_versions}"
     )
 delta = set(after_versions) - before_versions
-if delta != {"0005", "0010"}:
+expected_delta = set(expected_after) - before_versions
+if delta != expected_delta:
     raise SystemExit(f"unexpected migration delta: {sorted(delta)}")
 PY
 
