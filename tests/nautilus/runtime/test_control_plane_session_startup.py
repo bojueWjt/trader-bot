@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 from threading import Event
@@ -355,6 +356,26 @@ def test_stopped_session_publishes_termination_and_process_dead() -> None:
     assert stopped.stopped is True
     assert stopped.process_liveness is False
     assert stopped.ready is False
+
+
+def test_repeated_start_stop_leaves_no_control_plane_threads() -> None:
+    thread_prefix = "account-stall-start-stop"
+
+    for cycle in range(100):
+        session = NodeControlPlaneSession(
+            thread_name_prefix=f"{thread_prefix}-{cycle}",
+        )
+        session.start()
+
+        assert _wait_until(lambda: session.snapshot().ready)
+        assert session.stop(time.monotonic() + 1.0) is True
+
+    leaked = [
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name.startswith(thread_prefix)
+    ]
+    assert leaked == []
 
 
 def test_health_liveness_fails_closed_from_session_process_state() -> None:
