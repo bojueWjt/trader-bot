@@ -5,9 +5,16 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 from .health_server import build_health_server
-from .node import build_account_runtime, run_startup_readiness_checks
+from .node import (
+    _stop_background_workers,
+    _stop_control_plane_session,
+    _stop_redis_runtime_safety,
+    build_account_runtime,
+    run_startup_readiness_checks,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,6 +78,67 @@ def main(argv: list[str] | None = None) -> int:
     node.build()
     node.run()
     return 0
+
+
+def _cleanup_runtime(runtime: Any, server: Any) -> None:
+    errors: list[Exception] = []
+    if server is not False:
+        _call_cleanup(server, "shutdown", errors)
+        _call_cleanup(server, "server_close", errors)
+
+    if runtime is not False:
+        writer_cleanup_clean = True
+        try:
+            _stop_control_plane_session(runtime)
+        except Exception as exc:
+            errors.append(exc)
+            writer_cleanup_clean = False
+        node = getattr(runtime, "trading_node", None)
+        if node is not None:
+            error_count = len(errors)
+            _call_cleanup(node, "stop", errors)
+            _call_cleanup(node, "dispose", errors)
+            if len(errors) != error_count:
+                writer_cleanup_clean = False
+        try:
+            _stop_background_workers(runtime)
+        except Exception as exc:
+            errors.append(exc)
+            writer_cleanup_clean = False
+        try:
+            _stop_redis_runtime_safety(runtime)
+        except Exception as exc:
+            errors.append(exc)
+            writer_cleanup_clean = False
+        guard = getattr(runtime, "namespace_lease_guard", None)
+        if guard is not None and writer_cleanup_clean:
+            _call_cleanup(guard, "close", errors)
+        elif guard is not None:
+            errors.append(
+                RuntimeError(
+                    "namespace lease retained because writer cleanup "
+                    "did not complete"
+                )
+            )
+
+    if errors:
+        raise RuntimeError(
+            f"runtime cleanup failed with {len(errors)} error(s)"
+        ) from errors[0]
+
+
+def _call_cleanup(
+    target: Any,
+    method_name: str,
+    errors: list[Exception],
+) -> None:
+    method = getattr(target, method_name, None)
+    if not callable(method):
+        return
+    try:
+        method()
+    except Exception as exc:
+        errors.append(exc)
 
 
 if __name__ == "__main__":

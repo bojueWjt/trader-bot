@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -508,6 +509,65 @@ def _dependency_by_value(value: str) -> Any:
     except ModuleNotFoundError:
         return value
     return None
+
+
+def _stop_control_plane_session(runtime: Any) -> None:
+    session = getattr(runtime, "control_plane_session", None)
+    if session is None:
+        return
+    try:
+        stopped = bool(session.stop(time.monotonic() + 1.0))
+        if not stopped:
+            raise RuntimeError(
+                "control-plane session failed to drain before deadline"
+            )
+    finally:
+        runtime.control_plane_session = None
+
+
+def _stop_background_workers(runtime: Any) -> None:
+    workers = getattr(runtime, "background_workers", None)
+    if not isinstance(workers, list):
+        return
+    errors: list[Exception] = []
+    for worker in reversed(workers):
+        try:
+            stopped = worker.stop()
+            if stopped is False:
+                errors.append(
+                    RuntimeError(
+                        "background worker remained alive after stop"
+                    )
+                )
+        except Exception as exc:
+            errors.append(exc)
+    if errors:
+        raise RuntimeError(
+            f"background worker cleanup failed with {len(errors)} error(s)"
+        ) from errors[0]
+    workers.clear()
+
+
+def _stop_redis_runtime_safety(runtime: Any) -> None:
+    guard = getattr(runtime, "redis_runtime_safety_guard", None)
+    client = getattr(runtime, "redis_runtime_safety_client", None)
+    errors: list[Exception] = []
+    if guard is not None:
+        try:
+            guard.stop()
+        except Exception as exc:
+            errors.append(exc)
+        runtime.redis_runtime_safety_guard = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception as exc:
+            errors.append(exc)
+        runtime.redis_runtime_safety_client = None
+    if errors:
+        raise RuntimeError(
+            "Redis runtime safety cleanup failed"
+        ) from errors[0]
 
 
 class _NautilusIntentPublisher:
