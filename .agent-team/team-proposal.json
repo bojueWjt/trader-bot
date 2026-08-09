@@ -1,0 +1,407 @@
+{
+  "team": "account-stall-hardening",
+  "goal": "完成节点发布、Redis、控制面、健康恢复与事故模型改造，并通过故障注入和一次受限真实小额交易闭环验证。",
+  "form": "pipeline",
+  "platforms": [
+    "codex"
+  ],
+  "roles": [
+    {
+      "id": "planner",
+      "title": "总控与变更负责人",
+      "duty": "拆解里程碑、派发原子任务、维护依赖和风险台账，并主持每个生产变更门。",
+      "required": true,
+      "modelTier": "brain",
+      "models": {
+        "codex": "gpt-5.6-sol (high)"
+      },
+      "candidates": [
+        {
+          "file": "specialized/agents-orchestrator.md",
+          "name": "Agents Orchestrator",
+          "emoji": "🎛️",
+          "vibe": "The conductor who runs the entire dev pipeline from spec to ship.",
+          "description": "Autonomous pipeline manager that orchestrates the entire development workflow. You are the leader of this process."
+        },
+        {
+          "file": "project-management/project-manager-senior.md",
+          "name": "Senior Project Manager",
+          "emoji": "📝",
+          "vibe": "Converts specs to tasks with realistic scope — no gold-plating, no fantasy.",
+          "description": "Converts specs to tasks and remembers previous projects. Focused on realistic scope, no background processes, exact spec requirements"
+        },
+        {
+          "file": "project-management/project-management-project-shepherd.md",
+          "name": "Project Shepherd",
+          "emoji": "🐑",
+          "vibe": "Herds cross-functional chaos into on-time, on-scope delivery.",
+          "description": "Expert project manager specializing in cross-functional project coordination, timeline management, and stakeholder alignment."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "architect",
+      "title": "交易运行时架构师",
+      "duty": "冻结目标架构、ADR、状态机和模块边界，覆盖 NodeControlPlaneSession、控制面隔离与恢复语义。",
+      "required": true,
+      "modelTier": "brain",
+      "models": {
+        "codex": "gpt-5.6-sol (high)"
+      },
+      "candidates": [
+        {
+          "file": "engineering/engineering-software-architect.md",
+          "name": "Software Architect",
+          "emoji": "🏛️",
+          "vibe": "Designs systems that survive the team that built them. Every decision has a trade-off — name it.",
+          "description": "Expert software architect specializing in system design, domain-driven design, architectural patterns, and technical decision-making."
+        },
+        {
+          "file": "engineering/engineering-backend-architect.md",
+          "name": "Backend Architect",
+          "emoji": "🏗️",
+          "vibe": "Designs the systems that hold everything up — databases, APIs, cloud, scale.",
+          "description": "Senior backend architect specializing in scalable system design, database architecture, API development, and cloud infrastructure."
+        },
+        {
+          "file": "specialized/specialized-workflow-architect.md",
+          "name": "Workflow Architect",
+          "emoji": "🗺️",
+          "vibe": "Every path the system can take — mapped, named, and specified before a single line is written.",
+          "description": "Workflow design specialist who maps happy paths, branch conditions, failure modes, recovery paths, contracts, and observable states."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "node-runtime-executor",
+      "title": "节点并发与生命周期工程师",
+      "duty": "实现独立网络 lanes、actor 结果队列、状态机、tick watchdog 和幂等恢复。",
+      "required": true,
+      "modelTier": "labor",
+      "models": {
+        "codex": "gpt-5.6-luna (medium)"
+      },
+      "candidates": [
+        {
+          "file": "engineering/engineering-backend-architect.md",
+          "name": "Backend Architect",
+          "emoji": "🏗️",
+          "vibe": "Designs the systems that hold everything up — databases, APIs, cloud, scale.",
+          "description": "Senior backend architect specializing in scalable system design, database architecture, API development, and cloud infrastructure."
+        },
+        {
+          "file": "engineering/engineering-realtime-collaboration-engineer.md",
+          "name": "Realtime Collaboration Engineer",
+          "emoji": "🤝",
+          "vibe": "Every keystroke is a distributed system. Converge, don't collide — and assume the network just dropped.",
+          "description": "Expert realtime systems engineer for reconnect-safe protocols, offline-first synchronization, and fan-out scaling."
+        },
+        {
+          "file": "engineering/engineering-codebase-onboarding-engineer.md",
+          "name": "Codebase Onboarding Engineer",
+          "emoji": "🧭",
+          "vibe": "Gets new developers productive faster by reading the code, tracing the paths, and stating the facts.",
+          "description": "Expert developer onboarding specialist who traces unfamiliar code paths and states only code-grounded facts."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "control-plane-executor",
+      "title": "控制面与 PostgreSQL 工程师",
+      "duty": "拆分 node-control、event-ingest、operator-query 服务，落地专属连接池、超时和容量隔离。",
+      "required": true,
+      "modelTier": "labor",
+      "models": {
+        "codex": "gpt-5.6-luna (medium)"
+      },
+      "candidates": [
+        {
+          "file": "engineering/engineering-api-platform-engineer.md",
+          "name": "API Platform Engineer",
+          "emoji": "🔌",
+          "vibe": "A public API is a promise you can't take back. Design the contract like you'll live with it for a decade.",
+          "description": "Expert API platform engineer for contract-first APIs, versioning, gateways, authentication, rate limits, and quotas."
+        },
+        {
+          "file": "engineering/engineering-database-optimizer.md",
+          "name": "Database Optimizer",
+          "emoji": "🗄️",
+          "vibe": "Indexes, query plans, and schema design — databases that don't wake you at 3am.",
+          "description": "Expert database specialist focusing on schema design, query optimization, indexing, and PostgreSQL performance."
+        },
+        {
+          "file": "engineering/engineering-database-reliability-engineer.md",
+          "name": "Database Reliability Engineer",
+          "emoji": "🛟",
+          "vibe": "Prove the restore, rehearse the failover, migrate without a maintenance window.",
+          "description": "Expert DBRE for availability, connection pooling, backup, failover, and zero-downtime schema migrations."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "redis-release-executor",
+      "title": "Redis 与不可变发布工程师",
+      "duty": "实现稳定 UUID namespace、fencing、janitor、容量限制、不可变镜像和 A/B digest 发布门。",
+      "required": true,
+      "modelTier": "labor",
+      "models": {
+        "codex": "gpt-5.6-luna (medium)"
+      },
+      "candidates": [
+        {
+          "file": "engineering/engineering-sre.md",
+          "name": "SRE (Site Reliability Engineer)",
+          "emoji": "🛡️",
+          "vibe": "Reliability is a feature. Error budgets fund velocity — spend them wisely.",
+          "description": "Expert site reliability engineer specializing in SLOs, observability, chaos engineering, and toil reduction."
+        },
+        {
+          "file": "engineering/engineering-devops-automator.md",
+          "name": "DevOps Automator",
+          "emoji": "⚙️",
+          "vibe": "Automates infrastructure so your team ships faster and sleeps better.",
+          "description": "Expert DevOps engineer specializing in infrastructure automation, CI/CD pipelines, and cloud operations."
+        },
+        {
+          "file": "support/support-infrastructure-maintainer.md",
+          "name": "Infrastructure Maintainer",
+          "emoji": "🏢",
+          "vibe": "Keeps the lights on, the servers humming, and the alerts quiet.",
+          "description": "Infrastructure specialist focused on reliability, performance optimization, security, and operations."
+        },
+        {
+          "file": "engineering/engineering-database-reliability-engineer.md",
+          "name": "Database Reliability Engineer",
+          "emoji": "🛟",
+          "vibe": "Prove the restore, rehearse the failover, migrate without a maintenance window.",
+          "description": "Expert DBRE for high availability, backup verification, connection pooling, and disaster recovery drills."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "reviewer",
+      "title": "高风险代码审查员",
+      "duty": "逐任务审查正确性、线程安全、幂等、账户隔离、发布可回滚性和测试充分性。",
+      "required": true,
+      "modelTier": "gate",
+      "models": {
+        "codex": "gpt-5.6-terra (high)"
+      },
+      "candidates": [
+        {
+          "file": "engineering/engineering-code-reviewer.md",
+          "name": "Code Reviewer",
+          "emoji": "👁️",
+          "vibe": "Reviews code like a mentor, not a gatekeeper. Every comment teaches something.",
+          "description": "Expert code reviewer focused on correctness, maintainability, security, and performance."
+        },
+        {
+          "file": "engineering/engineering-autonomous-optimization-architect.md",
+          "name": "Autonomous Optimization Architect",
+          "emoji": "⚡",
+          "vibe": "The system governor that makes things faster without bankrupting you.",
+          "description": "Intelligent system governor that shadow-tests APIs while enforcing strict financial and security guardrails."
+        },
+        {
+          "file": "engineering/engineering-privacy-engineer.md",
+          "name": "Privacy Engineer",
+          "emoji": "🕵️",
+          "vibe": "A privacy policy is a promise; the code is whether you kept it.",
+          "description": "Expert privacy engineer who builds provable API controls, minimization, retention, and deletion."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "chaos-tester",
+      "title": "故障注入与恢复验收工程师",
+      "duty": "验证控制面延迟、ACK 堵塞、PG pool exhaustion、Redis 压力、actor 冻结和重启幂等。",
+      "required": true,
+      "modelTier": "gate",
+      "models": {
+        "codex": "gpt-5.6-terra (medium)"
+      },
+      "candidates": [
+        {
+          "file": "testing/testing-performance-benchmarker.md",
+          "name": "Performance Benchmarker",
+          "emoji": "⏱️",
+          "vibe": "Measures everything, optimizes what matters, and proves the improvement.",
+          "description": "Expert performance testing specialist focused on measuring and proving system behavior under load."
+        },
+        {
+          "file": "testing/testing-api-tester.md",
+          "name": "API Tester",
+          "emoji": "🔌",
+          "vibe": "Breaks your API before your users do.",
+          "description": "Expert API testing specialist focused on validation, performance, and third-party integration behavior."
+        },
+        {
+          "file": "engineering/engineering-database-reliability-engineer.md",
+          "name": "Database Reliability Engineer",
+          "emoji": "🛟",
+          "vibe": "Prove the restore, rehearse the failover, migrate without a maintenance window.",
+          "description": "Expert DBRE for failover, backup, pool behavior, and disaster-recovery drills."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "live-trade-verifier",
+      "title": "真实小额交易安全验证官",
+      "duty": "在全部离线门通过后执行 account-a 单次微型交易闭环，并强制资金、亏损、账户、版本和恢复状态红线。",
+      "required": true,
+      "modelTier": "gate",
+      "models": {
+        "codex": "gpt-5.6-sol (high)"
+      },
+      "candidates": [
+        {
+          "file": "engineering/engineering-autonomous-optimization-architect.md",
+          "name": "Autonomous Optimization Architect",
+          "emoji": "⚡",
+          "vibe": "The system governor that makes things faster without bankrupting you.",
+          "description": "Intelligent system governor that shadow-tests APIs while enforcing strict financial and security guardrails."
+        },
+        {
+          "file": "specialized/automation-governance-architect.md",
+          "name": "Automation Governance Architect",
+          "emoji": "⚙️",
+          "vibe": "Calm, skeptical, and operations-focused. Prefer reliable systems over automation hype.",
+          "description": "Governance-first automation architect who audits risk, value, and maintainability before execution."
+        },
+        {
+          "file": "finance/finance-bookkeeper-controller.md",
+          "name": "Bookkeeper & Controller",
+          "emoji": "📒",
+          "vibe": "Every penny accounted for, every close on time — the backbone of financial trust.",
+          "description": "Financial controls specialist focused on reconciliation, internal controls, completeness, and audit readiness."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "evidence-auditor",
+      "title": "证据与发布审计员",
+      "duty": "收集 commit、digest、配置哈希、测试输出、故障注入轨迹和交易所/节点/PG 四层证据。",
+      "required": true,
+      "modelTier": "gate",
+      "models": {
+        "codex": "gpt-5.6-terra (medium)"
+      },
+      "candidates": [
+        {
+          "file": "testing/testing-evidence-collector.md",
+          "name": "Evidence Collector",
+          "emoji": "📸",
+          "vibe": "Screenshot-obsessed QA who won't approve anything without visual proof.",
+          "description": "Evidence-first QA specialist who requires concrete proof before approving completion."
+        },
+        {
+          "file": "engineering/engineering-it-service-manager.md",
+          "name": "IT Service Manager",
+          "emoji": "🖧",
+          "vibe": "Every ticket, SLA, and change window is a promise. Keep the promises and measure everything.",
+          "description": "ITIL specialist for incident management, change control, SLA governance, and continual improvement."
+        },
+        {
+          "file": "specialized/specialized-model-qa.md",
+          "name": "Model QA Specialist",
+          "emoji": "🔬",
+          "vibe": "Audits models end-to-end — from data reconstruction to calibration testing.",
+          "description": "Independent QA expert for replication, monitoring, evidence reconstruction, and audit-grade reporting."
+        }
+      ],
+      "selectedCandidate": 0
+    },
+    {
+      "id": "documenter",
+      "title": "运行手册与 ADR 文档员",
+      "duty": "在审查通过后维护 ADR、runbook、事故状态机、发布步骤和验证报告，不修改业务逻辑。",
+      "required": true,
+      "modelTier": "labor",
+      "models": {
+        "codex": "gpt-5.6-luna (low)"
+      },
+      "candidates": [
+        {
+          "file": "engineering/engineering-technical-writer.md",
+          "name": "Technical Writer",
+          "emoji": "📚",
+          "vibe": "Writes the docs that developers actually read and use.",
+          "description": "Expert technical writer for developer documentation, API references, README files, and tutorials."
+        },
+        {
+          "file": "specialized/specialized-developer-advocate.md",
+          "name": "Developer Advocate",
+          "emoji": "🗣️",
+          "vibe": "Bridges product teams and developers through authentic engineering communication.",
+          "description": "Developer experience specialist who translates platform behavior into usable technical guidance."
+        },
+        {
+          "file": "engineering/engineering-codebase-onboarding-engineer.md",
+          "name": "Codebase Onboarding Engineer",
+          "emoji": "🧭",
+          "vibe": "Reads the code, traces the paths, and states the facts.",
+          "description": "Code-grounded documentation specialist for unfamiliar codebases and execution paths."
+        }
+      ],
+      "selectedCandidate": 0
+    }
+  ],
+  "bench": [
+    {
+      "file": "specialized/specialized-workflow-architect.md",
+      "name": "Workflow Architect",
+      "emoji": "🗺️",
+      "vibe": "Every path mapped before implementation.",
+      "description": "Maps failure modes, recovery paths, handoffs, and observable states.",
+      "division": "specialized"
+    },
+    {
+      "file": "engineering/engineering-devops-automator.md",
+      "name": "DevOps Automator",
+      "emoji": "⚙️",
+      "vibe": "Automates infrastructure so teams ship safely.",
+      "description": "CI/CD and infrastructure automation specialist.",
+      "division": "engineering"
+    },
+    {
+      "file": "engineering/engineering-database-optimizer.md",
+      "name": "Database Optimizer",
+      "emoji": "🗄️",
+      "vibe": "Databases that do not wake you at 3am.",
+      "description": "PostgreSQL schema, query, and index specialist.",
+      "division": "engineering"
+    },
+    {
+      "file": "testing/testing-api-tester.md",
+      "name": "API Tester",
+      "emoji": "🔌",
+      "vibe": "Breaks APIs before users do.",
+      "description": "API correctness, performance, and integration specialist.",
+      "division": "testing"
+    },
+    {
+      "file": "finance/finance-investment-researcher.md",
+      "name": "Investment Researcher",
+      "emoji": "🔍",
+      "vibe": "Finds risks in the narratives.",
+      "description": "Financial risk and due-diligence specialist.",
+      "division": "finance"
+    },
+    {
+      "file": "engineering/engineering-multi-agent-systems-architect.md",
+      "name": "Multi-Agent Systems Architect",
+      "emoji": "🕸️",
+      "vibe": "Treats agent teams like distributed systems.",
+      "description": "Multi-agent coordination, trust, failure recovery, gating, and observability specialist.",
+      "division": "engineering"
+    }
+  ]
+}

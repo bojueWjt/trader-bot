@@ -1,0 +1,68 @@
+# Account Stall Phase A Source Freeze
+
+Date: 2026-08-09
+Production state: `HALTED / NO-GO`
+
+## Worktrees
+
+| Role | Path | Branch | HEAD |
+|---|---|---|---|
+| Evidence source | `/Users/balen/projects/trader-bot` | `codex/account-stall-hardening` | `7368641e98c410b3c6edbe4ab3ea8f72cf5efe1d` |
+| Phase A integration | `/Users/balen/projects/trader-bot-account-stall-phase-a` | `codex/account-stall-phase-a` | `7368641e98c410b3c6edbe4ab3ea8f72cf5efe1d` |
+
+The evidence source contains the uncommitted implementation accumulated before
+the meta-review. The integration worktree started clean from the same HEAD.
+Files move into the integration worktree only through an explicit in-scope
+manifest and hash verification.
+
+## Frozen Source Snapshot
+
+The source snapshot was taken after the meta-review documents were added. It
+contains 169 status entries. The earlier test-baseline document records 168
+entries from the immediately preceding snapshot; the additional entry is the
+new evidence document.
+
+| Artifact | SHA-256 | Meaning |
+|---|---|---|
+| `/tmp/account-stall-phase-a-status.z` | `5f7c58290fac0a6337e6390ea8b81f64ad347a76d22b2f273da4a01eeca198a0` | NUL-delimited `git status --porcelain=v1` |
+| `/tmp/account-stall-phase-a-status.tsv` | `2f5e62b313956fb7dbad6ae5a665e033cf95de17a06d121f84d6a17eab7a4941` | Sorted human-readable status inventory |
+| `/tmp/account-stall-phase-a-tracked.patch` | `19ac81ad6160e15caf553be1a6af54f31be8e75f5678c96dffa34bbfcda2c106` | Binary-safe tracked diff from HEAD |
+| `/tmp/account-stall-phase-a-domain-sha256.txt` | `81a7389547d8e327067ec7bcfce360025537ae4f3172f464315173592fdcada9` | Sorted hashes under runtime, scripts, and focused tests |
+
+The snapshot contains 61 tracked modifications and 108 untracked status
+entries at freeze time.
+
+## Source Authority
+
+- `services/` is the canonical application implementation.
+- `packages/` contains shared importable domain modules.
+- `scripts/` owns release and deployment tooling.
+- `.live-mirror/` is production-byte evidence and a drift comparator.
+- `infra/systemd/*.conf` contains concrete host resource values.
+- Tests use temporary roots and explicit test mode.
+- `/srv/trader-v3` remains a production default and is outside local test
+  mutation scope.
+
+## Import Rules
+
+1. Import one domain batch at a time.
+2. Record every imported path and source SHA-256.
+3. Audit tracked mixed-purpose files at hunk granularity.
+4. Exclude Attention, Hermes, channel strategy, and unrelated order-management
+   changes.
+5. Run the batch-specific collection hash and red/green command before the next
+   import.
+6. Preserve the original evidence worktree without cleanup or reset.
+
+## Agent Team
+
+| Agent | Responsibility | Write permission |
+|---|---|---|
+| Runtime Diagnostician | Current executor/queue/shutdown stall mechanisms and red-capable seam | Read-only |
+| Runtime Resource Contract Auditor | Node/manifest optionality drift and parity matrix | Read-only |
+| Scope and Integration Auditor | In-scope dependency closure and import order | Read-only |
+| Historical and Evidence Auditor | Git lineage, Redis evidence, mirror drift, test reproducibility | Read-only |
+| Planner/Integrator | Clean worktree, imports, implementation, verification | Integration worktree only |
+
+Production access, restart, data mutation, deployment, and trading remain
+frozen throughout Phase A.
