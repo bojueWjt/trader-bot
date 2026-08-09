@@ -87,3 +87,22 @@ source.
 
 Exact commands, hashes, semantics, and reviewer results are recorded in
 `docs/evidence/2026-08-09-account-stall-runtime-validation.md`.
+
+## Local Deployment Entry Boundary
+
+Phase A excludes the complete `scripts/hk-deploy-20260803.sh` entrypoint from
+local execution.
+
+The script hardcodes `/srv/trader-v3` and performs host-wide mutations through
+`systemctl`, Docker, PostgreSQL, control-plane commands, backups, and in-place
+file replacement. A local `TRADER_ROOT` override would leave the remaining
+host mutation interfaces active and would not provide a safe test seam.
+
+Local tests may inspect the script as text or execute separately extracted
+pure helpers with temporary roots. They must not invoke the complete script.
+The immutable deployment path introduced in later phases must accept an
+explicit validated `release_root`; the legacy script remains production
+evidence and a rollback reference.
+
+This decision satisfies the Phase A test-root isolation gate without changing
+the historical production script.

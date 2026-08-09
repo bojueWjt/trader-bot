@@ -15,8 +15,8 @@
 | A3 | runtime-diagnostician | done | 当前代码 stall red-capable seam 与假设排序 | `docs/evidence/2026-08-09-account-stall-runtime-diagnosis.md` |
 | A4 | runtime-resource-contract-auditor | done | Node/manifest optionality matrix 与 Phase B interface | `docs/evidence/2026-08-09-account-stall-runtime-resource-contract-audit.md` |
 | A5 | historical-evidence-auditor | done | 历史/offload lineage、Redis 强度、mirror drift、test inventory 审核 | `docs/evidence/2026-08-09-account-stall-history-and-evidence-audit.md` |
-| A5-T | planner/integrator | pending | 固化完整 replay package 与部署脚本测试根策略 | 依赖制品 hash、继承环境、raw output、exit code、JUnit、warning/skip；`TRADER_ROOT` override 或完整入口排除 |
-| A6 | planner/integrator | in_progress | 导入最小 runtime dependency closure，实现并运行 fault-injection loop | A2、A3 |
+| A5-T | evidence-auditor | in_progress | 固化完整 replay package 与部署脚本测试根策略 | Agent worktree `/Users/balen/projects/trader-bot-account-stall-a3-evidence`；完整 `hk-deploy-20260803.sh` 已明确排除出本地执行；等待依赖制品 hash、继承环境、raw output、exit code、JUnit、warning/skip 工具 |
+| A6 | planner/integrator | in_progress | 导入最小 runtime dependency closure，实现并运行 fault-injection loop | `627c6ff` cleanup retry authority；`bbe35fa` actor message-bus seam；`bca0720` runtime lifecycle；Phase A runtime `30 passed`；等待 actor/node 与 strategy closure manifest |
 | A7 | reviewer | pending | GAP-0 结论与 Phase B/Phase B-S 授权 | A3、A4、A5、A6 |
 
 ## 历史任务记录
