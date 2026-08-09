@@ -65,10 +65,12 @@ class ProjectionActor:
         self._health = health
         self._spool_lock = RLock()
         self._egress_halted_reason = ""
+        self._lag_degraded = False
 
     @property
     def egress_halted_reason(self) -> str:
-        return self._egress_halted_reason
+        with self._spool_lock:
+            return self._egress_halted_reason
 
     def on_event(self, event: Any) -> str | None:
         result = self.ingest_event(event)
@@ -85,18 +87,29 @@ class ProjectionActor:
                 event_id=None,
             )
         with self._spool_lock:
+            if self._egress_halted_reason:
+                return ProjectionIngestResult(
+                    outcome=ProjectionIngestOutcome.IGNORED,
+                    event_id=None,
+                )
             appended = self.spool.append_once(envelope)
-        if appended:
-            self._record_projection_progress(envelope)
-            outcome = ProjectionIngestOutcome.DURABLE
-        else:
-            outcome = ProjectionIngestOutcome.DEDUPED
+            if appended:
+                self._record_projection_progress(envelope)
+                outcome = ProjectionIngestOutcome.DURABLE
+            else:
+                outcome = ProjectionIngestOutcome.DEDUPED
         return ProjectionIngestResult(
             outcome=outcome,
             event_id=envelope.event_id,
         )
 
     def flush(self) -> list[str]:
+        return self._flush(propagate_sink_error=False)
+
+    def flush_for_session(self) -> list[str]:
+        return self._flush(propagate_sink_error=True)
+
+    def _flush(self, *, propagate_sink_error: bool) -> list[str]:
         with self._spool_lock:
             pending = self.spool.pending_events(
                 limit=self.config.max_flush_batch_size
@@ -109,51 +122,80 @@ class ProjectionActor:
             self._mark_projection_degraded(
                 "control-plane execution-event sink unavailable"
             )
+            if propagate_sink_error:
+                raise
             return []
         with self._spool_lock:
             self.spool.mark_acked(acked)
             pending_count = self.spool.pending_count
-        if acked:
-            last_event_id = acked[-1]
-            last_event = _find_event(pending, last_event_id)
-            if last_event is not None:
-                self._record_projection_progress(last_event)
-        if pending_count == 0:
-            self._mark_projection_ready()
+            if acked:
+                last_event_id = acked[-1]
+                last_event = _find_event(pending, last_event_id)
+                if last_event is not None:
+                    self._record_projection_progress(last_event)
+            if pending_count == 0:
+                self._mark_projection_ready()
         return acked
 
     def halt_egress(self, reason: str) -> None:
-        if self._egress_halted_reason:
-            return
-        self._egress_halted_reason = reason
-        self._mark_projection_failed(reason)
+        with self._spool_lock:
+            if self._egress_halted_reason:
+                return
+            self._egress_halted_reason = reason
+            self._mark_projection_failed(reason)
 
     def _record_projection_progress(self, envelope: ExecutionEventEnvelopeV1) -> None:
-        lag_ms = _lag_ms(now=self._now(), ts_event=envelope.ts_event)
-        if self._health is not None:
-            self._health.record_projection_progress(lag_ms, envelope.event_id)
+        with self._spool_lock:
+            lag_ms = _lag_ms(now=self._now(), ts_event=envelope.ts_event)
+            if self._health is None:
+                return
+            self._health.record_projection_progress(
+                lag_ms,
+                envelope.event_id,
+            )
+            if self._egress_halted_reason:
+                return
             if lag_ms > self.config.lag_degrade_threshold_ms:
-                self._health.mark_projection_degraded(
+                self._lag_degraded = True
+                reason = (
                     "projection lag "
-                    f"{lag_ms}ms exceeds {self.config.lag_degrade_threshold_ms}ms"
+                    f"{lag_ms}ms exceeds "
+                    f"{self.config.lag_degrade_threshold_ms}ms"
                 )
-            else:
-                self._health.mark_projection_ready()
+                if not self._mark_projection_degraded(reason):
+                    self._health.mark_projection_failed(reason)
+                return
+            self._lag_degraded = False
+            self._health.mark_projection_ready()
 
     def _mark_projection_ready(self) -> None:
-        if self._health is None:
-            return
-        if self._egress_halted_reason:
-            return
-        self._health.mark_projection_ready()
+        with self._spool_lock:
+            if self._health is None:
+                return
+            if self._egress_halted_reason:
+                return
+            if self._lag_degraded:
+                return
+            self._health.mark_projection_ready()
 
     def _mark_projection_failed(self, reason: str) -> None:
-        if self._health is not None:
-            self._health.mark_projection_failed(reason)
+        with self._spool_lock:
+            if self._health is not None:
+                self._health.mark_projection_failed(reason)
 
-    def _mark_projection_degraded(self, reason: str) -> None:
-        if self._health is not None:
-            self._health.mark_projection_degraded(reason)
+    def _mark_projection_degraded(self, reason: str) -> bool:
+        with self._spool_lock:
+            if self._health is None:
+                return False
+            marker = getattr(
+                self._health,
+                "mark_projection_degraded",
+                None,
+            )
+            if callable(marker):
+                marker(reason)
+                return True
+            return False
 
 
 class LifecycleProjectionHealth:

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Event, get_ident
+from queue import Queue
+from threading import Event, Thread, get_ident
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,7 +23,7 @@ from projection.event_mapper import ProjectionConfig  # noqa: E402
 from projection.spool import JsonExecutionSpool  # noqa: E402
 from runtime.control_plane_session import NodeControlPlaneSession  # noqa: E402
 
-MAX_CALLBACK_SECONDS = 0.05
+MAX_CALLBACK_SECONDS = 0.01
 
 
 def test_projection_core_ingest_is_durable_without_inline_flush(
@@ -41,6 +43,128 @@ def test_projection_core_ingest_is_durable_without_inline_flush(
     assert result.event_id
     assert spool.pending_count == 1
     assert sink.calls == []
+
+
+def test_projection_sink_http_failure_is_recoverable_degradation(
+    tmp_path: Path,
+) -> None:
+    sink = _FailingSink()
+    health = _ProjectionHealth()
+    spool = JsonExecutionSpool(tmp_path / "execution-events-http.json")
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            lag_degrade_threshold_ms=10**12,
+        ),
+        sink,
+        spool,
+        health=health,
+    )
+
+    event_id = projection.on_event(_execution_event("event-http"))
+
+    assert event_id
+    assert spool.pending_count == 1
+    assert health.degraded == [
+        "control-plane execution-event sink unavailable"
+    ]
+    assert health.failed.is_set() is False
+
+
+def test_projection_session_sink_failure_retries_same_spooled_event(
+    tmp_path: Path,
+) -> None:
+    sink = _ToggleFailingSink()
+    health = _ProjectionHealth()
+    spool = JsonExecutionSpool(tmp_path / "execution-events-session.json")
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            lag_degrade_threshold_ms=10**12,
+        ),
+        sink,
+        spool,
+        health=health,
+    )
+    actor_holder: dict[str, ExecutionProjectionActor] = {}
+    session = NodeControlPlaneSession(
+        execution_event_sink=lambda event: actor_holder[
+            "actor"
+        ].session_flush_execution_event(event),
+        retry_budget=1,
+        retry_base_delay_seconds=0.001,
+        retry_max_delay_seconds=0.001,
+        retry_jitter_ratio=0,
+        circuit_reset_seconds=0.01,
+    )
+    actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+        worker_shutdown_wait_seconds=0.5,
+    )
+    actor_holder["actor"] = actor
+    actor.on_start()
+
+    assert actor.on_event(_execution_event("event-session-http")) is True
+    assert _wait_until(lambda: spool.pending_count == 1)
+    assert _wait_until(
+        lambda: bool(
+            session.snapshot().lanes["execution_event"].failure
+        )
+    )
+
+    failed_lane = session.snapshot().lanes["execution_event"]
+    assert failed_lane.success_count == 0
+    assert failed_lane.error_count >= 1
+    assert sink.calls >= 1
+    assert spool.pending_count == 1
+
+    sink.fail = False
+
+    assert _wait_until(
+        lambda: (
+            spool.pending_count == 0
+            and session.snapshot().lanes[
+                "execution_event"
+            ].success_count
+            >= 1
+        )
+    )
+    recovered_lane = session.snapshot().lanes["execution_event"]
+    assert spool.pending_count == 0
+    assert recovered_lane.success_count >= 1
+    assert actor.on_stop() is True
+
+
+def test_projection_lag_degradation_survives_same_flush_until_low_lag_progress(
+    tmp_path: Path,
+) -> None:
+    event_time = datetime.fromtimestamp(1_786_000_000, tz=timezone.utc)
+    now_value = [event_time + timedelta(milliseconds=6)]
+    health = _ProjectionHealth()
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            lag_degrade_threshold_ms=5,
+        ),
+        _RecordingSink(),
+        JsonExecutionSpool(tmp_path / "execution-events-lag.json"),
+        now=lambda: now_value[0],
+        health=health,
+    )
+
+    projection.on_event(_execution_event("event-high-lag"))
+
+    assert health.states[-1][0] == "degraded"
+    assert health.degraded[-1] == "projection lag 6ms exceeds 5ms"
+
+    now_value[0] = event_time + timedelta(milliseconds=1)
+    projection.on_event(_execution_event("event-low-lag"))
+
+    assert health.states[-1] == ("ready", "")
 
 
 def test_projection_callback_only_enqueues_while_durable_ingest_blocks() -> None:
@@ -205,6 +329,196 @@ def test_projection_durable_ingress_error_is_sticky_fatal() -> None:
     actor.on_stop()
 
 
+def test_projection_consumer_ready_waits_for_ingress_worker() -> None:
+    projection = _DurableProjection()
+    actor = ExecutionProjectionActor(
+        projection,
+        worker_shutdown_wait_seconds=1.0,
+    )
+    release_worker = Event()
+    original_run_worker = actor._run_worker
+    startup_errors: list[BaseException] = []
+
+    def delayed_run_worker() -> None:
+        release_worker.wait(timeout=1.0)
+        original_run_worker()
+
+    def start_actor() -> None:
+        try:
+            actor.on_start()
+        except BaseException as exc:
+            startup_errors.append(exc)
+
+    actor._run_worker = delayed_run_worker
+    assert actor.control_plane_consumer_ready is False
+    starter = Thread(target=start_actor)
+    starter.start()
+    assert _wait_until(lambda: actor._worker_thread is not None)
+    assert actor._worker_started.is_set() is False
+    assert actor.control_plane_consumer_ready is False
+
+    release_worker.set()
+    starter.join(timeout=1.0)
+
+    assert starter.is_alive() is False
+    assert startup_errors == []
+    assert actor._worker_started.is_set()
+    assert actor.control_plane_consumer_ready is True
+    assert actor.on_stop() is True
+    assert actor.control_plane_consumer_ready is False
+
+
+def test_projection_halt_serializes_admission_with_queue_publish() -> None:
+    projection = _DurableProjection()
+    actor = ExecutionProjectionActor(projection)
+    actor.on_start()
+    admission_queue = _ProjectionAdmissionBarrierQueue()
+    actor._event_queue = admission_queue
+    accepted: list[bool] = []
+    halt_finished = Event()
+
+    def admit() -> None:
+        accepted.append(bool(actor.on_event("fill-racing-halt")))
+
+    def halt() -> None:
+        actor._halt_egress("explicit projection halt")
+        halt_finished.set()
+
+    publisher = Thread(target=admit)
+    publisher.start()
+    assert admission_queue.put_started.wait(timeout=1.0)
+    halter = Thread(target=halt)
+    halter.start()
+
+    assert halt_finished.wait(timeout=0.03) is False
+    admission_queue.release_put.set()
+    publisher.join(timeout=1.0)
+    halter.join(timeout=1.0)
+
+    assert publisher.is_alive() is False
+    assert halter.is_alive() is False
+    assert accepted == [True]
+    assert actor.halted_reason == "explicit projection halt"
+    assert actor.on_event("fill-after-halt") is False
+    actor.on_stop()
+
+
+def test_projection_stop_serializes_admission_and_drains_accepted_event() -> None:
+    projection = _DurableProjection()
+    actor = ExecutionProjectionActor(
+        projection,
+        worker_shutdown_wait_seconds=0.5,
+    )
+    actor.on_start()
+    assert actor.control_plane_consumer_ready is True
+    admission_queue = _ProjectionAdmissionBarrierQueue()
+    actor._event_queue = admission_queue
+    accepted: list[bool] = []
+    stop_results: list[bool] = []
+    stop_finished = Event()
+
+    def admit() -> None:
+        accepted.append(bool(actor.on_event("fill-racing-stop")))
+
+    def stop() -> None:
+        stop_results.append(bool(actor.on_stop()))
+        stop_finished.set()
+
+    publisher = Thread(target=admit)
+    publisher.start()
+    assert admission_queue.put_started.wait(timeout=1.0)
+    stopper = Thread(target=stop)
+    stopper.start()
+
+    assert stop_finished.wait(timeout=0.03) is False
+    assert _wait_until(
+        lambda: not actor.control_plane_consumer_ready
+    )
+    admission_queue.release_put.set()
+    publisher.join(timeout=1.0)
+    stopper.join(timeout=1.0)
+
+    assert publisher.is_alive() is False
+    assert stopper.is_alive() is False
+    assert accepted == [True]
+    assert stop_results == [True]
+    assert projection.ingested == ["fill-racing-stop"]
+    assert admission_queue.empty()
+    assert actor.on_event("fill-after-stop") is False
+
+
+def test_projection_core_halt_is_final_health_and_admission_barrier() -> None:
+    spool = _BlockingProjectionSpool()
+    health = _ProjectionHealth()
+    projection = ProjectionActor(
+        ProjectionConfig(node_id="node-a", account_id="account-a"),
+        _RecordingSink(),
+        spool,
+        health=health,
+    )
+    ingest_results: list[Any] = []
+
+    def ingest() -> None:
+        ingest_results.append(
+            projection.ingest_event(_execution_event("event-before-halt"))
+        )
+
+    ingestion = Thread(target=ingest)
+    ingestion.start()
+    assert spool.append_started.wait(timeout=1.0)
+    halt = Thread(target=projection.halt_egress, args=("durable hard halt",))
+    halt.start()
+    assert health.failed.wait(timeout=0.03) is False
+
+    spool.release_append.set()
+    ingestion.join(timeout=1.0)
+    halt.join(timeout=1.0)
+
+    assert ingestion.is_alive() is False
+    assert halt.is_alive() is False
+    assert ingest_results[0].outcome.value == "DURABLE"
+    assert health.states[-1] == ("failed", "durable hard halt")
+    ready_after_failure = False
+    failure_seen = False
+    for state, _reason in health.states:
+        if state == "failed":
+            failure_seen = True
+            continue
+        if failure_seen and state == "ready":
+            ready_after_failure = True
+    assert ready_after_failure is False
+
+    rejected = projection.ingest_event(
+        _execution_event("event-after-halt")
+    )
+
+    assert rejected.outcome.value == "IGNORED"
+    assert spool.append_count == 1
+
+
+def test_projection_session_stop_failure_retains_retry_identity() -> None:
+    projection = _DurableProjection()
+    session = _RetryableStopSession()
+    actor = ExecutionProjectionActor(
+        projection,
+        control_plane_session=session,
+        worker_shutdown_wait_seconds=0.1,
+    )
+    actor.on_start()
+
+    first_stopped = actor.on_stop()
+
+    assert first_stopped is False
+    assert actor._session_started is True
+    assert session.stop_calls == 1
+
+    second_stopped = actor.on_stop()
+
+    assert second_stopped is True
+    assert actor._session_started is False
+    assert session.stop_calls == 2
+
+
 def test_projection_session_backpressure_after_ingest_is_recoverable() -> None:
     projection = _DurableProjection()
     session = _BackpressuredAfterStartupSession()
@@ -321,6 +635,85 @@ class _RecordingSink:
         return [str(event.event_id) for event in batch]
 
 
+class _FailingSink(_RecordingSink):
+    def post_events(self, node_id: str, events: Any) -> list[str]:
+        del node_id, events
+        raise RuntimeError("HTTP 503")
+
+
+class _ToggleFailingSink:
+    def __init__(self) -> None:
+        self.fail = True
+        self.calls = 0
+
+    def post_events(self, node_id: str, events: Any) -> list[str]:
+        del node_id
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("HTTP 503")
+        return [str(event.event_id) for event in events]
+
+
+class _ProjectionAdmissionBarrierQueue(Queue[Any]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.put_started = Event()
+        self.release_put = Event()
+
+    def put_nowait(self, item: Any) -> None:
+        self.put_started.set()
+        self.release_put.wait(timeout=1.0)
+        super().put_nowait(item)
+
+
+class _BlockingProjectionSpool:
+    def __init__(self) -> None:
+        self.append_started = Event()
+        self.release_append = Event()
+        self.append_count = 0
+        self.pending_count = 0
+
+    def append_once(self, envelope: Any) -> bool:
+        del envelope
+        self.append_started.set()
+        self.release_append.wait(timeout=1.0)
+        self.append_count += 1
+        self.pending_count += 1
+        return True
+
+    def pending_events(self, limit: int) -> list[Any]:
+        del limit
+        return []
+
+    def mark_acked(self, event_ids: Any) -> None:
+        del event_ids
+
+
+class _ProjectionHealth:
+    def __init__(self) -> None:
+        self.states: list[tuple[str, str]] = []
+        self.degraded: list[str] = []
+        self.failed = Event()
+
+    def record_projection_progress(
+        self,
+        projection_lag_ms: int,
+        last_event_id: str | None = None,
+    ) -> None:
+        del projection_lag_ms, last_event_id
+
+    def mark_projection_ready(self) -> None:
+        self.states.append(("ready", ""))
+
+    def mark_projection_degraded(self, reason: str) -> None:
+        self.degraded.append(reason)
+        self.states.append(("degraded", reason))
+
+    def mark_projection_failed(self, reason: str) -> None:
+        self.states.append(("failed", reason))
+        self.failed.set()
+
+
 class _DurableProjection:
     def __init__(
         self,
@@ -392,6 +785,17 @@ class _AcceptingSession(_BackpressuredAfterStartupSession):
     def submit_execution_event(self, event: Any) -> str:
         self.submitted.append(event)
         return "accepted"
+
+
+class _RetryableStopSession(_AcceptingSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stop_calls = 0
+
+    def stop(self, deadline: float) -> bool:
+        del deadline
+        self.stop_calls += 1
+        return self.stop_calls >= 2
 
 
 class _FullExecutionEventSession(_BackpressuredAfterStartupSession):

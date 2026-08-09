@@ -5,6 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import timedelta
+from enum import Enum
 from queue import Empty, Full, Queue
 from threading import Event, RLock, Thread
 from typing import Any, Callable, Iterable
@@ -69,6 +70,19 @@ class _SessionCommandPublication:
     error: Exception | None = None
 
 
+class _CommandPhase(str, Enum):
+    APPLYING = "APPLYING"
+    ACK_QUEUED = "ACK_QUEUED"
+    ACKED = "ACKED"
+
+
+@dataclass
+class _CommandState:
+    phase: _CommandPhase
+    publication: _SessionCommandPublication | None = None
+    acknowledgement: _PendingCommandAck | None = None
+
+
 @dataclass
 class _ProjectionPublication:
     event: Any = None
@@ -94,20 +108,27 @@ class _QueueingIntentPublisher:
         self._stopped = Event()
         self._admission_lock = RLock()
 
-    def stop(self) -> None:
-        with self._admission_lock:
-            self._stopped.set()
+    def stop(self, deadline: float) -> bool:
+        self._stopped.set()
+        if not _acquire_lock_before_deadline(
+            self._admission_lock,
+            deadline,
+        ):
+            return False
+        try:
             while True:
                 try:
                     publication = self._pending.get_nowait()
                 except Empty:
-                    return
+                    return True
                 publication.cancelled.set()
                 publication.error = RuntimeError(
                     "intent publisher actor stopped before publication"
                 )
                 publication.completed.set()
                 self._pending.task_done()
+        finally:
+            self._admission_lock.release()
 
     def publish(self, intent: Any) -> None:
         publication = _IntentPublication(intent=intent)
@@ -314,6 +335,7 @@ class IntentPublisherActor(Actor):
         self._manage_control_plane_session = bool(
             manage_control_plane_session
         )
+        self._consumer_ready = Event()
         self._stopped = Event()
         self._executor: ThreadPoolExecutor | None = None
         self._poll_future: Future[int] | None = None
@@ -349,33 +371,49 @@ class IntentPublisherActor(Actor):
     def pending_intent_count(self) -> int:
         return self._pending_intents.qsize()
 
+    @property
+    def control_plane_consumer_ready(self) -> bool:
+        return self._consumer_ready.is_set()
+
     def on_start(self) -> None:
+        self._consumer_ready.clear()
         self._started_at = time.monotonic()
         session = self._control_plane_session
         if session is not None:
             if self._manage_control_plane_session:
                 session.start()
             self._register_poll_timer()
+            self._consumer_ready.set()
             return
         self._ensure_executor()
         self._register_poll_timer()
+        self._consumer_ready.set()
 
-    def on_stop(self) -> None:
-        self._stopped.set()
-        self._queued_publisher.stop()
+    def on_stop(self) -> bool:
+        self._consumer_ready.clear()
         deadline = (
             time.monotonic() + self._worker_shutdown_wait_seconds
         )
+        cleanup_complete = True
+        self._stopped.set()
+        publisher_stopped = self._queued_publisher.stop(deadline)
+        if not publisher_stopped:
+            cleanup_complete = False
+            self._record_failure(
+                "intent publisher admission shutdown deadline exceeded"
+            )
         session = self._control_plane_session
         if session is not None and self._manage_control_plane_session:
             try:
                 stopped = bool(session.stop(deadline))
             except Exception as exc:
                 stopped = False
+                cleanup_complete = False
                 self._record_failure(
                     f"control-plane session stop failed: {exc!r}"
                 )
             if not stopped:
+                cleanup_complete = False
                 self._record_failure(
                     "control-plane session failed to stop before deadline"
                 )
@@ -388,9 +426,11 @@ class IntentPublisherActor(Actor):
             self._executor = None
             self._poll_future = None
         else:
+            cleanup_complete = False
             self._record_failure(
                 "approved intent poll worker failed to stop before deadline"
             )
+        return cleanup_complete
 
     def poll_once(self) -> int:
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -501,7 +541,7 @@ class IntentPublisherActor(Actor):
             reference = self._started_at
         if time.monotonic() - reference < self._stale_after_seconds:
             return
-        self._record_failure("approved intent poll stale")
+        self._record_degraded("approved intent poll stale")
 
     def _evaluate_session_health(self) -> None:
         session = self._control_plane_session
@@ -515,9 +555,16 @@ class IntentPublisherActor(Actor):
             )
             self._evaluate_poll_staleness()
             return
+        if bool(getattr(snapshot, "stopped", False)):
+            self._record_failure("control-plane session is stopped")
+            return
         lanes = getattr(snapshot, "lanes", {})
+        fetch_lane = lanes.get("intent_fetch")
+        last_success = getattr(fetch_lane, "last_success_at", False)
+        if last_success is not False:
+            self._last_poll_success_at = float(last_success)
         intent_lanes = (
-            ("intent_fetch", lanes.get("intent_fetch")),
+            ("intent_fetch", fetch_lane),
             ("intent_delivery", lanes.get("intent_delivery")),
         )
         for lane_name, lane in intent_lanes:
@@ -531,23 +578,26 @@ class IntentPublisherActor(Actor):
                 self._record_degraded(failure)
                 self._evaluate_poll_staleness()
                 return
-        if bool(getattr(snapshot, "degraded", False)):
-            self._record_degraded("control-plane intent session degraded")
-            self._evaluate_poll_staleness()
-            return
-        fetch_lane = lanes.get("intent_fetch")
-        last_success = getattr(fetch_lane, "last_success_at", False)
         if last_success is not False:
-            self._record_poll_progress()
+            self._record_poll_progress(float(last_success))
             return
         self._evaluate_poll_staleness()
 
-    def _record_poll_progress(self) -> None:
-        self._last_poll_success_at = time.monotonic()
+    def _record_poll_progress(
+        self,
+        last_success_at: float | None = None,
+    ) -> None:
+        if last_success_at is None:
+            last_success_at = time.monotonic()
+        self._last_poll_success_at = float(last_success_at)
+        if self._intent_stream_failed:
+            return
         self._degraded_reason = ""
         self._mark_dependency_ready("intent_stream")
 
     def _record_failure(self, reason: str) -> None:
+        if self._intent_stream_failed:
+            return
         self._failure_reason = reason
         self._degraded_reason = ""
         self._mark_dependency_failed("intent_stream", reason)
@@ -619,11 +669,12 @@ class IntentPublisherActor(Actor):
         return _first_attr(self, ("msgbus", "message_bus", "_msgbus"))
 
     def _mark_dependency_ready(self, dependency_value: str) -> None:
+        if self._intent_stream_failed:
+            return
         dependency = _dependency_by_value(dependency_value)
         marker = getattr(self._lifecycle, "mark_dependency_ready", None)
         if dependency is not None and callable(marker):
             marker(dependency)
-        self._intent_stream_failed = False
 
     def _mark_dependency_failed(
         self,
@@ -739,6 +790,7 @@ class ExecutionProjectionActor(Actor):
         self._manage_control_plane_session = bool(
             manage_control_plane_session
         )
+        self._consumer_ready = Event()
         self._session_started = False
         self._durable_ingress = callable(
             getattr(self._projection_actor, "ingest_event", None)
@@ -752,11 +804,17 @@ class ExecutionProjectionActor(Actor):
     def degraded_reason(self) -> str:
         return self._degraded_reason
 
+    @property
+    def control_plane_consumer_ready(self) -> bool:
+        return self._consumer_ready.is_set()
+
     def on_start(self) -> None:
+        self._consumer_ready.clear()
         if not self._durable_ingress:
             for topic in self._event_topics:
                 self._subscribe_execution_topic(topic)
             self._flush_projection_once()
+            self._consumer_ready.set()
             return
         deadline = (
             time.monotonic() + self._worker_shutdown_wait_seconds
@@ -774,27 +832,34 @@ class ExecutionProjectionActor(Actor):
         self._await_worker_start(deadline)
         if self._durable_ingress:
             if session is not None:
-                if not self._submit_flush_wake(False):
-                    return
+                pending_count = self._durable_pending_count()
+                if pending_count is None or pending_count > 0:
+                    if not self._submit_flush_wake(False):
+                        return
             else:
                 self._flush_wake.set()
         else:
             self._enqueue_startup_flush()
         for topic in self._event_topics:
             self._subscribe_execution_topic(topic)
+        self._consumer_ready.set()
 
-    def on_stop(self) -> None:
-        if not self._durable_ingress:
-            return
+    def on_stop(self) -> bool:
+        self._consumer_ready.clear()
         deadline = (
             time.monotonic() + self._worker_shutdown_wait_seconds
         )
-        self._worker_stop_deadline = deadline
-        self._worker_stop.set()
+        if not self._durable_ingress:
+            return True
+        cleanup_complete = True
+        with self._halt_lock:
+            self._worker_stop_deadline = deadline
+            self._worker_stop.set()
         worker = self._worker_thread
         if worker is not None:
             worker.join(timeout=max(deadline - time.monotonic(), 0.0))
             if worker.is_alive():
+                cleanup_complete = False
                 self._halt_egress(
                     "execution projection stopped with durable ingress pending"
                 )
@@ -805,10 +870,12 @@ class ExecutionProjectionActor(Actor):
             or not self._event_queue.empty()
             or self._session_wake_pending.is_set()
         ):
+            cleanup_complete = False
             self._halt_egress(
                 "execution projection stopped with durable ingress pending"
             )
-        self._stop_deadline_worker(deadline)
+        if not self._stop_deadline_worker(deadline):
+            cleanup_complete = False
 
         session = self._control_plane_session
         if (
@@ -824,52 +891,54 @@ class ExecutionProjectionActor(Actor):
                     "execution projection session stop failed: "
                     f"{exc!r}"
                 )
-            self._session_started = False
             if not stopped:
+                cleanup_complete = False
                 self._halt_egress(
                     "execution projection session shutdown "
                     "deadline exceeded"
                 )
+            else:
+                self._session_started = False
         if session is None and self._durable_ingress:
-            self._stop_flush_worker(deadline)
+            if not self._stop_flush_worker(deadline):
+                cleanup_complete = False
+        return cleanup_complete
 
     def on_event(self, event: Any) -> Any:
         if not self._durable_ingress:
             self._attach_order_payload_fields(event)
             return self._projection_actor.on_event(event)
-        if self._worker_stop.is_set() or self._halted_reason:
-            return False
-        worker = self._worker_thread
-        if worker is None or not worker.is_alive():
-            self._halt_egress(
-                "execution projection persistence worker is not running"
-            )
-            return False
-        deadline_at = None
-        if self._durable_ingress:
+        with self._halt_lock:
+            if self._worker_stop.is_set() or self._halted_reason:
+                return False
+            worker = self._worker_thread
+            if worker is None or not worker.is_alive():
+                self._halt_egress(
+                    "execution projection persistence worker is not running"
+                )
+                return False
             deadline_at = (
                 time.monotonic()
                 + self._durable_ingress_deadline_seconds
             )
-        publication = _ProjectionPublication(
-            event=event,
-            deadline_at=deadline_at,
-        )
-        if self._durable_ingress:
-            self._register_publication(publication)
-        try:
-            self._event_queue.put_nowait(publication)
-        except Full:
-            self._complete_publication(publication)
-            self._halt_egress(
-                "execution projection persistence queue capacity exceeded"
+            publication = _ProjectionPublication(
+                event=event,
+                deadline_at=deadline_at,
             )
-            return False
-        return True
+            self._register_publication(publication)
+            try:
+                self._event_queue.put_nowait(publication)
+            except Full:
+                self._complete_publication(publication)
+                self._halt_egress(
+                    "execution projection persistence queue capacity exceeded"
+                )
+                return False
+            return True
 
     def session_flush_execution_event(self, event: Any) -> None:
         del event
-        self._drain_durable_spool()
+        self._drain_durable_spool(session_callback=True)
 
     def _enqueue_startup_flush(self) -> None:
         try:
@@ -1093,10 +1162,10 @@ class ExecutionProjectionActor(Actor):
             self._deadline_wake.wait(timeout=min(remaining, 0.05))
             self._deadline_wake.clear()
 
-    def _stop_deadline_worker(self, deadline: float) -> None:
+    def _stop_deadline_worker(self, deadline: float) -> bool:
         worker = self._deadline_thread
         if worker is None:
-            return
+            return True
         self._deadline_stop.set()
         self._deadline_wake.set()
         worker.join(timeout=max(deadline - time.monotonic(), 0.0))
@@ -1105,8 +1174,9 @@ class ExecutionProjectionActor(Actor):
                 "execution projection deadline worker shutdown "
                 "deadline exceeded"
             )
-            return
+            return False
         self._deadline_thread = None
+        return True
 
     def _register_publication(
         self,
@@ -1184,10 +1254,10 @@ class ExecutionProjectionActor(Actor):
                 )
                 return
 
-    def _stop_flush_worker(self, deadline: float) -> None:
+    def _stop_flush_worker(self, deadline: float) -> bool:
         worker = self._flush_thread
         if worker is None:
-            return
+            return True
         self._flush_stop_deadline = deadline
         self._flush_stop.set()
         self._flush_wake.set()
@@ -1197,18 +1267,26 @@ class ExecutionProjectionActor(Actor):
                 "execution projection flush worker shutdown "
                 "deadline exceeded"
             )
-            return
+            return False
         self._flush_thread = None
         pending_count = self._durable_pending_count()
         if pending_count is not None and pending_count > 0:
             self._halt_egress(
                 "execution projection stopped with flush pending"
             )
+            return False
+        return True
 
-    def _drain_durable_spool(self) -> None:
+    def _drain_durable_spool(
+        self,
+        *,
+        session_callback: bool = False,
+    ) -> None:
         while True:
             before = self._durable_pending_count()
-            self._flush_projection_once()
+            self._flush_projection_once(
+                session_callback=session_callback,
+            )
             after = self._durable_pending_count()
             if before is None or after is None:
                 return
@@ -1217,7 +1295,20 @@ class ExecutionProjectionActor(Actor):
             if self._flush_deadline_reached():
                 return
 
-    def _flush_projection_once(self) -> None:
+    def _flush_projection_once(
+        self,
+        *,
+        session_callback: bool = False,
+    ) -> None:
+        if session_callback:
+            flush_for_session = getattr(
+                self._projection_actor,
+                "flush_for_session",
+                None,
+            )
+            if callable(flush_for_session):
+                flush_for_session()
+                return
         flush = getattr(self._projection_actor, "flush", None)
         if callable(flush):
             flush()
@@ -1495,9 +1586,12 @@ class CommandPollerActor(Actor):
             maxsize=self._max_pending_commands
         )
         self._session_admission_lock = RLock()
-        # Process-local until ACK succeeds. Restart durability belongs to the
-        # command journal and remains outside this adapter batch.
-        self._session_pending_acks: dict[str, _PendingCommandAck] = {}
+        # Process-local command identity is retained through ACKED. Restart
+        # durability belongs to the command journal outside this adapter.
+        self._command_states: dict[str, _CommandState] = {}
+        self._consumer_ready = Event()
+        self._consumer_progress_lock = RLock()
+        self._consumer_last_progress_at: float | bool = False
         self._stopped = Event()
         self._heartbeat_executor: ThreadPoolExecutor | None = None
         self._command_executor: ThreadPoolExecutor | None = None
@@ -1521,7 +1615,20 @@ class CommandPollerActor(Actor):
             len(self._pending_commands) - self._pending_command_index,
             0,
         )
-        return legacy_pending + self._session_commands.qsize()
+        session_pending_acks = 0
+        with self._session_admission_lock:
+            for state in self._command_states.values():
+                if (
+                    state.publication is not None
+                    and state.phase is _CommandPhase.ACK_QUEUED
+                ):
+                    session_pending_acks += 1
+        return (
+            legacy_pending
+            + self._session_commands.qsize()
+            + len(self._pending_acks)
+            + session_pending_acks
+        )
 
     @property
     def failure_reason(self) -> str:
@@ -1531,34 +1638,64 @@ class CommandPollerActor(Actor):
     def degraded_reason(self) -> str:
         return "; ".join(self._degraded_reasons.values())
 
+    @property
+    def control_plane_consumer_ready(self) -> bool:
+        return self._consumer_ready.is_set()
+
+    @property
+    def control_plane_consumer_last_progress_at(self) -> float | bool:
+        with self._consumer_progress_lock:
+            return self._consumer_last_progress_at
+
     def on_start(self) -> None:
-        self._started_at = time.monotonic()
+        self._consumer_ready.clear()
+        started_at = time.monotonic()
+        self._started_at = started_at
+        self._record_consumer_progress(started_at)
         session = self._control_plane_session
         if session is not None:
             if self._manage_control_plane_session:
                 session.start()
             self._register_poll_timer()
+            self._consumer_ready.set()
             return
         self._ensure_executors()
         self._register_poll_timer()
+        self._consumer_ready.set()
 
-    def on_stop(self) -> None:
-        with self._session_admission_lock:
-            self._stopped.set()
-            self._reject_session_commands(
-                "command poller actor stopped before apply"
-            )
+    def on_stop(self) -> bool:
+        self._consumer_ready.clear()
         deadline = time.monotonic() + self._worker_shutdown_wait_seconds
+        cleanup_complete = True
+        self._stopped.set()
+        admission_stopped = _acquire_lock_before_deadline(
+            self._session_admission_lock,
+            deadline,
+        )
+        if admission_stopped:
+            try:
+                self._reject_session_commands(
+                    "command poller actor stopped before apply"
+                )
+            finally:
+                self._session_admission_lock.release()
+        else:
+            cleanup_complete = False
+            self._fail_command_stream(
+                "command poller admission shutdown deadline exceeded"
+            )
         session = self._control_plane_session
         if session is not None and self._manage_control_plane_session:
             try:
                 stopped = bool(session.stop(deadline))
             except Exception as exc:
                 stopped = False
+                cleanup_complete = False
                 reason = f"control-plane session stop failed: {exc!r}"
                 self._mark_dependency_failed("control_plane", reason)
                 self._fail_command_stream(reason)
             if not stopped:
+                cleanup_complete = False
                 reason = (
                     "control-plane session failed to stop before deadline"
                 )
@@ -1607,10 +1744,12 @@ class CommandPollerActor(Actor):
                 setattr(self, executor_attr, None)
                 setattr(self, future_attr, None)
                 continue
+            cleanup_complete = False
             if dependency == "control_plane":
                 self._mark_dependency_failed(dependency, reason)
                 continue
             self._fail_command_stream(reason)
+        return cleanup_complete
 
     def _register_poll_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -1628,6 +1767,7 @@ class CommandPollerActor(Actor):
     def _on_poll_timer(self, *_args: Any, **_kwargs: Any) -> None:
         if self._stopped.is_set():
             return
+        self._record_consumer_progress()
         if self._control_plane_session is not None:
             self._drain_session_commands()
             self._evaluate_session_health()
@@ -1651,14 +1791,49 @@ class CommandPollerActor(Actor):
             self.session_send_heartbeat()
         except Exception:
             pass
+        self._retry_pending_acks_inline()
         commands = self._control_plane.poll_commands(self._node_id, None)
         for cmd in commands:
+            command_id = str(cmd.command_id)
+            with self._session_admission_lock:
+                if command_id in self._command_states:
+                    continue
+            if len(self._pending_acks) >= self._max_pending_acks:
+                self._fail_command_stream(
+                    "operator command ACK backlog capacity exceeded"
+                )
+                break
+            with self._session_admission_lock:
+                self._command_states[command_id] = _CommandState(
+                    phase=_CommandPhase.APPLYING,
+                )
             status, error = self._apply(cmd)
+            acknowledgement = _PendingCommandAck(
+                command_id=cmd.command_id,
+                status=status,
+                error=error,
+            )
+            self._pending_acks[command_id] = acknowledgement
+            with self._session_admission_lock:
+                state = self._command_states[command_id]
+                state.acknowledgement = acknowledgement
+                state.phase = _CommandPhase.ACK_QUEUED
             try:
-                self._control_plane.ack_command(self._node_id, cmd.command_id, status, error=error)
-            except Exception:  # ack failure must not crash the poll loop
-                pass
+                self.session_ack_command(acknowledgement)
+            except Exception:
+                continue
+            self._pending_acks.pop(command_id, None)
         return len(commands)
+
+    def _retry_pending_acks_inline(self) -> None:
+        for command_id, acknowledgement in tuple(
+            self._pending_acks.items()
+        ):
+            try:
+                self.session_ack_command(acknowledgement)
+            except Exception:
+                continue
+            self._pending_acks.pop(command_id, None)
 
     def session_send_heartbeat(self) -> None:
         self._ensure_open_orders_provider()
@@ -1672,14 +1847,22 @@ class CommandPollerActor(Actor):
         if capacity < 1:
             return ()
         commands = []
+        seen_command_ids: set[str] = set()
         for command in self._control_plane.poll_commands(
             self._node_id,
             None,
         ):
+            command_id = str(command.command_id)
+            if command_id in seen_command_ids:
+                continue
+            with self._session_admission_lock:
+                if command_id in self._command_states:
+                    continue
             if len(commands) >= capacity:
                 reason = "operator command delivery capacity exceeded"
                 self._fail_command_stream(reason)
                 raise RuntimeError(reason)
+            seen_command_ids.add(command_id)
             commands.append(command)
         self._last_command_success_at = time.monotonic()
         return tuple(commands)
@@ -1687,29 +1870,55 @@ class CommandPollerActor(Actor):
     def session_apply_command(
         self,
         command: Any,
-    ) -> _PendingCommandAck:
-        command_id = str(command.command_id)
-        publication = _SessionCommandPublication(command=command)
-        with self._session_admission_lock:
-            if self._stopped.is_set():
-                raise RuntimeError("command poller actor is stopped")
-            acknowledgement = self._session_pending_acks.get(command_id)
-            if acknowledgement is not None:
-                return acknowledgement
-            try:
-                self._session_commands.put(
-                    publication,
-                    timeout=self._session_enqueue_timeout_seconds,
-                )
-            except Full as exc:
-                reason = "operator command actor mailbox capacity exceeded"
-                self._fail_command_stream(reason)
-                raise RuntimeError(reason) from exc
-
+    ) -> _PendingCommandAck | bool:
         deadline = (
             time.monotonic()
             + self._session_completion_timeout_seconds
         )
+        command_id = str(command.command_id)
+        publication: _SessionCommandPublication
+        with self._session_admission_lock:
+            if self._stopped.is_set():
+                raise RuntimeError("command poller actor is stopped")
+            state = self._command_states.get(command_id)
+            if state is not None:
+                if state.phase is not _CommandPhase.APPLYING:
+                    return False
+                publication = state.publication
+                if publication is None:
+                    return False
+            else:
+                if "command_stream" in self._failed_dependencies:
+                    reason = self._failure_reason or (
+                        "operator command stream is failed"
+                    )
+                    raise RuntimeError(reason)
+                publication = _SessionCommandPublication(command=command)
+                state = _CommandState(
+                    phase=_CommandPhase.APPLYING,
+                    publication=publication,
+                )
+                self._command_states[command_id] = state
+                remaining = max(deadline - time.monotonic(), 0.0)
+                enqueue_timeout = min(
+                    self._session_enqueue_timeout_seconds,
+                    remaining,
+                )
+                try:
+                    self._session_commands.put(
+                        publication,
+                        timeout=enqueue_timeout,
+                    )
+                except Full as exc:
+                    current = self._command_states.get(command_id)
+                    if current is state:
+                        self._command_states.pop(command_id, None)
+                    reason = (
+                        "operator command actor mailbox capacity exceeded"
+                    )
+                    self._fail_command_stream(reason)
+                    raise RuntimeError(reason) from exc
+
         while not publication.completed.wait(timeout=0.01):
             if self._stopped.is_set():
                 publication.cancelled.set()
@@ -1730,23 +1939,37 @@ class CommandPollerActor(Actor):
             raise RuntimeError(
                 "operator command apply produced no acknowledgement"
             )
-        return acknowledgement
+        with self._session_admission_lock:
+            state = self._command_states.get(command_id)
+            if state is None:
+                return False
+            if state.phase is not _CommandPhase.APPLYING:
+                return False
+            state.acknowledgement = acknowledgement
+            state.phase = _CommandPhase.ACK_QUEUED
+            return acknowledgement
 
     def session_ack_command(
         self,
         acknowledgement: _PendingCommandAck,
     ) -> None:
+        command_id = str(acknowledgement.command_id)
+        with self._session_admission_lock:
+            state = self._command_states.get(command_id)
+            if state is not None and state.phase is _CommandPhase.ACKED:
+                return
         self._control_plane.ack_command(
             self._node_id,
             acknowledgement.command_id,
             acknowledgement.status,
             error=acknowledgement.error,
         )
-        command_id = str(acknowledgement.command_id)
         with self._session_admission_lock:
-            pending = self._session_pending_acks.get(command_id)
-            if pending is acknowledgement:
-                self._session_pending_acks.pop(command_id, None)
+            state = self._command_states.get(command_id)
+            if state is None:
+                return
+            state.acknowledgement = acknowledgement
+            state.phase = _CommandPhase.ACKED
 
     def _drain_session_commands(self) -> int:
         drained = 0
@@ -1772,9 +1995,9 @@ class CommandPollerActor(Actor):
                     publication.acknowledgement = acknowledgement
                     command_id = str(publication.command.command_id)
                     with self._session_admission_lock:
-                        self._session_pending_acks[
-                            command_id
-                        ] = acknowledgement
+                        state = self._command_states.get(command_id)
+                        if state is not None:
+                            state.acknowledgement = acknowledgement
             except Exception as exc:
                 publication.error = exc
                 self._fail_command_stream(
@@ -1894,19 +2117,33 @@ class CommandPollerActor(Actor):
             command = self._pending_commands[
                 self._pending_command_index
             ]
-            self._pending_command_index += 1
-            status, error = self._apply(command)
             command_id = str(command.command_id)
+            with self._session_admission_lock:
+                state = self._command_states.get(command_id)
+                if state is not None:
+                    self._pending_command_index += 1
+                    continue
             if len(self._pending_acks) >= self._max_pending_acks:
                 self._fail_command_stream(
                     "operator command ACK backlog capacity exceeded"
                 )
                 break
-            self._pending_acks[command_id] = _PendingCommandAck(
+            with self._session_admission_lock:
+                self._command_states[command_id] = _CommandState(
+                    phase=_CommandPhase.APPLYING,
+                )
+            status, error = self._apply(command)
+            acknowledgement = _PendingCommandAck(
                 command_id=command.command_id,
                 status=status,
                 error=error,
             )
+            self._pending_acks[command_id] = acknowledgement
+            with self._session_admission_lock:
+                state = self._command_states[command_id]
+                state.acknowledgement = acknowledgement
+                state.phase = _CommandPhase.ACK_QUEUED
+            self._pending_command_index += 1
             applied += 1
         if self._pending_command_index >= len(self._pending_commands):
             self._pending_commands = ()
@@ -1959,7 +2196,7 @@ class CommandPollerActor(Actor):
         if heartbeat_reference is None:
             heartbeat_reference = self._started_at
         if now - heartbeat_reference >= self._stale_after_seconds:
-            self._mark_dependency_failed(
+            self._mark_dependency_degraded(
                 "control_plane",
                 "control-plane heartbeat stale",
             )
@@ -1967,7 +2204,10 @@ class CommandPollerActor(Actor):
         if command_reference is None:
             command_reference = self._started_at
         if now - command_reference >= self._stale_after_seconds:
-            self._fail_command_stream("operator command poll stale")
+            self._mark_dependency_degraded(
+                "command_stream",
+                "operator command poll stale",
+            )
 
     def _evaluate_session_health(self) -> None:
         session = self._control_plane_session
@@ -1980,6 +2220,11 @@ class CommandPollerActor(Actor):
             self._mark_dependency_degraded("control_plane", reason)
             self._mark_dependency_degraded("command_stream", reason)
             self._evaluate_poll_staleness()
+            return
+        if bool(getattr(snapshot, "stopped", False)):
+            reason = "control-plane session is stopped"
+            self._mark_dependency_failed("control_plane", reason)
+            self._fail_command_stream(reason)
             return
         lanes = getattr(snapshot, "lanes", {})
         heartbeat_lane = lanes.get("heartbeat")
@@ -2006,12 +2251,13 @@ class CommandPollerActor(Actor):
             "last_success_at",
             False,
         )
+        if heartbeat_success is not False:
+            self._last_heartbeat_success_at = float(heartbeat_success)
         if (
             not heartbeat_hard_failure
             and not heartbeat_degraded_failure
             and heartbeat_success is not False
         ):
-            self._last_heartbeat_success_at = float(heartbeat_success)
             self._mark_dependency_ready("control_plane")
 
         command_lanes = (
@@ -2033,6 +2279,14 @@ class CommandPollerActor(Actor):
         command_degraded_failures = [
             failure for failure in command_degraded_failures if failure
         ]
+        command_lane = lanes.get("command_poll")
+        command_success = getattr(
+            command_lane,
+            "last_success_at",
+            False,
+        )
+        if command_success is not False:
+            self._last_command_success_at = float(command_success)
         if command_hard_failures:
             self._fail_command_stream(command_hard_failures[0])
         elif command_degraded_failures:
@@ -2040,21 +2294,22 @@ class CommandPollerActor(Actor):
                 "command_stream",
                 command_degraded_failures[0],
             )
-        command_lane = lanes.get("command_poll")
-        command_success = getattr(
-            command_lane,
-            "last_success_at",
-            False,
-        )
         if (
             not command_hard_failures
             and not command_degraded_failures
             and command_success is not False
-            and not self._failure_reason
         ):
-            self._last_command_success_at = float(command_success)
             self._mark_dependency_ready("command_stream")
         self._evaluate_poll_staleness()
+
+    def _record_consumer_progress(
+        self,
+        progress_at: float | None = None,
+    ) -> None:
+        if progress_at is None:
+            progress_at = time.monotonic()
+        with self._consumer_progress_lock:
+            self._consumer_last_progress_at = float(progress_at)
 
     def _ensure_open_orders_provider(self) -> None:
         if getattr(self, "_oo_provider_registered", False):
@@ -2070,15 +2325,18 @@ class CommandPollerActor(Actor):
         self._oo_provider_registered = True
 
     def _fail_command_stream(self, reason: str) -> None:
+        if "command_stream" in self._failed_dependencies:
+            return
         self._failure_reason = reason
         self._mark_dependency_failed("command_stream", reason)
 
     def _mark_dependency_ready(self, dependency_value: str) -> None:
+        if dependency_value in self._failed_dependencies:
+            return
         dependency = _dependency_by_value(dependency_value)
         marker = getattr(self._lifecycle, "mark_dependency_ready", None)
         if dependency is not None and callable(marker):
             marker(dependency)
-        self._failed_dependencies.discard(dependency_value)
         self._degraded_reasons.pop(dependency_value, None)
 
     def _mark_dependency_degraded(
@@ -2200,6 +2458,13 @@ def _lane_degraded_failure(lane_name: str, lane: Any) -> str:
     if queue_pressure == "degraded":
         return f"{lane_name} queue pressure is degraded"
     return ""
+
+
+def _acquire_lock_before_deadline(lock: Any, deadline: float) -> bool:
+    remaining = max(float(deadline) - time.monotonic(), 0.0)
+    if remaining <= 0:
+        return bool(lock.acquire(blocking=False))
+    return bool(lock.acquire(timeout=remaining))
 
 
 def _shutdown_executor(

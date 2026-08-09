@@ -23,10 +23,11 @@ from app.nautilus_actors import (  # noqa: E402
 from execution_domain.control_plane import (  # noqa: E402
     CommandType,
     NodeCommand,
+    TradingState,
 )
 from runtime.control_plane_session import NodeControlPlaneSession  # noqa: E402
 
-MAX_CALLBACK_SECONDS = 0.05
+MAX_CALLBACK_SECONDS = 0.01
 
 
 def test_blocked_intent_fetch_keeps_actor_timer_callback_bounded() -> None:
@@ -51,7 +52,9 @@ def test_blocked_intent_fetch_keeps_actor_timer_callback_bounded() -> None:
         control_plane_session=session,
         worker_shutdown_wait_seconds=1.0,
     )
+    assert actor.control_plane_consumer_ready is False
     actor.on_start()
+    assert actor.control_plane_consumer_ready is True
     assert fetch_started.wait(timeout=1.0)
 
     started_at = time.monotonic()
@@ -61,6 +64,7 @@ def test_blocked_intent_fetch_keeps_actor_timer_callback_bounded() -> None:
     release_fetch.set()
     actor.on_stop()
     assert elapsed < MAX_CALLBACK_SECONDS
+    assert actor.control_plane_consumer_ready is False
 
 
 def test_blocked_plain_intent_poll_keeps_actor_timer_callback_bounded() -> None:
@@ -103,8 +107,9 @@ def test_intent_stop_retains_running_poll_cleanup_identity_for_retry() -> None:
     executor = actor._executor
     future = actor._poll_future
 
-    actor.on_stop()
+    stopped = actor.on_stop()
     try:
+        assert stopped is False
         assert actor._executor is executor
         assert actor._poll_future is future
         assert _failed_reasons(lifecycle)["intent_stream"] == (
@@ -113,7 +118,7 @@ def test_intent_stop_retains_running_poll_cleanup_identity_for_retry() -> None:
     finally:
         client.release_poll.set()
         assert client.poll_finished.wait(timeout=1.0)
-        actor.on_stop()
+        assert actor.on_stop() is True
 
     assert actor._executor is None
     assert actor._poll_future is None
@@ -211,6 +216,9 @@ def test_intent_stop_rejects_delivery_admitted_during_stop_race() -> None:
         control_plane_session=_LocalSession(),
         publication_completion_timeout_seconds=1.0,
     )
+    assert actor.control_plane_consumer_ready is False
+    actor.on_start()
+    assert actor.control_plane_consumer_ready is True
     pending: _AdmissionBarrierQueue = _AdmissionBarrierQueue()
     actor._pending_intents = pending
     actor._queued_publisher._pending = pending
@@ -228,6 +236,8 @@ def test_intent_stop_rejects_delivery_admitted_during_stop_race() -> None:
 
     stopper = Thread(target=actor.on_stop)
     stopper.start()
+    assert _wait_until(actor._stopped.is_set)
+    assert actor.control_plane_consumer_ready is False
     pending.release_put.set()
     worker.join(timeout=1.0)
     stopper.join(timeout=1.0)
@@ -238,6 +248,44 @@ def test_intent_stop_rejects_delivery_admitted_during_stop_race() -> None:
     assert pending.empty()
     assert len(errors) == 1
     assert "stopped" in str(errors[0])
+
+
+def test_intent_stop_deadline_includes_admission_lock_wait() -> None:
+    client = _IntentClient()
+    actor = IntentPublisherActor(
+        client,
+        lifecycle=_Lifecycle(),
+        control_plane_session=_LocalSession(),
+        worker_shutdown_wait_seconds=0.02,
+        publication_completion_timeout_seconds=1.0,
+    )
+    pending = _AdmissionBarrierQueue(block_timeout=0.2)
+    actor._pending_intents = pending
+    actor._queued_publisher._pending = pending
+    errors: list[BaseException] = []
+
+    def deliver() -> None:
+        try:
+            client.deliver(SimpleNamespace(account_id="account-a"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = Thread(target=deliver)
+    worker.start()
+    assert pending.put_started.wait(timeout=1.0)
+
+    started_at = time.monotonic()
+    stopped = actor.on_stop()
+    elapsed = time.monotonic() - started_at
+
+    assert stopped is False
+    assert elapsed < 0.1
+    pending.release_put.set()
+    worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+    assert len(errors) == 1
+    assert "stopped" in str(errors[0])
+    assert actor.on_stop() is True
 
 
 def test_intent_delivery_timeout_cancels_late_publication() -> None:
@@ -303,7 +351,9 @@ def test_blocked_command_poll_keeps_actor_timer_callback_bounded() -> None:
         worker_shutdown_wait_seconds=1.0,
     )
     actor_holder["actor"] = actor
+    assert actor.control_plane_consumer_ready is False
     actor.on_start()
+    assert actor.control_plane_consumer_ready is True
     assert control_plane.poll_started.wait(timeout=1.0)
 
     started_at = time.monotonic()
@@ -313,6 +363,73 @@ def test_blocked_command_poll_keeps_actor_timer_callback_bounded() -> None:
     control_plane.release_poll.set()
     actor.on_stop()
     assert elapsed < MAX_CALLBACK_SECONDS
+    assert actor.control_plane_consumer_ready is False
+
+
+def test_command_consumer_progress_advances_while_intent_fetch_is_blocked() -> None:
+    fetch_started = Event()
+    release_fetch = Event()
+
+    def fetch(capacity: int) -> tuple[Any, ...]:
+        del capacity
+        fetch_started.set()
+        release_fetch.wait(timeout=2.0)
+        return ()
+
+    session = NodeControlPlaneSession(
+        intent_fetch=fetch,
+        intent_fetch_interval_seconds=0.01,
+        operation_timeout_seconds=1.0,
+    )
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=_Lifecycle(),
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        manage_control_plane_session=False,
+    )
+
+    assert actor.control_plane_consumer_last_progress_at is False
+    actor.on_start()
+    started_progress = actor.control_plane_consumer_last_progress_at
+    assert isinstance(started_progress, float)
+    session.start()
+    assert fetch_started.wait(timeout=1.0)
+
+    time.sleep(0.002)
+    actor._evaluate_session_health()
+    assert (
+        actor.control_plane_consumer_last_progress_at
+        == started_progress
+    )
+
+    previous_progress = float(started_progress)
+    for _index in range(3):
+        time.sleep(0.002)
+        actor._on_poll_timer()
+        current_progress = actor.control_plane_consumer_last_progress_at
+        assert isinstance(current_progress, float)
+        assert current_progress > previous_progress
+        previous_progress = current_progress
+
+    frozen_progress = actor.control_plane_consumer_last_progress_at
+    time.sleep(0.01)
+    assert (
+        actor.control_plane_consumer_last_progress_at
+        == frozen_progress
+    )
+
+    assert actor.on_stop() is True
+    stopped_progress = actor.control_plane_consumer_last_progress_at
+    actor._on_poll_timer()
+    assert (
+        actor.control_plane_consumer_last_progress_at
+        == stopped_progress
+    )
+
+    release_fetch.set()
+    assert session.stop(time.monotonic() + 1.0) is True
 
 
 def test_blocked_plain_command_io_keeps_actor_timer_callback_bounded() -> None:
@@ -368,8 +485,9 @@ def test_command_stop_retains_running_poll_cleanup_identity_for_retry() -> None:
     executor = actor._command_executor
     future = actor._command_future
 
-    actor.on_stop()
+    stopped = actor.on_stop()
     try:
+        assert stopped is False
         assert actor._command_executor is executor
         assert actor._command_future is future
         assert _failed_reasons(lifecycle)["command_stream"] == (
@@ -378,7 +496,7 @@ def test_command_stop_retains_running_poll_cleanup_identity_for_retry() -> None:
     finally:
         control_plane.release_poll.set()
         assert control_plane.poll_finished.wait(timeout=1.0)
-        actor.on_stop()
+        assert actor.on_stop() is True
 
     assert actor._command_executor is None
     assert actor._command_future is None
@@ -405,6 +523,81 @@ def test_plain_command_apply_runs_on_actor_thread_and_ack_runs_on_worker() -> No
     assert control_plane.poll_thread_id != actor_thread_id
     assert control_plane.ack_thread_id is not None
     assert control_plane.ack_thread_id != actor_thread_id
+
+
+def test_plain_command_dedupes_while_ack_is_blocked() -> None:
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+    control_plane = _RepeatingCommandControlPlane(command)
+    lifecycle = _Lifecycle()
+    actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        max_pending_acks=2,
+    )
+    actor.on_start()
+
+    assert _pump_actor_until(actor, control_plane.ack_started.is_set)
+    for _index in range(20):
+        actor._on_poll_timer()
+
+    assert control_plane.poll_count == 1
+    assert len(lifecycle.apply_thread_ids) == 1
+    assert actor.pending_command_count == 1
+    assert actor._command_states["command-1"].phase.value == "ACK_QUEUED"
+
+    control_plane.release_ack.set()
+    assert _pump_actor_until(actor, control_plane.acked.is_set)
+    assert _pump_actor_until(actor, lambda: actor.pending_command_count == 0)
+    assert actor._command_states["command-1"].phase.value == "ACKED"
+    actor.on_stop()
+
+
+def test_plain_command_checks_ack_capacity_before_apply() -> None:
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+    lifecycle = _Lifecycle()
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        max_pending_acks=1,
+    )
+    actor._pending_commands = (command,)
+    actor._pending_acks["already-pending"] = SimpleNamespace(
+        command_id="already-pending"
+    )
+
+    applied = actor._drain_pending_commands()
+
+    assert applied == 0
+    assert lifecycle.apply_thread_ids == []
+    assert actor._pending_command_index == 0
+    assert actor.pending_command_count == 2
+    assert _failed_reasons(lifecycle)["command_stream"] == (
+        "operator command ACK backlog capacity exceeded"
+    )
+
+
+def test_poll_once_retries_ack_without_reapplying_command() -> None:
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+    control_plane = _FailOnceAckControlPlane(command)
+    lifecycle = _Lifecycle()
+    actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+    )
+
+    actor.poll_once()
+    actor.poll_once()
+
+    assert len(lifecycle.apply_thread_ids) == 1
+    assert control_plane.ack_count == 2
+    assert actor.pending_command_count == 0
+    assert actor._command_states["command-1"].phase.value == "ACKED"
 
 
 def test_session_command_apply_runs_on_actor_thread_and_ack_runs_on_worker() -> None:
@@ -501,11 +694,101 @@ def test_session_command_ack_failure_keeps_process_local_apply_result() -> None:
     first_ack = _apply_session_command(actor, command)
     with pytest.raises(RuntimeError, match="ACK unavailable"):
         actor.session_ack_command(first_ack)
-    second_ack = _apply_session_command(actor, command)
+    second_ack = actor.session_apply_command(command)
     actor.on_stop()
 
-    assert second_ack is first_ack
+    assert second_ack is False
     assert len(lifecycle.apply_thread_ids) == 1
+
+
+def test_session_poll_excludes_tracked_command_before_capacity_check() -> None:
+    old_command = NodeCommand(
+        command_id="command-old",
+        type=CommandType.HALT,
+    )
+    new_command = NodeCommand(
+        command_id="command-new",
+        type=CommandType.HALT,
+    )
+    control_plane = _MutableCommandControlPlane()
+    lifecycle = _Lifecycle()
+    actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+    )
+    acknowledgement = _apply_session_command(actor, old_command)
+    actor.session_ack_command(acknowledgement)
+    control_plane.commands = (old_command, new_command)
+
+    polled = actor.session_poll_commands(1)
+
+    assert polled == (new_command,)
+    assert _failed_reasons(lifecycle) == {}
+    actor.on_stop()
+
+
+def test_session_command_apply_timeout_shares_in_flight_result_and_queues_ack_once() -> None:
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+    control_plane = _AckRecordingControlPlane()
+    lifecycle = _BlockingApplyLifecycle()
+    actor = CommandPollerActor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        session_completion_timeout_seconds=0.03,
+    )
+    first_errors: list[BaseException] = []
+    second_results: list[Any] = []
+
+    def apply_first() -> None:
+        try:
+            actor.session_apply_command(command)
+        except BaseException as exc:
+            first_errors.append(exc)
+
+    def apply_second() -> None:
+        second_results.append(actor.session_apply_command(command))
+
+    first = Thread(target=apply_first)
+    first.start()
+    assert _wait_until(lambda: actor.pending_command_count == 1)
+    drainer = Thread(target=actor._drain_session_commands)
+    drainer.start()
+    assert lifecycle.apply_started.wait(timeout=1.0)
+    first.join(timeout=1.0)
+    assert first.is_alive() is False
+    assert len(first_errors) == 1
+    assert "timed out" in str(first_errors[0])
+    assert actor._command_states["command-1"].phase.value == "APPLYING"
+
+    second = Thread(target=apply_second)
+    second.start()
+    lifecycle.release_apply.set()
+    drainer.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert drainer.is_alive() is False
+    assert second.is_alive() is False
+    assert lifecycle.apply_count == 1
+    assert len(second_results) == 1
+    acknowledgement = second_results[0]
+    assert acknowledgement is not False
+    assert actor._command_states["command-1"].phase.value == (
+        "ACK_QUEUED"
+    )
+    assert actor.session_apply_command(command) is False
+
+    actor.session_ack_command(acknowledgement)
+
+    assert control_plane.ack_count == 1
+    assert actor._command_states["command-1"].phase.value == "ACKED"
+    assert actor.session_apply_command(command) is False
+    actor.on_stop()
 
 
 def test_command_mailbox_full_fails_stream_and_stop_releases_waiter() -> None:
@@ -559,6 +842,9 @@ def test_command_stop_rejects_delivery_admitted_during_stop_race() -> None:
         control_plane_session=_LocalSession(),
         session_completion_timeout_seconds=1.0,
     )
+    assert actor.control_plane_consumer_ready is False
+    actor.on_start()
+    assert actor.control_plane_consumer_ready is True
     pending: _AdmissionBarrierQueue = _AdmissionBarrierQueue()
     actor._session_commands = pending
     command = NodeCommand(command_id="command-1", type=CommandType.HALT)
@@ -576,6 +862,8 @@ def test_command_stop_rejects_delivery_admitted_during_stop_race() -> None:
 
     stopper = Thread(target=actor.on_stop)
     stopper.start()
+    assert _wait_until(actor._stopped.is_set)
+    assert actor.control_plane_consumer_ready is False
     pending.release_put.set()
     worker.join(timeout=1.0)
     stopper.join(timeout=1.0)
@@ -587,6 +875,46 @@ def test_command_stop_rejects_delivery_admitted_during_stop_race() -> None:
     assert len(errors) == 1
     assert "stopped" in str(errors[0])
     assert lifecycle.apply_thread_ids == []
+
+
+def test_command_stop_deadline_includes_admission_lock_wait() -> None:
+    lifecycle = _Lifecycle()
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        worker_shutdown_wait_seconds=0.02,
+        session_completion_timeout_seconds=1.0,
+    )
+    pending = _AdmissionBarrierQueue(block_timeout=0.2)
+    actor._session_commands = pending
+    errors: list[BaseException] = []
+    command = NodeCommand(command_id="command-1", type=CommandType.HALT)
+
+    def apply_command() -> None:
+        try:
+            actor.session_apply_command(command)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = Thread(target=apply_command)
+    worker.start()
+    assert pending.put_started.wait(timeout=1.0)
+
+    started_at = time.monotonic()
+    stopped = actor.on_stop()
+    elapsed = time.monotonic() - started_at
+
+    assert stopped is False
+    assert elapsed < 0.1
+    pending.release_put.set()
+    worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+    assert len(errors) == 1
+    assert "stopped" in str(errors[0])
+    assert actor.on_stop() is True
 
 
 def test_command_apply_timeout_cancels_late_actor_apply() -> None:
@@ -648,9 +976,9 @@ def test_command_session_stop_deadline_failure_fails_dependencies() -> None:
     }
 
 
-def test_stale_intent_session_fails_stream_without_polling_client() -> None:
+def test_stale_intent_session_degrades_without_halting_or_losing_readiness() -> None:
     client = _IntentClient()
-    lifecycle = _Lifecycle()
+    lifecycle = _ActiveLifecycle()
     actor = IntentPublisherActor(
         client,
         lifecycle=lifecycle,
@@ -658,17 +986,50 @@ def test_stale_intent_session_fails_stream_without_polling_client() -> None:
         stale_after_seconds=0,
     )
 
+    actor.on_start()
     actor._on_poll_timer()
-    actor.on_stop()
 
     assert client.poll_calls == []
-    assert _failed_reasons(lifecycle) == {
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
         "intent_stream": "approved intent poll stale",
     }
+    assert actor.degraded_reason == "approved intent poll stale"
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.readiness.ready is True
+    assert actor.control_plane_consumer_ready is True
+    actor.on_stop()
 
 
-def test_stale_session_lanes_fail_closed_without_control_plane_calls() -> None:
-    lifecycle = _Lifecycle()
+def test_stopped_session_immediately_hard_fails_intent_stream_sticky() -> None:
+    lifecycle = _ActiveLifecycle()
+    session = _LocalSession()
+    session._snapshot.stopped = True
+    actor = IntentPublisherActor(
+        _IntentClient(),
+        lifecycle=lifecycle,
+        control_plane_session=session,
+        stale_after_seconds=10.0,
+    )
+
+    actor.on_start()
+    actor._on_poll_timer()
+    session._snapshot.stopped = False
+    session._snapshot.lanes[
+        "intent_fetch"
+    ].last_success_at = time.monotonic()
+    actor._on_poll_timer()
+
+    assert _failed_reasons(lifecycle) == {
+        "intent_stream": "control-plane session is stopped",
+    }
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.readiness.ready is False
+    actor.on_stop()
+
+
+def test_stale_command_session_degrades_without_halting_or_losing_readiness() -> None:
+    lifecycle = _ActiveLifecycle()
     control_plane = _ForbiddenControlPlane()
     session = _LocalSession()
     actor = CommandPollerActor(
@@ -680,14 +1041,55 @@ def test_stale_session_lanes_fail_closed_without_control_plane_calls() -> None:
         stale_after_seconds=0,
     )
 
+    actor.on_start()
     actor._on_poll_timer()
-    actor.on_stop()
 
     assert control_plane.calls == []
-    assert _failed_reasons(lifecycle) == {
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
         "control_plane": "control-plane heartbeat stale",
         "command_stream": "operator command poll stale",
     }
+    assert "control-plane heartbeat stale" in actor.degraded_reason
+    assert "operator command poll stale" in actor.degraded_reason
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.readiness.ready is True
+    assert actor.control_plane_consumer_ready is True
+    actor.on_stop()
+
+
+def test_stopped_session_immediately_hard_fails_command_dependencies_sticky() -> None:
+    lifecycle = _ActiveLifecycle()
+    session = _LocalSession()
+    session._snapshot.stopped = True
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        stale_after_seconds=10.0,
+    )
+
+    actor.on_start()
+    actor._on_poll_timer()
+    session._snapshot.stopped = False
+    session._snapshot.lanes[
+        "heartbeat"
+    ].last_success_at = time.monotonic()
+    session._snapshot.lanes[
+        "command_poll"
+    ].last_success_at = time.monotonic()
+    actor._on_poll_timer()
+
+    reason = "control-plane session is stopped"
+    assert _failed_reasons(lifecycle) == {
+        "control_plane": reason,
+        "command_stream": reason,
+    }
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.readiness.ready is False
+    actor.on_stop()
 
 
 def test_recoverable_intent_session_failure_is_degraded_until_recovery() -> None:
@@ -719,6 +1121,72 @@ def test_recoverable_intent_session_failure_is_degraded_until_recovery() -> None
 
     assert _degraded_reasons(lifecycle) == {}
     assert actor.degraded_reason == ""
+
+
+def test_intent_fetch_progress_refreshes_while_delivery_is_degraded() -> None:
+    lifecycle = _Lifecycle()
+    session = _LocalSession()
+    fetch_success_at = time.monotonic()
+    fetch_lane = session._snapshot.lanes["intent_fetch"]
+    fetch_lane.last_success_at = fetch_success_at
+    delivery_lane = session._snapshot.lanes["intent_delivery"]
+    delivery_lane.failure = "intent delivery HTTP 503"
+    delivery_lane.circuit_state = "open"
+    actor = IntentPublisherActor(
+        _IntentClient(),
+        lifecycle=lifecycle,
+        control_plane_session=session,
+        stale_after_seconds=0.05,
+    )
+    actor._started_at = fetch_success_at - 1.0
+
+    actor._on_poll_timer()
+
+    assert actor._last_poll_success_at == fetch_success_at
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
+        "intent_stream": "intent delivery HTTP 503",
+    }
+    actor.on_stop()
+
+
+def test_intent_hard_mailbox_failure_survives_normal_drain() -> None:
+    client = _IntentClient()
+    lifecycle = _Lifecycle()
+    actor = IntentPublisherActor(
+        client,
+        lifecycle=lifecycle,
+        control_plane_session=_LocalSession(),
+        pending_intent_limit=1,
+        publication_enqueue_timeout_seconds=0.01,
+        publication_completion_timeout_seconds=1.0,
+    )
+    actor.publish = lambda intent: None
+    errors: list[BaseException] = []
+
+    def deliver() -> None:
+        try:
+            client.deliver(SimpleNamespace(account_id="account-a"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = Thread(target=deliver)
+    worker.start()
+    assert _wait_until(lambda: actor.pending_intent_count == 1)
+    with pytest.raises(RuntimeError, match="backlog full"):
+        client.deliver(SimpleNamespace(account_id="account-a"))
+
+    actor._on_poll_timer()
+    worker.join(timeout=1.0)
+
+    assert worker.is_alive() is False
+    assert errors == []
+    assert actor._intent_stream_failed is True
+    assert _failed_reasons(lifecycle)["intent_stream"] == (
+        "intent publication backlog full"
+    )
+    assert lifecycle.ready_dependencies == []
+    actor.on_stop()
 
 
 def test_recoverable_command_session_failure_is_degraded_until_recovery() -> None:
@@ -756,6 +1224,35 @@ def test_recoverable_command_session_failure_is_degraded_until_recovery() -> Non
 
     assert _degraded_reasons(lifecycle) == {}
     assert actor.degraded_reason == ""
+
+
+def test_command_poll_progress_refreshes_while_ack_is_degraded() -> None:
+    lifecycle = _Lifecycle()
+    session = _LocalSession()
+    success_at = time.monotonic()
+    session._snapshot.lanes["heartbeat"].last_success_at = success_at
+    session._snapshot.lanes["command_poll"].last_success_at = success_at
+    ack_lane = session._snapshot.lanes["command_ack"]
+    ack_lane.failure = "command ACK HTTP 503"
+    ack_lane.circuit_state = "open"
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=session,
+        stale_after_seconds=0.05,
+    )
+    actor._started_at = success_at - 1.0
+
+    actor._on_poll_timer()
+
+    assert actor._last_command_success_at == success_at
+    assert _failed_reasons(lifecycle) == {}
+    assert _degraded_reasons(lifecycle) == {
+        "command_stream": "command ACK HTTP 503",
+    }
+    actor.on_stop()
 
 
 def test_fatal_session_queue_state_remains_hard_failure() -> None:
@@ -859,8 +1356,9 @@ class _AttachablePublisher:
 
 
 class _AdmissionBarrierQueue(Queue[Any]):
-    def __init__(self) -> None:
+    def __init__(self, *, block_timeout: float = 1.0) -> None:
         super().__init__()
+        self._block_timeout = block_timeout
         self.put_started = Event()
         self.release_put = Event()
         self.admitted = Event()
@@ -872,7 +1370,7 @@ class _AdmissionBarrierQueue(Queue[Any]):
         timeout: float | None = None,
     ) -> None:
         self.put_started.set()
-        self.release_put.wait(timeout=1.0)
+        self.release_put.wait(timeout=self._block_timeout)
         super().put(item, block=block, timeout=timeout)
         self.admitted.set()
 
@@ -954,6 +1452,36 @@ class _Lifecycle:
         reason: str,
     ) -> None:
         self.degraded_dependencies[dependency] = reason
+
+
+class _ActiveLifecycle(_Lifecycle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.trading_state = TradingState.ACTIVE
+        self.readiness = SimpleNamespace(ready=True)
+
+    def mark_dependency_failed(
+        self,
+        dependency: Any,
+        reason: str,
+    ) -> None:
+        super().mark_dependency_failed(dependency, reason)
+        self.trading_state = TradingState.HALTED
+        self.readiness.ready = False
+
+
+class _BlockingApplyLifecycle(_Lifecycle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.apply_started = Event()
+        self.release_apply = Event()
+        self.apply_count = 0
+
+    def apply_operator_state(self, state: Any, reason: str) -> None:
+        self.apply_count += 1
+        self.apply_started.set()
+        self.release_apply.wait(timeout=1.0)
+        super().apply_operator_state(state, reason)
 
 
 class _LocalSession:
@@ -1064,6 +1592,40 @@ class _FailingAckControlPlane:
     def ack_command(self, *args: Any, **kwargs: Any) -> None:
         del args, kwargs
         raise RuntimeError("ACK unavailable")
+
+
+class _AckRecordingControlPlane:
+    def __init__(self) -> None:
+        self.ack_count = 0
+
+    def ack_command(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        self.ack_count += 1
+
+
+class _MutableCommandControlPlane(_AckRecordingControlPlane):
+    def __init__(self) -> None:
+        super().__init__()
+        self.commands: tuple[Any, ...] = ()
+
+    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
+        del node_id, after
+        return self.commands
+
+
+class _FailOnceAckControlPlane(_AckRecordingControlPlane):
+    def __init__(self, command: Any) -> None:
+        super().__init__()
+        self._command = command
+
+    def poll_commands(self, node_id: str, after: Any) -> tuple[Any, ...]:
+        del node_id, after
+        return (self._command,)
+
+    def ack_command(self, *args: Any, **kwargs: Any) -> None:
+        super().ack_command(*args, **kwargs)
+        if self.ack_count == 1:
+            raise RuntimeError("ACK unavailable")
 
 
 class _ForbiddenControlPlane:
