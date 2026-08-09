@@ -169,12 +169,17 @@ class NodeLifecycle:
         now = self._clock.now()
         if self._last_control_plane_ok_at is None:
             if DependencyName.CONTROL_PLANE in self._ready_dependencies:
-                self._halt("control-plane heartbeat missing")
+                self.mark_dependency_degraded(
+                    DependencyName.CONTROL_PLANE,
+                    "control-plane heartbeat missing",
+                )
             return
 
         if now - self._last_control_plane_ok_at > self.config.control_plane.heartbeat_timeout:
-            self._ready_dependencies.discard(DependencyName.CONTROL_PLANE)
-            self._halt("control-plane heartbeat stale")
+            self.mark_dependency_degraded(
+                DependencyName.CONTROL_PLANE,
+                "control-plane heartbeat stale",
+            )
             return
 
         if self._control_plane is None:
@@ -184,12 +189,16 @@ class NodeLifecycle:
         )
         if snapshot_at is None:
             if DependencyName.PROJECTION in self._ready_dependencies:
-                self._ready_dependencies.discard(DependencyName.PROJECTION)
-                self._halt("control-plane snapshot missing")
+                self.mark_dependency_degraded(
+                    DependencyName.PROJECTION,
+                    "control-plane snapshot missing",
+                )
             return
         if now - snapshot_at > self.config.control_plane.snapshot_stale_after:
-            self._ready_dependencies.discard(DependencyName.PROJECTION)
-            self._halt("control-plane snapshot stale")
+            self.mark_dependency_degraded(
+                DependencyName.PROJECTION,
+                "control-plane snapshot stale",
+            )
 
     def _halt(self, reason: str) -> None:
         self._trading_state = TradingState.HALTED

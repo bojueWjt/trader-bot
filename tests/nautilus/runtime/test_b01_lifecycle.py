@@ -293,7 +293,7 @@ def test_heartbeat_carries_the_runtime_account_identity(
     assert heartbeat.account_id == config.account_id
 
 
-def test_control_plane_loss_and_stale_snapshot_auto_halt(
+def test_control_plane_loss_and_stale_snapshot_degrade_active_trading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = _FixedClock(datetime(2026, 6, 19, 12, tzinfo=timezone.utc))
@@ -311,8 +311,15 @@ def test_control_plane_loss_and_stale_snapshot_auto_halt(
     clock.advance(config.control_plane.heartbeat_timeout + timedelta(seconds=1))
     lifecycle.evaluate_safety()
 
-    assert lifecycle.trading_state is TradingState.HALTED
-    assert lifecycle.halt_reason == "control-plane heartbeat stale"
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.halt_reason == ""
+    assert lifecycle.readiness.ready is True
+    assert lifecycle.readiness.degraded == (
+        (
+            DependencyName.CONTROL_PLANE,
+            "control-plane heartbeat stale",
+        ),
+    )
 
     control_plane.heartbeat(config.node_id, lifecycle.build_heartbeat())
     lifecycle.mark_dependency_ready(DependencyName.CONTROL_PLANE)
@@ -324,8 +331,15 @@ def test_control_plane_loss_and_stale_snapshot_auto_halt(
     )
     lifecycle.evaluate_safety()
 
-    assert lifecycle.trading_state is TradingState.HALTED
-    assert lifecycle.halt_reason == "control-plane snapshot stale"
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.halt_reason == ""
+    assert lifecycle.readiness.ready is True
+    assert lifecycle.readiness.degraded == (
+        (
+            DependencyName.PROJECTION,
+            "control-plane snapshot stale",
+        ),
+    )
 
 
 def _load_account_a(monkeypatch: pytest.MonkeyPatch):
