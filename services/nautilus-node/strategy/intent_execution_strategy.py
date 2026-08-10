@@ -57,9 +57,11 @@ def _configured_positive_int(
     default: int,
     field: str,
 ) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a positive integer")
     if value == 0:
         return default
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field} must be a positive integer")
     return value
 
@@ -70,10 +72,10 @@ def _configured_positive_number(
     default: float,
     field: str,
 ) -> float:
-    if value == 0:
-        return default
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be a positive number")
+    if value == 0:
+        return default
     number = float(value)
     if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{field} must be a positive number")

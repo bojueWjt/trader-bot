@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
+LEGACY_SCHEMA_VERSION = "1.0"
 AMBIGUOUS_APPLY_ERROR = "ambiguous_apply_after_restart"
 DEFAULT_MAX_BYTES = 16 * 1024 * 1024
+MAX_ERROR_JSON_BYTES = 96
+COMMAND_ACK_STATUSES = frozenset(
+    {
+        "accepted",
+        "completed",
+        "failed",
+    }
+)
+MAX_COMMAND_ACK_STATUS = "completed"
 
 
 class CommandJournalPhase(str, Enum):
@@ -28,6 +39,7 @@ class CommandJournalRecord:
     phase: CommandJournalPhase
     status: str | bool = False
     error: str | bool = False
+    acked_sequence: int | bool = False
 
 
 class InMemoryCommandJournal:
@@ -82,8 +94,8 @@ class InMemoryCommandJournal:
         error: str | bool,
     ) -> CommandJournalRecord:
         normalized_id = _required_text("command_id", command_id)
-        normalized_status = _required_text("status", status)
-        normalized_error = _optional_text(error)
+        normalized_status = self._normalize_status(status)
+        normalized_error = self._normalize_error(error)
         with self._lock:
             existing = self._records.get(normalized_id)
             if existing is None:
@@ -126,12 +138,15 @@ class InMemoryCommandJournal:
                 raise ValueError(
                     "cannot mark APPLYING command as ACKED"
                 )
+            if existing.phase is CommandJournalPhase.ACKED:
+                return existing
             record = CommandJournalRecord(
                 command_id=existing.command_id,
                 command_type=existing.command_type,
                 phase=CommandJournalPhase.ACKED,
                 status=existing.status,
                 error=existing.error,
+                acked_sequence=self._next_acked_sequence(),
             )
             self._store_record(record)
             return record
@@ -144,11 +159,12 @@ class InMemoryCommandJournal:
                 return False
             if existing.phase is not CommandJournalPhase.APPLYING:
                 return False
+            previous_records = dict(self._records)
             self._records.pop(normalized_id)
             try:
                 self._save()
             except Exception:
-                self._records[normalized_id] = existing
+                self._records = previous_records
                 raise
             return True
 
@@ -181,15 +197,12 @@ class InMemoryCommandJournal:
         self,
         record: CommandJournalRecord,
     ) -> None:
-        previous = self._records.get(record.command_id)
+        previous_records = dict(self._records)
         self._records[record.command_id] = record
         try:
             self._save()
         except Exception:
-            if previous is None:
-                self._records.pop(record.command_id, None)
-            else:
-                self._records[record.command_id] = previous
+            self._records = previous_records
             raise
 
     def _snapshot(self) -> tuple[CommandJournalRecord, ...]:
@@ -200,6 +213,15 @@ class InMemoryCommandJournal:
 
     def _save(self) -> None:
         return
+
+    def _normalize_status(self, status: Any) -> str:
+        return _command_ack_status(status)
+
+    def _normalize_error(self, error: Any) -> str | bool:
+        return _optional_text(error)
+
+    def _next_acked_sequence(self) -> int | bool:
+        return False
 
 
 class DurableCommandJournal(InMemoryCommandJournal):
@@ -240,15 +262,38 @@ class DurableCommandJournal(InMemoryCommandJournal):
     def max_bytes(self) -> int:
         return self._max_bytes
 
+    def _normalize_error(self, error: Any) -> str | bool:
+        return _bounded_optional_text(
+            error,
+            max_json_bytes=MAX_ERROR_JSON_BYTES,
+            digest_characters=64,
+        )
+
+    def _next_acked_sequence(self) -> int:
+        sequences = [
+            record.acked_sequence
+            for record in self._records.values()
+            if (
+                record.phase is CommandJournalPhase.ACKED
+                and isinstance(record.acked_sequence, int)
+                and not isinstance(record.acked_sequence, bool)
+            )
+        ]
+        if not sequences:
+            return 1
+        return max(sequences) + 1
+
     def _load(self) -> None:
         if not self._path.exists():
             return
-        if self._path.stat().st_size > self._max_bytes:
-            raise ValueError("command journal exceeds max_bytes")
         raw = json.loads(self._path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("command journal must be an object")
-        if raw.get("schema_version") != SCHEMA_VERSION:
+        schema_version = raw.get("schema_version")
+        if schema_version not in {
+            LEGACY_SCHEMA_VERSION,
+            SCHEMA_VERSION,
+        }:
             raise ValueError(
                 "unsupported command journal schema_version"
             )
@@ -262,35 +307,92 @@ class DurableCommandJournal(InMemoryCommandJournal):
                 "command journal commands must be an object"
             )
         loaded: dict[str, CommandJournalRecord] = {}
+        legacy_acked: list[CommandJournalRecord] = []
         for command_id, payload in commands.items():
+            if (
+                schema_version == LEGACY_SCHEMA_VERSION
+                and isinstance(payload, dict)
+                and payload.get("phase") == CommandJournalPhase.ACKED.value
+            ):
+                legacy_acked.append(
+                    _record_from_payload(
+                        command_id,
+                        payload,
+                        require_acked_sequence=False,
+                    )
+                )
+                continue
             record = _record_from_payload(command_id, payload)
             loaded[record.command_id] = record
+        for sequence, record in enumerate(
+            _legacy_acked_migration_order(legacy_acked),
+            start=1,
+        ):
+            loaded[record.command_id] = replace(
+                record,
+                acked_sequence=sequence,
+            )
         self._records = loaded
+        self._save()
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        records, encoded = self._prepared_payload()
+        self._write_payload(encoded)
+        self._records = records
+
+    def _prepared_payload(
+        self,
+    ) -> tuple[dict[str, CommandJournalRecord], bytes]:
+        records = _with_rebased_acked_sequences(self._records)
+        while True:
+            encoded = self._serialize_records(records)
+            queued_reserved_records = (
+                _with_terminal_reservations(records)
+            )
+            queued_reserved = self._serialize_records(
+                queued_reserved_records
+            )
+            acked_reserved = self._serialize_records(
+                _with_acked_reservations(
+                    queued_reserved_records
+                )
+            )
+            if (
+                len(encoded) <= self._max_bytes
+                and len(queued_reserved) <= self._max_bytes
+                and len(acked_reserved) <= self._max_bytes
+            ):
+                return records, encoded
+            acked_id = _first_acked_command_id(records)
+            if acked_id is False:
+                raise ValueError(
+                    "command journal exceeds max_bytes before "
+                    "terminal state can be reserved"
+                )
+            records.pop(acked_id)
+            records = _with_rebased_acked_sequences(records)
+
+    def _serialize_records(
+        self,
+        records: dict[str, CommandJournalRecord],
+    ) -> bytes:
         payload = {
             "schema_version": SCHEMA_VERSION,
             "account_id": self._account_id,
             "node_id": self._node_id,
             "commands": {
                 command_id: _record_to_payload(record)
-                for command_id, record in sorted(
-                    self._records.items()
-                )
+                for command_id, record in sorted(records.items())
             },
         }
-        serialized = (
-            json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n"
+        serialized = json.dumps(
+            payload,
+            separators=(",", ":"),
         )
-        encoded = serialized.encode("utf-8")
-        if len(encoded) > self._max_bytes:
-            raise ValueError("command journal exceeds max_bytes")
+        return (serialized + "\n").encode("utf-8")
+
+    def _write_payload(self, encoded: bytes) -> None:
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{self._path.name}.",
             suffix=".tmp",
@@ -312,6 +414,8 @@ class DurableCommandJournal(InMemoryCommandJournal):
 def _record_from_payload(
     command_id: Any,
     payload: Any,
+    *,
+    require_acked_sequence: bool = True,
 ) -> CommandJournalRecord:
     normalized_id = _required_text("command_id", command_id)
     if not isinstance(payload, dict):
@@ -329,12 +433,29 @@ def _record_from_payload(
     phase = CommandJournalPhase(
         _required_text("record.phase", payload.get("phase"))
     )
-    status = _optional_text(payload.get("status", False))
+    status: str | bool = False
     error = _optional_text(payload.get("error", False))
-    if phase is not CommandJournalPhase.APPLYING and status is False:
-        raise ValueError(
-            f"command journal record {normalized_id!r} missing status"
-        )
+    acked_sequence: int | bool = False
+    if phase is not CommandJournalPhase.APPLYING:
+        status = _command_ack_status(payload.get("status", False))
+    if phase is CommandJournalPhase.ACKED:
+        raw_sequence = payload.get("acked_sequence")
+        if raw_sequence is None and not require_acked_sequence:
+            raw_sequence = False
+        if (
+            require_acked_sequence
+            and (
+                isinstance(raw_sequence, bool)
+                or not isinstance(raw_sequence, int)
+                or raw_sequence <= 0
+            )
+        ):
+            raise ValueError(
+                f"command journal record {normalized_id!r} "
+                "missing acked_sequence"
+            )
+        if require_acked_sequence:
+            acked_sequence = raw_sequence
     return CommandJournalRecord(
         command_id=normalized_id,
         command_type=_required_text(
@@ -344,12 +465,22 @@ def _record_from_payload(
         phase=phase,
         status=status,
         error=error,
+        acked_sequence=acked_sequence,
     )
 
 
 def _record_to_payload(
     record: CommandJournalRecord,
 ) -> dict[str, Any]:
+    if record.phase is CommandJournalPhase.ACKED:
+        return {
+            "command_id": record.command_id,
+            "command_type": record.command_type,
+            "phase": record.phase.value,
+            "status": record.status,
+            "error": record.error,
+            "acked_sequence": record.acked_sequence,
+        }
     return {
         "command_id": record.command_id,
         "command_type": record.command_type,
@@ -373,6 +504,172 @@ def _optional_text(value: Any) -> str | bool:
     if not normalized:
         return False
     return normalized
+
+
+def _bounded_optional_text(
+    value: Any,
+    *,
+    max_json_bytes: int,
+    digest_characters: int,
+) -> str | bool:
+    normalized = _optional_text(value)
+    if normalized is False:
+        return False
+    return _bounded_text(
+        normalized,
+        max_json_bytes=max_json_bytes,
+        digest_characters=digest_characters,
+    )
+
+
+def _bounded_text(
+    value: str,
+    *,
+    max_json_bytes: int,
+    digest_characters: int,
+) -> str:
+    if _json_text_size(value) <= max_json_bytes:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    suffix = (
+        "...[truncated:sha256="
+        f"{digest[:digest_characters]}]"
+    )
+    low = 0
+    high = len(value)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = value[:middle] + suffix
+        if _json_text_size(candidate) <= max_json_bytes:
+            low = middle
+        else:
+            high = middle - 1
+    bounded = value[:low] + suffix
+    if _json_text_size(bounded) > max_json_bytes:
+        raise ValueError("bounded journal text budget is too small")
+    return bounded
+
+
+def _json_text_size(value: str) -> int:
+    return len(json.dumps(value).encode("utf-8"))
+
+
+def _command_ack_status(value: Any) -> str:
+    normalized = _required_text("status", value)
+    if normalized not in COMMAND_ACK_STATUSES:
+        raise ValueError(
+            "status must be accepted, completed, or failed"
+        )
+    return normalized
+
+
+def _with_terminal_reservations(
+    records: dict[str, CommandJournalRecord],
+) -> dict[str, CommandJournalRecord]:
+    reserved = {}
+    error = "e" * (MAX_ERROR_JSON_BYTES - 2)
+    for command_id, record in records.items():
+        terminal = record
+        if record.phase is CommandJournalPhase.APPLYING:
+            terminal = CommandJournalRecord(
+                command_id=record.command_id,
+                command_type=record.command_type,
+                phase=CommandJournalPhase.ACK_QUEUED,
+                status=MAX_COMMAND_ACK_STATUS,
+                error=error,
+            )
+        reserved[command_id] = terminal
+    return reserved
+
+
+def _with_acked_reservations(
+    records: dict[str, CommandJournalRecord],
+) -> dict[str, CommandJournalRecord]:
+    reserved = {}
+    next_sequence = 1
+    for record in records.values():
+        if record.phase is not CommandJournalPhase.ACKED:
+            continue
+        next_sequence = max(
+            next_sequence,
+            int(record.acked_sequence) + 1,
+        )
+    for command_id, record in records.items():
+        terminal = record
+        if record.phase is not CommandJournalPhase.ACKED:
+            terminal = CommandJournalRecord(
+                command_id=record.command_id,
+                command_type=record.command_type,
+                phase=CommandJournalPhase.ACKED,
+                status=record.status,
+                error=record.error,
+                acked_sequence=next_sequence,
+            )
+            next_sequence += 1
+        reserved[command_id] = terminal
+    return reserved
+
+
+def _with_rebased_acked_sequences(
+    records: dict[str, CommandJournalRecord],
+) -> dict[str, CommandJournalRecord]:
+    ordered = sorted(
+        (
+            record
+            for record in records.values()
+            if record.phase is CommandJournalPhase.ACKED
+        ),
+        key=lambda record: int(record.acked_sequence),
+    )
+    sequences = {
+        record.command_id: sequence
+        for sequence, record in enumerate(ordered, start=1)
+    }
+    rebased = {}
+    for command_id, record in records.items():
+        sequence = sequences.get(command_id)
+        if sequence is None or record.acked_sequence == sequence:
+            rebased[command_id] = record
+            continue
+        rebased[command_id] = replace(
+            record,
+            acked_sequence=sequence,
+        )
+    return rebased
+
+
+def _legacy_acked_migration_order(
+    records: list[CommandJournalRecord],
+) -> tuple[CommandJournalRecord, ...]:
+    # v1.0 has no ACK timestamp; content order avoids treating JSON keys as time.
+    return tuple(
+        sorted(
+            records,
+            key=lambda record: (
+                hashlib.sha256(
+                    record.command_id.encode("utf-8")
+                ).hexdigest(),
+                record.command_id,
+            ),
+        )
+    )
+
+
+def _first_acked_command_id(
+    records: dict[str, CommandJournalRecord],
+) -> str | bool:
+    acked = [
+        record
+        for record in records.values()
+        if record.phase is CommandJournalPhase.ACKED
+    ]
+    if not acked:
+        return False
+    oldest = min(
+        acked,
+        key=lambda record: int(record.acked_sequence),
+    )
+    return oldest.command_id
 
 
 def _fsync_directory(path: Path) -> None:

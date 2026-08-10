@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, Mapping
 
 SCHEMA_VERSION = "trader-v3-runtime-resources/v2"
+LEGACY_SCHEMA_VERSION = "trader-v3-runtime-resources/v1"
 ABSENT = object()
 
 
@@ -108,6 +109,45 @@ _COMPAT_REQUIRED_ROOT_FIELDS = {
     "schema_version",
     "command_journal",
 }
+_LEGACY_ROOT_FIELDS = _ROOT_FIELDS | {
+    "redis",
+    "terminal_exchange",
+    "reporter_workers",
+}
+_LEGACY_REQUIRED_ROOT_FIELDS = {
+    "schema_version",
+    "redis",
+    "command_journal",
+}
+_LEGACY_GROUP_FIELDS = {
+    "redis": {
+        "stream_max_entries",
+        "stream_max_bytes",
+        "total_stream_max_bytes",
+        "scan_count",
+        "sample_interval_seconds",
+        "critical_window_seconds",
+        "thread_join_timeout_seconds",
+        "memory_warning_ratio",
+        "memory_degraded_ratio",
+        "memory_critical_ratio",
+    },
+    "terminal_exchange": {
+        "queue_capacity",
+        "result_queue_capacity",
+        "degraded_ratio",
+        "total_deadline_seconds",
+        "shutdown_timeout_seconds",
+    },
+    "reporter_workers": {
+        "denial_queue_capacity",
+        "protection_event_queue_capacity",
+        "live_canary_risk_queue_capacity",
+        "incident_queue_capacity",
+        "task_timeout_seconds",
+        "shutdown_timeout_seconds",
+    },
+}
 
 
 def parse_runtime_resources(
@@ -120,6 +160,11 @@ def parse_runtime_resources(
         raise TypeError("policy must be a RuntimeResourcePolicy")
     source = _root_source(raw, policy)
     strict = policy is RuntimeResourcePolicy.LIVE_STRICT
+    if (
+        policy is RuntimeResourcePolicy.COMPAT
+        and source.get("schema_version") == LEGACY_SCHEMA_VERSION
+    ):
+        source = _normalize_legacy_source(source)
     required_root = _COMPAT_REQUIRED_ROOT_FIELDS
     if strict:
         required_root = _ROOT_FIELDS
@@ -192,6 +237,38 @@ def _root_source(
             "command_journal": dict(COMMAND_JOURNAL_DEFAULTS),
         }
     return _mapping(raw, "runtime_resources")
+
+
+def _normalize_legacy_source(
+    source: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    _validate_fields(
+        source,
+        path="runtime_resources",
+        allowed=_LEGACY_ROOT_FIELDS,
+        required=_LEGACY_REQUIRED_ROOT_FIELDS,
+    )
+    for group, allowed in _LEGACY_GROUP_FIELDS.items():
+        raw_group = source.get(group, ABSENT)
+        if raw_group is ABSENT:
+            continue
+        legacy_group = _mapping(
+            raw_group,
+            f"runtime_resources.{group}",
+        )
+        _validate_fields(
+            legacy_group,
+            path=f"runtime_resources.{group}",
+            allowed=allowed,
+            required=set(),
+        )
+    normalized = {
+        key: value
+        for key, value in source.items()
+        if key in _ROOT_FIELDS
+    }
+    normalized["schema_version"] = SCHEMA_VERSION
+    return normalized
 
 
 def _parse_command_journal(

@@ -60,6 +60,31 @@ def test_manifest_api_is_dependency_closed_for_phase_b() -> None:
     assert not hasattr(release_manifest, "capture_release_manifest")
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["verify-live", "--manifest", "/definitely/missing.json"],
+        ["capture", "--help"],
+    ],
+)
+def test_phase_b_manifest_cli_fails_closed(args: list[str]) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "release_manifest.py"),
+            *args,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "library-only" in result.stderr
+
+
 def test_node_config_hash_uses_normalized_runtime_resources() -> None:
     first = {
         "account_id": "account-a",
@@ -79,6 +104,25 @@ def test_node_config_hash_uses_normalized_runtime_resources() -> None:
     ] = 15.0
 
     assert release_manifest.node_config_value_sha256(first) == (
+        release_manifest.node_config_value_sha256(second)
+    )
+
+
+def test_node_identity_normalization_preserves_hostname_tokens() -> None:
+    first = {
+        "account_id": "account-a",
+        "node_id": "node-a",
+        "control_plane_url": "https://node-api.internal",
+        "runtime_resources": strict_runtime_resources(),
+    }
+    second = {
+        "account_id": "account-b",
+        "node_id": "node-b",
+        "control_plane_url": "https://node-bpi.internal",
+        "runtime_resources": strict_runtime_resources(),
+    }
+
+    assert release_manifest.node_config_value_sha256(first) != (
         release_manifest.node_config_value_sha256(second)
     )
 

@@ -34,10 +34,22 @@ CONFIG_MOUNT_TARGET = "/cfg.json"
 REQUIRED_ACCOUNTS = {"account-a", "account-b"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IDENTITY_PATTERNS = (
-    re.compile(r"trader[-_]?account[-_]?[ab]", re.IGNORECASE),
-    re.compile(r"instance[-_]?account[-_]?[ab]", re.IGNORECASE),
-    re.compile(r"account[-_]?[ab]", re.IGNORECASE),
-    re.compile(r"node[-_]?[ab]", re.IGNORECASE),
+    re.compile(
+        r"(?<![A-Za-z0-9])trader[-_]?account[-_]?[ab](?![A-Za-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![A-Za-z0-9])instance[-_]?account[-_]?[ab](?![A-Za-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![A-Za-z0-9])account[-_]?[ab](?![A-Za-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![A-Za-z0-9])node[-_]?[ab](?![A-Za-z0-9])",
+        re.IGNORECASE,
+    ),
 )
 
 __all__ = (
@@ -408,3 +420,17 @@ def _require_sha256(value: str, field: str) -> str:
             f"{field} must be a lowercase sha256"
         )
     return normalized
+
+
+def main(argv: list[str] | None = None) -> int:
+    del argv
+    print(
+        "FATAL: release_manifest.py is a Phase B library-only module; "
+        "release CLI commands are unavailable",
+        file=sys.stderr,
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

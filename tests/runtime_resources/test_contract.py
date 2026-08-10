@@ -17,6 +17,39 @@ from tests.runtime_resource_fixtures import (
 )
 
 
+def _v1_runtime_resources() -> dict[str, object]:
+    raw = strict_runtime_resources()
+    raw["schema_version"] = "trader-v3-runtime-resources/v1"
+    raw["redis"] = {
+        "stream_max_entries": 100_000,
+        "stream_max_bytes": 64 * 1024 * 1024,
+        "total_stream_max_bytes": 256 * 1024 * 1024,
+        "scan_count": 500,
+        "sample_interval_seconds": 5.0,
+        "critical_window_seconds": 30.0,
+        "thread_join_timeout_seconds": 5.0,
+        "memory_warning_ratio": 0.60,
+        "memory_degraded_ratio": 0.75,
+        "memory_critical_ratio": 0.85,
+    }
+    raw["terminal_exchange"] = {
+        "queue_capacity": 64,
+        "result_queue_capacity": 128,
+        "degraded_ratio": 0.8,
+        "total_deadline_seconds": 6.0,
+        "shutdown_timeout_seconds": 7.0,
+    }
+    raw["reporter_workers"] = {
+        "denial_queue_capacity": 256,
+        "protection_event_queue_capacity": 1024,
+        "live_canary_risk_queue_capacity": 128,
+        "incident_queue_capacity": 64,
+        "task_timeout_seconds": 5.0,
+        "shutdown_timeout_seconds": 5.0,
+    }
+    return raw
+
+
 @pytest.mark.parametrize(
     "case",
     strict_invalid_cases(),
@@ -79,6 +112,26 @@ def test_compat_uses_matching_legacy_session() -> None:
     )
 
     assert parsed.control_plane_session.to_dict() == session
+
+
+def test_compat_normalizes_v1_resources_to_the_v2_contract() -> None:
+    raw = _v1_runtime_resources()
+
+    parsed = parse_runtime_resources(
+        raw,
+        policy=RuntimeResourcePolicy.COMPAT,
+    )
+
+    expected = strict_runtime_resources()
+    assert parsed.to_dict() == expected
+
+
+def test_live_strict_rejects_v1_resources() -> None:
+    with pytest.raises(RuntimeResourceContractError):
+        parse_runtime_resources(
+            _v1_runtime_resources(),
+            policy=RuntimeResourcePolicy.LIVE_STRICT,
+        )
 
 
 def test_duplicate_session_rejects_drift() -> None:

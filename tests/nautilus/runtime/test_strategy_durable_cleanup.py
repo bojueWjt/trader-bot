@@ -108,6 +108,30 @@ def test_strategy_uses_release_bound_durable_io_resources(
     assert strategy._durable_io_shutdown_timeout_seconds == 0.5
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "durable_io_queue_capacity",
+        "durable_io_task_timeout_seconds",
+        "durable_io_shutdown_timeout_seconds",
+    ],
+)
+@pytest.mark.parametrize("value", [False, True])
+def test_strategy_rejects_boolean_durable_io_resources(
+    field: str,
+    value: bool,
+) -> None:
+    values = {
+        "account_id": "account-a",
+        "node_id": "node-a",
+        "trading_state": "HALTED",
+        field: value,
+    }
+
+    with pytest.raises(ValueError, match=field):
+        IntentExecutionStrategy(IntentExecutionStrategyConfig(**values))
+
+
 def test_blocked_protection_stash_write_returns_immediately_and_actor_progress_continues(
     tmp_path: Path,
 ) -> None:
