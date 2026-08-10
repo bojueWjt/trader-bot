@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -42,33 +43,33 @@ def test_release_manifest_normalizes_with_the_shared_contract() -> None:
     assert release_manifest.runtime_resources_sha256(raw)
 
 
-def test_manifest_api_is_dependency_closed_for_phase_b() -> None:
-    assert set(release_manifest.__all__) == {
-        "CONFIG_MOUNT_TARGET",
-        "RUNTIME_RESOURCES_SCHEMA_VERSION",
-        "ReleaseManifestError",
-        "build_node_config_artifacts",
-        "canonical_json_bytes",
-        "node_config_sha256",
-        "node_config_value_sha256",
-        "normalize_node_config",
-        "runtime_resources_sha256",
+def test_manifest_api_exposes_release_and_runtime_contracts() -> None:
+    required = {
+        "TRANSITION_RUNTIME_FILES",
+        "augment_transition_bundle",
+        "build_release_manifest",
+        "capture_release_manifest",
+        "validate_build_attestation",
+        "validate_bundle_payload",
+        "validate_migration_manifest",
+        "validate_release_payload_envelope",
+        "validate_release_source_manifest",
+        "verify_live_release",
     }
-    assert not hasattr(release_manifest, "TRANSITION_RUNTIME_FILES")
-    assert not hasattr(release_manifest, "augment_transition_bundle")
-    assert not hasattr(release_manifest, "build_release_manifest")
-    assert not hasattr(release_manifest, "capture_release_manifest")
+
+    assert all(hasattr(release_manifest, name) for name in required)
 
 
 @pytest.mark.parametrize(
     "args",
     [
-        [],
-        ["verify-live", "--manifest", "/definitely/missing.json"],
+        ["--help"],
         ["capture", "--help"],
+        ["validate-bundle", "--help"],
+        ["verify-live", "--help"],
     ],
 )
-def test_phase_b_manifest_cli_fails_closed(args: list[str]) -> None:
+def test_release_manifest_cli_help_is_available(args: list[str]) -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -81,8 +82,170 @@ def test_phase_b_manifest_cli_fails_closed(args: list[str]) -> None:
         check=False,
     )
 
-    assert result.returncode != 0
-    assert "library-only" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
+
+
+def test_release_manifest_cli_rejects_missing_manifest() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "release_manifest.py"),
+            "verify-live",
+            "--manifest",
+            "/definitely/missing.json",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "FATAL:" in result.stderr
+
+
+def test_validate_bundle_cli_checks_payload(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    payload = tmp_path / "node.py"
+    payload.write_text("release payload\n", encoding="utf-8")
+    bundle = tmp_path / "bundle-manifest.json"
+    bundle.write_text(
+        json.dumps(
+            {
+                "repo_commit": "1" * 40,
+                "repo_dirty": False,
+                "schema_epochs": dict(release_manifest.SCHEMA_EPOCHS),
+                "files": [
+                    {
+                        "bundle_path": payload.name,
+                        "mount_target": "/app/app/node.py",
+                        "sha256": release_manifest.sha256_file(payload),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = release_manifest.main(
+        [
+            "validate-bundle",
+            "--bundle-manifest",
+            str(bundle),
+            "--patch-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    assert "PASS: bundle files=1" in capsys.readouterr().out
+
+
+def test_capture_cli_dispatches_reviewed_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured = {}
+    manifest = {
+        "release_commit": "1" * 40,
+        "release_id": "2" * 64,
+        "delivery_mode": release_manifest.DELIVERY_TRANSITION,
+        "release_purpose": (
+            release_manifest.RELEASE_PURPOSE_EMERGENCY_ROLLBACK
+        ),
+        "image_digest": "sha256:" + ("3" * 64),
+        "config_sha256": "4" * 64,
+    }
+
+    def fake_capture_release_manifest(**kwargs):
+        captured.update(kwargs)
+        return manifest
+
+    monkeypatch.setattr(
+        release_manifest,
+        "capture_release_manifest",
+        fake_capture_release_manifest,
+    )
+    result = release_manifest.main(
+        [
+            "capture",
+            "--bundle-manifest",
+            str(tmp_path / "bundle-manifest.json"),
+            "--dependency-lock",
+            str(tmp_path / release_manifest.RELEASE_DEPENDENCY_LOCK_NAME),
+            "--output",
+            str(tmp_path / "release-manifest.json"),
+            "--delivery-mode",
+            release_manifest.DELIVERY_TRANSITION,
+            "--emergency-rollback",
+            "--node-config",
+            f"account-a=trader-v3-node-a={tmp_path / 'account-a.json'}",
+            "--node-config",
+            f"account-b=trader-v3-node-b={tmp_path / 'account-b.json'}",
+        ]
+    )
+
+    assert result == 0
+    assert captured["delivery_mode"] == release_manifest.DELIVERY_TRANSITION
+    assert captured["emergency_rollback"] is True
+    assert set(captured["node_config_specs"]) == {
+        "account-a",
+        "account-b",
+    }
+
+
+def test_verify_live_cli_dispatches_selected_nodes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manifest = {
+        "release_commit": "1" * 40,
+        "release_id": "2" * 64,
+        "delivery_mode": release_manifest.DELIVERY_TRANSITION,
+        "release_purpose": (
+            release_manifest.RELEASE_PURPOSE_EMERGENCY_ROLLBACK
+        ),
+        "image_digest": "sha256:" + ("3" * 64),
+        "config_sha256": "4" * 64,
+    }
+    captured = {}
+
+    def fake_verify_live_release(
+        value,
+        containers,
+        *,
+        payload_root,
+        reviewer_trust_sha256,
+    ):
+        captured["manifest"] = value
+        captured["containers"] = containers
+        captured["payload_root"] = payload_root
+        captured["reviewer_trust_sha256"] = reviewer_trust_sha256
+        return [{"source_hashes": {"/app/app/node.py": "5" * 64}}]
+
+    monkeypatch.setattr(release_manifest, "_load_json", lambda _path: manifest)
+    monkeypatch.setattr(
+        release_manifest,
+        "verify_live_release",
+        fake_verify_live_release,
+    )
+    manifest_path = tmp_path / "release-manifest.json"
+    result = release_manifest.main(
+        [
+            "verify-live",
+            "--manifest",
+            str(manifest_path),
+            "--container",
+            "trader-v3-node-a",
+        ]
+    )
+
+    assert result == 0
+    assert captured["containers"] == ["trader-v3-node-a"]
+    assert captured["payload_root"] == tmp_path
 
 
 def test_node_config_hash_uses_normalized_runtime_resources() -> None:
