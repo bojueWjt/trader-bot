@@ -138,11 +138,22 @@ HARD_ADAPTER_ERROR_RE = re.compile(
     r"\bwriter(?:[-_ ]identity)?[-_ ]?"
     r"(?:mismatch|conflict)\b|"
     r"\blease[-_ ]?(?:mismatch|conflict)\b|"
+    r"\bidentity[-_ ]?(?:is[-_ ]?)?"
+    r"(?:incomplete|invalid)\b|"
+    r"\bfenc(?:e|ing)[-_ ]epoch[-_ ]?"
+    r"(?:is[-_ ]?)?invalid\b|"
+    r"\bnode[-_ ]auth[-_ ]tokens[-_ ]must[-_ ]be[-_ ]unique\b|"
     r"\bfsync\b|"
     r"\bdurab(?:le|ility)[-_ ]?"
     r"(?:write|append|commit|failure|error)\b|"
+    r"\bdurab(?:le|ility)[-_ ]?operation[-_ ]?deadline[-_ ]?"
+    r"(?:exceeded|expired|failed|timeout)\b|"
     r"\bENOSPC\b|"
     r"\bno[-_ ]space\b|"
+    r"\b(?:disk|file[-_ ]?system)[-_ ]?"
+    r"(?:is[-_ ]?)?full\b|"
+    r"\batomic[-_ ]replace[-_ ]?"
+    r"(?:failed|failure|error)\b|"
     r"\b(?:journal|outbox|store|disk)[-_ ]?"
     r"capacity[-_ ]?(?:exhausted|full)\b"
     r")",
@@ -7871,7 +7882,11 @@ def _hard_failure_code(exc: BaseException) -> str:
     ):
         return "OWNERSHIP_FENCING_CONFLICT"
     if re.search(
-        r"journal|fsync|no space|capacity|durab",
+        (
+            r"journal|fsync|no space|capacity|durab|"
+            r"disk full|filesystem full|file system full|"
+            r"atomic replace"
+        ),
         text,
         re.IGNORECASE,
     ):

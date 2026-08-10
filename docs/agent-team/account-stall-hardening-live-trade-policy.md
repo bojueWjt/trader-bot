@@ -41,6 +41,8 @@
 - 控制面 HTTP timeout、普通 5xx、circuit open 或瞬态 poll/ACK 失败。
 - 新鲜交易所 preflight 已确认目标归零后，`/v1/nodes` timeout、普通 5xx 或
   node snapshot 缺失。
+- `/v1/nodes` 目标记录缺失 `node_id` 或 `account_id` 时，整个 node snapshot
+  作为 unavailable 处理。
 - heartbeat、execution-event 或 loss-monitor 纯遥测发布失败，包括普通永久 4xx 拒绝；
   本地 durable spool 保留，401/403/409 与 identity/fencing 冲突继续硬阻断。
 - Redis、PostgreSQL、控制面或节点资源超过告警阈值，同时 durable 写入仍可完成。
@@ -118,7 +120,11 @@
 
 - account、node、release、writer、lease 或 fencing identity 不一致。
 - 节点或 loss-monitor 发布返回 401、403、409，或明确 identity/fencing conflict。
+- 任一非空 node identity mismatch；node auth identity incomplete/invalid、
+  fencing epoch invalid 或 token 不唯一。
 - durable journal、intent、outbox 或 evidence 写入失败或容量耗尽。
+- fsync、ENOSPC、disk/filesystem full、atomic replace failure 或 durable operation
+  deadline。
 - 节点明确报告 `process_liveness=false` 或 `loss_monitor_healthy=false`。
 - OPEN 请求结果存在歧义，且交易所查询无法确认唯一订单状态。
 - 订单数量、方向、position side、reduce-only 或 client order ID 与计划不一致。

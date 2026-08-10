@@ -4,8 +4,9 @@
 更新：2026-08-10
 状态：Claude 元复核与 reviewer 发现已吸收；生产运行 `3922a7c` 并保持 HALTED；
 一次 `0.07 SOLUSDT LIMIT + IOC` 小额往返已经完成，目标仓位、普通订单、algo
-订单和节点状态均已归零/归停。当前收敛项是修复成交归因和只读 evidence recovery，
-完成既有 consumed permit 的 ledger 终结。
+订单和节点状态均已归零/归停。既有 consumed permit 已通过 commit-bound
+evidence-only recovery 完成 ledger 终结。常规 OPEN 路径进一步放宽缺失 node identity
+遥测，同时补齐明确 identity 配置错误和 durability 故障的硬分类。
 
 ## 1. 决策
 
@@ -67,14 +68,14 @@ directory entries。`--untracked-files=all` 展开后是 373 个 status entries�
 ```text
 packages/execution-domain/.venv/bin/pytest -q \
   tests/deployment/test_account_a_live_trade_executor.py
-=> 242 passed
+=> 255 passed
 
 packages/execution-domain/.venv/bin/pytest -q \
   tests/deployment/test_account_a_live_trade_http_adapter.py
-=> 162 passed
+=> 203 passed
 
 packages/execution-domain/.venv/bin/pytest -q tests/deployment
-=> 495 passed
+=> 549 passed
 
 python3 -m py_compile \
   scripts/account_a_live_trade_executor.py \
@@ -85,8 +86,8 @@ git diff --check
 
 当前待提交脚本 SHA-256：
 
-- executor：`3811496324d1de884e838d71a9a71f0c1b5850f55896edd946426d7b8a106406`
-- adapter：`4d8e753bfcac0e6119c19a9284bfef3c9878b5b69cf2869cc8ff14c9f9e76d32`
+- executor：`1250faab099541b5b4c54bfb6a3016c738c5e317e95ddf9f4034721bf7440049`
+- adapter：`734ace16d39d22cfb5dc24917790a5ee6a89986105a603dc78231c5e29f51483`
 
 `recorder / deployment bundle 聚焦` 的 `45 passed` 对应以下六文件选择范围：
 `tests/control-plane/tools/test_exchange_state_recorder.py`、
@@ -113,7 +114,7 @@ git diff --check
 | 历史放大因素 | 随机 Redis namespace、无界 streams、内存/swap/AOF/I/O 压力 |
 | 历史发布因素 | bind-mounted hotpatch、deleted inode、A/B 运行字节漂移 |
 | 当前生产可用性回归 | `OrderInitialized` 被错误提升为 durable fatal；与 Redis lineage 无直接因果 |
-| 当前生产状态 | 生产运行 `3922a7c`；account-a 保持 HALTED，permit `876e8402-1761-4a84-8ace-2ba021120e8e` 的 ledger 为 HALTED、pending action 为空、evidence hash 为空 |
+| 当前生产状态 | 生产运行 `3922a7c`；account-a 保持 HALTED，permit `876e8402-1761-4a84-8ace-2ba021120e8e` 的 ledger 为 `EVIDENCE_COMMITTED`、pending action 为空、evidence SHA-256 为 `abf168e60450d72d59e857a8a1c49317cb81a5071617672285ddfcfcbd625cde` |
 | 新鲜 exchange filter | 2026-08-09 20:39 UTC 活跃 Redis generation 的 `SOLUSDT` instrument 为 `min_notional=5`、tick/step=`0.01`、min quantity=`0.01`；`0.07 SOL` 在当前价格下满足 |
 | 冲突 filter 处置 | 公网 `exchangeInfo` 同时返回 `minNotional=50`、`minPrice=556.8` 和约 `77.24` 的市场价格，证据内部冲突；gate 采用节点刚启动加载的活跃 instrument cache |
 
@@ -129,17 +130,20 @@ projection/canary 变更选择面。
 | Soft | readiness、heartbeat、projection、reconciliation stale/false | 签名告警，继续 |
 | Soft | HTTP timeout、5xx、circuit open、普通 queue/resource pressure | bounded retry 或降级继续 |
 | Soft | 新鲜 exchange preflight 已证明目标归零后，`/v1/nodes` timeout、普通 5xx 或 snapshot 缺失 | 保留 exchange authority，记录 warning，继续 OPEN |
+| Soft | `/v1/nodes` 目标记录缺失 `node_id` 或 `account_id` | 整个 node snapshot 降级为 unavailable，继续使用新鲜 exchange authority |
 | Soft | before-open exchange snapshot 仍在 freshness 窗口内，但时间早于 RESUME ACK | 记录 `BEFORE_OPEN_CAUSAL_FRESHNESS_RELAXED`，继续校验目标仓位、两类目标订单和已知余额充足性后 OPEN |
 | Soft | heartbeat、execution-event、loss-monitor 纯遥测发布普通永久 4xx；本地 durable spool 完整 | 有界降级，不终止进程 |
 | Soft | emergency-close 只有确定性 `contract_replay`，缺少新鲜 testnet execution | 明确记录 `EMERGENCY_CLOSE_CONTRACT_REPLAY_ONLY`，继续 |
 | Soft | `risk_healthy` 缺失/false；actor/loss progress 陈旧；ownership/fencing/durability、writer/lease、余额、filter 遥测缺失 | 记录精确 warning，继续 |
 | Soft | `exchange_authoritative` 标记缺失/false，同时 exchange source/freshness 有效 | 记录 `PREFLIGHT_EXCHANGE_AUTHORITY_UNCONFIRMED`，继续 |
 | Hard | account/symbol/release/writer/lease/fencing identity | 阻断 |
+| Hard | 任一非空 node identity mismatch；node auth identity incomplete/invalid、fencing epoch invalid 或 token 不唯一 | 阻断 |
 | Hard | 节点或 loss-monitor 发布 401/403/409、identity/fencing conflict | 阻断 |
 | Hard | `process_liveness=false`、`loss_monitor_healthy=false` | 阻断 |
 | Hard | quantity 固定 `0.07`、notional、已知 exchange filter、已知余额不足、single-use permit、loss cap | 阻断 |
 | Hard | `OPEN` 前 freshness 窗口内的 exchange preflight | 缺失时停止新增风险；快照早于 RESUME ACK 时降级继续 |
 | Hard | durable journal/订单副作用身份/执行结果唯一性 | 阻断或进入恢复 |
+| Hard | fsync、ENOSPC、disk/filesystem full、atomic replace failure、durable operation deadline | 阻断 |
 | Hard | 目标最终平仓、目标订单归零、最终 HALT | 阻断最终 PASS |
 | Hard completion | 目标最终平仓、两类目标订单归零、最终 HALT、身份一致、无超授权 close effect | 缺失时结果为 BLOCKED，ledger 保持 recoverable |
 | Soft completion | open/close 成交归因、逐 fill commission、成交价、方向和 signed/derived PnL 完整 | 缺失时结果为 DEGRADED，提交 evidence 并保留可重复 enrichment |
@@ -214,6 +218,23 @@ RESUME、OPEN 或 CLOSE。
   `EVIDENCE_ENRICHMENT_PENDING` 两阶段 journal 原子替换同 identity evidence。
 - `EVIDENCE_COMMITTED` 对应文件缺失时，从 ledger 保留的 prepared payload 恢复相同
   SHA-256；文件内容冲突时保持 ledger 与文件原状并报告完整性故障。
+
+2026-08-10 03:05 UTC，生产使用 `92fa444` 对应的 commit-bound recovery bundle
+执行一次 `--recover-evidence-only`：
+
+- recovery adapter 只调用 `final-snapshot`，未调用 RESUME、OPEN、CANCEL、CLOSE 或 HALT。
+- 交易所快照确认 `SOLUSDT` position、普通订单、algo 订单三项归零。
+- 财务证明完整：open `0.07 @ 76.25`、close `0.07 @ 76.26`、fees
+  `0.00533785 USDT`、net PnL `-0.00463785 USDT`。
+- ledger 从 `HALTED` 经 `EVIDENCE_PREPARED` 进入 `EVIDENCE_COMMITTED`。
+- evidence 写入
+  `/var/lib/trader-v3/evidence/account-a-876e8402-92fa444.json`，文件 SHA-256 与
+  ledger 均为
+  `abf168e60450d72d59e857a8a1c49317cb81a5071617672285ddfcfcbd625cde`。
+- evidence 状态为 `DEGRADED`，原因仅包含历史签名 gate 中缺失/陈旧的软遥测和
+  `CLOSE_ACK_MISSING_RECOVERED_FROM_EXCHANGE_SNAPSHOT`；金融 enrichment 已完整，
+  `financial_enrichment_retryable=false`。
+- 节点保持 `HALTED`，容器 `trader-v3-node-a` restart count 保持 `0`。
 
 ## 3. 为什么持续返工
 

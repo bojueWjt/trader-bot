@@ -52,8 +52,14 @@ DURABLE_HTTP_FAILURE_RE = re.compile(
     r"(?:failed|failure|error|unavailable)\b|"
     r"\bdurab(?:le|ility)[-_ ]?"
     r"(?:write|append|commit|failure|error)\b|"
+    r"\bdurab(?:le|ility)[-_ ]?operation[-_ ]?deadline[-_ ]?"
+    r"(?:exceeded|expired|failed|timeout)\b|"
     r"\bENOSPC\b|"
     r"\bno[-_ ]space\b|"
+    r"\b(?:disk|file[-_ ]?system)[-_ ]?"
+    r"(?:is[-_ ]?)?full\b|"
+    r"\batomic[-_ ]replace[-_ ]?"
+    r"(?:failed|failure|error)\b|"
     r"\b(?:journal|outbox|store|disk)[-_ ]?"
     r"capacity[-_ ]?(?:exhausted|full)\b"
     r")",
@@ -69,7 +75,12 @@ OWNERSHIP_IDENTITY_HTTP_FAILURE_RE = re.compile(
     r"\bidentity[-_ ]?(?:mismatch|conflict)\b|"
     r"\bwriter(?:[-_ ]identity)?[-_ ]?"
     r"(?:mismatch|conflict)\b|"
-    r"\blease[-_ ]?(?:mismatch|conflict)\b"
+    r"\blease[-_ ]?(?:mismatch|conflict)\b|"
+    r"\bidentity[-_ ]?(?:is[-_ ]?)?"
+    r"(?:incomplete|invalid)\b|"
+    r"\bfenc(?:e|ing)[-_ ]epoch[-_ ]?"
+    r"(?:is[-_ ]?)?invalid\b|"
+    r"\bnode[-_ ]auth[-_ ]tokens[-_ ]must[-_ ]be[-_ ]unique\b"
     r")",
     re.IGNORECASE,
 )
@@ -1038,17 +1049,18 @@ class AccountALiveTradeHttpAdapter:
         try:
             nodes = self._client.risk_get("/v1/nodes")
             node = _find_node(nodes, self._config.node_id)
-        except AdapterError as exc:
-            if _is_hard_control_plane_error(exc):
-                raise
-            warnings.append(
-                _enrichment_warning("node telemetry", exc)
-            )
-        if isinstance(node, Mapping):
             _validate_node_identity(
                 node,
                 request,
                 warnings=warnings,
+                missing_required_is_unavailable=True,
+            )
+        except AdapterError as exc:
+            if _is_hard_control_plane_error(exc):
+                raise
+            node = False
+            warnings.append(
+                _enrichment_warning("node telemetry", exc)
             )
         payload = {
             **_identity(request),
@@ -1154,6 +1166,12 @@ class AccountALiveTradeHttpAdapter:
         try:
             response = self._client.risk_get("/v1/nodes")
             node = _find_node(response, self._config.node_id)
+            _validate_node_identity(
+                node,
+                request,
+                warnings=warnings,
+                missing_required_is_unavailable=True,
+            )
         except AdapterError as exc:
             if _is_hard_control_plane_error(exc):
                 raise
@@ -1161,11 +1179,6 @@ class AccountALiveTradeHttpAdapter:
                 _enrichment_warning("node health evidence", exc)
             )
             return False, warnings
-        _validate_node_identity(
-            node,
-            request,
-            warnings=warnings,
-        )
         return _redacted_node_snapshot(node), warnings
 
     def _publish_loss_monitor_evidence(
@@ -2127,7 +2140,7 @@ def _find_node(
     foreign_account_nodes = [
         node
         for node in account_nodes
-        if node.get("node_id") != node_id
+        if node.get("node_id") not in {None, "", node_id}
     ]
     if foreign_account_nodes:
         raise AdapterError(
@@ -2144,6 +2157,21 @@ def _find_node(
             "ownership/fencing conflict: duplicate node identity"
         )
     if matching_nodes:
+        matching_account_id = matching_nodes[0].get("account_id")
+        if matching_account_id not in {None, "", ACCOUNT_ID}:
+            raise AdapterError(
+                "ownership/fencing conflict: node account mismatch"
+            )
+    anonymous_account_nodes = [
+        node
+        for node in account_nodes
+        if node.get("node_id") is None or node.get("node_id") == ""
+    ]
+    if anonymous_account_nodes:
+        raise AdapterError(
+            "node telemetry unavailable: node_id is missing"
+        )
+    if matching_nodes:
         return matching_nodes[0]
     raise AdapterError(f"node is missing: {node_id}")
 
@@ -2153,14 +2181,27 @@ def _validate_node_identity(
     request: Mapping[str, Any],
     *,
     warnings: list[str],
+    missing_required_is_unavailable: bool = False,
 ) -> None:
-    if node.get("node_id") != request.get("node_id"):
+    for field_name in ("node_id", "account_id"):
+        actual_value = node.get(field_name)
+        if actual_value is None or actual_value == "":
+            if missing_required_is_unavailable:
+                raise AdapterError(
+                    f"node telemetry unavailable: {field_name} is missing"
+                )
+            raise AdapterError(
+                "ownership/fencing conflict: "
+                f"node {field_name} is missing"
+            )
+        if actual_value == request.get(field_name):
+            continue
+        mismatch_label = field_name
+        if field_name == "account_id":
+            mismatch_label = "account"
         raise AdapterError(
-            "ownership/fencing conflict: node node_id mismatch"
-        )
-    if node.get("account_id") != request.get("account_id"):
-        raise AdapterError(
-            "ownership/fencing conflict: node account mismatch"
+            "ownership/fencing conflict: "
+            f"node {mismatch_label} mismatch"
         )
     for field_name in ("writer_id", "lease_id", "fencing_epoch"):
         actual_value = node.get(field_name)

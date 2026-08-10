@@ -7,12 +7,12 @@
 | ID | Owner | Status | Deliverable | Evidence / Next Gate |
 |---|---|---|---|---|
 | C-P2 | planner/runtime | done | FILTERED/HALTED 优先级、pending session wake、公平清理 wrapper degradation | projection 37 passed/4 skipped；调度竞态 50/50 |
-| C-GATE | planner/live-trade-verifier | in_progress | 可用性 gate 分层、节点遥测与交易所 authority 解耦、独立 loss monitor、身份重验、完整财务证明 | before-open recorder snapshot 因果时间降为 DEGRADED，继续硬校验 freshness、目标归零和已知余额不足；executor+adapter 320 passed、deployment bundle 24 passed、reviewer `P0=0 P1=0`；等待新部署 hash |
+| C-GATE | planner/live-trade-verifier | done | 可用性 gate 分层、节点遥测与交易所 authority 解耦、独立 loss monitor、身份重验、完整财务证明 | 缺失 node identity 遥测整段降级；显式 mismatch、identity 配置错误和 durability 故障硬阻断；executor 255 passed、adapter 203 passed |
 | C-BASELINE | planner/runtime | done | 非目标组合基线按明确结构字段 allowlist 计算，行情刷新和未知扩展字段不阻断；recorder 保留杠杆、保证金模式与自动追加保证金配置 | deployment + recorder 421 passed；双独立 reviewer `P0=0 P1=0` |
-| C-DEPLOY | planner | in_progress | 提交并部署新 executor、adapter 与 recorder bundle，保持 account-a HALTED | 当前生产 commit `3f3cbe8`，部署时间 2026-08-09 23:04:11 UTC；等待新 commit-bound bundle |
-| C-PREFLIGHT | live-trade-verifier | pending | deployed adapter preflight、目标归零和非目标组合审计快照 | 等待 C-DEPLOY；现场读取当前 Redis instrument 原始字节、当前 book 和新鲜 exchange snapshot |
-| C-LIVE | live-trade-verifier | pending | 单次 `0.07 SOLUSDT LIMIT + IOC` 往返、精确平仓、最终 HALT | 等待签名 gate 与 dry-run |
-| C-REVIEW | reviewer/evidence-auditor | pending | 最终 P0/P1、交易所证据、组合基线和损益复核 | 等待 C-LIVE |
+| C-DEPLOY | planner | done | 提交并部署 commit-bound executor/adapter recovery bundle，保持 account-a HALTED | `92fa444` recovery bundle 已部署并校验脚本 SHA、reviewer 签名与固定 evidence path |
+| C-PREFLIGHT | live-trade-verifier | done | deployed adapter preflight、目标归零和非目标组合审计快照 | 2026-08-10 03:00 UTC 只读快照确认 position/regular/algo 三项归零，财务证明完整 |
+| C-LIVE | live-trade-verifier | done | 单次 `0.07 SOLUSDT LIMIT + IOC` 往返、精确平仓、最终 HALT | OPEN `0.07 @ 76.25`；reduce-only CLOSE `0.07 @ 76.26`；net PnL `-0.00463785 USDT` |
+| C-REVIEW | reviewer/evidence-auditor | done | 最终 P0/P1、交易所证据、组合基线和损益复核 | ledger `EVIDENCE_COMMITTED`；evidence SHA `abf168e60450d72d59e857a8a1c49317cb81a5071617672285ddfcfcbd625cde`；最终 Codex reviewer `P0=0 P1=0 P2=0` |
 
 ## 2026-08-09 Meta-Review 有效任务
 

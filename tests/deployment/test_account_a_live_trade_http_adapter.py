@@ -661,6 +661,47 @@ def test_preflight_store_availability_failure_is_advisory(
     )
 
 
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "node auth binding identity is incomplete",
+        "node auth writer identity is incomplete",
+        "node auth fencing epoch is invalid",
+        "node auth writer identity is invalid",
+        "node auth tokens must be unique",
+    ],
+)
+def test_preflight_identity_configuration_failure_is_hard(
+    tmp_path: Path,
+    detail: str,
+) -> None:
+    scenario = Scenario()
+    scenario.forced_responses[("GET", "/v1/nodes")] = (
+        503,
+        {"detail": detail},
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "ownership/fencing/identity conflict" in completed.stderr
+    assert detail in completed.stderr
+    matching_requests = [
+        request
+        for request in scenario.requests
+        if request["method"] == "GET"
+        and request["path"] == "/v1/nodes"
+    ]
+    assert len(matching_requests) == 1
+
+
 def test_preflight_keeps_exchange_authority_when_node_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -742,6 +783,36 @@ def test_preflight_rejects_additional_account_nodes(
     assert "multiple account nodes" in completed.stderr
 
 
+def test_preflight_anonymous_node_does_not_mask_account_conflict(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    anonymous_account_node = {
+        **_node_snapshot(),
+    }
+    anonymous_account_node.pop("node_id")
+    conflicting_target_node = {
+        **_node_snapshot(),
+        "account_id": "account-b",
+    }
+    scenario.node_snapshots = [
+        anonymous_account_node,
+        conflicting_target_node,
+    ]
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "node account mismatch" in completed.stderr
+
+
 def test_preflight_allows_missing_extended_node_identity_with_warnings(
     tmp_path: Path,
 ) -> None:
@@ -764,6 +835,30 @@ def test_preflight_allows_missing_extended_node_identity_with_warnings(
         "node identity telemetry missing: lease_id",
         "node identity telemetry missing: fencing_epoch",
     ]
+
+
+@pytest.mark.parametrize("field_name", ["node_id", "account_id"])
+def test_preflight_degrades_when_required_node_identity_is_missing(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    scenario = Scenario()
+    scenario.node_snapshot.pop(field_name)
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["action"] == "preflight"
+    assert "node_snapshot" not in payload
+    assert len(payload["warnings"]) == 1
+    assert "node telemetry degraded" in payload["warnings"][0]
+    assert f"{field_name} is missing" in payload["warnings"][0]
 
 
 @pytest.mark.parametrize(
@@ -2317,6 +2412,10 @@ def test_final_snapshot_generic_operator_failure_degrades_enrichment(
         (503, "outbox durable write failed"),
         (503, "durable journal capacity exhausted"),
         (503, "ENOSPC"),
+        (503, "disk full"),
+        (425, "filesystem full"),
+        (429, "atomic replace failed"),
+        (400, "durable operation deadline exceeded"),
         (408, "journal fsync failed"),
         (425, "outbox durable write failed"),
         (429, "ENOSPC"),
@@ -2352,6 +2451,11 @@ def test_final_snapshot_durable_operator_failure_is_hard(
     [
         "writer identity conflict",
         "fencing lease lost",
+        "node auth binding identity is incomplete",
+        "node auth writer identity is incomplete",
+        "node auth fencing epoch is invalid",
+        "node auth writer identity is invalid",
+        "node auth tokens must be unique",
     ],
 )
 def test_final_snapshot_identity_or_fencing_operator_failure_is_hard(
@@ -3161,6 +3265,10 @@ def test_http_5xx_availability_details_remain_soft(
         (503, "outbox durable write failed"),
         (503, "durable journal capacity exhausted"),
         (503, "ENOSPC"),
+        (503, "disk full"),
+        (425, "filesystem full"),
+        (429, "atomic replace failed"),
+        (400, "durable operation deadline exceeded"),
         (408, "journal fsync failed"),
         (425, "outbox durable write failed"),
         (429, "ENOSPC"),
@@ -3199,6 +3307,60 @@ def test_http_durable_status_is_a_hard_adapter_failure(
     assert payload == {}
     assert "durable control-plane failure" in completed.stderr
     assert detail in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "status_code",
+    [400, 408, 425, 429, 503],
+)
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "disk full",
+        "filesystem full",
+        "atomic replace failed",
+        "durable operation deadline exceeded",
+    ],
+)
+def test_http_explicit_durable_details_are_hard_for_every_status(
+    tmp_path: Path,
+    status_code: int,
+    detail: str,
+) -> None:
+    scenario = Scenario()
+    scenario.forced_responses[("POST", "/v1/operator/orders")] = (
+        status_code,
+        {"detail": detail},
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "open",
+            _request(
+                client_order_id=OPEN_CLIENT_ORDER_ID,
+                side="BUY",
+                order_type="LIMIT",
+                time_in_force="IOC",
+                quantity="0.07",
+                limit_price_usdt="100",
+                max_actual_open_notional_usdt="12",
+                side_effect_id="open-request-id",
+            ),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 1
+    assert payload == {}
+    assert "durable control-plane failure" in completed.stderr
+    assert detail in completed.stderr
+    matching_requests = [
+        request
+        for request in scenario.requests
+        if request["method"] == "POST"
+        and request["path"] == "/v1/operator/orders"
+    ]
+    assert len(matching_requests) == 1
 
 
 def _invoke(

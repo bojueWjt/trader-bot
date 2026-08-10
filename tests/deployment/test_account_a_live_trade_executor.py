@@ -140,6 +140,30 @@ class LockCheckingEvidenceWriter(executor.AtomicEvidenceWriter):
         )
 
 
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "disk full",
+        "filesystem full",
+        "atomic replace failed",
+        "durable operation deadline exceeded",
+    ],
+)
+def test_explicit_durable_failures_are_never_soft(detail: str) -> None:
+    error = RuntimeError(f"HTTP 503 {detail}")
+    assert executor._is_soft_action_failure(error) is False
+    rejection = executor._soft_adapter_rejection(
+        {
+            "accepted": False,
+            "error_code": "HTTP_503",
+            "status_code": 503,
+            "reason": detail,
+        },
+        action="open",
+    )
+    assert rejection is None
+
+
 class MutableClock:
     def __init__(self, current: datetime = NOW) -> None:
         self.current = current
@@ -2542,6 +2566,12 @@ def test_live_preflight_blocks_existing_position_without_closing_it(
         "permit journal fsync failed: HTTP 503",
         "durable write failed with ENOSPC: service unavailable",
         "durable journal capacity exhausted",
+        "HTTP 503 node auth writer identity is incomplete",
+        "HTTP 503 node auth writer identity is invalid",
+        "HTTP 503 disk full",
+        "HTTP 503 filesystem full",
+        "HTTP 503 atomic replace failed",
+        "HTTP 503 durable operation deadline exceeded",
     ],
 )
 def test_live_preflight_hard_failure_precedes_soft_classification(
@@ -3110,6 +3140,14 @@ def test_before_open_preflight_missing_extended_identity_is_advisory(
         "node telemetry degraded: HTTP_503 node projection unavailable",
         "node telemetry degraded: HTTP_TIMEOUT node telemetry timeout",
         "node telemetry degraded: ADAPTER_ERROR node is missing",
+        (
+            "node telemetry degraded: ADAPTER_ERROR "
+            "node telemetry unavailable: node_id is missing"
+        ),
+        (
+            "node telemetry degraded: ADAPTER_ERROR "
+            "node telemetry unavailable: account_id is missing"
+        ),
     ],
 )
 def test_before_open_preflight_allows_unavailable_node_telemetry(
@@ -3151,6 +3189,7 @@ def test_before_open_preflight_allows_unavailable_node_telemetry(
     ("field_name", "field_value"),
     [
         ("node_id", "nautilus-node-account-b"),
+        ("account_id", "account-b"),
         ("writer_id", "writer-account-b"),
         ("lease_id", "lease-account-b"),
         ("fencing_epoch", 43),
@@ -3188,9 +3227,12 @@ def test_before_open_preflight_binds_signed_execution_identity(
     result = live_executor.execute(authorization)
 
     assert result.status == "BLOCKED"
-    assert f"preflight node identity mismatch: {field_name}" in (
-        result.failure_reason
+    expected_failure = (
+        f"preflight node identity mismatch: {field_name}"
     )
+    if field_name == "account_id":
+        expected_failure = "preflight node account identity mismatch"
+    assert expected_failure in result.failure_reason
     assert "open" not in adapter.calls
 
 
