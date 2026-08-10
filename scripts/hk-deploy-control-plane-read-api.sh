@@ -135,14 +135,14 @@ PY
 drain_control_plane_clients() {
   local connections
   connections="$(
-    ss -Htn state established '( sport = :8080 )' || true
+    ss -Htn state established '( sport = :8080 )'
   )"
   if [ -z "$connections" ]; then
     return
   fi
   ss -Ktn state established '( sport = :8080 )' >/dev/null
   connections="$(
-    ss -Htn state established '( sport = :8080 )' || true
+    ss -Htn state established '( sport = :8080 )'
   )"
   if [ -n "$connections" ]; then
     die "control-plane clients remain connected before bootstrap restart"

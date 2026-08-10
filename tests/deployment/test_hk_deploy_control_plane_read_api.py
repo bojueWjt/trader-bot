@@ -94,6 +94,9 @@ case "${1:-}" in
     rm -f "$FAKE_BOOTSTRAP_CLIENT_FILE"
     ;;
   *)
+    if [ "${FAKE_SS_QUERY_FAIL:-0}" = "1" ]; then
+      exit 75
+    fi
     if [ -e "$FAKE_BOOTSTRAP_CLIENT_FILE" ]; then
       printf '0 1024 127.0.0.1:8080 127.0.0.1:50062\n'
     fi
@@ -835,6 +838,29 @@ def test_bootstrap_client_drain_failure_rolls_back(
     assert isinstance(command_log, Path)
     commands = command_log.read_text(encoding="utf-8")
     assert "ss -Ktn state established ( sport = :8080 )" in commands
+    assert "systemctl restart trader-v3-controlplane.service" not in commands
+
+
+def test_bootstrap_client_query_failure_rolls_back(
+    tmp_path: Path,
+) -> None:
+    harness = _prepare_harness(tmp_path)
+    environment = harness["env"]
+    assert isinstance(environment, dict)
+    environment["FAKE_SS_QUERY_FAIL"] = "1"
+    old_read = _old_read_api()
+
+    result = _run_script(harness)
+
+    assert result.returncode != 0
+    assert "automatic rollback completed" in result.stderr
+    read_target = harness["read_target"]
+    assert isinstance(read_target, Path)
+    assert read_target.read_bytes() == old_read
+    command_log = harness["command_log"]
+    assert isinstance(command_log, Path)
+    commands = command_log.read_text(encoding="utf-8")
+    assert "ss -Htn state established ( sport = :8080 )" in commands
     assert "systemctl restart trader-v3-controlplane.service" not in commands
 
 
