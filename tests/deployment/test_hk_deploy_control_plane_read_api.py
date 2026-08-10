@@ -203,6 +203,11 @@ if [ "$url" = "$CONTROL_PLANE_DIRECT_SSE_URL" ]; then
       status="$FAKE_BOOTSTRAP_DIRECT_STATUS"
     fi
   fi
+  if [ -f "$FAKE_RESTART_COUNT_FILE" ] \
+    && [ "$(cat "$FAKE_RESTART_COUNT_FILE")" = "2" ] \
+    && [ -n "${FAKE_FINAL_DIRECT_STATUS:-}" ]; then
+    status="$FAKE_FINAL_DIRECT_STATUS"
+  fi
   if [ -n "$write_out" ]; then
     printf '%s' "$status"
   fi
@@ -224,6 +229,11 @@ if [ -n "$write_out" ] \
   if [ -n "${FAKE_BOOTSTRAP_PROXY_STATUS:-}" ]; then
     status="$FAKE_BOOTSTRAP_PROXY_STATUS"
   fi
+fi
+if [ -f "$FAKE_RESTART_COUNT_FILE" ] \
+  && [ "$(cat "$FAKE_RESTART_COUNT_FILE")" = "2" ] \
+  && [ -n "${FAKE_FINAL_PROXY_STATUS:-}" ]; then
+  status="$FAKE_FINAL_PROXY_STATUS"
 fi
 if [ -n "$headers" ]; then
   printf 'HTTP/1.1 %s OK\r\nContent-Type: text/event-stream\r\n\r\n' \
@@ -475,6 +485,7 @@ def _prepare_harness(
             "CONTROL_PLANE_DIRECT_SSE_URL": (
                 "http://127.0.0.1:18080/v1/stream"
             ),
+            "SSE_CONTRACT_READY_TIMEOUT_SECONDS": "3",
             "COMMAND_LOG": str(command_log),
             "FAKE_UNIT_TARGET": str(unit_target),
             "FAKE_VENDOR_FRAGMENT": vendor_fragment,
@@ -848,6 +859,35 @@ def test_bootstrap_persistent_contract_failure_automatically_rolls_back(
     restart_saw_sse = harness["restart_saw_sse"]
     assert isinstance(restart_saw_sse, Path)
     assert not restart_saw_sse.exists()
+
+
+def test_final_contract_failure_uses_explicit_automatic_rollback(
+    tmp_path: Path,
+) -> None:
+    harness = _prepare_harness(tmp_path)
+    environment = harness["env"]
+    assert isinstance(environment, dict)
+    environment["FAKE_FINAL_PROXY_STATUS"] = "502"
+    old_read = _old_read_api()
+
+    result = _run_script(harness)
+
+    assert result.returncode != 0
+    assert (
+        "SSE contract did not recover during after restart: "
+        "proxy=502 direct=401"
+    ) in result.stderr
+    assert "FATAL: control-plane read API update failed" in result.stderr
+    assert "automatic rollback completed" in result.stderr
+    read_target = harness["read_target"]
+    assert isinstance(read_target, Path)
+    assert read_target.read_bytes() == old_read
+    restart_count = harness["restart_count"]
+    assert isinstance(restart_count, Path)
+    assert restart_count.read_text(encoding="utf-8").strip() == "2"
+    restart_saw_sse = harness["restart_saw_sse"]
+    assert isinstance(restart_saw_sse, Path)
+    assert restart_saw_sse.exists()
 
 
 def test_partial_install_failure_rolls_back_when_original_unit_was_absent(

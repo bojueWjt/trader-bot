@@ -11,6 +11,7 @@ OPERATION_LOCK="${OPERATION_LOCK:-/var/lock/trader-v3-account-stall-operation.lo
 ACCOUNT_A_READY_URL="${ACCOUNT_A_READY_URL:-http://127.0.0.1:8081/ready}"
 CONTROL_PLANE_SSE_PROXY_URL="${CONTROL_PLANE_SSE_PROXY_URL:-http://100.104.27.123:8088/v1/stream}"
 CONTROL_PLANE_DIRECT_SSE_URL="${CONTROL_PLANE_DIRECT_SSE_URL:-http://127.0.0.1:8080/v1/stream}"
+SSE_CONTRACT_READY_TIMEOUT_SECONDS="${SSE_CONTRACT_READY_TIMEOUT_SECONDS:-15}"
 
 DEPLOYMENT_FILE_COUNT=2
 READ_API_RELATIVE="services/control-plane/api/read_api.py"
@@ -38,10 +39,14 @@ SSE_BODY=""
 SSE_ERROR=""
 SSE_PID=""
 MUTATION_STARTED=0
+FAILURE_HANDLING=0
 
 
 die() {
   echo "FATAL: $*" >&2
+  if [ "${MUTATION_STARTED:-0}" = "1" ]; then
+    handle_failure 1
+  fi
   return 1
 }
 
@@ -113,7 +118,7 @@ probe_sse_contract() {
 wait_for_sse_contract() {
   local phase="$1"
   local attempt=0
-  local deadline=$((SECONDS + 15))
+  local deadline=$((SECONDS + SSE_CONTRACT_READY_TIMEOUT_SECONDS))
   local proxy_status=""
   local direct_status=""
   while [ "$attempt" -lt 300 ] && [ "$SECONDS" -lt "$deadline" ]; do
@@ -318,9 +323,13 @@ cleanup() {
 }
 
 
-on_err() {
-  local status=$?
+handle_failure() {
+  local status="$1"
   trap - ERR
+  if [ "$FAILURE_HANDLING" = "1" ]; then
+    exit "$status"
+  fi
+  FAILURE_HANDLING=1
   stop_sse_hold
   echo "FATAL: control-plane read API update failed" >&2
   if [ "$MUTATION_STARTED" = "1" ] && [ -x "$ROLLBACK_PATH" ]; then
@@ -334,6 +343,12 @@ on_err() {
     echo "ROLLBACK: bash $ROLLBACK_PATH" >&2
   fi
   exit "$status"
+}
+
+
+on_err() {
+  local status=$?
+  handle_failure "$status"
 }
 
 
@@ -352,6 +367,15 @@ if [ "$(id -u)" != "0" ]; then
 fi
 if [ "$DEPLOYMENT_FILE_COUNT" -ne 2 ]; then
   die "invalid deployment file count"
+fi
+case "$SSE_CONTRACT_READY_TIMEOUT_SECONDS" in
+  ""|*[!0-9]*)
+    die "SSE readiness timeout must be an integer"
+    ;;
+esac
+if [ "$SSE_CONTRACT_READY_TIMEOUT_SECONDS" -lt 1 ] \
+  || [ "$SSE_CONTRACT_READY_TIMEOUT_SECONDS" -gt 60 ]; then
+  die "SSE readiness timeout must be between 1 and 60 seconds"
 fi
 if [ ! -d "$T" ]; then
   die "trader root is missing: $T"
@@ -780,7 +804,7 @@ if grep -Eqi \
   die "unsafe control-plane stop found in journal"
 fi
 
-probe_sse_contract "after restart"
+wait_for_sse_contract "after restart"
 verify_account_a_halted "after restart"
 echo "update complete"
 echo "backup: $BACKUP_ROOT"
