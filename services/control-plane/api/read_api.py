@@ -90,10 +90,12 @@ def system_snapshot(authorization: str | None = Header(default=None)):
 
 
 # Dashboard realtime feed (SSE). The SPA treats `dashboard_snapshot` as a
-# notification and fetches the canonical snapshot over HTTP. Keeping SSE
-# payloads small avoids holding database work and large proxy buffers open.
+# notification and fetches the canonical snapshot over HTTP. Production Caddy
+# injects SYSTEM_OBSERVER_TOKEN for /v1/* browser requests. Bridge exposes a
+# separate public, empty-data SSE. Direct read-api clients must send the reader
+# Bearer token themselves. Keeping SSE payloads small avoids holding database
+# work and large proxy buffers open.
 _STREAM_INTERVAL_S = 5.0
-_STREAM_MAX_AGE_S = 60.0
 
 
 @app.get("/v1/stream")
@@ -104,18 +106,13 @@ async def v1_stream(
     require_reader(authorization)
 
     async def event_gen():
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _STREAM_MAX_AGE_S
-        while loop.time() < deadline:
+        while True:
             if await request.is_disconnected():
                 return
             yield "event: dashboard_snapshot\ndata: {}\n\n"
             beat = json.dumps({"ts": datetime.now(timezone.utc).isoformat()})
             yield f"event: heartbeat\ndata: {beat}\n\n"
-            remaining_s = deadline - loop.time()
-            if remaining_s <= 0:
-                return
-            await asyncio.sleep(min(_STREAM_INTERVAL_S, remaining_s))
+            await asyncio.sleep(_STREAM_INTERVAL_S)
 
     return StreamingResponse(
         event_gen(),

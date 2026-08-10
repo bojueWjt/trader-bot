@@ -436,6 +436,8 @@ while IFS=$'\t' read -r status target backup_relative; do
 done <"$INDEX"
 
 systemctl daemon-reload
+systemctl enable "$CONTROL_PLANE_UNIT"
+systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT"
 systemctl start "$CONTROL_PLANE_UNIT"
 systemctl is-active --quiet "$CONTROL_PLANE_UNIT"
 systemctl start "$EXCHANGE_STATE_UNIT"
@@ -859,6 +861,10 @@ UNIT_TARGET_SHA="$(sha256sum "$CONTROL_PLANE_UNIT_TARGET" | awk '{print $1}')"
 [ "$UNIT_SOURCE_SHA" = "$UNIT_TARGET_SHA" ] \
   || die "control-plane unit SHA256 mismatch"
 systemctl daemon-reload
+systemctl enable "$CONTROL_PLANE_UNIT" \
+  || die "$CONTROL_PLANE_UNIT failed to enable"
+systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT" \
+  || die "$CONTROL_PLANE_UNIT is not enabled"
 systemctl stop "$EXCHANGE_STATE_UNIT"
 RECORDER_WATERMARK="$TEMP_DIR/exchange-state-watermark.txt"
 "$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" capture \

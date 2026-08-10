@@ -35,9 +35,17 @@ def test_deploy_script_is_control_plane_first() -> None:
         host_install,
     )
     daemon_reload = text.index("systemctl daemon-reload", unit_install)
+    control_plane_enable = text.index(
+        'systemctl enable "$CONTROL_PLANE_UNIT"',
+        daemon_reload,
+    )
+    control_plane_enabled = text.index(
+        'systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT"',
+        control_plane_enable,
+    )
     control_plane_restart = text.index(
         'systemctl restart "$CONTROL_PLANE_UNIT"',
-        daemon_reload,
+        control_plane_enabled,
     )
     recorder_restart = text.index(
         'systemctl start "$EXCHANGE_STATE_UNIT"',
@@ -55,7 +63,9 @@ def test_deploy_script_is_control_plane_first() -> None:
 
     assert host_install < unit_install
     assert unit_install < daemon_reload
-    assert daemon_reload < control_plane_restart
+    assert daemon_reload < control_plane_enable
+    assert control_plane_enable < control_plane_enabled
+    assert control_plane_enabled < control_plane_restart
     assert control_plane_restart < recorder_restart
     assert recorder_restart < port_8080_check
     assert port_8080_check < patch_install
@@ -131,6 +141,36 @@ def test_deploy_script_keeps_lock_backup_and_precise_rollback() -> None:
     assert 'cat >"$ROLLBACK_PATH"' in text
     assert 'rm -rf -- "$target"' in text
     assert text.count("systemctl daemon-reload") == 2
+    assert text.count('systemctl enable "$CONTROL_PLANE_UNIT"') == 2
+    assert text.count(
+        'systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT"'
+    ) == 2
+
+    rollback_start = text.index("cat >\"$ROLLBACK_PATH\" <<'ROLLBACK'")
+    rollback_end = text.index("\nROLLBACK", rollback_start)
+    rollback = text[rollback_start:rollback_end]
+    daemon_reload = rollback.index("systemctl daemon-reload")
+    control_plane_enable = rollback.index(
+        'systemctl enable "$CONTROL_PLANE_UNIT"',
+        daemon_reload,
+    )
+    control_plane_enabled = rollback.index(
+        'systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT"',
+        control_plane_enable,
+    )
+    control_plane_start = rollback.index(
+        'systemctl start "$CONTROL_PLANE_UNIT"',
+        control_plane_enabled,
+    )
+    control_plane_active = rollback.index(
+        'systemctl is-active --quiet "$CONTROL_PLANE_UNIT"',
+        control_plane_start,
+    )
+
+    assert daemon_reload < control_plane_enable
+    assert control_plane_enable < control_plane_enabled
+    assert control_plane_enabled < control_plane_start
+    assert control_plane_start < control_plane_active
 
 
 def test_deploy_script_installs_versioned_controlplane_unit() -> None:
@@ -154,6 +194,8 @@ def test_deploy_script_installs_versioned_controlplane_unit() -> None:
     assert (
         '"$CONTROL_PLANE_UNIT_SOURCE" "$CONTROL_PLANE_UNIT_TARGET"'
     ) in text
+    assert 'systemctl enable "$CONTROL_PLANE_UNIT"' in text
+    assert 'systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT"' in text
 
 
 def test_deploy_script_repairs_non_file_patch_sources() -> None:
