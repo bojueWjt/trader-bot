@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+from packages.runtime_resource_contract import (
+    ABSENT,
+    ControlPlaneSessionResources,
+    RuntimeResourceContractError,
+    RuntimeResourcePolicy,
+    RuntimeResources,
+    parse_runtime_resources,
+)
+
+ControlPlaneSessionNodeConfig = ControlPlaneSessionResources
 
 
 class NodeConfigError(ValueError):
@@ -66,22 +76,6 @@ class BinanceNodeConfig:
 
 
 @dataclass(frozen=True)
-class ControlPlaneSessionNodeConfig:
-    command_delivery_capacity: int = 128
-    command_ack_capacity: int = 256
-    intent_delivery_capacity: int = 256
-    execution_event_capacity: int = 1024
-    queue_degraded_ratio: float = 0.8
-    retry_budget: int = 3
-    retry_base_delay_seconds: float = 0.05
-    retry_max_delay_seconds: float = 1.0
-    retry_jitter_ratio: float = 0.2
-    circuit_reset_seconds: float = 5.0
-    operation_timeout_seconds: float = 15.0
-    shutdown_timeout_seconds: float = 1.0
-
-
-@dataclass(frozen=True)
 class ControlPlaneNodeConfig:
     base_url: str
     token: str
@@ -103,6 +97,7 @@ class NodeConfig:
     reconciliation: ReconciliationNodeConfig
     binance: BinanceNodeConfig
     control_plane: ControlPlaneNodeConfig
+    runtime_resources: RuntimeResources
 
     @property
     def route_prefix(self) -> str:
@@ -123,6 +118,16 @@ def load_node_config(path: str | Path) -> NodeConfig:
     redis_raw = _required_mapping(raw, "redis")
     binance_raw = _required_mapping(raw, "binance")
     control_plane_raw = _required_mapping(raw, "control_plane")
+    environment = _required_str(binance_raw, "environment").lower()
+    if environment not in {"sandbox", "testnet", "live"}:
+        raise NodeConfigError(
+            f"binance.environment must be sandbox/testnet/live, got {environment!r}"
+        )
+    runtime_resources = _load_runtime_resources_config(
+        raw.get("runtime_resources", ABSENT),
+        environment=environment,
+        legacy_control_plane_session=control_plane_raw.get("session", ABSENT),
+    )
 
     redis = RedisNodeConfig(
         url=_required_str(redis_raw, "url"),
@@ -132,11 +137,6 @@ def load_node_config(path: str | Path) -> NodeConfig:
     message_bus = _load_message_bus_config(raw.get("message_bus"))
     reconciliation = _load_reconciliation_config(raw.get("reconciliation"))
 
-    environment = _required_str(binance_raw, "environment").lower()
-    if environment not in {"sandbox", "testnet", "live"}:
-        raise NodeConfigError(
-            f"binance.environment must be sandbox/testnet/live, got {environment!r}"
-        )
     account_type = _required_str(binance_raw, "account_type")
     if account_type not in {"USDT-M", "USDT_FUTURES", "USDT-FUTURES"}:
         raise NodeConfigError(
@@ -171,9 +171,7 @@ def load_node_config(path: str | Path) -> NodeConfig:
                 control_plane_raw, "snapshot_stale_after_seconds"
             )
         ),
-        session=_load_control_plane_session_config(
-            control_plane_raw.get("session")
-        ),
+        session=runtime_resources.control_plane_session,
     )
 
     _reject_overlapping_identity(account_id, node_id, trader_id, instance_id, redis)
@@ -189,7 +187,27 @@ def load_node_config(path: str | Path) -> NodeConfig:
         reconciliation=reconciliation,
         binance=binance,
         control_plane=control_plane,
+        runtime_resources=runtime_resources,
     )
+
+
+def _load_runtime_resources_config(
+    raw: Any,
+    *,
+    environment: str,
+    legacy_control_plane_session: Any,
+) -> RuntimeResources:
+    policy = RuntimeResourcePolicy.COMPAT
+    if environment == "live":
+        policy = RuntimeResourcePolicy.LIVE_STRICT
+    try:
+        return parse_runtime_resources(
+            raw,
+            policy=policy,
+            legacy_session=legacy_control_plane_session,
+        )
+    except RuntimeResourceContractError as exc:
+        raise NodeConfigError(str(exc)) from exc
 
 
 def _resolve_secret(label: str, raw: Any) -> tuple[str, str]:
@@ -305,88 +323,6 @@ def _load_reconciliation_config(raw: Any) -> ReconciliationNodeConfig:
     )
 
 
-def _load_control_plane_session_config(
-    raw: Any,
-) -> ControlPlaneSessionNodeConfig:
-    if raw is None:
-        return ControlPlaneSessionNodeConfig()
-    if not isinstance(raw, Mapping):
-        raise NodeConfigError("control_plane.session must be an object")
-
-    retry_base_delay_seconds = _optional_positive_number(
-        raw,
-        "retry_base_delay_seconds",
-        0.05,
-    )
-    retry_max_delay_seconds = _optional_positive_number(
-        raw,
-        "retry_max_delay_seconds",
-        1.0,
-    )
-    if retry_max_delay_seconds < retry_base_delay_seconds:
-        raise NodeConfigError(
-            "control_plane.session.retry_max_delay_seconds must be at "
-            "least retry_base_delay_seconds"
-        )
-
-    return ControlPlaneSessionNodeConfig(
-        command_delivery_capacity=_optional_positive_int(
-            raw,
-            "command_delivery_capacity",
-            128,
-        ),
-        command_ack_capacity=_optional_positive_int(
-            raw,
-            "command_ack_capacity",
-            256,
-        ),
-        intent_delivery_capacity=_optional_positive_int(
-            raw,
-            "intent_delivery_capacity",
-            256,
-        ),
-        execution_event_capacity=_optional_positive_int(
-            raw,
-            "execution_event_capacity",
-            1024,
-        ),
-        queue_degraded_ratio=_optional_ratio(
-            raw,
-            "queue_degraded_ratio",
-            0.8,
-            allow_zero=False,
-        ),
-        retry_budget=_optional_positive_int(
-            raw,
-            "retry_budget",
-            3,
-        ),
-        retry_base_delay_seconds=retry_base_delay_seconds,
-        retry_max_delay_seconds=retry_max_delay_seconds,
-        retry_jitter_ratio=_optional_ratio(
-            raw,
-            "retry_jitter_ratio",
-            0.2,
-            allow_zero=True,
-        ),
-        circuit_reset_seconds=_optional_positive_number(
-            raw,
-            "circuit_reset_seconds",
-            5.0,
-        ),
-        operation_timeout_seconds=_optional_positive_number(
-            raw,
-            "operation_timeout_seconds",
-            15.0,
-        ),
-        shutdown_timeout_seconds=_optional_positive_number(
-            raw,
-            "shutdown_timeout_seconds",
-            1.0,
-        ),
-    )
-
-
 def _optional_bool(raw: Mapping[str, Any], key: str, default: bool) -> bool:
     value = raw.get(key, default)
     if not isinstance(value, bool):
@@ -406,39 +342,6 @@ def _optional_positive_int(raw: Mapping[str, Any], key: str, default: int) -> in
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise NodeConfigError(f"{key} must be a positive integer")
     return value
-
-
-def _optional_positive_number(
-    raw: Mapping[str, Any],
-    key: str,
-    default: float,
-) -> float:
-    value = raw.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise NodeConfigError(f"{key} must be a positive number")
-    number = float(value)
-    if not math.isfinite(number) or number <= 0:
-        raise NodeConfigError(f"{key} must be a positive number")
-    return number
-
-
-def _optional_ratio(
-    raw: Mapping[str, Any],
-    key: str,
-    default: float,
-    *,
-    allow_zero: bool,
-) -> float:
-    value = raw.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise NodeConfigError(f"{key} must be a ratio below 1")
-    ratio = float(value)
-    lower_bound_valid = ratio >= 0
-    if not allow_zero:
-        lower_bound_valid = ratio > 0
-    if not math.isfinite(ratio) or not lower_bound_valid or ratio >= 1:
-        raise NodeConfigError(f"{key} must be a ratio below 1")
-    return ratio
 
 
 def _reject_overlapping_identity(

@@ -33,6 +33,10 @@ PATCH_MOUNT_TARGETS = (
     ("control_plane_session.py", "/app/runtime/control_plane_session.py"),
     ("binance_adapter_config.py", "/app/runtime/binance_adapter_config.py"),
     ("node_config.py", "/app/config/node_config.py"),
+    (
+        "runtime_resource_contract.py",
+        "/app/packages/runtime_resource_contract/__init__.py",
+    ),
     ("node.py", "/app/app/node.py"),
     ("run_node.py", "/app/app/run_node.py"),
     ("health_server.py", "/app/app/health_server.py"),

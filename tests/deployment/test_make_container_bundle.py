@@ -24,6 +24,9 @@ REQUIRED_DEPENDENCY_CLOSURE = {
     "bounded_task_worker.py": "/app/runtime/bounded_task_worker.py",
     "control_plane_session.py": "/app/runtime/control_plane_session.py",
     "node_config.py": "/app/config/node_config.py",
+    "runtime_resource_contract.py": (
+        "/app/packages/runtime_resource_contract/__init__.py"
+    ),
     "approved_intent_client.py": "/app/data_client/approved_intent_client.py",
     "atomic_json.py": "/app/data_client/atomic_json.py",
     "durable_intent_inbox.py": "/app/data_client/durable_intent_inbox.py",

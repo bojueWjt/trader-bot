@@ -22,6 +22,7 @@ RUN test -s /tmp/requirements.node.lock.txt \
 COPY services/nautilus-node/ /app/
 COPY packages/execution-domain/execution_domain/ /app/execution_domain/
 COPY packages/nautilus-adapter/intent/ /app/intent/
+COPY packages/runtime_resource_contract/ /app/packages/runtime_resource_contract/
 
 RUN mkdir -p /var/lib/nautilus-node/spool /app/bin \
     && printf '%s\n' '#!/bin/sh' 'exec python -m app.run_node "$@"' > /app/bin/run-nautilus-node \

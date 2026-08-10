@@ -89,6 +89,11 @@ BUNDLE_FILES = (
         "/app/config/node_config.py",
     ),
     (
+        "runtime_resource_contract.py",
+        "packages/runtime_resource_contract/__init__.py",
+        "/app/packages/runtime_resource_contract/__init__.py",
+    ),
+    (
         "node.py",
         "services/nautilus-node/app/node.py",
         "/app/app/node.py",
