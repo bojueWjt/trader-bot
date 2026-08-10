@@ -1,0 +1,149 @@
+Account Stall Phase A - control-plane two-file rollout transcript
+Captured: 2026-08-10 UTC
+Target: HK /srv/trader-v3
+Branch: codex/account-stall-phase-a
+
+== Local commits ==
+
+07abd32e63a911ea08cbbebcedfa8ce970c99c05
+2026-08-10 18:07:16 +0800
+fix(control-plane): rollback explicit probe failures
+
+ad083325aaa779c19565ee28de05ce27b1bc606a
+2026-08-10 17:58:33 +0800
+fix(control-plane): wait for bootstrap readiness
+
+== Final local/staging SHA-256 ==
+
+e9e7ba7f01bfd80bc092ba741ed37348cf0d89b76bfbd58881f22fbe70a55d96  scripts/hk-deploy-control-plane-read-api.sh
+953a429f3290e64409784e1fc9ce5e69f1fbff2eb94646ff313fdae7769ee943  services/control-plane/api/read_api.py
+9a010de0d2486b37669ec8b293102aff7230086961ecb1aeec2478ef36d448c9  infra/systemd/trader-v3-controlplane.service
+
+Remote staging:
+/tmp/trader-v3-control-plane-07abd32-20260810T100725Z
+
+== Final deployment stdout/stderr ==
+
+Command:
+ssh root@100.104.27.123 \
+  'bash /tmp/trader-v3-control-plane-07abd32-20260810T100725Z/scripts/hk-deploy-control-plane-read-api.sh'
+
+Exit code: 0
+
+curl: (28) Operation timed out after 3002 milliseconds with 103 bytes received
+bootstrap restart completed in 0.169s
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (28) Operation timed out after 500 milliseconds with 103 bytes received
+== control-plane SSE contract verified: after bootstrap restart
+SSE validation restart completed in 10.153s
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
+curl: (28) Operation timed out after 503 milliseconds with 103 bytes received
+== control-plane SSE contract verified: after restart
+update complete
+backup: /srv/trader-v3/backups/control-plane-read-api-20260810T100759Z
+rollback: /srv/trader-v3/backups/control-plane-read-api-20260810T100759Z/rollback.sh
+
+== Final service verification ==
+
+Captured at 2026-08-10T10:11:39Z:
+
+state=active
+enabled=enabled
+pid=3738391
+restarts=0
+proxy=200
+direct=401
+ready={"degraded": [], "halt_reason": "operator_command", "missing": [], "ready": true, "trading_state": "HALTED"}
+
+Production SHA-256:
+
+953a429f3290e64409784e1fc9ce5e69f1fbff2eb94646ff313fdae7769ee943  /srv/trader-v3/services/control-plane/api/read_api.py
+9a010de0d2486b37669ec8b293102aff7230086961ecb1aeec2478ef36d448c9  /etc/systemd/system/trader-v3-controlplane.service
+
+rollback=executable
+unsafe_journal_lines=0
+operation_lock=available
+
+unsafe_journal_lines pattern:
+State .*stop-sigterm.*timed out|SIGKILL|status=9/KILL|signal KILL
+
+== Final restart journal excerpt ==
+
+2026-08-10T10:08:04+00:00 qctbhy0a32hucub systemd[1]: Stopping trader-v3-controlplane.service - Trader v3 control-plane read API (isolated, 127.0.0.1:8080)...
+2026-08-10T10:08:04+00:00 qctbhy0a32hucub uvicorn[3725535]: INFO:     Shutting down
+2026-08-10T10:08:04+00:00 qctbhy0a32hucub uvicorn[3725535]: INFO:     Application shutdown complete.
+2026-08-10T10:08:04+00:00 qctbhy0a32hucub uvicorn[3725535]: INFO:     Finished server process [3725535]
+2026-08-10T10:08:04+00:00 qctbhy0a32hucub systemd[1]: Stopped trader-v3-controlplane.service - Trader v3 control-plane read API (isolated, 127.0.0.1:8080).
+2026-08-10T10:08:04+00:00 qctbhy0a32hucub systemd[1]: Started trader-v3-controlplane.service - Trader v3 control-plane read API (isolated, 127.0.0.1:8080).
+2026-08-10T10:08:05+00:00 qctbhy0a32hucub uvicorn[3738027]: INFO:     Application startup complete.
+2026-08-10T10:08:05+00:00 qctbhy0a32hucub systemd[1]: Stopping trader-v3-controlplane.service - Trader v3 control-plane read API (isolated, 127.0.0.1:8080)...
+2026-08-10T10:08:05+00:00 qctbhy0a32hucub uvicorn[3738027]: INFO:     Shutting down
+2026-08-10T10:08:15+00:00 qctbhy0a32hucub uvicorn[3738027]: ERROR:    Cancel 1 running task(s), timeout graceful shutdown exceeded
+2026-08-10T10:08:15+00:00 qctbhy0a32hucub uvicorn[3738027]: INFO:     Application shutdown complete.
+2026-08-10T10:08:15+00:00 qctbhy0a32hucub uvicorn[3738027]: INFO:     Finished server process [3738027]
+2026-08-10T10:08:15+00:00 qctbhy0a32hucub systemd[1]: Stopped trader-v3-controlplane.service - Trader v3 control-plane read API (isolated, 127.0.0.1:8080).
+2026-08-10T10:08:15+00:00 qctbhy0a32hucub systemd[1]: Started trader-v3-controlplane.service - Trader v3 control-plane read API (isolated, 127.0.0.1:8080).
+2026-08-10T10:08:16+00:00 qctbhy0a32hucub uvicorn[3738391]: INFO:     Application startup complete.
+
+== Account-A mirror observations ==
+
+Before final rollout:
+account-a|2026-08-10 09:57:25.122503|3|20|33
+
+After final rollout:
+account-a|2026-08-10 10:08:45.156259|3|20|33
+
+Later stability observation:
+account-a|2026-08-10 10:11:00.308680|3|20|33
+
+Fields:
+account_id|updated_at_utc|positions|open_orders|algo_orders
+
+== Host resource observation ==
+
+memory=avail=4982MB swap_used=820MB/8191MB
+redis=used=690.26M max=2.00G
+keys=30879
+
+== Local verification ==
+
+Focused command:
+PYTHONDONTWRITEBYTECODE=1 uv run --no-project --with pytest \
+  pytest -q tests/deployment/test_hk_deploy_control_plane_read_api.py
+
+Result:
+23 passed in 43.44s
+
+Full deployment command:
+PYTHONDONTWRITEBYTECODE=1 uv run --no-project --with pytest \
+  --with 'pydantic>=2.7,<3' --with jsonschema --with fastapi \
+  --with httpx --with psycopg2-binary \
+  python -m pytest -q tests/deployment
+
+Result:
+675 passed, 20 subtests passed in 177.79s
+
+Additional checks:
+bash -n scripts/hk-deploy-control-plane-read-api.sh
+python3 -m py_compile tests/deployment/test_hk_deploy_control_plane_read_api.py
+git diff --check
+
+Result:
+all passed
+
+Independent Codex reviewer:
+PASS

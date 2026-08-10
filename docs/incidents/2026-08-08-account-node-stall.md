@@ -1,6 +1,7 @@
 # 2026-08-08 Account Node Stall / Redis Growth / Release Drift
 
-- 状态：Historical forensics complete；当前代码 residual stall 机制待 Phase A 重诊
+- 状态：Historical forensics complete；Phase A 控制面可用性修复已生产验收；
+  节点 runtime 发布与真实小额 canary 待后续窗口
 - 取证截止：2026-08-08 06:38 UTC
 - 本文“事实”章节描述该取证时刻的生产基线；工作区修复状态单列记录
 - 影响账户：`account-a`、`account-b`
@@ -260,6 +261,42 @@ Redis namespace/stream 无界增长持续制造内存、swap 和 I/O 压力，�
 - 可复现命令、依赖版本、suite path list 与 inventory hash 见
   `docs/evidence/2026-08-09-account-stall-test-baseline.md`。
 - 当前只授权 Phase A。生产继续 `HALTED / NO-GO`。
+
+### 2026-08-10 Phase A 控制面生产收口
+
+- Durable journal、release/runtime-resource 绑定、systemd restart 预算、SSE
+  contract、旧连接 drain、readiness wait 和显式自动回滚已进入
+  `codex/account-stall-phase-a`。
+- 最终两文件生产版本：
+  - read API SHA：
+    `953a429f3290e64409784e1fc9ce5e69f1fbff2eb94646ff313fdae7769ee943`
+  - systemd unit SHA：
+    `9a010de0d2486b37669ec8b293102aff7230086961ecb1aeec2478ef36d448c9`
+- 最终部署尝试于 `2026-08-10T10:07:59Z` 启动，最终进程于
+  `2026-08-10T10:08:16Z` 完成 startup。bootstrap restart 为 `0.169s`，
+  持有真实 Caddy SSE 的 validation restart 为 `10.153s`。
+- 两个 restart 后都经历短暂的 socket/代理启动窗口，15 秒 readiness deadline
+  最终收敛到 proxy `200`、direct anonymous `401`。
+- Uvicorn 在配置的 10 秒应用 shutdown deadline 取消 1 个 SSE task。systemd
+  完成 stop/start，journal 未出现 systemd stop timeout、SIGKILL 或
+  `status=9/KILL`。
+- 服务保持 `active/enabled`；account-a 为
+  `ready=true / HALTED / operator_command`；systemd automatic restart count
+  为 `0`。
+- `2026-08-10T10:08:45.156259Z` 的 account-a exchange mirror 为
+  `3 positions / 20 regular orders / 33 algo orders`。部署前
+  `2026-08-10T09:57:25.122503Z` 的计数同为 `3 / 20 / 33`。两文件脚本
+  不包含订单、仓位、risk state 或节点容器 mutation 命令。
+- 生产主机观测为约 `4.9 GiB` 可用内存、`820 MiB / 8 GiB` swap、Redis
+  `690.26 MiB / 2 GiB`、`30,879` keys。该状态显著低于 8 月 8 日的
+  `6.08 GiB / 191,847 keys` 压力基线。
+- 聚焦两文件部署测试：`23 passed`；完整 deployment：
+  `675 passed, 20 subtests passed`；独立 Codex reviewer：PASS。
+- 原始命令转录：
+  [`2026-08-10-control-plane-two-file-rollout.txt`](../evidence/raw/2026-08-10-control-plane-two-file-rollout.txt)。
+- 真实小额 canary 与节点 runtime 发布继续延期。上述 `3 / 20 / 33` 是
+  `2026-08-10T10:08:45.156259Z` 的观测快照，后续窗口需重新采集并冻结目标
+  symbol 与非目标组合签名。
 
 ## 后续验证证据要求
 
