@@ -119,7 +119,10 @@ def process_one_decision(
             # is already classified + recorded (never dropped); a stale-context approval is
             # held for human review instead of auto-executing. This moves the staleness gate
             # from "drop the message" (wrong) to "hold the approval" (correct).
-            if outcome.status == "approved" and _projection_is_stale(cur):
+            if (
+                outcome.status == "approved"
+                and _projection_is_stale(cur, outcome.account_id)
+            ):
                 outcome.status = "needs_review"
                 outcome.reason = "context_stale: approval held pending fresh projection"
                 outcome.checks = list(outcome.checks) + [
@@ -299,13 +302,22 @@ def _raw_message_authorization(cur, row: dict[str, Any]) -> dict[str, Any]:
     return authorization
 
 
-def _projection_is_stale(cur, threshold_ms: int = 60_000) -> bool:
-    """Freshness for auto-approval = the execution projection is CURRENT, which a live node
-    proves by HEARTBEATING — not by having traded recently. A quiet (no new fills) period
-    must not block new risk while the node is connected and pushing events, otherwise every
-    actionable signal during a calm market is held forever (auto-trading deadlock). Fail
-    closed: stale when no node has heartbeat within the threshold (node down / no node)."""
-    cur.execute("SELECT max(last_seen_at) AS t FROM node_heartbeats")
+def _projection_is_stale(
+    cur,
+    account_id: str | None,
+    threshold_ms: int = 60_000,
+) -> bool:
+    """Treat an account projection as current when its own node is heartbeating."""
+    if not account_id:
+        return True
+    cur.execute(
+        """
+        SELECT max(last_seen_at) AS t
+        FROM node_heartbeats
+        WHERE account_id = %s
+        """,
+        (account_id,),
+    )
     row = cur.fetchone()
     last = row["t"] if row else None
     if last is None:

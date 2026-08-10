@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import psycopg2
@@ -81,6 +82,33 @@ def seed_risk_state(conn, account_id="acct-1", instrument="BTCUSDT", mode="ACTIV
         )
 
 
+def seed_node_heartbeat(
+    conn,
+    *,
+    account_id="acct-1",
+    node_id="node-acct-1",
+    last_seen_at=None,
+):
+    observed_at = last_seen_at or datetime.now(timezone.utc)
+    with transaction(conn), conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO node_heartbeats (
+                node_id,
+                account_id,
+                status,
+                last_seen_at
+            )
+            VALUES (%s, %s, 'ACTIVE', %s)
+            ON CONFLICT (node_id) DO UPDATE
+            SET account_id = EXCLUDED.account_id,
+                status = EXCLUDED.status,
+                last_seen_at = EXCLUDED.last_seen_at
+            """,
+            (node_id, account_id, observed_at),
+        )
+
+
 def _one(conn, sql, params=()):
     with conn.cursor() as cur:
         cur.execute(sql, params)
@@ -98,6 +126,7 @@ def test_approved_decision_writes_risk_decision_intent_and_outbox(db_conn):
         source_message_id="tg-msg-5026",
     )
     seed_risk_state(db_conn)
+    seed_node_heartbeat(db_conn)
     result = gateway.process_one_decision(db_conn, policy=POLICY)
 
     assert result["status"] == "approved"
@@ -141,6 +170,7 @@ def test_user_raw_message_builds_user_authorization(db_conn):
         author_id="balen",
     )
     seed_risk_state(db_conn)
+    seed_node_heartbeat(db_conn)
 
     result = gateway.process_one_decision(db_conn, policy=POLICY)
 
@@ -162,6 +192,7 @@ def test_user_raw_message_builds_user_authorization(db_conn):
 def test_idempotent_second_pass_makes_no_duplicate(db_conn):
     seed_decision(db_conn)
     seed_risk_state(db_conn)
+    seed_node_heartbeat(db_conn)
     first = gateway.process_one_decision(db_conn, policy=POLICY)
     second = gateway.process_one_decision(db_conn, policy=POLICY)
 
@@ -189,6 +220,30 @@ def test_missing_risk_state_fails_closed_to_needs_review(db_conn):
     assert result["status"] == "needs_review"
     assert result["intent_id"] is None
     assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+
+
+def test_fresh_other_account_heartbeat_does_not_mask_stale_target_account(db_conn):
+    seed_decision(db_conn)
+    seed_risk_state(db_conn)
+    now = datetime.now(timezone.utc)
+    seed_node_heartbeat(
+        db_conn,
+        last_seen_at=now - timedelta(minutes=5),
+    )
+    seed_node_heartbeat(
+        db_conn,
+        account_id="acct-2",
+        node_id="node-acct-2",
+        last_seen_at=now,
+    )
+
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "needs_review"
+    assert result["reason"] == (
+        "context_stale: approval held pending fresh projection"
+    )
+    assert result["intent_id"] is None
 
 
 def test_stale_decision_fails_closed_to_needs_review(db_conn):
