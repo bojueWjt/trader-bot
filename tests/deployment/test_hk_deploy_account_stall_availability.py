@@ -23,6 +23,14 @@ def _rollback_text() -> str:
     return text[start:end] + "\n"
 
 
+def _sse_probe_function_text() -> str:
+    text = _text()
+    marker = "probe_control_plane_sse_contract() {"
+    start = text.index(marker)
+    end = text.index("\n}\n", start) + len("\n}\n")
+    return text[start:end]
+
+
 def _write_executable(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -33,7 +41,14 @@ def _run_rollback(
     tmp_path: Path,
     *,
     original_state: str,
-) -> tuple[subprocess.CompletedProcess[str], list[str], Path, str]:
+    vendor_fragment: str = "",
+) -> tuple[
+    subprocess.CompletedProcess[str],
+    list[str],
+    Path,
+    str,
+    Path,
+]:
     trader_root = tmp_path / "trader"
     backup_root = trader_root / "backups" / f"rollback-{original_state}"
     backup_root.mkdir(parents=True)
@@ -54,7 +69,8 @@ def _run_rollback(
     unit_target.parent.mkdir(parents=True)
     unit_target.write_text("deployed unit\n", encoding="utf-8")
     backup_relative = Path("files") / str(unit_target).lstrip("/")
-    if original_state == "absent":
+    snapshot_fragment = str(unit_target)
+    if original_state == "absent" or vendor_fragment:
         index_line = f"absent\t{unit_target}\t-\n"
     else:
         backup_unit = backup_root / backup_relative
@@ -65,19 +81,62 @@ def _run_rollback(
         )
     (backup_root / "index.tsv").write_text(index_line, encoding="utf-8")
     (backup_root / "SHA256SUMS").write_text("", encoding="utf-8")
+    load_state = "loaded"
+    if original_state == "absent":
+        load_state = "not-found"
+        snapshot_fragment = "-"
+    elif vendor_fragment:
+        snapshot_fragment = vendor_fragment
     (backup_root / "control-plane-unit-state.txt").write_text(
-        f"{original_state}\n",
+        (
+            f"{original_state}\t{load_state}\t"
+            f"{snapshot_fragment}\n"
+        ),
         encoding="utf-8",
     )
 
     fake_bin = tmp_path / "fake-bin"
     systemctl_log = tmp_path / f"systemctl-{original_state}.log"
-    fake_state = tmp_path / f"unit-state-{original_state}.txt"
-    fake_state.write_text(f"{original_state}\n", encoding="utf-8")
+    wants_link = (
+        unit_target.parent
+        / "multi-user.target.wants"
+        / "trader-v3-controlplane.service"
+    )
+    wants_link.parent.mkdir(parents=True)
+    wants_link.symlink_to(unit_target)
     _write_executable(
         fake_bin / "systemctl",
         """#!/usr/bin/env bash
 set -eu
+load_state() {
+  if [ -e "$FAKE_DEPLOY_UNIT_FILE" ]; then
+    printf 'loaded\\n'
+    return
+  fi
+  if [ -n "$FAKE_VENDOR_FRAGMENT" ]; then
+    printf 'loaded\\n'
+    return
+  fi
+  printf 'not-found\\n'
+}
+fragment_path() {
+  if [ -e "$FAKE_DEPLOY_UNIT_FILE" ]; then
+    printf '%s\\n' "$FAKE_DEPLOY_UNIT_FILE"
+    return
+  fi
+  printf '%s\\n' "$FAKE_VENDOR_FRAGMENT"
+}
+enablement_state() {
+  if [ -L "$FAKE_WANTS_LINK" ]; then
+    printf 'enabled\\n'
+    return
+  fi
+  if [ "$(load_state)" = "not-found" ]; then
+    printf 'not-found\\n'
+    return
+  fi
+  printf 'disabled\\n'
+}
 command="$1"
 shift
 printf '%s' "$command" >>"$SYSTEMCTL_LOG"
@@ -87,27 +146,48 @@ fi
 printf '\\n' >>"$SYSTEMCTL_LOG"
 case "$command" in
   enable)
-    printf 'enabled\\n' >"$FAKE_UNIT_STATE_FILE"
+    [ "$(load_state)" = "loaded" ]
+    mkdir -p "$(dirname "$FAKE_WANTS_LINK")"
+    rm -f "$FAKE_WANTS_LINK"
+    ln -s "$(fragment_path)" "$FAKE_WANTS_LINK"
     ;;
   disable)
-    printf 'disabled\\n' >"$FAKE_UNIT_STATE_FILE"
+    [ "$(load_state)" = "loaded" ]
+    rm -f "$FAKE_WANTS_LINK"
     ;;
   is-enabled)
-    state="$(cat "$FAKE_UNIT_STATE_FILE")"
+    state="$(enablement_state)"
     printf '%s\\n' "$state"
     [ "$state" = "enabled" ]
     ;;
   start|is-active)
-    state="$(cat "$FAKE_UNIT_STATE_FILE")"
     for argument in "$@"; do
       if [ "$argument" = "trader-v3-controlplane.service" ] \
-        && [ "$state" = "absent" ]; then
+        && [ "$(load_state)" = "not-found" ]; then
         exit 9
       fi
     done
     ;;
   show)
-    printf '4242\\n'
+    property=""
+    for argument in "$@"; do
+      case "$argument" in
+        --property=*)
+          property="${argument#--property=}"
+          ;;
+      esac
+    done
+    case "$property" in
+      LoadState)
+        load_state
+        ;;
+      FragmentPath)
+        fragment_path
+        ;;
+      MainPID)
+        printf '4242\\n'
+        ;;
+    esac
     ;;
 esac
 """,
@@ -136,7 +216,9 @@ esac
     environment = os.environ.copy()
     environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
     environment["SYSTEMCTL_LOG"] = str(systemctl_log)
-    environment["FAKE_UNIT_STATE_FILE"] = str(fake_state)
+    environment["FAKE_DEPLOY_UNIT_FILE"] = str(unit_target)
+    environment["FAKE_VENDOR_FRAGMENT"] = vendor_fragment
+    environment["FAKE_WANTS_LINK"] = str(wants_link)
     result = subprocess.run(
         ["bash", str(rollback_path)],
         cwd=trader_root,
@@ -146,8 +228,61 @@ esac
         check=False,
     )
     commands = systemctl_log.read_text(encoding="utf-8").splitlines()
-    restored_state = fake_state.read_text(encoding="utf-8").strip()
-    return result, commands, unit_target, restored_state
+    if wants_link.is_symlink():
+        restored_state = "enabled"
+    elif unit_target.exists() or vendor_fragment:
+        restored_state = "disabled"
+    else:
+        restored_state = "not-found"
+    return result, commands, unit_target, restored_state, wants_link
+
+
+def _run_sse_probe(
+    tmp_path: Path,
+    *,
+    proxy_status: str,
+    direct_status: str,
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "fake-bin"
+    _write_executable(
+        fake_bin / "curl",
+        """#!/usr/bin/env bash
+set -eu
+url=""
+for argument in "$@"; do
+  url="$argument"
+done
+if [ "$url" = "http://127.0.0.1:8080/v1/stream" ]; then
+  printf '%s' "$DIRECT_STATUS"
+else
+  printf '%s' "$PROXY_STATUS"
+fi
+exit 28
+""",
+    )
+    shell = (
+        "set -Eeuo pipefail\n"
+        "die() {\n"
+        "  echo \"FATAL: $*\" >&2\n"
+        "  return 1\n"
+        "}\n"
+        "CONTROL_PLANE_SSE_PROXY_URL="
+        '"http://100.104.27.123:8088/v1/stream"\n'
+        f"{_sse_probe_function_text()}\n"
+        'probe_control_plane_sse_contract "test"\n'
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["PROXY_STATUS"] = proxy_status
+    environment["DIRECT_STATUS"] = direct_status
+    return subprocess.run(
+        ["bash", "-c", shell],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def test_deploy_script_is_account_a_only_and_never_auto_resumes() -> None:
@@ -298,8 +433,10 @@ def test_deploy_script_keeps_lock_backup_and_precise_rollback() -> None:
 def test_deploy_snapshots_control_plane_unit_state_before_install() -> None:
     text = _text()
 
+    snapshot_start = text.index('CONTROL_PLANE_UNIT_LOAD_STATE="$(')
     state_snapshot = text.index(
-        'printf \'%s\\n\' "$CONTROL_PLANE_UNIT_STATE"'
+        '>"$CONTROL_PLANE_UNIT_STATE_FILE"',
+        snapshot_start,
     )
     backup_unit = text.index(
         'backup_target "$CONTROL_PLANE_UNIT_TARGET"',
@@ -314,17 +451,33 @@ def test_deploy_snapshots_control_plane_unit_state_before_install() -> None:
     assert state_snapshot < backup_unit < unit_install
 
 
+def test_deploy_uses_systemd_load_state_and_fragment_path() -> None:
+    text = _text()
+    start = text.index('CONTROL_PLANE_UNIT_LOAD_STATE="$(')
+    end = text.index("\n\nbackup_target()", start)
+    snapshot = text[start:end]
+
+    assert "systemctl show" in snapshot
+    assert "--property=LoadState" in snapshot
+    assert "--property=FragmentPath" in snapshot
+    assert '[ -e "$CONTROL_PLANE_UNIT_TARGET" ]' not in snapshot
+    assert '[ -L "$CONTROL_PLANE_UNIT_TARGET" ]' not in snapshot
+
+
 def test_rollback_restores_present_enabled_control_plane(
     tmp_path: Path,
 ) -> None:
-    result, commands, unit_target, restored_state = _run_rollback(
-        tmp_path,
-        original_state="enabled",
+    result, commands, unit_target, restored_state, wants_link = (
+        _run_rollback(
+            tmp_path,
+            original_state="enabled",
+        )
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert unit_target.read_text(encoding="utf-8") == "original unit\n"
     assert restored_state == "enabled"
+    assert wants_link.resolve() == unit_target
     assert "enable trader-v3-controlplane.service" in commands
     assert "start trader-v3-controlplane.service" in commands
     assert "start trader-v3-exchange-state.service" in commands
@@ -333,14 +486,72 @@ def test_rollback_restores_present_enabled_control_plane(
 def test_rollback_restores_present_disabled_control_plane(
     tmp_path: Path,
 ) -> None:
-    result, commands, unit_target, restored_state = _run_rollback(
-        tmp_path,
-        original_state="disabled",
+    result, commands, unit_target, restored_state, wants_link = (
+        _run_rollback(
+            tmp_path,
+            original_state="disabled",
+        )
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert unit_target.read_text(encoding="utf-8") == "original unit\n"
     assert restored_state == "disabled"
+    assert not wants_link.exists()
+    assert "disable trader-v3-controlplane.service" in commands
+    assert "enable trader-v3-controlplane.service" not in commands
+    assert "start trader-v3-controlplane.service" in commands
+    assert "start trader-v3-exchange-state.service" in commands
+
+
+def test_rollback_restores_vendor_enabled_control_plane(
+    tmp_path: Path,
+) -> None:
+    fragment_path = (
+        "/usr/lib/systemd/system/trader-v3-controlplane.service"
+    )
+    result, commands, unit_target, restored_state, wants_link = (
+        _run_rollback(
+            tmp_path,
+            original_state="enabled",
+            vendor_fragment=fragment_path,
+        )
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not unit_target.exists()
+    assert restored_state == "enabled"
+    assert os.readlink(wants_link) == fragment_path
+    assert (
+        "show --property=FragmentPath --value "
+        "trader-v3-controlplane.service"
+    ) in commands
+    assert "enable trader-v3-controlplane.service" in commands
+    assert "start trader-v3-controlplane.service" in commands
+    assert "start trader-v3-exchange-state.service" in commands
+
+
+def test_rollback_restores_vendor_disabled_control_plane(
+    tmp_path: Path,
+) -> None:
+    fragment_path = (
+        "/lib/systemd/system/trader-v3-controlplane.service"
+    )
+    result, commands, unit_target, restored_state, wants_link = (
+        _run_rollback(
+            tmp_path,
+            original_state="disabled",
+            vendor_fragment=fragment_path,
+        )
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not unit_target.exists()
+    assert restored_state == "disabled"
+    assert not wants_link.exists()
+    assert (
+        "show --property=FragmentPath --value "
+        "trader-v3-controlplane.service"
+    ) in commands
     assert "disable trader-v3-controlplane.service" in commands
     assert "enable trader-v3-controlplane.service" not in commands
     assert "start trader-v3-controlplane.service" in commands
@@ -350,18 +561,109 @@ def test_rollback_restores_present_disabled_control_plane(
 def test_rollback_restores_absent_control_plane_without_starting_it(
     tmp_path: Path,
 ) -> None:
-    result, commands, unit_target, restored_state = _run_rollback(
-        tmp_path,
-        original_state="absent",
+    result, commands, unit_target, restored_state, wants_link = (
+        _run_rollback(
+            tmp_path,
+            original_state="absent",
+        )
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert not unit_target.exists()
-    assert restored_state == "absent"
+    assert restored_state == "not-found"
+    assert not wants_link.exists()
     assert "enable trader-v3-controlplane.service" not in commands
-    assert "disable trader-v3-controlplane.service" not in commands
+    disable_index = commands.index(
+        "disable trader-v3-controlplane.service"
+    )
+    disabled_index = commands.index(
+        "is-enabled trader-v3-controlplane.service",
+        disable_index,
+    )
+    daemon_reload_index = commands.index("daemon-reload")
+    absent_index = commands.index(
+        "is-enabled trader-v3-controlplane.service",
+        daemon_reload_index,
+    )
+    exchange_start_index = commands.index(
+        "start trader-v3-exchange-state.service"
+    )
+    assert disable_index < disabled_index < daemon_reload_index
+    assert daemon_reload_index < exchange_start_index < absent_index
     assert "start trader-v3-controlplane.service" not in commands
     assert "start trader-v3-exchange-state.service" in commands
+
+
+def test_deploy_probes_versioned_sse_proxy_before_and_after_restart() -> None:
+    text = _text()
+
+    assert (
+        'CONTROL_PLANE_SSE_PROXY_URL="${CONTROL_PLANE_SSE_PROXY_URL:-'
+        'http://100.104.27.123:8088/v1/stream}"'
+    ) in text
+    before_probe = text.index(
+        'probe_control_plane_sse_contract "before"'
+    )
+    state_snapshot = text.index(
+        'CONTROL_PLANE_UNIT_LOAD_STATE="$(',
+        before_probe,
+    )
+    control_plane_restart = text.index(
+        'systemctl restart "$CONTROL_PLANE_UNIT"',
+        state_snapshot,
+    )
+    after_probe = text.index(
+        'probe_control_plane_sse_contract "after"',
+        control_plane_restart,
+    )
+    patch_install = text.index(
+        'target_path="$PATCH_DIR/$bundle_path"',
+        after_probe,
+    )
+
+    assert before_probe < state_snapshot
+    assert state_snapshot < control_plane_restart < after_probe
+    assert after_probe < patch_install
+
+
+def test_sse_proxy_probe_fails_closed_on_non_200(
+    tmp_path: Path,
+) -> None:
+    result = _run_sse_probe(
+        tmp_path,
+        proxy_status="502",
+        direct_status="401",
+    )
+
+    assert result.returncode != 0
+    assert "proxy expected HTTP 200, got 502" in result.stderr
+
+
+def test_sse_probe_fails_closed_when_direct_stream_is_authenticated(
+    tmp_path: Path,
+) -> None:
+    result = _run_sse_probe(
+        tmp_path,
+        proxy_status="200",
+        direct_status="200",
+    )
+
+    assert result.returncode != 0
+    assert "direct control-plane SSE expected HTTP 401, got 200" in (
+        result.stderr
+    )
+
+
+def test_sse_proxy_probe_accepts_proxy_200_and_direct_401(
+    tmp_path: Path,
+) -> None:
+    result = _run_sse_probe(
+        tmp_path,
+        proxy_status="200",
+        direct_status="401",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_deploy_script_installs_versioned_controlplane_unit() -> None:

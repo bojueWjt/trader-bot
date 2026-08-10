@@ -11,6 +11,7 @@ CONTROL_PLANE_UNIT="trader-v3-controlplane.service"
 CONTROL_PLANE_UNIT_SOURCE_RELATIVE="infra/systemd/trader-v3-controlplane.service"
 CONTROL_PLANE_UNIT_SOURCE="$T/$CONTROL_PLANE_UNIT_SOURCE_RELATIVE"
 CONTROL_PLANE_UNIT_TARGET="/etc/systemd/system/trader-v3-controlplane.service"
+CONTROL_PLANE_SSE_PROXY_URL="${CONTROL_PLANE_SSE_PROXY_URL:-http://100.104.27.123:8088/v1/stream}"
 EXCHANGE_STATE_UNIT="trader-v3-exchange-state.service"
 OPERATION_LOCK="/var/lock/trader-v3-account-stall-operation.lock"
 MEMORY_LIMIT="${ACCOUNT_A_MEMORY_LIMIT:-768m}"
@@ -52,6 +53,40 @@ from pathlib import Path
 path = Path(sys.argv[1])
 compile(path.read_text(encoding="utf-8"), str(path), "exec")
 PY
+}
+
+
+probe_control_plane_sse_contract() {
+  local phase="$1"
+  local proxy_status
+  local direct_status
+  proxy_status="$(
+    curl \
+      --silent \
+      --no-buffer \
+      --connect-timeout 2 \
+      --max-time 3 \
+      --output /dev/null \
+      --write-out '%{http_code}' \
+      "$CONTROL_PLANE_SSE_PROXY_URL" \
+      || true
+  )"
+  [ "$proxy_status" = "200" ] \
+    || die "control-plane SSE proxy expected HTTP 200, got $proxy_status during $phase"
+  direct_status="$(
+    curl \
+      --silent \
+      --no-buffer \
+      --connect-timeout 2 \
+      --max-time 3 \
+      --output /dev/null \
+      --write-out '%{http_code}' \
+      "http://127.0.0.1:8080/v1/stream" \
+      || true
+  )"
+  [ "$direct_status" = "401" ] \
+    || die "direct control-plane SSE expected HTTP 401, got $direct_status during $phase"
+  echo "== control-plane SSE contract verified: $phase"
 }
 
 
@@ -322,26 +357,59 @@ if str(payload.get("trading_state") or "").upper() != "HALTED":
     raise SystemExit("account-a must be HALTED before deployment")
 PY
 
+probe_control_plane_sse_contract "before"
+
 [ ! -e "$BACKUP_ROOT" ] || die "backup path already exists: $BACKUP_ROOT"
 mkdir -p "$BACKUP_ROOT/files"
 chmod 0700 "$BACKUP_ROOT"
 : >"$BACKUP_ROOT/index.tsv"
 
-CONTROL_PLANE_UNIT_STATE="absent"
-if [ -e "$CONTROL_PLANE_UNIT_TARGET" ] \
-  || [ -L "$CONTROL_PLANE_UNIT_TARGET" ]; then
-  CONTROL_PLANE_UNIT_STATE="$(
-    systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
-  )"
-  case "$CONTROL_PLANE_UNIT_STATE" in
-    enabled|disabled)
-      ;;
-    *)
-      die "unsupported control-plane unit state: $CONTROL_PLANE_UNIT_STATE"
-      ;;
-  esac
-fi
-printf '%s\n' "$CONTROL_PLANE_UNIT_STATE" \
+CONTROL_PLANE_UNIT_LOAD_STATE="$(
+  systemctl show \
+    --property=LoadState \
+    --value \
+    "$CONTROL_PLANE_UNIT"
+)" || die "control-plane unit LoadState is unavailable"
+CONTROL_PLANE_UNIT_FRAGMENT_PATH="$(
+  systemctl show \
+    --property=FragmentPath \
+    --value \
+    "$CONTROL_PLANE_UNIT"
+)" || die "control-plane unit FragmentPath is unavailable"
+case "$CONTROL_PLANE_UNIT_LOAD_STATE" in
+  loaded)
+    case "$CONTROL_PLANE_UNIT_FRAGMENT_PATH" in
+      /*)
+        ;;
+      *)
+        die "loaded control-plane unit has invalid FragmentPath"
+        ;;
+    esac
+    CONTROL_PLANE_UNIT_STATE="$(
+      systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
+    )"
+    case "$CONTROL_PLANE_UNIT_STATE" in
+      enabled|disabled)
+        ;;
+      *)
+        die "unsupported control-plane unit state: $CONTROL_PLANE_UNIT_STATE"
+        ;;
+    esac
+    ;;
+  not-found)
+    [ -z "$CONTROL_PLANE_UNIT_FRAGMENT_PATH" ] \
+      || die "absent control-plane unit has a FragmentPath"
+    CONTROL_PLANE_UNIT_STATE="absent"
+    CONTROL_PLANE_UNIT_FRAGMENT_PATH="-"
+    ;;
+  *)
+    die "unsupported control-plane LoadState: $CONTROL_PLANE_UNIT_LOAD_STATE"
+    ;;
+esac
+printf '%s\t%s\t%s\n' \
+  "$CONTROL_PLANE_UNIT_STATE" \
+  "$CONTROL_PLANE_UNIT_LOAD_STATE" \
+  "$CONTROL_PLANE_UNIT_FRAGMENT_PATH" \
   >"$CONTROL_PLANE_UNIT_STATE_FILE"
 
 
@@ -425,13 +493,35 @@ flock -n 9 || {
   sha256sum -c SHA256SUMS >/dev/null
 )
 
-IFS= read -r CONTROL_PLANE_UNIT_STATE \
+IFS=$'\t' read -r \
+  CONTROL_PLANE_UNIT_STATE \
+  CONTROL_PLANE_UNIT_LOAD_STATE \
+  CONTROL_PLANE_UNIT_FRAGMENT_PATH \
   <"$CONTROL_PLANE_UNIT_STATE_FILE" || {
   echo "FATAL: control-plane unit state snapshot is unreadable" >&2
   exit 1
 }
 case "$CONTROL_PLANE_UNIT_STATE" in
-  enabled|disabled|absent)
+  enabled|disabled)
+    [ "$CONTROL_PLANE_UNIT_LOAD_STATE" = "loaded" ] || {
+      echo "FATAL: present control-plane snapshot is not loaded" >&2
+      exit 1
+    }
+    case "$CONTROL_PLANE_UNIT_FRAGMENT_PATH" in
+      /*)
+        ;;
+      *)
+        echo "FATAL: present control-plane snapshot has invalid FragmentPath" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  absent)
+    [ "$CONTROL_PLANE_UNIT_LOAD_STATE" = "not-found" ] \
+      && [ "$CONTROL_PLANE_UNIT_FRAGMENT_PATH" = "-" ] || {
+      echo "FATAL: absent control-plane snapshot is inconsistent" >&2
+      exit 1
+    }
     ;;
   *)
     echo "FATAL: invalid control-plane unit state snapshot" >&2
@@ -443,6 +533,17 @@ systemctl stop "$CONTROL_PLANE_UNIT" "$EXCHANGE_STATE_UNIT"
 "$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" capture \
   --env-file "$T/.env.v3" \
   --output "$RECORDER_WATERMARK"
+
+if [ "$CONTROL_PLANE_UNIT_STATE" = "absent" ]; then
+  systemctl disable "$CONTROL_PLANE_UNIT"
+  DISABLED_CONTROL_PLANE_UNIT_STATE="$(
+    systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
+  )"
+  [ "$DISABLED_CONTROL_PLANE_UNIT_STATE" = "disabled" ] || {
+    echo "FATAL: deployed control-plane unit could not be disabled" >&2
+    exit 1
+  }
+fi
 
 while IFS=$'\t' read -r status target backup_relative; do
   case "$target" in
@@ -473,6 +574,24 @@ systemctl start "$EXCHANGE_STATE_UNIT"
 systemctl is-active --quiet "$EXCHANGE_STATE_UNIT"
 case "$CONTROL_PLANE_UNIT_STATE" in
   enabled)
+    RESTORED_CONTROL_PLANE_LOAD_STATE="$(
+      systemctl show \
+        --property=LoadState \
+        --value \
+        "$CONTROL_PLANE_UNIT"
+    )"
+    RESTORED_CONTROL_PLANE_FRAGMENT_PATH="$(
+      systemctl show \
+        --property=FragmentPath \
+        --value \
+        "$CONTROL_PLANE_UNIT"
+    )"
+    [ "$RESTORED_CONTROL_PLANE_LOAD_STATE" = "loaded" ] \
+      && [ "$RESTORED_CONTROL_PLANE_FRAGMENT_PATH" \
+        = "$CONTROL_PLANE_UNIT_FRAGMENT_PATH" ] || {
+      echo "FATAL: restored enabled control-plane fragment changed" >&2
+      exit 1
+    }
     systemctl enable "$CONTROL_PLANE_UNIT"
     RESTORED_CONTROL_PLANE_UNIT_STATE="$(
       systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
@@ -485,6 +604,24 @@ case "$CONTROL_PLANE_UNIT_STATE" in
     systemctl is-active --quiet "$CONTROL_PLANE_UNIT"
     ;;
   disabled)
+    RESTORED_CONTROL_PLANE_LOAD_STATE="$(
+      systemctl show \
+        --property=LoadState \
+        --value \
+        "$CONTROL_PLANE_UNIT"
+    )"
+    RESTORED_CONTROL_PLANE_FRAGMENT_PATH="$(
+      systemctl show \
+        --property=FragmentPath \
+        --value \
+        "$CONTROL_PLANE_UNIT"
+    )"
+    [ "$RESTORED_CONTROL_PLANE_LOAD_STATE" = "loaded" ] \
+      && [ "$RESTORED_CONTROL_PLANE_FRAGMENT_PATH" \
+        = "$CONTROL_PLANE_UNIT_FRAGMENT_PATH" ] || {
+      echo "FATAL: restored disabled control-plane fragment changed" >&2
+      exit 1
+    }
     systemctl disable "$CONTROL_PLANE_UNIT"
     RESTORED_CONTROL_PLANE_UNIT_STATE="$(
       systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
@@ -497,6 +634,30 @@ case "$CONTROL_PLANE_UNIT_STATE" in
     systemctl is-active --quiet "$CONTROL_PLANE_UNIT"
     ;;
   absent)
+    RESTORED_CONTROL_PLANE_LOAD_STATE="$(
+      systemctl show \
+        --property=LoadState \
+        --value \
+        "$CONTROL_PLANE_UNIT"
+    )"
+    RESTORED_CONTROL_PLANE_FRAGMENT_PATH="$(
+      systemctl show \
+        --property=FragmentPath \
+        --value \
+        "$CONTROL_PLANE_UNIT"
+    )"
+    RESTORED_CONTROL_PLANE_UNIT_STATE="$(
+      systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
+    )"
+    [ "$RESTORED_CONTROL_PLANE_LOAD_STATE" = "not-found" ] \
+      && [ -z "$RESTORED_CONTROL_PLANE_FRAGMENT_PATH" ] || {
+      echo "FATAL: absent control-plane unit still has a fragment" >&2
+      exit 1
+    }
+    [ "$RESTORED_CONTROL_PLANE_UNIT_STATE" = "not-found" ] || {
+      echo "FATAL: absent control-plane unit remains registered" >&2
+      exit 1
+    }
     echo "control-plane unit was absent before deployment; start skipped"
     ;;
 esac
@@ -1074,6 +1235,7 @@ for item in items:
         if not required.issubset(proof):
             raise SystemExit("source-specific opening proof is incomplete")
 PY
+probe_control_plane_sse_contract "after"
 echo "== control-plane verified on 127.0.0.1:8080"
 
 mkdir -p "$PATCH_DIR"
