@@ -216,8 +216,18 @@ Redis namespace/stream 无界增长持续制造内存、swap 和 I/O 压力，�
 ### 2026-08-08 21:00 UTC 只读安全复核
 
 - account-a 容器已运行 2 天，数据库 heartbeat 新鲜且状态为 HALTED。
-- account-b 容器仍为 exit 137，数据库 heartbeat 仍冻结在
+- account-b 容器于 2026-08-08 07:26:57 UTC 以 exit 137 退出。2026-08-10
+  复核确认 `OOMKilled=false`，dockerd 记录
+  `hasBeenManuallyStopped=true` 与 `restart canceled`，说明该退出来自手工
+  stop/kill 路径，`unless-stopped` 因此没有拉起容器。数据库 heartbeat 仍冻结在
   2026-08-06 12:40:27 UTC 的 ACTIVE。
+- 2026-08-10 已显式将 account-b 的 BTCUSDT/ETHUSDT/SOLUSDT risk state
+  置为 HALTED，撤销一笔 2026-06-30 创建的 SPCXUSDT opening order，并用新鲜
+  exchange read 证明仓位、普通订单和 algo 订单全部归零。
+- `/v1/nodes` 现保留 reported state，同时输出
+  `operational_state=OFFLINE`、`heartbeat_stale=true`、
+  `effective_readiness=false` 和 `admission_eligible=false`；decision gateway
+  freshness 已按 account 作用域计算。
 - Redis 为 191,849 keys / 6.14 GiB，`maxmemory=0`、`noeviction`，
   fencing epoch marker 仍缺失。
 - 主机可用内存 384 MiB，swap 使用 7,430/8,191 MiB。
