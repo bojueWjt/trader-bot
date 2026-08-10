@@ -58,6 +58,19 @@ def _run_shell(
     )
 
 
+def _materialize_recreate_validator(tmp_path: Path) -> Path:
+    validator = tmp_path / "validate-recreate.py"
+    shell = (
+        "set -Eeuo pipefail\n"
+        f'RECREATE_VALIDATOR="{validator}"\n'
+        f"{_function_text('write_recreate_validator')}\n"
+        "write_recreate_validator\n"
+    )
+    result = _run_shell(tmp_path, shell)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return validator
+
+
 def test_script_targets_only_the_stopped_account_b_runtime() -> None:
     text = _text()
 
@@ -89,7 +102,10 @@ def test_script_is_manifest_driven_and_rejects_current_head_mount_drift() -> Non
     assert "PATCH_MOUNT_TARGETS" in text
     assert "bundle and recreate mount plans differ" in text
     assert "account-a runtime mount set differs from peer manifest" in text
+    assert "if set(mounts) != expected_mount_targets:" in text
     assert "unexpected account-a runtime hash" in text
+    assert 'EXPECTED_GENERATOR_SHA256="0a0026cd307080c57037b94726f835339' in text
+    assert "account-b recreate generator hash is invalid" in text
     assert "runtime_resource_contract.py" not in text
 
 
@@ -113,7 +129,7 @@ def test_script_gates_exchange_risk_and_stopped_baseline_before_mutation() -> No
     assert "account-b pending runtime work is not empty" in text
 
 
-def test_script_backs_up_runtime_state_and_installs_patches_atomically() -> None:
+def test_script_isolates_account_b_patches_and_installs_atomically() -> None:
     text = _text()
 
     assert (
@@ -122,7 +138,11 @@ def test_script_backs_up_runtime_state_and_installs_patches_atomically() -> None
     ) in text
     assert 'backup_target "$RECREATE_TARGET"' in text
     assert 'backup_target "$GENERATOR_TARGET"' in text
-    assert 'backup_target "$PATCH_DIR/$bundle_path"' in text
+    assert 'backup_target "$PEER_PATCH_DIR/$bundle_path"' not in text
+    assert 'B_RELEASE_ROOT="$T/account-b-releases/$RELEASE_COMMIT"' in text
+    assert 'mkdir -p "$B_PATCH_DIR"' in text
+    assert '"$B_PATCH_DIR/$bundle_path"' in text
+    assert '"$B_RELEASE_ROOT" \\\n    "$OPERATION_LOCK"' in text
     assert 'snapshot_state_metadata "$STATE_DIR"' in text
     assert 'cp -a "$STATE_DIR" "$BACKUP_ROOT/node-state"' in text
     assert "atomic_install()" in text
@@ -139,6 +159,8 @@ def test_script_verifies_halted_health_identity_mounts_and_memory() -> None:
     assert "reconciliation_state must be healthy" in text
     assert "process_liveness must be true" in text
     assert "container target SHA256 mismatch" in text
+    assert "account-b runtime mount set differs from manifest" in text
+    assert "account-b config mount source changed" in text
     assert "deleted inode mount detected" in text
     assert "account-b Docker memory limit mismatch" in text
     assert "account-b Docker memory-swap limit mismatch" in text
@@ -237,6 +259,87 @@ fi
     assert "account-b container must be stopped" in result.stderr
 
 
+def test_peer_runtime_rejects_any_extra_account_a_mount(
+    tmp_path: Path,
+) -> None:
+    trader_root = tmp_path / "trader"
+    patch_dir = trader_root / "container-patches"
+    state_dir = trader_root / "node-state" / "a"
+    config = trader_root / "node-a.hk.json"
+    runtime = patch_dir / "runtime.py"
+    digest = hashlib.sha256(b"runtime").hexdigest()
+    manifest = tmp_path / "peer.tsv"
+    manifest.write_text(
+        f"runtime.py\t/app/runtime/runtime.py\t{digest}\n",
+        encoding="utf-8",
+    )
+    inspect_path = tmp_path / "peer-inspect.json"
+    inspect_path.write_text(
+        json.dumps(
+            [
+                {
+                    "Mounts": [
+                        {
+                            "Source": str(runtime),
+                            "Destination": "/app/runtime/runtime.py",
+                            "RW": False,
+                        },
+                        {
+                            "Source": str(state_dir),
+                            "Destination": "/state",
+                            "RW": True,
+                        },
+                        {
+                            "Source": str(config),
+                            "Destination": "/cfg.json",
+                            "RW": False,
+                        },
+                        {
+                            "Source": "/tmp/python",
+                            "Destination": "/usr/local/bin/python",
+                            "RW": False,
+                        },
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    _write_executable(
+        fake_bin / "docker",
+        """#!/usr/bin/env bash
+set -eu
+if [ "$1" = "inspect" ]; then
+  cat "$PEER_INSPECT"
+  exit 0
+fi
+exit 99
+""",
+    )
+    shell = (
+        "set -Eeuo pipefail\n"
+        f'PATH="{fake_bin}:$PATH"\n'
+        f'PEER_TSV="{manifest}"\n'
+        'PEER_CONTAINER="trader-v3-node-a"\n'
+        f'T="{trader_root}"\n'
+        f"{_function_text('verify_peer_runtime')}\n"
+        "verify_peer_runtime\n"
+    )
+
+    result = _run_shell(
+        tmp_path,
+        shell,
+        environment={"PEER_INSPECT": str(inspect_path)},
+    )
+
+    assert result.returncode != 0
+    assert (
+        "account-a runtime mount set differs from peer manifest"
+        in result.stderr
+    )
+
+
 @pytest.mark.parametrize(
     ("row", "expected"),
     (
@@ -320,6 +423,201 @@ printf 'BTCUSDT\tHALTED\nETHUSDT\tACTIVE\nSOLUSDT\tHALTED\n'
     assert "account-b BTC/ETH/SOL risk modes are not HALTED" in result.stderr
 
 
+def test_recreate_validator_rejects_shell_control_suffix(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "node-state" / "b"
+    recreate = tmp_path / "recreate.sh"
+    mount_plan = tmp_path / "mounts.tsv"
+    mount_plan.write_text("", encoding="utf-8")
+    validator = _materialize_recreate_validator(tmp_path)
+    _write_executable(
+        recreate,
+        (
+            "#!/usr/bin/env bash\n"
+            "set -Eeuo pipefail\n"
+            "docker rm -f trader-v3-node-b 2>/dev/null || true\n"
+            f"mkdir -p {state_dir}\n"
+            "docker run -d --name trader-v3-node-b "
+            "--publish 8082:8082/tcp "
+            "-e NODE_STATE_DIR=/state "
+            "-e NAUTILUS_INITIAL_TRADING_STATE=HALTED "
+            "trader-bot/nautilus-node:b10-verify "
+            f"; touch {tmp_path / 'unexpected'}\n"
+        ),
+    )
+    shell = (
+        "set -Eeuo pipefail\n"
+        'NODE_CONTAINER="trader-v3-node-b"\n'
+        'TARGET_IMAGE="trader-bot/nautilus-node:b10-verify"\n'
+        'NODE_PORT="8082"\n'
+        f'STATE_DIR="{state_dir}"\n'
+        f'RECREATE_VALIDATOR="{validator}"\n'
+        f"{_function_text('validate_recreate_script')}\n"
+        f'validate_recreate_script "{recreate}" "{mount_plan}" '
+        '"$TARGET_IMAGE"\n'
+    )
+
+    result = _run_shell(tmp_path, shell)
+
+    assert result.returncode != 0
+    assert "recreate command is not canonical" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("image_and_command", "extra_mount", "expected"),
+    (
+        (
+            (
+                "old/image:latest "
+                "trader-bot/nautilus-node:b10-verify"
+            ),
+            "",
+            "recreate Docker image is invalid",
+        ),
+        (
+            "trader-bot/nautilus-node:b10-verify",
+            " -v /tmp/extra:/usr/local/bin/python:ro",
+            "recreate mount plan is invalid",
+        ),
+    ),
+)
+def test_recreate_validator_binds_image_and_exact_mount_plan(
+    tmp_path: Path,
+    image_and_command: str,
+    extra_mount: str,
+    expected: str,
+) -> None:
+    state_dir = tmp_path / "node-state" / "b"
+    config = tmp_path / "node-b.json"
+    recreate = tmp_path / "recreate.sh"
+    mount_plan = tmp_path / "mounts.tsv"
+    mount_plan.write_text(
+        (
+            f"{config}\t/cfg.json\tro\n"
+            f"{state_dir}\t/state\trw\n"
+        ),
+        encoding="utf-8",
+    )
+    validator = _materialize_recreate_validator(tmp_path)
+    _write_executable(
+        recreate,
+        (
+            "#!/usr/bin/env bash\n"
+            "set -Eeuo pipefail\n"
+            "docker rm -f trader-v3-node-b 2>/dev/null || true\n"
+            f"mkdir -p {state_dir}\n"
+            "docker run -d --name trader-v3-node-b "
+            "--publish 8082:8082/tcp "
+            "-e NODE_STATE_DIR=/state "
+            "-e NAUTILUS_INITIAL_TRADING_STATE=HALTED "
+            f"-v {config}:/cfg.json:ro "
+            f"-v {state_dir}:/state:rw"
+            f"{extra_mount} {image_and_command}\n"
+        ),
+    )
+    result = subprocess.run(
+        [
+            "python3",
+            str(validator),
+            "validate",
+            str(recreate),
+            str(mount_plan),
+            "trader-v3-node-b",
+            "trader-bot/nautilus-node:b10-verify",
+            "8082",
+            str(state_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert expected in result.stderr
+
+
+def test_recreate_rewrite_binds_release_mounts_and_immutable_image(
+    tmp_path: Path,
+) -> None:
+    trader_root = tmp_path / "trader"
+    peer_patch_dir = trader_root / "container-patches"
+    release_patch_dir = (
+        trader_root / "account-b-releases" / "commit" / "container-patches"
+    )
+    state_dir = trader_root / "node-state" / "b"
+    config = trader_root / "node-b.hk.json"
+    recreate = trader_root / "recreate-trader-v3-node-b.sh"
+    manifest = tmp_path / "container.tsv"
+    mount_plan = tmp_path / "release-mounts.tsv"
+    validator = tmp_path / "validate-recreate.py"
+    target_image = "trader-bot/nautilus-node:b10-verify"
+    image_id = "sha256:immutable-image"
+    manifest.write_text(
+        "runtime.py\t/app/runtime/runtime.py\tdeadbeef\n",
+        encoding="utf-8",
+    )
+    mount_plan.write_text(
+        (
+            f"{config}\t/cfg.json\tro\n"
+            f"{release_patch_dir / 'runtime.py'}"
+            "\t/app/runtime/runtime.py\tro\n"
+            f"{state_dir}\t/state\trw\n"
+        ),
+        encoding="utf-8",
+    )
+    _write_executable(
+        recreate,
+        (
+            "#!/usr/bin/env bash\n"
+            "set -Eeuo pipefail\n"
+            "docker rm -f trader-v3-node-b 2>/dev/null || true\n"
+            f"mkdir -p {state_dir}\n"
+            "docker run -d --name trader-v3-node-b "
+            "--network=host "
+            "-e NAUTILUS_HEALTH_PORT=8082 "
+            "-e NODE_STATE_DIR=/state "
+            "-e NAUTILUS_INITIAL_TRADING_STATE=HALTED "
+            f"-v {config}:/cfg.json:ro "
+            f"-v {state_dir}:/state:rw "
+            f"-v {peer_patch_dir / 'runtime.py'}"
+            ":/app/runtime/runtime.py:ro "
+            f"{target_image}\n"
+        ),
+    )
+    shell = (
+        "set -Eeuo pipefail\n"
+        f'RECREATE_TARGET="{recreate}"\n'
+        f'CONTAINER_TSV="{manifest}"\n'
+        f'PEER_PATCH_DIR="{peer_patch_dir}"\n'
+        f'B_PATCH_DIR="{release_patch_dir}"\n'
+        f'TARGET_IMAGE="{target_image}"\n'
+        f'TARGET_IMAGE_ID="{image_id}"\n'
+        f'RECREATE_VALIDATOR="{validator}"\n'
+        'NODE_CONTAINER="trader-v3-node-b"\n'
+        'NODE_PORT="8082"\n'
+        f'STATE_DIR="{state_dir}"\n'
+        f"{_function_text('write_recreate_validator')}\n"
+        f"{_function_text('validate_recreate_script')}\n"
+        f"{_function_text('rewrite_recreate_mounts')}\n"
+        "write_recreate_validator\n"
+        "rewrite_recreate_mounts\n"
+        "python3 \"$RECREATE_VALIDATOR\" rewrite-image "
+        "\"$RECREATE_TARGET\" \"$TARGET_IMAGE\" \"$TARGET_IMAGE_ID\"\n"
+        f'validate_recreate_script "$RECREATE_TARGET" "{mount_plan}" '
+        '"$TARGET_IMAGE_ID"\n'
+    )
+
+    result = _run_shell(tmp_path, shell)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    rewritten = recreate.read_text(encoding="utf-8")
+    assert image_id in rewritten
+    assert target_image not in rewritten
+    assert str(release_patch_dir / "runtime.py") in rewritten
+    assert str(peer_patch_dir / "runtime.py") not in rewritten
+
+
 def test_rollback_recreates_halted_and_never_starts_the_legacy_container() -> None:
     text = _text()
     marker = "cat >\"$ROLLBACK_PATH\" <<'ROLLBACK'\n"
@@ -329,34 +627,53 @@ def test_rollback_recreates_halted_and_never_starts_the_legacy_container() -> No
 
     assert "docker start" not in rollback
     assert 'docker rm -f "$NODE_CONTAINER"' in rollback
-    assert 'grep -Fq "NAUTILUS_INITIAL_TRADING_STATE=HALTED"' in rollback
+    assert '"$RECREATE_VALIDATOR" \\\n  rewrite-image' in rollback
+    assert '"$RECREATE_VALIDATOR" \\\n  validate' in rollback
+    assert '"$LEGACY_MOUNTS_TSV"' in rollback
     assert 'bash "$RECREATE_TARGET"' in rollback
     assert 'mv "$STATE_DIR" "$FAILED_STATE"' in rollback
     assert 'cp -a "$BACKUP_ROOT/node-state" "$STATE_DIR"' in rollback
+    assert 'rm -rf -- "$B_RELEASE_ROOT"' in rollback
 
 
-def test_rollback_restores_patch_and_state_then_recreates_halted(
+def test_rollback_restores_recreate_and_state_then_removes_failed_release(
     tmp_path: Path,
 ) -> None:
     trader_root = tmp_path / "trader"
     backup_root = trader_root / "backups" / "account-b-hardening-test"
-    backup_file = (
+    state_dir = trader_root / "node-state" / "b"
+    config = trader_root / "node-b.hk.json"
+    recreate = trader_root / "recreate-trader-v3-node-b.sh"
+    backup_recreate = (
         backup_root
         / "files"
-        / str(trader_root / "container-patches" / "runtime.py").lstrip("/")
+        / str(recreate).lstrip("/")
     )
-    backup_file.parent.mkdir(parents=True)
-    backup_file.write_text("old runtime\n", encoding="utf-8")
-    patch_target = trader_root / "container-patches" / "runtime.py"
-    patch_target.parent.mkdir(parents=True)
-    patch_target.write_text("new runtime\n", encoding="utf-8")
+    valid_recreate = (
+        "#!/usr/bin/env bash\n"
+        "set -Eeuo pipefail\n"
+        "docker rm -f trader-v3-node-b 2>/dev/null || true\n"
+        f"mkdir -p {state_dir}\n"
+        "docker run -d --name trader-v3-node-b "
+        "--publish 8082:8082/tcp "
+        "-e NODE_STATE_DIR=/state "
+        "-e NAUTILUS_INITIAL_TRADING_STATE=HALTED "
+        f"-v {config}:/cfg.json:ro "
+        f"-v {state_dir}:/state:rw "
+        "trader-bot/nautilus-node:b10-verify\n"
+    )
+    backup_recreate.parent.mkdir(parents=True)
+    _write_executable(backup_recreate, valid_recreate)
+    _write_executable(
+        recreate,
+        "#!/usr/bin/env bash\nexit 99\n",
+    )
     index = (
-        f"present\t{patch_target}\t"
-        f"{backup_file.relative_to(backup_root).as_posix()}\n"
+        f"present\t{recreate}\t"
+        f"{backup_recreate.relative_to(backup_root).as_posix()}\n"
     )
     (backup_root / "index.tsv").write_text(index, encoding="utf-8")
 
-    state_dir = trader_root / "node-state" / "b"
     state_dir.mkdir(parents=True)
     (state_dir / "journal.json").write_text("new state\n", encoding="utf-8")
     backup_state = backup_root / "node-state"
@@ -365,17 +682,29 @@ def test_rollback_restores_patch_and_state_then_recreates_halted(
         "old state\n",
         encoding="utf-8",
     )
-    recreate = trader_root / "recreate-trader-v3-node-b.sh"
-    _write_executable(
-        recreate,
-        """#!/usr/bin/env bash
-set -Eeuo pipefail
-# NAUTILUS_INITIAL_TRADING_STATE=HALTED
-docker rm -f trader-v3-node-b 2>/dev/null || true
-docker run -d --name trader-v3-node-b \
-  -e NAUTILUS_INITIAL_TRADING_STATE=HALTED \
-  trader-bot/nautilus-node:b10-verify
-""",
+    release_root = trader_root / "account-b-releases" / "failed-release"
+    release_root.mkdir(parents=True)
+    (release_root / "runtime.py").write_text(
+        "failed release\n",
+        encoding="utf-8",
+    )
+    operation_lock = tmp_path / "default-operation.lock"
+    image_id = "sha256:test-image"
+    (backup_root / "rollback-config.tsv").write_text(
+        (
+            f"{trader_root}\t8082\t{release_root}\t"
+            f"{operation_lock}\t{image_id}\n"
+        ),
+        encoding="utf-8",
+    )
+    validator = _materialize_recreate_validator(tmp_path)
+    validator.replace(backup_root / "validate-recreate.py")
+    (backup_root / "legacy-mounts.tsv").write_text(
+        (
+            f"{config}\t/cfg.json\tro\n"
+            f"{state_dir}\t/state\trw\n"
+        ),
+        encoding="utf-8",
     )
 
     text = _text()
@@ -447,10 +776,13 @@ fi
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert patch_target.read_text(encoding="utf-8") == "old runtime\n"
+    restored_recreate = recreate.read_text(encoding="utf-8")
+    assert image_id in restored_recreate
+    assert "trader-bot/nautilus-node:b10-verify" not in restored_recreate
     assert (state_dir / "journal.json").read_text(
         encoding="utf-8"
     ) == "old state\n"
+    assert not release_root.exists()
     failed_states = list(backup_root.glob("failed-node-state-*"))
     assert len(failed_states) == 1
     assert (failed_states[0] / "journal.json").read_text(

@@ -32,8 +32,12 @@ DEFAULT_CIRCUIT_RESET_SECONDS = 5.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 15.0
 DEFAULT_CONSUMER_FREEZE_THRESHOLD_SECONDS = 60.0
 DEFAULT_HEALTH_LOG_INTERVAL_SECONDS = 30.0
+DEFAULT_LOG_QUEUE_CAPACITY = 256
+DEFAULT_TERMINAL_LOG_QUEUE_CAPACITY = 8
+DEFAULT_QUEUE_PRESSURE_LOG_COOLDOWN_SECONDS = 5.0
 DEFAULT_RETRY_DELAY_SECONDS = DEFAULT_RETRY_BASE_DELAY_SECONDS
 _TERMINAL_HEARTBEAT_MAX_WAIT_SECONDS = 1.0
+_LOG_STOP_JOIN_MAX_SECONDS = 0.1
 _LOGGER = logging.getLogger(__name__)
 if not _LOGGER.handlers:
     _LOG_HANDLER = logging.StreamHandler(sys.stdout)
@@ -50,6 +54,13 @@ _TELEMETRY_LANES = frozenset(
 _AUTH_IDENTITY_HTTP_STATUS_CODES = frozenset({401, 403})
 _TRANSIENT_CLIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429})
 _POLL_TOKEN = object()
+_TERMINAL_LOG_EVENTS = frozenset(
+    {
+        "control_plane_session.fatal",
+        "control_plane_session.stop_requested",
+        "control_plane_session.stopped",
+    }
+)
 
 
 class SubmissionResult(str, Enum):
@@ -587,6 +598,18 @@ class NodeControlPlaneSession:
         self._fatal_termination_lock = Lock()
         self._fatal_termination_invoked = False
         self._log_state_lock = Lock()
+        self._log_queue: Queue[Mapping[str, Any]] = Queue(
+            maxsize=DEFAULT_LOG_QUEUE_CAPACITY,
+        )
+        self._terminal_log_queue: Queue[Mapping[str, Any]] = Queue(
+            maxsize=DEFAULT_TERMINAL_LOG_QUEUE_CAPACITY,
+        )
+        self._log_stop = Event()
+        self._log_thread = self._thread(
+            "logger",
+            self._run_log_writer,
+        )
+        self._log_dropped_count = 0
         self._stop_requested_logged = False
         self._stopped_logged = False
         self._last_health_log_at: float | bool = False
@@ -595,6 +618,13 @@ class NodeControlPlaneSession:
             for name in self._lanes
         }
         self._queue_capacity_logged = {
+            name: False
+            for name in self._lanes
+        }
+        self._queue_pressure_last_logged_at: dict[
+            str,
+            float | bool,
+        ] = {
             name: False
             for name in self._lanes
         }
@@ -625,6 +655,7 @@ class NodeControlPlaneSession:
             self._startup_thread = startup_thread
             self._started = True
             self._last_health_log_at = float(self._monotonic_clock())
+            self._log_thread.start()
             watchdog.start()
             startup_thread.start()
         self._emit_log(
@@ -640,7 +671,6 @@ class NodeControlPlaneSession:
 
     def stop(self, deadline: float) -> bool:
         cutoff = float(deadline)
-        self._emit_stop_requested()
         with self._stop_deadline_lock:
             current_deadline = self._stop_deadline
             if current_deadline is False:
@@ -652,6 +682,7 @@ class NodeControlPlaneSession:
                 )
         self._stop.set()
         self._termination.set()
+        self._emit_stop_requested()
         startup_thread = self._startup_thread
         if startup_thread is not None:
             remaining = max(cutoff - time.monotonic(), 0.0)
@@ -676,6 +707,12 @@ class NodeControlPlaneSession:
         with self._lifecycle_lock:
             self._stopped = stopped
         self._emit_stopped(stopped)
+        self._log_stop.set()
+        remaining = max(cutoff - time.monotonic(), 0.0)
+        if self._log_thread.is_alive():
+            self._log_thread.join(
+                timeout=min(remaining, _LOG_STOP_JOIN_MAX_SECONDS),
+            )
         return stopped
 
     def submit_execution_event(self, event: Any) -> SubmissionResult:
@@ -1643,15 +1680,30 @@ class NodeControlPlaneSession:
     def _emit_queue_pressure_if_changed(self, lane: _Lane) -> None:
         if not lane.pressure_enabled:
             return
+        now = time.monotonic()
         with self._log_state_lock:
-            health = lane.snapshot(time.monotonic())
+            health = lane.snapshot(now)
             previous = self._queue_pressure_by_lane[lane.name]
             current = health.queue_pressure
             if previous == current:
                 return
             self._queue_pressure_by_lane[lane.name] = current
-            if current != QueuePressure.FULL.value:
+            if current == QueuePressure.NORMAL.value:
                 self._queue_capacity_logged[lane.name] = False
+            last_logged_at = self._queue_pressure_last_logged_at[
+                lane.name
+            ]
+            should_emit = True
+            if (
+                last_logged_at is not False
+                and now - float(last_logged_at)
+                < DEFAULT_QUEUE_PRESSURE_LOG_COOLDOWN_SECONDS
+            ):
+                should_emit = False
+            if should_emit:
+                self._queue_pressure_last_logged_at[lane.name] = now
+        if not should_emit:
+            return
         level = "INFO"
         if current != QueuePressure.NORMAL.value:
             level = "WARNING"
@@ -1694,6 +1746,8 @@ class NodeControlPlaneSession:
             name: _lane_health_log_fields(lane)
             for name, lane in health.lanes.items()
         }
+        with self._log_state_lock:
+            log_dropped_count = self._log_dropped_count
         self._emit_log(
             "control_plane_session.health",
             level=level,
@@ -1706,6 +1760,7 @@ class NodeControlPlaneSession:
             consumer_progress_age_ms=(
                 self._consumer_progress_age_ms(now)
             ),
+            log_dropped_count=log_dropped_count,
             lanes=lanes,
         )
 
@@ -1732,10 +1787,37 @@ class NodeControlPlaneSession:
             "level": str(level).upper(),
             **fields,
         }
+        queue = self._log_queue
+        if event in _TERMINAL_LOG_EVENTS:
+            queue = self._terminal_log_queue
         try:
-            self._log_callback(record)
-        except Exception:
+            queue.put_nowait(record)
+        except Full:
+            with self._log_state_lock:
+                self._log_dropped_count += 1
             return
+
+    def _run_log_writer(self) -> None:
+        while (
+            not self._log_stop.is_set()
+            or not self._terminal_log_queue.empty()
+            or not self._log_queue.empty()
+        ):
+            queue = self._terminal_log_queue
+            try:
+                record = queue.get_nowait()
+            except Empty:
+                queue = self._log_queue
+                try:
+                    record = queue.get(timeout=0.05)
+                except Empty:
+                    continue
+            try:
+                self._log_callback(record)
+            except Exception:
+                pass
+            finally:
+                queue.task_done()
 
     def _trigger_fatal_termination(
         self,

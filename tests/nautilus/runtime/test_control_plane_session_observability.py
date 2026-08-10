@@ -196,6 +196,15 @@ def test_structured_logs_cover_queue_pressure_capacity_and_recovery(
         "backpressured"
     )
 
+    assert _wait_until(
+        lambda: len(
+            _events(
+                records,
+                "control_plane_session.queue_capacity_exceeded",
+            )
+        )
+        == 1
+    )
     capacity = _single_event(
         records,
         "control_plane_session.queue_capacity_exceeded",
@@ -226,8 +235,7 @@ def test_structured_logs_cover_queue_pressure_capacity_and_recovery(
         for record in pressure_records
     ]
     assert "degraded" in pressure_states
-    assert "full" in pressure_states
-    assert pressure_states[-1] == "normal"
+    assert len(pressure_states) == 1
 
     serialized = json.dumps(records, sort_keys=True)
     assert "private-hold-order" not in serialized
@@ -287,6 +295,7 @@ def test_structured_health_logs_are_rate_limited_and_include_lane_progress(
     assert first["consumer_progress_age_ms"] == 1100.0
     assert first["process_liveness"] is True
     assert first["ready"] is True
+    assert first["log_dropped_count"] == 0
     assert set(first["lanes"]) == {
         "heartbeat",
         "command_poll",
@@ -318,6 +327,120 @@ def test_structured_health_logs_are_rate_limited_and_include_lane_progress(
         == 2
     )
     assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_blocking_log_callback_does_not_delay_stop_or_fatal_fencing(
+) -> None:
+    callback_entered = Event()
+    release_callback = Event()
+
+    def block(_entry: Mapping[str, Any]) -> None:
+        callback_entered.set()
+        release_callback.wait(timeout=2.0)
+
+    stop_session = NodeControlPlaneSession(log_callback=block)
+    stop_session.start()
+    assert callback_entered.wait(timeout=1.0)
+
+    started_at = time.monotonic()
+    assert stop_session.stop(time.monotonic() + 0.5) is True
+    assert time.monotonic() - started_at < 0.25
+
+    fatal_session = NodeControlPlaneSession(
+        execution_event_sink=lambda _event: _raise_fence_conflict(),
+        operation_timeout_seconds=0.1,
+        retry_budget=1,
+        log_callback=block,
+    )
+    fatal_session.start()
+    assert _wait_until(lambda: fatal_session.snapshot().ready)
+    assert fatal_session.submit_execution_event("event").value == "accepted"
+    assert fatal_session.wait_for_termination(timeout=0.25) is True
+    assert fatal_session.stop(time.monotonic() + 0.5) is True
+    release_callback.set()
+
+
+def test_terminal_logs_survive_regular_queue_saturation() -> None:
+    records: list[dict[str, Any]] = []
+    callback_entered = Event()
+    release_callback = Event()
+
+    def block(entry: Mapping[str, Any]) -> None:
+        callback_entered.set()
+        release_callback.wait(timeout=2.0)
+        records.append(dict(entry))
+
+    session = NodeControlPlaneSession(log_callback=block)
+    session.start()
+    assert callback_entered.wait(timeout=1.0)
+
+    for index in range(400):
+        session._emit_log(  # noqa: SLF001
+            "control_plane_session.test",
+            level="INFO",
+            sequence=index,
+        )
+    session._trigger_fatal_termination(  # noqa: SLF001
+        session._lanes["execution_event"],  # noqa: SLF001
+        "test fence",
+    )
+    assert session.stop(time.monotonic() + 0.5) is True
+    release_callback.set()
+
+    assert _wait_until(
+        lambda: {
+            "control_plane_session.fatal",
+            "control_plane_session.stop_requested",
+            "control_plane_session.stopped",
+        }.issubset(
+            {
+                str(record.get("event"))
+                for record in records
+            }
+        ),
+        timeout=2.0,
+    )
+
+
+def test_queue_pressure_recovery_transitions_share_cooldown() -> None:
+    records: list[dict[str, Any]] = []
+    session = NodeControlPlaneSession(
+        execution_event_capacity=2,
+        queue_degraded_ratio=0.5,
+        log_callback=lambda entry: records.append(dict(entry)),
+    )
+    session.start()
+    assert _wait_until(lambda: session.snapshot().ready)
+    lane = session._lanes["execution_event"]  # noqa: SLF001
+
+    for _ in range(20):
+        lane.queue.put_nowait("event")
+        session._emit_queue_pressure_if_changed(lane)  # noqa: SLF001
+        lane.queue.get_nowait()
+        lane.queue.task_done()
+        session._emit_queue_pressure_if_changed(lane)  # noqa: SLF001
+
+    assert _wait_until(
+        lambda: len(
+            _events(
+                records,
+                "control_plane_session.queue_pressure",
+            )
+        )
+        == 1
+    )
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_stop_before_start_does_not_join_an_unstarted_log_thread() -> None:
+    session = NodeControlPlaneSession()
+
+    assert session.stop(time.monotonic() + 0.5) is True
+    assert session.snapshot().stopped is True
+
+
+def _raise_fence_conflict() -> None:
+    raise _FenceConflictError("private fence detail")
 
 
 class _ManualClock:
