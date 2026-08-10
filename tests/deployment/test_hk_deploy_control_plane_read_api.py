@@ -91,7 +91,9 @@ case "${1:-}" in
     if [ "${FAKE_SS_KILL_FAIL:-0}" = "1" ]; then
       exit 74
     fi
-    rm -f "$FAKE_BOOTSTRAP_CLIENT_FILE"
+    if [ "${FAKE_SS_KILL_KEEPS_CLIENT:-0}" != "1" ]; then
+      rm -f "$FAKE_BOOTSTRAP_CLIENT_FILE"
+    fi
     ;;
   *)
     if [ "${FAKE_SS_QUERY_FAIL:-0}" = "1" ]; then
@@ -185,12 +187,44 @@ if [ "$url" = "$ACCOUNT_A_READY_URL" ]; then
 fi
 if [ "$url" = "$CONTROL_PLANE_DIRECT_SSE_URL" ]; then
   status="${FAKE_DIRECT_STATUS:-401}"
+  if [ -n "$write_out" ] \
+    && [ -f "$FAKE_RESTART_COUNT_FILE" ] \
+    && [ "$(cat "$FAKE_RESTART_COUNT_FILE")" = "1" ]; then
+    bootstrap_attempt=0
+    if [ -f "$FAKE_BOOTSTRAP_DIRECT_ATTEMPT_FILE" ]; then
+      bootstrap_attempt="$(cat "$FAKE_BOOTSTRAP_DIRECT_ATTEMPT_FILE")"
+    fi
+    bootstrap_attempt=$((bootstrap_attempt + 1))
+    printf '%s\n' "$bootstrap_attempt" >"$FAKE_BOOTSTRAP_DIRECT_ATTEMPT_FILE"
+    if [ "$bootstrap_attempt" -le "${FAKE_BOOTSTRAP_DIRECT_FAILURES:-0}" ]; then
+      status="503"
+    fi
+    if [ -n "${FAKE_BOOTSTRAP_DIRECT_STATUS:-}" ]; then
+      status="$FAKE_BOOTSTRAP_DIRECT_STATUS"
+    fi
+  fi
   if [ -n "$write_out" ]; then
     printf '%s' "$status"
   fi
   exit 0
 fi
 status="${FAKE_PROXY_STATUS:-200}"
+if [ -n "$write_out" ] \
+  && [ -f "$FAKE_RESTART_COUNT_FILE" ] \
+  && [ "$(cat "$FAKE_RESTART_COUNT_FILE")" = "1" ]; then
+  bootstrap_attempt=0
+  if [ -f "$FAKE_BOOTSTRAP_PROXY_ATTEMPT_FILE" ]; then
+    bootstrap_attempt="$(cat "$FAKE_BOOTSTRAP_PROXY_ATTEMPT_FILE")"
+  fi
+  bootstrap_attempt=$((bootstrap_attempt + 1))
+  printf '%s\n' "$bootstrap_attempt" >"$FAKE_BOOTSTRAP_PROXY_ATTEMPT_FILE"
+  if [ "$bootstrap_attempt" -le "${FAKE_BOOTSTRAP_PROXY_FAILURES:-0}" ]; then
+    status="502"
+  fi
+  if [ -n "${FAKE_BOOTSTRAP_PROXY_STATUS:-}" ]; then
+    status="$FAKE_BOOTSTRAP_PROXY_STATUS"
+  fi
+fi
 if [ -n "$headers" ]; then
   printf 'HTTP/1.1 %s OK\r\nContent-Type: text/event-stream\r\n\r\n' \
     "$status" >"$headers"
@@ -451,6 +485,12 @@ def _prepare_harness(
             "FAKE_SSE_PID_FILE": str(fake_state / "sse.pid"),
             "FAKE_RESTART_COUNT_FILE": str(fake_state / "restart-count"),
             "FAKE_RESTART_SAW_SSE": str(fake_state / "restart-saw-sse"),
+            "FAKE_BOOTSTRAP_PROXY_ATTEMPT_FILE": str(
+                fake_state / "bootstrap-proxy-attempt"
+            ),
+            "FAKE_BOOTSTRAP_DIRECT_ATTEMPT_FILE": str(
+                fake_state / "bootstrap-direct-attempt"
+            ),
         }
     )
     return {
@@ -464,6 +504,8 @@ def _prepare_harness(
         "bootstrap_client_file": bootstrap_client_file,
         "restart_saw_sse": fake_state / "restart-saw-sse",
         "restart_count": fake_state / "restart-count",
+        "bootstrap_proxy_attempt": fake_state / "bootstrap-proxy-attempt",
+        "bootstrap_direct_attempt": fake_state / "bootstrap-direct-attempt",
         "command_log": command_log,
     }
 
@@ -736,6 +778,78 @@ def test_proxy_contract_failure_precedes_backup_and_mutation(
     assert not (trader_root / "backups").exists()
 
 
+def test_bootstrap_transient_proxy_failure_recovers_within_readiness_window(
+    tmp_path: Path,
+) -> None:
+    harness = _prepare_harness(tmp_path)
+    environment = harness["env"]
+    assert isinstance(environment, dict)
+    environment["FAKE_BOOTSTRAP_PROXY_FAILURES"] = "3"
+
+    result = _run_script(harness)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "control-plane SSE contract verified: after bootstrap restart"
+        in result.stdout
+    )
+    attempt_file = harness["bootstrap_proxy_attempt"]
+    assert isinstance(attempt_file, Path)
+    assert attempt_file.read_text(encoding="utf-8").strip() == "4"
+    restart_count = harness["restart_count"]
+    assert isinstance(restart_count, Path)
+    assert restart_count.read_text(encoding="utf-8").strip() == "2"
+    restart_saw_sse = harness["restart_saw_sse"]
+    assert isinstance(restart_saw_sse, Path)
+    assert restart_saw_sse.exists()
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "status", "expected_statuses"),
+    [
+        (
+            "FAKE_BOOTSTRAP_PROXY_STATUS",
+            "502",
+            "proxy=502 direct=401",
+        ),
+        (
+            "FAKE_BOOTSTRAP_DIRECT_STATUS",
+            "503",
+            "proxy=200 direct=503",
+        ),
+    ],
+)
+def test_bootstrap_persistent_contract_failure_automatically_rolls_back(
+    tmp_path: Path,
+    environment_name: str,
+    status: str,
+    expected_statuses: str,
+) -> None:
+    harness = _prepare_harness(tmp_path)
+    environment = harness["env"]
+    assert isinstance(environment, dict)
+    environment[environment_name] = status
+    old_read = _old_read_api()
+
+    result = _run_script(harness)
+
+    assert result.returncode != 0
+    assert (
+        "SSE contract did not recover during after bootstrap restart: "
+        f"{expected_statuses}"
+    ) in result.stderr
+    assert "automatic rollback completed" in result.stderr
+    read_target = harness["read_target"]
+    assert isinstance(read_target, Path)
+    assert read_target.read_bytes() == old_read
+    restart_count = harness["restart_count"]
+    assert isinstance(restart_count, Path)
+    assert restart_count.read_text(encoding="utf-8").strip() == "1"
+    restart_saw_sse = harness["restart_saw_sse"]
+    assert isinstance(restart_saw_sse, Path)
+    assert not restart_saw_sse.exists()
+
+
 def test_partial_install_failure_rolls_back_when_original_unit_was_absent(
     tmp_path: Path,
 ) -> None:
@@ -830,6 +944,33 @@ def test_bootstrap_client_drain_failure_rolls_back(
     result = _run_script(harness)
 
     assert result.returncode != 0
+    assert "automatic rollback completed" in result.stderr
+    read_target = harness["read_target"]
+    assert isinstance(read_target, Path)
+    assert read_target.read_bytes() == old_read
+    command_log = harness["command_log"]
+    assert isinstance(command_log, Path)
+    commands = command_log.read_text(encoding="utf-8")
+    assert "ss -Ktn state established ( sport = :8080 )" in commands
+    assert "systemctl restart trader-v3-controlplane.service" not in commands
+
+
+def test_bootstrap_client_remains_after_drain_automatically_rolls_back(
+    tmp_path: Path,
+) -> None:
+    harness = _prepare_harness(tmp_path)
+    environment = harness["env"]
+    assert isinstance(environment, dict)
+    environment["FAKE_SS_KILL_KEEPS_CLIENT"] = "1"
+    old_read = _old_read_api()
+
+    result = _run_script(harness)
+
+    assert result.returncode != 0
+    assert (
+        "control-plane clients remain connected before bootstrap restart"
+        in result.stderr
+    )
     assert "automatic rollback completed" in result.stderr
     read_target = harness["read_target"]
     assert isinstance(read_target, Path)

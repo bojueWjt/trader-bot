@@ -78,12 +78,14 @@ PY
 
 http_status() {
   local url="$1"
+  local connect_timeout="${2:-2}"
+  local max_time="${3:-3}"
   curl \
     --silent \
     --show-error \
     --no-buffer \
-    --connect-timeout 2 \
-    --max-time 3 \
+    --connect-timeout "$connect_timeout" \
+    --max-time "$max_time" \
     --output /dev/null \
     --write-out '%{http_code}' \
     "$url" \
@@ -98,11 +100,39 @@ probe_sse_contract() {
   proxy_status="$(http_status "$CONTROL_PLANE_SSE_PROXY_URL")"
   if [ "$proxy_status" != "200" ]; then
     die "SSE proxy expected HTTP 200, got $proxy_status during $phase"
+    return 1
   fi
   direct_status="$(http_status "$CONTROL_PLANE_DIRECT_SSE_URL")"
   if [ "$direct_status" != "401" ]; then
     die "direct anonymous SSE expected HTTP 401, got $direct_status during $phase"
+    return 1
   fi
+}
+
+
+wait_for_sse_contract() {
+  local phase="$1"
+  local attempt=0
+  local deadline=$((SECONDS + 15))
+  local proxy_status=""
+  local direct_status=""
+  while [ "$attempt" -lt 300 ] && [ "$SECONDS" -lt "$deadline" ]; do
+    proxy_status="$(
+      http_status "$CONTROL_PLANE_SSE_PROXY_URL" 0.5 0.5
+    )"
+    direct_status="$(
+      http_status "$CONTROL_PLANE_DIRECT_SSE_URL" 0.5 0.5
+    )"
+    if [ "$proxy_status" = "200" ] && [ "$direct_status" = "401" ]; then
+      echo "== control-plane SSE contract verified: $phase"
+      return
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.05
+  done
+  die \
+    "SSE contract did not recover during $phase: proxy=$proxy_status direct=$direct_status"
+  return 1
 }
 
 
@@ -146,6 +176,7 @@ drain_control_plane_clients() {
   )"
   if [ -n "$connections" ]; then
     die "control-plane clients remain connected before bootstrap restart"
+    return 1
   fi
   echo "== drained existing control-plane client connections"
 }
@@ -176,6 +207,7 @@ start_sse_hold() {
     if ! kill -0 "$SSE_PID" 2>/dev/null; then
       wait "$SSE_PID" 2>/dev/null || true
       die "Caddy SSE hold ended before the first event"
+      return 1
     fi
     attempt=$((attempt + 1))
     sleep 0.05
@@ -183,12 +215,15 @@ start_sse_hold() {
 
   if ! grep -Eq '^HTTP/[0-9.]+ 200([[:space:]]|$)' "$SSE_HEADERS"; then
     die "Caddy SSE hold did not establish HTTP 200"
+    return 1
   fi
   if ! grep -Fq "event: dashboard_snapshot" "$SSE_BODY"; then
     die "Caddy SSE hold did not receive the first event"
+    return 1
   fi
   if ! kill -0 "$SSE_PID" 2>/dev/null; then
     die "Caddy SSE hold was not active before restart"
+    return 1
   fi
 }
 
@@ -198,6 +233,7 @@ wait_for_sse_hold_shutdown() {
   local status=0
   if [ -z "$SSE_PID" ]; then
     die "Caddy SSE hold PID is missing after restart"
+    return 1
   fi
   while kill -0 "$SSE_PID" 2>/dev/null && [ "$attempt" -lt 40 ]; do
     attempt=$((attempt + 1))
@@ -205,6 +241,7 @@ wait_for_sse_hold_shutdown() {
   done
   if kill -0 "$SSE_PID" 2>/dev/null; then
     die "Caddy SSE hold did not close during graceful restart"
+    return 1
   fi
   if wait "$SSE_PID"; then
     status=0
@@ -214,6 +251,7 @@ wait_for_sse_hold_shutdown() {
   SSE_PID=""
   if [ "$status" -ne 0 ]; then
     die "Caddy SSE hold exited unsafely during restart: status=$status"
+    return 1
   fi
 }
 
@@ -710,7 +748,7 @@ drain_control_plane_clients
 restart_control_plane_bounded "bootstrap"
 systemctl is-active --quiet "$UNIT_NAME" \
   || die "$UNIT_NAME is inactive after bootstrap restart"
-probe_sse_contract "after bootstrap restart"
+wait_for_sse_contract "after bootstrap restart"
 verify_account_a_halted "after bootstrap restart"
 
 start_sse_hold
