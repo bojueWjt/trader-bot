@@ -39,6 +39,28 @@ def _old_read_api() -> bytes:
     return result.stdout
 
 
+def _old_unit() -> bytes:
+    payload = (
+        "[Unit]\n"
+        "Description=Trader v3 control-plane read API "
+        "(isolated, 127.0.0.1:8080)\n"
+        "After=docker.service network.target\n"
+        "[Service]\n"
+        "WorkingDirectory=/srv/trader-v3/services/control-plane/api\n"
+        "EnvironmentFile=/srv/trader-v3/.env.v3\n"
+        "ExecStart=/srv/trader-v3/.venv-cp/bin/uvicorn read_api:app "
+        "--host 127.0.0.1 --port 8080\n"
+        "Restart=on-failure\n"
+        "RestartSec=3\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    ).encode("utf-8")
+    assert hashlib.sha256(payload).hexdigest() == (
+        "cdce9a88f429b760df255ee09f17ae80b30a338d9cb3fe8169bc508718b90d0f"
+    )
+    return payload
+
+
 def _fake_tools(fake_bin: Path) -> None:
     _write_executable(
         fake_bin / "id",
@@ -327,7 +349,7 @@ def _prepare_harness(
 
     vendor_fragment = ""
     if unit_origin == "local":
-        shutil.copy2(REPO_ROOT / UNIT_RELATIVE, unit_target)
+        unit_target.write_bytes(_old_unit())
     elif unit_origin == "vendor":
         vendor_path = (
             tmp_path
@@ -338,7 +360,7 @@ def _prepare_harness(
             / UNIT_NAME
         )
         vendor_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(REPO_ROOT / UNIT_RELATIVE, vendor_path)
+        vendor_path.write_bytes(_old_unit())
         vendor_fragment = str(vendor_path)
     elif unit_origin != "absent":
         raise AssertionError(f"unsupported unit origin: {unit_origin}")
@@ -478,6 +500,7 @@ def test_success_holds_caddy_sse_during_restart_and_deploys_two_files(
 ) -> None:
     harness = _prepare_harness(tmp_path)
     old_read = _old_read_api()
+    old_unit = _old_unit()
 
     result = _run_script(harness)
 
@@ -489,6 +512,7 @@ def test_success_holds_caddy_sse_during_restart_and_deploys_two_files(
     assert read_target.read_bytes() == (REPO_ROOT / READ_API_RELATIVE).read_bytes()
     assert unit_target.read_bytes() == (REPO_ROOT / UNIT_RELATIVE).read_bytes()
     assert read_target.read_bytes() != old_read
+    assert unit_target.read_bytes() != old_unit
     restart_saw_sse = harness["restart_saw_sse"]
     assert isinstance(restart_saw_sse, Path)
     assert restart_saw_sse.exists()
@@ -523,6 +547,7 @@ def test_rollback_restores_fragment_enablement_and_active_state(
         active=active,
     )
     old_read = _old_read_api()
+    old_unit = _old_unit()
     result = _run_script(harness)
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -552,7 +577,12 @@ def test_rollback_restores_fragment_enablement_and_active_state(
     assert isinstance(active_file, Path)
     assert read_target.read_bytes() == old_read
     if unit_origin == "local":
-        assert unit_target.exists()
+        assert unit_target.read_bytes() == old_unit
+    elif unit_origin == "vendor":
+        vendor_fragment = harness["vendor_fragment"]
+        assert isinstance(vendor_fragment, str)
+        assert Path(vendor_fragment).read_bytes() == old_unit
+        assert not unit_target.exists()
     else:
         assert not unit_target.exists()
     assert wants_link.is_symlink() is (enablement == "enabled")
