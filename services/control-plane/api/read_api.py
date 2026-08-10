@@ -2365,7 +2365,9 @@ def _envelope(cur, *, now: datetime | None = None, threshold_ms: int = DEFAULT_S
     """Compute the SystemSnapshotV1 §2.2 envelope from the live projections — identical
     semantics to snapshot.build_system_snapshot, reused here so every /v1 row payload
     carries the same freshness verdict the snapshot endpoint reports."""
-    now = now or datetime.now(timezone.utc)
+    if now is None:
+        cur.execute("SELECT CURRENT_TIMESTAMP AS now")
+        now = cur.fetchone()["now"]
     cur.execute("SELECT account_id, reconciliation_state::text AS reconciliation_state FROM accounts_projection")
     accounts = [dict(r) for r in cur.fetchall()]
     cur.execute("SELECT node_id, last_seen_at FROM node_heartbeats")
@@ -2437,24 +2439,55 @@ def v1_nodes(authorization: str | None = Header(default=None)):
             cur.execute(
                 """
                 SELECT nh.node_id, nh.account_id, nh.status, nh.version, nh.payload, nh.last_seen_at,
+                       nh.last_seen_at IS NULL
+                           OR (CURRENT_TIMESTAMP - nh.last_seen_at)
+                              > (%s * interval '1 millisecond') AS heartbeat_stale,
                        (SELECT count(*) FROM positions_projection p
                           WHERE p.account_id = nh.account_id AND p.status = 'open') AS open_position_count,
                        (SELECT count(DISTINCT p.instrument_id) FROM positions_projection p
                           WHERE p.account_id = nh.account_id AND p.status = 'open') AS instrument_count
                 FROM node_heartbeats nh ORDER BY nh.last_seen_at DESC
-                """
+                """,
+                (DEFAULT_STALENESS_MS,),
             )
             rows = [dict(r) for r in cur.fetchall()]
         nodes = []
         for r in rows:
             payload = r.get("payload") or {}
+            heartbeat_stale = bool(r.get("heartbeat_stale"))
+            reported_trading_state = r["status"]
+            reported_readiness = payload.get("readiness")
+            readiness_valid = (
+                reported_readiness is None
+                or type(reported_readiness) is bool
+            )
+            effective_readiness = reported_readiness
+            if not readiness_valid:
+                effective_readiness = False
+            if heartbeat_stale:
+                effective_readiness = False
+            operational_state = "ONLINE"
+            if heartbeat_stale:
+                operational_state = "OFFLINE"
+            admission_eligible = (
+                not heartbeat_stale
+                and reported_trading_state == "ACTIVE"
+                and effective_readiness is not False
+            )
             nodes.append({
                 "node_id": r["node_id"],
                 "name": r["node_id"],
                 "account_id": r["account_id"],
-                "trading_state": r["status"],
-                "status": r["status"],
-                "readiness": payload.get("readiness"),
+                "trading_state": reported_trading_state,
+                "status": reported_trading_state,
+                "reported_trading_state": reported_trading_state,
+                "heartbeat_stale": heartbeat_stale,
+                "operational_state": operational_state,
+                "admission_eligible": admission_eligible,
+                "readiness": reported_readiness,
+                "reported_readiness": reported_readiness,
+                "readiness_valid": readiness_valid,
+                "effective_readiness": effective_readiness,
                 "last_heartbeat_at": _iso(r["last_seen_at"]),
                 "open_position_count": int(r["open_position_count"] or 0),
                 "instrument_count": int(r["instrument_count"] or 0),

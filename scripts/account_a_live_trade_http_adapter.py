@@ -499,6 +499,25 @@ class AccountALiveTradeHttpAdapter:
                 or ""
             ).upper()
             if last_state in expected_states:
+                heartbeat_stale = raw_node.get("heartbeat_stale")
+                operational_state = str(
+                    raw_node.get("operational_state") or ""
+                ).upper()
+                if heartbeat_stale is True or operational_state == "OFFLINE":
+                    last_state = f"{last_state}:STALE"
+                    time.sleep(self._config.poll_interval_seconds)
+                    continue
+                expects_active = bool(
+                    expected_states
+                    & {"ACTIVE", "RUNNING", "RESUMED"}
+                )
+                if (
+                    expects_active
+                    and raw_node.get("admission_eligible") is False
+                ):
+                    last_state = f"{last_state}:INELIGIBLE"
+                    time.sleep(self._config.poll_interval_seconds)
+                    continue
                 return raw_node, tuple(warnings)
             time.sleep(self._config.poll_interval_seconds)
         raise SoftAdapterError(

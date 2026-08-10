@@ -259,6 +259,82 @@ def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
 
 
 @pytest.mark.parametrize("action", ["resume", "halt"])
+def test_state_polling_rejects_stale_reported_state(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    scenario = Scenario()
+    scenario.node_snapshot.update(
+        {
+            "heartbeat_stale": True,
+            "operational_state": "OFFLINE",
+            "admission_eligible": False,
+        }
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            action,
+            _request(
+                command=action.upper(),
+                scope="single-canary-round-trip",
+                max_round_trips=1,
+                side_effect_id=f"{action}-request-id",
+            ),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "ACCOUNT_A_LIVE_TRADE_ACTION_TIMEOUT_SECONDS": "0.02",
+                "ACCOUNT_A_LIVE_TRADE_POLL_INTERVAL_SECONDS": "0",
+            },
+        )
+
+    assert completed.returncode == 0
+    assert payload["accepted"] is False
+    assert payload["action"] == action
+    assert payload["error_code"] == "HTTP_TIMEOUT"
+    assert "node state poll timeout" in payload["reason"]
+    assert "STALE" in payload["reason"]
+
+
+def test_resume_rejects_explicit_admission_ineligibility(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.node_snapshot.update(
+        {
+            "heartbeat_stale": False,
+            "operational_state": "ONLINE",
+            "admission_eligible": False,
+        }
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "resume",
+            _request(
+                command="RESUME",
+                scope="single-canary-round-trip",
+                max_round_trips=1,
+                side_effect_id="resume-request-id",
+            ),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "ACCOUNT_A_LIVE_TRADE_ACTION_TIMEOUT_SECONDS": "0.02",
+                "ACCOUNT_A_LIVE_TRADE_POLL_INTERVAL_SECONDS": "0",
+            },
+        )
+
+    assert completed.returncode == 0
+    assert payload["accepted"] is False
+    assert payload["action"] == "resume"
+    assert payload["error_code"] == "HTTP_TIMEOUT"
+    assert "node state poll timeout" in payload["reason"]
+    assert "INELIGIBLE" in payload["reason"]
+
+
+@pytest.mark.parametrize("action", ["resume", "halt"])
 def test_state_polling_allows_missing_extended_identity_with_warnings(
     tmp_path: Path,
     action: str,

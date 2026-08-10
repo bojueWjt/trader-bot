@@ -74,6 +74,13 @@ def test_heartbeat_identity_and_health_round_trip(
 
     assert fetched.status_code == 200
     node = fetched.json()["nodes"][0]
+    assert node["heartbeat_stale"] is False
+    assert node["operational_state"] == "ONLINE"
+    assert node["admission_eligible"] is False
+    assert node["reported_trading_state"] == "HALTED"
+    assert node["reported_readiness"] is False
+    assert node["readiness_valid"] is True
+    assert node["effective_readiness"] is False
     for field_name in (
         "writer_id",
         "lease_id",
@@ -270,6 +277,16 @@ def test_loss_monitor_merges_health_without_extending_node_liveness(
     assert node["last_heartbeat_at"] == (
         pinned_last_seen_at.isoformat()
     )
+    assert node["heartbeat_stale"] is True
+    assert node["operational_state"] == "OFFLINE"
+    assert node["admission_eligible"] is False
+    assert node["trading_state"] == "ACTIVE"
+    assert node["status"] == "ACTIVE"
+    assert node["reported_trading_state"] == "ACTIVE"
+    assert node["readiness"] is True
+    assert node["reported_readiness"] is True
+    assert node["readiness_valid"] is True
+    assert node["effective_readiness"] is False
     assert node["loss_monitor_healthy"] is False
     assert node["loss_monitor_at"] == monitor_at
 
@@ -345,6 +362,77 @@ def test_ordinary_heartbeat_preserves_explicit_loss_monitor_failure(
     assert node["process_liveness"] is True
     assert node["loss_monitor_healthy"] is False
     assert node["loss_monitor_at"] == monitor_at
+    assert node["heartbeat_stale"] is False
+    assert node["operational_state"] == "ONLINE"
+    assert node["admission_eligible"] is True
+    assert node["readiness_valid"] is True
+    assert node["effective_readiness"] is None
+
+
+def test_node_read_surface_rejects_invalid_stored_readiness(
+    migrated_db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", migrated_db)
+    monkeypatch.setenv(
+        "NAUTILUS_NODE_AUTH_JSON",
+        json.dumps(
+            {
+                NODE_ID: {
+                    "account_id": ACCOUNT_ID,
+                    "token": NODE_TOKEN,
+                }
+            }
+        ),
+    )
+    monkeypatch.setenv("SYSTEM_OBSERVER_TOKEN", READER_TOKEN)
+    client = TestClient(read_api.app)
+    headers = {
+        "Authorization": f"Bearer {NODE_TOKEN}",
+        "X-Node-Id": NODE_ID,
+        "X-Account-Id": ACCOUNT_ID,
+    }
+    posted = client.post(
+        f"/v1/nodes/{NODE_ID}/heartbeat",
+        json={
+            "account_id": ACCOUNT_ID,
+            "trading_state": "ACTIVE",
+            "readiness": True,
+        },
+        headers=headers,
+    )
+    assert posted.status_code == 200
+
+    conn = psycopg2.connect(migrated_db)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE node_heartbeats
+                SET payload = jsonb_set(
+                    payload,
+                    '{readiness}',
+                    '"false"'::jsonb
+                )
+                WHERE node_id = %s
+                """,
+                (NODE_ID,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fetched = client.get(
+        "/v1/nodes",
+        headers={"Authorization": f"Bearer {READER_TOKEN}"},
+    )
+
+    assert fetched.status_code == 200
+    node = fetched.json()["nodes"][0]
+    assert node["readiness"] == "false"
+    assert node["readiness_valid"] is False
+    assert node["effective_readiness"] is False
+    assert node["admission_eligible"] is False
 
 
 @pytest.mark.parametrize(
