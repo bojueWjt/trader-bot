@@ -174,6 +174,31 @@ start_sse_hold() {
 }
 
 
+wait_for_sse_hold_shutdown() {
+  local attempt=0
+  local status=0
+  if [ -z "$SSE_PID" ]; then
+    die "Caddy SSE hold PID is missing after restart"
+  fi
+  while kill -0 "$SSE_PID" 2>/dev/null && [ "$attempt" -lt 40 ]; do
+    attempt=$((attempt + 1))
+    sleep 0.05
+  done
+  if kill -0 "$SSE_PID" 2>/dev/null; then
+    die "Caddy SSE hold did not close during graceful restart"
+  fi
+  if wait "$SSE_PID"; then
+    status=0
+  else
+    status=$?
+  fi
+  SSE_PID=""
+  if [ "$status" -ne 0 ]; then
+    die "Caddy SSE hold exited unsafely during restart: status=$status"
+  fi
+}
+
+
 stop_sse_hold() {
   local attempt=0
   if [ -z "$SSE_PID" ]; then
@@ -660,7 +685,7 @@ print(f"control-plane restart completed in {elapsed_seconds:.3f}s")
 PY
 systemctl is-active --quiet "$UNIT_NAME" \
   || die "$UNIT_NAME is inactive after restart"
-stop_sse_hold
+wait_for_sse_hold_shutdown
 
 JOURNAL_UNTIL="$(
   python3 - <<'PY'
@@ -677,7 +702,7 @@ journalctl \
   --output=cat \
   >"$JOURNAL_BODY"
 if grep -Eqi \
-  "stop.*timed out|timed out.*stop|SIGKILL|status=9/KILL|signal KILL" \
+  "stop.*timed out|timed out.*stop|result.*timeout|timeout.*result|SIGKILL|status=9/KILL|signal KILL" \
   "$JOURNAL_BODY"; then
   die "unsafe control-plane stop found in journal"
 fi

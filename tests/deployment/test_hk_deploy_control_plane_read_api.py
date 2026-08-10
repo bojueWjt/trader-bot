@@ -172,9 +172,10 @@ if [ -n "$headers" ]; then
   printf 'HTTP/1.1 %s OK\r\nContent-Type: text/event-stream\r\n\r\n' \
     "$status" >"$headers"
   printf 'event: dashboard_snapshot\ndata: {}\n\n' >"$output"
+  printf '%s\n' "$$" >"$FAKE_SSE_PID_FILE"
   touch "$FAKE_SSE_ACTIVE_FILE"
-  trap 'rm -f "$FAKE_SSE_ACTIVE_FILE"; exit 0' TERM INT
-  trap 'rm -f "$FAKE_SSE_ACTIVE_FILE"' EXIT
+  trap 'rm -f "$FAKE_SSE_ACTIVE_FILE" "$FAKE_SSE_PID_FILE"; exit 0' TERM INT
+  trap 'rm -f "$FAKE_SSE_ACTIVE_FILE" "$FAKE_SSE_PID_FILE"' EXIT
   while true; do
     sleep 0.1
   done
@@ -281,6 +282,15 @@ case "$command" in
   restart)
     [ -e "$FAKE_SSE_ACTIVE_FILE" ]
     touch "$FAKE_RESTART_SAW_SSE"
+    if [ "${FAKE_RESTART_LEAVES_SSE_OPEN:-0}" != "1" ]; then
+      kill -TERM "$(cat "$FAKE_SSE_PID_FILE")"
+      attempt=0
+      while [ -e "$FAKE_SSE_ACTIVE_FILE" ] && [ "$attempt" -lt 40 ]; do
+        attempt=$((attempt + 1))
+        sleep 0.05
+      done
+      [ ! -e "$FAKE_SSE_ACTIVE_FILE" ]
+    fi
     touch "$FAKE_ACTIVE_FILE"
     ;;
   start)
@@ -402,6 +412,7 @@ def _prepare_harness(
             "FAKE_WANTS_LINK": str(wants_link),
             "FAKE_ACTIVE_FILE": str(active_file),
             "FAKE_SSE_ACTIVE_FILE": str(fake_state / "sse-active"),
+            "FAKE_SSE_PID_FILE": str(fake_state / "sse.pid"),
             "FAKE_RESTART_SAW_SSE": str(fake_state / "restart-saw-sse"),
         }
     )
@@ -523,6 +534,9 @@ def test_success_holds_caddy_sse_during_restart_and_deploys_two_files(
     assert "curl http://127.0.0.1:18080/v1/stream" in commands
     assert "systemctl restart trader-v3-controlplane.service" in commands
     assert "journalctl -u trader-v3-controlplane.service" in commands
+    assert "Caddy SSE hold did not close during graceful restart" in (
+        SCRIPT.read_text(encoding="utf-8")
+    )
     assert "rollback.sh" in result.stdout
 
 
@@ -705,6 +719,7 @@ def test_partial_install_failure_rolls_back_when_original_unit_was_absent(
         "State 'stop-sigterm' timed out. Killing.",
         "Main process exited, code=killed, status=9/KILL",
         "Killing process 42 with signal SIGKILL",
+        "trader-v3-controlplane.service: Failed with result 'timeout'.",
     ],
 )
 def test_bad_restart_journal_fails_and_automatically_rolls_back(
@@ -728,6 +743,25 @@ def test_bad_restart_journal_fails_and_automatically_rolls_back(
     wants_link = harness["wants_link"]
     assert isinstance(wants_link, Path)
     assert wants_link.is_symlink()
+
+
+def test_restart_must_gracefully_close_the_held_sse(
+    tmp_path: Path,
+) -> None:
+    harness = _prepare_harness(tmp_path)
+    environment = harness["env"]
+    assert isinstance(environment, dict)
+    environment["FAKE_RESTART_LEAVES_SSE_OPEN"] = "1"
+    old_read = _old_read_api()
+
+    result = _run_script(harness)
+
+    assert result.returncode != 0
+    assert "SSE hold did not close during graceful restart" in result.stderr
+    assert "automatic rollback completed" in result.stderr
+    read_target = harness["read_target"]
+    assert isinstance(read_target, Path)
+    assert read_target.read_bytes() == old_read
 
 
 def test_script_has_valid_bash_syntax() -> None:
