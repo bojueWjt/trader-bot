@@ -88,6 +88,7 @@ def test_bundle_writes_dependency_closed_release_identity_and_checksums(
         "packages/execution-domain/execution_domain/control_plane.py",
         "scripts/account_a_live_trade_executor.py",
         "scripts/account_a_live_trade_http_adapter.py",
+        "infra/systemd/trader-v3-controlplane.service",
     }
     host_modes = {
         item["target_relative"]: item["install_mode"]
@@ -103,6 +104,7 @@ def test_bundle_writes_dependency_closed_release_identity_and_checksums(
         ): "0644",
         "scripts/account_a_live_trade_executor.py": "0755",
         "scripts/account_a_live_trade_http_adapter.py": "0755",
+        "infra/systemd/trader-v3-controlplane.service": "0644",
     }
     migration_targets = {
         item["target_relative"]

@@ -187,6 +187,12 @@ HOST_FILES = (
         "scripts/account_a_live_trade_http_adapter.py",
         "0755",
     ),
+    (
+        "host/trader-v3-controlplane.service",
+        "infra/systemd/trader-v3-controlplane.service",
+        "infra/systemd/trader-v3-controlplane.service",
+        "0644",
+    ),
 )
 
 MIGRATION_FILES = (

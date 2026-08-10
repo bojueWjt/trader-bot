@@ -28,7 +28,7 @@ from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 import psycopg2
-from fastapi import Body, FastAPI, Header, HTTPException, Query
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from psycopg2.extras import RealDictCursor
@@ -89,41 +89,33 @@ def system_snapshot(authorization: str | None = Header(default=None)):
         conn.close()
 
 
-# Dashboard realtime feed (SSE). The v3 SPA opens EventSource("/v1/stream") and
-# listens for `dashboard_snapshot` + `heartbeat` events. We stream the same
-# SystemSnapshotV1 projection that /api/system/snapshot returns, on a fixed
-# interval, plus heartbeats to keep the connection warm through the Caddy proxy.
-# Read-only: no trading side effects.
+# Dashboard realtime feed (SSE). The SPA treats `dashboard_snapshot` as a
+# notification and fetches the canonical snapshot over HTTP. Keeping SSE
+# payloads small avoids holding database work and large proxy buffers open.
 _STREAM_INTERVAL_S = 5.0
-
-
-def _dashboard_snapshot_payload() -> dict:
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("projection store unavailable")
-    conn = psycopg2.connect(database_url)
-    try:
-        return build_system_snapshot(conn)
-    finally:
-        conn.close()
+_STREAM_MAX_AGE_S = 60.0
 
 
 @app.get("/v1/stream")
-async def v1_stream(authorization: str | None = Header(default=None)):
+async def v1_stream(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
     require_reader(authorization)
 
     async def event_gen():
-        while True:
-            try:
-                snap = await asyncio.to_thread(_dashboard_snapshot_payload)
-                data = json.dumps(jsonable_encoder(snap), separators=(",", ":"))
-                yield f"event: dashboard_snapshot\ndata: {data}\n\n"
-            except Exception as exc:  # keep the stream alive; surface as an SSE error event
-                err = json.dumps({"error": str(exc)})
-                yield f"event: error\ndata: {err}\n\n"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _STREAM_MAX_AGE_S
+        while loop.time() < deadline:
+            if await request.is_disconnected():
+                return
+            yield "event: dashboard_snapshot\ndata: {}\n\n"
             beat = json.dumps({"ts": datetime.now(timezone.utc).isoformat()})
             yield f"event: heartbeat\ndata: {beat}\n\n"
-            await asyncio.sleep(_STREAM_INTERVAL_S)
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                return
+            await asyncio.sleep(min(_STREAM_INTERVAL_S, remaining_s))
 
     return StreamingResponse(
         event_gen(),

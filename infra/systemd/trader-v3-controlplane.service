@@ -1,0 +1,15 @@
+[Unit]
+Description=Trader v3 control-plane read API (isolated, 127.0.0.1:8080)
+After=docker.service network.target
+
+[Service]
+WorkingDirectory=/srv/trader-v3/services/control-plane/api
+EnvironmentFile=/srv/trader-v3/.env.v3
+ExecStart=/srv/trader-v3/.venv-cp/bin/uvicorn read_api:app --host 127.0.0.1 --port 8080 --timeout-graceful-shutdown 10
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=20s
+
+[Install]
+WantedBy=multi-user.target

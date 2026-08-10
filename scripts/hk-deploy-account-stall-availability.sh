@@ -8,6 +8,9 @@ STAGING="${STAGING:-$SCRIPT_DIR}"
 NODE_CONTAINER="trader-v3-node-a"
 NODE_PORT="${NODE_PORT:-8081}"
 CONTROL_PLANE_UNIT="trader-v3-controlplane.service"
+CONTROL_PLANE_UNIT_SOURCE_RELATIVE="infra/systemd/trader-v3-controlplane.service"
+CONTROL_PLANE_UNIT_SOURCE="$T/$CONTROL_PLANE_UNIT_SOURCE_RELATIVE"
+CONTROL_PLANE_UNIT_TARGET="/etc/systemd/system/trader-v3-controlplane.service"
 EXCHANGE_STATE_UNIT="trader-v3-exchange-state.service"
 OPERATION_LOCK="/var/lock/trader-v3-account-stall-operation.lock"
 MEMORY_LIMIT="${ACCOUNT_A_MEMORY_LIMIT:-768m}"
@@ -186,6 +189,7 @@ expected_host = {
     "packages/execution-domain/execution_domain/control_plane.py",
     "scripts/account_a_live_trade_executor.py",
     "scripts/account_a_live_trade_http_adapter.py",
+    "infra/systemd/trader-v3-controlplane.service",
 }
 actual_host = set()
 with open(host_path, "w", encoding="utf-8") as output:
@@ -367,6 +371,7 @@ done <"$MIGRATION_TSV"
 backup_target "$GENERATOR_TARGET"
 backup_target "$RECREATE_TARGET"
 backup_target "$DEPLOYED_COMMIT_TARGET"
+backup_target "$CONTROL_PLANE_UNIT_TARGET"
 cp "$TEMP_DIR/container-inspect.json" "$BACKUP_ROOT/container-inspect.json"
 cp "$MANIFEST" "$BACKUP_ROOT/bundle-manifest.json"
 cp "$CHECKSUMS" "$BACKUP_ROOT/staging-SHA256SUMS"
@@ -430,6 +435,7 @@ while IFS=$'\t' read -r status target backup_relative; do
   esac
 done <"$INDEX"
 
+systemctl daemon-reload
 systemctl start "$CONTROL_PLANE_UNIT"
 systemctl is-active --quiet "$CONTROL_PLANE_UNIT"
 systemctl start "$EXCHANGE_STATE_UNIT"
@@ -822,7 +828,11 @@ while IFS=$'\t' read -r \
   actual_sha="$(sha256sum "$target_path" | awk '{print $1}')"
   [ "$actual_sha" = "$expected_sha" ] \
     || die "host SHA256 mismatch: $target_path"
-  compile_python "$target_path"
+  case "$target_path" in
+    *.py)
+      compile_python "$target_path"
+      ;;
+  esac
 done <"$HOST_TSV"
 
 grep -Fq 'command_expires_at' \
@@ -833,6 +843,22 @@ grep -Fq '"source_evidence"' \
   || die "control-plane opening evidence contract is missing"
 [ -f "$RECORDER_TARGET" ] \
   || die "exchange-state recorder install is missing"
+[ -f "$CONTROL_PLANE_UNIT_SOURCE" ] \
+  || die "control-plane unit source is missing"
+grep -Fq -- "--timeout-graceful-shutdown 10" \
+  "$CONTROL_PLANE_UNIT_SOURCE" \
+  || die "control-plane graceful shutdown timeout is missing"
+grep -Fq "TimeoutStopSec=20s" "$CONTROL_PLANE_UNIT_SOURCE" \
+  || die "control-plane stop timeout is missing"
+grep -Fq "KillMode=control-group" "$CONTROL_PLANE_UNIT_SOURCE" \
+  || die "control-plane kill mode is invalid"
+prepare_file_target "$CONTROL_PLANE_UNIT_TARGET"
+install -D -m 0644 "$CONTROL_PLANE_UNIT_SOURCE" "$CONTROL_PLANE_UNIT_TARGET"
+UNIT_SOURCE_SHA="$(sha256sum "$CONTROL_PLANE_UNIT_SOURCE" | awk '{print $1}')"
+UNIT_TARGET_SHA="$(sha256sum "$CONTROL_PLANE_UNIT_TARGET" | awk '{print $1}')"
+[ "$UNIT_SOURCE_SHA" = "$UNIT_TARGET_SHA" ] \
+  || die "control-plane unit SHA256 mismatch"
+systemctl daemon-reload
 systemctl stop "$EXCHANGE_STATE_UNIT"
 RECORDER_WATERMARK="$TEMP_DIR/exchange-state-watermark.txt"
 "$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" capture \

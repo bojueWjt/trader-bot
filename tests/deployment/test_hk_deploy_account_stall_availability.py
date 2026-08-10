@@ -29,9 +29,15 @@ def test_deploy_script_is_control_plane_first() -> None:
     text = _text()
 
     host_install = text.index('target_path="$T/$target_relative"')
+    unit_install = text.index(
+        'install -D -m 0644 "$CONTROL_PLANE_UNIT_SOURCE" '
+        '"$CONTROL_PLANE_UNIT_TARGET"',
+        host_install,
+    )
+    daemon_reload = text.index("systemctl daemon-reload", unit_install)
     control_plane_restart = text.index(
         'systemctl restart "$CONTROL_PLANE_UNIT"',
-        host_install,
+        daemon_reload,
     )
     recorder_restart = text.index(
         'systemctl start "$EXCHANGE_STATE_UNIT"',
@@ -47,7 +53,9 @@ def test_deploy_script_is_control_plane_first() -> None:
     )
     recreate = text.index('bash "$RECREATE_TARGET"', patch_install)
 
-    assert host_install < control_plane_restart
+    assert host_install < unit_install
+    assert unit_install < daemon_reload
+    assert daemon_reload < control_plane_restart
     assert control_plane_restart < recorder_restart
     assert recorder_restart < port_8080_check
     assert port_8080_check < patch_install
@@ -116,11 +124,36 @@ def test_deploy_script_keeps_lock_backup_and_precise_rollback() -> None:
     assert "rollback-exchange-state-watermark.txt" in text
     assert 'backup_target "$RECREATE_TARGET"' in text
     assert 'backup_target "$DEPLOYED_COMMIT_TARGET"' in text
+    assert 'backup_target "$CONTROL_PLANE_UNIT_TARGET"' in text
     assert 'docker inspect "$NODE_CONTAINER" >' in text
     assert 'printf \'absent\\t%s\\t-\\n\'' in text
     assert 'echo "ROLLBACK: bash $ROLLBACK_PATH"' in text
     assert 'cat >"$ROLLBACK_PATH"' in text
     assert 'rm -rf -- "$target"' in text
+    assert text.count("systemctl daemon-reload") == 2
+
+
+def test_deploy_script_installs_versioned_controlplane_unit() -> None:
+    text = _text()
+
+    assert (
+        'CONTROL_PLANE_UNIT_SOURCE_RELATIVE="infra/systemd/'
+        'trader-v3-controlplane.service"'
+    ) in text
+    assert (
+        'CONTROL_PLANE_UNIT_TARGET="/etc/systemd/system/'
+        'trader-v3-controlplane.service"'
+    ) in text
+    assert '"--timeout-graceful-shutdown 10"' in text
+    assert 'TimeoutStopSec=20s' in text
+    assert 'KillMode=control-group' in text
+    assert (
+        'install -D -m 0644 "$CONTROL_PLANE_UNIT_SOURCE" '
+        '"$CONTROL_PLANE_UNIT_TARGET"'
+    ) in text
+    assert (
+        '"$CONTROL_PLANE_UNIT_SOURCE" "$CONTROL_PLANE_UNIT_TARGET"'
+    ) in text
 
 
 def test_deploy_script_repairs_non_file_patch_sources() -> None:
