@@ -229,6 +229,10 @@ DEPLOYMENT_FILES = (
         "scripts/hk-gen-recreate-patched.py",
     ),
     (
+        "tools/hk-deploy-account-b-hardening.sh",
+        "scripts/hk-deploy-account-b-hardening.sh",
+    ),
+    (
         "tools/verify-exchange-state-recorder.py",
         "scripts/verify_exchange_state_recorder.py",
     ),
@@ -240,6 +244,10 @@ DEPLOYMENT_FILES = (
 
 MANIFEST_NAME = "bundle-manifest.json"
 CHECKSUMS_NAME = "SHA256SUMS"
+ACCOUNT_B_OBSERVABILITY_BUNDLE_PATH = "control_plane_session.py"
+ACCOUNT_B_OBSERVABILITY_MOUNT_TARGET = (
+    "/app/runtime/control_plane_session.py"
+)
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -317,12 +325,121 @@ def _write_checksums(output_dir: Path, artifact_paths: list[str]) -> None:
     checksums_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _git_blob(
+    repo_root: Path,
+    commit: str,
+    source_relative: str,
+) -> bytes:
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{source_relative}"],
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise BundleError(
+            "peer baseline lacks runtime source: "
+            f"{source_relative} at {commit}"
+        )
+    return result.stdout
+
+
+def _account_b_peer_contract(
+    repo_root: Path,
+    files: list[dict[str, object]],
+    *,
+    baseline_commit: str,
+    observability_bundle_path: str,
+) -> dict[str, object]:
+    if _COMMIT_RE.fullmatch(baseline_commit) is None:
+        raise BundleError(
+            "account_b_peer_baseline must be a full lowercase git SHA"
+        )
+    if (
+        observability_bundle_path
+        != ACCOUNT_B_OBSERVABILITY_BUNDLE_PATH
+    ):
+        raise BundleError(
+            "account-b observability delta must be "
+            f"{ACCOUNT_B_OBSERVABILITY_BUNDLE_PATH}"
+        )
+    source_by_bundle = {
+        bundle_path: source_relative
+        for bundle_path, source_relative, _ in BUNDLE_FILES
+    }
+    if observability_bundle_path not in source_by_bundle:
+        raise BundleError(
+            "account_b_observability_bundle_path is not a runtime file"
+        )
+    mount_by_bundle = {
+        bundle_path: mount_target
+        for bundle_path, _, mount_target in BUNDLE_FILES
+    }
+    if (
+        mount_by_bundle[observability_bundle_path]
+        != ACCOUNT_B_OBSERVABILITY_MOUNT_TARGET
+    ):
+        raise BundleError(
+            "account-b observability mount target is invalid"
+        )
+
+    peer_files = []
+    changed = []
+    for item in files:
+        bundle_path = str(item["bundle_path"])
+        source_relative = source_by_bundle[bundle_path]
+        peer_payload = _git_blob(
+            repo_root,
+            baseline_commit,
+            source_relative,
+        )
+        peer_sha256 = hashlib.sha256(peer_payload).hexdigest()
+        release_sha256 = str(item["sha256"])
+        peer_files.append(
+            {
+                "bundle_path": bundle_path,
+                "mount_target": str(item["mount_target"]),
+                "sha256": peer_sha256,
+            }
+        )
+        if peer_sha256 != release_sha256:
+            changed.append(
+                {
+                    "bundle_path": bundle_path,
+                    "mount_target": str(item["mount_target"]),
+                    "peer_sha256": peer_sha256,
+                    "release_sha256": release_sha256,
+                }
+            )
+
+    changed_paths = {
+        str(item["bundle_path"])
+        for item in changed
+    }
+    if changed_paths != {observability_bundle_path}:
+        raise BundleError(
+            "account-b runtime delta must contain exactly the reviewed "
+            f"observability file: expected={observability_bundle_path!r} "
+            f"actual={sorted(changed_paths)!r}"
+        )
+
+    return {
+        "schema_version": "1.0",
+        "peer_container": "trader-v3-node-a",
+        "baseline_repo_commit": baseline_commit,
+        "peer_files": peer_files,
+        "observability_delta": changed[0],
+    }
+
+
 def build_bundle(
     repo_root: Path,
     output_dir: Path,
     *,
     repo_commit: str,
     repo_dirty: bool,
+    account_b_peer_baseline: str | None = None,
+    account_b_observability_bundle_path: str | None = None,
 ) -> dict[str, object]:
     repo_root = repo_root.resolve()
     output_dir = output_dir.resolve()
@@ -394,6 +511,24 @@ def build_bundle(
         "migration_files": migration_files,
         "deployment_files": deployment_files,
     }
+    peer_arguments = (
+        account_b_peer_baseline,
+        account_b_observability_bundle_path,
+    )
+    if any(peer_arguments) and not all(peer_arguments):
+        raise BundleError(
+            "account-b peer baseline and observability bundle path "
+            "must be provided together"
+        )
+    if account_b_peer_baseline and account_b_observability_bundle_path:
+        manifest["account_b_peer_contract"] = _account_b_peer_contract(
+            repo_root,
+            files,
+            baseline_commit=account_b_peer_baseline,
+            observability_bundle_path=(
+                account_b_observability_bundle_path
+            ),
+        )
     manifest_path = output_dir / MANIFEST_NAME
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -438,6 +573,17 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(__file__).resolve().parents[1],
     )
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument(
+        "--account-b-peer-baseline",
+        help="full git SHA for the deployed account-a runtime baseline",
+    )
+    parser.add_argument(
+        "--account-b-observability-bundle-path",
+        help=(
+            "single reviewed runtime bundle path allowed to differ from "
+            "the account-a baseline"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -453,6 +599,10 @@ def main(argv: list[str] | None = None) -> int:
             args.output_dir,
             repo_commit=repo_commit,
             repo_dirty=repo_dirty,
+            account_b_peer_baseline=args.account_b_peer_baseline,
+            account_b_observability_bundle_path=(
+                args.account_b_observability_bundle_path
+            ),
         )
     except (BundleError, OSError) as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
