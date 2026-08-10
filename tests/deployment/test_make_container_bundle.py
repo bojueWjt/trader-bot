@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -118,6 +119,7 @@ def test_bundle_writes_dependency_closed_release_identity_and_checksums(
     }
     assert deployment_paths == {
         "deploy.sh",
+        "tools/hk-deploy-account-b-hardening.sh",
         "tools/hk-gen-recreate-patched.py",
         "tools/verify-exchange-state-recorder.py",
     }
@@ -182,4 +184,180 @@ def test_bundle_rejects_abbreviated_release_identity(tmp_path: Path) -> None:
             output_dir,
             repo_commit="abc123",
             repo_dirty=False,
+        )
+
+
+def _git(repo_root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _commit_all(repo_root: Path, message: str) -> str:
+    _git(repo_root, "add", ".")
+    _git(
+        repo_root,
+        "-c",
+        "user.name=Bundle Test",
+        "-c",
+        "user.email=bundle-test@example.invalid",
+        "commit",
+        "-m",
+        message,
+    )
+    return _git(repo_root, "rev-parse", "HEAD")
+
+
+def test_account_b_peer_contract_allows_one_reviewed_observability_delta(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    output_dir = tmp_path / "bundle"
+    repo_root.mkdir()
+    _git(repo_root, "init")
+    _seed_sources(repo_root)
+    baseline = _commit_all(repo_root, "baseline")
+
+    delta_bundle_path = bundle.ACCOUNT_B_OBSERVABILITY_BUNDLE_PATH
+    delta_source = next(
+        source
+        for bundle_path, source, _target in bundle.BUNDLE_FILES
+        if bundle_path == delta_bundle_path
+    )
+    delta_target = bundle.ACCOUNT_B_OBSERVABILITY_MOUNT_TARGET
+    (repo_root / delta_source).write_text(
+        "reviewed logging delta\n",
+        encoding="utf-8",
+    )
+    release_commit = _commit_all(repo_root, "observability")
+
+    manifest = bundle.build_bundle(
+        repo_root,
+        output_dir,
+        repo_commit=release_commit,
+        repo_dirty=False,
+        account_b_peer_baseline=baseline,
+        account_b_observability_bundle_path=delta_bundle_path,
+    )
+
+    contract = manifest["account_b_peer_contract"]
+    assert contract["schema_version"] == "1.0"
+    assert contract["peer_container"] == "trader-v3-node-a"
+    assert contract["baseline_repo_commit"] == baseline
+    assert len(contract["peer_files"]) == len(bundle.BUNDLE_FILES)
+    delta = contract["observability_delta"]
+    assert delta["bundle_path"] == delta_bundle_path
+    assert delta["mount_target"] == delta_target
+    assert delta["peer_sha256"] != delta["release_sha256"]
+
+
+def test_account_b_peer_contract_rejects_an_extra_runtime_change(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    output_dir = tmp_path / "bundle"
+    repo_root.mkdir()
+    _git(repo_root, "init")
+    _seed_sources(repo_root)
+    baseline = _commit_all(repo_root, "baseline")
+
+    first_bundle_path = bundle.ACCOUNT_B_OBSERVABILITY_BUNDLE_PATH
+    first_source = next(
+        source
+        for bundle_path, source, _target in bundle.BUNDLE_FILES
+        if bundle_path == first_bundle_path
+    )
+    second_source = next(
+        source
+        for bundle_path, source, _target in bundle.BUNDLE_FILES
+        if bundle_path != first_bundle_path
+    )
+    (repo_root / first_source).write_text("logging delta\n", encoding="utf-8")
+    (repo_root / second_source).write_text("extra delta\n", encoding="utf-8")
+    release_commit = _commit_all(repo_root, "two changes")
+
+    with pytest.raises(
+        bundle.BundleError,
+        match="exactly the reviewed observability file",
+    ):
+        bundle.build_bundle(
+            repo_root,
+            output_dir,
+            repo_commit=release_commit,
+            repo_dirty=False,
+            account_b_peer_baseline=baseline,
+            account_b_observability_bundle_path=first_bundle_path,
+        )
+
+
+def test_account_b_peer_contract_rejects_a_baseline_without_the_mount_set(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    output_dir = tmp_path / "bundle"
+    repo_root.mkdir()
+    _git(repo_root, "init")
+    _seed_sources(repo_root)
+    missing_source = repo_root / bundle.BUNDLE_FILES[-1][1]
+    missing_source.unlink()
+    baseline = _commit_all(repo_root, "incomplete baseline")
+    missing_source.parent.mkdir(parents=True, exist_ok=True)
+    missing_source.write_text("current-head-only\n", encoding="utf-8")
+    first_bundle_path = bundle.ACCOUNT_B_OBSERVABILITY_BUNDLE_PATH
+    first_source = next(
+        source
+        for bundle_path, source, _target in bundle.BUNDLE_FILES
+        if bundle_path == first_bundle_path
+    )
+    (repo_root / first_source).write_text("logging delta\n", encoding="utf-8")
+    release_commit = _commit_all(repo_root, "release")
+
+    with pytest.raises(
+        bundle.BundleError,
+        match="peer baseline lacks runtime source",
+    ):
+        bundle.build_bundle(
+            repo_root,
+            output_dir,
+            repo_commit=release_commit,
+            repo_dirty=False,
+            account_b_peer_baseline=baseline,
+            account_b_observability_bundle_path=first_bundle_path,
+        )
+
+
+def test_account_b_peer_contract_rejects_a_non_observability_delta(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    output_dir = tmp_path / "bundle"
+    repo_root.mkdir()
+    _git(repo_root, "init")
+    _seed_sources(repo_root)
+    baseline = _commit_all(repo_root, "baseline")
+
+    bundle_path, source, _target = next(
+        item
+        for item in bundle.BUNDLE_FILES
+        if item[0] != bundle.ACCOUNT_B_OBSERVABILITY_BUNDLE_PATH
+    )
+    (repo_root / source).write_text("strategy delta\n", encoding="utf-8")
+    release_commit = _commit_all(repo_root, "wrong delta")
+
+    with pytest.raises(
+        bundle.BundleError,
+        match="observability delta must be control_plane_session.py",
+    ):
+        bundle.build_bundle(
+            repo_root,
+            output_dir,
+            repo_commit=release_commit,
+            repo_dirty=False,
+            account_b_peer_baseline=baseline,
+            account_b_observability_bundle_path=bundle_path,
         )
