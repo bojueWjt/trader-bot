@@ -280,16 +280,26 @@ case "$command" in
     [ "$state" = "active" ]
     ;;
   restart)
-    [ -e "$FAKE_SSE_ACTIVE_FILE" ]
-    touch "$FAKE_RESTART_SAW_SSE"
-    if [ "${FAKE_RESTART_LEAVES_SSE_OPEN:-0}" != "1" ]; then
-      kill -TERM "$(cat "$FAKE_SSE_PID_FILE")"
-      attempt=0
-      while [ -e "$FAKE_SSE_ACTIVE_FILE" ] && [ "$attempt" -lt 40 ]; do
-        attempt=$((attempt + 1))
-        sleep 0.05
-      done
+    restart_count=0
+    if [ -f "$FAKE_RESTART_COUNT_FILE" ]; then
+      restart_count="$(cat "$FAKE_RESTART_COUNT_FILE")"
+    fi
+    restart_count=$((restart_count + 1))
+    printf '%s\n' "$restart_count" >"$FAKE_RESTART_COUNT_FILE"
+    if [ "$restart_count" -eq 1 ]; then
       [ ! -e "$FAKE_SSE_ACTIVE_FILE" ]
+    else
+      [ -e "$FAKE_SSE_ACTIVE_FILE" ]
+      touch "$FAKE_RESTART_SAW_SSE"
+      if [ "${FAKE_RESTART_LEAVES_SSE_OPEN:-0}" != "1" ]; then
+        kill -TERM "$(cat "$FAKE_SSE_PID_FILE")"
+        attempt=0
+        while [ -e "$FAKE_SSE_ACTIVE_FILE" ] && [ "$attempt" -lt 40 ]; do
+          attempt=$((attempt + 1))
+          sleep 0.05
+        done
+        [ ! -e "$FAKE_SSE_ACTIVE_FILE" ]
+      fi
     fi
     touch "$FAKE_ACTIVE_FILE"
     ;;
@@ -413,6 +423,7 @@ def _prepare_harness(
             "FAKE_ACTIVE_FILE": str(active_file),
             "FAKE_SSE_ACTIVE_FILE": str(fake_state / "sse-active"),
             "FAKE_SSE_PID_FILE": str(fake_state / "sse.pid"),
+            "FAKE_RESTART_COUNT_FILE": str(fake_state / "restart-count"),
             "FAKE_RESTART_SAW_SSE": str(fake_state / "restart-saw-sse"),
         }
     )
@@ -425,6 +436,7 @@ def _prepare_harness(
         "vendor_fragment": vendor_fragment,
         "active_file": active_file,
         "restart_saw_sse": fake_state / "restart-saw-sse",
+        "restart_count": fake_state / "restart-count",
         "command_log": command_log,
     }
 
@@ -527,12 +539,17 @@ def test_success_holds_caddy_sse_during_restart_and_deploys_two_files(
     restart_saw_sse = harness["restart_saw_sse"]
     assert isinstance(restart_saw_sse, Path)
     assert restart_saw_sse.exists()
+    restart_count = harness["restart_count"]
+    assert isinstance(restart_count, Path)
+    assert restart_count.read_text(encoding="utf-8").strip() == "2"
     command_log = harness["command_log"]
     assert isinstance(command_log, Path)
     commands = command_log.read_text(encoding="utf-8")
     assert "curl http://proxy.test/v1/stream" in commands
     assert "curl http://127.0.0.1:18080/v1/stream" in commands
-    assert "systemctl restart trader-v3-controlplane.service" in commands
+    assert commands.count(
+        "systemctl restart trader-v3-controlplane.service"
+    ) == 2
     assert "journalctl -u trader-v3-controlplane.service" in commands
     assert "Caddy SSE hold did not close during graceful restart" in (
         SCRIPT.read_text(encoding="utf-8")

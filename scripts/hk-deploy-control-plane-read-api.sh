@@ -199,6 +199,42 @@ wait_for_sse_hold_shutdown() {
 }
 
 
+restart_control_plane_bounded() {
+  local phase="$1"
+  local started_ns
+  local finished_ns
+  started_ns="$(
+    python3 - <<'PY'
+import time
+
+print(time.monotonic_ns())
+PY
+  )"
+  systemctl restart "$UNIT_NAME"
+  finished_ns="$(
+    python3 - <<'PY'
+import time
+
+print(time.monotonic_ns())
+PY
+  )"
+  python3 - "$started_ns" "$finished_ns" "$phase" <<'PY'
+import sys
+
+started = int(sys.argv[1])
+finished = int(sys.argv[2])
+phase = sys.argv[3]
+elapsed_seconds = (finished - started) / 1_000_000_000
+if elapsed_seconds >= 15:
+    raise SystemExit(
+        f"{phase} restart must complete in less than 15 seconds: "
+        f"{elapsed_seconds:.3f}s"
+    )
+print(f"{phase} restart completed in {elapsed_seconds:.3f}s")
+PY
+}
+
+
 stop_sse_hold() {
   local attempt=0
   if [ -z "$SSE_PID" ]; then
@@ -624,7 +660,6 @@ echo "rollback restored the control-plane read API and unit state"
 ROLLBACK
 chmod 0700 "$ROLLBACK_PATH"
 
-start_sse_hold
 MUTATION_STARTED=1
 
 install -D -m 0644 "$READ_API_SOURCE" "$READ_API_TARGET"
@@ -645,9 +680,6 @@ systemctl enable "$UNIT_NAME"
 systemctl is-enabled --quiet "$UNIT_NAME" \
   || die "$UNIT_NAME is not enabled"
 
-if ! kill -0 "$SSE_PID" 2>/dev/null; then
-  die "Caddy SSE hold ended before restart"
-fi
 JOURNAL_SINCE="$(
   python3 - <<'PY'
 import time
@@ -655,36 +687,19 @@ import time
 print(f"@{time.time():.6f}")
 PY
 )"
-RESTART_STARTED_NS="$(
-  python3 - <<'PY'
-import time
-
-print(time.monotonic_ns())
-PY
-)"
-systemctl restart "$UNIT_NAME"
-RESTART_FINISHED_NS="$(
-  python3 - <<'PY'
-import time
-
-print(time.monotonic_ns())
-PY
-)"
-python3 - "$RESTART_STARTED_NS" "$RESTART_FINISHED_NS" <<'PY'
-import sys
-
-started = int(sys.argv[1])
-finished = int(sys.argv[2])
-elapsed_seconds = (finished - started) / 1_000_000_000
-if elapsed_seconds >= 15:
-    raise SystemExit(
-        "restart must complete in less than 15 seconds: "
-        f"{elapsed_seconds:.3f}s"
-    )
-print(f"control-plane restart completed in {elapsed_seconds:.3f}s")
-PY
+restart_control_plane_bounded "bootstrap"
 systemctl is-active --quiet "$UNIT_NAME" \
-  || die "$UNIT_NAME is inactive after restart"
+  || die "$UNIT_NAME is inactive after bootstrap restart"
+probe_sse_contract "after bootstrap restart"
+verify_account_a_halted "after bootstrap restart"
+
+start_sse_hold
+if ! kill -0 "$SSE_PID" 2>/dev/null; then
+  die "Caddy SSE hold ended before validation restart"
+fi
+restart_control_plane_bounded "SSE validation"
+systemctl is-active --quiet "$UNIT_NAME" \
+  || die "$UNIT_NAME is inactive after SSE validation restart"
 wait_for_sse_hold_shutdown
 
 JOURNAL_UNTIL="$(
