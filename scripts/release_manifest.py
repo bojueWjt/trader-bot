@@ -50,7 +50,7 @@ SUPPORTED_SCHEMA_VERSIONS = {
 }
 SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0010_live_safety",
+    "db": "0010_evidence_and_poll_indexes",
     "redis": "fenced-generation-namespace/v2",
 }
 DEFAULT_CONTAINERS = ("trader-v3-node-a", "trader-v3-node-b")
@@ -120,13 +120,11 @@ SYSTEMD_RESOURCE_CONTRACT_SCHEMA_VERSION = (
     "trader-v3-systemd-resource-contract/v1"
 )
 MIGRATION_RUNNER_PATH = "services/control-plane/db/migrate.py"
-MIGRATION_UP_PATH = "db/migrations/0010_live_safety.up.sql"
-MIGRATION_DOWN_PATH = "db/migrations/0010_live_safety.down.sql"
-MIGRATION_MAINTENANCE_FENCE_UP_PATH = (
-    "db/migrations/0012_control_plane_maintenance_fence.up.sql"
+MIGRATION_UP_PATH = (
+    "db/migrations/0010_evidence_and_poll_indexes.up.sql"
 )
-MIGRATION_MAINTENANCE_FENCE_DOWN_PATH = (
-    "db/migrations/0012_control_plane_maintenance_fence.down.sql"
+MIGRATION_DOWN_PATH = (
+    "db/migrations/0010_evidence_and_poll_indexes.down.sql"
 )
 MIGRATION_PREREQUISITE_PATHS = (
     "db/migrations/0005_order_management.up.sql",
@@ -152,23 +150,14 @@ CANONICAL_MIGRATION_PATHS = (
     "db/migrations/0009_trade_outcome_job_runs.down.sql",
     MIGRATION_UP_PATH,
     MIGRATION_DOWN_PATH,
-    MIGRATION_MAINTENANCE_FENCE_UP_PATH,
-    MIGRATION_MAINTENANCE_FENCE_DOWN_PATH,
 )
 CANONICAL_MIGRATION_STEPS = (
     {
         "version": "0010",
-        "name": "live_safety",
+        "name": "evidence_and_poll_indexes",
         "up": MIGRATION_UP_PATH,
         "down": MIGRATION_DOWN_PATH,
         "prerequisites": list(MIGRATION_PREREQUISITE_PATHS),
-    },
-    {
-        "version": "0012",
-        "name": "control_plane_maintenance_fence",
-        "up": MIGRATION_MAINTENANCE_FENCE_UP_PATH,
-        "down": MIGRATION_MAINTENANCE_FENCE_DOWN_PATH,
-        "prerequisites": [MIGRATION_UP_PATH],
     },
 )
 STRICT_V3_REQUIRED_FIELDS = {
@@ -322,6 +311,11 @@ TRANSITION_RUNTIME_FILES = (
         "approved_intent_client.py",
         "services/nautilus-node/data_client/approved_intent_client.py",
         "/app/data_client/approved_intent_client.py",
+    ),
+    (
+        "durable_command_journal.py",
+        "services/nautilus-node/commands/durable_command_journal.py",
+        "/app/commands/durable_command_journal.py",
     ),
     (
         "nautilus_config.py",
@@ -858,13 +852,7 @@ def validate_migration_manifest(
             "migration prerequisites must equal canonical exact-set"
         )
     steps = _validated_migration_steps(document.get("steps"))
-    required_paths = {
-        up,
-        down,
-        MIGRATION_MAINTENANCE_FENCE_UP_PATH,
-        MIGRATION_MAINTENANCE_FENCE_DOWN_PATH,
-        *prerequisite_paths,
-    }
+    required_paths = {up, down, *prerequisite_paths}
     if not required_paths.issubset(migration_paths):
         raise ReleaseManifestError(
             "migration manifest apply paths are incomplete"
@@ -3070,9 +3058,11 @@ def capture_release_manifest(
 ) -> dict[str, Any]:
     bundle = _load_json(bundle_path)
     bundle_files = _validated_bundle_files(bundle, patch_root)
+    delivery_mode = _require_delivery_mode(delivery_mode)
+    if delivery_mode == DELIVERY_TRANSITION:
+        require_transition_runtime = True
     if require_transition_runtime:
         require_transition_runtime_files(bundle_files)
-    delivery_mode = _require_delivery_mode(delivery_mode)
     if node_config_specs is None:
         raise ReleaseManifestError(
             "capture requires immutable account-a/account-b config artifacts"

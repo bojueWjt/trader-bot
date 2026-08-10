@@ -18,7 +18,7 @@ SOURCE_SHA256 = "4" * 64
 RELEASE_COMMIT = "5" * 40
 EXPECTED_SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0010_live_safety",
+    "db": "0010_evidence_and_poll_indexes",
     "redis": "fenced-generation-namespace/v2",
 }
 EXPECTED_TRANSITION_RUNTIME_FILES = {
@@ -39,6 +39,9 @@ EXPECTED_TRANSITION_RUNTIME_FILES = {
     "risk_init.py": "/app/risk/__init__.py",
     "projection_spool.py": "/app/projection/spool.py",
     "approved_intent_client.py": "/app/data_client/approved_intent_client.py",
+    "durable_command_journal.py": (
+        "/app/commands/durable_command_journal.py"
+    ),
     "nautilus_config.py": "/app/persistence/nautilus_config.py",
     "persistence_init.py": "/app/persistence/__init__.py",
     "redis_namespace_lease.py": "/app/persistence/redis_namespace_lease.py",
@@ -155,6 +158,25 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             encoding="utf-8",
         )
         return path
+
+    def write_transition_bundle(self):
+        bundle = json.loads(json.dumps(self.bundle))
+        for bundle_name, _source_relative, mount_target in (
+            release_manifest.TRANSITION_RUNTIME_FILES
+        ):
+            payload = self.patch_root / bundle_name
+            payload.write_text(
+                f"transition:{bundle_name}\n",
+                encoding="utf-8",
+            )
+            bundle["files"].append(
+                {
+                    "bundle_path": bundle_name,
+                    "mount_target": mount_target,
+                    "sha256": release_manifest.sha256_file(payload),
+                }
+            )
+        return bundle
 
     def write_migration_manifest(self):
         runner_relative = release_manifest.MIGRATION_RUNNER_PATH
@@ -344,7 +366,7 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
     def test_capture_builds_v3_manifest_from_reviewed_config_artifacts(self):
         bundle_path = self.temp_path / "bundle-manifest.json"
         bundle_path.write_text(
-            json.dumps(self.bundle),
+            json.dumps(self.write_transition_bundle()),
             encoding="utf-8",
         )
         lock_path = self.write_dependency_lock()
@@ -389,6 +411,26 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             json.loads(output_path.read_text(encoding="utf-8")),
             manifest,
         )
+
+    def test_transition_capture_requires_complete_runtime_without_flag(self):
+        bundle_path = self.temp_path / "bundle-manifest.json"
+        bundle_path.write_text(
+            json.dumps(self.bundle),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            release_manifest.ReleaseManifestError,
+            "transition runtime mounts",
+        ):
+            release_manifest.capture_release_manifest(
+                bundle_path=bundle_path,
+                dependency_lock_path=self.temp_path / "missing.lock",
+                output_path=self.temp_path / "release-manifest.json",
+                patch_root=self.patch_root,
+                containers=["trader-v3-node-a", "trader-v3-node-b"],
+                delivery_mode=release_manifest.DELIVERY_TRANSITION,
+            )
 
     def test_capture_fails_closed_without_config_artifacts(self):
         bundle_path = self.temp_path / "bundle-manifest.json"
@@ -1135,6 +1177,21 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
         }
 
         self.assertEqual(actual, EXPECTED_TRANSITION_RUNTIME_FILES)
+
+    def test_canonical_migration_exact_set_exists_in_repository(self):
+        actual = {
+            str(path.relative_to(REPO_ROOT))
+            for path in (REPO_ROOT / "db" / "migrations").glob("*.sql")
+        }
+
+        self.assertEqual(
+            set(release_manifest.CANONICAL_MIGRATION_PATHS),
+            actual,
+        )
+        self.assertEqual(
+            len(release_manifest.CANONICAL_MIGRATION_PATHS),
+            len(actual),
+        )
 
     def test_transition_bundle_requires_each_hardening_runtime_file(self):
         complete = [
