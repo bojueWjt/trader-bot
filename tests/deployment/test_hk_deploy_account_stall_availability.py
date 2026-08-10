@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import subprocess
 
@@ -12,6 +13,141 @@ SCRIPT = (
 
 def _text() -> str:
     return SCRIPT.read_text(encoding="utf-8")
+
+
+def _rollback_text() -> str:
+    text = _text()
+    marker = "cat >\"$ROLLBACK_PATH\" <<'ROLLBACK'\n"
+    start = text.index(marker) + len(marker)
+    end = text.index("\nROLLBACK\n", start)
+    return text[start:end] + "\n"
+
+
+def _write_executable(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _run_rollback(
+    tmp_path: Path,
+    *,
+    original_state: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str], Path, str]:
+    trader_root = tmp_path / "trader"
+    backup_root = trader_root / "backups" / f"rollback-{original_state}"
+    backup_root.mkdir(parents=True)
+    rollback_path = backup_root / "rollback.sh"
+    rollback = _rollback_text().replace(
+        'LOCK="/var/lock/trader-v3-account-stall-operation.lock"',
+        f'LOCK="{tmp_path / "rollback.lock"}"',
+    )
+    _write_executable(rollback_path, rollback)
+
+    unit_target = (
+        tmp_path
+        / "etc"
+        / "systemd"
+        / "system"
+        / "trader-v3-controlplane.service"
+    )
+    unit_target.parent.mkdir(parents=True)
+    unit_target.write_text("deployed unit\n", encoding="utf-8")
+    backup_relative = Path("files") / str(unit_target).lstrip("/")
+    if original_state == "absent":
+        index_line = f"absent\t{unit_target}\t-\n"
+    else:
+        backup_unit = backup_root / backup_relative
+        backup_unit.parent.mkdir(parents=True)
+        backup_unit.write_text("original unit\n", encoding="utf-8")
+        index_line = (
+            f"present\t{unit_target}\t{backup_relative.as_posix()}\n"
+        )
+    (backup_root / "index.tsv").write_text(index_line, encoding="utf-8")
+    (backup_root / "SHA256SUMS").write_text("", encoding="utf-8")
+    (backup_root / "control-plane-unit-state.txt").write_text(
+        f"{original_state}\n",
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "fake-bin"
+    systemctl_log = tmp_path / f"systemctl-{original_state}.log"
+    fake_state = tmp_path / f"unit-state-{original_state}.txt"
+    fake_state.write_text(f"{original_state}\n", encoding="utf-8")
+    _write_executable(
+        fake_bin / "systemctl",
+        """#!/usr/bin/env bash
+set -eu
+command="$1"
+shift
+printf '%s' "$command" >>"$SYSTEMCTL_LOG"
+if [ "$#" -gt 0 ]; then
+  printf ' %s' "$*" >>"$SYSTEMCTL_LOG"
+fi
+printf '\\n' >>"$SYSTEMCTL_LOG"
+case "$command" in
+  enable)
+    printf 'enabled\\n' >"$FAKE_UNIT_STATE_FILE"
+    ;;
+  disable)
+    printf 'disabled\\n' >"$FAKE_UNIT_STATE_FILE"
+    ;;
+  is-enabled)
+    state="$(cat "$FAKE_UNIT_STATE_FILE")"
+    printf '%s\\n' "$state"
+    [ "$state" = "enabled" ]
+    ;;
+  start|is-active)
+    state="$(cat "$FAKE_UNIT_STATE_FILE")"
+    for argument in "$@"; do
+      if [ "$argument" = "trader-v3-controlplane.service" ] \
+        && [ "$state" = "absent" ]; then
+        exit 9
+      fi
+    done
+    ;;
+  show)
+    printf '4242\\n'
+    ;;
+esac
+""",
+    )
+    _write_executable(
+        fake_bin / "flock",
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    _write_executable(
+        fake_bin / "sha256sum",
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    _write_executable(
+        trader_root / ".venv-cp" / "bin" / "python",
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    _write_executable(
+        trader_root / "recreate-trader-v3-node-a.sh",
+        (
+            "#!/usr/bin/env bash\n"
+            "# NAUTILUS_INITIAL_TRADING_STATE=HALTED\n"
+            "exit 0\n"
+        ),
+    )
+
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["SYSTEMCTL_LOG"] = str(systemctl_log)
+    environment["FAKE_UNIT_STATE_FILE"] = str(fake_state)
+    result = subprocess.run(
+        ["bash", str(rollback_path)],
+        cwd=trader_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    commands = systemctl_log.read_text(encoding="utf-8").splitlines()
+    restored_state = fake_state.read_text(encoding="utf-8").strip()
+    return result, commands, unit_target, restored_state
 
 
 def test_deploy_script_is_account_a_only_and_never_auto_resumes() -> None:
@@ -135,42 +271,97 @@ def test_deploy_script_keeps_lock_backup_and_precise_rollback() -> None:
     assert 'backup_target "$RECREATE_TARGET"' in text
     assert 'backup_target "$DEPLOYED_COMMIT_TARGET"' in text
     assert 'backup_target "$CONTROL_PLANE_UNIT_TARGET"' in text
+    assert 'CONTROL_PLANE_UNIT_STATE_FILE="$BACKUP_ROOT/' in text
+    assert "control-plane-unit-state.txt" in text
     assert 'docker inspect "$NODE_CONTAINER" >' in text
     assert 'printf \'absent\\t%s\\t-\\n\'' in text
     assert 'echo "ROLLBACK: bash $ROLLBACK_PATH"' in text
     assert 'cat >"$ROLLBACK_PATH"' in text
     assert 'rm -rf -- "$target"' in text
     assert text.count("systemctl daemon-reload") == 2
-    assert text.count('systemctl enable "$CONTROL_PLANE_UNIT"') == 2
-    assert text.count(
-        'systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT"'
-    ) == 2
-
     rollback_start = text.index("cat >\"$ROLLBACK_PATH\" <<'ROLLBACK'")
     rollback_end = text.index("\nROLLBACK", rollback_start)
     rollback = text[rollback_start:rollback_end]
     daemon_reload = rollback.index("systemctl daemon-reload")
-    control_plane_enable = rollback.index(
-        'systemctl enable "$CONTROL_PLANE_UNIT"',
+    exchange_state_start = rollback.index(
+        'systemctl start "$EXCHANGE_STATE_UNIT"',
         daemon_reload,
     )
-    control_plane_enabled = rollback.index(
-        'systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT"',
-        control_plane_enable,
-    )
-    control_plane_start = rollback.index(
-        'systemctl start "$CONTROL_PLANE_UNIT"',
-        control_plane_enabled,
-    )
-    control_plane_active = rollback.index(
-        'systemctl is-active --quiet "$CONTROL_PLANE_UNIT"',
-        control_plane_start,
+    restore_state_case = rollback.index(
+        'case "$CONTROL_PLANE_UNIT_STATE" in',
+        exchange_state_start,
     )
 
-    assert daemon_reload < control_plane_enable
-    assert control_plane_enable < control_plane_enabled
-    assert control_plane_enabled < control_plane_start
-    assert control_plane_start < control_plane_active
+    assert daemon_reload < exchange_state_start < restore_state_case
+
+
+def test_deploy_snapshots_control_plane_unit_state_before_install() -> None:
+    text = _text()
+
+    state_snapshot = text.index(
+        'printf \'%s\\n\' "$CONTROL_PLANE_UNIT_STATE"'
+    )
+    backup_unit = text.index(
+        'backup_target "$CONTROL_PLANE_UNIT_TARGET"',
+        state_snapshot,
+    )
+    unit_install = text.index(
+        'install -D -m 0644 "$CONTROL_PLANE_UNIT_SOURCE" '
+        '"$CONTROL_PLANE_UNIT_TARGET"',
+        backup_unit,
+    )
+
+    assert state_snapshot < backup_unit < unit_install
+
+
+def test_rollback_restores_present_enabled_control_plane(
+    tmp_path: Path,
+) -> None:
+    result, commands, unit_target, restored_state = _run_rollback(
+        tmp_path,
+        original_state="enabled",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert unit_target.read_text(encoding="utf-8") == "original unit\n"
+    assert restored_state == "enabled"
+    assert "enable trader-v3-controlplane.service" in commands
+    assert "start trader-v3-controlplane.service" in commands
+    assert "start trader-v3-exchange-state.service" in commands
+
+
+def test_rollback_restores_present_disabled_control_plane(
+    tmp_path: Path,
+) -> None:
+    result, commands, unit_target, restored_state = _run_rollback(
+        tmp_path,
+        original_state="disabled",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert unit_target.read_text(encoding="utf-8") == "original unit\n"
+    assert restored_state == "disabled"
+    assert "disable trader-v3-controlplane.service" in commands
+    assert "enable trader-v3-controlplane.service" not in commands
+    assert "start trader-v3-controlplane.service" in commands
+    assert "start trader-v3-exchange-state.service" in commands
+
+
+def test_rollback_restores_absent_control_plane_without_starting_it(
+    tmp_path: Path,
+) -> None:
+    result, commands, unit_target, restored_state = _run_rollback(
+        tmp_path,
+        original_state="absent",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not unit_target.exists()
+    assert restored_state == "absent"
+    assert "enable trader-v3-controlplane.service" not in commands
+    assert "disable trader-v3-controlplane.service" not in commands
+    assert "start trader-v3-controlplane.service" not in commands
+    assert "start trader-v3-exchange-state.service" in commands
 
 
 def test_deploy_script_installs_versioned_controlplane_unit() -> None:

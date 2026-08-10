@@ -98,7 +98,7 @@ def test_stream_stops_before_emitting_after_client_disconnect(
     assert request.calls == 1
 
 
-def test_caddy_v1_stream_rejects_missing_injected_reader_bearer(
+def test_direct_stream_requires_reader_bearer(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("SYSTEM_OBSERVER_TOKEN", "observer-token")

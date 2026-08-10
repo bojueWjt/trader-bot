@@ -21,6 +21,7 @@ POSTGRES_DB="${POSTGRES_DB:-trader}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_ROOT="$T/backups/account-stall-availability-$STAMP"
 ROLLBACK_PATH="$BACKUP_ROOT/rollback.sh"
+CONTROL_PLANE_UNIT_STATE_FILE="$BACKUP_ROOT/control-plane-unit-state.txt"
 MANIFEST="$STAGING/bundle-manifest.json"
 CHECKSUMS="$STAGING/SHA256SUMS"
 PATCH_DIR="$T/container-patches"
@@ -326,6 +327,23 @@ mkdir -p "$BACKUP_ROOT/files"
 chmod 0700 "$BACKUP_ROOT"
 : >"$BACKUP_ROOT/index.tsv"
 
+CONTROL_PLANE_UNIT_STATE="absent"
+if [ -e "$CONTROL_PLANE_UNIT_TARGET" ] \
+  || [ -L "$CONTROL_PLANE_UNIT_TARGET" ]; then
+  CONTROL_PLANE_UNIT_STATE="$(
+    systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
+  )"
+  case "$CONTROL_PLANE_UNIT_STATE" in
+    enabled|disabled)
+      ;;
+    *)
+      die "unsupported control-plane unit state: $CONTROL_PLANE_UNIT_STATE"
+      ;;
+  esac
+fi
+printf '%s\n' "$CONTROL_PLANE_UNIT_STATE" \
+  >"$CONTROL_PLANE_UNIT_STATE_FILE"
+
 
 backup_target() {
   local target="$1"
@@ -394,6 +412,7 @@ RECREATE_TARGET="$T/recreate-$NODE_CONTAINER.sh"
 RECORDER_TARGET="$T/services/control-plane/tools/exchange_state_recorder.py"
 RECORDER_VERIFIER="$BACKUP_ROOT/verify-exchange-state-recorder.py"
 RECORDER_WATERMARK="$BACKUP_ROOT/rollback-exchange-state-watermark.txt"
+CONTROL_PLANE_UNIT_STATE_FILE="$BACKUP_ROOT/control-plane-unit-state.txt"
 
 exec 9>"$LOCK"
 flock -n 9 || {
@@ -405,6 +424,20 @@ flock -n 9 || {
   cd "$BACKUP_ROOT"
   sha256sum -c SHA256SUMS >/dev/null
 )
+
+IFS= read -r CONTROL_PLANE_UNIT_STATE \
+  <"$CONTROL_PLANE_UNIT_STATE_FILE" || {
+  echo "FATAL: control-plane unit state snapshot is unreadable" >&2
+  exit 1
+}
+case "$CONTROL_PLANE_UNIT_STATE" in
+  enabled|disabled|absent)
+    ;;
+  *)
+    echo "FATAL: invalid control-plane unit state snapshot" >&2
+    exit 1
+    ;;
+esac
 
 systemctl stop "$CONTROL_PLANE_UNIT" "$EXCHANGE_STATE_UNIT"
 "$T/.venv-cp/bin/python" "$RECORDER_VERIFIER" capture \
@@ -436,12 +469,37 @@ while IFS=$'\t' read -r status target backup_relative; do
 done <"$INDEX"
 
 systemctl daemon-reload
-systemctl enable "$CONTROL_PLANE_UNIT"
-systemctl is-enabled --quiet "$CONTROL_PLANE_UNIT"
-systemctl start "$CONTROL_PLANE_UNIT"
-systemctl is-active --quiet "$CONTROL_PLANE_UNIT"
 systemctl start "$EXCHANGE_STATE_UNIT"
 systemctl is-active --quiet "$EXCHANGE_STATE_UNIT"
+case "$CONTROL_PLANE_UNIT_STATE" in
+  enabled)
+    systemctl enable "$CONTROL_PLANE_UNIT"
+    RESTORED_CONTROL_PLANE_UNIT_STATE="$(
+      systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
+    )"
+    [ "$RESTORED_CONTROL_PLANE_UNIT_STATE" = "enabled" ] || {
+      echo "FATAL: restored control-plane unit is not enabled" >&2
+      exit 1
+    }
+    systemctl start "$CONTROL_PLANE_UNIT"
+    systemctl is-active --quiet "$CONTROL_PLANE_UNIT"
+    ;;
+  disabled)
+    systemctl disable "$CONTROL_PLANE_UNIT"
+    RESTORED_CONTROL_PLANE_UNIT_STATE="$(
+      systemctl is-enabled "$CONTROL_PLANE_UNIT" 2>/dev/null || true
+    )"
+    [ "$RESTORED_CONTROL_PLANE_UNIT_STATE" = "disabled" ] || {
+      echo "FATAL: restored control-plane unit is not disabled" >&2
+      exit 1
+    }
+    systemctl start "$CONTROL_PLANE_UNIT"
+    systemctl is-active --quiet "$CONTROL_PLANE_UNIT"
+    ;;
+  absent)
+    echo "control-plane unit was absent before deployment; start skipped"
+    ;;
+esac
 EXCHANGE_STATE_PID="$(
   systemctl show \
     --property=MainPID \
