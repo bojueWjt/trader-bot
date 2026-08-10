@@ -82,6 +82,26 @@ exit 0
 """,
     )
     _write_executable(
+        fake_bin / "ss",
+        """#!/usr/bin/env bash
+set -eu
+printf 'ss %s\n' "$*" >>"$COMMAND_LOG"
+case "${1:-}" in
+  -Ktn)
+    if [ "${FAKE_SS_KILL_FAIL:-0}" = "1" ]; then
+      exit 74
+    fi
+    rm -f "$FAKE_BOOTSTRAP_CLIENT_FILE"
+    ;;
+  *)
+    if [ -e "$FAKE_BOOTSTRAP_CLIENT_FILE" ]; then
+      printf '0 1024 127.0.0.1:8080 127.0.0.1:50062\n'
+    fi
+    ;;
+esac
+""",
+    )
+    _write_executable(
         fake_bin / "install",
         """#!/usr/bin/env bash
 set -eu
@@ -395,6 +415,8 @@ def _prepare_harness(
 
     fake_state = tmp_path / "fake-state"
     fake_state.mkdir()
+    bootstrap_client_file = fake_state / "bootstrap-client"
+    bootstrap_client_file.touch()
     active_file = fake_state / "active"
     if active:
         active_file.touch()
@@ -421,6 +443,7 @@ def _prepare_harness(
             "FAKE_VENDOR_FRAGMENT": vendor_fragment,
             "FAKE_WANTS_LINK": str(wants_link),
             "FAKE_ACTIVE_FILE": str(active_file),
+            "FAKE_BOOTSTRAP_CLIENT_FILE": str(bootstrap_client_file),
             "FAKE_SSE_ACTIVE_FILE": str(fake_state / "sse-active"),
             "FAKE_SSE_PID_FILE": str(fake_state / "sse.pid"),
             "FAKE_RESTART_COUNT_FILE": str(fake_state / "restart-count"),
@@ -435,6 +458,7 @@ def _prepare_harness(
         "wants_link": wants_link,
         "vendor_fragment": vendor_fragment,
         "active_file": active_file,
+        "bootstrap_client_file": bootstrap_client_file,
         "restart_saw_sse": fake_state / "restart-saw-sse",
         "restart_count": fake_state / "restart-count",
         "command_log": command_log,
@@ -542,6 +566,9 @@ def test_success_holds_caddy_sse_during_restart_and_deploys_two_files(
     restart_count = harness["restart_count"]
     assert isinstance(restart_count, Path)
     assert restart_count.read_text(encoding="utf-8").strip() == "2"
+    bootstrap_client_file = harness["bootstrap_client_file"]
+    assert isinstance(bootstrap_client_file, Path)
+    assert not bootstrap_client_file.exists()
     command_log = harness["command_log"]
     assert isinstance(command_log, Path)
     commands = command_log.read_text(encoding="utf-8")
@@ -550,6 +577,13 @@ def test_success_holds_caddy_sse_during_restart_and_deploys_two_files(
     assert commands.count(
         "systemctl restart trader-v3-controlplane.service"
     ) == 2
+    drain_index = commands.index(
+        "ss -Ktn state established ( sport = :8080 )"
+    )
+    restart_index = commands.index(
+        "systemctl restart trader-v3-controlplane.service"
+    )
+    assert drain_index < restart_index
     assert "journalctl -u trader-v3-controlplane.service" in commands
     assert "Caddy SSE hold did not close during graceful restart" in (
         SCRIPT.read_text(encoding="utf-8")
@@ -779,6 +813,29 @@ def test_restart_must_gracefully_close_the_held_sse(
     read_target = harness["read_target"]
     assert isinstance(read_target, Path)
     assert read_target.read_bytes() == old_read
+
+
+def test_bootstrap_client_drain_failure_rolls_back(
+    tmp_path: Path,
+) -> None:
+    harness = _prepare_harness(tmp_path)
+    environment = harness["env"]
+    assert isinstance(environment, dict)
+    environment["FAKE_SS_KILL_FAIL"] = "1"
+    old_read = _old_read_api()
+
+    result = _run_script(harness)
+
+    assert result.returncode != 0
+    assert "automatic rollback completed" in result.stderr
+    read_target = harness["read_target"]
+    assert isinstance(read_target, Path)
+    assert read_target.read_bytes() == old_read
+    command_log = harness["command_log"]
+    assert isinstance(command_log, Path)
+    commands = command_log.read_text(encoding="utf-8")
+    assert "ss -Ktn state established ( sport = :8080 )" in commands
+    assert "systemctl restart trader-v3-controlplane.service" not in commands
 
 
 def test_script_has_valid_bash_syntax() -> None:

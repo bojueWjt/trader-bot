@@ -132,6 +132,25 @@ PY
 }
 
 
+drain_control_plane_clients() {
+  local connections
+  connections="$(
+    ss -Htn state established '( sport = :8080 )' || true
+  )"
+  if [ -z "$connections" ]; then
+    return
+  fi
+  ss -Ktn state established '( sport = :8080 )' >/dev/null
+  connections="$(
+    ss -Htn state established '( sport = :8080 )' || true
+  )"
+  if [ -n "$connections" ]; then
+    die "control-plane clients remain connected before bootstrap restart"
+  fi
+  echo "== drained existing control-plane client connections"
+}
+
+
 start_sse_hold() {
   local attempt=0
   : >"$SSE_HEADERS"
@@ -285,7 +304,7 @@ trap on_err ERR
 
 for command in \
   awk cp curl date flock grep id install journalctl mkdir mktemp \
-  python3 rm sha256sum sleep systemctl tr; do
+  python3 rm sha256sum sleep ss systemctl tr; do
   command -v "$command" >/dev/null \
     || die "required command missing: $command"
 done
@@ -687,6 +706,7 @@ import time
 print(f"@{time.time():.6f}")
 PY
 )"
+drain_control_plane_clients
 restart_control_plane_bounded "bootstrap"
 systemctl is-active --quiet "$UNIT_NAME" \
   || die "$UNIT_NAME is inactive after bootstrap restart"
