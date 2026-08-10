@@ -12,6 +12,7 @@ from typing import Any
 
 SCHEMA_VERSION = "1.0"
 AMBIGUOUS_APPLY_ERROR = "ambiguous_apply_after_restart"
+DEFAULT_MAX_BYTES = 16 * 1024 * 1024
 
 
 class CommandJournalPhase(str, Enum):
@@ -212,8 +213,16 @@ class DurableCommandJournal(InMemoryCommandJournal):
         *,
         account_id: str,
         node_id: str,
+        max_bytes: int = DEFAULT_MAX_BYTES,
     ) -> None:
+        if (
+            isinstance(max_bytes, bool)
+            or not isinstance(max_bytes, int)
+            or max_bytes <= 0
+        ):
+            raise ValueError("max_bytes must be a positive integer")
         self._path = Path(path)
+        self._max_bytes = max_bytes
         self._account_id = _required_text(
             "account_id",
             account_id,
@@ -227,9 +236,15 @@ class DurableCommandJournal(InMemoryCommandJournal):
     def path(self) -> Path:
         return self._path
 
+    @property
+    def max_bytes(self) -> int:
+        return self._max_bytes
+
     def _load(self) -> None:
         if not self._path.exists():
             return
+        if self._path.stat().st_size > self._max_bytes:
+            raise ValueError("command journal exceeds max_bytes")
         raw = json.loads(self._path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("command journal must be an object")
@@ -265,6 +280,17 @@ class DurableCommandJournal(InMemoryCommandJournal):
                 )
             },
         }
+        serialized = (
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        encoded = serialized.encode("utf-8")
+        if len(encoded) > self._max_bytes:
+            raise ValueError("command journal exceeds max_bytes")
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{self._path.name}.",
             suffix=".tmp",
@@ -272,14 +298,8 @@ class DurableCommandJournal(InMemoryCommandJournal):
             text=True,
         )
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                json.dump(
-                    payload,
-                    tmp,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                tmp.write("\n")
+            with os.fdopen(fd, "wb") as tmp:
+                tmp.write(encoded)
                 tmp.flush()
                 os.fsync(tmp.fileno())
             os.replace(tmp_name, self._path)

@@ -6,19 +6,7 @@ from typing import Any, Callable
 
 def strict_runtime_resources() -> dict[str, Any]:
     return {
-        "schema_version": "trader-v3-runtime-resources/v1",
-        "redis": {
-            "stream_max_entries": 100_000,
-            "stream_max_bytes": 64 * 1024 * 1024,
-            "total_stream_max_bytes": 256 * 1024 * 1024,
-            "scan_count": 500,
-            "sample_interval_seconds": 5.0,
-            "critical_window_seconds": 30.0,
-            "thread_join_timeout_seconds": 5.0,
-            "memory_warning_ratio": 0.60,
-            "memory_degraded_ratio": 0.75,
-            "memory_critical_ratio": 0.85,
-        },
+        "schema_version": "trader-v3-runtime-resources/v2",
         "command_journal": {
             "max_bytes": 16 * 1024 * 1024,
         },
@@ -41,21 +29,6 @@ def strict_runtime_resources() -> dict[str, Any]:
             "task_timeout_seconds": 1.0,
             "shutdown_timeout_seconds": 2.0,
         },
-        "terminal_exchange": {
-            "queue_capacity": 64,
-            "result_queue_capacity": 128,
-            "degraded_ratio": 0.8,
-            "total_deadline_seconds": 6.0,
-            "shutdown_timeout_seconds": 7.0,
-        },
-        "reporter_workers": {
-            "denial_queue_capacity": 256,
-            "protection_event_queue_capacity": 1024,
-            "live_canary_risk_queue_capacity": 128,
-            "incident_queue_capacity": 64,
-            "task_timeout_seconds": 5.0,
-            "shutdown_timeout_seconds": 5.0,
-        },
     }
 
 
@@ -74,10 +47,6 @@ class InvalidRuntimeResourceCase:
 def strict_invalid_cases() -> list[InvalidRuntimeResourceCase]:
     leaves = [
         ("schema_version",),
-        *[
-            ("redis", field)
-            for field in strict_runtime_resources()["redis"]
-        ],
         ("command_journal", "max_bytes"),
         *[
             ("control_plane_session", field)
@@ -86,14 +55,6 @@ def strict_invalid_cases() -> list[InvalidRuntimeResourceCase]:
         *[
             ("strategy_durable_io", field)
             for field in strict_runtime_resources()["strategy_durable_io"]
-        ],
-        *[
-            ("terminal_exchange", field)
-            for field in strict_runtime_resources()["terminal_exchange"]
-        ],
-        *[
-            ("reporter_workers", field)
-            for field in strict_runtime_resources()["reporter_workers"]
         ],
     ]
     cases = [
@@ -113,7 +74,7 @@ def strict_invalid_cases() -> list[InvalidRuntimeResourceCase]:
         )
         for path in wrong_type_paths
     )
-    assert len(cases) == 56
+    assert len(cases) == 33
     return cases
 
 

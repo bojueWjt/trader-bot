@@ -22,7 +22,7 @@ from tests.runtime_resource_fixtures import (
     strict_invalid_cases(),
     ids=lambda case: case.case_id,
 )
-def test_live_strict_rejects_the_56_case_invalid_matrix(case) -> None:
+def test_live_strict_rejects_the_invalid_matrix(case) -> None:
     with pytest.raises(
         RuntimeResourceContractError,
         match=case.expected_path,
@@ -44,24 +44,33 @@ def test_live_strict_normalizes_the_complete_contract() -> None:
     assert parsed.to_dict() == raw
 
 
+@pytest.mark.parametrize(
+    "policy",
+    [None, "live_strict", "compat", object()],
+)
+def test_policy_must_be_a_runtime_resource_policy(policy: object) -> None:
+    with pytest.raises(TypeError, match="RuntimeResourcePolicy"):
+        parse_runtime_resources(
+            strict_runtime_resources(),
+            policy=policy,  # type: ignore[arg-type]
+        )
+
+
 def test_compat_materializes_defaults_when_contract_is_absent() -> None:
     parsed = parse_runtime_resources(
         ABSENT,
         policy=RuntimeResourcePolicy.COMPAT,
     )
 
-    assert parsed.schema_version == "trader-v3-runtime-resources/v1"
-    assert parsed.redis.memory_warning_ratio == 0.60
+    assert parsed.schema_version == "trader-v3-runtime-resources/v2"
+    assert parsed.command_journal.max_bytes == 16 * 1024 * 1024
     assert parsed.strategy_durable_io.queue_capacity == 128
-    assert parsed.reporter_workers.incident_queue_capacity == 64
 
 
 def test_compat_uses_matching_legacy_session() -> None:
     raw = strict_runtime_resources()
     session = raw.pop("control_plane_session")
     raw.pop("strategy_durable_io")
-    raw.pop("terminal_exchange")
-    raw.pop("reporter_workers")
 
     parsed = parse_runtime_resources(
         raw,
@@ -92,9 +101,9 @@ def test_duplicate_session_rejects_drift() -> None:
     ("group", "field"),
     [
         (False, "unsupported_root"),
-        ("redis", "unsupported_redis"),
         ("command_journal", "unsupported_journal"),
         ("control_plane_session", "unsupported_session"),
+        ("strategy_durable_io", "unsupported_strategy"),
     ],
 )
 def test_allowed_fields_are_owned_by_the_shared_contract(
@@ -112,6 +121,26 @@ def test_allowed_fields_are_owned_by_the_shared_contract(
     with pytest.raises(
         RuntimeResourceContractError,
         match=field,
+    ):
+        parse_runtime_resources(
+            raw,
+            policy=RuntimeResourcePolicy.LIVE_STRICT,
+        )
+
+
+@pytest.mark.parametrize(
+    "group",
+    ["redis", "terminal_exchange", "reporter_workers"],
+)
+def test_application_contract_rejects_resources_without_runtime_consumers(
+    group: str,
+) -> None:
+    raw = strict_runtime_resources()
+    raw[group] = {}
+
+    with pytest.raises(
+        RuntimeResourceContractError,
+        match=group,
     ):
         parse_runtime_resources(
             raw,

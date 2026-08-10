@@ -88,6 +88,26 @@ class _ShortTimeoutStrategy(_RecordingStrategy):
     _DURABLE_IO_TASK_TIMEOUT_SECONDS = 0.02
 
 
+def test_strategy_uses_release_bound_durable_io_resources(
+    tmp_path: Path,
+) -> None:
+    strategy = IntentExecutionStrategy(
+        IntentExecutionStrategyConfig(
+            account_id="account-a",
+            node_id="node-a",
+            trading_state="HALTED",
+            durable_io_queue_capacity=7,
+            durable_io_task_timeout_seconds=0.25,
+            durable_io_shutdown_timeout_seconds=0.5,
+        )
+    )
+
+    assert strategy.durable_io_cleanup_worker().snapshot().queue_capacity == 7
+    assert strategy._durable_io_mailbox.maxsize == 7
+    assert strategy._durable_io_task_timeout_seconds == 0.25
+    assert strategy._durable_io_shutdown_timeout_seconds == 0.5
+
+
 def test_blocked_protection_stash_write_returns_immediately_and_actor_progress_continues(
     tmp_path: Path,
 ) -> None:

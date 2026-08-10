@@ -46,8 +46,10 @@ def test_non_live_node_materializes_compatibility_defaults(
 
     config = load_node_config(path)
 
-    assert config.runtime_resources.redis.memory_warning_ratio == 0.60
-    assert config.runtime_resources.terminal_exchange.queue_capacity == 64
+    assert config.runtime_resources.command_journal.max_bytes == (
+        16 * 1024 * 1024
+    )
+    assert config.runtime_resources.strategy_durable_io.queue_capacity == 128
 
 
 @pytest.mark.parametrize(

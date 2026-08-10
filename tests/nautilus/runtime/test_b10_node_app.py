@@ -174,6 +174,18 @@ class NodeAppAssemblyTest(unittest.TestCase):
             ["IntentExecutionStrategy"],
         )
         strategy = node.trader.strategies[0]
+        self.assertEqual(
+            strategy.config.durable_io_queue_capacity,
+            runtime.config.runtime_resources.strategy_durable_io.queue_capacity,
+        )
+        self.assertEqual(
+            strategy.config.durable_io_task_timeout_seconds,
+            runtime.config.runtime_resources.strategy_durable_io.task_timeout_seconds,
+        )
+        self.assertEqual(
+            strategy.config.durable_io_shutdown_timeout_seconds,
+            runtime.config.runtime_resources.strategy_durable_io.shutdown_timeout_seconds,
+        )
         self.assertIs(
             strategy.durable_io_fatal_handler,
             fatal_callback,
@@ -207,6 +219,10 @@ class NodeAppAssemblyTest(unittest.TestCase):
         actor_cleanup_workers = tuple(
             actor.runtime_cleanup_worker()
             for actor in node.trader.actors
+        )
+        self.assertEqual(
+            node.trader.actors[-1]._command_journal.max_bytes,
+            runtime.config.runtime_resources.command_journal.max_bytes,
         )
         self.assertEqual(
             tuple(runtime.background_workers[-3:]),
@@ -558,11 +574,21 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
             node_id: str = "",
             trading_state: str = "HALTED",
             existing_intent_ids: tuple[str, ...] = (),
+            durable_io_queue_capacity: int = 128,
+            durable_io_task_timeout_seconds: float = 1.0,
+            durable_io_shutdown_timeout_seconds: float = 2.0,
         ) -> None:
             self.account_id = account_id
             self.node_id = node_id
             self.trading_state = trading_state
             self.existing_intent_ids = existing_intent_ids
+            self.durable_io_queue_capacity = durable_io_queue_capacity
+            self.durable_io_task_timeout_seconds = (
+                durable_io_task_timeout_seconds
+            )
+            self.durable_io_shutdown_timeout_seconds = (
+                durable_io_shutdown_timeout_seconds
+            )
 
     class IntentExecutionStrategy:
         def __init__(self, config: Any) -> None:

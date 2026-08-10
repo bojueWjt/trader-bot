@@ -1184,6 +1184,23 @@ def test_session_command_restart_recovers_ack_without_reapplying(
     )
 
 
+def test_durable_command_journal_enforces_serialized_byte_capacity(
+    tmp_path: Path,
+) -> None:
+    journal = DurableCommandJournal(
+        tmp_path / "command-journal.json",
+        account_id="account-a",
+        node_id="node-a",
+        max_bytes=180,
+    )
+
+    with pytest.raises(ValueError, match="max_bytes"):
+        journal.begin("command-" + ("x" * 128), "halt")
+
+    assert journal.recover() == ()
+    assert not journal.path.exists()
+
+
 def test_session_command_restart_acks_ambiguous_apply_without_replay(
     tmp_path: Path,
 ) -> None:

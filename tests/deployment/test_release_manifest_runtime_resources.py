@@ -42,16 +42,44 @@ def test_release_manifest_normalizes_with_the_shared_contract() -> None:
     assert release_manifest.runtime_resources_sha256(raw)
 
 
-def test_transition_release_carries_the_shared_contract() -> None:
-    mounts = {
-        bundle_name: mount_target
-        for bundle_name, _source, mount_target in (
-            release_manifest.TRANSITION_RUNTIME_FILES
-        )
+def test_manifest_api_is_dependency_closed_for_phase_b() -> None:
+    assert set(release_manifest.__all__) == {
+        "CONFIG_MOUNT_TARGET",
+        "RUNTIME_RESOURCES_SCHEMA_VERSION",
+        "ReleaseManifestError",
+        "build_node_config_artifacts",
+        "canonical_json_bytes",
+        "node_config_sha256",
+        "node_config_value_sha256",
+        "normalize_node_config",
+        "runtime_resources_sha256",
     }
+    assert not hasattr(release_manifest, "TRANSITION_RUNTIME_FILES")
+    assert not hasattr(release_manifest, "augment_transition_bundle")
+    assert not hasattr(release_manifest, "build_release_manifest")
+    assert not hasattr(release_manifest, "capture_release_manifest")
 
-    assert mounts["runtime_resource_contract.py"] == (
-        "/app/packages/runtime_resource_contract/__init__.py"
+
+def test_node_config_hash_uses_normalized_runtime_resources() -> None:
+    first = {
+        "account_id": "account-a",
+        "node_id": "node-a",
+        "runtime_resources": strict_runtime_resources(),
+    }
+    second = {
+        "account_id": "account-b",
+        "node_id": "node-b",
+        "runtime_resources": strict_runtime_resources(),
+    }
+    first["runtime_resources"]["control_plane_session"][
+        "operation_timeout_seconds"
+    ] = 15
+    second["runtime_resources"]["control_plane_session"][
+        "operation_timeout_seconds"
+    ] = 15.0
+
+    assert release_manifest.node_config_value_sha256(first) == (
+        release_manifest.node_config_value_sha256(second)
     )
 
 
@@ -91,4 +119,4 @@ def test_release_root_layout_can_import_the_shared_contract(
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "trader-v3-runtime-resources/v1"
+    assert result.stdout.strip() == "trader-v3-runtime-resources/v2"

@@ -4,6 +4,7 @@ import copy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 import pickle
 import re
@@ -48,6 +49,35 @@ from strategy.intent_execution_planner import (
     _authorization_source,
     _rounded_positive,
 )
+
+
+def _configured_positive_int(
+    value: Any,
+    *,
+    default: int,
+    field: str,
+) -> int:
+    if value == 0:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+    return value
+
+
+def _configured_positive_number(
+    value: Any,
+    *,
+    default: float,
+    field: str,
+) -> float:
+    if value == 0:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a positive number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{field} must be a positive number")
+    return number
 
 
 @dataclass(frozen=True)
@@ -207,6 +237,9 @@ try:  # pragma: no cover - Nautilus is unavailable on local Py3.14 dev hosts.
         node_id: str = ""
         trading_state: str = "HALTED"
         existing_intent_ids: tuple[str, ...] = ()
+        durable_io_queue_capacity: int = 0
+        durable_io_task_timeout_seconds: float = 0.0
+        durable_io_shutdown_timeout_seconds: float = 0.0
 
 except ImportError:  # pragma: no cover - local dev fallback without Nautilus
 
@@ -220,6 +253,9 @@ except ImportError:  # pragma: no cover - local dev fallback without Nautilus
         node_id: str = ""
         trading_state: str = "HALTED"
         existing_intent_ids: tuple[str, ...] = ()
+        durable_io_queue_capacity: int = 0
+        durable_io_task_timeout_seconds: float = 0.0
+        durable_io_shutdown_timeout_seconds: float = 0.0
 
 
 class IntentExecutionStrategy(Strategy):
@@ -266,6 +302,31 @@ class IntentExecutionStrategy(Strategy):
         except TypeError:
             super().__init__(config)
         self._processed_intent_ids: set[str] = set(config.existing_intent_ids)
+        self._durable_io_queue_capacity = _configured_positive_int(
+            getattr(config, "durable_io_queue_capacity", 0),
+            default=self._DURABLE_IO_QUEUE_CAPACITY,
+            field="durable_io_queue_capacity",
+        )
+        self._durable_io_task_timeout_seconds = _configured_positive_number(
+            getattr(config, "durable_io_task_timeout_seconds", 0.0),
+            default=self._DURABLE_IO_TASK_TIMEOUT_SECONDS,
+            field="durable_io_task_timeout_seconds",
+        )
+        configured_shutdown_timeout = getattr(
+            config,
+            "durable_io_shutdown_timeout_seconds",
+            0.0,
+        )
+        self._durable_io_shutdown_uses_class_default = (
+            configured_shutdown_timeout == 0
+        )
+        self._durable_io_shutdown_timeout_seconds = (
+            _configured_positive_number(
+                configured_shutdown_timeout,
+                default=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS,
+                field="durable_io_shutdown_timeout_seconds",
+            )
+        )
         self.denials: list[OrderDenied] = []
         self._trading_state_getter: Optional[Callable[[], Any]] = None
         self._denial_reporter: Optional[Callable[[Any, OrderDenied], None]] = None
@@ -331,7 +392,7 @@ class IntentExecutionStrategy(Strategy):
             dict[str, Any],
         ] = {}
         self._durable_io_mailbox: Queue[Any] = Queue(
-            maxsize=self._DURABLE_IO_QUEUE_CAPACITY
+            maxsize=self._durable_io_queue_capacity
         )
         self._external_cancel_result_mailbox: Queue[
             _ExchangeCancelResult
@@ -356,8 +417,8 @@ class IntentExecutionStrategy(Strategy):
         self._durable_io_worker = BoundedTaskWorker(
             f"{worker_name}.protection-stash-io",
             self._process_durable_io_task,
-            capacity=self._DURABLE_IO_QUEUE_CAPACITY,
-            task_timeout_seconds=self._DURABLE_IO_TASK_TIMEOUT_SECONDS,
+            capacity=self._durable_io_queue_capacity,
+            task_timeout_seconds=self._durable_io_task_timeout_seconds,
             on_overflow=self._request_durable_io_halt,
             on_error=self._request_durable_io_halt,
             on_timeout=self._request_durable_io_halt,
@@ -3727,15 +3788,18 @@ class IntentExecutionStrategy(Strategy):
         self._opening_reconciliation_retry_scheduled = False
         for intent_key in tuple(self._entry_protection_stash):
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
+        shutdown_timeout = self._durable_io_shutdown_timeout_seconds
+        if self._durable_io_shutdown_uses_class_default:
+            shutdown_timeout = self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
         self._durable_io_worker.stop(
-            timeout_seconds=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
+            timeout_seconds=shutdown_timeout
         )
         self._external_io_cleanup_group.stop(
-            timeout_seconds=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
+            timeout_seconds=shutdown_timeout
         )
         self.drain_durable_io_mailbox(
             max_results=(
-                (self._DURABLE_IO_QUEUE_CAPACITY * 3) + 1
+                (self._durable_io_queue_capacity * 3) + 1
             )
         )
 

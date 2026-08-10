@@ -306,6 +306,9 @@ def build_nautilus_trading_node(
             ),
             account_id=runtime.config.account_id,
             node_id=runtime.config.node_id,
+            max_bytes=(
+                runtime.config.runtime_resources.command_journal.max_bytes
+            ),
         ),
         control_plane_session=session,
         manage_control_plane_session=False,
@@ -640,6 +643,15 @@ def _build_strategy_config(config: NodeConfig, lifecycle: Any) -> Any:
         account_id=config.account_id,
         node_id=config.node_id,
         trading_state="HALTED",
+        durable_io_queue_capacity=(
+            config.runtime_resources.strategy_durable_io.queue_capacity
+        ),
+        durable_io_task_timeout_seconds=(
+            config.runtime_resources.strategy_durable_io.task_timeout_seconds
+        ),
+        durable_io_shutdown_timeout_seconds=(
+            config.runtime_resources.strategy_durable_io.shutdown_timeout_seconds
+        ),
     )
     # Live Binance accounts here run in Hedge Mode: every order needs a positionSide,
     # which the exec client derives from a per-side position_id. The default (NETTING)
