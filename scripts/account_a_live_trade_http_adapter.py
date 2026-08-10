@@ -45,14 +45,31 @@ TERMINAL_ORDER_STATUSES = {
 SOFT_HTTP_STATUSES = {408, 425, 429}
 DURABLE_HTTP_FAILURE_RE = re.compile(
     r"(?:"
-    r"\b(?:intent|command|evidence)\s+store\s+unavailable\b|"
-    r"\bjournal\b|"
-    r"\boutbox\b|"
     r"\bfsync\b|"
-    r"\bdurab(?:le|ility)\b|"
+    r"\b(?:journal|outbox|intent|command|evidence)"
+    r"(?:[-_ ]store)?[-_ ]?"
+    r"(?:write|append|commit|fsync)[-_ ]?"
+    r"(?:failed|failure|error|unavailable)\b|"
+    r"\bdurab(?:le|ility)[-_ ]?"
+    r"(?:write|append|commit|failure|error)\b|"
     r"\bENOSPC\b|"
     r"\bno[-_ ]space\b|"
-    r"\bcapacity[-_ ]?(?:exhausted|full)\b"
+    r"\b(?:journal|outbox|store|disk)[-_ ]?"
+    r"capacity[-_ ]?(?:exhausted|full)\b"
+    r")",
+    re.IGNORECASE,
+)
+OWNERSHIP_IDENTITY_HTTP_FAILURE_RE = re.compile(
+    r"(?:"
+    r"\bownership(?:[-_ ]identity)?[-_ ]?"
+    r"(?:mismatch|conflict)\b|"
+    r"\bfenc(?:e|ing)(?:[-_ ](?:token|epoch|lease))?[-_ ]?"
+    r"(?:mismatch|conflict|lost|rejected|violation)\b|"
+    r"\bfencing[-_ ]lease[-_ ]lost\b|"
+    r"\bidentity[-_ ]?(?:mismatch|conflict)\b|"
+    r"\bwriter(?:[-_ ]identity)?[-_ ]?"
+    r"(?:mismatch|conflict)\b|"
+    r"\blease[-_ ]?(?:mismatch|conflict)\b"
     r")",
     re.IGNORECASE,
 )
@@ -314,10 +331,12 @@ class ControlPlaneClient:
                         "ownership/fencing conflict: "
                         f"HTTP {exc.code} {detail}"
                     ) from exc
-                if (
-                    500 <= exc.code <= 599
-                    and _is_durable_http_failure(detail)
-                ):
+                if _is_ownership_http_failure(detail):
+                    raise AdapterError(
+                        "ownership/fencing/identity conflict: "
+                        f"HTTP {exc.code} {detail}"
+                    ) from exc
+                if _is_durable_http_failure(detail):
                     raise AdapterError(
                         "durable control-plane failure: "
                         f"HTTP {exc.code} {detail}"
@@ -1457,12 +1476,32 @@ def _execution_summary(
     *,
     expected_client_order_id: str,
 ) -> dict[str, Decimal | str | bool]:
-    filled_quantity = Decimal(0)
-    average_fill_price = Decimal(0)
+    intent_identity_complete = True
+    intent_created_at: datetime | bool = False
+    intent = status.get("intent")
+    if not isinstance(intent, Mapping):
+        intent_identity_complete = False
+    else:
+        if intent.get("account_id") != ACCOUNT_ID:
+            intent_identity_complete = False
+        intent_instrument_id = str(
+            intent.get("instrument_id") or ""
+        ).strip().upper()
+        if _opening_instrument_symbol(intent_instrument_id) != SYMBOL:
+            intent_identity_complete = False
+        try:
+            intent_created_at = _timestamp_datetime(
+                intent.get("created_at")
+            )
+        except AdapterError:
+            intent_identity_complete = False
+    projected_filled_quantity = Decimal(0)
+    projected_average_fill_price = Decimal(0)
     order_quantity = Decimal(0)
     order_price = Decimal(0)
     order_status = "UNKNOWN"
     matched_order = False
+    projected_order_ids: set[str] = set()
     orders = status.get("orders")
     if isinstance(orders, list):
         for raw in orders:
@@ -1477,13 +1516,20 @@ def _execution_summary(
             ):
                 continue
             matched_order = True
+            projected_order_id = str(
+                raw.get("venue_order_id")
+                or raw.get("order_id")
+                or ""
+            ).strip()
+            if projected_order_id:
+                projected_order_ids.add(projected_order_id)
             candidate_quantity = _non_negative_decimal(
                 raw.get("filled_quantity"),
                 "filled_quantity",
             )
-            if candidate_quantity >= filled_quantity:
-                filled_quantity = candidate_quantity
-                average_fill_price = _non_negative_decimal(
+            if candidate_quantity >= projected_filled_quantity:
+                projected_filled_quantity = candidate_quantity
+                projected_average_fill_price = _non_negative_decimal(
                     raw.get("average_fill_price"),
                     "average_fill_price",
                 )
@@ -1500,8 +1546,6 @@ def _execution_summary(
                 ).upper()
     fees = Decimal(0)
     realized_pnl = Decimal(0)
-    order_filled_quantity = filled_quantity
-    order_average_fill_price = average_fill_price
     weighted_quote = Decimal(0)
     weighted_quantity = Decimal(0)
     matched_fill_event = False
@@ -1509,11 +1553,15 @@ def _execution_summary(
     commission_event_count = 0
     commission_currency_event_count = 0
     realized_pnl_event_count = 0
-    fill_identity_complete = True
+    fill_identity_complete = intent_identity_complete
     fill_details_complete = True
+    event_order_ids: set[str] = set()
     seen_trade_fingerprints: dict[
         str,
         tuple[
+            str,
+            str,
+            str,
             Decimal,
             Decimal,
             bool,
@@ -1543,6 +1591,37 @@ def _execution_summary(
             event_type = str(raw.get("event_type") or "")
             if event_type != "OrderFilled":
                 continue
+            try:
+                event_timestamp = _timestamp_datetime(
+                    raw.get("ts_event")
+                )
+            except AdapterError:
+                fill_identity_complete = False
+                continue
+            if (
+                intent_created_at is False
+                or event_timestamp < intent_created_at
+                or _timestamp_is_far_future(event_timestamp)
+            ):
+                fill_identity_complete = False
+                continue
+            instrument_id = str(
+                payload.get("instrument_id")
+                or raw.get("instrument_id")
+                or ""
+            ).strip().upper()
+            if _opening_instrument_symbol(instrument_id) != SYMBOL:
+                fill_identity_complete = False
+                continue
+            venue_order_id = str(
+                raw.get("venue_order_id")
+                or raw.get("order_id")
+                or ""
+            ).strip()
+            if venue_order_id:
+                event_order_ids.add(venue_order_id)
+            else:
+                fill_identity_complete = False
             last_quantity = _first_decimal(
                 payload,
                 ("last_qty", "quantity", "qty"),
@@ -1571,6 +1650,9 @@ def _execution_summary(
                 fill_identity_complete = False
             if trade_id:
                 fingerprint = (
+                    event_client_order_id,
+                    venue_order_id,
+                    instrument_id,
                     last_quantity,
                     last_price,
                     commission_present,
@@ -1601,19 +1683,37 @@ def _execution_summary(
                 weighted_quote += last_quantity * last_price
             else:
                 fill_details_complete = False
-    if filled_quantity == 0 and weighted_quantity > 0:
-        filled_quantity = weighted_quantity
-    if average_fill_price == 0 and weighted_quantity > 0:
-        average_fill_price = weighted_quote / weighted_quantity
     event_average_fill_price = Decimal(0)
     if weighted_quantity > 0:
         event_average_fill_price = weighted_quote / weighted_quantity
+    if len(event_order_ids) > 1:
+        fill_identity_complete = False
+    if (
+        projected_order_ids
+        and event_order_ids
+        and projected_order_ids != event_order_ids
+    ):
+        fill_identity_complete = False
+    filled_quantity = projected_filled_quantity
+    if weighted_quantity > 0:
+        filled_quantity = weighted_quantity
+    average_fill_price = projected_average_fill_price
+    if event_average_fill_price > 0:
+        average_fill_price = event_average_fill_price
+    if matched_fill_event and order_status == "UNKNOWN":
+        order_status = "FILLED"
     trade_ids = tuple(sorted(seen_trade_fingerprints))
     return {
         "filled_quantity": filled_quantity,
         "average_fill_price": average_fill_price,
-        "order_filled_quantity": order_filled_quantity,
-        "order_average_fill_price": order_average_fill_price,
+        "order_filled_quantity": filled_quantity,
+        "order_average_fill_price": average_fill_price,
+        "projected_order_filled_quantity": (
+            projected_filled_quantity
+        ),
+        "projected_order_average_fill_price": (
+            projected_average_fill_price
+        ),
         "order_quantity": order_quantity,
         "order_price": order_price,
         "fees": fees,
@@ -1647,6 +1747,8 @@ def _empty_execution_summary() -> dict[str, Decimal | str | bool]:
         "average_fill_price": Decimal(0),
         "order_filled_quantity": Decimal(0),
         "order_average_fill_price": Decimal(0),
+        "projected_order_filled_quantity": Decimal(0),
+        "projected_order_average_fill_price": Decimal(0),
         "order_quantity": Decimal(0),
         "order_price": Decimal(0),
         "fees": Decimal(0),
@@ -1671,8 +1773,6 @@ def _financial_summary_warning(
     label: str,
 ) -> str:
     gaps: list[str] = []
-    if summary.get("matched_order") is not True:
-        gaps.append("matching order")
     order_filled_quantity = Decimal(
         str(summary["order_filled_quantity"])
     )
@@ -1688,7 +1788,14 @@ def _financial_summary_warning(
     event_filled_quantity = Decimal(
         str(summary["event_filled_quantity"])
     )
-    if event_filled_quantity != order_filled_quantity:
+    projected_filled_quantity = Decimal(
+        str(summary["projected_order_filled_quantity"])
+    )
+    if (
+        summary.get("matched_order") is True
+        and projected_filled_quantity > 0
+        and event_filled_quantity != projected_filled_quantity
+    ):
         gaps.append("fill quantity reconciliation")
     if summary.get("fill_identity_complete") is not True:
         gaps.append("fill identity")
@@ -1697,14 +1804,20 @@ def _financial_summary_warning(
     event_average_fill_price = Decimal(
         str(summary["event_average_fill_price"])
     )
-    if event_average_fill_price != order_average_fill_price:
+    projected_average_fill_price = Decimal(
+        str(summary["projected_order_average_fill_price"])
+    )
+    if (
+        summary.get("matched_order") is True
+        and projected_average_fill_price > 0
+        and event_average_fill_price
+        != projected_average_fill_price
+    ):
         gaps.append("fill price reconciliation")
     if summary.get("commission_complete") is not True:
         gaps.append("commission coverage")
     if summary.get("commission_currency_complete") is not True:
         gaps.append("commission currency")
-    if summary.get("realized_pnl_complete") is not True:
-        gaps.append("realized PnL coverage")
     if not gaps:
         return ""
     missing = ", ".join(gaps)
@@ -1776,9 +1889,7 @@ def _round_trip_financial_warnings(
         str(close_summary["order_filled_quantity"])
     )
     quantities_comparable = (
-        open_summary.get("matched_order") is True
-        and close_summary.get("matched_order") is True
-        and open_quantity > 0
+        open_quantity > 0
         and close_quantity > 0
     )
     if quantities_comparable and open_quantity != close_quantity:
@@ -2159,10 +2270,18 @@ def _loss_monitor_evidence(
                 warnings.append(
                     f"node health telemetry stale: {node_field}"
                 )
-        if node_snapshot.get("loss_monitor_healthy") is False:
-            healthy = False
-        if node_snapshot.get("process_liveness") is False:
-            healthy = False
+        for field_name in (
+            "process_liveness",
+            "loss_monitor_healthy",
+        ):
+            health_value = node_snapshot.get(field_name)
+            if health_value is False:
+                healthy = False
+                continue
+            if health_value is not True:
+                warnings.append(
+                    f"node health telemetry missing: {field_name}"
+                )
         if node_progress_available:
             source_parts.append("node")
     observed_at = max(
@@ -2228,12 +2347,12 @@ def _enrichment_warning(
 
 
 def _is_ownership_error(error: AdapterError) -> bool:
+    description = str(error)
+    if OWNERSHIP_IDENTITY_HTTP_FAILURE_RE.search(description) is not None:
+        return True
     return re.search(
-        (
-            r"ownership|fencing|identity[-_ ]?conflict|"
-            r"unauthori[sz]ed|forbidden|HTTP (?:401|403|409)"
-        ),
-        str(error),
+        r"unauthori[sz]ed|forbidden|HTTP (?:401|403|409)",
+        description,
         re.IGNORECASE,
     ) is not None
 
@@ -2246,6 +2365,13 @@ def _is_soft_http_status(status_code: int) -> bool:
 
 def _is_durable_http_failure(detail: str) -> bool:
     return DURABLE_HTTP_FAILURE_RE.search(detail) is not None
+
+
+def _is_ownership_http_failure(detail: str) -> bool:
+    return (
+        OWNERSHIP_IDENTITY_HTTP_FAILURE_RE.search(detail)
+        is not None
+    )
 
 
 def _is_durable_control_plane_error(error: AdapterError) -> bool:

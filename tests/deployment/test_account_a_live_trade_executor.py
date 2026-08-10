@@ -762,6 +762,88 @@ def test_live_authorization_verifies_four_signed_documents(
     )
 
 
+def test_live_authorization_allows_expired_documents_for_evidence_recovery(
+    tmp_path: Path,
+) -> None:
+    verifier = FakeSignatureVerifier()
+    paths = _write_authorization_files(
+        tmp_path,
+        signed=True,
+    )
+    expired_now = NOW + timedelta(hours=2)
+
+    with _operation_lock(tmp_path) as operation_lock:
+        authorization = executor.load_authorization(
+            paths,
+            execute_live=True,
+            signature_verifier=verifier,
+            operation_lock=operation_lock,
+            now=expired_now,
+            allow_expired=True,
+        )
+
+    assert authorization.expires_at < expired_now
+    assert authorization.signatures_verified is True
+    assert any(
+        "EVIDENCE_RECOVERY_EXPIRED_AUTHORIZATION" in warning
+        for warning in authorization.warnings
+    )
+
+
+def test_evidence_recovery_gate_rejects_symlinked_output_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger_path = (tmp_path / "protected-ledger.json").resolve()
+    ledger_path.write_bytes(b'{"sentinel":"unchanged"}\n')
+    monkeypatch.setattr(
+        executor,
+        "DEFAULT_LIVE_PERMIT_LEDGER_PATH",
+        ledger_path,
+    )
+    authorization = _authorization(tmp_path)
+    authorization = replace(
+        authorization,
+        release=replace(
+            authorization.release,
+            permit_store_path=str(ledger_path),
+        ),
+    )
+    real_parent = tmp_path / "real-evidence-parent"
+    real_parent.mkdir(mode=0o700)
+    symlink_parent = tmp_path / "linked-evidence-parent"
+    symlink_parent.symlink_to(real_parent, target_is_directory=True)
+    evidence_path = symlink_parent / "live-evidence.json"
+    recovery_gate = _write_evidence_recovery_gate(
+        tmp_path,
+        authorization,
+        ledger_path=ledger_path,
+        evidence_path=evidence_path,
+    )
+    assert authorization.signatures_verified is True
+    reviewer_public_key = tmp_path / "recovery-reviewer.pem"
+    reviewer_public_key.write_bytes(PINNED_REVIEWER_PUBLIC_KEY)
+    reviewer_public_key.chmod(0o400)
+    before = ledger_path.read_bytes()
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="symlink",
+    ):
+        executor.load_evidence_recovery_gate(
+            recovery_gate,
+            reviewer_public_key=reviewer_public_key,
+            authorization=authorization,
+            evidence_path=evidence_path,
+            signature_verifier=FakeSignatureVerifier(),
+            operation_lock=AlwaysHeldOperationLock(),
+            now=NOW,
+        )
+
+    assert ledger_path.read_bytes() == before
+    assert list(real_parent.iterdir()) == []
+
+
 def test_live_authorization_rejects_missing_signature(
     tmp_path: Path,
 ) -> None:
@@ -1125,6 +1207,30 @@ def test_authorization_treats_missing_loss_monitor_health_as_advisory(
     )
 
 
+def test_authorization_treats_missing_process_liveness_as_advisory(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].pop(
+            "process_liveness",
+            None,
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    authorization = executor.load_authorization(
+        paths,
+        execute_live=False,
+        now=NOW,
+    )
+
+    assert any(
+        "SAFETY_PROCESS_LIVENESS_MISSING" in warning
+        for warning in authorization.warnings
+    )
+
+
 def test_authorization_rejects_explicit_unhealthy_loss_monitor(
     tmp_path: Path,
 ) -> None:
@@ -1138,7 +1244,29 @@ def test_authorization_rejects_explicit_unhealthy_loss_monitor(
 
     with pytest.raises(
         executor.LiveTradeExecutionError,
-        match="requires loss_monitor_healthy=true",
+        match="safety gate requires loss_monitor_healthy=true",
+    ):
+        executor.load_authorization(
+            paths,
+            execute_live=False,
+            now=NOW,
+        )
+
+
+def test_authorization_rejects_explicit_dead_process(
+    tmp_path: Path,
+) -> None:
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=lambda documents: documents["safety_gate"].update(
+            {"process_liveness": False}
+        ),
+        rebuild_hash_chain=True,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="safety gate requires process_liveness=true",
     ):
         executor.load_authorization(
             paths,
@@ -2406,9 +2534,14 @@ def test_live_preflight_blocks_existing_position_without_closing_it(
     [
         "ownership conflict: projection unavailable",
         "fencing lease lost during readiness timeout",
+        "identity conflict: HTTP 503",
+        "writer identity conflict: HTTP 503",
+        "writer mismatch: HTTP 500",
+        "lease conflict: HTTP 503",
+        "lease mismatch: HTTP 500",
         "permit journal fsync failed: HTTP 503",
         "durable write failed with ENOSPC: service unavailable",
-        "capacity-exhausted while projection is stale",
+        "durable journal capacity exhausted",
     ],
 )
 def test_live_preflight_hard_failure_precedes_soft_classification(
@@ -2442,6 +2575,54 @@ def test_live_preflight_hard_failure_precedes_soft_classification(
     assert "resume" not in adapter.calls
     assert "open" not in adapter.calls
     assert "PREFLIGHT" not in result.retry_counts
+
+
+@pytest.mark.parametrize(
+    "failure_message",
+    [
+        "HTTP 503 ownership telemetry unavailable",
+        "HTTP 503 journal projection unavailable",
+        "HTTP 503 evidence store unavailable",
+        "HTTP 503 capacity exhausted",
+    ],
+)
+def test_structured_preflight_5xx_with_nonconflict_keywords_is_soft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_message: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+    failures = 0
+
+    def soft_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        nonlocal failures
+        if failures < 3:
+            failures += 1
+            adapter._record_call("preflight", request)
+            raise executor.SoftActionFailure(
+                failure_message,
+                code="HTTP_5XX",
+            )
+        return original_preflight(request)
+
+    monkeypatch.setattr(adapter, "preflight", soft_preflight)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-structured-soft.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.retry_counts["PREFLIGHT"] == 3
+    assert adapter.calls.count("open") == 1
 
 
 def test_before_resume_preflight_transport_failure_degrades_and_continues(
@@ -2627,6 +2808,47 @@ def test_before_open_preflight_missing_live_health_is_advisory(
     assert adapter.calls.count("open") == 1
 
 
+def test_before_open_preflight_missing_trading_state_is_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def missing_state_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") != "before-open":
+            return payload
+        node_snapshot = dict(payload["node_snapshot"])
+        node_snapshot.pop("trading_state")
+        payload["node_snapshot"] = node_snapshot
+        return payload
+
+    monkeypatch.setattr(
+        adapter,
+        "preflight",
+        missing_state_preflight,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-missing-state.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert "PREFLIGHT_NODE_STATE_MISSING: trading_state" in (
+        result.warnings
+    )
+    assert adapter.calls.count("open") == 1
+
+
 @pytest.mark.parametrize(
     "field_name",
     [
@@ -2634,7 +2856,7 @@ def test_before_open_preflight_missing_live_health_is_advisory(
         "loss_monitor_healthy",
     ],
 )
-def test_before_open_preflight_explicit_unhealthy_state_blocks(
+def test_before_open_preflight_explicit_unhealthy_state_blocks_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     field_name: str,
@@ -2665,10 +2887,109 @@ def test_before_open_preflight_explicit_unhealthy_state_blocks(
     result = live_executor.execute(authorization)
 
     assert result.status == "BLOCKED"
-    assert f"preflight requires {field_name}=true" in (
-        result.failure_reason
+    assert result.passed is False
+    assert result.failure_reason == (
+        f"preflight requires {field_name}=true"
     )
-    assert "open" not in adapter.calls
+    assert result.finished_halted is True
+    assert adapter.calls.count("open") == 0
+    assert adapter.calls.count("close") == 0
+
+
+@pytest.mark.parametrize(
+    "raw_warnings",
+    [
+        None,
+        "projection delayed",
+        {"detail": "telemetry delayed"},
+        [""],
+    ],
+)
+def test_before_open_preflight_malformed_warnings_degrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_warnings: Any,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_preflight = adapter.preflight
+
+    def malformed_warnings_preflight(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_preflight(request))
+        if request.get("phase") == "before-open":
+            payload["warnings"] = raw_warnings
+        return payload
+
+    monkeypatch.setattr(
+        adapter,
+        "preflight",
+        malformed_warnings_preflight,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "preflight-malformed-warnings.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert any(
+        "PREFLIGHT_WARNINGS_MALFORMED" in warning
+        for warning in result.warnings
+    )
+    assert adapter.calls.count("open") == 1
+
+
+def test_observation_explicit_unhealthy_loss_monitor_flattens_and_halts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        final_open_filled_quantity="0.03",
+    )
+    original_observe = adapter.observe
+
+    def unhealthy_observation(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_observe(request))
+        adapter.position_quantity = Decimal("0.03")
+        adapter.position_side = "LONG"
+        payload["filled_quantity"] = "0.03"
+        payload["loss_monitor_healthy"] = False
+        return payload
+
+    monkeypatch.setattr(adapter, "observe", unhealthy_observation)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "observation-unhealthy.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.passed is False
+    assert result.failure_reason == (
+        "loss_monitor_healthy=false requires risk flattening"
+    )
+    assert result.finished_halted is True
+    assert result.close_submitted is True
+    assert result.close_quantity == Decimal("0.03")
+    assert adapter.calls.count("open") == 1
+    assert adapter.calls.count("close") == 1
+    assert adapter.calls.count("halt") == 2
+    assert adapter.calls.index("halt") < adapter.calls.index("close")
+    assert adapter.close_effect_quantities == [Decimal("0.03")]
+    assert adapter.close_requests[0]["quantity"] == "0.03"
 
 
 @pytest.mark.parametrize(
@@ -3081,7 +3402,7 @@ def test_preflight_only_portfolio_drift_records_phase_bound_hashes(
         )
 
 
-def test_financial_enrichment_failure_blocks_final_certification_only(
+def test_financial_enrichment_failure_commits_degraded_evidence(
     tmp_path: Path,
 ) -> None:
     authorization = _authorization(tmp_path)
@@ -3099,10 +3420,9 @@ def test_financial_enrichment_failure_blocks_final_certification_only(
 
     result = live_executor.execute(authorization)
 
-    assert result.status == "BLOCKED"
-    assert result.passed is False
-    assert result.error_code == "FINANCIAL_PROOF_INCOMPLETE"
-    assert "loss threshold cannot be certified" in result.failure_reason
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.failure_reason == ""
     assert result.close_submitted is True
     assert result.finished_halted is True
     assert any(
@@ -3118,7 +3438,7 @@ def test_financial_enrichment_failure_blocks_final_certification_only(
         "financial_proof_complete",
     ],
 )
-def test_final_snapshot_requires_explicit_financial_proof_state(
+def test_final_snapshot_missing_financial_proof_state_degrades(
     tmp_path: Path,
     field_name: str,
 ) -> None:
@@ -3127,18 +3447,21 @@ def test_final_snapshot_requires_explicit_financial_proof_state(
     payload = dict(adapter.final_snapshot({}))
     payload.pop(field_name)
 
-    with pytest.raises(
-        executor.LiveTradeExecutionError,
-        match=f"final {field_name} must be boolean",
-    ):
-        executor._validate_final_snapshot(
-            payload,
-            authorization,
-            now=NOW,
-        )
+    normalized = executor._validate_final_snapshot(
+        payload,
+        authorization,
+        now=NOW,
+    )
+
+    assert normalized["financial_proof_complete"] is False
+    assert normalized["enrichment_degraded"] is True
+    assert any(
+        "FINANCIAL_METADATA_INVALID" in warning
+        for warning in normalized["warnings"]
+    )
 
 
-def test_final_snapshot_rejects_warning_and_proof_state_mismatch(
+def test_final_snapshot_warning_and_proof_state_mismatch_degrades(
     tmp_path: Path,
 ) -> None:
     authorization = _authorization(tmp_path)
@@ -3146,15 +3469,65 @@ def test_final_snapshot_rejects_warning_and_proof_state_mismatch(
     payload = dict(adapter.final_snapshot({}))
     payload["warnings"] = ["operator projection unavailable"]
 
-    with pytest.raises(
-        executor.LiveTradeExecutionError,
-        match="final warnings and enrichment state differ",
-    ):
-        executor._validate_final_snapshot(
-            payload,
-            authorization,
-            now=NOW,
-        )
+    normalized = executor._validate_final_snapshot(
+        payload,
+        authorization,
+        now=NOW,
+    )
+
+    assert normalized["financial_proof_complete"] is False
+    assert normalized["enrichment_degraded"] is True
+    assert any(
+        "FINANCIAL_METADATA_INCONSISTENT" in warning
+        for warning in normalized["warnings"]
+    )
+
+
+def test_malformed_final_financial_enrichment_commits_degraded_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_final_snapshot = adapter.final_snapshot
+
+    def malformed_financial_snapshot(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_final_snapshot(request))
+        payload["gross_pnl_usdt"] = {"invalid": True}
+        payload["fees_usdt"] = "not-a-decimal"
+        payload["net_pnl_usdt"] = None
+        payload["cumulative_net_loss_usdt"] = ""
+        payload["enrichment_degraded"] = "yes"
+        payload.pop("financial_proof_complete", None)
+        payload["warnings"] = {"detail": "projection unavailable"}
+        return payload
+
+    monkeypatch.setattr(
+        adapter,
+        "final_snapshot",
+        malformed_financial_snapshot,
+    )
+    evidence_path = tmp_path / "malformed-financial-evidence.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.close_submitted is True
+    assert result.finished_halted is True
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert evidence["financial_enrichment_retryable"] is True
+    assert evidence["target_symbol_flat"] is True
+    assert evidence["target_symbol_regular_orders_zero"] is True
+    assert evidence["target_symbol_algo_orders_zero"] is True
 
 
 def test_live_preflight_blocks_known_insufficient_balance(
@@ -3264,6 +3637,47 @@ def test_close_enrichment_degradation_is_retained_in_execution_audit(
         if event["event_type"] == "reduce_only_close_confirmed"
     )
     assert close_event["payload"]["enrichment_warnings"] == [warning]
+
+
+def test_malformed_close_enrichment_metadata_degrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_submit_close = adapter.submit_close
+
+    def malformed_close_ack(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_submit_close(request))
+        payload["enrichment_degraded"] = "yes"
+        payload["warnings"] = {"detail": "projection unavailable"}
+        return payload
+
+    monkeypatch.setattr(
+        adapter,
+        "submit_close",
+        malformed_close_ack,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "malformed-close-enrichment.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.close_submitted is True
+    assert result.finished_halted is True
+    assert any(
+        "CLOSE_WARNINGS_MALFORMED" in reason
+        or "CLOSE_ENRICHMENT_METADATA_INVALID" in reason
+        for reason in result.degraded_reasons
+    )
 
 
 def test_resume_timeout_recovers_as_degraded_with_bounded_retry(
@@ -3405,19 +3819,9 @@ def test_close_timeout_after_exchange_acceptance_queries_before_retry(
         "CLOSE transport failure" in reason
         for reason in result.degraded_reasons
     )
-    assert adapter.calls.count("close") == 2
+    assert adapter.calls.count("close") == 1
     close_index = adapter.calls.index("close")
     assert adapter.calls[close_index + 1] == "position"
-    first_close = adapter.requests["close"][0]
-    second_close = adapter.requests["close"][1]
-    for field_name in (
-        "intent_id",
-        "client_order_id",
-        "side_effect_id",
-        "quantity",
-        "reduce_only",
-    ):
-        assert first_close[field_name] == second_close[field_name]
     assert adapter.close_effect_quantities == [Decimal("0.07")]
     assert result.close_submitted is True
     assert result.finished_halted is True
@@ -3467,6 +3871,10 @@ def test_ambiguous_close_ack_cannot_expand_cumulative_close_quantity(
         "0.07",
         "0.07",
     ]
+    assert (
+        adapter.close_requests[0]["side_effect_id"]
+        == adapter.close_requests[1]["side_effect_id"]
+    )
     assert adapter.position_quantity == Decimal("0.03")
     assert "target position remains after the authorized close" in (
         result.failure_reason
@@ -3474,7 +3882,7 @@ def test_ambiguous_close_ack_cannot_expand_cumulative_close_quantity(
     assert result.finished_halted is True
 
 
-def test_flat_position_without_exact_close_fill_proof_stays_blocked(
+def test_flat_position_after_close_timeout_stops_close_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3500,12 +3908,12 @@ def test_flat_position_without_exact_close_fill_proof_stays_blocked(
 
     result = live_executor.execute(authorization)
 
-    assert result.status == "BLOCKED"
-    assert result.passed is False
-    assert result.error_code == "EXACT_CLOSE_UNPROVEN"
-    assert "close" in result.failure_reason.lower()
-    assert adapter.calls.count("close") == 3
-    assert result.close_submitted is False
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert adapter.calls.count("close") == 1
+    assert adapter.calls.count("final-snapshot") == 2
+    assert result.close_submitted is True
+    assert result.close_quantity == Decimal("0.07")
     assert result.finished_halted is True
 
 
@@ -3806,6 +4214,7 @@ def test_post_halt_residual_position_keeps_permit_recoverable(
         final_adapter,
         evidence_path=tmp_path / "post-halt-residual.json",
         permit_store=final_store,
+        evidence_only=True,
     )
 
     recovered = final_executor.execute(authorization)
@@ -4570,6 +4979,1104 @@ def test_incomplete_open_journal_recovers_without_resume_or_open_replay(
     assert snapshot["state"] == "EVIDENCE_COMMITTED"
 
 
+def test_halted_recovery_finalizer_consumes_normalized_financial_snapshot(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(tmp_path / "halted-finalizer-ledger.json")
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    adapter = FakeAdapter(authorization)
+    evidence_path = tmp_path / "halted-finalizer-evidence.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "PASSED"
+    assert result.finished_halted is True
+    assert result.close_submitted is True
+    assert result.close_quantity == Decimal("0.07")
+    assert adapter.calls == ["final-snapshot"]
+    assert adapter.requests["final-snapshot"][0]["phase"] == (
+        "recovery-only-final"
+    )
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    round_trip = evidence["mainnet_round_trip"]
+    assert round_trip["open_filled_quantity"] == "0.07"
+    assert round_trip["close_filled_quantity"] == "0.07"
+    snapshot = store.snapshot(authorization, mode="live")
+    assert snapshot is not None
+    assert snapshot["state"] == "EVIDENCE_COMMITTED"
+    assert snapshot["pending_action"] == ""
+    assert snapshot["evidence_sha256"] == result.evidence_sha256
+
+
+def test_explicit_evidence_only_recovery_accepts_expired_permit(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    authorization = replace(
+        authorization,
+        expires_at=NOW - timedelta(minutes=1),
+    )
+    store = _permit_store(
+        tmp_path / "expired-evidence-only-ledger.json"
+    )
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    adapter = FakeAdapter(authorization)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "expired-evidence-only.json",
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "PASSED"
+    assert adapter.calls == ["final-snapshot"]
+    snapshot = store.snapshot(authorization, mode="live")
+    assert snapshot is not None
+    assert snapshot["state"] == "EVIDENCE_COMMITTED"
+
+
+def test_explicit_evidence_only_recovery_rejects_non_halted_journal(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(
+        tmp_path / "ineligible-evidence-only-ledger.json"
+    )
+    store.claim(authorization, mode="live")
+    adapter = FakeAdapter(authorization)
+    evidence_path = tmp_path / "ineligible-evidence-only.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.error_code == "RECOVERY_JOURNAL_INELIGIBLE"
+    assert adapter.calls == []
+    assert evidence_path.exists() is False
+    snapshot = store.snapshot(authorization, mode="live")
+    assert snapshot is not None
+    assert snapshot["state"] == "AUTHORIZED"
+
+
+def test_normal_live_mode_requires_recovery_gate_for_halted_finalization(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "normal-halted-gate-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    before = store_path.read_bytes()
+    adapter = FakeAdapter(authorization)
+    evidence_path = tmp_path / "normal-halted-gate-evidence.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.error_code == "RECOVERY_GATE_REQUIRED"
+    assert result.finished_halted is True
+    assert adapter.calls == []
+    assert evidence_path.exists() is False
+    assert store_path.read_bytes() == before
+
+
+def test_normal_live_mode_requires_recovery_gate_for_prepared_evidence(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "normal-prepared-gate-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    evidence_path = tmp_path / "normal-prepared-gate-evidence.json"
+    preparing_executor = _executor(
+        tmp_path,
+        authorization,
+        FakeAdapter(authorization),
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_writer=CrashBeforePublishEvidenceWriter(evidence_path),
+        evidence_only=True,
+    )
+    with pytest.raises(InjectedCrash):
+        preparing_executor.execute(authorization)
+    before = store_path.read_bytes()
+    adapter = FakeAdapter(authorization)
+    normal_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+        permit_store=_permit_store(store_path),
+    )
+
+    result = normal_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.error_code == "RECOVERY_GATE_REQUIRED"
+    assert adapter.calls == []
+    assert evidence_path.exists() is False
+    assert store_path.read_bytes() == before
+
+
+def test_normal_live_mode_requires_recovery_gate_for_terminal_file_restore(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "normal-terminal-gate-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    evidence_path = tmp_path / "normal-terminal-gate-evidence.json"
+    recovery_executor = _executor(
+        tmp_path,
+        authorization,
+        FakeAdapter(authorization),
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+    recovery_executor.execute(authorization)
+    evidence_path.unlink()
+    before = store_path.read_bytes()
+    adapter = FakeAdapter(authorization)
+    normal_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+        permit_store=_permit_store(store_path),
+    )
+
+    result = normal_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.error_code == "RECOVERY_GATE_REQUIRED"
+    assert adapter.calls == []
+    assert evidence_path.exists() is False
+    assert store_path.read_bytes() == before
+
+
+def test_halted_recovery_finalizer_accepts_flat_exchange_after_close_ack_timeout(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(tmp_path / "halted-close-timeout-ledger.json")
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=False,
+    )
+    adapter = FakeAdapter(authorization)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "halted-close-timeout-evidence.json",
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert any(
+        "CLOSE_ACK_MISSING_RECOVERED_FROM_EXCHANGE_SNAPSHOT" in reason
+        for reason in result.degraded_reasons
+    )
+    assert result.close_quantity == Decimal("0.07")
+    assert adapter.calls == ["final-snapshot"]
+    snapshot = store.snapshot(authorization, mode="live")
+    assert snapshot is not None
+    assert snapshot["state"] == "EVIDENCE_COMMITTED"
+
+
+def test_halted_recovery_finalizer_commits_degraded_financial_evidence(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(tmp_path / "halted-missing-audit-ledger.json")
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=False,
+    )
+    adapter = FakeAdapter(
+        authorization,
+        final_enrichment_degraded=True,
+        final_warnings=("trade history is not available yet",),
+        final_open_filled_quantity="0",
+        final_open_average_fill_price_usdt="0",
+    )
+    evidence_path = tmp_path / "halted-missing-audit-evidence.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "DEGRADED"
+    assert result.passed is True
+    assert result.retryable is False
+    assert result.failure_reason == ""
+    assert any(
+        "FINANCIAL_PROOF_DEGRADED" in reason
+        for reason in result.degraded_reasons
+    )
+    assert adapter.calls == ["final-snapshot"]
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert evidence["retryable"] is False
+    assert evidence["financial_enrichment_retryable"] is True
+    assert evidence["result_status"] == "DEGRADED"
+    snapshot = store.snapshot(authorization, mode="live")
+    assert snapshot is not None
+    assert snapshot["state"] == "EVIDENCE_COMMITTED"
+    assert snapshot["pending_action"] == ""
+    assert snapshot["evidence_sha256"] == result.evidence_sha256
+
+
+def test_committed_degraded_evidence_can_be_enriched_read_only(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "committed-enrichment-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    evidence_path = tmp_path / "committed-enrichment.json"
+    first_adapter = FakeAdapter(
+        authorization,
+        final_enrichment_degraded=True,
+        final_warnings=("trade history is not available yet",),
+        final_open_filled_quantity="0",
+        final_open_average_fill_price_usdt="0",
+    )
+    first_executor = _executor(
+        tmp_path,
+        authorization,
+        first_adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    first_result = first_executor.execute(authorization)
+
+    assert first_result.status == "DEGRADED"
+    first_hash = first_result.evidence_sha256
+    second_adapter = FakeAdapter(authorization)
+    second_executor = _executor(
+        tmp_path,
+        authorization,
+        second_adapter,
+        evidence_path=evidence_path,
+        permit_store=_permit_store(store_path),
+        evidence_only=True,
+    )
+
+    second_result = second_executor.execute(authorization)
+
+    assert second_result.status == "PASSED"
+    assert second_result.evidence_sha256 != first_hash
+    assert second_adapter.calls == ["final-snapshot"]
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert evidence["financial_enrichment_retryable"] is False
+    assert evidence["result_status"] == "PASSED"
+    committed = store.snapshot(authorization, mode="live")
+    assert committed is not None
+    assert committed["state"] == "EVIDENCE_COMMITTED"
+    assert committed["evidence_sha256"] == second_result.evidence_sha256
+
+
+def test_committed_enrichment_publish_crash_recovers_without_adapter_call(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "enrichment-crash-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    evidence_path = tmp_path / "enrichment-crash.json"
+    first_executor = _executor(
+        tmp_path,
+        authorization,
+        FakeAdapter(
+            authorization,
+            final_enrichment_degraded=True,
+            final_warnings=("trade history is not available yet",),
+            final_open_filled_quantity="0",
+            final_open_average_fill_price_usdt="0",
+        ),
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+    first_result = first_executor.execute(authorization)
+    crashing_executor = _executor(
+        tmp_path,
+        authorization,
+        FakeAdapter(authorization),
+        evidence_path=evidence_path,
+        permit_store=_permit_store(store_path),
+        evidence_writer=CrashBeforeReplaceEvidenceWriter(evidence_path),
+        evidence_only=True,
+    )
+
+    with pytest.raises(
+        InjectedCrash,
+        match="before recoverable evidence replacement",
+    ):
+        crashing_executor.execute(authorization)
+
+    prepared = store.snapshot(authorization, mode="live")
+    assert prepared is not None
+    assert prepared["state"] == "EVIDENCE_ENRICHMENT_PENDING"
+    assert prepared["evidence_sha256"] == first_result.evidence_sha256
+    pending_hash = prepared["pending_evidence"]["sha256"]
+    restart_adapter = FakeAdapter(authorization)
+    restart_executor = _executor(
+        tmp_path,
+        authorization,
+        restart_adapter,
+        evidence_path=evidence_path,
+        permit_store=_permit_store(store_path),
+        evidence_only=True,
+    )
+
+    result = restart_executor.execute(authorization)
+
+    assert result.status == "PASSED"
+    assert result.evidence_sha256 == pending_hash
+    assert restart_adapter.calls == []
+    committed = store.snapshot(authorization, mode="live")
+    assert committed is not None
+    assert committed["state"] == "EVIDENCE_COMMITTED"
+    assert committed["evidence_sha256"] == pending_hash
+
+
+def test_halted_recovery_residual_risk_becomes_non_reentrant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "halted-residual-risk-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    first_adapter = FakeAdapter(authorization)
+    original_final_snapshot = first_adapter.final_snapshot
+
+    def residual_final_snapshot(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_final_snapshot(request))
+        payload["target_symbol_flat"] = False
+        payload["position_quantity"] = "0.01"
+        return payload
+
+    monkeypatch.setattr(
+        first_adapter,
+        "final_snapshot",
+        residual_final_snapshot,
+    )
+    evidence_path = tmp_path / "halted-residual-risk.json"
+    first_executor = _executor(
+        tmp_path,
+        authorization,
+        first_adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    first_result = first_executor.execute(authorization)
+
+    assert first_result.status == "BLOCKED"
+    assert first_adapter.calls == ["final-snapshot"]
+    risk_record = store.snapshot(authorization, mode="live")
+    assert risk_record is not None
+    assert risk_record["state"] == "RISK_RECOVERY_REQUIRED"
+    assert risk_record["pending_action"] == ""
+
+    second_adapter = FakeAdapter(authorization)
+    second_executor = _executor(
+        tmp_path,
+        authorization,
+        second_adapter,
+        evidence_path=evidence_path,
+        permit_store=_permit_store(store_path),
+        evidence_only=True,
+    )
+
+    second_result = second_executor.execute(authorization)
+
+    assert second_result.status == "BLOCKED"
+    assert second_result.error_code == "RISK_RECOVERY_REQUIRED"
+    assert second_adapter.calls == []
+    assert evidence_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failure_text", "expected_state"),
+    [
+        (
+            "position",
+            "recovery final snapshot contains residual target risk",
+            "RISK_RECOVERY_REQUIRED",
+        ),
+        (
+            "regular-order",
+            "recovery final snapshot contains residual target risk",
+            "RISK_RECOVERY_REQUIRED",
+        ),
+        (
+            "algo-order",
+            "recovery final snapshot contains residual target risk",
+            "RISK_RECOVERY_REQUIRED",
+        ),
+        ("identity", "adapter identity mismatch: account_id", "HALTED"),
+        (
+            "loss",
+            "recovery cumulative net loss threshold reached",
+            "HALTED",
+        ),
+        (
+            "notional",
+            "recovery actual open notional exceeds permit",
+            "HALTED",
+        ),
+    ],
+)
+def test_halted_recovery_finalizer_hard_blocks_live_risk_or_identity_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    failure_text: str,
+    expected_state: str,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(
+        tmp_path / f"halted-hard-block-{mutation}-ledger.json"
+    )
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    adapter = FakeAdapter(authorization)
+    original_final_snapshot = adapter.final_snapshot
+
+    def final_snapshot(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_final_snapshot(request))
+        if mutation == "position":
+            payload["target_symbol_flat"] = False
+            payload["position_quantity"] = "0.01"
+        if mutation == "regular-order":
+            payload["target_symbol_regular_orders_zero"] = False
+        if mutation == "algo-order":
+            payload["target_symbol_algo_orders_zero"] = False
+        if mutation == "identity":
+            payload["account_id"] = "account-b"
+        if mutation == "loss":
+            payload["enrichment_degraded"] = True
+            payload["financial_proof_complete"] = False
+            payload["warnings"] = ["financial projection incomplete"]
+            payload["gross_pnl_usdt"] = "-1.48"
+            payload["fees_usdt"] = "0.02"
+            payload["net_pnl_usdt"] = "-1.50"
+            payload["cumulative_net_loss_usdt"] = "1.50"
+        if mutation == "notional":
+            payload["enrichment_degraded"] = True
+            payload["financial_proof_complete"] = False
+            payload["warnings"] = ["financial projection incomplete"]
+            payload["open_average_fill_price_usdt"] = "200"
+        return payload
+
+    monkeypatch.setattr(adapter, "final_snapshot", final_snapshot)
+    evidence_path = tmp_path / f"halted-hard-block-{mutation}.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.retryable is False
+    assert failure_text in result.failure_reason
+    assert adapter.calls == ["final-snapshot"]
+    assert evidence_path.exists() is False
+    snapshot = store.snapshot(authorization, mode="live")
+    assert snapshot is not None
+    assert snapshot["state"] == expected_state
+    assert snapshot["evidence_sha256"] == ""
+
+
+def test_halted_recovery_finalizer_is_idempotent_after_evidence_commit(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "halted-idempotent-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    first_adapter = FakeAdapter(authorization)
+    evidence_path = tmp_path / "halted-idempotent-evidence.json"
+    first_executor = _executor(
+        tmp_path,
+        authorization,
+        first_adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+
+    first_result = first_executor.execute(authorization)
+    committed = store.snapshot(authorization, mode="live")
+    assert committed is not None
+    committed_history_length = len(committed["history"])
+    evidence_path.unlink()
+
+    restart_store = _permit_store(store_path)
+    restart_adapter = FakeAdapter(authorization)
+    restart_executor = _executor(
+        tmp_path,
+        authorization,
+        restart_adapter,
+        evidence_path=evidence_path,
+        permit_store=restart_store,
+        evidence_only=True,
+    )
+
+    second_result = restart_executor.execute(authorization)
+
+    assert second_result.status == first_result.status
+    assert second_result.evidence_sha256 == first_result.evidence_sha256
+    assert second_result.close_quantity == Decimal("0.07")
+    assert restart_adapter.calls == []
+    assert evidence_path.exists() is True
+    assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+        first_result.evidence_sha256
+    )
+    finalized = restart_store.snapshot(authorization, mode="live")
+    assert finalized is not None
+    assert finalized["state"] == "EVIDENCE_COMMITTED"
+    assert len(finalized["history"]) == committed_history_length
+
+
+def test_committed_evidence_hash_conflict_does_not_rewrite_terminal_file(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "committed-conflict-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    first_adapter = FakeAdapter(authorization)
+    evidence_path = tmp_path / "committed-conflict-evidence.json"
+    first_executor = _executor(
+        tmp_path,
+        authorization,
+        first_adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_only=True,
+    )
+    first_result = first_executor.execute(authorization)
+    evidence_path.chmod(0o600)
+    evidence_path.write_text(
+        '{"status":"tampered"}\n',
+        encoding="ascii",
+    )
+    evidence_path.chmod(0o400)
+    tampered_hash = hashlib.sha256(
+        evidence_path.read_bytes()
+    ).hexdigest()
+
+    restart_adapter = FakeAdapter(authorization)
+    restart_executor = _executor(
+        tmp_path,
+        authorization,
+        restart_adapter,
+        evidence_path=evidence_path,
+        permit_store=_permit_store(store_path),
+        evidence_only=True,
+    )
+
+    result = restart_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert result.error_code == "RECOVERY_EVIDENCE_INCOMPLETE"
+    assert restart_adapter.calls == []
+    assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+        tampered_hash
+    )
+    committed = store.snapshot(authorization, mode="live")
+    assert committed is not None
+    assert committed["state"] == "EVIDENCE_COMMITTED"
+    assert committed["evidence_sha256"] == first_result.evidence_sha256
+
+
+def test_halted_recovery_finalizer_restart_publishes_prepared_evidence_read_only(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "halted-prepare-crash-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    first_adapter = FakeAdapter(authorization)
+    evidence_path = tmp_path / "halted-prepare-crash-evidence.json"
+    crashing_writer = CrashBeforePublishEvidenceWriter(evidence_path)
+    first_executor = _executor(
+        tmp_path,
+        authorization,
+        first_adapter,
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_writer=crashing_writer,
+        evidence_only=True,
+    )
+
+    with pytest.raises(
+        InjectedCrash,
+        match="crash before evidence publication",
+    ):
+        first_executor.execute(authorization)
+
+    prepared = store.snapshot(authorization, mode="live")
+    assert prepared is not None
+    assert prepared["state"] == "HALTED"
+    assert prepared["pending_action"] == "PUBLISH_EVIDENCE"
+    assert evidence_path.exists() is False
+
+    restart_store = _permit_store(store_path)
+    restart_adapter = FakeAdapter(authorization)
+    restart_executor = _executor(
+        tmp_path,
+        authorization,
+        restart_adapter,
+        evidence_path=evidence_path,
+        permit_store=restart_store,
+        evidence_only=True,
+    )
+
+    result = restart_executor.execute(authorization)
+
+    assert result.status == "PASSED"
+    assert restart_adapter.calls == []
+    assert evidence_path.exists() is True
+    finalized = restart_store.snapshot(authorization, mode="live")
+    assert finalized is not None
+    assert finalized["state"] == "EVIDENCE_COMMITTED"
+    assert finalized["evidence_sha256"] == result.evidence_sha256
+
+
+def test_prepared_evidence_identity_is_validated_before_publication(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store_path = tmp_path / "invalid-prepared-identity-ledger.json"
+    store = _permit_store(store_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    evidence_path = tmp_path / "invalid-prepared-identity.json"
+    first_executor = _executor(
+        tmp_path,
+        authorization,
+        FakeAdapter(authorization),
+        evidence_path=evidence_path,
+        permit_store=store,
+        evidence_writer=CrashBeforePublishEvidenceWriter(evidence_path),
+        evidence_only=True,
+    )
+
+    with pytest.raises(InjectedCrash):
+        first_executor.execute(authorization)
+
+    ledger_payload = json.loads(store_path.read_text(encoding="ascii"))
+    record = next(iter(ledger_payload["records"].values()))
+    pending = record["pending_evidence"]
+    pending_payload = pending["payload"]
+    pending_payload["release_id"] = "forged-release"
+    forged_hash = hashlib.sha256(
+        executor._canonical_pretty_json_bytes(pending_payload)
+    ).hexdigest()
+    pending["sha256"] = forged_hash
+    record["pending_action_payload"]["sha256"] = forged_hash
+    store_path.write_bytes(
+        executor._canonical_pretty_json_bytes(ledger_payload)
+    )
+
+    restart_adapter = FakeAdapter(authorization)
+    restart_executor = _executor(
+        tmp_path,
+        authorization,
+        restart_adapter,
+        evidence_path=evidence_path,
+        permit_store=_permit_store(store_path),
+        evidence_only=True,
+    )
+
+    result = restart_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "evidence identity mismatch: release_id" in (
+        result.failure_reason
+    )
+    assert restart_adapter.calls == []
+    assert evidence_path.exists() is False
+    unchanged = json.loads(store_path.read_text(encoding="ascii"))
+    unchanged_record = next(iter(unchanged["records"].values()))
+    assert unchanged_record["state"] == "HALTED"
+    assert unchanged_record["pending_evidence"]["sha256"] == forged_hash
+
+
+def test_claim_outcome_preserves_pending_close_request(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(tmp_path / "pending-close-outcome-ledger.json")
+    close_request = {
+        **_base_request(authorization),
+        "intent_id": authorization.close_intent_id,
+        "open_intent_id": authorization.intent_id,
+        "client_order_id": authorization.close_client_order_id,
+        "side": "SELL",
+        "position_side": "LONG",
+        "order_type": "MARKET",
+        "quantity": "0.07",
+        "reduce_only": True,
+        "reason": "failure-cleanup",
+        "attempt": 1,
+        "side_effect_id": executor.deterministic_side_effect_id(
+            authorization,
+            "CLOSE",
+        ),
+        "hard_timeout_seconds": 20.0,
+        "exchange_not_before": NOW.isoformat(),
+    }
+    store.claim(authorization, mode="live")
+    store.prepare_action(
+        authorization,
+        mode="live",
+        action="CLOSE",
+        payload=close_request,
+        state="CLOSE_PENDING",
+    )
+
+    outcome = store.claim_or_recover(authorization, mode="live")
+
+    assert outcome.pending_action == "CLOSE"
+    assert outcome.pending_action_payload == close_request
+
+
+def test_restart_replays_exact_pending_close_request(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(tmp_path / "pending-close-replay-ledger.json")
+    close_request = {
+        **_base_request(authorization),
+        "mode": "live",
+        "authorization_sha256": authorization.authorization_sha256,
+        "document_sha256": dict(authorization.document_sha256),
+        "intent_id": authorization.close_intent_id,
+        "open_intent_id": authorization.intent_id,
+        "client_order_id": authorization.close_client_order_id,
+        "side": "SELL",
+        "position_side": "LONG",
+        "order_type": "MARKET",
+        "quantity": "0.07",
+        "reduce_only": True,
+        "reason": "failure-cleanup",
+        "attempt": 1,
+        "side_effect_id": executor.deterministic_side_effect_id(
+            authorization,
+            "CLOSE",
+        ),
+        "hard_timeout_seconds": 20.0,
+        "exchange_not_before": NOW.isoformat(),
+    }
+    store.claim(authorization, mode="live")
+    store.prepare_action(
+        authorization,
+        mode="live",
+        action="CLOSE",
+        payload=close_request,
+        state="CLOSE_PENDING",
+    )
+    adapter = FakeAdapter(authorization)
+    adapter.position_quantity = Decimal("0.02")
+    adapter.position_side = "LONG"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "pending-close-replay.json",
+        permit_store=store,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "cancel-open" not in adapter.calls
+    assert adapter.calls.index("position") < adapter.calls.index("close")
+    assert adapter.close_requests == [close_request]
+    assert adapter.close_effect_quantities == [Decimal("0.07")]
+
+
+def test_pending_close_survives_recovery_position_query_failure(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(
+        tmp_path / "pending-close-query-failure-ledger.json"
+    )
+    close_request = {
+        **_base_request(authorization),
+        "mode": "live",
+        "authorization_sha256": authorization.authorization_sha256,
+        "document_sha256": dict(authorization.document_sha256),
+        "intent_id": authorization.close_intent_id,
+        "open_intent_id": authorization.intent_id,
+        "client_order_id": authorization.close_client_order_id,
+        "side": "SELL",
+        "position_side": "LONG",
+        "order_type": "MARKET",
+        "quantity": "0.07",
+        "reduce_only": True,
+        "reason": "failure-cleanup",
+        "attempt": 1,
+        "side_effect_id": executor.deterministic_side_effect_id(
+            authorization,
+            "CLOSE",
+        ),
+        "hard_timeout_seconds": 20.0,
+        "exchange_not_before": NOW.isoformat(),
+    }
+    store.claim(authorization, mode="live")
+    store.prepare_action(
+        authorization,
+        mode="live",
+        action="CLOSE",
+        payload=close_request,
+        state="CLOSE_PENDING",
+    )
+    adapter = FakeAdapter(
+        authorization,
+        position_failures=3,
+    )
+    adapter.position_quantity = Decimal("0.02")
+    adapter.position_side = "LONG"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "pending-close-query-failure.json",
+        permit_store=store,
+        recovery_max_attempts=3,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.status == "BLOCKED"
+    assert "close" not in adapter.calls
+    snapshot = store.snapshot(authorization, mode="live")
+    assert snapshot is not None
+    assert snapshot["state"] == "CLOSE_PENDING"
+    assert snapshot["pending_action"] == "CLOSE"
+    assert snapshot["pending_action_payload"] == close_request
+
+
+def test_recovery_history_accepts_production_close_quantity_field(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(tmp_path / "close-history-quantity-ledger.json")
+    store.claim(authorization, mode="live")
+    close_request = {
+        **_base_request(authorization),
+        "client_order_id": authorization.close_client_order_id,
+        "quantity": "0.07",
+        "reduce_only": True,
+        "side_effect_id": executor.deterministic_side_effect_id(
+            authorization,
+            "CLOSE",
+        ),
+    }
+    store.prepare_action(
+        authorization,
+        mode="live",
+        action="CLOSE",
+        payload=close_request,
+        state="CLOSE_PENDING",
+    )
+    store.complete_action(
+        authorization,
+        mode="live",
+        action="CLOSE",
+        state=None,
+        result={
+            "client_order_id": authorization.close_client_order_id,
+            "quantity": "0.07",
+        },
+    )
+    store.mark_state(
+        authorization,
+        mode="live",
+        state="HALTED",
+        event_type="HALTED",
+        payload={
+            "trading_state": "HALTED",
+            "observed_at": NOW.isoformat(),
+        },
+    )
+    record = store.snapshot(authorization, mode="live")
+    assert record is not None
+
+    recovery = executor._recovery_history_evidence(
+        record,
+        authorization,
+    )
+
+    assert recovery["requested_close_quantity"] == Decimal("0.07")
+    assert recovery["confirmed_close_quantity"] == Decimal("0.07")
+
+
+def test_recovery_history_rejects_conflicting_close_quantity_fields(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    store = _permit_store(tmp_path / "close-history-conflict-ledger.json")
+    store.claim(authorization, mode="live")
+    close_request = {
+        **_base_request(authorization),
+        "client_order_id": authorization.close_client_order_id,
+        "quantity": "0.07",
+        "reduce_only": True,
+        "side_effect_id": executor.deterministic_side_effect_id(
+            authorization,
+            "CLOSE",
+        ),
+    }
+    store.prepare_action(
+        authorization,
+        mode="live",
+        action="CLOSE",
+        payload=close_request,
+        state="CLOSE_PENDING",
+    )
+    store.complete_action(
+        authorization,
+        mode="live",
+        action="CLOSE",
+        state="CLOSE_CONFIRMED",
+        result={
+            "client_order_id": authorization.close_client_order_id,
+            "quantity": "0.07",
+            "filled_quantity": "0.06",
+        },
+    )
+    store.mark_state(
+        authorization,
+        mode="live",
+        state="HALTED",
+        event_type="HALTED",
+        payload={
+            "trading_state": "HALTED",
+            "observed_at": NOW.isoformat(),
+        },
+    )
+    record = store.snapshot(authorization, mode="live")
+    assert record is not None
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="confirmation quantity fields differ",
+    ):
+        executor._recovery_history_evidence(
+            record,
+            authorization,
+        )
+
+
 def test_close_retry_exhaustion_keeps_journal_recoverable(
     tmp_path: Path,
 ) -> None:
@@ -4593,9 +6100,11 @@ def test_close_retry_exhaustion_keeps_journal_recoverable(
 
     assert result.passed is False
     assert adapter.calls.count("close") == 3
-    assert [
-        request["attempt"] for request in adapter.close_requests
-    ] == [1, 2, 3]
+    assert adapter.close_requests == [
+        adapter.close_requests[0],
+        adapter.close_requests[0],
+        adapter.close_requests[0],
+    ]
     assert result.finished_halted is True
     outcome = store.claim_or_recover(
         authorization,
@@ -4806,6 +6315,7 @@ def test_restart_commits_evidence_prepared_before_publication_crash(
         restart_adapter,
         evidence_path=evidence_path,
         permit_store=restart_store,
+        evidence_only=True,
     )
 
     result = restart_executor.execute(authorization)
@@ -4887,6 +6397,7 @@ def test_restart_finalizes_ledger_after_evidence_publication_crash(
         restart_adapter,
         evidence_path=evidence_path,
         permit_store=restart_store,
+        evidence_only=True,
     )
 
     result = restart_executor.execute(authorization)
@@ -4939,6 +6450,65 @@ def test_atomic_evidence_write_fsyncs_file_and_directory(
         target.read_bytes()
     ).hexdigest()
     assert not list(tmp_path.glob(".evidence.json.*.tmp"))
+
+
+def test_live_evidence_parent_swap_to_symlink_blocks_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_parent = tmp_path / "bound-evidence-parent"
+    original_parent.mkdir(mode=0o700)
+    attacker_parent = tmp_path / "redirected-evidence-parent"
+    attacker_parent.mkdir(mode=0o700)
+    target = original_parent / "evidence.json"
+    original_payload = b'{"sentinel":"original"}\n'
+    target.write_bytes(original_payload)
+    target.chmod(0o400)
+    writer = executor.AtomicEvidenceWriter(target, live=True)
+    prepared, prepared_hash = writer.prepare(
+        {
+            "schema_version": executor.EVIDENCE_SCHEMA,
+            "passed": True,
+        }
+    )
+    moved_parent = tmp_path / "bound-evidence-parent-original"
+    original_mkstemp = executor.tempfile.mkstemp
+    swapped = False
+
+    def swapping_mkstemp(*args, **kwargs):
+        nonlocal swapped
+        if swapped is False:
+            swapped = True
+            original_parent.rename(moved_parent)
+            original_parent.symlink_to(
+                attacker_parent,
+                target_is_directory=True,
+            )
+        return original_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(
+        executor.tempfile,
+        "mkstemp",
+        swapping_mkstemp,
+    )
+
+    with pytest.raises(
+        executor.LiveTradeExecutionError,
+        match="protected evidence parent changed|symlink",
+    ):
+        writer.commit_prepared(
+            prepared,
+            evidence_sha256=prepared_hash,
+            allow_existing=False,
+            replace_existing=True,
+        )
+
+    assert swapped is True
+    assert (moved_parent / "evidence.json").read_bytes() == (
+        original_payload
+    )
+    assert (attacker_parent / "evidence.json").exists() is False
+    assert list(attacker_parent.glob(".evidence.json.*.tmp")) == []
 
 
 def test_external_adapter_requires_verified_live_authorization() -> None:
@@ -5085,6 +6655,319 @@ def test_live_cli_rejects_nonfixed_ledger_before_operation_lock(
     assert lock_constructed is False
 
 
+def test_live_cli_evidence_only_accepts_expired_stale_runtime_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ledger_path = (tmp_path / "live-recovery-ledger.json").resolve()
+    monkeypatch.setattr(
+        executor,
+        "DEFAULT_LIVE_PERMIT_LEDGER_PATH",
+        ledger_path,
+    )
+
+    def stale_runtime_binding(
+        documents: dict[str, dict[str, Any]],
+    ) -> None:
+        for payload in documents.values():
+            payload["live_executor_sha256"] = "a" * 64
+            payload["live_adapter_sha256"] = "b" * 64
+
+    paths = _write_authorization_files(
+        tmp_path,
+        mutate=stale_runtime_binding,
+        rebuild_hash_chain=True,
+        signed=True,
+    )
+    verifier = FakeSignatureVerifier()
+    with _operation_lock(tmp_path) as operation_lock:
+        authorization = executor.load_authorization(
+            paths,
+            execute_live=True,
+            signature_verifier=verifier,
+            operation_lock=operation_lock,
+            now=NOW,
+        )
+    store = executor.SingleUsePermitStore(ledger_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    adapter = FakeAdapter(authorization)
+    adapter_path = _write_live_adapter(tmp_path)
+
+    class HeldLiveOperationLock(AlwaysHeldOperationLock):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    class RecoveryJsonAdapter:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def __enter__(self):
+            return adapter
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    original_executor = executor.AccountALiveTradeExecutor
+
+    def fixed_time_executor(**kwargs):
+        kwargs["clock"] = lambda: NOW
+        kwargs["sleeper"] = lambda _seconds: None
+        return original_executor(**kwargs)
+
+    monkeypatch.setattr(
+        executor,
+        "OpenSSLSignatureVerifier",
+        FakeSignatureVerifier,
+    )
+    monkeypatch.setattr(
+        executor,
+        "LiveOperationLock",
+        HeldLiveOperationLock,
+    )
+    monkeypatch.setattr(
+        executor,
+        "JsonCommandAdapter",
+        RecoveryJsonAdapter,
+    )
+    monkeypatch.setattr(
+        executor,
+        "AccountALiveTradeExecutor",
+        fixed_time_executor,
+    )
+    evidence_path = (tmp_path / "live-recovery-evidence.json").resolve()
+    recovery_gate = _write_evidence_recovery_gate(
+        tmp_path,
+        authorization,
+        ledger_path=ledger_path,
+        evidence_path=evidence_path,
+    )
+
+    exit_code = executor.main(
+        [
+            "--release-gate",
+            str(paths.release_gate.payload),
+            "--release-gate-signature",
+            str(paths.release_gate.signature),
+            "--safety-gate",
+            str(paths.safety_gate.payload),
+            "--safety-gate-signature",
+            str(paths.safety_gate.signature),
+            "--emergency-close-gate",
+            str(paths.emergency_close_gate.payload),
+            "--emergency-close-gate-signature",
+            str(paths.emergency_close_gate.signature),
+            "--permit",
+            str(paths.permit.payload),
+            "--permit-signature",
+            str(paths.permit.signature),
+            "--reviewer-public-key",
+            str(paths.reviewer_public_key),
+            "--permit-ledger",
+            str(ledger_path),
+            "--evidence-output",
+            str(evidence_path),
+            "--execute-live",
+            "--recover-evidence-only",
+            "--evidence-recovery-gate",
+            str(recovery_gate.payload),
+            "--evidence-recovery-gate-signature",
+            str(recovery_gate.signature),
+            "--live-adapter",
+            str(adapter_path),
+        ]
+    )
+
+    assert exit_code == 0, capsys.readouterr().err
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["passed"] is True
+    assert adapter.calls == ["final-snapshot"]
+    committed = store.snapshot(authorization, mode="live")
+    assert committed is not None
+    assert committed["state"] == "EVIDENCE_COMMITTED"
+
+
+def test_live_cli_evidence_only_requires_signed_recovery_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ledger_path = (tmp_path / "missing-recovery-gate-ledger.json").resolve()
+    monkeypatch.setattr(
+        executor,
+        "DEFAULT_LIVE_PERMIT_LEDGER_PATH",
+        ledger_path,
+    )
+    paths = _write_authorization_files(tmp_path, signed=True)
+    verifier = FakeSignatureVerifier()
+    with _operation_lock(tmp_path) as operation_lock:
+        authorization = executor.load_authorization(
+            paths,
+            execute_live=True,
+            signature_verifier=verifier,
+            operation_lock=operation_lock,
+            now=NOW,
+        )
+    store = executor.SingleUsePermitStore(ledger_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    adapter_path = _write_live_adapter(tmp_path)
+
+    class HeldLiveOperationLock(AlwaysHeldOperationLock):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    monkeypatch.setattr(
+        executor,
+        "OpenSSLSignatureVerifier",
+        FakeSignatureVerifier,
+    )
+    monkeypatch.setattr(
+        executor,
+        "LiveOperationLock",
+        HeldLiveOperationLock,
+    )
+
+    exit_code = executor.main(
+        [
+            "--release-gate",
+            str(paths.release_gate.payload),
+            "--release-gate-signature",
+            str(paths.release_gate.signature),
+            "--safety-gate",
+            str(paths.safety_gate.payload),
+            "--safety-gate-signature",
+            str(paths.safety_gate.signature),
+            "--emergency-close-gate",
+            str(paths.emergency_close_gate.payload),
+            "--emergency-close-gate-signature",
+            str(paths.emergency_close_gate.signature),
+            "--permit",
+            str(paths.permit.payload),
+            "--permit-signature",
+            str(paths.permit.signature),
+            "--reviewer-public-key",
+            str(paths.reviewer_public_key),
+            "--evidence-output",
+            str((tmp_path / "missing-recovery-gate.json").resolve()),
+            "--execute-live",
+            "--recover-evidence-only",
+            "--live-adapter",
+            str(adapter_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "requires --evidence-recovery-gate" in captured.err
+
+
+def test_live_cli_evidence_only_rejects_recovery_runtime_hash_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ledger_path = (tmp_path / "recovery-runtime-drift-ledger.json").resolve()
+    monkeypatch.setattr(
+        executor,
+        "DEFAULT_LIVE_PERMIT_LEDGER_PATH",
+        ledger_path,
+    )
+    paths = _write_authorization_files(tmp_path, signed=True)
+    verifier = FakeSignatureVerifier()
+    with _operation_lock(tmp_path) as operation_lock:
+        authorization = executor.load_authorization(
+            paths,
+            execute_live=True,
+            signature_verifier=verifier,
+            operation_lock=operation_lock,
+            now=NOW,
+        )
+    store = executor.SingleUsePermitStore(ledger_path)
+    _seed_halted_round_trip_journal(
+        store,
+        authorization,
+        close_confirmed=True,
+    )
+    adapter_path = _write_live_adapter(tmp_path)
+    evidence_path = (tmp_path / "recovery-runtime-drift.json").resolve()
+    recovery_gate = _write_evidence_recovery_gate(
+        tmp_path,
+        authorization,
+        ledger_path=ledger_path,
+        evidence_path=evidence_path,
+        executor_sha256="f" * 64,
+    )
+
+    class HeldLiveOperationLock(AlwaysHeldOperationLock):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    monkeypatch.setattr(
+        executor,
+        "OpenSSLSignatureVerifier",
+        FakeSignatureVerifier,
+    )
+    monkeypatch.setattr(
+        executor,
+        "LiveOperationLock",
+        HeldLiveOperationLock,
+    )
+
+    exit_code = executor.main(
+        [
+            "--release-gate",
+            str(paths.release_gate.payload),
+            "--release-gate-signature",
+            str(paths.release_gate.signature),
+            "--safety-gate",
+            str(paths.safety_gate.payload),
+            "--safety-gate-signature",
+            str(paths.safety_gate.signature),
+            "--emergency-close-gate",
+            str(paths.emergency_close_gate.payload),
+            "--emergency-close-gate-signature",
+            str(paths.emergency_close_gate.signature),
+            "--permit",
+            str(paths.permit.payload),
+            "--permit-signature",
+            str(paths.permit.signature),
+            "--reviewer-public-key",
+            str(paths.reviewer_public_key),
+            "--evidence-output",
+            str(evidence_path),
+            "--execute-live",
+            "--recover-evidence-only",
+            "--evidence-recovery-gate",
+            str(recovery_gate.payload),
+            "--evidence-recovery-gate-signature",
+            str(recovery_gate.signature),
+            "--live-adapter",
+            str(adapter_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "live executor hash differs from signed release" in captured.err
+
+
 def _authorization(
     tmp_path: Path,
     *,
@@ -5132,6 +7015,53 @@ def _write_live_adapter(
     return adapter_path
 
 
+def _write_evidence_recovery_gate(
+    root: Path,
+    authorization: executor.CanaryAuthorization,
+    *,
+    ledger_path: Path,
+    evidence_path: Path,
+    executor_sha256: str = LIVE_EXECUTOR_SHA256,
+    adapter_sha256: str = LIVE_ADAPTER_SHA256,
+) -> executor.SignedDocumentPaths:
+    payload = {
+        "schema_version": executor.EVIDENCE_RECOVERY_GATE_SCHEMA,
+        "gate_id": str(uuid4()),
+        "capability": executor.EVIDENCE_RECOVERY_CAPABILITY,
+        "allowed_actions": [
+            "final-snapshot",
+            "publish-evidence",
+        ],
+        "account_id": authorization.account_id,
+        "symbol": authorization.symbol,
+        "permit_id": authorization.permit_id,
+        "authorization_sha256": authorization.authorization_sha256,
+        "release_id": authorization.release.release_id,
+        "intent_id": authorization.intent_id,
+        "close_intent_id": authorization.close_intent_id,
+        "open_client_order_id": authorization.open_client_order_id,
+        "close_client_order_id": authorization.close_client_order_id,
+        "permit_store_id": authorization.release.permit_store_id,
+        "permit_store_path": str(ledger_path),
+        "evidence_path": str(evidence_path),
+        "recovery_executor_sha256": executor_sha256,
+        "recovery_adapter_sha256": adapter_sha256,
+        "issued_at": "2026-08-08T11:00:00+00:00",
+        "refresh_after": "2027-08-08T11:00:00+00:00",
+    }
+    payload_bytes = _json_bytes(payload)
+    payload_path = root / f"evidence-recovery-gate-{uuid4()}.json"
+    signature_path = payload_path.with_suffix(".sig")
+    payload_path.write_bytes(payload_bytes)
+    signature_path.write_bytes(
+        hashlib.sha256(payload_bytes).hexdigest().encode("ascii")
+    )
+    return executor.SignedDocumentPaths(
+        payload_path,
+        signature_path,
+    )
+
+
 def _permit_store(
     path: Path,
 ) -> executor.SingleUsePermitStore:
@@ -5166,6 +7096,66 @@ def _seed_open_submitted_journal(
         result={
             "adapter_evidence_sha256": _digest("seed-open"),
             "client_order_id": authorization.open_client_order_id,
+        },
+    )
+
+
+def _seed_halted_round_trip_journal(
+    store: executor.SingleUsePermitStore,
+    authorization: executor.CanaryAuthorization,
+    *,
+    close_confirmed: bool,
+) -> None:
+    store.claim(authorization, mode="live")
+    store.mark_state(
+        authorization,
+        mode="live",
+        state="OPEN_OBSERVED",
+        event_type="OPEN_OBSERVED",
+        payload={
+            "client_order_id": authorization.open_client_order_id,
+            "filled_quantity": "0.07",
+            "average_fill_price_usdt": "100",
+        },
+    )
+    close_request = {
+        **_base_request(authorization),
+        "intent_id": authorization.close_intent_id,
+        "open_intent_id": authorization.intent_id,
+        "client_order_id": authorization.close_client_order_id,
+        "quantity": "0.07",
+        "reduce_only": True,
+        "side_effect_id": executor.deterministic_side_effect_id(
+            authorization,
+            "CLOSE",
+        ),
+    }
+    store.prepare_action(
+        authorization,
+        mode="live",
+        action="CLOSE",
+        payload=close_request,
+        state="CLOSE_PENDING",
+    )
+    if close_confirmed:
+        store.complete_action(
+            authorization,
+            mode="live",
+            action="CLOSE",
+            state="CLOSE_CONFIRMED",
+            result={
+                "client_order_id": authorization.close_client_order_id,
+                "quantity": "0.07",
+            },
+        )
+    store.mark_state(
+        authorization,
+        mode="live",
+        state="HALTED",
+        event_type="HALTED",
+        payload={
+            "trading_state": "HALTED",
+            "observed_at": NOW.isoformat(),
         },
     )
 
@@ -5267,6 +7257,7 @@ def _executor(
     recovery_deadline_seconds: float = 20,
     journal_write_timeout_seconds: float = 1,
     monotonic: Callable[[], float] = lambda: 0.0,
+    evidence_only: bool = False,
 ) -> executor.AccountALiveTradeExecutor:
     selected_store = permit_store
     if selected_store is None:
@@ -5289,6 +7280,7 @@ def _executor(
         journal_write_timeout_seconds=(
             journal_write_timeout_seconds
         ),
+        evidence_only=evidence_only,
         clock=clock,
         monotonic=monotonic,
         sleeper=lambda _seconds: None,
@@ -5380,6 +7372,7 @@ def _documents() -> dict[str, dict[str, Any]]:
         "target_symbol_flat": True,
         "target_symbol_regular_orders_zero": True,
         "target_symbol_algo_orders_zero": True,
+        "process_liveness": True,
         "loss_monitor_healthy": True,
         "ownership_healthy": True,
         "fencing_healthy": True,

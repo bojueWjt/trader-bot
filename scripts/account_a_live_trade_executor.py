@@ -55,6 +55,16 @@ EMERGENCY_CLOSE_GATE_SCHEMA = (
     "trader-v3-account-a-live-emergency-close-gate/v1"
 )
 PERMIT_SCHEMA = "trader-v3-account-a-live-permit/v1"
+EVIDENCE_RECOVERY_GATE_SCHEMA = (
+    "trader-v3-account-a-evidence-recovery-gate/v1"
+)
+EVIDENCE_RECOVERY_CAPABILITY = (
+    "final-snapshot-and-publish-evidence/v1"
+)
+EVIDENCE_RECOVERY_ALLOWED_ACTIONS = (
+    "final-snapshot",
+    "publish-evidence",
+)
 EVIDENCE_SCHEMA = "trader-v3-live-trade-report/v1"
 LEDGER_SCHEMA = "trader-v3-account-a-live-permit-ledger/v1"
 JOURNAL_STATES = (
@@ -65,6 +75,8 @@ JOURNAL_STATES = (
     "CLOSE_PENDING",
     "CLOSE_CONFIRMED",
     "HALTED",
+    "RISK_RECOVERY_REQUIRED",
+    "EVIDENCE_ENRICHMENT_PENDING",
     "EVIDENCE_COMMITTED",
 )
 
@@ -109,21 +121,30 @@ SOFT_ADAPTER_ERROR_RE = re.compile(
     r"exchange(?:[-_ ]?(?:mirror|state))?[-_ ]?"
     r"(?:lag|stale|pending)|"
     r"rate[-_ ]?limit|too many requests|"
-    r"readiness|heartbeat|projection|"
+    r"readiness|heartbeat|projection|telemetry|unavailable|"
+    r"capacity[-_ ]?(?:pressure|exhausted|full)|"
     r"service unavailable|temporar|overload"
     r")",
     re.IGNORECASE,
 )
 HARD_ADAPTER_ERROR_RE = re.compile(
     r"(?:"
-    r"\bownership\b|"
-    r"\bfenc(?:e|ing)\b|"
-    r"\bjournal\b|"
+    r"\bownership(?:[-_ ]identity)?[-_ ]?"
+    r"(?:mismatch|conflict)\b|"
+    r"\bfenc(?:e|ing)(?:[-_ ](?:token|epoch|lease))?[-_ ]?"
+    r"(?:mismatch|conflict|lost|rejected|violation)\b|"
+    r"\bfencing[-_ ]lease[-_ ]lost\b|"
+    r"\bidentity[-_ ]?(?:mismatch|conflict)\b|"
+    r"\bwriter(?:[-_ ]identity)?[-_ ]?"
+    r"(?:mismatch|conflict)\b|"
+    r"\blease[-_ ]?(?:mismatch|conflict)\b|"
     r"\bfsync\b|"
-    r"\bdurab(?:le|ility)\b|"
+    r"\bdurab(?:le|ility)[-_ ]?"
+    r"(?:write|append|commit|failure|error)\b|"
     r"\bENOSPC\b|"
     r"\bno[-_ ]space\b|"
-    r"\bcapacity[-_ ]?exhausted\b"
+    r"\b(?:journal|outbox|store|disk)[-_ ]?"
+    r"capacity[-_ ]?(?:exhausted|full)\b"
     r")",
     re.IGNORECASE,
 )
@@ -134,6 +155,10 @@ class LiveTradeExecutionError(RuntimeError):
 
 
 class DuplicatePermitError(LiveTradeExecutionError):
+    pass
+
+
+class RecoverableEvidenceError(LiveTradeExecutionError):
     pass
 
 
@@ -298,6 +323,26 @@ class CanaryAuthorization:
 
 
 @dataclass(frozen=True)
+class EvidenceRecoveryGate:
+    gate_id: str
+    permit_id: str
+    authorization_sha256: str
+    release_id: str
+    intent_id: str
+    close_intent_id: str
+    open_client_order_id: str
+    close_client_order_id: str
+    permit_store_id: str
+    permit_store_path: str
+    evidence_path: str
+    recovery_executor_sha256: str
+    recovery_adapter_sha256: str
+    issued_at: datetime
+    refresh_after: datetime
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class TradeObservation:
     open_status: str
     exchange_evidence_state: str
@@ -372,6 +417,8 @@ class PermitClaimOutcome:
     recovery_required: bool
     terminal: bool
     state: str
+    pending_action: str
+    pending_action_payload: Mapping[str, Any] | None
     pending_evidence: Mapping[str, Any] | None
 
 
@@ -380,6 +427,90 @@ class ValidatedLiveAdapter:
     source_path: Path
     sha256: str
     payload: bytes
+
+
+@dataclass(frozen=True)
+class ProtectedOutputPath:
+    target: Path
+    parent_device: int
+    parent_inode: int
+    owner_uid: int
+    label: str
+
+
+class EvidenceRecoveryOnlyAdapter:
+    def __init__(self, delegate: TradeAdapter) -> None:
+        self._delegate = delegate
+
+    def final_snapshot(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return self._delegate.final_snapshot(request)
+
+    def preflight(
+        self,
+        _request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise LiveTradeExecutionError(
+            "evidence recovery capability forbids preflight"
+        )
+
+    def resume(
+        self,
+        _request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise LiveTradeExecutionError(
+            "evidence recovery capability forbids RESUME"
+        )
+
+    def submit_open(
+        self,
+        _request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise LiveTradeExecutionError(
+            "evidence recovery capability forbids OPEN"
+        )
+
+    def observe(
+        self,
+        _request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise LiveTradeExecutionError(
+            "evidence recovery capability forbids observation"
+        )
+
+    def cancel_open(
+        self,
+        _request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise LiveTradeExecutionError(
+            "evidence recovery capability forbids CANCEL_OPEN"
+        )
+
+    def current_position(
+        self,
+        _request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise LiveTradeExecutionError(
+            "evidence recovery capability forbids position query"
+        )
+
+    def submit_close(
+        self,
+        _request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise LiveTradeExecutionError(
+            "evidence recovery capability forbids CLOSE"
+        )
+
+    def halt(
+        self,
+        _request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise LiveTradeExecutionError(
+            "evidence recovery capability forbids HALT"
+        )
 
 
 class LiveOperationLock:
@@ -1042,6 +1173,14 @@ class SingleUsePermitStore:
                 pending_evidence = existing.get("pending_evidence")
                 if not isinstance(pending_evidence, dict):
                     pending_evidence = None
+                pending_action = str(
+                    existing.get("pending_action") or ""
+                )
+                pending_action_payload = existing.get(
+                    "pending_action_payload"
+                )
+                if not isinstance(pending_action_payload, dict):
+                    pending_action_payload = None
                 return PermitClaimOutcome(
                     newly_authorized=False,
                     recovery_required=(
@@ -1049,6 +1188,8 @@ class SingleUsePermitStore:
                     ),
                     terminal=state == "EVIDENCE_COMMITTED",
                     state=state,
+                    pending_action=pending_action,
+                    pending_action_payload=pending_action_payload,
                     pending_evidence=pending_evidence,
                 )
             live_identity_fields = (
@@ -1116,6 +1257,8 @@ class SingleUsePermitStore:
                 recovery_required=False,
                 terminal=False,
                 state="AUTHORIZED",
+                pending_action="",
+                pending_action_payload=None,
                 pending_evidence=None,
             )
 
@@ -1281,6 +1424,7 @@ class SingleUsePermitStore:
         evidence: Mapping[str, Any],
         evidence_sha256: str,
         passed: bool,
+        allow_terminal_enrichment: bool = False,
     ) -> None:
         normalized_mode = _execution_mode(mode)
         normalized_hash = _required_sha256(
@@ -1298,7 +1442,19 @@ class SingleUsePermitStore:
                 authorization,
                 normalized_mode,
             )
-            if self._record_state(record) != "HALTED":
+            current_state = self._record_state(record)
+            enrichment_of_sha256 = ""
+            if (
+                current_state == "EVIDENCE_COMMITTED"
+                and allow_terminal_enrichment
+            ):
+                enrichment_of_sha256 = _required_sha256(
+                    record.get("evidence_sha256"),
+                    "committed enrichment evidence_sha256",
+                )
+                record["state"] = "EVIDENCE_ENRICHMENT_PENDING"
+                current_state = "EVIDENCE_ENRICHMENT_PENDING"
+            elif current_state != "HALTED":
                 raise LiveTradeExecutionError(
                     "evidence can only be prepared after HALTED"
                 )
@@ -1308,20 +1464,30 @@ class SingleUsePermitStore:
                 "passed": bool(passed),
                 "payload": _json_safe(dict(evidence)),
             }
+            if enrichment_of_sha256:
+                pending["enrichment_of_sha256"] = (
+                    enrichment_of_sha256
+                )
             record["pending_evidence"] = pending
             record["pending_action"] = "PUBLISH_EVIDENCE"
             record["pending_action_payload"] = {
                 "path": str(absolute_path),
                 "sha256": normalized_hash,
             }
+            event_type = "EVIDENCE_PREPARED"
+            if enrichment_of_sha256:
+                event_type = "EVIDENCE_ENRICHMENT_PREPARED"
             self._append_history(
                 record,
-                event_type="EVIDENCE_PREPARED",
-                state="HALTED",
+                event_type=event_type,
+                state=current_state,
                 payload={
                     "path": str(absolute_path),
                     "sha256": normalized_hash,
                     "passed": bool(passed),
+                    "enrichment_of_sha256": (
+                        enrichment_of_sha256
+                    ),
                 },
             )
 
@@ -1554,11 +1720,25 @@ class SingleUsePermitStore:
 
 
 class AtomicEvidenceWriter:
-    def __init__(self, path: Path) -> None:
-        self._path = _required_absolute_path(
-            path,
-            "evidence path",
-        )
+    def __init__(
+        self,
+        path: Path,
+        *,
+        live: bool = False,
+    ) -> None:
+        self._protected_path: ProtectedOutputPath | None = None
+        if live:
+            self._protected_path = _bind_protected_output_path(
+                path,
+                "live evidence path",
+                owner_uid=os.geteuid(),
+            )
+            self._path = self._protected_path.target
+        else:
+            self._path = _required_absolute_path(
+                path,
+                "evidence path",
+            )
 
     @property
     def path(self) -> Path:
@@ -1615,6 +1795,7 @@ class AtomicEvidenceWriter:
             payload,
             mode=0o400,
             replace_existing=replace_existing,
+            protected_path=self._protected_path,
         )
         return normalized_hash
 
@@ -1636,6 +1817,7 @@ class AccountALiveTradeExecutor:
         soft_action_max_attempts: int = 3,
         soft_action_deadline_seconds: float = 5.0,
         journal_write_timeout_seconds: float = 1.0,
+        evidence_only: bool = False,
         clock: Callable[[], datetime] = (
             lambda: datetime.now(timezone.utc)
         ),
@@ -1690,6 +1872,7 @@ class AccountALiveTradeExecutor:
             journal_write_timeout_seconds,
             "journal_write_timeout_seconds",
         )
+        self._evidence_only = bool(evidence_only)
         self._clock = clock
         self._monotonic = monotonic
         self._sleeper = sleeper
@@ -1713,6 +1896,7 @@ class AccountALiveTradeExecutor:
             authorization,
             mode=self._mode,
             now=_utc_now(self._clock),
+            allow_expired=self._evidence_only,
         )
         for warning in authorization.warnings:
             self._add_warning(warning)
@@ -1723,6 +1907,7 @@ class AccountALiveTradeExecutor:
         trail = AuditTrail(clock=self._clock)
         journal_enabled = False
         pending_evidence: Mapping[str, Any] | None = None
+        recovery_close_request: Mapping[str, Any] | None = None
         recovery_started = False
         cleanup_complete = False
         cleanup_required = False
@@ -1746,6 +1931,7 @@ class AccountALiveTradeExecutor:
         halt_attempted = False
         halt_observed_at: datetime | None = None
         open_dispatched_at: datetime | None = None
+        recovery_only_active = self._evidence_only
 
         try:
             claim_outcome = self._permit_store.claim_or_recover(
@@ -1760,8 +1946,246 @@ class AccountALiveTradeExecutor:
             pending_evidence = claim_outcome.pending_evidence
             recovery_started = claim_outcome.recovery_required
             if claim_outcome.terminal:
-                raise DuplicatePermitError(
-                    "single-use permit is already terminal"
+                recovery_only_active = True
+                cleanup_required = False
+                cleanup_complete = True
+                finished_halted = True
+                halt_attempted = True
+                committed_record = self._permit_store.snapshot(
+                    authorization,
+                    mode=self._mode,
+                )
+                if (
+                    self._mode == "live"
+                    and self._evidence_only is False
+                    and not os.path.lexists(
+                        self._evidence_writer.path
+                    )
+                ):
+                    return self._recovery_gate_required_result(
+                        disposition="terminal evidence file restore",
+                    )
+                committed_result = self._read_committed_evidence_result(
+                    authorization,
+                    committed_record,
+                )
+                if (
+                    self._evidence_only
+                    and _committed_evidence_requires_enrichment(
+                        committed_record,
+                        authorization,
+                        mode=self._mode,
+                    )
+                ):
+                    return self._finalize_halted_recovery(
+                        authorization,
+                        trail,
+                        committed_record,
+                        enrich_committed=True,
+                    )
+                return committed_result
+            if claim_outcome.state == "RISK_RECOVERY_REQUIRED":
+                recovery_only_active = True
+                cleanup_required = False
+                cleanup_complete = True
+                finished_halted = True
+                halt_attempted = True
+                return ExecutionResult(
+                    status=RESULT_BLOCKED,
+                    failure_reason=(
+                        "permit journal requires separately authorized "
+                        "target risk recovery"
+                    ),
+                    evidence_path=self._evidence_writer.path,
+                    evidence_sha256="",
+                    finished_halted=True,
+                    close_submitted=False,
+                    close_quantity=Decimal(0),
+                    warnings=tuple(self._warnings),
+                    degraded_reasons=tuple(
+                        self._degraded_reasons
+                    ),
+                    retryable=False,
+                    error_code="RISK_RECOVERY_REQUIRED",
+                    retry_counts=dict(self._retry_counts),
+                )
+            if claim_outcome.pending_action == "CLOSE":
+                try:
+                    recovery_close_request = (
+                        _validated_pending_close_request(
+                            claim_outcome.pending_action_payload,
+                            authorization,
+                        )
+                    )
+                except LiveTradeExecutionError as exc:
+                    self._permit_store.mark_state(
+                        authorization,
+                        mode=self._mode,
+                        state="RISK_RECOVERY_REQUIRED",
+                        event_type="PENDING_CLOSE_IDENTITY_CONFLICT",
+                        payload={
+                            "reason": _exception_text(exc),
+                        },
+                    )
+                    recovery_only_active = True
+                    cleanup_required = False
+                    cleanup_complete = True
+                    finished_halted = True
+                    halt_attempted = True
+                    return ExecutionResult(
+                        status=RESULT_BLOCKED,
+                        failure_reason=_exception_text(exc),
+                        evidence_path=self._evidence_writer.path,
+                        evidence_sha256="",
+                        finished_halted=True,
+                        close_submitted=False,
+                        close_quantity=Decimal(0),
+                        warnings=tuple(self._warnings),
+                        degraded_reasons=tuple(
+                            self._degraded_reasons
+                        ),
+                        retryable=False,
+                        error_code="RISK_RECOVERY_REQUIRED",
+                        retry_counts=dict(self._retry_counts),
+                    )
+            if (
+                self._mode == "live"
+                and self._evidence_only is False
+                and claim_outcome.state
+                in {
+                    "HALTED",
+                    "EVIDENCE_ENRICHMENT_PENDING",
+                }
+                and claim_outcome.pending_action
+                in {
+                    "",
+                    "PUBLISH_EVIDENCE",
+                }
+            ):
+                recovery_only_active = True
+                cleanup_required = False
+                cleanup_complete = True
+                finished_halted = True
+                halt_attempted = True
+                return self._recovery_gate_required_result(
+                    disposition="HALTED evidence recovery",
+                )
+            if (
+                claim_outcome.recovery_required
+                and claim_outcome.state == "HALTED"
+                and pending_evidence is None
+            ):
+                recovery_record = self._permit_store.snapshot(
+                    authorization,
+                    mode=self._mode,
+                )
+                if _is_recovery_only_record(recovery_record):
+                    recovery_only_active = True
+                    cleanup_required = False
+                    cleanup_complete = True
+                    finished_halted = True
+                    halt_attempted = True
+                    try:
+                        return self._finalize_halted_recovery(
+                            authorization,
+                            trail,
+                            recovery_record,
+                        )
+                    except Exception as exc:
+                        retryable_recovery = isinstance(
+                            exc,
+                            RecoverableEvidenceError,
+                        ) or _is_soft_action_failure(exc)
+                        failure_code = "EXECUTION_BLOCKED"
+                        if isinstance(exc, ClassifiedExecutionError):
+                            failure_code = exc.code
+                        if retryable_recovery:
+                            failure_code = (
+                                "RECOVERY_EVIDENCE_INCOMPLETE"
+                            )
+                        failure_text = _exception_text(exc)
+                        trail.record(
+                            "recovery_only_finalizer_blocked",
+                            {
+                                "reason": failure_text,
+                                "retryable": retryable_recovery,
+                                "error_code": failure_code,
+                            },
+                        )
+                        return ExecutionResult(
+                            status=RESULT_BLOCKED,
+                            failure_reason=failure_text,
+                            evidence_path=self._evidence_writer.path,
+                            evidence_sha256="",
+                            finished_halted=True,
+                            close_submitted=False,
+                            close_quantity=Decimal(0),
+                            warnings=tuple(self._warnings),
+                            degraded_reasons=tuple(
+                                self._degraded_reasons
+                            ),
+                            retryable=retryable_recovery,
+                            error_code=failure_code,
+                            retry_counts=dict(self._retry_counts),
+                        )
+            if (
+                claim_outcome.recovery_required
+                and claim_outcome.state
+                in {
+                    "HALTED",
+                    "EVIDENCE_ENRICHMENT_PENDING",
+                }
+                and pending_evidence is not None
+                and _is_recovery_only_pending_evidence(
+                    pending_evidence
+                )
+            ):
+                cleanup_required = False
+                cleanup_complete = True
+                finished_halted = True
+                halt_attempted = True
+                recovered_result = self._commit_recovered_evidence(
+                    authorization,
+                    pending_evidence,
+                )
+                if recovered_result is None:
+                    raise LiveTradeExecutionError(
+                        "prepared recovery-only evidence path mismatch"
+                    )
+                return recovered_result
+            if self._evidence_only:
+                failure_text = (
+                    "evidence-only recovery requires a HALTED permit "
+                    "journal with no pending side effect"
+                )
+                cleanup_required = False
+                cleanup_complete = True
+                halt_attempted = True
+                trail.record(
+                    "recovery_only_journal_rejected",
+                    {
+                        "reason": failure_text,
+                        "state": claim_outcome.state,
+                        "pending_evidence": pending_evidence is not None,
+                    },
+                )
+                return ExecutionResult(
+                    status=RESULT_BLOCKED,
+                    failure_reason=failure_text,
+                    evidence_path=self._evidence_writer.path,
+                    evidence_sha256="",
+                    finished_halted=(
+                        claim_outcome.state == "HALTED"
+                    ),
+                    close_submitted=False,
+                    close_quantity=Decimal(0),
+                    warnings=tuple(self._warnings),
+                    degraded_reasons=tuple(
+                        self._degraded_reasons
+                    ),
+                    retryable=False,
+                    error_code="RECOVERY_JOURNAL_INELIGIBLE",
+                    retry_counts=dict(self._retry_counts),
                 )
             if claim_outcome.recovery_required:
                 try:
@@ -2166,6 +2590,29 @@ class AccountALiveTradeExecutor:
                 open_filled_quantity = cleanup_result.close_quantity
             round_trip_complete = True
         except BaseException as exc:  # noqa: BLE001
+            if recovery_only_active:
+                if not isinstance(exc, Exception):
+                    raise
+                cleanup_required = False
+                cleanup_complete = True
+                halt_attempted = True
+                failure_text = _exception_text(exc)
+                return ExecutionResult(
+                    status=RESULT_BLOCKED,
+                    failure_reason=failure_text,
+                    evidence_path=self._evidence_writer.path,
+                    evidence_sha256="",
+                    finished_halted=True,
+                    close_submitted=False,
+                    close_quantity=Decimal(0),
+                    warnings=tuple(self._warnings),
+                    degraded_reasons=tuple(
+                        self._degraded_reasons
+                    ),
+                    retryable=_is_soft_action_failure(exc),
+                    error_code="RECOVERY_EVIDENCE_INCOMPLETE",
+                    retry_counts=dict(self._retry_counts),
+                )
             failure_reason = _exception_text(exc)
             error_code = _hard_failure_code(exc)
             trail.record(
@@ -2198,7 +2645,10 @@ class AccountALiveTradeExecutor:
                     authorization,
                     trail,
                     reason=halt_reason,
-                    journal_enabled=journal_enabled,
+                    journal_enabled=(
+                        journal_enabled
+                        and recovery_close_request is None
+                    ),
                 )
                 halt_attempted = True
                 if not finished_halted:
@@ -2224,6 +2674,7 @@ class AccountALiveTradeExecutor:
                             if open_filled_quantity > 0
                             else authorization.quantity
                         ),
+                        pending_close_request=recovery_close_request,
                     )
                     cleanup_result = emergency_result
                     cleanup_complete = True
@@ -2260,6 +2711,10 @@ class AccountALiveTradeExecutor:
                     )
             final_halt_required = cleanup_required
             first_halt_required = not halt_attempted
+            recovery_close_resolved = (
+                recovery_close_request is None
+                or cleanup_result.close_submitted
+            )
             if final_halt_required or first_halt_required:
                 (
                     finished_halted,
@@ -2269,7 +2724,10 @@ class AccountALiveTradeExecutor:
                     authorization,
                     trail,
                     reason=halt_reason,
-                    journal_enabled=journal_enabled,
+                    journal_enabled=(
+                        journal_enabled
+                        and recovery_close_resolved
+                    ),
                 )
                 halt_attempted = True
                 if not finished_halted:
@@ -2287,7 +2745,10 @@ class AccountALiveTradeExecutor:
                         authorization,
                         trail,
                         halt_observed_at=halt_observed_at,
-                        journal_enabled=journal_enabled,
+                        journal_enabled=(
+                            journal_enabled
+                            and recovery_close_resolved
+                        ),
                     )
                 )
                 if post_halt_snapshot is False:
@@ -2345,18 +2806,6 @@ class AccountALiveTradeExecutor:
                     ),
                 )
                 error_code = "LOSS_LIMIT_REACHED"
-        if (
-            final_snapshot is not None
-            and final_snapshot.get("financial_proof_complete") is not True
-        ):
-            failure_reason = _join_errors(
-                failure_reason,
-                (
-                    "final financial proof is incomplete; "
-                    "loss threshold cannot be certified",
-                ),
-            )
-            error_code = "FINANCIAL_PROOF_INCOMPLETE"
         if (
             final_snapshot is not None
             and final_snapshot.get("financial_proof_complete") is True
@@ -2888,6 +3337,7 @@ class AccountALiveTradeExecutor:
         journal_enabled: bool,
         exchange_not_before: datetime | None,
         expected_close_quantity: Decimal,
+        pending_close_request: Mapping[str, Any] | None = None,
     ) -> CleanupResult:
         cancel_started_at = self._monotonic()
         last_errors: list[str] = []
@@ -2896,11 +3346,52 @@ class AccountALiveTradeExecutor:
         final_snapshot: Mapping[str, Any] | None = None
         close_attempted = False
         close_confirmed = False
-        pending_close_request: dict[str, Any] | None = None
+        exact_pending_close_request: dict[str, Any] | None = None
         quantity_violation = False
         causal_exchange_not_before = exchange_not_before
+        if pending_close_request is not None:
+            exact_pending_close_request = dict(
+                _validated_pending_close_request(
+                    pending_close_request,
+                    authorization,
+                )
+            )
+            close_attempted = True
+            close_quantity = _decimal(
+                exact_pending_close_request.get("quantity"),
+                "pending CLOSE quantity",
+                positive=True,
+            )
+            raw_exchange_not_before = exact_pending_close_request.get(
+                "exchange_not_before"
+            )
+            if raw_exchange_not_before is not None:
+                causal_exchange_not_before = _timestamp(
+                    raw_exchange_not_before,
+                    "pending CLOSE exchange_not_before",
+                )
 
-        for attempt in range(1, self._recovery_max_attempts + 1):
+        cancel_attempts: Sequence[int] = range(
+            1,
+            self._recovery_max_attempts + 1,
+        )
+        if exact_pending_close_request is not None:
+            cancel_attempts = ()
+            trail.record(
+                "pending_close_recovery_queries_position_first",
+                {
+                    "client_order_id": (
+                        authorization.close_client_order_id
+                    ),
+                    "side_effect_id": (
+                        exact_pending_close_request[
+                            "side_effect_id"
+                        ]
+                    ),
+                    "quantity": _decimal_text(close_quantity),
+                },
+            )
+        for attempt in cancel_attempts:
             if not self._recovery_budget_available(
                 cancel_started_at
             ):
@@ -3024,7 +3515,10 @@ class AccountALiveTradeExecutor:
                 self._recovery_journal_prepare(
                     authorization,
                     trail,
-                    enabled=journal_enabled,
+                    enabled=(
+                        journal_enabled
+                        and exact_pending_close_request is None
+                    ),
                     action="QUERY_POSITION",
                     request=position_request,
                 )
@@ -3102,8 +3596,50 @@ class AccountALiveTradeExecutor:
                 self._recovery_sleep(close_started_at)
                 continue
 
+            if position.quantity == 0:
+                flat_confirmed = True
+                last_errors = []
+                if close_attempted and not close_confirmed:
+                    close_side_effect_id = ""
+                    if exact_pending_close_request is not None:
+                        close_side_effect_id = str(
+                            exact_pending_close_request.get(
+                                "side_effect_id",
+                                "",
+                            )
+                        )
+                    close_submitted = True
+                    self._add_degraded(
+                        "CLOSE_ACK_MISSING_RECOVERED_FROM_EXCHANGE_POSITION"
+                    )
+                    self._recovery_journal_mark_state(
+                        authorization,
+                        trail,
+                        enabled=journal_enabled,
+                        state="CLOSE_CONFIRMED",
+                        event_type="CLOSE_EFFECT_RECONCILED_FLAT",
+                        payload={
+                            "quantity": _decimal_text(close_quantity),
+                            "attempt": attempt,
+                            "side_effect_id": close_side_effect_id,
+                        },
+                    )
+                    trail.record(
+                        "reduce_only_close_effect_reconciled_flat",
+                        {
+                            "client_order_id": (
+                                authorization.close_client_order_id
+                            ),
+                            "quantity": _decimal_text(close_quantity),
+                            "reduce_only": True,
+                            "attempt": attempt,
+                            "side_effect_id": close_side_effect_id,
+                        },
+                    )
+                break
+
             if close_attempted and not close_confirmed:
-                if pending_close_request is None:
+                if exact_pending_close_request is None:
                     last_errors = [
                         (
                             "exact close request is unavailable for "
@@ -3111,18 +3647,9 @@ class AccountALiveTradeExecutor:
                         )
                     ]
                     break
-                reconcile_request = dict(pending_close_request)
-                reconcile_request["attempt"] = attempt
-                reconcile_request["hard_timeout_seconds"] = (
-                    self._recovery_seconds_remaining(
-                        close_started_at
-                    )
+                reconcile_request = dict(
+                    exact_pending_close_request
                 )
-                if not self._refresh_hard_timeout(
-                    reconcile_request,
-                    close_started_at,
-                ):
-                    break
                 try:
                     close_ack = self._adapter.submit_close(
                         reconcile_request
@@ -3213,11 +3740,6 @@ class AccountALiveTradeExecutor:
                 self._recovery_sleep(close_started_at)
                 continue
 
-            if position.quantity == 0:
-                flat_confirmed = True
-                last_errors = []
-                break
-
             if close_confirmed:
                 last_errors = [
                     (
@@ -3285,7 +3807,7 @@ class AccountALiveTradeExecutor:
                     state="CLOSE_PENDING",
                 )
             )
-            pending_close_request = dict(close_request)
+            exact_pending_close_request = dict(close_request)
             if not self._refresh_hard_timeout(
                 close_request,
                 close_started_at,
@@ -4204,6 +4726,29 @@ class AccountALiveTradeExecutor:
             )
         operation_lock.require_held()
 
+    def _recovery_gate_required_result(
+        self,
+        *,
+        disposition: str,
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            status=RESULT_BLOCKED,
+            failure_reason=(
+                "signed evidence recovery gate is required for "
+                f"{disposition}"
+            ),
+            evidence_path=self._evidence_writer.path,
+            evidence_sha256="",
+            finished_halted=True,
+            close_submitted=False,
+            close_quantity=Decimal(0),
+            warnings=tuple(self._warnings),
+            degraded_reasons=tuple(self._degraded_reasons),
+            retryable=False,
+            error_code="RECOVERY_GATE_REQUIRED",
+            retry_counts=dict(self._retry_counts),
+        )
+
     def _recovery_budget_available(self, started_at: float) -> bool:
         return self._recovery_seconds_remaining(started_at) > 0
 
@@ -4244,6 +4789,11 @@ class AccountALiveTradeExecutor:
             raise LiveTradeExecutionError(
                 "prepared recovery evidence payload is invalid"
             )
+        _validate_evidence_payload_identity(
+            payload,
+            authorization,
+            mode=self._mode,
+        )
         pending_hash = _required_sha256(
             pending.get("sha256"),
             "prepared recovery evidence sha256",
@@ -4257,9 +4807,21 @@ class AccountALiveTradeExecutor:
                 live=self._mode == "live",
             )
             if _sha256_bytes(existing) != pending_hash:
-                self._validate_recoverable_evidence_for_replacement(
-                    authorization
+                enrichment_of_sha256 = pending.get(
+                    "enrichment_of_sha256"
                 )
+                if enrichment_of_sha256:
+                    self._validate_enrichment_evidence_for_replacement(
+                        authorization,
+                        expected_sha256=_required_sha256(
+                            enrichment_of_sha256,
+                            "enrichment source evidence sha256",
+                        ),
+                    )
+                else:
+                    self._validate_recoverable_evidence_for_replacement(
+                        authorization
+                    )
                 replace_existing = True
         evidence_sha256 = self._evidence_writer.commit_prepared(
             payload,
@@ -4272,6 +4834,102 @@ class AccountALiveTradeExecutor:
             mode=self._mode,
             evidence_sha256=evidence_sha256,
         )
+        return self._execution_result_from_evidence(
+            payload,
+            evidence_sha256=evidence_sha256,
+        )
+
+    def _read_committed_evidence_result(
+        self,
+        authorization: CanaryAuthorization,
+        record: Mapping[str, Any] | None,
+    ) -> ExecutionResult:
+        if not isinstance(record, Mapping):
+            raise LiveTradeExecutionError(
+                "committed permit journal is missing"
+            )
+        if record.get("state") != "EVIDENCE_COMMITTED":
+            raise LiveTradeExecutionError(
+                "committed permit journal state changed"
+            )
+        evidence_path = str(record.get("evidence_path") or "")
+        if evidence_path != str(self._evidence_writer.path):
+            raise LiveTradeExecutionError(
+                "committed evidence path differs from executor"
+            )
+        evidence_sha256 = _required_sha256(
+            record.get("evidence_sha256"),
+            "committed evidence_sha256",
+        )
+        if not os.path.lexists(self._evidence_writer.path):
+            pending = record.get("pending_evidence")
+            if not isinstance(pending, Mapping):
+                raise LiveTradeExecutionError(
+                    "committed evidence recovery payload is missing"
+                )
+            if pending.get("path") != evidence_path:
+                raise LiveTradeExecutionError(
+                    "committed evidence recovery path mismatch"
+                )
+            pending_hash = _required_sha256(
+                pending.get("sha256"),
+                "committed evidence recovery sha256",
+            )
+            if pending_hash != evidence_sha256:
+                raise LiveTradeExecutionError(
+                    "committed evidence recovery hash mismatch"
+                )
+            pending_payload = pending.get("payload")
+            if not isinstance(pending_payload, Mapping):
+                raise LiveTradeExecutionError(
+                    "committed evidence recovery payload is invalid"
+                )
+            _validate_evidence_payload_identity(
+                pending_payload,
+                authorization,
+                mode=self._mode,
+            )
+            self._require_live_operation_lock()
+            self._evidence_writer.commit_prepared(
+                pending_payload,
+                evidence_sha256=evidence_sha256,
+                allow_existing=False,
+            )
+        raw_evidence = _read_protected_file(
+            self._evidence_writer.path,
+            "committed evidence",
+            live=self._mode == "live",
+        )
+        if _sha256_bytes(raw_evidence) != evidence_sha256:
+            raise LiveTradeExecutionError(
+                "committed evidence hash differs from ledger"
+            )
+        try:
+            payload = json.loads(raw_evidence)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LiveTradeExecutionError(
+                "committed evidence is invalid"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LiveTradeExecutionError(
+                "committed evidence must be an object"
+            )
+        _validate_evidence_payload_identity(
+            payload,
+            authorization,
+            mode=self._mode,
+        )
+        return self._execution_result_from_evidence(
+            payload,
+            evidence_sha256=evidence_sha256,
+        )
+
+    def _execution_result_from_evidence(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        evidence_sha256: str,
+    ) -> ExecutionResult:
         details_key = "dry_run_round_trip"
         if self._mode == "live":
             details_key = "mainnet_round_trip"
@@ -4323,6 +4981,237 @@ class AccountALiveTradeExecutor:
             },
         )
 
+    def _finalize_halted_recovery(
+        self,
+        authorization: CanaryAuthorization,
+        trail: AuditTrail,
+        recovery_record: Mapping[str, Any],
+        *,
+        enrich_committed: bool = False,
+    ) -> ExecutionResult:
+        recovery_history = _recovery_history_evidence(
+            recovery_record,
+            authorization,
+        )
+        halt_observed_at = recovery_history["halt_observed_at"]
+        final_request = self._base_request(authorization)
+        final_request.update(
+            {
+                "reason": "recovery-only-evidence-finalizer",
+                "phase": "recovery-only-final",
+                "quantity": _decimal_text(authorization.quantity),
+                "open_side": authorization.open_side,
+                "limit_price_usdt": _decimal_text(
+                    authorization.limit_price_usdt
+                ),
+                "halt_observed_at": halt_observed_at.isoformat(),
+                "exchange_not_before": halt_observed_at.isoformat(),
+                "hard_timeout_seconds": self._recovery_deadline_seconds,
+            }
+        )
+        raw_snapshot = self._adapter.final_snapshot(final_request)
+        residual_risk = _recovery_snapshot_target_risk(
+            raw_snapshot,
+            authorization,
+            now=_utc_now(self._clock),
+            exchange_not_before=halt_observed_at,
+        )
+        if residual_risk is not False:
+            self._require_live_operation_lock()
+            self._permit_store.mark_state(
+                authorization,
+                mode=self._mode,
+                state="RISK_RECOVERY_REQUIRED",
+                event_type="RISK_RECOVERY_REQUIRED",
+                payload=residual_risk,
+            )
+            trail.record(
+                "recovery_only_residual_target_risk",
+                residual_risk,
+            )
+            raise ClassifiedExecutionError(
+                "recovery final snapshot contains residual target risk",
+                code="RISK_RECOVERY_REQUIRED",
+            )
+        final_snapshot = _validate_final_snapshot(
+            raw_snapshot,
+            authorization,
+            now=_utc_now(self._clock),
+            exchange_not_before=halt_observed_at,
+        )
+        financial_proof_complete = (
+            final_snapshot.get("financial_proof_complete") is True
+        )
+        open_quantity = _decimal(
+            final_snapshot.get("open_filled_quantity"),
+            "recovery open_filled_quantity",
+            non_negative=True,
+        )
+        requested_close_quantity = recovery_history[
+            "requested_close_quantity"
+        ]
+        close_quantity = requested_close_quantity
+        if open_quantity > authorization.quantity:
+            raise LiveTradeExecutionError(
+                "recovery open filled quantity exceeds authorization"
+            )
+        confirmed_close_quantity = recovery_history[
+            "confirmed_close_quantity"
+        ]
+        if (
+            confirmed_close_quantity is not False
+            and requested_close_quantity != confirmed_close_quantity
+        ):
+            raise LiveTradeExecutionError(
+                "recovery close confirmation differs from journal request"
+            )
+        if confirmed_close_quantity is False:
+            self._add_degraded(
+                "CLOSE_ACK_MISSING_RECOVERED_FROM_EXCHANGE_SNAPSHOT"
+            )
+        open_average_price = _decimal(
+            final_snapshot.get("open_average_fill_price_usdt"),
+            "recovery open_average_fill_price_usdt",
+            non_negative=True,
+        )
+        actual_open_notional = open_quantity * open_average_price
+        if (
+            financial_proof_complete
+            and open_quantity != requested_close_quantity
+        ):
+            raise LiveTradeExecutionError(
+                "recovery open fill differs from journal close request"
+            )
+        if actual_open_notional > authorization.max_notional_usdt:
+            raise LiveTradeExecutionError(
+                "recovery actual open notional exceeds permit"
+            )
+        if actual_open_notional > MAX_ACTUAL_OPEN_NOTIONAL_USDT:
+            raise LiveTradeExecutionError(
+                "recovery actual open notional exceeds 12 USDT"
+            )
+        cumulative_loss = _decimal(
+            final_snapshot.get("cumulative_net_loss_usdt"),
+            "recovery cumulative_net_loss_usdt",
+            non_negative=True,
+        )
+        if cumulative_loss >= authorization.max_cumulative_net_loss_usdt:
+            raise LiveTradeExecutionError(
+                "recovery cumulative net loss threshold reached"
+            )
+        self._record_final_snapshot_degradation(
+            final_snapshot,
+            trail,
+            phase="recovery-only-final",
+        )
+        enrichment_retryable = not financial_proof_complete
+        trail.record(
+            "recovery_only_final_snapshot_confirmed",
+            {
+                "adapter_evidence_sha256": final_snapshot[
+                    "evidence_sha256"
+                ],
+                "fetched_at": final_snapshot["fetched_at"],
+                "halt_observed_at": halt_observed_at.isoformat(),
+                "open_filled_quantity": _decimal_text(open_quantity),
+                "close_filled_quantity": _decimal_text(close_quantity),
+                "close_ack_confirmed": (
+                    confirmed_close_quantity is not False
+                ),
+                "financial_proof_complete": financial_proof_complete,
+                "enrichment_retryable": enrichment_retryable,
+            },
+        )
+        cleanup_result = CleanupResult(
+            safe=True,
+            close_submitted=True,
+            close_quantity=close_quantity,
+            pre_halt_snapshot=final_snapshot,
+            final_snapshot=final_snapshot,
+            errors=(),
+        )
+        status = RESULT_PASSED
+        if self._degraded_reasons:
+            status = RESULT_DEGRADED
+        evidence = self._build_evidence(
+            authorization,
+            trail,
+            status=status,
+            passed=True,
+            failure_reason="",
+            error_code=(
+                self._degraded_error_code()
+                if status == RESULT_DEGRADED
+                else ""
+            ),
+            retryable=False,
+            finished_halted=True,
+            cleanup_result=cleanup_result,
+            actual_open_notional=actual_open_notional,
+            open_filled_quantity=open_quantity,
+            peak_cumulative_loss=cumulative_loss,
+        )
+        evidence["financial_enrichment_retryable"] = (
+            enrichment_retryable
+        )
+        prepared_evidence, prepared_hash = self._evidence_writer.prepare(
+            evidence
+        )
+        self._require_live_operation_lock()
+        self._permit_store.prepare_evidence(
+            authorization,
+            mode=self._mode,
+            evidence_path=self._evidence_writer.path,
+            evidence=prepared_evidence,
+            evidence_sha256=prepared_hash,
+            passed=True,
+            allow_terminal_enrichment=enrich_committed,
+        )
+        replace_existing = os.path.lexists(self._evidence_writer.path)
+        if replace_existing:
+            if enrich_committed:
+                self._validate_enrichment_evidence_for_replacement(
+                    authorization,
+                    expected_sha256=_required_sha256(
+                        recovery_record.get("evidence_sha256"),
+                        "committed enrichment source sha256",
+                    ),
+                )
+            else:
+                self._validate_recoverable_evidence_for_replacement(
+                    authorization
+                )
+        evidence_sha256 = self._evidence_writer.commit_prepared(
+            prepared_evidence,
+            evidence_sha256=prepared_hash,
+            allow_existing=False,
+            replace_existing=replace_existing,
+        )
+        self._permit_store.commit_evidence(
+            authorization,
+            mode=self._mode,
+            evidence_sha256=evidence_sha256,
+        )
+        self._require_live_operation_lock()
+        return ExecutionResult(
+            status=status,
+            failure_reason="",
+            evidence_path=self._evidence_writer.path,
+            evidence_sha256=evidence_sha256,
+            finished_halted=True,
+            close_submitted=True,
+            close_quantity=close_quantity,
+            warnings=tuple(self._warnings),
+            degraded_reasons=tuple(self._degraded_reasons),
+            retryable=False,
+            error_code=(
+                self._degraded_error_code()
+                if status == RESULT_DEGRADED
+                else ""
+            ),
+            retry_counts=dict(self._retry_counts),
+        )
+
     def _validate_recoverable_evidence_for_replacement(
         self,
         authorization: CanaryAuthorization,
@@ -4342,20 +5231,11 @@ class AccountALiveTradeExecutor:
             raise LiveTradeExecutionError(
                 "recoverable existing evidence must be an object"
             )
-        expected_identity = {
-            "schema_version": EVIDENCE_SCHEMA,
-            "mode": self._mode,
-            "permit_id": authorization.permit_id,
-            "authorization_sha256": (
-                authorization.authorization_sha256
-            ),
-        }
-        for field_name, expected_value in expected_identity.items():
-            if payload.get(field_name) != expected_value:
-                raise LiveTradeExecutionError(
-                    "recoverable existing evidence identity mismatch: "
-                    f"{field_name}"
-                )
+        _validate_evidence_payload_identity(
+            payload,
+            authorization,
+            mode=self._mode,
+        )
         result_status = payload.get("result_status")
         if result_status is None:
             result_status = payload.get("status")
@@ -4365,6 +5245,41 @@ class AccountALiveTradeExecutor:
         ):
             raise LiveTradeExecutionError(
                 "recoverable existing evidence is terminal"
+            )
+
+    def _validate_enrichment_evidence_for_replacement(
+        self,
+        authorization: CanaryAuthorization,
+        *,
+        expected_sha256: str,
+    ) -> None:
+        raw = _read_protected_file(
+            self._evidence_writer.path,
+            "committed enrichment source evidence",
+            live=self._mode == "live",
+        )
+        if _sha256_bytes(raw) != expected_sha256:
+            raise LiveTradeExecutionError(
+                "committed enrichment source hash mismatch"
+            )
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LiveTradeExecutionError(
+                "committed enrichment source evidence is invalid"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LiveTradeExecutionError(
+                "committed enrichment source evidence must be an object"
+            )
+        _validate_evidence_payload_identity(
+            payload,
+            authorization,
+            mode=self._mode,
+        )
+        if payload.get("financial_enrichment_retryable") is not True:
+            raise LiveTradeExecutionError(
+                "committed evidence does not allow enrichment"
             )
 
     def _base_request(
@@ -4615,6 +5530,13 @@ class AccountALiveTradeExecutor:
             "permit_journal_failures": list(
                 self._journal_failures
             ),
+            "financial_enrichment_retryable": (
+                final_snapshot is not None
+                and final_snapshot.get(
+                    "financial_proof_complete"
+                )
+                is False
+            ),
             "round_trip_count": round_trip_count,
             "finished_halted": finished_halted,
             "target_symbol_flat": target_flat,
@@ -4646,6 +5568,7 @@ def load_authorization(
     signature_verifier: SignatureVerifier | None = None,
     operation_lock: LiveOperationLock | None = None,
     now: datetime | None = None,
+    allow_expired: bool = False,
 ) -> CanaryAuthorization:
     current_time = now
     if current_time is None:
@@ -4730,6 +5653,170 @@ def load_authorization(
         document_sha256=document_sha256,
         signatures_verified=signatures_verified,
         now=current_time,
+        allow_expired=allow_expired,
+    )
+
+
+def load_evidence_recovery_gate(
+    paths: SignedDocumentPaths,
+    *,
+    reviewer_public_key: Path,
+    authorization: CanaryAuthorization,
+    evidence_path: Path,
+    signature_verifier: SignatureVerifier,
+    operation_lock: LiveOperationLock,
+    now: datetime | None = None,
+) -> EvidenceRecoveryGate:
+    operation_lock.require_held()
+    current_time = now
+    if current_time is None:
+        current_time = datetime.now(timezone.utc)
+    current_time = _aware_utc(current_time, "now")
+    public_key = _read_protected_file(
+        reviewer_public_key,
+        "reviewer public key",
+        live=True,
+    )
+    if _sha256_bytes(public_key) != PINNED_REVIEWER_PUBLIC_KEY_SHA256:
+        raise LiveTradeExecutionError(
+            "reviewer public key hash mismatch"
+        )
+    signature_path = paths.signature
+    if signature_path is None:
+        raise LiveTradeExecutionError(
+            "evidence recovery gate signature is required"
+        )
+    raw_payload = _read_protected_file(
+        paths.payload,
+        "evidence recovery gate",
+        live=True,
+    )
+    raw_signature = _read_protected_file(
+        signature_path,
+        "evidence recovery gate signature",
+        live=True,
+    )
+    operation_lock.require_held()
+    signature_verifier.verify(
+        public_key=public_key,
+        payload=raw_payload,
+        signature=raw_signature,
+    )
+    payload = _decode_json_object(
+        raw_payload,
+        "evidence recovery gate",
+    )
+    _require_schema(
+        payload,
+        EVIDENCE_RECOVERY_GATE_SCHEMA,
+        "evidence recovery gate",
+    )
+    if payload.get("capability") != EVIDENCE_RECOVERY_CAPABILITY:
+        raise LiveTradeExecutionError(
+            "evidence recovery gate capability mismatch"
+        )
+    allowed_actions = payload.get("allowed_actions")
+    if allowed_actions != list(EVIDENCE_RECOVERY_ALLOWED_ACTIONS):
+        raise LiveTradeExecutionError(
+            "evidence recovery gate allowed actions mismatch"
+        )
+    requested_evidence_path = _bind_protected_output_path(
+        evidence_path,
+        "evidence recovery output path",
+        owner_uid=os.geteuid(),
+    )
+    signed_evidence_path = _bind_protected_output_path(
+        payload.get("evidence_path"),
+        "signed evidence recovery output path",
+        owner_uid=os.geteuid(),
+    )
+    if signed_evidence_path.target != requested_evidence_path.target:
+        raise LiveTradeExecutionError(
+            "evidence recovery gate identity mismatch: evidence_path"
+        )
+    expected_identity = {
+        "account_id": authorization.account_id,
+        "symbol": authorization.symbol,
+        "permit_id": authorization.permit_id,
+        "authorization_sha256": (
+            authorization.authorization_sha256
+        ),
+        "release_id": authorization.release.release_id,
+        "intent_id": authorization.intent_id,
+        "close_intent_id": authorization.close_intent_id,
+        "open_client_order_id": (
+            authorization.open_client_order_id
+        ),
+        "close_client_order_id": (
+            authorization.close_client_order_id
+        ),
+        "permit_store_id": authorization.release.permit_store_id,
+        "permit_store_path": str(DEFAULT_LIVE_PERMIT_LEDGER_PATH),
+        "evidence_path": str(requested_evidence_path.target),
+    }
+    for field_name, expected_value in expected_identity.items():
+        actual_value = payload.get(field_name)
+        if field_name == "evidence_path":
+            actual_value = str(signed_evidence_path.target)
+        if actual_value != expected_value:
+            raise LiveTradeExecutionError(
+                "evidence recovery gate identity mismatch: "
+                f"{field_name}"
+            )
+    if Path(authorization.release.permit_store_path) != (
+        DEFAULT_LIVE_PERMIT_LEDGER_PATH
+    ):
+        raise LiveTradeExecutionError(
+            "evidence recovery authorization ledger path mismatch"
+        )
+    issued_at = _timestamp(
+        payload.get("issued_at"),
+        "evidence recovery gate issued_at",
+    )
+    if issued_at - current_time > MAX_CLOCK_SKEW:
+        raise LiveTradeExecutionError(
+            "evidence recovery gate is issued in the future"
+        )
+    refresh_after = _timestamp(
+        payload.get("refresh_after"),
+        "evidence recovery gate refresh_after",
+    )
+    if refresh_after <= issued_at:
+        raise LiveTradeExecutionError(
+            "evidence recovery gate refresh_after must follow issued_at"
+        )
+    warnings: list[str] = []
+    if current_time >= refresh_after:
+        warnings.append(
+            "EVIDENCE_RECOVERY_GATE_REFRESH_RECOMMENDED: "
+            "signed recovery capability remains valid"
+        )
+    return EvidenceRecoveryGate(
+        gate_id=_canonical_uuid(
+            payload.get("gate_id"),
+            "evidence recovery gate_id",
+        ),
+        permit_id=authorization.permit_id,
+        authorization_sha256=authorization.authorization_sha256,
+        release_id=authorization.release.release_id,
+        intent_id=authorization.intent_id,
+        close_intent_id=authorization.close_intent_id,
+        open_client_order_id=authorization.open_client_order_id,
+        close_client_order_id=authorization.close_client_order_id,
+        permit_store_id=authorization.release.permit_store_id,
+        permit_store_path=str(DEFAULT_LIVE_PERMIT_LEDGER_PATH),
+        evidence_path=expected_identity["evidence_path"],
+        recovery_executor_sha256=_required_sha256(
+            payload.get("recovery_executor_sha256"),
+            "evidence recovery executor sha256",
+        ),
+        recovery_adapter_sha256=_required_sha256(
+            payload.get("recovery_adapter_sha256"),
+            "evidence recovery adapter sha256",
+        ),
+        issued_at=issued_at,
+        refresh_after=refresh_after,
+        warnings=tuple(warnings),
     )
 
 
@@ -4739,6 +5826,7 @@ def _validate_authorization_documents(
     document_sha256: Mapping[str, str],
     signatures_verified: bool,
     now: datetime,
+    allow_expired: bool = False,
 ) -> CanaryAuthorization:
     release_gate = payloads["release_gate"]
     safety_gate = payloads["safety_gate"]
@@ -4827,7 +5915,12 @@ def _validate_authorization_documents(
         raise LiveTradeExecutionError(
             "release gate rollout phase must be account_a_canary"
         )
-    _validate_document_window(release_gate, "release gate", now)
+    _validate_document_window(
+        release_gate,
+        "release gate",
+        now,
+        allow_expired=allow_expired,
+    )
 
     _require_target_identity(safety_gate, "safety gate")
     _require_release_identity(
@@ -4853,18 +5946,26 @@ def _validate_authorization_documents(
             raise LiveTradeExecutionError(
                 f"safety gate requires {field_name}=true"
             )
-    loss_monitor_healthy = safety_gate.get(
-        "loss_monitor_healthy"
+    signed_live_health = (
+        (
+            "process_liveness",
+            "SAFETY_PROCESS_LIVENESS_MISSING",
+        ),
+        (
+            "loss_monitor_healthy",
+            "SAFETY_LOSS_MONITOR_HEALTH_MISSING",
+        ),
     )
-    if loss_monitor_healthy is False:
-        raise LiveTradeExecutionError(
-            "safety gate requires loss_monitor_healthy=true"
-        )
-    if loss_monitor_healthy is not True:
-        warnings.append(
-            "SAFETY_LOSS_MONITOR_HEALTH_MISSING: "
-            "loss_monitor_healthy telemetry is missing"
-        )
+    for field_name, warning_code in signed_live_health:
+        health_value = safety_gate.get(field_name)
+        if health_value is False:
+            raise LiveTradeExecutionError(
+                f"safety gate requires {field_name}=true"
+            )
+        if health_value is not True:
+            warnings.append(
+                f"{warning_code}: {field_name} telemetry is missing"
+            )
     scoped_safety_health = (
         (
             "ownership_healthy",
@@ -4985,7 +6086,12 @@ def _validate_authorization_documents(
             warnings.append(
                 f"SOFT_FRESHNESS_DEGRADED: {warning}"
             )
-    _validate_document_window(safety_gate, "safety gate", now)
+    _validate_document_window(
+        safety_gate,
+        "safety gate",
+        now,
+        allow_expired=allow_expired,
+    )
 
     _require_target_identity(
         emergency_gate,
@@ -5079,6 +6185,7 @@ def _validate_authorization_documents(
         emergency_gate,
         "emergency close gate",
         now,
+        allow_expired=allow_expired,
     )
 
     _require_target_identity(permit, "permit")
@@ -5214,7 +6321,17 @@ def _validate_authorization_documents(
         raise LiveTradeExecutionError(
             "permit portfolio baseline differs from safety gate"
         )
-    expires_at = _validate_document_window(permit, "permit", now)
+    expires_at = _validate_document_window(
+        permit,
+        "permit",
+        now,
+        allow_expired=allow_expired,
+    )
+    if allow_expired and expires_at <= now:
+        warnings.append(
+            "EVIDENCE_RECOVERY_EXPIRED_AUTHORIZATION: "
+            "signed authorization is restricted to evidence recovery"
+        )
 
     normalized_hashes = {
         name: _required_sha256(value, f"{name} sha256")
@@ -5353,6 +6470,7 @@ def _validate_authorization_for_execution(
     *,
     mode: str,
     now: datetime,
+    allow_expired: bool = False,
 ) -> tuple[str, ...]:
     if authorization.account_id != ACCOUNT_ID:
         raise LiveTradeExecutionError(
@@ -5378,7 +6496,7 @@ def _validate_authorization_for_execution(
         raise LiveTradeExecutionError(
             "execution loss threshold must be below 1.5 USDT"
         )
-    if authorization.expires_at <= now:
+    if authorization.expires_at <= now and not allow_expired:
         raise LiveTradeExecutionError("permit is expired")
     warnings = _validate_health_freshness(
         authorization,
@@ -5509,21 +6627,27 @@ def _validate_live_preflight(
                 raise LiveTradeExecutionError(
                     f"preflight node identity mismatch: {field_name}"
                 )
-        trading_state = _required_text(
-            node_snapshot.get("trading_state"),
-            "preflight trading_state",
-        ).upper()
-        allowed_trading_states = {"HALTED", "STOPPED"}
-        if phase == "before-open":
-            allowed_trading_states = {
-                "ACTIVE",
-                "RUNNING",
-                "RESUMED",
-            }
-        if trading_state not in allowed_trading_states:
-            raise LiveTradeExecutionError(
-                f"preflight node state is invalid for {phase}"
+        raw_trading_state = node_snapshot.get("trading_state")
+        if raw_trading_state is None or raw_trading_state == "":
+            warnings.append(
+                "PREFLIGHT_NODE_STATE_MISSING: trading_state"
             )
+        else:
+            trading_state = _required_text(
+                raw_trading_state,
+                "preflight trading_state",
+            ).upper()
+            allowed_trading_states = {"HALTED", "STOPPED"}
+            if phase == "before-open":
+                allowed_trading_states = {
+                    "ACTIVE",
+                    "RUNNING",
+                    "RESUMED",
+                }
+            if trading_state not in allowed_trading_states:
+                raise LiveTradeExecutionError(
+                    f"preflight node state is invalid for {phase}"
+                )
         for field_name in (
             "process_liveness",
             "loss_monitor_healthy",
@@ -5613,14 +6737,34 @@ def _validated_payload_warnings(
     label: str,
 ) -> list[str]:
     raw_warnings = payload.get("warnings", [])
+    warning_code = re.sub(
+        r"[^A-Z0-9]+",
+        "_",
+        label.upper(),
+    ).strip("_")
+    malformed_warning = f"{warning_code}_WARNINGS_MALFORMED"
     if not isinstance(raw_warnings, list):
-        raise LiveTradeExecutionError(
-            f"{label} warnings must be a list"
+        detail = str(raw_warnings)
+        if isinstance(raw_warnings, Mapping):
+            detail = json.dumps(
+                _json_safe(dict(raw_warnings)),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return [f"{malformed_warning}: {detail}"[:500]]
+    normalized: list[str] = []
+    malformed_items = 0
+    for item in raw_warnings:
+        text = str(item or "").strip()
+        if not text:
+            malformed_items += 1
+            continue
+        normalized.append(text[:500])
+    if malformed_items:
+        normalized.append(
+            f"{malformed_warning}: {malformed_items} empty item(s)"
         )
-    return [
-        _required_text(item, f"{label} warning")
-        for item in raw_warnings
-    ]
+    return list(dict.fromkeys(normalized))
 
 
 def _non_target_portfolio_drift_warning(
@@ -5665,7 +6809,7 @@ def _parse_observation(
     loss_monitor_healthy = payload.get("loss_monitor_healthy")
     if loss_monitor_healthy is False:
         raise LiveTradeExecutionError(
-            "loss monitor is unhealthy"
+            "loss_monitor_healthy=false requires risk flattening"
         )
     if loss_monitor_healthy is not True:
         warnings.append(
@@ -5870,6 +7014,153 @@ def _parse_position(
     )
 
 
+def _validated_pending_close_request(
+    payload: Mapping[str, Any] | None,
+    authorization: CanaryAuthorization,
+) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise LiveTradeExecutionError(
+            "pending CLOSE journal request is missing"
+        )
+    expected_values = {
+        "client_order_id": authorization.close_client_order_id,
+        "intent_id": authorization.close_intent_id,
+        "open_intent_id": authorization.intent_id,
+        "side_effect_id": deterministic_side_effect_id(
+            authorization,
+            "CLOSE",
+        ),
+        "order_type": "MARKET",
+    }
+    for field_name, expected_value in expected_values.items():
+        if payload.get(field_name) != expected_value:
+            raise LiveTradeExecutionError(
+                f"pending CLOSE identity mismatch: {field_name}"
+            )
+    if payload.get("reduce_only") is not True:
+        raise LiveTradeExecutionError(
+            "pending CLOSE request must be reduce-only"
+        )
+    expected_position_side = "LONG"
+    expected_close_side = "SELL"
+    if authorization.open_side == "SELL":
+        expected_position_side = "SHORT"
+        expected_close_side = "BUY"
+    if payload.get("position_side") != expected_position_side:
+        raise LiveTradeExecutionError(
+            "pending CLOSE position side mismatch"
+        )
+    if payload.get("side") != expected_close_side:
+        raise LiveTradeExecutionError(
+            "pending CLOSE side mismatch"
+        )
+    quantity = _decimal(
+        payload.get("quantity"),
+        "pending CLOSE quantity",
+        positive=True,
+    )
+    if quantity > authorization.quantity:
+        raise LiveTradeExecutionError(
+            "pending CLOSE quantity exceeds authorization"
+        )
+    raw_mode = payload.get("mode")
+    if raw_mode is not None and raw_mode != "live":
+        raise LiveTradeExecutionError(
+            "pending CLOSE mode mismatch"
+        )
+    raw_timeout = payload.get("hard_timeout_seconds")
+    if raw_timeout is not None:
+        _positive_float(
+            raw_timeout,
+            "pending CLOSE hard_timeout_seconds",
+        )
+    return _json_safe(dict(payload))
+
+
+def _recovery_snapshot_target_risk(
+    payload: Mapping[str, Any],
+    authorization: CanaryAuthorization,
+    *,
+    now: datetime,
+    exchange_not_before: datetime | None,
+) -> Mapping[str, Any] | bool:
+    _validate_adapter_identity(payload, authorization)
+    _require_evidence_source(
+        payload,
+        expected=EXCHANGE_EVIDENCE_SOURCE,
+        label="recovery final snapshot",
+    )
+    fetched_at = _timestamp(
+        payload.get("fetched_at"),
+        "recovery final snapshot fetched_at",
+    )
+    _require_fresh_timestamp(
+        fetched_at,
+        now=now,
+        max_age_seconds=authorization.exchange_max_age_seconds,
+        label="recovery final snapshot fetched_at",
+    )
+    _require_timestamp_not_before(
+        fetched_at,
+        not_before=exchange_not_before,
+        label="recovery final snapshot fetched_at",
+    )
+    truth_fields = (
+        "target_symbol_flat",
+        "target_symbol_regular_orders_zero",
+        "target_symbol_algo_orders_zero",
+    )
+    truths: dict[str, bool] = {}
+    for field_name in truth_fields:
+        field_value = payload.get(field_name)
+        if not isinstance(field_value, bool):
+            raise LiveTradeExecutionError(
+                f"recovery final snapshot {field_name} must be boolean"
+            )
+        truths[field_name] = field_value
+    position_quantity = _decimal(
+        payload.get("position_quantity"),
+        "recovery final position_quantity",
+        non_negative=True,
+    )
+    evidence_sha256 = _required_sha256(
+        payload.get("evidence_sha256"),
+        "recovery final snapshot evidence_sha256",
+    )
+    residual_risk = position_quantity > 0
+    if not all(truths.values()):
+        residual_risk = True
+    if not residual_risk:
+        return False
+    return {
+        **truths,
+        "position_quantity": _decimal_text(position_quantity),
+        "fetched_at": fetched_at.isoformat(),
+        "adapter_evidence_sha256": evidence_sha256,
+    }
+
+
+def _financial_decimal_or_degraded(
+    payload: Mapping[str, Any],
+    field_name: str,
+    *,
+    warnings: list[str],
+    non_negative: bool = False,
+) -> Decimal:
+    try:
+        return _decimal(
+            payload.get(field_name),
+            f"final {field_name}",
+            non_negative=non_negative,
+        )
+    except LiveTradeExecutionError as exc:
+        warnings.append(
+            "FINANCIAL_FIELD_INVALID: "
+            f"{field_name}: {_exception_text(exc)}"
+        )
+        return Decimal(0)
+
+
 def _validate_final_snapshot(
     payload: Mapping[str, Any],
     authorization: CanaryAuthorization,
@@ -5917,16 +7208,6 @@ def _validate_final_snapshot(
         raise LiveTradeExecutionError(
             "final target position is not flat"
         )
-    open_filled_quantity = _decimal(
-        payload.get("open_filled_quantity"),
-        "final open_filled_quantity",
-        non_negative=True,
-    )
-    open_average_fill_price = _decimal(
-        payload.get("open_average_fill_price_usdt"),
-        "final open_average_fill_price_usdt",
-        non_negative=True,
-    )
     baseline = _required_sha256(
         payload.get("non_target_portfolio_baseline_sha256"),
         "final non-target portfolio baseline",
@@ -5938,75 +7219,109 @@ def _validate_final_snapshot(
         payload.get("evidence_sha256"),
         "final snapshot evidence_sha256",
     )
-    gross_pnl = _decimal(
-        payload.get("gross_pnl_usdt"),
-        "final gross_pnl_usdt",
+    normalized_warnings = _validated_payload_warnings(
+        payload,
+        label="final snapshot",
     )
-    fees = _decimal(
-        payload.get("fees_usdt"),
-        "final fees_usdt",
+    open_filled_quantity = _financial_decimal_or_degraded(
+        payload,
+        "open_filled_quantity",
+        warnings=normalized_warnings,
         non_negative=True,
     )
-    net_pnl = _decimal(
-        payload.get("net_pnl_usdt"),
-        "final net_pnl_usdt",
+    open_average_fill_price = _financial_decimal_or_degraded(
+        payload,
+        "open_average_fill_price_usdt",
+        warnings=normalized_warnings,
+        non_negative=True,
     )
-    cumulative_loss = _decimal(
-        payload.get("cumulative_net_loss_usdt"),
-        "final cumulative_net_loss_usdt",
+    gross_pnl = _financial_decimal_or_degraded(
+        payload,
+        "gross_pnl_usdt",
+        warnings=normalized_warnings,
+    )
+    fees = _financial_decimal_or_degraded(
+        payload,
+        "fees_usdt",
+        warnings=normalized_warnings,
+        non_negative=True,
+    )
+    net_pnl = _financial_decimal_or_degraded(
+        payload,
+        "net_pnl_usdt",
+        warnings=normalized_warnings,
+    )
+    cumulative_loss = _financial_decimal_or_degraded(
+        payload,
+        "cumulative_net_loss_usdt",
+        warnings=normalized_warnings,
         non_negative=True,
     )
     enrichment_degraded = payload.get("enrichment_degraded")
     if not isinstance(enrichment_degraded, bool):
-        raise LiveTradeExecutionError(
-            "final enrichment_degraded must be boolean"
+        normalized_warnings.append(
+            "FINANCIAL_METADATA_INVALID: "
+            "enrichment_degraded must be boolean"
         )
     financial_proof_complete = payload.get(
         "financial_proof_complete"
     )
     if not isinstance(financial_proof_complete, bool):
-        raise LiveTradeExecutionError(
-            "final financial_proof_complete must be boolean"
+        normalized_warnings.append(
+            "FINANCIAL_METADATA_INVALID: "
+            "financial_proof_complete must be boolean"
         )
-    warnings = payload.get("warnings", [])
-    if not isinstance(warnings, list):
-        raise LiveTradeExecutionError(
-            "final snapshot warnings must be a list"
+    initial_warning_state = bool(
+        [
+            warning
+            for warning in normalized_warnings
+            if "FINANCIAL_METADATA_" not in warning
+        ]
+    )
+    if (
+        isinstance(enrichment_degraded, bool)
+        and enrichment_degraded != initial_warning_state
+    ):
+        normalized_warnings.append(
+            "FINANCIAL_METADATA_INCONSISTENT: "
+            "enrichment state differs from warnings"
         )
-    normalized_warnings = [
-        _required_text(item, "final snapshot warning")
-        for item in warnings
-    ]
-    if enrichment_degraded != bool(normalized_warnings):
-        raise LiveTradeExecutionError(
-            "final warnings and enrichment state differ"
+    if (
+        isinstance(financial_proof_complete, bool)
+        and financial_proof_complete == initial_warning_state
+    ):
+        normalized_warnings.append(
+            "FINANCIAL_METADATA_INCONSISTENT: "
+            "financial proof state differs from warnings"
         )
-    if financial_proof_complete != (not normalized_warnings):
+    if open_filled_quantity > authorization.quantity:
         raise LiveTradeExecutionError(
-            "final warnings and financial proof state differ"
+            "final open filled quantity exceeds authorization"
         )
-    if financial_proof_complete:
-        if open_filled_quantity <= 0:
-            raise LiveTradeExecutionError(
-                "final financial proof requires open filled quantity"
-            )
-        if open_average_fill_price <= 0:
-            raise LiveTradeExecutionError(
-                "final financial proof requires open average fill price"
-            )
-        if open_filled_quantity > authorization.quantity:
-            raise LiveTradeExecutionError(
-                "final open filled quantity exceeds authorization"
-            )
+    if open_filled_quantity <= 0:
+        normalized_warnings.append(
+            "FINANCIAL_PROOF_INCOMPLETE: "
+            "open filled quantity is unavailable"
+        )
+    if open_average_fill_price <= 0:
+        normalized_warnings.append(
+            "FINANCIAL_PROOF_INCOMPLETE: "
+            "open average fill price is unavailable"
+        )
     if net_pnl != gross_pnl - fees:
-        raise LiveTradeExecutionError(
-            "final net PnL does not equal gross PnL minus fees"
+        normalized_warnings.append(
+            "FINANCIAL_PNL_INCONSISTENT: "
+            "net PnL differs from gross PnL minus fees"
         )
     expected_loss = max(Decimal(0), -net_pnl)
     if cumulative_loss != expected_loss:
-        raise LiveTradeExecutionError(
-            "final cumulative net loss is inconsistent"
+        normalized_warnings.append(
+            "FINANCIAL_PNL_INCONSISTENT: "
+            "cumulative net loss differs from net PnL"
         )
+    normalized_warnings = list(dict.fromkeys(normalized_warnings))
+    financial_proof_complete = not normalized_warnings
+    enrichment_degraded = bool(normalized_warnings)
     normalized = dict(payload)
     normalized["gross_pnl_usdt"] = _decimal_text(gross_pnl)
     normalized["fees_usdt"] = _decimal_text(fees)
@@ -6030,6 +7345,288 @@ def _validate_final_snapshot(
     normalized["source"] = EXCHANGE_EVIDENCE_SOURCE
     normalized["fetched_at"] = fetched_at.isoformat()
     return normalized
+
+
+def _validate_evidence_payload_identity(
+    payload: Mapping[str, Any],
+    authorization: CanaryAuthorization,
+    *,
+    mode: str,
+) -> None:
+    expected_identity = {
+        "schema_version": EVIDENCE_SCHEMA,
+        "mode": mode,
+        "rollout_phase": "account_a_canary",
+        "account_id": authorization.account_id,
+        "symbol": authorization.symbol,
+        "release_id": authorization.release.release_id,
+        "permit_id": authorization.permit_id,
+        "intent_id": authorization.intent_id,
+        "open_client_order_id": authorization.open_client_order_id,
+        "close_client_order_id": authorization.close_client_order_id,
+        "authorization_sha256": authorization.authorization_sha256,
+    }
+    for field_name, expected_value in expected_identity.items():
+        if payload.get(field_name) != expected_value:
+            raise LiveTradeExecutionError(
+                f"evidence identity mismatch: {field_name}"
+            )
+    status = payload.get("status")
+    result_status = payload.get("result_status")
+    if status not in RESULT_STATUSES:
+        raise LiveTradeExecutionError(
+            "evidence result status is invalid"
+        )
+    if result_status != status:
+        raise LiveTradeExecutionError(
+            "evidence result status fields differ"
+        )
+    passed = payload.get("passed")
+    if not isinstance(passed, bool):
+        raise LiveTradeExecutionError(
+            "evidence passed must be boolean"
+        )
+    expected_passed = status != RESULT_BLOCKED
+    if passed != expected_passed:
+        raise LiveTradeExecutionError(
+            "evidence passed differs from result status"
+        )
+    details_key = "dry_run_round_trip"
+    if mode == "live":
+        details_key = "mainnet_round_trip"
+    if not isinstance(payload.get(details_key), Mapping):
+        raise LiveTradeExecutionError(
+            f"evidence {details_key} must be an object"
+        )
+
+
+def _is_recovery_only_record(
+    record: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(record, Mapping):
+        return False
+    if record.get("state") != "HALTED":
+        return False
+    if str(record.get("pending_action") or ""):
+        return False
+    if str(record.get("evidence_sha256") or ""):
+        return False
+    return True
+
+
+def _is_recovery_only_pending_evidence(
+    pending: Mapping[str, Any],
+) -> bool:
+    payload = pending.get("payload")
+    if not isinstance(payload, Mapping):
+        return False
+    if not isinstance(pending.get("path"), str):
+        return False
+    if SHA256_RE.fullmatch(str(pending.get("sha256") or "")) is None:
+        return False
+    return isinstance(pending.get("passed"), bool)
+
+
+def _is_committed_evidence_record(
+    record: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(record, Mapping):
+        return False
+    if record.get("state") != "EVIDENCE_COMMITTED":
+        return False
+    if str(record.get("pending_action") or ""):
+        return False
+    return bool(str(record.get("evidence_sha256") or ""))
+
+
+def _committed_evidence_requires_enrichment(
+    record: Mapping[str, Any] | None,
+    authorization: CanaryAuthorization,
+    *,
+    mode: str,
+) -> bool:
+    if not _is_committed_evidence_record(record):
+        return False
+    pending = record.get("pending_evidence")
+    if not isinstance(pending, Mapping):
+        return False
+    pending_hash = _required_sha256(
+        pending.get("sha256"),
+        "committed pending evidence sha256",
+    )
+    if pending_hash != record.get("evidence_sha256"):
+        raise LiveTradeExecutionError(
+            "committed pending evidence hash mismatch"
+        )
+    payload = pending.get("payload")
+    if not isinstance(payload, Mapping):
+        raise LiveTradeExecutionError(
+            "committed pending evidence payload is invalid"
+        )
+    _validate_evidence_payload_identity(
+        payload,
+        authorization,
+        mode=mode,
+    )
+    return payload.get("financial_enrichment_retryable") is True
+
+
+def _has_recovery_only_pending_evidence(
+    record: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(record, Mapping):
+        return False
+    if record.get("state") not in {
+        "HALTED",
+        "EVIDENCE_ENRICHMENT_PENDING",
+    }:
+        return False
+    if record.get("pending_action") != "PUBLISH_EVIDENCE":
+        return False
+    pending = record.get("pending_evidence")
+    if not isinstance(pending, Mapping):
+        return False
+    return _is_recovery_only_pending_evidence(pending)
+
+
+def _recovery_history_evidence(
+    record: Mapping[str, Any],
+    authorization: CanaryAuthorization,
+) -> Mapping[str, Any]:
+    raw_history = record.get("history")
+    if not isinstance(raw_history, list):
+        raise LiveTradeExecutionError(
+            "recovery permit journal history is invalid"
+        )
+    requested_close_quantity: Decimal | bool = False
+    confirmed_close_quantity: Decimal | bool = False
+    halt_observed_at: datetime | bool = False
+    for expected_sequence, raw_entry in enumerate(raw_history, start=1):
+        if not isinstance(raw_entry, Mapping):
+            raise LiveTradeExecutionError(
+                "recovery permit journal history entry is invalid"
+            )
+        if raw_entry.get("sequence") != expected_sequence:
+            raise LiveTradeExecutionError(
+                "recovery permit journal history sequence is invalid"
+            )
+        payload = raw_entry.get("payload")
+        if not isinstance(payload, Mapping):
+            raise LiveTradeExecutionError(
+                "recovery permit journal history payload is invalid"
+            )
+        event_type = str(raw_entry.get("event_type") or "")
+        action = str(payload.get("action") or "")
+        if event_type == "ACTION_PENDING" and action == "CLOSE":
+            request = payload.get("request")
+            if not isinstance(request, Mapping):
+                raise LiveTradeExecutionError(
+                    "recovery CLOSE journal request is invalid"
+                )
+            if (
+                request.get("client_order_id")
+                != authorization.close_client_order_id
+            ):
+                raise LiveTradeExecutionError(
+                    "recovery CLOSE journal identity mismatch"
+                )
+            if (
+                request.get("side_effect_id")
+                != deterministic_side_effect_id(
+                    authorization,
+                    "CLOSE",
+                )
+            ):
+                raise LiveTradeExecutionError(
+                    "recovery CLOSE side effect identity mismatch"
+                )
+            if request.get("reduce_only") is not True:
+                raise LiveTradeExecutionError(
+                    "recovery CLOSE journal is not reduce-only"
+                )
+            requested_close_quantity = _decimal(
+                request.get("quantity"),
+                "recovery requested close quantity",
+                positive=True,
+            )
+        close_confirmation_event = event_type in {
+            "ACTION_CONFIRMED",
+            "CLOSE_CONFIRMED",
+        }
+        if close_confirmation_event and action == "CLOSE":
+            result = payload.get("result")
+            if not isinstance(result, Mapping):
+                raise LiveTradeExecutionError(
+                    "recovery CLOSE confirmation is invalid"
+                )
+            confirmed_close_quantity = (
+                _recovery_confirmed_close_quantity(result)
+            )
+        if raw_entry.get("state") != "HALTED":
+            continue
+        raw_observed_at = payload.get("observed_at")
+        result = payload.get("result")
+        if (
+            (raw_observed_at is None or raw_observed_at == "")
+            and isinstance(result, Mapping)
+        ):
+            raw_observed_at = result.get("observed_at")
+        if raw_observed_at is None or raw_observed_at == "":
+            continue
+        halt_observed_at = _timestamp(
+            raw_observed_at,
+            "recovery HALT observed_at",
+        )
+    if requested_close_quantity is False:
+        raise RecoverableEvidenceError(
+            "recovery CLOSE journal request is missing"
+        )
+    if requested_close_quantity > authorization.quantity:
+        raise LiveTradeExecutionError(
+            "recovery CLOSE journal exceeds authorization"
+        )
+    if halt_observed_at is False:
+        raise RecoverableEvidenceError(
+            "recovery HALT audit timestamp is missing"
+        )
+    return {
+        "requested_close_quantity": requested_close_quantity,
+        "confirmed_close_quantity": confirmed_close_quantity,
+        "halt_observed_at": halt_observed_at,
+    }
+
+
+def _recovery_confirmed_close_quantity(
+    result: Mapping[str, Any],
+) -> Decimal:
+    raw_quantity = result.get("quantity")
+    raw_filled_quantity = result.get("filled_quantity")
+    quantity: Decimal | bool = False
+    filled_quantity: Decimal | bool = False
+    if raw_quantity is not None:
+        quantity = _decimal(
+            raw_quantity,
+            "recovery confirmed close quantity",
+            positive=True,
+        )
+    if raw_filled_quantity is not None:
+        filled_quantity = _decimal(
+            raw_filled_quantity,
+            "recovery confirmed close filled_quantity",
+            positive=True,
+        )
+    if quantity is not False and filled_quantity is not False:
+        if quantity != filled_quantity:
+            raise LiveTradeExecutionError(
+                "recovery CLOSE confirmation quantity fields differ"
+            )
+    if quantity is not False:
+        return quantity
+    if filled_quantity is not False:
+        return filled_quantity
+    raise LiveTradeExecutionError(
+        "recovery CLOSE confirmation quantity is missing"
+    )
 
 
 def _validate_ack(
@@ -6155,24 +7752,21 @@ def _validate_exact_close_ack(
         "enrichment_degraded",
         False,
     )
-    if not isinstance(enrichment_degraded, bool):
-        raise LiveTradeExecutionError(
-            "close enrichment_degraded must be boolean"
-        )
-    raw_warnings = payload.get("warnings", [])
-    if not isinstance(raw_warnings, list):
-        raise LiveTradeExecutionError(
-            "close warnings must be a list"
-        )
-    warnings = tuple(
-        _required_text(item, "close warning")
-        for item in raw_warnings
+    warnings = _validated_payload_warnings(
+        payload,
+        label="close",
     )
-    if enrichment_degraded != bool(warnings):
-        raise LiveTradeExecutionError(
-            "close enrichment state and warnings differ"
+    if not isinstance(enrichment_degraded, bool):
+        warnings.append(
+            "CLOSE_ENRICHMENT_METADATA_INVALID: "
+            "enrichment_degraded must be boolean"
         )
-    return evidence_sha256, warnings
+    elif enrichment_degraded != bool(warnings):
+        warnings.append(
+            "CLOSE_ENRICHMENT_METADATA_INCONSISTENT: "
+            "enrichment state differs from warnings"
+        )
+    return evidence_sha256, tuple(dict.fromkeys(warnings))
 
 
 def _soft_adapter_rejection(
@@ -6533,6 +8127,8 @@ def _validate_document_window(
     payload: Mapping[str, Any],
     label: str,
     now: datetime,
+    *,
+    allow_expired: bool = False,
 ) -> datetime:
     issued_at = _timestamp(
         payload.get("issued_at"),
@@ -6546,7 +8142,7 @@ def _validate_document_window(
         raise LiveTradeExecutionError(
             f"{label} issued_at is in the future"
         )
-    if expires_at <= now:
+    if expires_at <= now and not allow_expired:
         raise LiveTradeExecutionError(
             f"{label} is expired"
         )
@@ -6787,6 +8383,120 @@ def _required_absolute_path(value: Any, label: str) -> Path:
     return Path(os.path.abspath(path))
 
 
+def _bind_protected_output_path(
+    value: Any,
+    label: str,
+    *,
+    owner_uid: int,
+) -> ProtectedOutputPath:
+    target = _required_absolute_path(value, label)
+    canonical_parent, parent_stat = _validate_protected_parent_chain(
+        target.parent,
+        label,
+        owner_uid=owner_uid,
+    )
+    canonical_target = canonical_parent / target.name
+    try:
+        target_stat = os.lstat(canonical_target)
+    except FileNotFoundError:
+        target_stat = None
+    except OSError as exc:
+        raise LiveTradeExecutionError(
+            f"cannot inspect protected {label}: {canonical_target}"
+        ) from exc
+    if target_stat is not None:
+        if stat.S_ISLNK(target_stat.st_mode):
+            raise LiveTradeExecutionError(
+                f"{label} must not be a symlink"
+            )
+        if not stat.S_ISREG(target_stat.st_mode):
+            raise LiveTradeExecutionError(
+                f"{label} must be a regular file path"
+            )
+    return ProtectedOutputPath(
+        target=canonical_target,
+        parent_device=parent_stat.st_dev,
+        parent_inode=parent_stat.st_ino,
+        owner_uid=owner_uid,
+        label=label,
+    )
+
+
+def _validate_protected_parent_chain(
+    parent: Path,
+    label: str,
+    *,
+    owner_uid: int,
+) -> tuple[Path, os.stat_result]:
+    absolute_parent = _required_absolute_path(
+        parent,
+        f"{label} parent",
+    )
+    current = Path(absolute_parent.anchor)
+    allowed_owner_uids = {0, owner_uid}
+    parent_stat: os.stat_result | None = None
+    for part in absolute_parent.parts[1:]:
+        current = current / part
+        try:
+            current_stat = os.lstat(current)
+        except OSError as exc:
+            raise LiveTradeExecutionError(
+                f"{label} parent must already exist: {current}"
+            ) from exc
+        if stat.S_ISLNK(current_stat.st_mode):
+            raise LiveTradeExecutionError(
+                f"{label} parent chain contains a symlink: {current}"
+            )
+        if not stat.S_ISDIR(current_stat.st_mode):
+            raise LiveTradeExecutionError(
+                f"{label} parent chain contains a non-directory: "
+                f"{current}"
+            )
+        if current_stat.st_uid not in allowed_owner_uids:
+            raise LiveTradeExecutionError(
+                f"{label} parent owner is untrusted: {current}"
+            )
+        writable_by_others = current_stat.st_mode & 0o022
+        sticky_root_directory = (
+            current_stat.st_uid == 0
+            and current_stat.st_mode & stat.S_ISVTX
+        )
+        if writable_by_others and not sticky_root_directory:
+            raise LiveTradeExecutionError(
+                f"{label} parent is group/world writable: {current}"
+            )
+        parent_stat = current_stat
+    if parent_stat is None:
+        try:
+            parent_stat = os.lstat(current)
+        except OSError as exc:
+            raise LiveTradeExecutionError(
+                f"{label} parent must already exist: {current}"
+            ) from exc
+    return current, parent_stat
+
+
+def _revalidate_protected_output_path(
+    binding: ProtectedOutputPath,
+) -> None:
+    rebound = _bind_protected_output_path(
+        binding.target,
+        binding.label,
+        owner_uid=binding.owner_uid,
+    )
+    if rebound.target != binding.target:
+        raise LiveTradeExecutionError(
+            f"protected {binding.label} path changed"
+        )
+    if (
+        rebound.parent_device != binding.parent_device
+        or rebound.parent_inode != binding.parent_inode
+    ):
+        raise LiveTradeExecutionError(
+            f"protected {binding.label} parent changed"
+        )
+
+
 def _read_protected_file(
     path: Path,
     label: str,
@@ -6865,9 +8575,17 @@ def _atomic_write_bytes(
     *,
     mode: int,
     replace_existing: bool,
+    protected_path: ProtectedOutputPath | None = None,
 ) -> None:
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    if protected_path is None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        if target != protected_path.target:
+            raise LiveTradeExecutionError(
+                "protected output target differs from binding"
+            )
+        _revalidate_protected_output_path(protected_path)
     if not replace_existing and target.exists():
         raise LiveTradeExecutionError(
             f"target path already exists: {target}"
@@ -6883,6 +8601,8 @@ def _atomic_write_bytes(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        if protected_path is not None:
+            _revalidate_protected_output_path(protected_path)
         if not replace_existing and target.exists():
             raise LiveTradeExecutionError(
                 f"target path appeared concurrently: {target}"
@@ -6897,6 +8617,8 @@ def _atomic_write_bytes(
                     f"target path appeared concurrently: {target}"
                 ) from exc
             os.unlink(temporary_name)
+        if protected_path is not None:
+            _revalidate_protected_output_path(protected_path)
         _fsync_directory(target.parent)
     finally:
         if os.path.exists(temporary_name):
@@ -7214,6 +8936,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence-output", type=Path, required=True)
     parser.add_argument("--execute-live", action="store_true")
     parser.add_argument(
+        "--recover-evidence-only",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--evidence-recovery-gate",
+        type=Path,
+    )
+    parser.add_argument(
+        "--evidence-recovery-gate-signature",
+        type=Path,
+    )
+    parser.add_argument(
         "--live-adapter",
         type=Path,
     )
@@ -7290,7 +9024,10 @@ def _build_executor(
     return AccountALiveTradeExecutor(
         adapter=adapter,
         permit_store=permit_store,
-        evidence_writer=AtomicEvidenceWriter(args.evidence_output),
+        evidence_writer=AtomicEvidenceWriter(
+            args.evidence_output,
+            live=mode == "live",
+        ),
         operation_lock=operation_lock,
         mode=mode,
         max_observations=args.max_observations,
@@ -7303,6 +9040,7 @@ def _build_executor(
         journal_write_timeout_seconds=(
             args.journal_write_timeout_seconds
         ),
+        evidence_only=bool(args.recover_evidence_only),
     )
 
 
@@ -7334,6 +9072,7 @@ def _execute_live_from_args(
     args: argparse.Namespace,
     paths: AuthorizationPaths,
 ) -> ExecutionResult:
+    evidence_only = bool(args.recover_evidence_only)
     live_adapter_path = args.live_adapter
     if live_adapter_path is None:
         raise LiveTradeExecutionError(
@@ -7342,6 +9081,19 @@ def _execute_live_from_args(
     if paths.reviewer_public_key is None:
         raise LiveTradeExecutionError(
             "live execution requires --reviewer-public-key"
+        )
+    if evidence_only and args.evidence_recovery_gate is None:
+        raise LiveTradeExecutionError(
+            "evidence-only recovery requires "
+            "--evidence-recovery-gate"
+        )
+    if (
+        evidence_only
+        and args.evidence_recovery_gate_signature is None
+    ):
+        raise LiveTradeExecutionError(
+            "evidence-only recovery requires "
+            "--evidence-recovery-gate-signature"
         )
     if args.permit_ledger is not None:
         requested_ledger = _required_absolute_path(
@@ -7362,31 +9114,87 @@ def _execute_live_from_args(
                 execute_live=True,
                 signature_verifier=verifier,
                 operation_lock=operation_lock,
-            )
-            validate_live_executor(
-                Path(__file__).resolve(),
-                expected_sha256=(
-                    authorization.release.live_executor_sha256
-                ),
-            )
-            validated_adapter = validate_live_adapter(
-                live_adapter_path,
-                expected_sha256=(
-                    authorization.release.live_adapter_sha256
-                ),
+                allow_expired=evidence_only,
             )
             permit_store = SingleUsePermitStore(
                 DEFAULT_LIVE_PERMIT_LEDGER_PATH
             )
+            if evidence_only:
+                recovery_record = permit_store.snapshot(
+                    authorization,
+                    mode="live",
+                )
+                if (
+                    not _is_recovery_only_record(recovery_record)
+                    and not _is_committed_evidence_record(
+                        recovery_record
+                    )
+                    and not _has_recovery_only_pending_evidence(
+                        recovery_record
+                    )
+                ):
+                    raise LiveTradeExecutionError(
+                        "evidence-only recovery requires an eligible "
+                        "permit journal"
+                    )
+                recovery_gate = load_evidence_recovery_gate(
+                    SignedDocumentPaths(
+                        args.evidence_recovery_gate,
+                        args.evidence_recovery_gate_signature,
+                    ),
+                    reviewer_public_key=paths.reviewer_public_key,
+                    authorization=authorization,
+                    evidence_path=args.evidence_output,
+                    signature_verifier=verifier,
+                    operation_lock=operation_lock,
+                )
+                authorization = replace(
+                    authorization,
+                    warnings=(
+                        *authorization.warnings,
+                        *recovery_gate.warnings,
+                    ),
+                )
+                executor_path = Path(__file__).resolve()
+                validate_live_executor(
+                    executor_path,
+                    expected_sha256=(
+                        recovery_gate.recovery_executor_sha256
+                    ),
+                )
+                validated_adapter = validate_live_adapter(
+                    live_adapter_path,
+                    expected_sha256=(
+                        recovery_gate.recovery_adapter_sha256
+                    ),
+                )
+            else:
+                validate_live_executor(
+                    Path(__file__).resolve(),
+                    expected_sha256=(
+                        authorization.release.live_executor_sha256
+                    ),
+                )
+                validated_adapter = validate_live_adapter(
+                    live_adapter_path,
+                    expected_sha256=(
+                        authorization.release.live_adapter_sha256
+                    ),
+                )
             with JsonCommandAdapter(
                 validated_adapter,
                 timeout_seconds=args.adapter_timeout_seconds,
                 live_authorized=authorization.signatures_verified,
                 operation_lock=operation_lock,
             ) as adapter:
+                selected_adapter: TradeAdapter = adapter
+                if evidence_only:
+                    selected_adapter = EvidenceRecoveryOnlyAdapter(
+                        adapter
+                    )
                 executor = _build_executor(
                     args,
-                    adapter=adapter,
+                    adapter=selected_adapter,
                     permit_store=permit_store,
                     operation_lock=operation_lock,
                     mode="live",
@@ -7400,6 +9208,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     execute_live = bool(args.execute_live)
     if execute_live is False and args.live_adapter is not None:
         parser.error("--live-adapter requires --execute-live")
+    if args.recover_evidence_only and execute_live is False:
+        parser.error(
+            "--recover-evidence-only requires --execute-live"
+        )
 
     paths = _authorization_paths_from_args(args)
     mode = "live"

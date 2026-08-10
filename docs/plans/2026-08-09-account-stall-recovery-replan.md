@@ -1,12 +1,11 @@
 # Account Stall 修复重新复盘与收敛计划
 
 日期：2026-08-09
-状态：Claude 元复核与 reviewer 发现已吸收；生产运行 `3f3cbe8` 并保持 HALTED；
-本地放宽补丁已完成 executor、adapter 和 deployment 聚焦验证，reviewer
-`P0=0 P1=0`，等待生成新 commit-bound 部署
-生产结论：account-a 保持 HALTED；真实交易 permit 在 `C-GATE=done`、`C-DEPLOY=done`
-且 deployed commit/hash 复核完成后生效，目标为一次
-`0.07 SOLUSDT LIMIT + IOC` 小额往返
+更新：2026-08-10
+状态：Claude 元复核与 reviewer 发现已吸收；生产运行 `3922a7c` 并保持 HALTED；
+一次 `0.07 SOLUSDT LIMIT + IOC` 小额往返已经完成，目标仓位、普通订单、algo
+订单和节点状态均已归零/归停。当前收敛项是修复成交归因和只读 evidence recovery，
+完成既有 consumed permit 的 ledger 终结。
 
 ## 1. 决策
 
@@ -54,14 +53,40 @@ directory entries。`--untracked-files=all` 展开后是 373 个 status entries�
 | `tests/execution tests/nautilus` | 422 passed, 11 skipped, 2 subtests passed | PASS |
 | runtime/projection/http reviewer 聚焦 | 73 passed | PASS |
 | filtered-event 调度竞态独立进程循环 | 50/50 passed | PASS |
-| `tests/deployment` | 387 passed | PASS |
+| `tests/deployment` | 495 passed | PASS |
 | `tests/control-plane/api` | 86 passed | PASS |
-| 当前 live executor + adapter | 320 passed | PASS |
+| 当前 live executor + adapter | 404 passed | PASS |
 | recorder / deployment bundle 聚焦 | 45 passed | PASS |
 | heartbeat persistence 聚焦 | 14 passed | PASS |
 | reviewer red-suite + projection mapper 聚焦 | 284 passed | PASS |
 | Python compile + `git diff --check` | PASS | PASS |
 | 双 Codex reviewer | `P0=0 P1=0 P2=0` / `P0=0 P1=0 P2=0` | PASS |
+
+2026-08-10 最新 live/deployment 回归命令与结果：
+
+```text
+packages/execution-domain/.venv/bin/pytest -q \
+  tests/deployment/test_account_a_live_trade_executor.py
+=> 242 passed
+
+packages/execution-domain/.venv/bin/pytest -q \
+  tests/deployment/test_account_a_live_trade_http_adapter.py
+=> 162 passed
+
+packages/execution-domain/.venv/bin/pytest -q tests/deployment
+=> 495 passed
+
+python3 -m py_compile \
+  scripts/account_a_live_trade_executor.py \
+  scripts/account_a_live_trade_http_adapter.py
+git diff --check
+=> PASS
+```
+
+当前待提交脚本 SHA-256：
+
+- executor：`3811496324d1de884e838d71a9a71f0c1b5850f55896edd946426d7b8a106406`
+- adapter：`4d8e753bfcac0e6119c19a9284bfef3c9878b5b69cf2869cc8ff14c9f9e76d32`
 
 `recorder / deployment bundle 聚焦` 的 `45 passed` 对应以下六文件选择范围：
 `tests/control-plane/tools/test_exchange_state_recorder.py`、
@@ -88,7 +113,7 @@ directory entries。`--untracked-files=all` 展开后是 373 个 status entries�
 | 历史放大因素 | 随机 Redis namespace、无界 streams、内存/swap/AOF/I/O 压力 |
 | 历史发布因素 | bind-mounted hotpatch、deleted inode、A/B 运行字节漂移 |
 | 当前生产可用性回归 | `OrderInitialized` 被错误提升为 durable fatal；与 Redis lineage 无直接因果 |
-| 当前生产状态 | 2026-08-09 23:04:11 UTC 部署 `3f3cbe8`；account-a 保持 HALTED，live permit ledger 不存在 |
+| 当前生产状态 | 生产运行 `3922a7c`；account-a 保持 HALTED，permit `876e8402-1761-4a84-8ace-2ba021120e8e` 的 ledger 为 HALTED、pending action 为空、evidence hash 为空 |
 | 新鲜 exchange filter | 2026-08-09 20:39 UTC 活跃 Redis generation 的 `SOLUSDT` instrument 为 `min_notional=5`、tick/step=`0.01`、min quantity=`0.01`；`0.07 SOL` 在当前价格下满足 |
 | 冲突 filter 处置 | 公网 `exchangeInfo` 同时返回 `minNotional=50`、`minPrice=556.8` 和约 `77.24` 的市场价格，证据内部冲突；gate 采用节点刚启动加载的活跃 instrument cache |
 
@@ -116,7 +141,8 @@ projection/canary 变更选择面。
 | Hard | `OPEN` 前 freshness 窗口内的 exchange preflight | 缺失时停止新增风险；快照早于 RESUME ACK 时降级继续 |
 | Hard | durable journal/订单副作用身份/执行结果唯一性 | 阻断或进入恢复 |
 | Hard | 目标最终平仓、目标订单归零、最终 HALT | 阻断最终 PASS |
-| Hard completion | open/close 唯一成交集合数量守恒、逐 fill commission、成交价、方向和 signed PnL 完整 | 缺失时交易仍完成平仓与 HALT，最终结果为 BLOCKED |
+| Hard completion | 目标最终平仓、两类目标订单归零、最终 HALT、身份一致、无超授权 close effect | 缺失时结果为 BLOCKED，ledger 保持 recoverable |
+| Soft completion | open/close 成交归因、逐 fill commission、成交价、方向和 signed/derived PnL 完整 | 缺失时结果为 DEGRADED，提交 evidence 并保留可重复 enrichment |
 
 非目标组合基线保留为签名审计快照。持仓只记录 `symbol`、`position_side`、
 `position_amt`、`entry_price`、`leverage`、`margin_type`、`isolated_margin` 和
@@ -136,9 +162,58 @@ reduce-only close 和最终 HALT。
 7. 使用最终成交集合认证实际名义金额、手续费和净 PnL。
 
 close ACK 丢失时只重放首次 close identity 和 quantity，累计实际 close effect 保持在
-本轮授权量内。post-HALT 目标归零证明失败时，evidence 保持未提交，permit ledger 保持
-recoverable。后续恢复成功时，只允许同 permit、同 authorization、旧结果为 BLOCKED 的
-evidence 通过原子替换完成终结。
+本轮授权量内。查询已证明仓位归零后停止重放 CLOSE，避免把 exchange mirror 延迟转换为
+重复副作用。post-HALT 目标归零证明失败时，evidence 保持未提交，permit ledger 保持
+recoverable。财务 enrichment 缺失时提交 DEGRADED evidence；后续只读恢复只允许同
+permit、同 authorization、同 open/close identity 原子替换 enrichment，不执行
+RESUME、OPEN 或 CLOSE。
+
+### 2.2 真实小额交易后的新增证据
+
+真实交易使用 permit `876e8402-1761-4a84-8ace-2ba021120e8e` 和 intent
+`d4134320-0c73-4fbd-9c53-8abe560fc4a4`。节点日志与 durable execution events 记录：
+
+- OPEN：BUY `0.07 SOL @ 76.25`，commission `0.00266875 USDT`。
+- CLOSE：SELL reduce-only `0.07 SOL @ 76.26`，commission `0.00266910 USDT`。
+- derived gross PnL：`0.0007 USDT`。
+- net PnL：`-0.00463785 USDT`。
+- 最终目标仓位、普通订单、algo 订单均为零，节点为 HALTED，容器 restart 为零。
+
+执行器仍返回 `FINANCIAL_PROOF_INCOMPLETE`，由两处聚合缺陷共同造成：
+
+1. `orders_projection` 没有对应行，`execution_events` 已有两腿完整
+   `OrderFilled`；adapter 仍要求 order row，并保留
+   `order_filled_quantity=0`。
+2. CLOSE 副作用已经发生，后续 position query 已得到 flat；executor 先进入 close ACK
+   reconciliation，再检查 flat，最终把 exchange mirror 延迟保留为
+   `cleanup_result.safe=false`。
+
+修复后的完成语义：
+
+- 完整、同 identity 的 `OrderFilled` 集合可以独立提供成交数量、加权成交价、手续费和
+  trade identity；缺少 realized PnL 时按签名方向和两腿成交价推导 gross PnL。
+- CLOSE 已发出且后续新鲜交易所快照证明 flat 时停止 CLOSE 重放；最终
+  flat/orders-zero/HALTED 作为风险闭环。
+- consumed + HALTED + 空 evidence hash 进入只读 evidence recovery，只读取 final
+  snapshot 和历史成交并提交 `EVIDENCE_COMMITTED`。
+- 首次 evidence 发布期间 journal state 保持 `HALTED`。`EVIDENCE_PREPARED` 只作为
+  history event；prepared disposition 由 `state=HALTED`、
+  `pending_action=PUBLISH_EVIDENCE` 和包含 path、SHA-256、payload 的
+  `pending_evidence` 共同表示。文件发布成功后清空 pending 字段并进入
+  `EVIDENCE_COMMITTED`。
+- 原 permit 和 gate 已于 `2026-08-10 00:19:55 UTC` 过期。新增
+  `--recover-evidence-only` 明确区分新风险授权与审计终结：继续验证旧签名和 exact
+  ledger identity，并要求独立签名的 evidence recovery gate 绑定当前 executor/adapter
+  hash、固定 ledger/evidence path 和只读 capability。该模式禁止任何
+  RESUME/OPEN/CANCEL/CLOSE/HALT 调用。
+- Evidence recovery gate 不设短期 hard expiry；`refresh_after` 超期记录 warning。
+  原 permit 的过期继续阻断新增风险，审计终结保持可用。
+- 最终快照发现残余仓位、普通订单或 algo 订单时，ledger 进入
+  `RISK_RECOVERY_REQUIRED`；后续 evidence-only 调用在 adapter 启动前停止。
+- `EVIDENCE_COMMITTED` 且 `financial_enrichment_retryable=true` 时，使用
+  `EVIDENCE_ENRICHMENT_PENDING` 两阶段 journal 原子替换同 identity evidence。
+- `EVIDENCE_COMMITTED` 对应文件缺失时，从 ledger 保留的 prepared payload 恢复相同
+  SHA-256；文件内容冲突时保持 ledger 与文件原状并报告完整性故障。
 
 ## 3. 为什么持续返工
 

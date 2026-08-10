@@ -318,6 +318,76 @@ permit downlink 包含绝对 `expires_at`，control plane、data client 和 stra
 `1.5 USDT` 或 mark stale 时立即 HALT，并按交易所确认数量执行精确 reduce-only close。
 该监控不依赖后续 fill callback。
 
+### Canary Completion And Evidence Recovery
+
+canary 执行结果拆成两个独立模块：
+
+```text
+SafetyClosure
+  input: exchange position/orders, HALT acknowledgement, side-effect identity
+  output: closed | recoverable | exposed
+
+FinancialEnrichment
+  input: durable fills, exchange order history, rebuildable projections
+  output: complete | degraded
+```
+
+`SafetyClosure` 决定是否允许 ledger 终结。只有目标仓位归零、普通订单归零、algo
+订单归零、节点 HALTED、identity 一致且 close effect 没有超过授权量时返回 `closed`。
+任一目标风险残留返回 `exposed` 并保持硬阻断。
+
+`FinancialEnrichment` 决定结果是 `PASSED` 还是 `DEGRADED`。证据优先级固定为：
+
+1. 新鲜交易所目标仓位和订单快照。
+2. 同 client order ID、trade ID 和 symbol 的 durable `OrderFilled` 集合。
+3. 交易所 recent order history。
+4. 可重建的 `orders_projection`。
+5. 节点健康与控制面 telemetry。
+
+较弱来源的缺失或延迟不能覆盖较强来源已经确认的事实。fill reducer 对成交数量、成交价、
+commission 和 trade identity 单调聚合；同 trade ID 内容冲突、跨腿 trade ID 重复、
+数量不守恒继续返回 degraded 或 hard conflict。
+
+CLOSE 调用进入未知结果后先查询交易所目标仓位。仓位已归零时停止 CLOSE 重放，并由最终
+snapshot 证明 `SafetyClosure=closed`；仓位仍存在时只允许相同 side-effect ID、client
+order ID 和首次 quantity 的有界幂等重放。
+
+consumed permit 的恢复分成两类：
+
+- Risk recovery：存在目标风险或 pending side effect，可以执行 HALT、cancel 和 capped
+  reduce-only close。
+- Evidence recovery：ledger 已 HALTED、pending action 为空且最终目标风险归零，只允许
+  读取历史和提交 evidence，禁止 RESUME、OPEN 和 CLOSE。
+
+Evidence recovery 使用同 permit、authorization hash、release、intent 和 open/close
+identity，并要求 reviewer 独立签名的 `evidence-recovery-gate`。该 gate 绑定当前
+recovery executor/adapter SHA-256、固定 permit ledger、固定 evidence path 和唯一
+capability `final-snapshot-and-publish-evidence/v1`；允许动作精确为
+`final-snapshot`、`publish-evidence`。
+
+首次终结的 journal 状态转换为 `HALTED -> EVIDENCE_COMMITTED`。证据发布前 journal
+状态保持 `HALTED`；`EVIDENCE_PREPARED` 只作为 history event，prepared disposition
+由 `state=HALTED`、`pending_action=PUBLISH_EVIDENCE` 和包含 path、SHA-256、payload 的
+`pending_evidence` 共同表示。文件原子发布并校验成功后，journal 清空 pending 字段并进入
+`EVIDENCE_COMMITTED`。已提交 `DEGRADED` evidence 且标记
+`financial_enrichment_retryable=true` 时，后续只读恢复使用
+`EVIDENCE_COMMITTED -> EVIDENCE_ENRICHMENT_PENDING -> EVIDENCE_COMMITTED` 两阶段替换。
+任一 crash window 都从 ledger 保留的 payload、旧 hash 和新 hash 继续，禁止再次调用
+OPEN、CLOSE 或 HALT。
+
+Evidence recovery 的最终交易所快照发现残余目标仓位、普通订单或 algo 订单时，ledger
+原子进入 `RISK_RECOVERY_REQUIRED`。后续 evidence-only 调用在启动 adapter 前停止；风险
+处置需要独立授权。
+
+permit 和交易 gate 的过期时间继续约束新增风险。显式 `--recover-evidence-only` 模式可在
+签名文档过期后验证原始签名和 ledger identity，并只处理以下 ledger disposition：
+无 prepared evidence 的 `HALTED`、`HALTED + pending_action=PUBLISH_EVIDENCE` prepared
+disposition、`EVIDENCE_ENRICHMENT_PENDING` 或 `EVIDENCE_COMMITTED`。
+`EVIDENCE_PREPARED` history event 用于标记 prepared disposition 的形成。recovery gate
+使用 `issued_at` 和软 `refresh_after`，刷新超期只记录 warning，避免审计补全再次成为
+停摆源。任一不符合条件的 journal 状态或 disposition 直接返回 `BLOCKED`，不进入 HALT、
+cancel、close 或 open orchestration。
+
 ### Rollout Gates
 
 1. **Build gate**：单元、集成、Redis 重启恢复、queue overflow、timeout、stale heartbeat、

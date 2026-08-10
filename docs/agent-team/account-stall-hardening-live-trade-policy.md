@@ -25,7 +25,8 @@
 - durable journal、intent、outbox 和 evidence store 可写且有剩余容量。
 - rollout phase 为 `account_a_canary`，受限 canary RESUME gate 已绑定当前 release。
 - `process_liveness=false` 或 `loss_monitor_healthy=false` 未出现。
-- `RESUME` 后、`OPEN` 前取得同一轮新鲜交易所快照，确认目标仓位和订单归零。
+- `OPEN` 前取得 freshness 窗口内的交易所快照，确认目标仓位和订单归零。快照早于
+  `RESUME` ACK 时记录 causality degradation，保留 freshness 和目标归零硬校验。
 - before-open 节点状态存在明确值时，`ACTIVE`、`RUNNING` 或 `RESUMED` 允许新增风险；
   `HALTED` 和 `STOPPED` 阻断新增风险。
 - 可用 USDT 余额存在明确值时，该值覆盖
@@ -56,6 +57,10 @@
   证据有效。
 - 非目标持仓、普通挂单或 algo 挂单相对签名审计快照发生变化。执行器记录签名哈希、
   实时哈希和发生阶段，目标交易继续执行。
+- `orders_projection` 缺行或延迟，同时 durable `OrderFilled` 事件已经提供完整
+  client order ID、trade ID、成交数量、成交价和 commission。
+- CLOSE ACK 或 mirror advancement 超时，同时同一 deterministic CLOSE 已发出，后续新鲜
+  交易所快照已证明目标仓位归零。
 
 ## Symbol 选择
 
@@ -83,16 +88,18 @@
 4. **开仓路径验证**：提交一个显式 quantity 和 limit price 的 `LIMIT + IOC` 开仓单；
    本轮 quantity 固定 `0.07`，并满足
    `quantity * limit_price <= permit.max_notional_usdt <= 12 USDT`。
-5. **成交确认**：交易所历史按 account、client order ID、symbol、filled quantity 和
-   observed_at 给出因果绑定的成交证据。节点事件与 PostgreSQL projection 作为 enrichment
-   记录延迟和差异。IOC 未成交时禁止追加风险；只有交易所明确确认订单不存在时才允许使用
-   相同 deterministic client order ID 进行幂等恢复。
+5. **成交确认**：交易所历史或 durable `OrderFilled` 集合按 account、client order ID、
+   symbol、trade ID、filled quantity 和 observed_at 给出成交证据。`orders_projection`
+   作为可重建 enrichment，缺行或延迟不能覆盖 durable fill。IOC 未成交时禁止追加风险；
+   只有交易所明确确认订单不存在时才允许使用相同 deterministic client order ID 进行
+   幂等恢复。
 6. **关闭新增风险窗口**：OPEN 进入终态、返回异常或结果不明确后，立即通过 operator
    command 将 account-a 切回 HALTED。首次 HALT 全部重试失败时仍推进撤单和平仓。
 7. **平仓路径验证**：撤销残余 OPEN，查询当前目标仓位，按本轮实际 filled quantity
    和授权上限提交 capped exact reduce-only MARKET 平仓。本轮 close quantity 固定为
    当前目标仓位、本轮实际成交量和授权上限的最小值。ACK 丢失后的 reconciliation
-   重放同一 close identity 和首次 quantity。残余仓位进入 BLOCKED 证据。
+   先查询目标仓位；仓位已归零时停止 CLOSE 重放，仓位仍存在时只重放同一 close identity
+   和首次 quantity。残余仓位进入 BLOCKED 证据。
 8. **确认最终安全态**：平仓流程结束后再次幂等 HALT，确保 durable ledger 最终记录
    HALTED。
 9. **目标归零确认**：以最终 HALT 后的新鲜交易所镜像确认 `SOLUSDT` 仓位为零、普通挂单
@@ -100,8 +107,9 @@
    post-HALT 目标归零证明失败时，permit ledger 保持 recoverable，等待同一授权恢复流程。
 10. **组合活动审计**：重新计算非 `SOLUSDT` 的 `portfolio_baseline_sha256`，记录与交易前
     签名快照的差异。
-11. **财务证明**：open/close 订单、唯一 trade ID 成交集合、成交数量守恒、逐 fill
-    commission、开仓方向、signed realized PnL 与成交价全部完整后，才认证手续费和净损益。
+11. **财务证明**：open/close 唯一 trade ID 成交集合、成交数量守恒、逐 fill
+    commission、开仓方向和成交价完整后认证手续费和净损益。交易所未提供 realized PnL
+    时，按签名方向和两腿加权成交价推导 gross PnL。
 12. **事故关闭**：记录费用、滑点、时间线和 release metadata，关闭验证 incident。
 
 ## 自动停止条件
@@ -116,14 +124,25 @@
 - 订单数量、方向、position side、reduce-only 或 client order ID 与计划不一致。
 - 累计净亏损达到 permit 阈值；permit 阈值严格低于 `1.5 USDT`。
 - 出现额外目标仓位、额外目标挂单、重复 intent、重复 order 或跨账户数据。
-- exact reduce-only close 无法按实际成交数量提交或确认。
+- exact reduce-only close 无法按实际成交数量提交，或最终仍存在目标风险敞口。
 - 最终 HALT 或 HALT 后交易所归零快照无法证明。
-- 最终手续费、滑点和净损益证明缺失，无法认证累计净亏损低于 permit 阈值。
 
 heartbeat、readiness、projection、reconciliation、HTTP、circuit、资源压力和历史
 incident 的软异常持续写入审计轨迹。执行器使用有界重试推进 RESUME、OBSERVE、查询和
-证据采集。金融 enrichment 缺失发生在精确平仓和 HALT 之后，只阻断最终 PASS 认证。
-交易保护动作保持最高优先级。
+证据采集。金融 enrichment 缺失发生在精确平仓和 HALT 之后，将结果降为 DEGRADED 并
+提交可重复 enrichment 的 evidence。交易保护动作保持最高优先级。
+
+已消费 permit 的只读终结使用 `--recover-evidence-only`。原签名文档即使已经过期，
+仍须通过签名链和 ledger identity 校验，并携带 reviewer 独立签名的
+`--evidence-recovery-gate`。recovery gate 绑定当前 executor/adapter hash、固定 ledger、
+固定 evidence path 和 `final-snapshot`/`publish-evidence` 两项权限；`refresh_after`
+超期只记录 warning。该模式只接受以下 ledger disposition：无 prepared evidence 的
+`HALTED`、`HALTED + pending_action=PUBLISH_EVIDENCE` 且包含 `pending_evidence` 的
+prepared disposition、`EVIDENCE_ENRICHMENT_PENDING` 或 `EVIDENCE_COMMITTED`。
+`EVIDENCE_PREPARED` 只作为 history event，用于记录 prepared disposition 的形成。
+最终快照发现残余目标风险时 ledger 进入
+`RISK_RECOVERY_REQUIRED`，后续调用在 adapter 启动前停止。已提交 DEGRADED evidence
+允许同 identity 的只读原子 enrichment。
 
 ## 证据要求
 
