@@ -20,6 +20,63 @@ from commands.durable_command_journal import (  # noqa: E402
 )
 
 
+MUTATION_SEAMS = (
+    "begin",
+    "complete",
+    "mark_acked",
+    "recover",
+    "discard",
+)
+
+
+def _prepare_mutation(
+    journal: DurableCommandJournal,
+    mutation: str,
+) -> None:
+    if mutation == "begin":
+        return
+    journal.begin("command-1", "halt")
+    if mutation == "mark_acked":
+        journal.complete(
+            "command-1",
+            status="completed",
+            error=False,
+        )
+
+
+def _invoke_mutation(
+    journal: DurableCommandJournal,
+    mutation: str,
+) -> None:
+    if mutation == "begin":
+        journal.begin("command-1", "halt")
+        return
+    if mutation == "complete":
+        journal.complete(
+            "command-1",
+            status="completed",
+            error=False,
+        )
+        return
+    if mutation == "mark_acked":
+        journal.mark_acked("command-1")
+        return
+    if mutation == "recover":
+        journal.recover()
+        return
+    if mutation == "discard":
+        journal.discard_unapplied("command-1")
+        return
+    raise AssertionError(f"unknown mutation: {mutation}")
+
+
+def _stored_record(path: Path) -> dict[str, object] | bool:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    commands = payload["commands"]
+    assert isinstance(commands, dict)
+    return commands.get("command-1", False)
+
+
 def test_final_ack_survives_process_restart(tmp_path: Path) -> None:
     path = tmp_path / "command-journal.json"
     journal = DurableCommandJournal(
@@ -195,6 +252,137 @@ def test_atomic_replace_failure_keeps_previous_durable_and_memory_state(
     record = journal.get("command-1")
     assert record.phase is CommandJournalPhase.APPLYING
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("mutation", MUTATION_SEAMS)
+def test_pre_replace_failure_rolls_back_every_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    path = tmp_path / "command-journal.json"
+    journal = DurableCommandJournal(
+        path,
+        account_id="account-a",
+        node_id="node-a",
+    )
+    _prepare_mutation(journal, mutation)
+    before_record = journal.get("command-1")
+    before_payload: bytes | bool = False
+    if path.exists():
+        before_payload = path.read_bytes()
+
+    def fail_replace(source: str, target: Path) -> None:
+        del source, target
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(journal_module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed") as caught:
+        _invoke_mutation(journal, mutation)
+
+    assert getattr(caught.value, "committed", False) is False
+    assert journal.get("command-1") == before_record
+    if before_payload is False:
+        assert not path.exists()
+    else:
+        assert path.read_bytes() == before_payload
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_phase"),
+    [
+        ("begin", CommandJournalPhase.APPLYING),
+        ("complete", CommandJournalPhase.ACK_QUEUED),
+        ("mark_acked", CommandJournalPhase.ACKED),
+        ("recover", CommandJournalPhase.ACK_QUEUED),
+        ("discard", False),
+    ],
+)
+def test_post_replace_fsync_failure_keeps_committed_disk_and_memory_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    expected_phase: CommandJournalPhase | bool,
+) -> None:
+    path = tmp_path / "command-journal.json"
+    journal = DurableCommandJournal(
+        path,
+        account_id="account-a",
+        node_id="node-a",
+    )
+    _prepare_mutation(journal, mutation)
+
+    def fail_directory_fsync(directory: Path) -> None:
+        del directory
+        raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(
+        journal_module,
+        "_fsync_directory",
+        fail_directory_fsync,
+    )
+
+    with pytest.raises(OSError, match="durability uncertain") as caught:
+        _invoke_mutation(journal, mutation)
+
+    assert getattr(caught.value, "committed", False) is True
+    assert getattr(caught.value, "durability_uncertain", False) is True
+    memory_record = journal.get("command-1")
+    disk_record = _stored_record(path)
+    if expected_phase is False:
+        assert memory_record is False
+        assert disk_record is False
+        return
+    assert memory_record.phase is expected_phase
+    assert isinstance(disk_record, dict)
+    assert disk_record["phase"] == expected_phase.value
+    if mutation == "complete":
+        assert memory_record.status == "completed"
+        assert disk_record["status"] == "completed"
+    if mutation == "recover":
+        assert memory_record.status == "failed"
+        assert disk_record["status"] == "failed"
+
+
+def test_post_replace_fsync_failure_keeps_compacted_begin_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "command-journal.json"
+    journal = DurableCommandJournal(
+        path,
+        account_id="account-a",
+        node_id="node-a",
+        max_bytes=470,
+    )
+    for command_id in ("z-oldest", "a-middle"):
+        journal.begin(command_id, "halt")
+        journal.complete(
+            command_id,
+            status="completed",
+            error=False,
+        )
+        journal.mark_acked(command_id)
+
+    def fail_directory_fsync(directory: Path) -> None:
+        del directory
+        raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(
+        journal_module,
+        "_fsync_directory",
+        fail_directory_fsync,
+    )
+
+    with pytest.raises(OSError, match="durability uncertain"):
+        journal.begin("m-newest", "halt")
+
+    assert journal.get("z-oldest") is False
+    assert journal.get("a-middle").phase is CommandJournalPhase.ACKED
+    assert journal.get("m-newest").phase is CommandJournalPhase.APPLYING
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert set(payload["commands"]) == {"a-middle", "m-newest"}
 
 
 def test_acked_history_is_compacted_under_small_capacity(
@@ -485,6 +673,98 @@ def test_legacy_acked_records_migrate_with_complete_results(
     )
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == "1.1"
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        CommandJournalPhase.ACKED,
+        CommandJournalPhase.ACK_QUEUED,
+    ],
+)
+def test_legacy_long_error_is_bounded_before_capacity_migration(
+    tmp_path: Path,
+    phase: CommandJournalPhase,
+) -> None:
+    path = tmp_path / "command-journal.json"
+    original_error = "legacy exchange error " + ("x" * 2048)
+    record = {
+        "command_id": "command-1",
+        "command_type": "halt",
+        "phase": phase.value,
+        "status": "failed",
+        "error": original_error,
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "account_id": "account-a",
+                "node_id": "node-a",
+                "commands": {"command-1": record},
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    recovered = DurableCommandJournal(
+        path,
+        account_id="account-a",
+        node_id="node-a",
+        max_bytes=500,
+    ).recover()
+
+    assert len(recovered) == 1
+    migrated = recovered[0]
+    assert migrated.command_id == "command-1"
+    assert migrated.phase is phase
+    assert migrated.status == "failed"
+    assert isinstance(migrated.error, str)
+    assert "[truncated:sha256=" in migrated.error
+    assert hashlib.sha256(original_error.encode("utf-8")).hexdigest() in (
+        migrated.error
+    )
+    assert path.stat().st_size <= 500
+
+
+def test_legacy_ack_queued_fails_closed_when_bounded_record_cannot_fit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "command-journal.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "account_id": "account-a",
+                "node_id": "node-a",
+                "commands": {
+                    "command-1": {
+                        "command_id": "command-1",
+                        "command_type": "halt",
+                        "phase": "ACK_QUEUED",
+                        "status": "failed",
+                        "error": "x" * 2048,
+                    }
+                },
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="before terminal state can be reserved",
+    ):
+        DurableCommandJournal(
+            path,
+            account_id="account-a",
+            node_id="node-a",
+            max_bytes=250,
+        )
 
 
 def test_acked_eviction_uses_persisted_sequence_across_restart(

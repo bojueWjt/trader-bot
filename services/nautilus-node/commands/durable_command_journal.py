@@ -32,6 +32,20 @@ class CommandJournalPhase(str, Enum):
     ACKED = "ACKED"
 
 
+class CommandJournalDurabilityUncertainError(OSError):
+    """The replacement is visible, but its directory entry may not be durable."""
+
+    committed = True
+    durability_uncertain = True
+
+    def __init__(self, path: Path, cause: OSError) -> None:
+        super().__init__(
+            "command journal replacement committed with durability uncertain "
+            f"for {path}: {cause}"
+        )
+        self.path = path
+
+
 @dataclass(frozen=True)
 class CommandJournalRecord:
     command_id: str
@@ -163,8 +177,9 @@ class InMemoryCommandJournal:
             self._records.pop(normalized_id)
             try:
                 self._save()
-            except Exception:
-                self._records = previous_records
+            except Exception as exc:
+                if not _exception_committed(exc):
+                    self._records = previous_records
                 raise
             return True
 
@@ -188,8 +203,9 @@ class InMemoryCommandJournal:
         if changed:
             try:
                 self._save()
-            except Exception:
-                self._records = previous_records
+            except Exception as exc:
+                if not _exception_committed(exc):
+                    self._records = previous_records
                 raise
         return changed
 
@@ -201,8 +217,9 @@ class InMemoryCommandJournal:
         self._records[record.command_id] = record
         try:
             self._save()
-        except Exception:
-            self._records = previous_records
+        except Exception as exc:
+            if not _exception_committed(exc):
+                self._records = previous_records
             raise
 
     def _snapshot(self) -> tuple[CommandJournalRecord, ...]:
@@ -309,8 +326,9 @@ class DurableCommandJournal(InMemoryCommandJournal):
         loaded: dict[str, CommandJournalRecord] = {}
         legacy_acked: list[CommandJournalRecord] = []
         for command_id, payload in commands.items():
+            is_legacy = schema_version == LEGACY_SCHEMA_VERSION
             if (
-                schema_version == LEGACY_SCHEMA_VERSION
+                is_legacy
                 and isinstance(payload, dict)
                 and payload.get("phase") == CommandJournalPhase.ACKED.value
             ):
@@ -319,10 +337,15 @@ class DurableCommandJournal(InMemoryCommandJournal):
                         command_id,
                         payload,
                         require_acked_sequence=False,
+                        bound_error=True,
                     )
                 )
                 continue
-            record = _record_from_payload(command_id, payload)
+            record = _record_from_payload(
+                command_id,
+                payload,
+                bound_error=is_legacy,
+            )
             loaded[record.command_id] = record
         for sequence, record in enumerate(
             _legacy_acked_migration_order(legacy_acked),
@@ -338,7 +361,11 @@ class DurableCommandJournal(InMemoryCommandJournal):
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         records, encoded = self._prepared_payload()
-        self._write_payload(encoded)
+        try:
+            self._write_payload(encoded)
+        except CommandJournalDurabilityUncertainError:
+            self._records = records
+            raise
         self._records = records
 
     def _prepared_payload(
@@ -405,7 +432,13 @@ class DurableCommandJournal(InMemoryCommandJournal):
                 tmp.flush()
                 os.fsync(tmp.fileno())
             os.replace(tmp_name, self._path)
-            _fsync_directory(self._path.parent)
+            try:
+                _fsync_directory(self._path.parent)
+            except OSError as exc:
+                raise CommandJournalDurabilityUncertainError(
+                    self._path,
+                    exc,
+                ) from exc
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
@@ -416,6 +449,7 @@ def _record_from_payload(
     payload: Any,
     *,
     require_acked_sequence: bool = True,
+    bound_error: bool = False,
 ) -> CommandJournalRecord:
     normalized_id = _required_text("command_id", command_id)
     if not isinstance(payload, dict):
@@ -434,7 +468,14 @@ def _record_from_payload(
         _required_text("record.phase", payload.get("phase"))
     )
     status: str | bool = False
-    error = _optional_text(payload.get("error", False))
+    raw_error = payload.get("error", False)
+    error = _optional_text(raw_error)
+    if bound_error:
+        error = _bounded_optional_text(
+            raw_error,
+            max_json_bytes=MAX_ERROR_JSON_BYTES,
+            digest_characters=64,
+        )
     acked_sequence: int | bool = False
     if phase is not CommandJournalPhase.APPLYING:
         status = _command_ack_status(payload.get("status", False))
@@ -504,6 +545,10 @@ def _optional_text(value: Any) -> str | bool:
     if not normalized:
         return False
     return normalized
+
+
+def _exception_committed(exc: BaseException) -> bool:
+    return isinstance(exc, CommandJournalDurabilityUncertainError)
 
 
 def _bounded_optional_text(

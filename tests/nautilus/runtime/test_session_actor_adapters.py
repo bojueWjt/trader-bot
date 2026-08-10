@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from app.nautilus_actors import (  # noqa: E402
     CommandPollerActor,
     IntentPublisherActor,
 )
+from commands import durable_command_journal as journal_module  # noqa: E402
 from commands.durable_command_journal import (  # noqa: E402
     CommandJournalPhase,
     DurableCommandJournal,
@@ -1287,6 +1289,71 @@ def test_session_command_journal_write_failure_is_hard() -> None:
     assert "command_stream" in _failed_reasons(lifecycle)
     assert lifecycle.trading_state is TradingState.HALTED
     assert lifecycle.readiness.ready is False
+
+
+def test_session_command_post_replace_durability_uncertain_is_hard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "command-journal.json"
+    command_journal = DurableCommandJournal(
+        path,
+        account_id="account-a",
+        node_id="node-a",
+    )
+    real_fsync = journal_module._fsync_directory
+    fsync_calls = 0
+
+    def fail_second_directory_fsync(directory: Path) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            raise OSError("directory fsync failed")
+        real_fsync(directory)
+
+    monkeypatch.setattr(
+        journal_module,
+        "_fsync_directory",
+        fail_second_directory_fsync,
+    )
+    lifecycle = _ActiveLifecycle()
+    actor = CommandPollerActor(
+        control_plane=object(),
+        lifecycle=lifecycle,
+        node_id="node-a",
+        account_id="account-a",
+        control_plane_session=_LocalSession(),
+        command_journal=command_journal,
+    )
+    errors: list[BaseException] = []
+
+    def apply_command() -> None:
+        try:
+            actor.session_apply_command(
+                NodeCommand(
+                    command_id="command-1",
+                    type=CommandType.HALT,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = Thread(target=apply_command)
+    worker.start()
+    assert _pump_actor_until(actor, lambda: not worker.is_alive())
+    worker.join(timeout=1.0)
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert "journal ACK_QUEUED write failed" in str(errors[0])
+    assert "durability uncertain" in str(errors[0])
+    assert "command_stream" in _failed_reasons(lifecycle)
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.readiness.ready is False
+    memory_record = command_journal.get("command-1")
+    assert memory_record.phase is CommandJournalPhase.ACK_QUEUED
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["commands"]["command-1"]["phase"] == "ACK_QUEUED"
 
 
 def test_session_command_journal_deadline_is_hard() -> None:
