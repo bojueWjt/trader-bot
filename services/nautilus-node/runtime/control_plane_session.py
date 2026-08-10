@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 import math
 import random
+import sys
 import time
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from inspect import Parameter, signature
@@ -10,7 +14,7 @@ from itertools import islice
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from typing import Any
 
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 2.0
 DEFAULT_COMMAND_POLL_INTERVAL_SECONDS = 2.0
@@ -27,8 +31,16 @@ DEFAULT_RETRY_JITTER_RATIO = 0.2
 DEFAULT_CIRCUIT_RESET_SECONDS = 5.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 15.0
 DEFAULT_CONSUMER_FREEZE_THRESHOLD_SECONDS = 60.0
+DEFAULT_HEALTH_LOG_INTERVAL_SECONDS = 30.0
 DEFAULT_RETRY_DELAY_SECONDS = DEFAULT_RETRY_BASE_DELAY_SECONDS
 _TERMINAL_HEARTBEAT_MAX_WAIT_SECONDS = 1.0
+_LOGGER = logging.getLogger(__name__)
+if not _LOGGER.handlers:
+    _LOG_HANDLER = logging.StreamHandler(sys.stdout)
+    _LOG_HANDLER.setFormatter(logging.Formatter("%(message)s"))
+    _LOGGER.addHandler(_LOG_HANDLER)
+_LOGGER.setLevel(logging.INFO)
+_LOGGER.propagate = False
 _TELEMETRY_LANES = frozenset(
     {
         "heartbeat",
@@ -142,9 +154,15 @@ class _Lane:
             self.deadline_reported = False
             return half_open
 
-    def succeed(self) -> None:
+    def succeed(self) -> tuple[bool, str]:
         now = time.monotonic()
         with self.lock:
+            previous_circuit_state = self.circuit_state.value
+            recovered = (
+                self.failure is not False
+                or self.circuit_state is not CircuitState.CLOSED
+                or self.consecutive_failures > 0
+            )
             self.last_success_at = now
             self.in_flight_started_at = False
             self.failure = False
@@ -153,19 +171,30 @@ class _Lane:
             self.consecutive_failures = 0
             self.success_count += 1
             self.deadline_reported = False
+            return recovered, previous_circuit_state
 
-    def fail(self, exc: BaseException) -> tuple[str, bool]:
+    def fail(
+        self,
+        exc: BaseException,
+        *,
+        open_circuit: bool = False,
+    ) -> tuple[str, bool, bool, bool]:
         detail = _exception_detail(exc)
+        now = time.monotonic()
         with self.lock:
             self.in_flight_started_at = False
             if self.deadline_reported:
-                return str(self.failure), True
+                return str(self.failure), True, False, False
+            first_failure = self.failure is False
             self.failure = detail
             self.consecutive_failures += 1
             self.error_count += 1
             if isinstance(exc, TimeoutError):
                 self.timeout_count += 1
-            return detail, False
+            opened = False
+            if open_circuit:
+                opened = self._open_circuit_locked(now)
+            return detail, False, first_failure, opened
 
     def record_retry(self) -> None:
         with self.lock:
@@ -176,24 +205,29 @@ class _Lane:
         with self.lock:
             return self._open_circuit_locked(now)
 
-    def complete_timeout(self, exc: TimeoutError) -> tuple[str, bool]:
+    def complete_timeout(
+        self,
+        exc: TimeoutError,
+    ) -> tuple[str, bool, bool, bool]:
         detail = _exception_detail(exc)
         now = time.monotonic()
         with self.lock:
             self.in_flight_started_at = False
             if self.deadline_reported:
-                return str(self.failure), False
+                return str(self.failure), False, False, False
+            first_failure = self.failure is False
             self.deadline_reported = True
             self.failure = detail
             self.consecutive_failures += 1
             self.error_count += 1
             self.timeout_count += 1
-            return detail, self._open_circuit_locked(now)
+            opened = self._open_circuit_locked(now)
+            return detail, opened, first_failure, True
 
     def expire_if_overdue(
         self,
         now: float,
-    ) -> tuple[str, bool] | bool:
+    ) -> tuple[str, bool, bool] | bool:
         with self.lock:
             started_at = self.in_flight_started_at
             if started_at is False:
@@ -203,6 +237,7 @@ class _Lane:
             elapsed = max(now - float(started_at), 0.0)
             if elapsed <= self.operation_timeout_seconds:
                 return False
+            first_failure = self.failure is False
             detail = (
                 f"{self.name} operation exceeded "
                 f"{self.operation_timeout_seconds:.3f}s deadline"
@@ -213,7 +248,7 @@ class _Lane:
             self.error_count += 1
             self.timeout_count += 1
             opened = self._open_circuit_locked(now)
-            return detail, opened
+            return detail, opened, first_failure
 
     def _open_circuit_locked(self, now: float) -> bool:
         already_open = self.circuit_state is CircuitState.OPEN
@@ -247,14 +282,15 @@ class _Lane:
             self.failure = reason
             return True
 
-    def mark_backpressured(self, reason: str) -> bool:
+    def mark_backpressured(self, reason: str) -> tuple[bool, bool]:
         with self.lock:
             if self.fatal_failure is not False:
-                return False
+                return False, False
+            first_failure = self.failure is False
             self.failure = str(reason)
             self.consecutive_failures += 1
             self.error_count += 1
-            return True
+            return True, first_failure
 
     def accepts_submissions(self) -> bool:
         with self.lock:
@@ -363,6 +399,10 @@ class NodeControlPlaneSession:
         consumer_freeze_threshold_seconds: float = (
             DEFAULT_CONSUMER_FREEZE_THRESHOLD_SECONDS
         ),
+        health_log_interval_seconds: float = (
+            DEFAULT_HEALTH_LOG_INTERVAL_SECONDS
+        ),
+        log_callback: Callable[[Mapping[str, Any]], None] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
         random_source: Callable[[], float] | None = None,
         thread_name_prefix: str = "node-control-plane",
@@ -401,6 +441,10 @@ class NodeControlPlaneSession:
             "consumer_freeze_threshold_seconds",
             consumer_freeze_threshold_seconds,
         )
+        _require_positive_interval(
+            "health_log_interval_seconds",
+            health_log_interval_seconds,
+        )
         if retry_max_delay_seconds < retry_base_delay_seconds:
             raise ValueError(
                 "retry_max_delay_seconds must be at least "
@@ -421,6 +465,8 @@ class NodeControlPlaneSession:
             and not callable(fatal_termination_hook)
         ):
             raise TypeError("fatal termination hook must be callable")
+        if log_callback is not None and not callable(log_callback):
+            raise TypeError("log callback must be callable")
         self._heartbeat = heartbeat
         self._command_poll = command_poll
         self._command_apply = command_apply
@@ -464,6 +510,10 @@ class NodeControlPlaneSession:
         self._consumer_freeze_threshold_seconds = float(
             consumer_freeze_threshold_seconds
         )
+        self._health_log_interval_seconds = float(
+            health_log_interval_seconds
+        )
+        self._log_callback = log_callback or _standard_log_callback
         self._monotonic_clock = monotonic_clock or time.monotonic
         self._random_source = random_source or random.random
         self._thread_name_prefix = str(thread_name_prefix).strip()
@@ -536,6 +586,18 @@ class NodeControlPlaneSession:
         self._fatal_process = Event()
         self._fatal_termination_lock = Lock()
         self._fatal_termination_invoked = False
+        self._log_state_lock = Lock()
+        self._stop_requested_logged = False
+        self._stopped_logged = False
+        self._last_health_log_at: float | bool = False
+        self._queue_pressure_by_lane = {
+            name: QueuePressure.NORMAL.value
+            for name in self._lanes
+        }
+        self._queue_capacity_logged = {
+            name: False
+            for name in self._lanes
+        }
         self._heartbeat_publish_lock = Lock()
         self._lifecycle_lock = Lock()
         self._threads: list[Thread] = []
@@ -562,8 +624,13 @@ class NodeControlPlaneSession:
             self._threads = [watchdog]
             self._startup_thread = startup_thread
             self._started = True
+            self._last_health_log_at = float(self._monotonic_clock())
             watchdog.start()
             startup_thread.start()
+        self._emit_log(
+            "control_plane_session.started",
+            level="INFO",
+        )
 
     def mark_consumers_ready(self) -> None:
         self._consumers_ready.set()
@@ -573,6 +640,7 @@ class NodeControlPlaneSession:
 
     def stop(self, deadline: float) -> bool:
         cutoff = float(deadline)
+        self._emit_stop_requested()
         with self._stop_deadline_lock:
             current_deadline = self._stop_deadline
             if current_deadline is False:
@@ -607,6 +675,7 @@ class NodeControlPlaneSession:
         )
         with self._lifecycle_lock:
             self._stopped = stopped
+        self._emit_stopped(stopped)
         return stopped
 
     def submit_execution_event(self, event: Any) -> SubmissionResult:
@@ -676,6 +745,9 @@ class NodeControlPlaneSession:
                 ),
                 "consumer_freeze_threshold_seconds": (
                     self._consumer_freeze_threshold_seconds
+                ),
+                "health_log_interval_seconds": (
+                    self._health_log_interval_seconds
                 ),
             }
         )
@@ -1016,6 +1088,7 @@ class NodeControlPlaneSession:
                 item = lane.queue.get(timeout=0.05)
             except Empty:
                 continue
+            self._emit_queue_pressure_if_changed(lane)
             if self._fatal_process.is_set():
                 if lane_name == "command_delivery":
                     self._forget_command_delivery(item)
@@ -1070,23 +1143,60 @@ class NodeControlPlaneSession:
             try:
                 action()
             except BaseException as exc:
-                detail, deadline_reported = lane.fail(exc)
-                if _requires_fatal_termination(lane, exc):
+                fatal = _requires_fatal_termination(lane, exc)
+                nonfatal_telemetry = _is_nonfatal_telemetry_rejection(
+                    lane,
+                    exc,
+                )
+                should_open = (
+                    not fatal
+                    and not nonfatal_telemetry
+                    and (half_open or attempt + 1 >= lane.retry_budget)
+                )
+                if nonfatal_telemetry:
+                    self._report_failure(lane.name, exc)
+                (
+                    detail,
+                    deadline_reported,
+                    first_failure,
+                    opened,
+                ) = lane.fail(
+                    exc,
+                    open_circuit=should_open,
+                )
+                if fatal:
+                    if first_failure:
+                        self._emit_lane_failure(lane, exc)
                     self._trigger_fatal_termination(lane, detail)
                     return False
-                if _is_nonfatal_telemetry_rejection(lane, exc):
-                    self._report_failure(lane.name, exc)
+                if nonfatal_telemetry:
+                    if first_failure:
+                        self._emit_lane_failure(lane, exc)
+                    if (
+                        isinstance(exc, TimeoutError)
+                        and not deadline_reported
+                    ):
+                        self._emit_lane_timeout(lane)
                     return True
                 if deadline_reported:
                     return False
                 attempt += 1
-                if half_open or attempt >= lane.retry_budget:
-                    opened = lane.open_circuit()
+                if should_open:
+                    if first_failure:
+                        self._emit_lane_failure(lane, exc)
+                    if isinstance(exc, TimeoutError):
+                        self._emit_lane_timeout(lane)
                     if opened:
+                        self._emit_lane_circuit_open(lane)
                         self._report_failure(lane.name, exc)
                     return False
                 lane.record_retry()
                 delay = self._retry_delay(attempt)
+                if first_failure:
+                    self._emit_lane_failure(lane, exc)
+                if isinstance(exc, TimeoutError):
+                    self._emit_lane_timeout(lane)
+                self._emit_lane_retry(lane, delay)
                 if not self._wait(
                     delay,
                     drain_on_stop=drain_on_stop,
@@ -1099,11 +1209,26 @@ class NodeControlPlaneSession:
                     f"{lane.name} operation exceeded "
                     f"{lane.operation_timeout_seconds:.3f}s deadline"
                 )
-                _detail, opened = lane.complete_timeout(exc)
+                (
+                    _detail,
+                    opened,
+                    first_failure,
+                    timeout_recorded,
+                ) = lane.complete_timeout(exc)
+                if first_failure:
+                    self._emit_lane_failure(lane, exc)
+                if timeout_recorded:
+                    self._emit_lane_timeout(lane)
                 if opened:
+                    self._emit_lane_circuit_open(lane)
                     self._report_failure(lane.name, exc)
                 return False
-            lane.succeed()
+            recovered, previous_circuit_state = lane.succeed()
+            if recovered:
+                self._emit_lane_recovered(
+                    lane,
+                    previous_circuit_state,
+                )
             self._report_success(lane.name)
             return True
         return False
@@ -1198,11 +1323,20 @@ class NodeControlPlaneSession:
         except Full:
             self._mark_lane_capacity_failure(lane)
             return False
+        self._emit_queue_pressure_if_changed(lane)
         return True
 
     def _mark_lane_capacity_failure(self, lane: _Lane) -> None:
         reason = f"{lane.name} queue capacity exceeded"
-        lane.mark_backpressured(reason)
+        marked, first_failure = lane.mark_backpressured(reason)
+        if not marked:
+            return
+        if first_failure:
+            self._emit_lane_failure_kind(
+                lane,
+                error_type="QueueCapacityExceeded",
+            )
+        self._emit_queue_capacity_exceeded(lane)
 
     def _offer_token(self, lane: _Lane) -> None:
         try:
@@ -1232,6 +1366,7 @@ class NodeControlPlaneSession:
             if lane.name == "command_delivery":
                 self._forget_command_delivery(item)
             lane.queue.task_done()
+            self._emit_queue_pressure_if_changed(lane)
 
     def _stop_deadline_expired(self) -> bool:
         if not self._stop.is_set():
@@ -1253,13 +1388,21 @@ class NodeControlPlaneSession:
                 expired = lane.expire_if_overdue(now)
                 if expired is False:
                     continue
-                detail, opened = expired
+                detail, opened, first_failure = expired
+                if first_failure:
+                    self._emit_lane_failure(
+                        lane,
+                        TimeoutError(detail),
+                    )
+                self._emit_lane_timeout(lane)
                 if opened:
+                    self._emit_lane_circuit_open(lane)
                     self._report_failure(
                         lane.name,
                         TimeoutError(detail),
                     )
             self._check_consumer_progress()
+            self._maybe_emit_health_summary()
 
     def _check_consumer_progress(self) -> None:
         callback = self._consumer_progress_check
@@ -1405,6 +1548,195 @@ class NodeControlPlaneSession:
         except Exception:
             return
 
+    def _emit_stop_requested(self) -> None:
+        with self._log_state_lock:
+            if self._stop_requested_logged:
+                return
+            self._stop_requested_logged = True
+        self._emit_log(
+            "control_plane_session.stop_requested",
+            level="INFO",
+        )
+
+    def _emit_stopped(self, stopped: bool) -> None:
+        with self._log_state_lock:
+            if self._stopped_logged:
+                return
+            self._stopped_logged = True
+        level = "ERROR"
+        if stopped:
+            level = "INFO"
+        self._emit_log(
+            "control_plane_session.stopped",
+            level=level,
+            completed=bool(stopped),
+            drain_failed=self._drain_failed.is_set(),
+            delivery_queues_empty=self._delivery_queues_are_empty(),
+        )
+
+    def _emit_lane_failure(
+        self,
+        lane: _Lane,
+        exc: BaseException,
+    ) -> None:
+        self._emit_lane_failure_kind(
+            lane,
+            **_safe_exception_fields(exc),
+        )
+
+    def _emit_lane_failure_kind(
+        self,
+        lane: _Lane,
+        **failure_fields: Any,
+    ) -> None:
+        health = lane.snapshot(time.monotonic())
+        self._emit_log(
+            "control_plane_session.lane_failure",
+            level="WARNING",
+            **_lane_log_fields(health),
+            **failure_fields,
+        )
+
+    def _emit_lane_retry(
+        self,
+        lane: _Lane,
+        delay: float,
+    ) -> None:
+        health = lane.snapshot(time.monotonic())
+        self._emit_log(
+            "control_plane_session.lane_retry",
+            level="WARNING",
+            retry_delay_ms=round(max(delay, 0.0) * 1000.0, 3),
+            **_lane_log_fields(health),
+        )
+
+    def _emit_lane_timeout(self, lane: _Lane) -> None:
+        health = lane.snapshot(time.monotonic())
+        self._emit_log(
+            "control_plane_session.lane_timeout",
+            level="ERROR",
+            **_lane_log_fields(health),
+        )
+
+    def _emit_lane_circuit_open(self, lane: _Lane) -> None:
+        health = lane.snapshot(time.monotonic())
+        self._emit_log(
+            "control_plane_session.lane_circuit_open",
+            level="ERROR",
+            circuit_reset_seconds=lane.circuit_reset_seconds,
+            **_lane_log_fields(health),
+        )
+
+    def _emit_lane_recovered(
+        self,
+        lane: _Lane,
+        previous_circuit_state: str,
+    ) -> None:
+        health = lane.snapshot(time.monotonic())
+        self._emit_log(
+            "control_plane_session.lane_recovered",
+            level="INFO",
+            previous_circuit_state=previous_circuit_state,
+            **_lane_log_fields(health),
+        )
+
+    def _emit_queue_pressure_if_changed(self, lane: _Lane) -> None:
+        if not lane.pressure_enabled:
+            return
+        with self._log_state_lock:
+            health = lane.snapshot(time.monotonic())
+            previous = self._queue_pressure_by_lane[lane.name]
+            current = health.queue_pressure
+            if previous == current:
+                return
+            self._queue_pressure_by_lane[lane.name] = current
+            if current != QueuePressure.FULL.value:
+                self._queue_capacity_logged[lane.name] = False
+        level = "INFO"
+        if current != QueuePressure.NORMAL.value:
+            level = "WARNING"
+        self._emit_log(
+            "control_plane_session.queue_pressure",
+            level=level,
+            previous_queue_pressure=previous,
+            **_lane_log_fields(health),
+        )
+
+    def _emit_queue_capacity_exceeded(self, lane: _Lane) -> None:
+        with self._log_state_lock:
+            if self._queue_capacity_logged[lane.name]:
+                return
+            self._queue_capacity_logged[lane.name] = True
+        health = lane.snapshot(time.monotonic())
+        self._emit_log(
+            "control_plane_session.queue_capacity_exceeded",
+            level="ERROR",
+            **_lane_log_fields(health),
+        )
+
+    def _maybe_emit_health_summary(self) -> None:
+        now = float(self._monotonic_clock())
+        with self._log_state_lock:
+            last_emitted_at = self._last_health_log_at
+            if last_emitted_at is False:
+                self._last_health_log_at = now
+                return
+            elapsed = max(now - float(last_emitted_at), 0.0)
+            if elapsed < self._health_log_interval_seconds:
+                return
+            self._last_health_log_at = now
+
+        health = self.snapshot()
+        level = "INFO"
+        if health.degraded or not health.process_liveness:
+            level = "WARNING"
+        lanes = {
+            name: _lane_health_log_fields(lane)
+            for name, lane in health.lanes.items()
+        }
+        self._emit_log(
+            "control_plane_session.health",
+            level=level,
+            started=health.started,
+            stopped=health.stopped,
+            consumers_ready=health.consumers_ready,
+            process_liveness=health.process_liveness,
+            ready=health.ready,
+            degraded=health.degraded,
+            consumer_progress_age_ms=(
+                self._consumer_progress_age_ms(now)
+            ),
+            lanes=lanes,
+        )
+
+    def _consumer_progress_age_ms(
+        self,
+        now: float,
+    ) -> float | bool:
+        with self._consumer_progress_lock:
+            observed_at = self._consumer_progress_observed_at
+        if observed_at is None:
+            return False
+        age_ms = max(now - observed_at, 0.0) * 1000.0
+        return round(age_ms, 3)
+
+    def _emit_log(
+        self,
+        event: str,
+        *,
+        level: str,
+        **fields: Any,
+    ) -> None:
+        record = {
+            "event": str(event),
+            "level": str(level).upper(),
+            **fields,
+        }
+        try:
+            self._log_callback(record)
+        except Exception:
+            return
+
     def _trigger_fatal_termination(
         self,
         lane: _Lane,
@@ -1417,6 +1749,12 @@ class NodeControlPlaneSession:
             lane.mark_fatal(reason)
             self._fatal_process.set()
             self._stop.set()
+        health = lane.snapshot(time.monotonic())
+        self._emit_log(
+            "control_plane_session.fatal",
+            level="CRITICAL",
+            **_lane_log_fields(health),
+        )
         self._publish_terminal_heartbeat(lane)
         self._termination.set()
         self._report_failure(
@@ -1485,6 +1823,59 @@ class NodeControlPlaneSession:
 def _require_positive_interval(name: str, value: float) -> None:
     if float(value) <= 0:
         raise ValueError(f"{name} must be positive")
+
+
+def _standard_log_callback(record: Mapping[str, Any]) -> None:
+    level_name = str(record.get("level", "INFO")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    message = json.dumps(
+        dict(record),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    _LOGGER.log(level, message)
+
+
+def _lane_log_fields(lane: LaneHealth) -> dict[str, Any]:
+    return {
+        "lane": lane.name,
+        "queue_depth": lane.queue_depth,
+        "queue_capacity": lane.capacity,
+        "queue_pressure": lane.queue_pressure,
+        "circuit_state": lane.circuit_state,
+        "circuit_open_count": lane.circuit_open_count,
+        "consecutive_failures": lane.consecutive_failures,
+        "retry_count": lane.retry_count,
+        "timeout_count": lane.timeout_count,
+        "error_count": lane.error_count,
+        "success_count": lane.success_count,
+    }
+
+
+def _lane_health_log_fields(lane: LaneHealth) -> dict[str, Any]:
+    fields = _lane_log_fields(lane)
+    fields.pop("lane")
+    fields["queue_usage_ratio"] = round(lane.queue_usage_ratio, 6)
+    fields["last_success_age_ms"] = _rounded_age_ms(
+        lane.last_success_age_ms
+    )
+    return fields
+
+
+def _rounded_age_ms(value: float | bool) -> float | bool:
+    if value is False:
+        return False
+    return round(float(value), 3)
+
+
+def _safe_exception_fields(exc: BaseException) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "error_type": type(exc).__name__,
+    }
+    status_code = getattr(exc, "status_code", False)
+    if isinstance(status_code, int) and not isinstance(status_code, bool):
+        fields["status_code"] = status_code
+    return fields
 
 
 def _exception_detail(exc: BaseException) -> str:
