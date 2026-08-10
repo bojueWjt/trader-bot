@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from threading import Event, Thread, get_ident
+from threading import Event, Lock, Thread, get_ident
 from types import SimpleNamespace
 from typing import Any
 
@@ -65,6 +65,31 @@ class _Session:
         return self.terminated.wait(timeout=timeout)
 
 
+class _BlockingStopSession:
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.release = Event()
+        self._lock = Lock()
+        self.stop_calls = 0
+        self.active_stop_calls = 0
+        self.max_active_stop_calls = 0
+
+    def stop(self, deadline: float) -> bool:
+        del deadline
+        with self._lock:
+            self.stop_calls += 1
+            self.active_stop_calls += 1
+            self.max_active_stop_calls = max(
+                self.max_active_stop_calls,
+                self.active_stop_calls,
+            )
+        self.entered.set()
+        self.release.wait(timeout=2.0)
+        with self._lock:
+            self.active_stop_calls -= 1
+        return True
+
+
 class _Node:
     def __init__(self, *, fail_stage: str = "") -> None:
         self._fail_stage = fail_stage
@@ -88,6 +113,17 @@ class _Node:
 
     def dispose(self) -> None:
         self.disposed = True
+
+
+class _ActorNode:
+    def __init__(self, actor: Any) -> None:
+        self._actor = actor
+
+    def stop(self) -> None:
+        self._actor.on_stop()
+
+    def dispose(self) -> None:
+        return
 
 
 class _BlockingNode(_Node):
@@ -404,6 +440,84 @@ def test_cleanup_retains_lease_when_bounded_worker_stop_returns_false() -> None:
     assert lease_guard.closed is False
 
 
+@pytest.mark.parametrize(
+    "actor_kind",
+    ("intent", "projection", "command"),
+)
+def test_process_cleanup_retains_lease_when_actor_stop_returns_false(
+    actor_kind: str,
+) -> None:
+    session = _Session(
+        stop_results=(False, False, True, True),
+    )
+    actor = _cleanup_fence_actor(actor_kind, session)
+    cleanup_worker = actor.runtime_cleanup_worker()
+    lease_guard = _LeaseGuard()
+    runtime = SimpleNamespace(
+        control_plane_session=None,
+        trading_node=_ActorNode(actor),
+        background_workers=[cleanup_worker],
+        redis_runtime_safety_guard=None,
+        redis_runtime_safety_client=None,
+        namespace_lease_guard=lease_guard,
+    )
+
+    with pytest.raises(RuntimeError, match="runtime cleanup failed"):
+        run_node._cleanup_runtime(runtime, False)
+
+    assert lease_guard.closed is False
+    assert runtime.background_workers == [cleanup_worker]
+    assert actor.runtime_cleanup_worker() is cleanup_worker
+
+    run_node._cleanup_runtime(runtime, False)
+
+    assert lease_guard.closed is True
+    assert runtime.background_workers == []
+    assert session.stop_calls >= 3
+
+
+@pytest.mark.parametrize(
+    "actor_kind",
+    ("intent", "projection", "command"),
+)
+def test_actor_cleanup_worker_serializes_with_on_stop(
+    actor_kind: str,
+) -> None:
+    session = _BlockingStopSession()
+    actor = _cleanup_fence_actor(actor_kind, session)
+    cleanup_worker = actor.runtime_cleanup_worker()
+    actor_stop_done = Event()
+    cleanup_stop_started = Event()
+    cleanup_stop_done = Event()
+
+    def stop_actor() -> None:
+        actor.on_stop()
+        actor_stop_done.set()
+
+    def stop_cleanup_worker() -> None:
+        cleanup_stop_started.set()
+        cleanup_worker.stop()
+        cleanup_stop_done.set()
+
+    actor_stop_thread = Thread(target=stop_actor)
+    cleanup_stop_thread = Thread(target=stop_cleanup_worker)
+    actor_stop_thread.start()
+    assert session.entered.wait(timeout=1.0)
+    cleanup_stop_thread.start()
+    assert cleanup_stop_started.wait(timeout=1.0)
+
+    assert cleanup_stop_done.wait(timeout=0.05) is False
+    assert session.max_active_stop_calls == 1
+
+    session.release.set()
+    actor_stop_thread.join(timeout=1.0)
+    cleanup_stop_thread.join(timeout=1.0)
+
+    assert actor_stop_done.is_set()
+    assert cleanup_stop_done.is_set()
+    assert session.max_active_stop_calls == 1
+
+
 def test_cleanup_retries_failed_session_before_releasing_lease() -> None:
     lease_guard = _LeaseGuard()
     session = _Session(stop_results=(False, True))
@@ -665,6 +779,40 @@ def _runtime(
         redis_runtime_safety_client=redis_client,
         namespace_lease_guard=lease_guard,
     )
+
+
+def _cleanup_fence_actor(actor_kind: str, session: Any) -> Any:
+    if actor_kind == "intent":
+        return IntentPublisherActor(
+            _ProgressIntentClient(),
+            control_plane_session=session,
+            manage_control_plane_session=True,
+            worker_shutdown_wait_seconds=0.01,
+        )
+    if actor_kind == "projection":
+        projection = SimpleNamespace(
+            ingest_event=lambda event: event,
+            halt_egress=lambda reason: None,
+        )
+        actor = ExecutionProjectionActor(
+            projection,
+            control_plane_session=session,
+            manage_control_plane_session=True,
+            worker_shutdown_wait_seconds=0.01,
+        )
+        actor._session_started = True
+        return actor
+    if actor_kind == "command":
+        return CommandPollerActor(
+            control_plane=SimpleNamespace(),
+            lifecycle=_ProgressLifecycle(),
+            node_id="node-a",
+            account_id="account-a",
+            control_plane_session=session,
+            manage_control_plane_session=True,
+            worker_shutdown_wait_seconds=0.01,
+        )
+    raise AssertionError(f"unsupported actor kind: {actor_kind}")
 
 
 def _wait_for(predicate: Any, *, timeout: float) -> bool:

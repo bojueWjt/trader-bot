@@ -313,6 +313,16 @@ def build_nautilus_trading_node(
             session_config.shutdown_timeout_seconds
         ),
     )
+    for actor in (
+        intent_actor,
+        projection_actor,
+        command_actor,
+    ):
+        _register_background_cleanup_worker(
+            runtime,
+            actor,
+            "runtime_cleanup_worker",
+        )
     actor_holder.update(
         {
             "command": command_actor,

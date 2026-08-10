@@ -53,6 +53,14 @@ DEFAULT_PROJECTION_DURABLE_INGRESS_DEADLINE_SECONDS = 0.5
 DEFAULT_COMMAND_JOURNAL_DEADLINE_SECONDS = 5.0
 
 
+class _ActorRuntimeCleanupWorker:
+    def __init__(self, actor: Any) -> None:
+        self._actor = actor
+
+    def stop(self) -> bool:
+        return bool(self._actor._stop_runtime_workers())
+
+
 @dataclass
 class _PendingCommandAck:
     command_id: Any
@@ -443,6 +451,8 @@ class IntentPublisherActor(Actor):
         )
         self._consumer_ready = Event()
         self._stopped = Event()
+        self._runtime_stop_lock = RLock()
+        self._runtime_cleanup_worker = _ActorRuntimeCleanupWorker(self)
         self._executor: ThreadPoolExecutor | None = None
         self._poll_future: Future[int] | None = None
         self._pending_intents: Queue[_IntentPublication] = Queue(
@@ -481,6 +491,9 @@ class IntentPublisherActor(Actor):
     def control_plane_consumer_ready(self) -> bool:
         return self._consumer_ready.is_set()
 
+    def runtime_cleanup_worker(self) -> _ActorRuntimeCleanupWorker:
+        return self._runtime_cleanup_worker
+
     def on_start(self) -> None:
         self._consumer_ready.clear()
         self._started_at = time.monotonic()
@@ -496,6 +509,13 @@ class IntentPublisherActor(Actor):
         self._consumer_ready.set()
 
     def on_stop(self) -> bool:
+        return self._stop_runtime_workers()
+
+    def _stop_runtime_workers(self) -> bool:
+        with self._runtime_stop_lock:
+            return self._stop_runtime_workers_locked()
+
+    def _stop_runtime_workers_locked(self) -> bool:
         self._consumer_ready.clear()
         deadline = (
             time.monotonic() + self._worker_shutdown_wait_seconds
@@ -911,6 +931,8 @@ class ExecutionProjectionActor(Actor):
             manage_control_plane_session
         )
         self._consumer_ready = Event()
+        self._runtime_stop_lock = RLock()
+        self._runtime_cleanup_worker = _ActorRuntimeCleanupWorker(self)
         self._session_started = False
         self._durable_ingress = callable(
             getattr(self._projection_actor, "ingest_event", None)
@@ -928,6 +950,9 @@ class ExecutionProjectionActor(Actor):
     @property
     def control_plane_consumer_ready(self) -> bool:
         return self._consumer_ready.is_set()
+
+    def runtime_cleanup_worker(self) -> _ActorRuntimeCleanupWorker:
+        return self._runtime_cleanup_worker
 
     def on_start(self) -> None:
         self._consumer_ready.clear()
@@ -966,6 +991,13 @@ class ExecutionProjectionActor(Actor):
         self._consumer_ready.set()
 
     def on_stop(self) -> bool:
+        return self._stop_runtime_workers()
+
+    def _stop_runtime_workers(self) -> bool:
+        with self._runtime_stop_lock:
+            return self._stop_runtime_workers_locked()
+
+    def _stop_runtime_workers_locked(self) -> bool:
         self._consumer_ready.clear()
         deadline = (
             time.monotonic() + self._worker_shutdown_wait_seconds
@@ -1884,6 +1916,8 @@ class CommandPollerActor(Actor):
         self._consumer_progress_lock = RLock()
         self._consumer_last_progress_at: float | bool = False
         self._stopped = Event()
+        self._runtime_stop_lock = RLock()
+        self._runtime_cleanup_worker = _ActorRuntimeCleanupWorker(self)
         self._heartbeat_executor: ThreadPoolExecutor | None = None
         self._command_executor: ThreadPoolExecutor | None = None
         self._ack_executor: ThreadPoolExecutor | None = None
@@ -1940,6 +1974,9 @@ class CommandPollerActor(Actor):
         with self._consumer_progress_lock:
             return self._consumer_last_progress_at
 
+    def runtime_cleanup_worker(self) -> _ActorRuntimeCleanupWorker:
+        return self._runtime_cleanup_worker
+
     def on_start(self) -> None:
         self._consumer_ready.clear()
         started_at = time.monotonic()
@@ -1957,6 +1994,13 @@ class CommandPollerActor(Actor):
         self._consumer_ready.set()
 
     def on_stop(self) -> bool:
+        return self._stop_runtime_workers()
+
+    def _stop_runtime_workers(self) -> bool:
+        with self._runtime_stop_lock:
+            return self._stop_runtime_workers_locked()
+
+    def _stop_runtime_workers_locked(self) -> bool:
         self._consumer_ready.clear()
         deadline = time.monotonic() + self._worker_shutdown_wait_seconds
         cleanup_complete = True

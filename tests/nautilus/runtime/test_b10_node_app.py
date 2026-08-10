@@ -181,7 +181,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
         dispatched = object()
         strategy.durable_io_actor_dispatcher(dispatched)
         self.assertEqual(node.dispatched, [dispatched])
-        self.assertEqual(len(runtime.background_workers), 3)
+        self.assertEqual(len(runtime.background_workers), 6)
         self.assertIs(
             strategy.durable_io_cleanup_worker(),
             runtime.background_workers[0],
@@ -204,6 +204,22 @@ class NodeAppAssemblyTest(unittest.TestCase):
             [type(actor).__name__ for actor in node.trader.actors],
             ["IntentPublisherActor", "ExecutionProjectionActor", "CommandPollerActor"],
         )
+        actor_cleanup_workers = tuple(
+            actor.runtime_cleanup_worker()
+            for actor in node.trader.actors
+        )
+        self.assertEqual(
+            tuple(runtime.background_workers[-3:]),
+            actor_cleanup_workers,
+        )
+        for actor, cleanup_worker in zip(
+            node.trader.actors,
+            actor_cleanup_workers,
+        ):
+            self.assertIs(
+                actor.runtime_cleanup_worker(),
+                cleanup_worker,
+            )
         session = runtime.control_plane_session
         self.assertIsNotNone(session)
         self.assertFalse(session.snapshot().started)
