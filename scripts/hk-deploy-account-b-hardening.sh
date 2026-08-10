@@ -14,6 +14,7 @@ TARGET_IMAGE="trader-bot/nautilus-node:b10-verify"
 EXPECTED_PEER_BASELINE_COMMIT="3922a7c176a872452ff4ddde791ce42069684017"
 EXPECTED_OBSERVABILITY_BUNDLE="control_plane_session.py"
 EXPECTED_OBSERVABILITY_TARGET="/app/runtime/control_plane_session.py"
+EXPECTED_GENERATOR_SHA256="0a0026cd307080c57037b94726f83533930a60711756e957f79f1f38afe4a1df"
 OPERATION_LOCK="${OPERATION_LOCK:-/var/lock/trader-v3-account-stall-operation.lock}"
 MEMORY_LIMIT="${ACCOUNT_B_MEMORY_LIMIT:-768m}"
 MEMORY_SWAP_LIMIT="${ACCOUNT_B_MEMORY_SWAP_LIMIT:-768m}"
@@ -26,7 +27,7 @@ BACKUP_ROOT="${BACKUP_ROOT:-$T/backups/account-b-hardening-$STAMP}"
 ROLLBACK_PATH="$BACKUP_ROOT/rollback.sh"
 MANIFEST="$STAGING/bundle-manifest.json"
 CHECKSUMS="$STAGING/SHA256SUMS"
-PATCH_DIR="$T/container-patches"
+PEER_PATCH_DIR="$T/container-patches"
 GENERATOR_SOURCE="$STAGING/tools/hk-gen-recreate-patched.py"
 GENERATOR_TARGET="$T/hk-gen-recreate-patched.py"
 RECREATE_TARGET="$T/recreate-$NODE_CONTAINER.sh"
@@ -36,8 +37,13 @@ TEMP_DIR=""
 CONTAINER_TSV=""
 PEER_TSV=""
 DELTA_TSV=""
+LEGACY_MOUNTS_TSV=""
+RELEASE_MOUNTS_TSV=""
+RECREATE_VALIDATOR=""
 RELEASE_COMMIT=""
 TARGET_IMAGE_ID=""
+B_RELEASE_ROOT=""
+B_PATCH_DIR=""
 BINANCE_EXEC_DST=""
 BINANCE_FUTURES_EXEC_DST=""
 EXCHANGE_BEFORE=""
@@ -135,7 +141,8 @@ validate_bundle() {
       "$DELTA_TSV" \
       "$EXPECTED_PEER_BASELINE_COMMIT" \
       "$EXPECTED_OBSERVABILITY_BUNDLE" \
-      "$EXPECTED_OBSERVABILITY_TARGET" <<'PY'
+      "$EXPECTED_OBSERVABILITY_TARGET" \
+      "$EXPECTED_GENERATOR_SHA256" <<'PY'
 from __future__ import annotations
 
 import json
@@ -151,6 +158,7 @@ import sys
     expected_baseline,
     expected_delta_bundle,
     expected_delta_target,
+    expected_generator_sha,
 ) = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as source:
     manifest = json.load(source)
@@ -281,17 +289,34 @@ with open(delta_path, "w", encoding="utf-8") as output:
         f"{delta_peer}\t{delta_release}\n"
     )
 
-deployment_paths = {
-    str(item.get("bundle_path") or "")
-    for item in manifest.get("deployment_files") or []
-    if isinstance(item, dict)
-}
+deployment_files = manifest.get("deployment_files")
+if not isinstance(deployment_files, list):
+    raise SystemExit("account-b deployment files are invalid")
+deployment_hashes = {}
+for item in deployment_files:
+    if not isinstance(item, dict):
+        raise SystemExit("account-b deployment file item is invalid")
+    bundle_path = relative(
+        item.get("bundle_path"),
+        "deployment bundle_path",
+    )
+    digest = str(item.get("sha256") or "")
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise SystemExit(
+            f"deployment SHA256 is invalid: {bundle_path}"
+        )
+    deployment_hashes[bundle_path] = digest
 required_tools = {
     "tools/hk-deploy-account-b-hardening.sh",
     "tools/hk-gen-recreate-patched.py",
 }
-if not required_tools.issubset(deployment_paths):
+if not required_tools.issubset(deployment_hashes):
     raise SystemExit("account-b deployment tools are incomplete")
+if (
+    deployment_hashes["tools/hk-gen-recreate-patched.py"]
+    != expected_generator_sha
+):
+    raise SystemExit("account-b recreate generator hash is invalid")
 print(commit)
 PY
   )" || die "bundle manifest validation failed"
@@ -392,13 +417,21 @@ actual_config = str(
 )
 if actual_config != expected_config:
     raise SystemExit("account-b config mount source changed")
-bindings = (node.get("HostConfig") or {}).get("PortBindings") or {}
+host_config = node.get("HostConfig") or {}
+bindings = host_config.get("PortBindings") or {}
 expected_binding = bindings.get(f"{node_port}/tcp") or []
-if not any(
+published = any(
     str(item.get("HostPort") or "") == node_port
     for item in expected_binding
     if isinstance(item, dict)
-):
+)
+environment = {
+    str(value)
+    for value in config.get("Env") or []
+}
+host_network = str(host_config.get("NetworkMode") or "") == "host"
+host_health = f"NAUTILUS_HEALTH_PORT={node_port}" in environment
+if not published and not (host_network and host_health):
     raise SystemExit("account-b health port baseline changed")
 peer_state = peer.get("State") or {}
 if peer_state.get("Running") is not True:
@@ -484,8 +517,8 @@ mounts = {
     str(item.get("Destination") or ""): item
     for item in inspected.get("Mounts") or []
 }
-runtime_targets = {target for target in mounts if target in expected}
-if runtime_targets != set(expected):
+expected_mount_targets = set(expected) | {"/state", "/cfg.json"}
+if set(mounts) != expected_mount_targets:
     raise SystemExit(
         "account-a runtime mount set differs from peer manifest"
     )
@@ -515,8 +548,22 @@ if actual_config_source != expected_config_source:
     raise SystemExit("account-a config mount source changed")
 if config_mount.get("RW", True):
     raise SystemExit("account-a config mount must be read-only")
-for target, (_bundle_path, digest) in expected.items():
+for target, (bundle_path, digest) in expected.items():
     mount = mounts[target]
+    expected_source = str(
+        (
+            Path(trader_root)
+            / "container-patches"
+            / bundle_path
+        ).resolve()
+    )
+    actual_source = str(
+        Path(str(mount.get("Source") or "")).resolve()
+    )
+    if actual_source != expected_source:
+        raise SystemExit(
+            f"account-a runtime mount source changed: {target}"
+        )
     if mount.get("RW", True):
         raise SystemExit(f"account-a runtime mount is writable: {target}")
     result = subprocess.run(
@@ -549,7 +596,7 @@ exchange_snapshot() {
           updated_at AT TIME ZONE 'UTC',
           'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'
         ),
-        ((CURRENT_TIMESTAMP - updated_at) > interval '180 seconds')::text,
+        ((CURRENT_TIMESTAMP - updated_at) > interval '90 seconds')::text,
         payload::text
       FROM exchange_state_mirror
       WHERE account_id = '$ACCOUNT_ID'
@@ -701,14 +748,7 @@ verify_quiescent_runtime_state() {
       FROM operator_commands oc
       JOIN command_node_acks na ON na.command_id = oc.command_id
       WHERE na.node_id = '$NODE_ID'
-        AND na.status = 'pending'
-        AND (
-              oc.command_type <> 'RESUME'
-              OR (
-                  na.expires_at IS NOT NULL
-                  AND na.expires_at > now()
-              )
-            );
+        AND na.status = 'pending';
     " >"$database_state"
   python3 - "$database_state" <<'PY'
 import sys
@@ -804,18 +844,494 @@ PY
 }
 
 
+write_recreate_validator() {
+  cat >"$RECREATE_VALIDATOR" <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+import shlex
+import sys
+
+
+_VALUE_OPTIONS = {
+    "--entrypoint",
+    "--env",
+    "--hostname",
+    "--memory",
+    "--memory-swap",
+    "--name",
+    "--network",
+    "--network-alias",
+    "--publish",
+    "--restart",
+    "--user",
+    "--volume",
+    "--workdir",
+    "-e",
+    "-v",
+}
+_FLAG_OPTIONS = {
+    "--detach",
+    "--init",
+    "--read-only",
+    "-d",
+}
+_PREFIX_OPTIONS = tuple(
+    f"{name}="
+    for name in _VALUE_OPTIONS
+    if name.startswith("--")
+)
+
+
+def _run_image_index(tokens: list[str]) -> int:
+    index = 2
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            if index + 1 >= len(tokens):
+                raise SystemExit("recreate Docker image is missing")
+            return index + 1
+        if token in _FLAG_OPTIONS:
+            index += 1
+            continue
+        if token in _VALUE_OPTIONS:
+            if index + 1 >= len(tokens):
+                raise SystemExit(
+                    f"recreate Docker option lacks value: {token}"
+                )
+            index += 2
+            continue
+        if token.startswith(_PREFIX_OPTIONS):
+            index += 1
+            continue
+        if token.startswith("-"):
+            raise SystemExit(
+                f"recreate Docker option is not allowed: {token}"
+            )
+        return index
+    raise SystemExit("recreate Docker image is missing")
+
+
+def _option_values(
+    tokens: list[str],
+    image_index: int,
+    names: set[str],
+) -> list[str]:
+    values = []
+    index = 2
+    while index < image_index:
+        token = tokens[index]
+        if token in names:
+            values.append(tokens[index + 1])
+            index += 2
+            continue
+        matched = False
+        for name in names:
+            prefix = f"{name}="
+            if token.startswith(prefix):
+                values.append(token[len(prefix):])
+                matched = True
+                break
+        if matched or token in _FLAG_OPTIONS or token.startswith(_PREFIX_OPTIONS):
+            index += 1
+            continue
+        if token in _VALUE_OPTIONS:
+            index += 2
+            continue
+        raise SystemExit(f"recreate Docker option parse failed: {token}")
+    return values
+
+
+def _read_mount_plan(path: str) -> dict[str, tuple[str, str]]:
+    mounts = {}
+    with open(path, encoding="utf-8") as source:
+        for raw in source:
+            source_path, target, mode = raw.rstrip("\n").split("\t")
+            if target in mounts:
+                raise SystemExit(
+                    f"recreate mount plan target is duplicated: {target}"
+                )
+            mounts[target] = (source_path, mode)
+    return mounts
+
+
+def _run_mounts(
+    tokens: list[str],
+    image_index: int,
+) -> dict[str, tuple[str, str]]:
+    mounts = {}
+    for value in _option_values(
+        tokens,
+        image_index,
+        {"-v", "--volume"},
+    ):
+        parts = value.rsplit(":", 2)
+        if len(parts) != 3:
+            raise SystemExit("recreate volume argument is invalid")
+        source, target, mode = parts
+        if target in mounts:
+            raise SystemExit(
+                f"recreate mount target is duplicated: {target}"
+            )
+        mounts[target] = (source, mode)
+    return mounts
+
+
+def validate(
+    path: str,
+    mount_plan: str,
+    container: str,
+    image: str,
+    node_port: str,
+    state_dir: str,
+) -> None:
+    expected_mounts = _read_mount_plan(mount_plan)
+    run_count = 0
+    remove_count = 0
+    state_count = 0
+    for raw in open(path, encoding="utf-8"):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line in {"set -Eeuo pipefail", "set -euo pipefail"}:
+            continue
+        tokens = shlex.split(line)
+        if tokens[:3] == ["docker", "rm", "-f"]:
+            expected_remove = (
+                f"docker rm -f {shlex.quote(container)} "
+                "2>/dev/null || true"
+            )
+            if line != expected_remove:
+                raise SystemExit(
+                    "recreate docker rm command is invalid"
+                )
+            remove_count += 1
+            continue
+        if line != shlex.join(tokens):
+            raise SystemExit("recreate command is not canonical")
+        if tokens[:2] == ["mkdir", "-p"]:
+            if tokens[2:] != [state_dir]:
+                raise SystemExit(
+                    "recreate state mkdir command is invalid"
+                )
+            state_count += 1
+            continue
+        if tokens[:2] == ["docker", "run"]:
+            run_count += 1
+            image_index = _run_image_index(tokens)
+            if tokens[image_index] != image:
+                raise SystemExit("recreate Docker image is invalid")
+            names = _option_values(
+                tokens,
+                image_index,
+                {"--name"},
+            )
+            if names != [container]:
+                raise SystemExit("recreate Docker name is invalid")
+            environments = _option_values(
+                tokens,
+                image_index,
+                {"-e", "--env"},
+            )
+            initial_states = [
+                value
+                for value in environments
+                if value.startswith(
+                    "NAUTILUS_INITIAL_TRADING_STATE="
+                )
+            ]
+            if initial_states != [
+                "NAUTILUS_INITIAL_TRADING_STATE=HALTED"
+            ]:
+                raise SystemExit(
+                    "recreate HALTED startup is invalid"
+                )
+            state_values = [
+                value
+                for value in environments
+                if value.startswith("NODE_STATE_DIR=")
+            ]
+            if (
+                not state_values
+                or set(state_values) != {"NODE_STATE_DIR=/state"}
+            ):
+                raise SystemExit(
+                    "recreate node state environment is invalid"
+                )
+            networks = _option_values(
+                tokens,
+                image_index,
+                {"--network"},
+            )
+            published = _option_values(
+                tokens,
+                image_index,
+                {"--publish"},
+            )
+            expected_port = f"{node_port}:{node_port}/tcp"
+            port_is_published = any(
+                value == expected_port
+                or value.endswith(f":{expected_port}")
+                for value in published
+            )
+            health_values = [
+                value
+                for value in environments
+                if value.startswith("NAUTILUS_HEALTH_PORT=")
+            ]
+            host_health = (
+                "host" in networks
+                and f"NAUTILUS_HEALTH_PORT={node_port}"
+                in health_values
+            )
+            if not port_is_published and not host_health:
+                raise SystemExit(
+                    "recreate health port is invalid"
+                )
+            if _run_mounts(tokens, image_index) != expected_mounts:
+                raise SystemExit(
+                    "recreate mount plan is invalid"
+                )
+            continue
+        if tokens[:3] == ["docker", "network", "connect"]:
+            if tokens[-1] != container:
+                raise SystemExit(
+                    "recreate network target is invalid"
+                )
+            continue
+        raise SystemExit(
+            f"recreate command is not allowed: {tokens[:3]}"
+        )
+    if remove_count != 1 or state_count != 1 or run_count != 1:
+        raise SystemExit("recreate command set is incomplete")
+
+
+def rewrite_image(
+    path: str,
+    current_image: str,
+    immutable_image: str,
+) -> None:
+    lines = []
+    rewritten = 0
+    for raw in open(path, encoding="utf-8"):
+        line = raw.rstrip("\n")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            lines.append(line)
+            continue
+        tokens = shlex.split(stripped)
+        if tokens[:2] != ["docker", "run"]:
+            lines.append(line)
+            continue
+        if stripped != shlex.join(tokens):
+            raise SystemExit("recreate command is not canonical")
+        image_index = _run_image_index(tokens)
+        if tokens[image_index] not in {
+            current_image,
+            immutable_image,
+        }:
+            raise SystemExit("recreate Docker image is invalid")
+        tokens[image_index] = immutable_image
+        lines.append(shlex.join(tokens))
+        rewritten += 1
+    if rewritten != 1:
+        raise SystemExit("recreate Docker image rewrite is incomplete")
+    Path(path).write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
+
+command = sys.argv[1]
+if command == "validate":
+    validate(*sys.argv[2:])
+elif command == "rewrite-image":
+    rewrite_image(*sys.argv[2:])
+else:
+    raise SystemExit(f"unknown recreate validator command: {command}")
+PY
+  chmod 0700 "$RECREATE_VALIDATOR"
+}
+
+
+validate_recreate_script() {
+  local script_path="$1"
+  local mount_plan="$2"
+  local image="$3"
+  python3 \
+    "$RECREATE_VALIDATOR" \
+    validate \
+    "$script_path" \
+    "$mount_plan" \
+    "$NODE_CONTAINER" \
+    "$image" \
+    "$NODE_PORT" \
+    "$STATE_DIR"
+}
+
+
+write_recreate_mount_plans() {
+  python3 - \
+    "$TEMP_DIR/container-inspect.json" \
+    "$CONTAINER_TSV" \
+    "$LEGACY_MOUNTS_TSV" \
+    "$RELEASE_MOUNTS_TSV" \
+    "$B_PATCH_DIR" \
+    "$STATE_DIR" \
+    "$T/node-b.hk.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+(
+    inspect_path,
+    manifest_path,
+    legacy_path,
+    release_path,
+    release_patch_dir,
+    state_dir,
+    config_path,
+) = sys.argv[1:]
+with open(inspect_path, encoding="utf-8") as source:
+    inspected = json.load(source)[0]
+
+
+def write_plan(path: str, mounts: dict[str, tuple[str, str]]) -> None:
+    with open(path, "w", encoding="utf-8") as output:
+        for target in sorted(mounts):
+            source, mode = mounts[target]
+            output.write(f"{source}\t{target}\t{mode}\n")
+
+
+legacy = {}
+for mount in inspected.get("Mounts") or []:
+    source = str(mount.get("Source") or "")
+    target = str(mount.get("Destination") or "")
+    if not source or not target or target in legacy:
+        raise SystemExit("account-b legacy mount plan is invalid")
+    mode = "rw"
+    if not mount.get("RW", True):
+        mode = "ro"
+    legacy[target] = (source, mode)
+
+release = {
+    "/state": (state_dir, "rw"),
+    "/cfg.json": (config_path, "ro"),
+}
+with open(manifest_path, encoding="utf-8") as source:
+    for raw in source:
+        bundle_path, target, _digest = raw.rstrip("\n").split("\t")
+        if target in release:
+            raise SystemExit("account-b release mount plan is invalid")
+        release[target] = (
+            str(Path(release_patch_dir) / bundle_path),
+            "ro",
+        )
+
+write_plan(legacy_path, legacy)
+write_plan(release_path, release)
+PY
+}
+
+
+rewrite_recreate_mounts() {
+  python3 - \
+    "$RECREATE_TARGET" \
+    "$CONTAINER_TSV" \
+    "$PEER_PATCH_DIR" \
+    "$B_PATCH_DIR" \
+    "$TARGET_IMAGE" <<'PY'
+from pathlib import Path
+import shlex
+import sys
+
+(
+    script_path,
+    manifest_path,
+    peer_patch_dir,
+    release_patch_dir,
+    current_image,
+) = sys.argv[1:]
+bundle_by_target = {}
+with open(manifest_path, encoding="utf-8") as source:
+    for raw in source:
+        bundle_path, target, _digest = raw.rstrip("\n").split("\t")
+        bundle_by_target[target] = bundle_path
+
+rewritten_targets = set()
+lines = []
+for raw in open(script_path, encoding="utf-8"):
+    line = raw.rstrip("\n")
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or stripped == "set -Eeuo pipefail":
+        lines.append(line)
+        continue
+    tokens = shlex.split(stripped)
+    if tokens[:2] != ["docker", "run"]:
+        lines.append(line)
+        continue
+    image_indexes = [
+        index
+        for index, token in enumerate(tokens)
+        if token == current_image
+    ]
+    if len(image_indexes) != 1:
+        raise SystemExit("generated Docker image is invalid")
+    image_index = image_indexes[0]
+    index = 0
+    while index < image_index:
+        token = tokens[index]
+        if token not in {"-v", "--volume"}:
+            index += 1
+            continue
+        if index + 1 >= len(tokens):
+            raise SystemExit("recreate volume argument is incomplete")
+        source, target, mode = tokens[index + 1].split(":", 2)
+        bundle_path = bundle_by_target.get(target)
+        if bundle_path is None:
+            index += 2
+            continue
+        expected_source = str(Path(peer_patch_dir) / bundle_path)
+        if source != expected_source or mode != "ro":
+            raise SystemExit(
+                f"generated runtime mount is invalid: {target}"
+            )
+        tokens[index + 1] = (
+            f"{Path(release_patch_dir) / bundle_path}:{target}:ro"
+        )
+        rewritten_targets.add(target)
+        index += 2
+    lines.append(shlex.join(tokens))
+
+if rewritten_targets != set(bundle_by_target):
+    missing = sorted(set(bundle_by_target) - rewritten_targets)
+    raise SystemExit(f"recreate runtime mounts were not rewritten: {missing}")
+Path(script_path).write_text(
+    "\n".join(lines) + "\n",
+    encoding="utf-8",
+)
+PY
+  chmod 0700 "$RECREATE_TARGET"
+}
+
+
 write_rollback() {
   cat >"$ROLLBACK_PATH" <<'ROLLBACK'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
 BACKUP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-T="$(cd "$BACKUP_ROOT/../.." && pwd)"
 INDEX="$BACKUP_ROOT/index.tsv"
-LOCK="${OPERATION_LOCK:-/var/lock/trader-v3-account-stall-operation.lock}"
+IFS=$'\t' read -r \
+  T NODE_PORT B_RELEASE_ROOT DEFAULT_OPERATION_LOCK TARGET_IMAGE_ID \
+  <"$BACKUP_ROOT/rollback-config.tsv"
+LOCK="${OPERATION_LOCK:-$DEFAULT_OPERATION_LOCK}"
 NODE_CONTAINER="trader-v3-node-b"
+TARGET_IMAGE="trader-bot/nautilus-node:b10-verify"
 RECREATE_TARGET="$T/recreate-$NODE_CONTAINER.sh"
 STATE_DIR="$T/node-state/b"
+RECREATE_VALIDATOR="$BACKUP_ROOT/validate-recreate.py"
+LEGACY_MOUNTS_TSV="$BACKUP_ROOT/legacy-mounts.tsv"
 FAILED_STATE="$BACKUP_ROOT/failed-node-state-$(date -u +%Y%m%dT%H%M%SZ)"
 
 exec 9>"$LOCK"
@@ -855,26 +1371,37 @@ if [ -e "$BACKUP_ROOT/node-state" ]; then
   mkdir -p "$(dirname "$STATE_DIR")"
   cp -a "$BACKUP_ROOT/node-state" "$STATE_DIR"
 fi
+rm -rf -- "$B_RELEASE_ROOT"
 
 [ -x "$RECREATE_TARGET" ] || {
   echo "FATAL: restored account-b recreate script is unavailable" >&2
   exit 1
 }
-grep -Fq "NAUTILUS_INITIAL_TRADING_STATE=HALTED" "$RECREATE_TARGET" || {
-  echo "FATAL: restored recreate script lacks HALTED startup" >&2
+[ -x "$RECREATE_VALIDATOR" ] || {
+  echo "FATAL: recreate validator is unavailable" >&2
   exit 1
 }
-if grep -Eq '(^|[[:space:]])docker[[:space:]]+start([[:space:]]|$)' \
-  "$RECREATE_TARGET"; then
-  echo "FATAL: restored recreate script starts a legacy container" >&2
-  exit 1
-fi
+python3 \
+  "$RECREATE_VALIDATOR" \
+  rewrite-image \
+  "$RECREATE_TARGET" \
+  "$TARGET_IMAGE" \
+  "$TARGET_IMAGE_ID"
+python3 \
+  "$RECREATE_VALIDATOR" \
+  validate \
+  "$RECREATE_TARGET" \
+  "$LEGACY_MOUNTS_TSV" \
+  "$NODE_CONTAINER" \
+  "$TARGET_IMAGE_ID" \
+  "$NODE_PORT" \
+  "$STATE_DIR"
 bash "$RECREATE_TARGET"
 
 READY_BODY="$BACKUP_ROOT/rollback-ready.json"
 for _ in $(seq 1 45); do
   if curl --silent --show-error --max-time 5 \
-    "http://127.0.0.1:8082/ready" >"$READY_BODY"; then
+    "http://127.0.0.1:$NODE_PORT/ready" >"$READY_BODY"; then
     if python3 - "$READY_BODY" <<'PY'
 import json
 import sys
@@ -901,21 +1428,28 @@ ROLLBACK
 create_backup() {
   [ ! -e "$BACKUP_ROOT" ] \
     || die "backup path already exists: $BACKUP_ROOT"
+  [ ! -e "$B_RELEASE_ROOT" ] \
+    || die "account-b release path already exists: $B_RELEASE_ROOT"
   mkdir -p "$BACKUP_ROOT/files"
   chmod 0700 "$BACKUP_ROOT"
   : >"$BACKUP_ROOT/index.tsv"
 
-  while IFS=$'\t' read -r bundle_path mount_target expected_sha; do
-    : "$mount_target" "$expected_sha"
-    backup_target "$PATCH_DIR/$bundle_path"
-  done <"$CONTAINER_TSV"
   backup_target "$GENERATOR_TARGET"
   backup_target "$RECREATE_TARGET"
   backup_target "$DEPLOYED_COMMIT_TARGET"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$T" \
+    "$NODE_PORT" \
+    "$B_RELEASE_ROOT" \
+    "$OPERATION_LOCK" \
+    "$TARGET_IMAGE_ID" >"$BACKUP_ROOT/rollback-config.tsv"
 
   cp "$TEMP_DIR/container-inspect.json" \
     "$BACKUP_ROOT/container-inspect.json"
   cp "$TEMP_DIR/peer-inspect.json" "$BACKUP_ROOT/peer-inspect.json"
+  cp "$RECREATE_VALIDATOR" "$BACKUP_ROOT/validate-recreate.py"
+  cp "$LEGACY_MOUNTS_TSV" "$BACKUP_ROOT/legacy-mounts.tsv"
+  cp "$RELEASE_MOUNTS_TSV" "$BACKUP_ROOT/release-mounts.tsv"
   cp "$MANIFEST" "$BACKUP_ROOT/bundle-manifest.json"
   cp "$CHECKSUMS" "$BACKUP_ROOT/staging-SHA256SUMS"
   snapshot_state_metadata "$STATE_DIR"
@@ -968,20 +1502,19 @@ atomic_install() {
 
 
 install_container_patches() {
-  mkdir -p "$PATCH_DIR"
+  mkdir -p "$B_PATCH_DIR"
   while IFS=$'\t' read -r bundle_path mount_target expected_sha; do
     : "$mount_target"
     atomic_install \
       "$STAGING/$bundle_path" \
-      "$PATCH_DIR/$bundle_path" \
+      "$B_PATCH_DIR/$bundle_path" \
       "$expected_sha" \
       0644
   done <"$CONTAINER_TSV"
-  GENERATOR_SHA="$(sha256_file "$GENERATOR_SOURCE")"
   atomic_install \
     "$GENERATOR_SOURCE" \
     "$GENERATOR_TARGET" \
-    "$GENERATOR_SHA" \
+    "$EXPECTED_GENERATOR_SHA256" \
     0755
 }
 
@@ -995,31 +1528,27 @@ generate_recreate() {
       "$BINANCE_EXEC_DST" \
       "$BINANCE_FUTURES_EXEC_DST"
 
-  grep -Fq "NAUTILUS_INITIAL_TRADING_STATE=HALTED" "$RECREATE_TARGET" \
-    || die "generated recreate script lacks HALTED startup"
-  if grep -Fq "NAUTILUS_INITIAL_TRADING_STATE=ACTIVE" "$RECREATE_TARGET"; then
-    die "generated recreate script retains ACTIVE startup"
-  fi
-  if grep -Eq '(^|[[:space:]])docker[[:space:]]+start([[:space:]]|$)' \
-    "$RECREATE_TARGET"; then
-    die "generated recreate script starts the legacy container"
-  fi
-  grep -Fq "$TARGET_IMAGE" "$RECREATE_TARGET" \
-    || die "generated recreate script uses the wrong image"
-  grep -Fq "$NODE_PORT:$NODE_PORT/tcp" "$RECREATE_TARGET" \
-    || die "generated recreate script uses the wrong health port"
+  rewrite_recreate_mounts
+  python3 \
+    "$RECREATE_VALIDATOR" \
+    rewrite-image \
+    "$RECREATE_TARGET" \
+    "$TARGET_IMAGE" \
+    "$TARGET_IMAGE_ID"
+  validate_recreate_script \
+    "$RECREATE_TARGET" \
+    "$RELEASE_MOUNTS_TSV" \
+    "$TARGET_IMAGE_ID"
 }
 
 
 verify_rollback_source() {
   [ -x "$RECREATE_TARGET" ] \
     || die "existing account-b recreate script is missing"
-  grep -Fq "NAUTILUS_INITIAL_TRADING_STATE=HALTED" "$RECREATE_TARGET" \
-    || die "existing account-b recreate script lacks HALTED startup"
-  if grep -Eq '(^|[[:space:]])docker[[:space:]]+start([[:space:]]|$)' \
-    "$RECREATE_TARGET"; then
-    die "existing account-b recreate script starts the legacy container"
-  fi
+  validate_recreate_script \
+    "$RECREATE_TARGET" \
+    "$LEGACY_MOUNTS_TSV" \
+    "$TARGET_IMAGE"
 }
 
 
@@ -1043,7 +1572,6 @@ verify_memory_and_image() {
     "$MEMORY_SWAP_LIMIT" \
     "$resource_values" \
     "$image_values" \
-    "$TARGET_IMAGE" \
     "$TARGET_IMAGE_ID" \
     "$restart_count" <<'PY'
 import re
@@ -1076,10 +1604,10 @@ image = sys.argv[4].split()
 if len(image) != 2:
     raise SystemExit("Docker image inspection is invalid")
 if image[0] != sys.argv[5]:
-    raise SystemExit("account-b Docker image tag mismatch")
-if image[1] != sys.argv[6]:
+    raise SystemExit("account-b Docker image reference mismatch")
+if image[1] != sys.argv[5]:
     raise SystemExit("account-b Docker image ID mismatch")
-if int(sys.argv[7]) != 0:
+if int(sys.argv[6]) != 0:
     raise SystemExit("account-b Docker restart count is not zero")
 PY
 }
@@ -1177,6 +1705,7 @@ verify_runtime_mounts() {
     "$PEER_TSV" \
     "$DELTA_TSV" \
     "$T" \
+    "$B_PATCH_DIR" \
     "$NODE_CONTAINER" <<'PY'
 from __future__ import annotations
 
@@ -1185,7 +1714,14 @@ from pathlib import Path
 import subprocess
 import sys
 
-release_path, peer_path, delta_path, trader_root, container = sys.argv[1:]
+(
+    release_path,
+    peer_path,
+    delta_path,
+    trader_root,
+    release_patch_dir,
+    container,
+) = sys.argv[1:]
 
 
 def read_manifest(path: str) -> dict[str, tuple[str, str]]:
@@ -1212,17 +1748,12 @@ mounts = {
     str(item.get("Destination") or ""): item
     for item in inspected.get("Mounts") or []
 }
-runtime_targets = {
-    target
-    for target in mounts
-    if target.startswith("/app/")
-    or target in {value[0] for value in release.values()}
-}
 expected_targets = {
     target
     for target, _digest in release.values()
 }
-if runtime_targets != expected_targets:
+expected_mount_targets = expected_targets | {"/state", "/cfg.json"}
+if set(mounts) != expected_mount_targets:
     raise SystemExit("account-b runtime mount set differs from manifest")
 state_mount = mounts.get("/state")
 expected_state_source = str(
@@ -1237,16 +1768,25 @@ if actual_state_source != expected_state_source:
     raise SystemExit("account-b state mount source changed")
 if state_mount.get("RW") is not True:
     raise SystemExit("account-b state mount must be writable")
+config_mount = mounts.get("/cfg.json")
+expected_config_source = str(
+    (Path(trader_root) / "node-b.hk.json").resolve()
+)
+if config_mount is None:
+    raise SystemExit("account-b config mount is missing")
+actual_config_source = str(
+    Path(str(config_mount.get("Source") or "")).resolve()
+)
+if actual_config_source != expected_config_source:
+    raise SystemExit("account-b config mount source changed")
+if config_mount.get("RW", True):
+    raise SystemExit("account-b config mount must be read-only")
 for bundle_path, (target, digest) in release.items():
     mount = mounts.get(target)
     if mount is None:
         raise SystemExit(f"missing container mount: {target}")
     expected_source = str(
-        (
-            Path(trader_root)
-            / "container-patches"
-            / bundle_path
-        ).resolve()
+        (Path(release_patch_dir) / bundle_path).resolve()
     )
     actual_source = str(Path(str(mount.get("Source") or "")).resolve())
     if actual_source != expected_source or mount.get("RW", True):
@@ -1343,12 +1883,21 @@ main() {
   CONTAINER_TSV="$TEMP_DIR/container.tsv"
   PEER_TSV="$TEMP_DIR/peer.tsv"
   DELTA_TSV="$TEMP_DIR/delta.tsv"
+  LEGACY_MOUNTS_TSV="$TEMP_DIR/legacy-mounts.tsv"
+  RELEASE_MOUNTS_TSV="$TEMP_DIR/release-mounts.tsv"
+  RECREATE_VALIDATOR="$TEMP_DIR/validate-recreate.py"
 
   validate_bundle
+  [ "$(sha256_file "$GENERATOR_SOURCE")" = "$EXPECTED_GENERATOR_SHA256" ] \
+    || die "recreate generator SHA256 differs from the reviewed baseline"
+  B_RELEASE_ROOT="$T/account-b-releases/$RELEASE_COMMIT"
+  B_PATCH_DIR="$B_RELEASE_ROOT/container-patches"
   TARGET_IMAGE_ID="$(
     docker image inspect --format '{{.Id}}' "$TARGET_IMAGE"
   )"
   verify_stopped_baseline
+  write_recreate_validator
+  write_recreate_mount_plans
   verify_rollback_source
   resolve_binance_mounts
   verify_generator_mount_plan
@@ -1359,6 +1908,10 @@ main() {
   create_backup
   install_container_patches
   generate_recreate
+  verify_stopped_baseline
+  EXCHANGE_BEFORE="$(verify_exchange_zero "before")"
+  verify_risk_halted
+  verify_quiescent_runtime_state
   bash "$RECREATE_TARGET"
   verify_memory_and_image
   verify_ready_halted
