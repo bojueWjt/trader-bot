@@ -12,7 +12,7 @@ from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from queue import Empty, Full, Queue
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID, uuid4
 
@@ -62,6 +62,7 @@ class _DurableIoTaskKind(str, Enum):
     INTENT_EXCHANGE_CONFIRMED = "intent_exchange_confirmed"
     INTENT_RECEIVE = "intent_receive"
     PREPARE_SUBMIT = "prepare_submit"
+    PREPARE_ROLLBACK = "prepare_rollback"
     MANAGEMENT_PREPARE = "management_prepare"
     MANAGEMENT_COMPLETE = "management_complete"
     RECOVERY_CONFIRMED = "recovery_confirmed"
@@ -81,6 +82,7 @@ class _DurableIoTask:
     plans: tuple[OrderPlan, ...] = ()
     live_canary_execution: LiveCanaryExecutionIdentity | bool = False
     protection_payload: Mapping[str, Any] | bool = False
+    protection_rollback_payload: Mapping[str, Any] | bool = False
     protection_version: int = 0
     protection_payload_sha256: str = ""
     continuation: Mapping[str, Any] | bool = False
@@ -238,13 +240,29 @@ class IntentExecutionStrategy(Strategy):
         )
         self._strategy_stopping = False
         self._durable_io_halted_reason = ""
-        self._durable_io_halt_lock = Lock()
+        self._durable_io_halt_lock = RLock()
         self._protection_stash_version = 0
         self._protection_stash_persisted_version = 0
         self._protection_durable_continuations: dict[
             int,
             list[Mapping[str, Any]],
         ] = {}
+        self._prepared_zone_ladder_orders: dict[
+            str,
+            tuple[Any, ...],
+        ] = {}
+        self._durable_entry_prepare_active = False
+        self._durable_entry_prepare_task_queued = False
+        self._durable_entry_prepare_preimage: Mapping[str, Any] | bool = (
+            False
+        )
+        self._durable_entry_prepare_task: _DurableIoTask | bool = False
+        self._durable_entry_prepare_disk_staged = False
+        self._durable_entry_submit_started = False
+        self._pending_durable_entry_intents: list[
+            tuple[Any, bool]
+        ] = []
+        self._protection_stash_file_lock = RLock()
         self._durable_io_mailbox: Queue[_DurableIoResult] = Queue(
             maxsize=self._DURABLE_IO_QUEUE_CAPACITY
         )
@@ -531,6 +549,8 @@ class IntentExecutionStrategy(Strategy):
     ) -> int:
         if max_results < 1:
             raise ValueError("max_results must be positive")
+        if self._strategy_stopping or self._durable_io_halted_reason:
+            self._abort_durable_entry_prepare()
         drained = 0
         while drained < max_results:
             try:
@@ -704,9 +724,14 @@ class IntentExecutionStrategy(Strategy):
 
     def _persist_entry_protection_stash(self) -> bool:
         try:
-            self._write_entry_protection_stash(
-                self._entry_protection_stash_payload()
-            )
+            payload = self._entry_protection_stash_payload()
+            if self._durable_entry_prepare_active:
+                with self._protection_stash_file_lock:
+                    self._write_entry_protection_stash(payload)
+            else:
+                self._write_entry_protection_stash(
+                    payload
+                )
             return True
         except Exception as exc:
             log = getattr(self, "log", None)
@@ -718,11 +743,27 @@ class IntentExecutionStrategy(Strategy):
             return False
 
     def _entry_protection_stash_payload(self) -> dict[str, Any]:
+        return self._protection_stash_payload(
+            self._entry_protection_stash
+        )
+
+    def _durable_entry_rollback_payload(
+        self,
+    ) -> Mapping[str, Any] | bool:
+        preimage = self._durable_entry_prepare_preimage
+        if not isinstance(preimage, Mapping):
+            return False
+        return self._protection_stash_payload(preimage)
+
+    def _protection_stash_payload(
+        self,
+        stash_rows: Mapping[str, Any],
+    ) -> dict[str, Any]:
         return {
             str(intent_key): copy.deepcopy(
                 self._jsonable_protection_stash_value(value)
             )
-            for intent_key, value in self._entry_protection_stash.items()
+            for intent_key, value in stash_rows.items()
             if isinstance(value, dict)
         }
 
@@ -754,6 +795,70 @@ class IntentExecutionStrategy(Strategy):
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
+
+    def _read_entry_protection_stash_payload(
+        self,
+    ) -> dict[str, Any]:
+        try:
+            with open(self._protection_stash_path(), "r") as fh:
+                raw = json.load(fh)
+        except FileNotFoundError:
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                "protection stash payload must be an object"
+            )
+        payload: dict[str, Any] = {}
+        for intent_key, value in raw.items():
+            if not isinstance(value, dict):
+                raise ValueError(
+                    "protection stash row must be an object"
+                )
+            payload[str(intent_key)] = copy.deepcopy(value)
+        return payload
+
+    @staticmethod
+    def _conditional_protection_rollback(
+        current: Mapping[str, Any],
+        staged: Mapping[str, Any],
+        preimage: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        missing = object()
+        changed_keys = tuple(
+            key
+            for key in set(staged) | set(preimage)
+            if staged.get(key, missing) != preimage.get(key, missing)
+        )
+        if not changed_keys:
+            return copy.deepcopy(dict(current)), "noop"
+        merged = copy.deepcopy(dict(current))
+        applied = False
+        preserved = False
+        conflict = False
+        for key in changed_keys:
+            current_value = current.get(key, missing)
+            staged_value = staged.get(key, missing)
+            preimage_value = preimage.get(key, missing)
+            if current_value == staged_value:
+                applied = True
+                if preimage_value is missing:
+                    merged.pop(key, None)
+                    continue
+                merged[key] = copy.deepcopy(preimage_value)
+                continue
+            if current_value == preimage_value:
+                continue
+            if preimage_value is not missing:
+                preserved = True
+                continue
+            conflict = True
+        if conflict:
+            return merged, "conflict"
+        if preserved:
+            return merged, "preserved"
+        if not applied:
+            return merged, "noop"
+        return merged, "applied"
 
     def _queue_entry_protection_stash_persist(
         self,
@@ -1635,6 +1740,61 @@ class IntentExecutionStrategy(Strategy):
     ) -> None:
         raw_action = getattr(intent, "action", "")
         action = str(getattr(raw_action, "value", raw_action))
+        serialize_entry = (
+            durable_async
+            and action in {"open_position", "add_position"}
+        )
+        if not serialize_entry:
+            self._handle_intent_ready_now(
+                intent,
+                exchange_state_ready=exchange_state_ready,
+                durable_async=durable_async,
+            )
+            return
+        self._pending_durable_entry_intents.append(
+            (intent, exchange_state_ready)
+        )
+        if not self._durable_entry_prepare_active:
+            self._advance_durable_entry_prepare()
+
+    def _advance_durable_entry_prepare(self) -> None:
+        while self._pending_durable_entry_intents:
+            if self._strategy_stopping or self._durable_io_halted_reason:
+                self._pending_durable_entry_intents.clear()
+                return
+            intent, exchange_state_ready = (
+                self._pending_durable_entry_intents.pop(0)
+            )
+            self._durable_entry_prepare_active = True
+            self._durable_entry_prepare_task_queued = False
+            self._durable_entry_prepare_task = False
+            self._durable_entry_prepare_disk_staged = False
+            self._durable_entry_submit_started = False
+            self._durable_entry_prepare_preimage = copy.deepcopy(
+                self._entry_protection_stash
+            )
+            try:
+                self._handle_intent_ready_now(
+                    intent,
+                    exchange_state_ready=exchange_state_ready,
+                    durable_async=True,
+                )
+            except Exception:
+                self._abort_durable_entry_prepare()
+                raise
+            if self._durable_entry_prepare_task_queued:
+                return
+            self._reset_durable_entry_prepare()
+
+    def _handle_intent_ready_now(
+        self,
+        intent: Any,
+        *,
+        exchange_state_ready: bool,
+        durable_async: bool = False,
+    ) -> None:
+        raw_action = getattr(intent, "action", "")
+        action = str(getattr(raw_action, "value", raw_action))
         raw_order_plan = getattr(intent, "order_plan", {}) or {}
         context = PlannerContext(
             account_id=self.config.account_id,
@@ -2105,43 +2265,51 @@ class IntentExecutionStrategy(Strategy):
         intent_execution: IntentExecutionIdentity,
         action: str,
     ) -> bool:
-        protection_preimage: Mapping[str, Any] | bool = False
         protection_payload: Mapping[str, Any] | bool = False
+        protection_rollback_payload: Mapping[str, Any] | bool = False
         if action in {"open_position", "add_position"}:
-            protection_preimage = copy.deepcopy(
-                self._entry_protection_stash
-            )
             if not self._stage_entry_protection(intent, plan):
+                self._restore_durable_entry_prepare_preimage()
                 denial = self.denials[-1] if self.denials else OrderDenied(
                     "protection_stash_invalid",
                     str(plan.intent_id),
                 )
                 self._report_denial(intent, denial)
                 return False
-            if self._entry_protection_stash != protection_preimage:
+            preimage = self._durable_entry_prepare_preimage
+            if (
+                isinstance(preimage, Mapping)
+                and self._entry_protection_stash != preimage
+            ):
                 protection_payload = (
                     self._entry_protection_stash_payload()
                 )
+                protection_rollback_payload = (
+                    self._durable_entry_rollback_payload()
+                )
+        operation_id = uuid4().hex
         task = _DurableIoTask(
             kind=_DurableIoTaskKind.PREPARE_SUBMIT,
+            operation_id=operation_id,
             intent=intent,
             intent_execution=intent_execution,
             client_order_ids=(str(plan.client_order_id),),
             plans=(plan,),
             live_canary_execution=live_canary_execution,
             protection_payload=protection_payload,
+            protection_rollback_payload=(
+                protection_rollback_payload
+            ),
             continuation={
                 "kind": "prepare_submit",
                 "mode": "single",
-                "protection_preimage": protection_preimage,
             },
         )
+        self._durable_entry_prepare_task = task
         if self._submit_durable_io_task(task):
+            self._durable_entry_prepare_task_queued = True
             return True
-        if isinstance(protection_preimage, Mapping):
-            self._entry_protection_stash = copy.deepcopy(
-                dict(protection_preimage)
-            )
+        self._restore_durable_entry_prepare_preimage()
         denial = self.denials[-1] if self.denials else OrderDenied(
             "intent_dispatch_queue_rejected",
             intent_execution.intent_id,
@@ -2173,12 +2341,15 @@ class IntentExecutionStrategy(Strategy):
             self._report_denial(intent, ladder_denial)
             return
 
+        prepared_orders = self._zone_ladder_submission_orders(plans)
+        if isinstance(prepared_orders, OrderDenied):
+            self._record_denial(prepared_orders)
+            self._report_denial(intent, prepared_orders)
+            return
+
         if durable_async:
-            protection_preimage = copy.deepcopy(
-                self._entry_protection_stash
-            )
             if not self._stage_entry_protection(intent, plans[0]):
-                self._entry_protection_stash = protection_preimage
+                self._restore_durable_entry_prepare_preimage()
                 denial = self.denials[-1] if self.denials else OrderDenied(
                     "protection_stash_invalid",
                     str(plans[0].intent_id),
@@ -2192,12 +2363,27 @@ class IntentExecutionStrategy(Strategy):
                 stash["entry_sequence_max"] = 9
                 stash["protection_sequence_start"] = 11
             protection_payload: Mapping[str, Any] | bool = False
-            if self._entry_protection_stash != protection_preimage:
+            protection_rollback_payload: Mapping[str, Any] | bool = (
+                False
+            )
+            preimage = self._durable_entry_prepare_preimage
+            if (
+                isinstance(preimage, Mapping)
+                and self._entry_protection_stash != preimage
+            ):
                 protection_payload = (
                     self._entry_protection_stash_payload()
                 )
+                protection_rollback_payload = (
+                    self._durable_entry_rollback_payload()
+                )
+            operation_id = uuid4().hex
+            self._prepared_zone_ladder_orders[operation_id] = (
+                prepared_orders
+            )
             task = _DurableIoTask(
                 kind=_DurableIoTaskKind.PREPARE_SUBMIT,
+                operation_id=operation_id,
                 intent=intent,
                 intent_execution=intent_execution,
                 client_order_ids=tuple(
@@ -2205,15 +2391,23 @@ class IntentExecutionStrategy(Strategy):
                 ),
                 plans=plans,
                 protection_payload=protection_payload,
+                protection_rollback_payload=(
+                    protection_rollback_payload
+                ),
                 continuation={
                     "kind": "prepare_submit",
                     "mode": "zone_ladder",
-                    "protection_preimage": protection_preimage,
                 },
             )
+            self._durable_entry_prepare_task = task
             if self._submit_durable_io_task(task):
+                self._durable_entry_prepare_task_queued = True
                 return
-            self._entry_protection_stash = protection_preimage
+            self._prepared_zone_ladder_orders.pop(
+                operation_id,
+                False,
+            )
+            self._restore_durable_entry_prepare_preimage()
             denial = self.denials[-1] if self.denials else OrderDenied(
                 "intent_dispatch_queue_rejected",
                 intent_execution.intent_id,
@@ -2281,8 +2475,11 @@ class IntentExecutionStrategy(Strategy):
                 return
         submitted = True
         submitted_plans: list[OrderPlan] = []
-        for plan in plans:
-            if not self._submit_order_plan(plan):
+        for plan, order in zip(plans, prepared_orders):
+            if not self._submit_order_plan(
+                plan,
+                prepared_order=order,
+            ):
                 submitted = False
                 break
             submitted_plans.append(plan)
@@ -2670,7 +2867,8 @@ class IntentExecutionStrategy(Strategy):
             return False
 
     def on_stop(self) -> None:
-        self._strategy_stopping = True
+        with self._durable_io_halt_lock:
+            self._strategy_stopping = True
         self._cancel_clock_timer("strategy.durable-io.mailbox")
         self._cancel_clock_timer("exchange-state.reconcile")
         self._cancel_clock_timer("terminal-exchange.mailbox")
@@ -2683,6 +2881,7 @@ class IntentExecutionStrategy(Strategy):
         self.drain_durable_io_mailbox(
             max_results=self._DURABLE_IO_QUEUE_CAPACITY
         )
+        self._abort_durable_entry_prepare()
 
     def on_event(self, event: Any) -> None:
         if self._strategy_stopping:
@@ -2750,6 +2949,23 @@ class IntentExecutionStrategy(Strategy):
         self,
         task: _DurableIoTask,
     ) -> None:
+        if self._strategy_stopping or self._durable_io_halted_reason:
+            if task.kind in {
+                _DurableIoTaskKind.PREPARE_SUBMIT,
+                _DurableIoTaskKind.PREPARE_ROLLBACK,
+            }:
+                self._compensate_prepare_task(task)
+            return
+        try:
+            self._process_durable_io_task_body(task)
+        except Exception as exc:
+            self._publish_prepare_submit_failure(task, exc)
+            raise
+
+    def _process_durable_io_task_body(
+        self,
+        task: _DurableIoTask,
+    ) -> None:
         if task.kind is _DurableIoTaskKind.INTENT_EXCHANGE_CONFIRMED:
             self._intent_execution_inbox.mark_exchange_confirmed_by_client_order_id(
                 task.client_order_id
@@ -2760,6 +2976,8 @@ class IntentExecutionStrategy(Strategy):
             outcome = self._process_intent_receive_task(task)
         elif task.kind is _DurableIoTaskKind.PREPARE_SUBMIT:
             outcome = self._process_prepare_submit_task(task)
+        elif task.kind is _DurableIoTaskKind.PREPARE_ROLLBACK:
+            outcome = self._process_prepare_rollback_task(task)
         elif task.kind is _DurableIoTaskKind.MANAGEMENT_PREPARE:
             outcome = self._process_management_prepare_task(task)
         elif task.kind is _DurableIoTaskKind.MANAGEMENT_COMPLETE:
@@ -2798,7 +3016,8 @@ class IntentExecutionStrategy(Strategy):
                 raise ValueError(
                     "protection stash task payload digest mismatch"
                 )
-            self._write_entry_protection_stash(payload)
+            with self._protection_stash_file_lock:
+                self._write_entry_protection_stash(payload)
             outcome = True
         else:
             raise ValueError(f"unsupported durable I/O task: {task.kind}")
@@ -2806,6 +3025,84 @@ class IntentExecutionStrategy(Strategy):
             self._publish_durable_io_result(
                 _DurableIoResult(task=task, outcome=outcome)
             )
+
+    def _publish_prepare_submit_failure(
+        self,
+        task: _DurableIoTask,
+        error: Exception,
+    ) -> None:
+        if task.kind not in {
+            _DurableIoTaskKind.PREPARE_SUBMIT,
+            _DurableIoTaskKind.PREPARE_ROLLBACK,
+        }:
+            return
+        self._compensate_prepare_task(task)
+        if not task.operation_id:
+            return
+        if task.continuation is False:
+            return
+        self._publish_durable_io_result(
+            _DurableIoResult(
+                task=task,
+                outcome={"worker_error": repr(error)},
+            )
+        )
+
+    def _compensate_prepare_task(
+        self,
+        task: _DurableIoTask,
+    ) -> bool:
+        staged = task.protection_payload
+        preimage = task.protection_rollback_payload
+        if not isinstance(staged, Mapping):
+            return True
+        if not isinstance(preimage, Mapping):
+            return True
+        try:
+            with self._protection_stash_file_lock:
+                current = (
+                    self._read_entry_protection_stash_payload()
+                )
+                merged, status = (
+                    self._conditional_protection_rollback(
+                        current,
+                        staged,
+                        preimage,
+                    )
+                )
+                if merged != current:
+                    self._write_entry_protection_stash(merged)
+                if status == "conflict":
+                    self._record_denial(
+                        OrderDenied(
+                            "protection_stash_rollback_conflict",
+                            str(task.operation_id),
+                        )
+                    )
+                    return False
+            return True
+        except Exception as exc:
+            self._record_denial(
+                OrderDenied(
+                    "protection_stash_rollback_failed",
+                    repr(exc),
+                )
+            )
+            return False
+
+    def _persist_prepare_protection_payload(
+        self,
+        task: _DurableIoTask,
+    ) -> bool:
+        payload = task.protection_payload
+        if not isinstance(payload, Mapping):
+            return False
+        with self._protection_stash_file_lock:
+            if self._strategy_stopping or self._durable_io_halted_reason:
+                self._compensate_prepare_task(task)
+                return False
+            self._write_entry_protection_stash(payload)
+        return True
 
     def _publish_durable_io_result(
         self,
@@ -2816,6 +3113,11 @@ class IntentExecutionStrategy(Strategy):
         try:
             self._durable_io_mailbox.put_nowait(result)
         except Full:
+            if result.task.kind in {
+                _DurableIoTaskKind.PREPARE_SUBMIT,
+                _DurableIoTaskKind.PREPARE_ROLLBACK,
+            }:
+                self._compensate_prepare_task(result.task)
             self._halt_durable_io(
                 "strategy durable I/O result mailbox capacity exceeded"
             )
@@ -2836,6 +3138,9 @@ class IntentExecutionStrategy(Strategy):
             return
         if kind == "prepare_submit":
             self._on_prepare_submit_result(result)
+            return
+        if kind == "prepare_rollback":
+            self._on_prepare_rollback_result(result)
             return
         if kind == "management_prepared":
             self._on_management_prepared_result(result)
@@ -2874,8 +3179,17 @@ class IntentExecutionStrategy(Strategy):
         task = result.task
         if task.kind in {
             _DurableIoTaskKind.PREPARE_SUBMIT,
-            _DurableIoTaskKind.MANAGEMENT_PREPARE,
+            _DurableIoTaskKind.PREPARE_ROLLBACK,
         }:
+            operation_id = str(task.operation_id).strip()
+            if operation_id:
+                self._prepared_zone_ladder_orders.pop(
+                    operation_id,
+                    False,
+                )
+            self._abort_durable_entry_prepare()
+            return
+        if task.kind is _DurableIoTaskKind.MANAGEMENT_PREPARE:
             self._restore_prepare_submit_preimage(task)
             return
         if (
@@ -3013,144 +3327,352 @@ class IntentExecutionStrategy(Strategy):
         result: _DurableIoResult,
     ) -> None:
         task = result.task
-        outcome = result.outcome
-        if not isinstance(outcome, Mapping):
-            self._halt_durable_io(
-                "prepare-submit continuation missing outcome"
-            )
-            return
-        intent = task.intent
-        intent_execution = task.intent_execution
-        if not isinstance(intent_execution, IntentExecutionIdentity):
-            self._halt_durable_io(
-                "prepare-submit continuation missing intent identity"
-            )
-            return
-        dispatch_result = outcome.get("dispatch_result", False)
-        if dispatch_result is IntentDispatchResult.EXCHANGE_CONFIRMED:
-            self._processed_intent_ids.add(intent_execution.intent_id)
-            return
-        if dispatch_result is IntentDispatchResult.REJECTED:
-            denial = OrderDenied(
-                "durable_intent_rejected",
-                intent_execution.intent_id,
-            )
-            self._record_denial(denial)
-            self._report_denial(intent, denial)
-            self._restore_prepare_submit_preimage(task)
-            return
-        if dispatch_result is IntentDispatchResult.RECOVERY_REQUIRED:
-            record = outcome.get("durable_record", False)
-            if (
-                record is not False
-                and self._durable_intent_orders_exist(record)
-            ):
-                self._queue_recovery_confirmation(task)
-                return
-            denial = OrderDenied(
-                "intent_exchange_confirmation_required",
-                intent_execution.intent_id,
-            )
-            self._record_denial(denial)
-            self._report_denial(intent, denial)
-            self._restore_prepare_submit_preimage(task)
-            return
-
-        claim_result = outcome.get("claim_result", False)
-        if claim_result is LiveCanaryClaimResult.PERMIT_CONFLICT:
-            live_canary = task.live_canary_execution
-            permit_id = str(
-                getattr(live_canary, "permit_id", "") or ""
-            )
-            denial = OrderDenied(
-                "canary_permit_already_claimed",
-                permit_id,
-            )
-            self._record_denial(denial)
-            self._report_denial(intent, denial)
-            self._restore_prepare_submit_preimage(task)
-            return
-        if claim_result is LiveCanaryClaimResult.RECOVERY_REQUIRED:
-            plans = task.plans
-            if (
-                len(plans) == 1
-                and self._live_canary_order_exists(plans[0])
-            ):
-                self._queue_recovery_confirmation(task)
-                return
-            live_canary = task.live_canary_execution
-            client_order_id = str(
-                getattr(live_canary, "client_order_id", "") or ""
-            )
-            denial = OrderDenied(
-                "canary_exchange_confirmation_required",
-                client_order_id,
-            )
-            self._record_denial(denial)
-            self._report_denial(intent, denial)
-            self._restore_prepare_submit_preimage(task)
-            return
-
-        if (
-            any(not plan.reduce_only for plan in task.plans)
-            and self._trading_state().upper() != "ACTIVE"
-        ):
-            denial = OrderDenied(
-                "trading_not_active",
-                self._trading_state(),
-            )
-            self._record_denial(denial)
-            self._report_denial(intent, denial)
-            self._restore_prepare_submit_preimage(task)
-            return
-
+        self._durable_entry_prepare_task_queued = False
+        self._durable_entry_prepare_task = task
         mode = ""
         continuation = task.continuation
         if isinstance(continuation, Mapping):
             mode = str(continuation.get("mode") or "")
-        if mode == "zone_ladder":
-            ladder_denial = self._zone_ladder_dynamic_budget_denial(
-                task.plans,
+        prepared_orders: tuple[Any, ...] | bool = False
+        operation_id = str(task.operation_id).strip()
+        if mode == "zone_ladder" and operation_id:
+            prepared_orders = self._prepared_zone_ladder_orders.pop(
+                operation_id,
+                False,
             )
-            if ladder_denial is not None:
-                self._record_denial(ladder_denial)
-                self._report_denial(intent, ladder_denial)
-                self._restore_prepare_submit_preimage(task)
+        try:
+            outcome = result.outcome
+            if not isinstance(outcome, Mapping):
+                self._halt_durable_io(
+                    "prepare-submit continuation missing outcome"
+                )
+                self._abort_durable_entry_prepare()
+                return
+            self._durable_entry_prepare_disk_staged = bool(
+                outcome.get("protection_persisted", False)
+            )
+            worker_error = outcome.get("worker_error", False)
+            if worker_error is not False:
+                self._halt_durable_io(
+                    f"prepare-submit worker failed: {worker_error}"
+                )
+                self._abort_durable_entry_prepare()
+                return
+            intent = task.intent
+            intent_execution = task.intent_execution
+            if not isinstance(
+                intent_execution,
+                IntentExecutionIdentity,
+            ):
+                self._halt_durable_io(
+                    "prepare-submit continuation missing intent identity"
+                )
+                self._abort_durable_entry_prepare()
+                return
+            dispatch_result = outcome.get("dispatch_result", False)
+            if (
+                dispatch_result
+                is IntentDispatchResult.EXCHANGE_CONFIRMED
+            ):
+                self._commit_durable_entry_prepare()
+                self._processed_intent_ids.add(
+                    intent_execution.intent_id
+                )
+                return
+            if dispatch_result is IntentDispatchResult.REJECTED:
+                denial = OrderDenied(
+                    "durable_intent_rejected",
+                    intent_execution.intent_id,
+                )
+                self._record_denial(denial)
+                self._report_denial(intent, denial)
+                self._rollback_durable_entry_prepare()
+                return
+            if (
+                dispatch_result
+                is IntentDispatchResult.RECOVERY_REQUIRED
+            ):
+                record = outcome.get("durable_record", False)
+                if (
+                    record is not False
+                    and self._durable_intent_orders_exist(record)
+                ):
+                    self._commit_durable_entry_prepare()
+                    self._queue_recovery_confirmation(task)
+                    return
+                denial = OrderDenied(
+                    "intent_exchange_confirmation_required",
+                    intent_execution.intent_id,
+                )
+                self._record_denial(denial)
+                self._report_denial(intent, denial)
+                self._rollback_durable_entry_prepare()
                 return
 
-        submitted_plans: list[OrderPlan] = []
-        for plan in task.plans:
-            if not self._submit_order_plan_after_durable_prepare(
-                plan,
-                live_canary_execution=task.live_canary_execution,
-            ):
-                break
-            submitted_plans.append(plan)
-        if len(submitted_plans) != len(task.plans):
-            self._cancel_partial_prepared_submit(
-                task,
-                submitted_plans,
-            )
-            denial = self.denials[-1] if self.denials else OrderDenied(
-                "order_submit_failed",
-                intent_execution.intent_id,
-            )
-            self._report_denial(intent, denial)
-            return
-
-        live_canary = task.live_canary_execution
-        if isinstance(live_canary, LiveCanaryExecutionIdentity):
-            self._submit_durable_io_task(
-                _DurableIoTask(
-                    kind=_DurableIoTaskKind.CANARY_MARK_DISPATCHED,
-                    intent=intent,
-                    intent_execution=intent_execution,
-                    live_canary_execution=live_canary,
-                    continuation={"kind": "canary_dispatched"},
+            claim_result = outcome.get("claim_result", False)
+            if claim_result is LiveCanaryClaimResult.PERMIT_CONFLICT:
+                live_canary = task.live_canary_execution
+                permit_id = str(
+                    getattr(live_canary, "permit_id", "") or ""
                 )
+                denial = OrderDenied(
+                    "canary_permit_already_claimed",
+                    permit_id,
+                )
+                self._record_denial(denial)
+                self._report_denial(intent, denial)
+                self._rollback_durable_entry_prepare()
+                return
+            if (
+                claim_result
+                is LiveCanaryClaimResult.RECOVERY_REQUIRED
+            ):
+                plans = task.plans
+                if (
+                    len(plans) == 1
+                    and self._live_canary_order_exists(plans[0])
+                ):
+                    self._commit_durable_entry_prepare()
+                    self._queue_recovery_confirmation(task)
+                    return
+                live_canary = task.live_canary_execution
+                client_order_id = str(
+                    getattr(
+                        live_canary,
+                        "client_order_id",
+                        "",
+                    )
+                    or ""
+                )
+                denial = OrderDenied(
+                    "canary_exchange_confirmation_required",
+                    client_order_id,
+                )
+                self._record_denial(denial)
+                self._report_denial(intent, denial)
+                self._rollback_durable_entry_prepare()
+                return
+
+            if (
+                any(not plan.reduce_only for plan in task.plans)
+                and self._trading_state().upper() != "ACTIVE"
+            ):
+                denial = OrderDenied(
+                    "trading_not_active",
+                    self._trading_state(),
+                )
+                self._record_denial(denial)
+                self._report_denial(intent, denial)
+                self._rollback_durable_entry_prepare()
+                return
+
+            if mode == "zone_ladder":
+                if (
+                    prepared_orders is False
+                    or len(prepared_orders) != len(task.plans)
+                ):
+                    denial = OrderDenied(
+                        "approved_max_notional_invalid",
+                        "zone_ladder.prepared_orders",
+                    )
+                    self._record_denial(denial)
+                    self._report_denial(intent, denial)
+                    self._rollback_durable_entry_prepare()
+                    return
+
+            submitted_plans: list[OrderPlan] = []
+            for index, plan in enumerate(task.plans):
+                prepared_order: Any | bool = False
+                if prepared_orders is not False:
+                    prepared_order = prepared_orders[index]
+                if not self._submit_order_plan_after_durable_prepare(
+                    plan,
+                    live_canary_execution=(
+                        task.live_canary_execution
+                    ),
+                    prepared_order=prepared_order,
+                ):
+                    break
+                submitted_plans.append(plan)
+            if len(submitted_plans) != len(task.plans):
+                if self._durable_entry_submit_started:
+                    self._commit_durable_entry_prepare()
+                else:
+                    self._rollback_durable_entry_prepare()
+                self._cancel_partial_prepared_submit(
+                    task,
+                    submitted_plans,
+                )
+                denial = (
+                    self.denials[-1]
+                    if self.denials
+                    else OrderDenied(
+                        "order_submit_failed",
+                        intent_execution.intent_id,
+                    )
+                )
+                self._report_denial(intent, denial)
+                return
+            self._commit_durable_entry_prepare()
+
+            live_canary = task.live_canary_execution
+            if isinstance(
+                live_canary,
+                LiveCanaryExecutionIdentity,
+            ):
+                self._submit_durable_io_task(
+                    _DurableIoTask(
+                        kind=(
+                            _DurableIoTaskKind.CANARY_MARK_DISPATCHED
+                        ),
+                        intent=intent,
+                        intent_execution=intent_execution,
+                        live_canary_execution=live_canary,
+                        continuation={"kind": "canary_dispatched"},
+                    )
+                )
+                return
+            self._processed_intent_ids.add(
+                intent_execution.intent_id
+            )
+        finally:
+            if not self._durable_entry_prepare_task_queued:
+                self._finish_durable_entry_prepare()
+
+    def _on_prepare_rollback_result(
+        self,
+        result: _DurableIoResult,
+    ) -> None:
+        self._durable_entry_prepare_task_queued = False
+        self._durable_entry_prepare_task = result.task
+        outcome = result.outcome
+        if not isinstance(outcome, Mapping):
+            self._halt_durable_io(
+                "prepare-rollback continuation missing outcome"
+            )
+            self._abort_durable_entry_prepare()
+            return
+        worker_error = outcome.get("worker_error", False)
+        if worker_error is not False:
+            self._halt_durable_io(
+                f"prepare-rollback worker failed: {worker_error}"
+            )
+            self._abort_durable_entry_prepare()
+            return
+        if outcome.get("rolled_back") is not True:
+            self._halt_durable_io(
+                "prepare-rollback continuation missing confirmation"
+            )
+            self._abort_durable_entry_prepare()
+            return
+        self._durable_entry_prepare_disk_staged = False
+        self._finish_durable_entry_prepare()
+
+    def _restore_durable_entry_prepare_preimage(self) -> None:
+        preimage = self._durable_entry_prepare_preimage
+        if not isinstance(preimage, Mapping):
+            return
+        active_task = self._durable_entry_prepare_task
+        if not isinstance(active_task, _DurableIoTask):
+            self._entry_protection_stash = copy.deepcopy(
+                dict(preimage)
             )
             return
-        self._processed_intent_ids.add(intent_execution.intent_id)
+        staged = active_task.protection_payload
+        if not isinstance(staged, Mapping):
+            return
+        current = self._entry_protection_stash_payload()
+        serialized_preimage = self._protection_stash_payload(
+            preimage
+        )
+        merged, status = self._conditional_protection_rollback(
+            current,
+            staged,
+            serialized_preimage,
+        )
+        if status == "noop":
+            return
+        current_keys = set(self._entry_protection_stash)
+        merged_keys = set(merged)
+        for key in current_keys - merged_keys:
+            self._entry_protection_stash.pop(key, None)
+        for key in merged_keys:
+            current_value = current.get(key, False)
+            merged_value = merged[key]
+            if current_value == merged_value:
+                continue
+            before = preimage.get(key, False)
+            if before is False:
+                self._entry_protection_stash.pop(key, None)
+                continue
+            self._entry_protection_stash[key] = copy.deepcopy(before)
+
+    def _commit_durable_entry_prepare(self) -> None:
+        self._durable_entry_prepare_task = False
+        self._durable_entry_prepare_disk_staged = False
+
+    def _rollback_durable_entry_prepare(self) -> None:
+        self._restore_durable_entry_prepare_preimage()
+        if not self._durable_entry_prepare_disk_staged:
+            return
+        active_task = self._durable_entry_prepare_task
+        if not isinstance(active_task, _DurableIoTask):
+            self._halt_durable_io(
+                "durable entry rollback missing active task"
+            )
+            self._abort_durable_entry_prepare()
+            return
+        rollback_payload = active_task.protection_rollback_payload
+        if not isinstance(rollback_payload, Mapping):
+            self._halt_durable_io(
+                "durable entry rollback missing preimage payload"
+            )
+            self._abort_durable_entry_prepare()
+            return
+        rollback_task = _DurableIoTask(
+            kind=_DurableIoTaskKind.PREPARE_ROLLBACK,
+            operation_id=uuid4().hex,
+            intent=active_task.intent,
+            intent_execution=active_task.intent_execution,
+            protection_payload=active_task.protection_payload,
+            protection_rollback_payload=rollback_payload,
+            continuation={"kind": "prepare_rollback"},
+        )
+        self._durable_entry_prepare_task = rollback_task
+        if self._submit_durable_io_task(rollback_task):
+            self._durable_entry_prepare_task_queued = True
+            return
+        self._compensate_prepare_task(rollback_task)
+        self._durable_entry_prepare_disk_staged = False
+
+    def _abort_durable_entry_prepare(self) -> None:
+        active_task = self._durable_entry_prepare_task
+        if (
+            isinstance(active_task, _DurableIoTask)
+            and not self._durable_entry_submit_started
+        ):
+            self._compensate_prepare_task(active_task)
+        if not self._durable_entry_submit_started:
+            self._restore_durable_entry_prepare_preimage()
+        self._prepared_zone_ladder_orders.clear()
+        self._pending_durable_entry_intents.clear()
+        self._reset_durable_entry_prepare()
+
+    def _finish_durable_entry_prepare(self) -> None:
+        self._reset_durable_entry_prepare()
+        if self._strategy_stopping or self._durable_io_halted_reason:
+            self._pending_durable_entry_intents.clear()
+            self._prepared_zone_ladder_orders.clear()
+            return
+        self._advance_durable_entry_prepare()
+
+    def _reset_durable_entry_prepare(self) -> None:
+        self._durable_entry_prepare_active = False
+        self._durable_entry_prepare_task_queued = False
+        self._durable_entry_prepare_preimage = False
+        self._durable_entry_prepare_task = False
+        self._durable_entry_prepare_disk_staged = False
+        self._durable_entry_submit_started = False
 
     def _on_management_prepared_result(
         self,
@@ -3225,14 +3747,23 @@ class IntentExecutionStrategy(Strategy):
     def _restore_prepare_submit_preimage(
         self,
         task: _DurableIoTask,
+        *,
+        preimage: Mapping[str, Any] | bool = False,
     ) -> None:
-        continuation = task.continuation
-        if not isinstance(continuation, Mapping):
+        selected_preimage = preimage
+        if selected_preimage is False:
+            continuation = task.continuation
+            if not isinstance(continuation, Mapping):
+                return
+            selected_preimage = continuation.get(
+                "protection_preimage",
+                False,
+            )
+        if not isinstance(selected_preimage, Mapping):
             return
-        preimage = continuation.get("protection_preimage", False)
-        if not isinstance(preimage, Mapping):
-            return
-        self._entry_protection_stash = copy.deepcopy(dict(preimage))
+        self._entry_protection_stash = copy.deepcopy(
+            dict(selected_preimage)
+        )
 
     def _cancel_partial_prepared_submit(
         self,
@@ -3316,19 +3847,38 @@ class IntentExecutionStrategy(Strategy):
                 durable_record = self._intent_execution_inbox.get(
                     intent_execution
                 )
+                protection_persisted = (
+                    self._persist_prepare_protection_payload(task)
+                )
                 return {
                     "dispatch_result": dispatch_result,
                     "durable_record": durable_record,
                     "claim_result": False,
+                    "protection_persisted": (
+                        protection_persisted
+                    ),
                 }
-            if dispatch_result in {
-                IntentDispatchResult.EXCHANGE_CONFIRMED,
-                IntentDispatchResult.REJECTED,
-            }:
+            if (
+                dispatch_result
+                is IntentDispatchResult.EXCHANGE_CONFIRMED
+            ):
+                protection_persisted = (
+                    self._persist_prepare_protection_payload(task)
+                )
                 return {
                     "dispatch_result": dispatch_result,
                     "durable_record": False,
                     "claim_result": False,
+                    "protection_persisted": (
+                        protection_persisted
+                    ),
+                }
+            if dispatch_result is IntentDispatchResult.REJECTED:
+                return {
+                    "dispatch_result": dispatch_result,
+                    "durable_record": False,
+                    "claim_result": False,
+                    "protection_persisted": False,
                 }
         claim_result: LiveCanaryClaimResult | bool = False
         live_canary = task.live_canary_execution
@@ -3349,15 +3899,36 @@ class IntentExecutionStrategy(Strategy):
                     "dispatch_result": dispatch_result,
                     "durable_record": False,
                     "claim_result": claim_result,
+                    "protection_persisted": False,
                 }
-        protection_payload = task.protection_payload
-        if isinstance(protection_payload, Mapping):
-            self._write_entry_protection_stash(protection_payload)
+        protection_persisted = self._persist_prepare_protection_payload(
+            task
+        )
         return {
             "dispatch_result": dispatch_result,
             "durable_record": durable_record,
             "claim_result": claim_result,
+            "protection_persisted": protection_persisted,
         }
+
+    def _process_prepare_rollback_task(
+        self,
+        task: _DurableIoTask,
+    ) -> dict[str, Any]:
+        if not isinstance(task.protection_payload, Mapping):
+            raise ValueError(
+                "prepare rollback task requires staged protection payload"
+            )
+        if not isinstance(
+            task.protection_rollback_payload,
+            Mapping,
+        ):
+            raise ValueError(
+                "prepare rollback task requires preimage protection payload"
+            )
+        if not self._compensate_prepare_task(task):
+            raise RuntimeError("prepare rollback compensation failed")
+        return {"rolled_back": True}
 
     def _process_management_prepare_task(
         self,
@@ -3415,6 +3986,12 @@ class IntentExecutionStrategy(Strategy):
             if self._durable_io_halted_reason:
                 return
             self._durable_io_halted_reason = halt_reason
+        active_task = self._durable_entry_prepare_task
+        if (
+            isinstance(active_task, _DurableIoTask)
+            and not self._durable_entry_submit_started
+        ):
+            self._compensate_prepare_task(active_task)
         handler = self._terminal_exchange_halt_handler
         if handler is None and self._requires_live_canary_runtime():
             handler = self._live_canary_halt_handler
@@ -5475,6 +6052,7 @@ class IntentExecutionStrategy(Strategy):
         plan: OrderPlan,
         *,
         live_canary_execution: LiveCanaryExecutionIdentity | bool,
+        prepared_order: Any | bool = False,
     ) -> bool:
         requires_live_canary = (
             str(getattr(self.config, "account_id", "")) == "account-a"
@@ -5505,31 +6083,12 @@ class IntentExecutionStrategy(Strategy):
                 self._record_denial(canary_denial)
                 return False
 
-        instrument = self._cache_instrument(plan.instrument_id)
-        if instrument is None:
-            self._record_denial(
-                OrderDenied(
-                    "instrument_not_found",
-                    plan.instrument_id,
-                )
-            )
-            return False
-        try:
-            order = self._build_nautilus_order(
-                self._plan_for_submission(plan),
-                instrument,
-            )
-        except Exception as exc:
-            self._record_denial(
-                OrderDenied("order_submit_failed", repr(exc))
-            )
-            return False
-        entry_denial = self._live_entry_notional_denial(
+        order = self._submission_order(
             plan,
-            order,
+            prepared_order=prepared_order,
         )
-        if entry_denial is not None:
-            self._record_denial(entry_denial)
+        if isinstance(order, OrderDenied):
+            self._record_denial(order)
             return False
 
         if isinstance(
@@ -5550,13 +6109,42 @@ class IntentExecutionStrategy(Strategy):
             )
         try:
             position_id = self._hedge_position_id(order, plan)
-            if position_id is not None:
-                self.submit_order(  # type: ignore[attr-defined]
-                    order,
-                    position_id=position_id,
-                )
-            else:
-                self.submit_order(order)  # type: ignore[attr-defined]
+            with self._durable_io_halt_lock:
+                if self._strategy_stopping:
+                    self._record_denial(
+                        OrderDenied(
+                            "strategy_stopping",
+                            str(plan.intent_id),
+                        )
+                    )
+                    return False
+                if self._durable_io_halted_reason:
+                    self._record_denial(
+                        OrderDenied(
+                            "strategy_durable_io_halted",
+                            self._durable_io_halted_reason,
+                        )
+                    )
+                    return False
+                if (
+                    not plan.reduce_only
+                    and self._trading_state().upper() != "ACTIVE"
+                ):
+                    self._record_denial(
+                        OrderDenied(
+                            "trading_not_active",
+                            self._trading_state(),
+                        )
+                    )
+                    return False
+                self._durable_entry_submit_started = True
+                if position_id is not None:
+                    self.submit_order(  # type: ignore[attr-defined]
+                        order,
+                        position_id=position_id,
+                    )
+                else:
+                    self.submit_order(order)  # type: ignore[attr-defined]
         except Exception as exc:
             self._record_denial(
                 OrderDenied("order_submit_failed", repr(exc))
@@ -5570,6 +6158,7 @@ class IntentExecutionStrategy(Strategy):
         *,
         live_canary_execution: LiveCanaryExecutionIdentity | bool = False,
         intent_execution: IntentExecutionIdentity | bool = False,
+        prepared_order: Any | bool = False,
     ) -> bool:
         requires_live_canary = (
             str(getattr(self.config, "account_id", "")) == "account-a"
@@ -5600,29 +6189,12 @@ class IntentExecutionStrategy(Strategy):
                 self._record_denial(canary_denial)
                 return False
 
-        instrument = self._cache_instrument(plan.instrument_id)
-        if instrument is None:
-            self._record_denial(OrderDenied("instrument_not_found", plan.instrument_id))
-            return False
-
-        try:
-            # NOTE: order kwargs may drop the internal reduce_only flag (external
-            # position quirk, see _plan_for_submission) but the live-entry gate
-            # always uses the ORIGINAL plan semantics.
-            order = self._build_nautilus_order(
-                self._plan_for_submission(plan),
-                instrument,
-            )
-        except Exception as exc:
-            self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
-            return False
-
-        entry_denial = self._live_entry_notional_denial(
+        order = self._submission_order(
             plan,
-            order,
+            prepared_order=prepared_order,
         )
-        if entry_denial is not None:
-            self._record_denial(entry_denial)
+        if isinstance(order, OrderDenied):
+            self._record_denial(order)
             return False
 
         if isinstance(intent_execution, IntentExecutionIdentity):
@@ -5758,6 +6330,34 @@ class IntentExecutionStrategy(Strategy):
             self._after_live_canary_dispatched(live_canary_execution)
         return True
 
+    def _submission_order(
+        self,
+        plan: OrderPlan,
+        *,
+        prepared_order: Any | bool = False,
+    ) -> Any | OrderDenied:
+        if prepared_order is not False:
+            return prepared_order
+        instrument = self._cache_instrument(plan.instrument_id)
+        if instrument is None:
+            return OrderDenied(
+                "instrument_not_found",
+                plan.instrument_id,
+            )
+        try:
+            # Submission kwargs may drop the internal reduce_only flag for
+            # external positions. The live-entry gate uses the original plan.
+            order = self._build_nautilus_order(
+                self._plan_for_submission(plan),
+                instrument,
+            )
+        except Exception as exc:
+            return OrderDenied("order_submit_failed", repr(exc))
+        entry_denial = self._live_entry_notional_denial(plan, order)
+        if entry_denial is not None:
+            return entry_denial
+        return order
+
     def _live_entry_notional_denial(
         self,
         plan: OrderPlan,
@@ -5833,12 +6433,23 @@ class IntentExecutionStrategy(Strategy):
     def _zone_ladder_dynamic_budget_denial(
         self,
         plans: Iterable[OrderPlan],
+        *,
+        orders: Iterable[Any] | bool = False,
     ) -> OrderDenied | None:
+        plan_rows = tuple(plans)
+        order_rows: tuple[Any, ...] | bool = False
+        if orders is not False:
+            order_rows = tuple(orders)
+            if len(order_rows) != len(plan_rows):
+                return OrderDenied(
+                    "approved_max_notional_invalid",
+                    "zone_ladder.final_orders",
+                )
         total = Decimal("0")
         instrument_id = ""
         intent_id = ""
         approved_max_notional: Decimal | bool = False
-        for plan in plans:
+        for index, plan in enumerate(plan_rows):
             intent_id = str(plan.intent_id)
             instrument_id = plan.instrument_id
             if plan.reduce_only:
@@ -5855,8 +6466,14 @@ class IntentExecutionStrategy(Strategy):
                     "approved_max_notional_invalid",
                     f"zone_ladder:{intent_id}",
                 )
-            quantity = _positive_canary_decimal(plan.quantity)
-            price = _positive_canary_decimal(plan.price)
+            quantity_raw = plan.quantity
+            price_raw = plan.price
+            if order_rows is not False:
+                order = order_rows[index]
+                quantity_raw = getattr(order, "quantity", None)
+                price_raw = getattr(order, "price", None)
+            quantity = _positive_canary_decimal(quantity_raw)
+            price = _positive_canary_decimal(price_raw)
             if quantity is None or price is None:
                 return OrderDenied("unsupported_order_spec", "zone_ladder")
             total += quantity * price
@@ -5871,6 +6488,25 @@ class IntentExecutionStrategy(Strategy):
                 f"intent={intent_id}"
             ),
         )
+
+    def _zone_ladder_submission_orders(
+        self,
+        plans: Iterable[OrderPlan],
+    ) -> tuple[Any, ...] | OrderDenied:
+        plan_rows = tuple(plans)
+        orders: list[Any] = []
+        for plan in plan_rows:
+            order = self._submission_order(plan)
+            if isinstance(order, OrderDenied):
+                return order
+            orders.append(order)
+        denial = self._zone_ladder_dynamic_budget_denial(
+            plan_rows,
+            orders=orders,
+        )
+        if denial is not None:
+            return denial
+        return tuple(orders)
 
     def _fresh_live_mark_price(
         self,

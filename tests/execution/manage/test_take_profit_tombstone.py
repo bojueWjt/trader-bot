@@ -1689,6 +1689,7 @@ class _Intent:
     valid_until: datetime
     idempotency_key: str
     approved_at: datetime
+    risk_budget: Any
     target_position_id: str | None = None
 
 
@@ -1711,6 +1712,7 @@ def _intent(**overrides: Any) -> _Intent:
         "valid_until": NOW + timedelta(minutes=5),
         "idempotency_key": sha256(str(intent_id).encode("ascii")).hexdigest(),
         "approved_at": NOW - timedelta(seconds=5),
+        "risk_budget": SimpleNamespace(max_notional="100000"),
     }
     values.update(overrides)
     return _Intent(**values)

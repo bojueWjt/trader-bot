@@ -61,6 +61,7 @@ class IntentExecutionPlannerTest(unittest.TestCase):
         self.assertEqual(result.quantity, "0.123")
         self.assertIsNone(result.price)
         self.assertEqual(result.time_in_force, "IOC")
+        self.assertEqual(result.approved_max_notional, "100000")
         self.assertEqual(decode_client_order_id(result.client_order_id).intent_id, intent.intent_id)
         self.assertIn(f"intent_id={intent.intent_id}", result.tags)
         self.assertIn(f"decision_id={intent.decision_id}", result.tags)

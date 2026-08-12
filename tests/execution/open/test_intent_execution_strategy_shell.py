@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -37,6 +37,7 @@ from runtime.live_canary_execution import (  # noqa: E402
     LiveCanaryExecutionIdentity,
 )
 from runtime.intent_execution_inbox import (  # noqa: E402
+    IntentDispatchResult,
     IntentExecutionIdentity,
     IntentExecutionState,
     JsonIntentExecutionInbox,
@@ -716,6 +717,1521 @@ class StrategyShellTest(unittest.TestCase):
             self.assertIn("actual=120", strategy.denials[-1].detail)
             self.assertIn("approved=100", strategy.denials[-1].detail)
 
+    def test_live_zone_ladder_rejects_final_adjusted_total_before_submit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                final_quantity="0.34",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="100",
+                tranche_quantity="0.33",
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = _normal_live_open_gate()
+
+            strategy._handle_intent_ready(
+                intent,
+                exchange_state_ready=False,
+            )
+
+            self.assertEqual(strategy.submitted_orders, [])
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "approved_max_notional_exceeded",
+            )
+            self.assertIn("actual=102.00", strategy.denials[-1].detail)
+            self.assertIn("approved=100", strategy.denials[-1].detail)
+
+    def test_durable_zone_ladder_rejects_before_dispatch_persist(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                final_quantity="0.34",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="100",
+                tranche_quantity="0.33",
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = _normal_live_open_gate()
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+
+            strategy._handle_intent_ready(
+                intent,
+                exchange_state_ready=False,
+                durable_async=True,
+            )
+
+            self.assertEqual(strategy.submitted_orders, [])
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "approved_max_notional_exceeded",
+            )
+            self.assertIn(
+                "actual=102.00",
+                strategy.denials[-1].detail,
+            )
+            self.assertIn(
+                "approved=100",
+                strategy.denials[-1].detail,
+            )
+            record = strategy._intent_execution_inbox.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state, IntentExecutionState.RECEIVED)
+
+            restarted = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                final_quantity="0.34",
+                state_dir=Path(state_dir),
+            )
+            restarted.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            restarted._handle_intent(intent)
+
+            self.assertEqual(restarted.submitted_orders, [])
+            self.assertEqual(
+                restarted.denials[-1].reason,
+                "approved_max_notional_exceeded",
+            )
+            replay_record = (
+                restarted._intent_execution_inbox.get(identity)
+            )
+            self.assertTrue(replay_record)
+            self.assertEqual(
+                replay_record.state,
+                IntentExecutionState.RECEIVED,
+            )
+
+    def test_durable_zone_ladder_submits_prebuilt_orders_once(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(max_notional="150")
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+
+            try:
+                strategy._handle_intent_ready(
+                    intent,
+                    exchange_state_ready=False,
+                    durable_async=True,
+                )
+
+                self.assertEqual(len(strategy.built_orders), 3)
+                self.assertEqual(
+                    len(strategy._prepared_zone_ladder_orders),
+                    1,
+                )
+                self.assertTrue(
+                    _pump_durable_until(
+                        strategy,
+                        lambda: len(strategy.submitted_orders) == 3,
+                        timeout=1.0,
+                    )
+                )
+                self.assertEqual(len(strategy.built_orders), 3)
+                self.assertEqual(
+                    strategy.submitted_order_objects,
+                    strategy.built_orders,
+                )
+                for submitted, built in zip(
+                    strategy.submitted_order_objects,
+                    strategy.built_orders,
+                ):
+                    self.assertIs(submitted, built)
+                self.assertEqual(
+                    strategy._prepared_zone_ladder_orders,
+                    {},
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_active
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_preimage
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_zone_ladder_queue_rejection_releases_prebuilt_orders(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(max_notional="150")
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    return_value=False,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                self.assertEqual(strategy.submitted_orders, [])
+                self.assertEqual(
+                    strategy._prepared_zone_ladder_orders,
+                    {},
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_active
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_preimage
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_zone_ladder_worker_failure_releases_prebuilt_orders(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(max_notional="150")
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+
+            try:
+                with patch.object(
+                    strategy._intent_execution_inbox,
+                    "begin_dispatch",
+                    side_effect=OSError("dispatch fsync failed"),
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                    self.assertTrue(
+                        strategy.wait_for_durable_io(
+                            timeout_seconds=1.0
+                        )
+                    )
+                    strategy.drain_durable_io_mailbox()
+
+                self.assertEqual(strategy.submitted_orders, [])
+                self.assertEqual(
+                    strategy._prepared_zone_ladder_orders,
+                    {},
+                )
+                self.assertEqual(
+                    strategy._entry_protection_stash,
+                    {},
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_active
+                )
+                self.assertEqual(
+                    strategy._pending_durable_entry_intents,
+                    [],
+                )
+                self.assertIn(
+                    "dispatch fsync failed",
+                    strategy.durable_io_halted_reason,
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_zone_ladder_fifo_restores_rejected_a_then_submits_b(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent_a = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent_b = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            for intent in (intent_a, intent_b):
+                intent.order_plan["rollout_phase"] = "fleet_complete"
+                intent.order_plan["live_open_gate"] = (
+                    _normal_live_open_gate()
+                )
+                intent.order_plan["stop_loss"] = "90"
+
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent_a,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                    strategy._handle_intent_ready(
+                        intent_b,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+
+                    self.assertEqual(len(queued_tasks), 1)
+                    self.assertEqual(len(strategy.built_orders), 3)
+                    self.assertEqual(
+                        strategy._pending_durable_entry_intents,
+                        [(intent_b, False)],
+                    )
+                    self.assertIn(
+                        str(intent_a.intent_id),
+                        strategy._entry_protection_stash,
+                    )
+                    self.assertNotIn(
+                        str(intent_b.intent_id),
+                        strategy._entry_protection_stash,
+                    )
+
+                    strategy._on_prepare_submit_result(
+                        _DurableIoResult(
+                            task=queued_tasks[0],
+                            outcome={
+                                "dispatch_result": (
+                                    IntentDispatchResult.REJECTED
+                                ),
+                                "claim_result": False,
+                            },
+                        )
+                    )
+
+                    self.assertEqual(len(queued_tasks), 2)
+                    self.assertEqual(len(strategy.built_orders), 6)
+                    self.assertNotIn(
+                        str(intent_a.intent_id),
+                        strategy._entry_protection_stash,
+                    )
+                    self.assertIn(
+                        str(intent_b.intent_id),
+                        strategy._entry_protection_stash,
+                    )
+                    prepared_b = tuple(
+                        strategy._prepared_zone_ladder_orders[
+                            queued_tasks[1].operation_id
+                        ]
+                    )
+
+                    strategy._on_prepare_submit_result(
+                        _DurableIoResult(
+                            task=queued_tasks[1],
+                            outcome={
+                                "dispatch_result": (
+                                    IntentDispatchResult.READY
+                                ),
+                                "claim_result": False,
+                            },
+                        )
+                    )
+
+                self.assertEqual(
+                    tuple(strategy.submitted_order_objects),
+                    prepared_b,
+                )
+                for submitted, prepared in zip(
+                    strategy.submitted_order_objects,
+                    prepared_b,
+                ):
+                    self.assertIs(submitted, prepared)
+                self.assertEqual(
+                    set(strategy._entry_protection_stash),
+                    {str(intent_b.intent_id)},
+                )
+                self.assertEqual(
+                    strategy._prepared_zone_ladder_orders,
+                    {},
+                )
+                self.assertEqual(
+                    strategy._pending_durable_entry_intents,
+                    [],
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_active
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_single_and_ladder_share_entry_prepare_fifo(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            single = _live_entry_intent(max_notional="150")
+            ladder = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            for intent in (single, ladder):
+                intent.order_plan["rollout_phase"] = "fleet_complete"
+                intent.order_plan["live_open_gate"] = (
+                    _normal_live_open_gate()
+                )
+                intent.order_plan["stop_loss"] = "90"
+
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        single,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                    strategy._handle_intent_ready(
+                        ladder,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+
+                    self.assertEqual(len(queued_tasks), 1)
+                    self.assertEqual(
+                        queued_tasks[0].continuation["mode"],
+                        "single",
+                    )
+                    self.assertEqual(strategy.built_orders, [])
+
+                    strategy._on_prepare_submit_result(
+                        _DurableIoResult(
+                            task=queued_tasks[0],
+                            outcome={
+                                "dispatch_result": (
+                                    IntentDispatchResult.READY
+                                ),
+                                "claim_result": False,
+                            },
+                        )
+                    )
+
+                    self.assertEqual(len(queued_tasks), 2)
+                    self.assertEqual(
+                        queued_tasks[1].continuation["mode"],
+                        "zone_ladder",
+                    )
+                    self.assertEqual(len(strategy.built_orders), 4)
+                    strategy._on_prepare_submit_result(
+                        _DurableIoResult(
+                            task=queued_tasks[1],
+                            outcome={
+                                "dispatch_result": (
+                                    IntentDispatchResult.READY
+                                ),
+                                "claim_result": False,
+                            },
+                        )
+                    )
+
+                self.assertEqual(len(strategy.submitted_orders), 4)
+                self.assertEqual(
+                    set(strategy._entry_protection_stash),
+                    {str(ladder.intent_id)},
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_active
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_entry_operator_halt_rolls_back_staged_disk_stash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=state_path,
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                prepare_task = queued_tasks[0]
+                outcome = strategy._process_prepare_submit_task(
+                    prepare_task
+                )
+                self.assertTrue(outcome["protection_persisted"])
+                self.assertIn(
+                    str(intent.intent_id),
+                    strategy._load_entry_protection_stash(),
+                )
+
+                strategy.set_trading_state_getter(lambda: "HALTED")
+                strategy._on_prepare_submit_result(
+                    _DurableIoResult(
+                        task=prepare_task,
+                        outcome=outcome,
+                    )
+                )
+                self.assertTrue(
+                    _pump_durable_until(
+                        strategy,
+                        lambda: (
+                            not strategy._durable_entry_prepare_active
+                        ),
+                        timeout=1.0,
+                    )
+                )
+
+                restarted = _LiveEntrySubmitStrategy(
+                    inventory=(
+                        ("BTCUSDT-PERP.BINANCE", "100000"),
+                    ),
+                    release_id="release-a",
+                    state_dir=state_path,
+                )
+                self.assertEqual(
+                    restarted._load_entry_protection_stash(),
+                    {},
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_entry_fifo_waits_for_rollback_fsync(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent_a = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent_b = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            for intent in (intent_a, intent_b):
+                intent.order_plan["rollout_phase"] = "fleet_complete"
+                intent.order_plan["live_open_gate"] = (
+                    _normal_live_open_gate()
+                )
+                intent.order_plan["stop_loss"] = "90"
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent_a,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                    strategy._handle_intent_ready(
+                        intent_b,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                    prepare_a = queued_tasks[0]
+                    strategy._prepared_zone_ladder_orders.pop(
+                        prepare_a.operation_id
+                    )
+                    strategy._on_prepare_submit_result(
+                        _DurableIoResult(
+                            task=prepare_a,
+                            outcome={
+                                "dispatch_result": (
+                                    IntentDispatchResult.READY
+                                ),
+                                "claim_result": False,
+                                "protection_persisted": True,
+                            },
+                        )
+                    )
+
+                    self.assertEqual(len(queued_tasks), 2)
+                    rollback_a = queued_tasks[1]
+                    self.assertEqual(
+                        rollback_a.kind,
+                        _DurableIoTaskKind.PREPARE_ROLLBACK,
+                    )
+                    self.assertEqual(len(strategy.built_orders), 3)
+                    self.assertEqual(
+                        strategy._pending_durable_entry_intents,
+                        [(intent_b, False)],
+                    )
+
+                    strategy._on_prepare_rollback_result(
+                        _DurableIoResult(
+                            task=rollback_a,
+                            outcome={"rolled_back": True},
+                        )
+                    )
+
+                    self.assertEqual(len(queued_tasks), 3)
+                    self.assertEqual(
+                        queued_tasks[2].kind,
+                        _DurableIoTaskKind.PREPARE_SUBMIT,
+                    )
+                    self.assertEqual(len(strategy.built_orders), 6)
+            finally:
+                strategy.on_stop()
+
+    def test_durable_entry_rejection_preserves_concurrent_memory_update(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            concurrent_key = str(uuid4())
+            strategy._entry_protection_stash[concurrent_key] = {
+                "instrument_id": "ETHUSDT-PERP.BINANCE",
+                "state": "ready",
+            }
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                    strategy._entry_protection_stash[
+                        concurrent_key
+                    ]["state"] = "managed"
+                    strategy._entry_protection_stash[
+                        concurrent_key
+                    ]["management_revision"] = 3
+                    strategy._on_prepare_submit_result(
+                        _DurableIoResult(
+                            task=queued_tasks[0],
+                            outcome={
+                                "dispatch_result": (
+                                    IntentDispatchResult.REJECTED
+                                ),
+                                "claim_result": False,
+                                "protection_persisted": False,
+                            },
+                        )
+                    )
+
+                self.assertNotIn(
+                    str(intent.intent_id),
+                    strategy._entry_protection_stash,
+                )
+                self.assertEqual(
+                    strategy._entry_protection_stash[
+                        concurrent_key
+                    ]["state"],
+                    "managed",
+                )
+                self.assertEqual(
+                    strategy._entry_protection_stash[
+                        concurrent_key
+                    ]["management_revision"],
+                    3,
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_entry_disk_rollback_preserves_concurrent_update(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=state_path,
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                prepare_task = queued_tasks[0]
+                outcome = strategy._process_prepare_submit_task(
+                    prepare_task
+                )
+                self.assertTrue(outcome["protection_persisted"])
+                concurrent_key = str(uuid4())
+                concurrent_payload = (
+                    strategy._read_entry_protection_stash_payload()
+                )
+                concurrent_payload[concurrent_key] = {
+                    "instrument_id": "ETHUSDT-PERP.BINANCE",
+                    "state": "protection_callback_persisted",
+                }
+                strategy._write_entry_protection_stash(
+                    concurrent_payload
+                )
+
+                rollback_task = _DurableIoTask(
+                    kind=_DurableIoTaskKind.PREPARE_ROLLBACK,
+                    operation_id=uuid4().hex,
+                    protection_payload=(
+                        prepare_task.protection_payload
+                    ),
+                    protection_rollback_payload=(
+                        prepare_task.protection_rollback_payload
+                    ),
+                )
+                rollback_outcome = (
+                    strategy._process_prepare_rollback_task(
+                        rollback_task
+                    )
+                )
+
+                self.assertTrue(rollback_outcome["rolled_back"])
+                persisted = (
+                    strategy._read_entry_protection_stash_payload()
+                )
+                self.assertNotIn(str(intent.intent_id), persisted)
+                self.assertEqual(
+                    persisted[concurrent_key]["state"],
+                    "protection_callback_persisted",
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_entry_disk_rollback_preserves_updated_old_owner(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=state_path,
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            old_owner_key = str(uuid4())
+            old_owner = {
+                "instrument_id": "BTCUSDT-PERP.BINANCE",
+                "entry_side": "BUY",
+                "state": "ready",
+                "protection_revision": 2,
+            }
+            strategy._entry_protection_stash[old_owner_key] = (
+                dict(old_owner)
+            )
+            strategy._persist_entry_protection_stash()
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                prepare_task = queued_tasks[0]
+                outcome = strategy._process_prepare_submit_task(
+                    prepare_task
+                )
+                self.assertTrue(outcome["protection_persisted"])
+                concurrent_payload = (
+                    strategy._read_entry_protection_stash_payload()
+                )
+                concurrent_payload[old_owner_key] = {
+                    **old_owner,
+                    "state": "terminal_callback_persisted",
+                    "protection_revision": 3,
+                }
+                strategy._write_entry_protection_stash(
+                    concurrent_payload
+                )
+                rollback_task = _DurableIoTask(
+                    kind=_DurableIoTaskKind.PREPARE_ROLLBACK,
+                    operation_id=uuid4().hex,
+                    protection_payload=(
+                        prepare_task.protection_payload
+                    ),
+                    protection_rollback_payload=(
+                        prepare_task.protection_rollback_payload
+                    ),
+                )
+
+                outcome = strategy._process_prepare_rollback_task(
+                    rollback_task
+                )
+
+                self.assertTrue(outcome["rolled_back"])
+                restarted = _LiveEntrySubmitStrategy(
+                    inventory=(
+                        ("BTCUSDT-PERP.BINANCE", "100000"),
+                    ),
+                    release_id="release-a",
+                    state_dir=state_path,
+                )
+                persisted = restarted._load_entry_protection_stash()
+                self.assertNotIn(str(intent.intent_id), persisted)
+                self.assertEqual(
+                    persisted[old_owner_key]["state"],
+                    "terminal_callback_persisted",
+                )
+                self.assertEqual(
+                    persisted[old_owner_key]["protection_revision"],
+                    3,
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_halt_before_first_durable_submit_sends_no_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            original_submission_order = strategy._submission_order
+
+            def halt_before_submit(plan, *, prepared_order=False):
+                order = original_submission_order(
+                    plan,
+                    prepared_order=prepared_order,
+                )
+                strategy._halt_durable_io(
+                    "halt before first exchange submit"
+                )
+                return order
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                with patch.object(
+                    strategy,
+                    "_submission_order",
+                    side_effect=halt_before_submit,
+                ):
+                    strategy._on_prepare_submit_result(
+                        _DurableIoResult(
+                            task=queued_tasks[0],
+                            outcome={
+                                "dispatch_result": (
+                                    IntentDispatchResult.READY
+                                ),
+                                "claim_result": False,
+                                "protection_persisted": False,
+                            },
+                        )
+                    )
+
+                self.assertEqual(strategy.submitted_orders, [])
+                self.assertNotIn(
+                    str(intent.intent_id),
+                    strategy._entry_protection_stash,
+                )
+                self.assertIn(
+                    "halt before first exchange submit",
+                    strategy.durable_io_halted_reason,
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_halt_after_first_ladder_submit_blocks_later_rungs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            queued_tasks: list[_DurableIoTask] = []
+            cancelled: list[str] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            original_submit_order = strategy.submit_order
+
+            def submit_then_halt(order, position_id=None) -> None:
+                original_submit_order(
+                    order,
+                    position_id=position_id,
+                )
+                if len(strategy.submitted_orders) == 1:
+                    strategy._halt_durable_io(
+                        "halt after first ladder submit"
+                    )
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                with (
+                    patch.object(
+                        strategy,
+                        "submit_order",
+                        side_effect=submit_then_halt,
+                    ),
+                    patch.object(
+                        strategy,
+                        "_cancel_order_by_client_order_id",
+                        side_effect=lambda _instrument_id, order_id: (
+                            cancelled.append(order_id)
+                        ),
+                    ),
+                ):
+                    strategy._on_prepare_submit_result(
+                        _DurableIoResult(
+                            task=queued_tasks[0],
+                            outcome={
+                                "dispatch_result": (
+                                    IntentDispatchResult.READY
+                                ),
+                                "claim_result": False,
+                                "protection_persisted": True,
+                            },
+                        )
+                    )
+
+                self.assertEqual(
+                    len(strategy.submitted_orders),
+                    1,
+                )
+                self.assertEqual(
+                    cancelled,
+                    strategy.submitted_orders,
+                )
+                self.assertIn(
+                    str(intent.intent_id),
+                    strategy._entry_protection_stash,
+                )
+                self.assertIn(
+                    "halt after first ladder submit",
+                    strategy.durable_io_halted_reason,
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_halt_wins_threaded_final_submit_lock_race(
+        self,
+    ) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            quantity="0.1",
+            price="100",
+        )
+        reached_final_gate = Event()
+        release_final_gate = Event()
+        submit_result: list[bool] = []
+
+        def block_before_final_gate(_order, _plan):
+            reached_final_gate.set()
+            release_final_gate.wait(timeout=1.0)
+            return None
+
+        def submit() -> None:
+            submit_result.append(
+                strategy._submit_order_plan_after_durable_prepare(
+                    plan,
+                    live_canary_execution=False,
+                )
+            )
+
+        try:
+            with patch.object(
+                strategy,
+                "_hedge_position_id",
+                side_effect=block_before_final_gate,
+            ):
+                submit_thread = Thread(target=submit)
+                submit_thread.start()
+                self.assertTrue(
+                    reached_final_gate.wait(timeout=1.0)
+                )
+                halt_thread = Thread(
+                    target=strategy._halt_durable_io,
+                    args=("threaded halt before submit",),
+                )
+                halt_thread.start()
+                halt_thread.join(timeout=1.0)
+                self.assertFalse(halt_thread.is_alive())
+                release_final_gate.set()
+                submit_thread.join(timeout=1.0)
+                self.assertFalse(submit_thread.is_alive())
+
+            self.assertEqual(submit_result, [False])
+            self.assertEqual(strategy.submitted_orders, [])
+            self.assertIn(
+                "threaded halt before submit",
+                strategy.durable_io_halted_reason,
+            )
+        finally:
+            release_final_gate.set()
+            strategy.on_stop()
+
+    def test_entry_rollback_skips_key_changed_after_stage(
+        self,
+    ) -> None:
+        current = {"entry": {"state": "managed"}}
+        staged = {"entry": {"state": "staged"}}
+        preimage = {"entry": {"state": "previous"}}
+
+        merged, status = (
+            IntentExecutionStrategy._conditional_protection_rollback(
+                current,
+                staged,
+                preimage,
+            )
+        )
+
+        self.assertEqual(status, "preserved")
+        self.assertEqual(merged, current)
+
+    def test_durable_entry_worker_failure_after_stage_rolls_back_disk(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=state_path,
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+            original_write = strategy._write_entry_protection_stash
+
+            def write_then_fail(payload) -> None:
+                original_write(payload)
+                if str(intent.intent_id) in payload:
+                    raise OSError("failure after staged fsync")
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_write_entry_protection_stash",
+                    side_effect=write_then_fail,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                    self.assertTrue(
+                        strategy.wait_for_durable_io(
+                            timeout_seconds=1.0
+                        )
+                    )
+                    strategy.drain_durable_io_mailbox()
+
+                restarted = _LiveEntrySubmitStrategy(
+                    inventory=(
+                        ("BTCUSDT-PERP.BINANCE", "100000"),
+                    ),
+                    release_id="release-a",
+                    state_dir=state_path,
+                )
+                self.assertEqual(
+                    restarted._load_entry_protection_stash(),
+                    {},
+                )
+                self.assertIn(
+                    "failure after staged fsync",
+                    strategy.durable_io_halted_reason,
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_entry_stop_rolls_back_unpublished_disk_stash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=state_path,
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            with patch.object(
+                strategy,
+                "_submit_durable_io_task",
+                side_effect=capture_task,
+            ):
+                strategy._handle_intent_ready(
+                    intent,
+                    exchange_state_ready=False,
+                    durable_async=True,
+                )
+            prepare_task = queued_tasks[0]
+            outcome = strategy._process_prepare_submit_task(
+                prepare_task
+            )
+            self.assertTrue(outcome["protection_persisted"])
+
+            strategy.on_stop()
+
+            restarted = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=state_path,
+            )
+            self.assertEqual(
+                restarted._load_entry_protection_stash(),
+                {},
+            )
+
+    def test_durable_entry_halt_compensates_disk_before_mailbox_drain(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=state_path,
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                prepare_task = queued_tasks[0]
+                outcome = strategy._process_prepare_submit_task(
+                    prepare_task
+                )
+                self.assertTrue(outcome["protection_persisted"])
+
+                strategy._halt_durable_io("worker timeout")
+
+                restarted = _LiveEntrySubmitStrategy(
+                    inventory=(
+                        ("BTCUSDT-PERP.BINANCE", "100000"),
+                    ),
+                    release_id="release-a",
+                    state_dir=state_path,
+                )
+                self.assertEqual(
+                    restarted._load_entry_protection_stash(),
+                    {},
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_entry_mailbox_overflow_compensates_disk(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                release_id="release-a",
+                state_dir=state_path,
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(
+                max_notional="150"
+            )
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = (
+                _normal_live_open_gate()
+            )
+            intent.order_plan["stop_loss"] = "90"
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+            queued_tasks: list[_DurableIoTask] = []
+
+            def capture_task(task: _DurableIoTask) -> bool:
+                queued_tasks.append(task)
+                return True
+
+            try:
+                with patch.object(
+                    strategy,
+                    "_submit_durable_io_task",
+                    side_effect=capture_task,
+                ):
+                    strategy._handle_intent_ready(
+                        intent,
+                        exchange_state_ready=False,
+                        durable_async=True,
+                    )
+                prepare_task = queued_tasks[0]
+                outcome = strategy._process_prepare_submit_task(
+                    prepare_task
+                )
+                self.assertTrue(outcome["protection_persisted"])
+                for index in range(
+                    strategy._DURABLE_IO_QUEUE_CAPACITY
+                ):
+                    strategy._durable_io_mailbox.put_nowait(
+                        _DurableIoResult(
+                            task=_DurableIoTask(
+                                kind=(
+                                    _DurableIoTaskKind.INTENT_RECEIVE
+                                ),
+                                operation_id=str(index),
+                            ),
+                            outcome=False,
+                        )
+                    )
+
+                strategy._publish_durable_io_result(
+                    _DurableIoResult(
+                        task=prepare_task,
+                        outcome=outcome,
+                    )
+                )
+
+                restarted = _LiveEntrySubmitStrategy(
+                    inventory=(
+                        ("BTCUSDT-PERP.BINANCE", "100000"),
+                    ),
+                    release_id="release-a",
+                    state_dir=state_path,
+                )
+                self.assertEqual(
+                    restarted._load_entry_protection_stash(),
+                    {},
+                )
+                self.assertIn(
+                    "result mailbox capacity exceeded",
+                    strategy.durable_io_halted_reason,
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_durable_entry_fifo_handles_many_sync_rejections_iteratively(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _DurableIntentStrategy(Path(state_dir))
+            intents = [
+                _durable_entry_intent()
+                for _index in range(1500)
+            ]
+            strategy._pending_durable_entry_intents.extend(
+                (intent, False)
+                for intent in intents
+            )
+
+            with patch.object(
+                strategy,
+                "_handle_intent_ready_now",
+            ) as handle:
+                strategy._advance_durable_entry_prepare()
+
+            self.assertEqual(handle.call_count, len(intents))
+            self.assertEqual(
+                strategy._pending_durable_entry_intents,
+                [],
+            )
+            self.assertFalse(
+                strategy._durable_entry_prepare_active
+            )
+
     def test_live_secondary_regular_submit_stays_compatible_with_release_id(
         self,
     ) -> None:
@@ -853,6 +2369,43 @@ class StrategyShellTest(unittest.TestCase):
         self.assertEqual(
             strategy.submitted_orders,
             [plan.client_order_id],
+        )
+
+    def test_live_market_entry_rejects_fresh_mark_over_intent_budget(
+        self,
+    ) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+            mark_price="100",
+            mark_price_at=datetime(
+                2026,
+                8,
+                8,
+                11,
+                59,
+                55,
+                tzinfo=timezone.utc,
+            ),
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            order_type="MARKET",
+            quantity="1.01",
+            price=None,
+            approved_max_notional="100",
+        )
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertFalse(submitted)
+        self.assertEqual(strategy.submitted_orders, [])
+        self.assertEqual(
+            strategy.denials[-1].reason,
+            "approved_max_notional_exceeded",
+        )
+        self.assertEqual(
+            strategy.denials[-1].detail,
+            "instrument=BTCUSDT-PERP.BINANCE:actual=101.00:approved=100",
         )
 
     def test_live_reduce_only_market_bypasses_entry_inventory_and_mark_price(
@@ -1502,16 +3055,20 @@ class StrategyShellTest(unittest.TestCase):
             strategy._entry_protection_stash = {
                 str(intent.intent_id): {"state": "staged"}
             }
+            strategy._durable_entry_prepare_active = True
+            strategy._durable_entry_prepare_task_queued = True
+            strategy._durable_entry_prepare_preimage = {}
             result = _DurableIoResult(
                 task=_DurableIoTask(
                     kind=_DurableIoTaskKind.PREPARE_SUBMIT,
+                    operation_id=uuid4().hex,
                     intent=intent,
                     intent_execution=identity,
                     client_order_ids=(plan.client_order_id,),
                     plans=(plan,),
                     continuation={
                         "kind": "prepare_submit",
-                        "protection_preimage": {},
+                        "mode": "single",
                     },
                 ),
                 outcome={},
@@ -1525,6 +3082,141 @@ class StrategyShellTest(unittest.TestCase):
 
             self.assertEqual(strategy.submitted_orders, [])
             self.assertEqual(strategy._entry_protection_stash, {})
+
+    def test_discard_late_zone_ladder_result_releases_prebuilt_orders(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _DurableIntentStrategy(Path(state_dir))
+            result = _prepared_zone_ladder_result(
+                _durable_entry_intent()
+            )
+            operation_id = result.task.operation_id
+            strategy._prepared_zone_ladder_orders[operation_id] = (
+                SimpleNamespace(client_order_id="order-a"),
+                SimpleNamespace(client_order_id="order-b"),
+                SimpleNamespace(client_order_id="order-c"),
+            )
+            strategy._entry_protection_stash = {
+                "pending": {"state": "staged"}
+            }
+            strategy._durable_entry_prepare_active = True
+            strategy._durable_entry_prepare_task_queued = True
+            strategy._durable_entry_prepare_preimage = {}
+            strategy._pending_durable_entry_intents.append(
+                (_durable_entry_intent(), False)
+            )
+
+            try:
+                strategy._discard_durable_io_result(result)
+                self.assertEqual(
+                    strategy._prepared_zone_ladder_orders,
+                    {},
+                )
+                self.assertEqual(
+                    strategy._pending_durable_entry_intents,
+                    [],
+                )
+                self.assertEqual(
+                    strategy._entry_protection_stash,
+                    {},
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_active
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_actor_mailbox_drain_releases_orders_after_worker_halt(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _DurableIntentStrategy(Path(state_dir))
+            strategy._prepared_zone_ladder_orders["operation-a"] = (
+                SimpleNamespace(client_order_id="order-a"),
+            )
+            strategy._prepared_zone_ladder_orders["operation-b"] = (
+                SimpleNamespace(client_order_id="order-b"),
+            )
+            preimage = {"existing": {"state": "ready"}}
+            strategy._entry_protection_stash = {
+                **preimage,
+                "pending": {"state": "staged"},
+            }
+            strategy._durable_entry_prepare_active = True
+            strategy._durable_entry_prepare_task_queued = True
+            strategy._durable_entry_prepare_preimage = preimage
+            strategy._pending_durable_entry_intents.append(
+                (_durable_entry_intent(), False)
+            )
+
+            try:
+                strategy._halt_durable_io("worker timeout")
+                strategy.drain_durable_io_mailbox()
+                self.assertEqual(
+                    strategy._prepared_zone_ladder_orders,
+                    {},
+                )
+                self.assertEqual(
+                    strategy._pending_durable_entry_intents,
+                    [],
+                )
+                self.assertEqual(
+                    strategy._entry_protection_stash,
+                    preimage,
+                )
+                self.assertFalse(
+                    strategy._durable_entry_prepare_active
+                )
+            finally:
+                strategy.on_stop()
+
+    def test_worker_halt_skips_queued_prepare_persistence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _DurableIntentStrategy(Path(state_dir))
+            result = _prepared_zone_ladder_result(
+                _durable_entry_intent()
+            )
+            task = result.task
+            operation_id = task.operation_id
+            strategy._prepared_zone_ladder_orders[operation_id] = (
+                SimpleNamespace(client_order_id="order-a"),
+            )
+            strategy._entry_protection_stash = {
+                "pending": {"state": "staged"}
+            }
+            strategy._durable_entry_prepare_active = True
+            strategy._durable_entry_prepare_task_queued = True
+            strategy._durable_entry_prepare_preimage = {}
+            strategy._pending_durable_entry_intents.append(
+                (_durable_entry_intent(), False)
+            )
+
+            try:
+                strategy._halt_durable_io("earlier worker failure")
+                with patch.object(
+                    strategy,
+                    "_process_prepare_submit_task",
+                ) as process:
+                    strategy._process_durable_io_task(task)
+                process.assert_not_called()
+                strategy.drain_durable_io_mailbox()
+                self.assertEqual(
+                    strategy._prepared_zone_ladder_orders,
+                    {},
+                )
+                self.assertEqual(
+                    strategy._pending_durable_entry_intents,
+                    [],
+                )
+                self.assertEqual(
+                    strategy._entry_protection_stash,
+                    {},
+                )
+            finally:
+                strategy.on_stop()
 
     def test_operator_halt_blocks_late_risk_increasing_prepare_result(
         self,
@@ -1572,6 +3264,44 @@ class StrategyShellTest(unittest.TestCase):
             )
             self.assertFalse(
                 strategy._durable_io_worker.snapshot().running
+            )
+
+    def test_strategy_stop_releases_unpublished_zone_ladder_orders(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _DurableIntentStrategy(Path(state_dir))
+            strategy._prepared_zone_ladder_orders["operation-a"] = (
+                SimpleNamespace(client_order_id="order-a"),
+            )
+            preimage = {"existing": {"state": "ready"}}
+            strategy._entry_protection_stash = {
+                **preimage,
+                "pending": {"state": "staged"},
+            }
+            strategy._durable_entry_prepare_active = True
+            strategy._durable_entry_prepare_task_queued = True
+            strategy._durable_entry_prepare_preimage = preimage
+            strategy._pending_durable_entry_intents.append(
+                (_durable_entry_intent(), False)
+            )
+
+            strategy.on_stop()
+
+            self.assertEqual(
+                strategy._prepared_zone_ladder_orders,
+                {},
+            )
+            self.assertEqual(
+                strategy._pending_durable_entry_intents,
+                [],
+            )
+            self.assertEqual(
+                strategy._entry_protection_stash,
+                preimage,
+            )
+            self.assertFalse(
+                strategy._durable_entry_prepare_active
             )
 
     def test_venue_backed_terminal_events_remain_exchange_confirmations(
@@ -2377,6 +4107,8 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         state_dir: Path | None = None,
     ) -> None:
         self.submitted_orders: list[str] = []
+        self.submitted_order_objects: list[object] = []
+        self.built_orders: list[object] = []
         self._final_quantity = final_quantity
         self._final_price = final_price
         self._mark_price = mark_price
@@ -2444,12 +4176,14 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         price = plan.price
         if self._final_price is not None:
             price = self._final_price
-        return SimpleNamespace(
+        order = SimpleNamespace(
             client_order_id=plan.client_order_id,
             instrument_id=plan.instrument_id,
             quantity=quantity,
             price=price,
         )
+        self.built_orders.append(order)
+        return order
 
     def _hedge_position_id(self, order, plan):
         del order, plan
@@ -2457,6 +4191,7 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
 
     def submit_order(self, order, position_id=None) -> None:
         del position_id
+        self.submitted_order_objects.append(order)
         self.submitted_orders.append(str(order.client_order_id))
 
     def _now(self) -> datetime:
@@ -2604,6 +4339,7 @@ def _live_entry_intent(
 def _live_zone_ladder_intent(
     *,
     max_notional: str,
+    tranche_quantity: str = "0.4",
 ) -> SimpleNamespace:
     intent = _live_entry_intent(max_notional=max_notional)
     intent.order_plan = {
@@ -2615,9 +4351,9 @@ def _live_zone_ladder_intent(
             "source_message_id": str(uuid4()),
         },
         "tranches": [
-            {"seq": 1, "quantity": "0.4", "price": "100"},
-            {"seq": 2, "quantity": "0.4", "price": "100"},
-            {"seq": 3, "quantity": "0.4", "price": "100"},
+            {"seq": 1, "quantity": tranche_quantity, "price": "100"},
+            {"seq": 2, "quantity": tranche_quantity, "price": "100"},
+            {"seq": 3, "quantity": tranche_quantity, "price": "100"},
         ],
     }
     return intent
@@ -2673,6 +4409,47 @@ def _prepared_submit_result(
             plans=(plan,),
             continuation={
                 "kind": "prepare_submit",
+                "protection_preimage": {},
+            },
+        ),
+        outcome={},
+    )
+
+
+def _prepared_zone_ladder_result(
+    intent: SimpleNamespace,
+) -> _DurableIoResult:
+    plans = tuple(
+        OrderPlan(
+            intent_id=str(intent.intent_id),
+            client_order_id=encode_client_order_id(
+                intent.intent_id,
+                sequence=sequence,
+            ),
+            tags=(f"intent_id={intent.intent_id}",),
+            instrument_id=intent.instrument_id,
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.1",
+            price="100",
+            time_in_force="IOC",
+            reduce_only=False,
+        )
+        for sequence in (1, 2, 3)
+    )
+    return _DurableIoResult(
+        task=_DurableIoTask(
+            kind=_DurableIoTaskKind.PREPARE_SUBMIT,
+            operation_id=uuid4().hex,
+            intent=intent,
+            intent_execution=_durable_identity(intent),
+            client_order_ids=tuple(
+                plan.client_order_id for plan in plans
+            ),
+            plans=plans,
+            continuation={
+                "kind": "prepare_submit",
+                "mode": "zone_ladder",
                 "protection_preimage": {},
             },
         ),
