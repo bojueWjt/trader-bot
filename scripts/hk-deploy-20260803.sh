@@ -124,6 +124,7 @@ CONTROL_PLANE_UNITS=()
 TEMP_FILES=()
 BACKUP_CAPTURED=0
 FILES_INSTALLED=0
+HOST_RUNTIME_INSTALL_COMPLETE=0
 CONTROL_PLANE_RESTARTED=0
 HERMES_RESTART_REQUIRED=0
 HERMES_RESTARTED=0
@@ -160,6 +161,7 @@ WATCHER_RUNTIME_CHANGED_LIST="$BACKUP_ROOT/watcher-runtime-changed.tsv"
 BOOTSTRAP_STOPPED_GATE_LOG="$BACKUP_ROOT/bootstrap-stopped-gates.jsonl"
 BOOTSTRAP_REDIS_FENCING_EPOCH=""
 BOOTSTRAP_RECOVERY_BLOCKED_EVIDENCE="$BACKUP_ROOT/bootstrap-recovery-blocked.json"
+PARTIAL_INSTALL_RECOVERY_EVIDENCE="$BACKUP_ROOT/partial-install-recovery.json"
 MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0014-migration-committed.json"
 MAINTENANCE_FENCE_STATE="$BACKUP_ROOT/maintenance-fence.json"
 MAINTENANCE_FENCE_ID=""
@@ -2112,6 +2114,7 @@ verify_post_restart_four_channel_account_mapping() {
 restore_installed_runtime_files() {
   local label
   local destination
+  local restore_failed=0
   if [ "$BACKUP_CAPTURED" != "1" ] || [ "$FILES_INSTALLED" != "1" ]; then
     return
   fi
@@ -2121,7 +2124,10 @@ restore_installed_runtime_files() {
         continue
       fi
       cp -a -- "$BACKUP_ROOT/files/$label" "$destination" \
-        || echo "!! file rollback FAILED: $destination" >&2
+        || {
+          echo "!! file rollback FAILED: $destination" >&2
+          restore_failed=1
+        }
     done < "$BACKUP_ROOT/index.tsv"
   fi
   if [ -f "$BACKUP_ROOT/new-files.txt" ]; then
@@ -2130,9 +2136,18 @@ restore_installed_runtime_files() {
         continue
       fi
       rm -f -- "$destination" \
-        || echo "!! new file cleanup FAILED: $destination" >&2
+        || {
+          echo "!! new file cleanup FAILED: $destination" >&2
+          restore_failed=1
+          continue
+        }
+      if [ -e "$destination" ] || [ -L "$destination" ]; then
+        echo "!! new file cleanup verification FAILED: $destination" >&2
+        restore_failed=1
+      fi
     done < "$BACKUP_ROOT/new-files.txt"
   fi
+  return "$restore_failed"
 }
 rollback_restart_changed_runtimes() {
   if [ "$WATCHER_RESTARTED" = "1" ]; then
@@ -2163,9 +2178,19 @@ if not source.is_file() or source.is_symlink():
     raise SystemExit(f"source payload is invalid: {source}")
 if target.is_symlink():
     raise SystemExit(f"target payload cannot be a symlink: {target}")
-metadata = target.stat()
-if not stat.S_ISREG(metadata.st_mode):
-    raise SystemExit(f"target payload must be regular: {target}")
+if not target.parent.is_dir() or target.parent.is_symlink():
+    raise SystemExit(f"target parent is invalid: {target.parent}")
+if target.exists():
+    metadata = target.stat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(f"target payload must be regular: {target}")
+    target_mode = stat.S_IMODE(metadata.st_mode)
+    target_uid = metadata.st_uid
+    target_gid = metadata.st_gid
+else:
+    target_mode = 0o644
+    target_uid = 0
+    target_gid = 0
 descriptor, temporary_raw = tempfile.mkstemp(
     prefix=f".{target.name}.deploy.",
     dir=target.parent,
@@ -2178,8 +2203,8 @@ try:
                 writer.write(chunk)
             writer.flush()
             os.fsync(writer.fileno())
-    os.chmod(temporary, stat.S_IMODE(metadata.st_mode))
-    os.chown(temporary, metadata.st_uid, metadata.st_gid)
+    os.chmod(temporary, target_mode)
+    os.chown(temporary, target_uid, target_gid)
     os.replace(temporary, target)
     directory_fd = os.open(target.parent, os.O_RDONLY)
     try:
@@ -2191,6 +2216,51 @@ finally:
         temporary.unlink()
     except FileNotFoundError:
         pass
+PY
+}
+install_host_python_module() {
+  local source="$1"
+  local target="$2"
+  mkdir -p "$(dirname "$target")"
+  install_payload_atomically "$source" "$target"
+}
+verify_optional_host_python_module_target() {
+  local target="$1"
+  python3 - "$target" <<'PY'
+from __future__ import annotations
+
+import os
+import stat
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+try:
+    parent_metadata = os.lstat(target.parent)
+except OSError as exc:
+    raise SystemExit(
+        f"optional host module parent is unavailable: {target.parent}"
+    ) from exc
+if not stat.S_ISDIR(parent_metadata.st_mode):
+    raise SystemExit(
+        f"optional host module parent must be a real directory: {target.parent}"
+    )
+try:
+    target_metadata = os.lstat(target)
+except FileNotFoundError:
+    raise SystemExit(0)
+except OSError as exc:
+    raise SystemExit(
+        f"optional host module target is unavailable: {target}"
+    ) from exc
+if stat.S_ISLNK(target_metadata.st_mode):
+    raise SystemExit(
+        f"optional host module target cannot be a symlink: {target}"
+    )
+if not stat.S_ISREG(target_metadata.st_mode):
+    raise SystemExit(
+        f"optional host module target must be regular: {target}"
+    )
 PY
 }
 install_operator_account_registry_environment() {
@@ -3639,6 +3709,98 @@ PY
   fi
   echo "!! bootstrap recovery evidence: $BOOTSTRAP_RECOVERY_BLOCKED_EVIDENCE" >&2
 }
+write_partial_install_recovery_evidence() {
+  local reason="$1"
+  local cleanup_passed="$2"
+  if ! python3 - \
+      "$PARTIAL_INSTALL_RECOVERY_EVIDENCE" \
+      "$reason" \
+      "$cleanup_passed" \
+      "${RELEASE_ID:-}" \
+      "$BACKUP_ROOT/index.tsv" \
+      "$BACKUP_ROOT/new-files.txt" \
+      "${RECREATE_NODES[@]}" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def sha256_if_file(path: Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        return ""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+(
+    output_raw,
+    reason,
+    cleanup_passed_raw,
+    release_id,
+    index_raw,
+    new_files_raw,
+    *nodes,
+) = sys.argv[1:]
+output = Path(output_raw)
+index_path = Path(index_raw)
+new_files_path = Path(new_files_raw)
+payload = {
+    "schema_version": "trader-v3-partial-install-recovery/v1",
+    "recorded_at": datetime.now(timezone.utc).isoformat(),
+    "reason": reason,
+    "cleanup_passed": cleanup_passed_raw == "1",
+    "release_id": release_id,
+    "index_path": str(index_path),
+    "index_sha256": sha256_if_file(index_path),
+    "new_files_path": str(new_files_path),
+    "new_files_sha256": sha256_if_file(new_files_path),
+    "nodes": nodes,
+    "required_state": "A-D stopped",
+}
+encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(
+    "utf-8"
+)
+temporary = output.with_name(f".{output.name}.new")
+try:
+    temporary.unlink()
+except FileNotFoundError:
+    pass
+descriptor = os.open(
+    temporary,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+    0o400,
+)
+try:
+    offset = 0
+    while offset < len(encoded):
+        offset += os.write(descriptor, encoded[offset:])
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+os.replace(temporary, output)
+os.chmod(output, 0o400)
+directory_descriptor = os.open(output.parent, os.O_RDONLY)
+try:
+    os.fsync(directory_descriptor)
+finally:
+    os.close(directory_descriptor)
+PY
+  then
+    echo "!! partial install recovery evidence write FAILED" >&2
+    return 1
+  fi
+  if ! refresh_backup_checksums; then
+    echo "!! partial install recovery evidence checksum refresh FAILED" >&2
+    return 1
+  fi
+  echo "!! partial install recovery evidence: $PARTIAL_INSTALL_RECOVERY_EVIDENCE" >&2
+}
 advance_reviewed_rollout_for_node() {
   case "$ROLLOUT_NODE" in
     trader-v3-node-b)
@@ -4076,6 +4238,23 @@ on_err() {
     post_migration_recovery_required=1
   fi
   if [ "$post_migration_recovery_required" = "1" ]; then
+    if [ "${FILES_INSTALLED:-0}" = "1" ] \
+      && [ "${HOST_RUNTIME_INSTALL_COMPLETE:-0}" != "1" ]; then
+      if restore_installed_runtime_files; then
+        rollback_restart_changed_runtimes
+        FILES_INSTALLED=0
+        write_partial_install_recovery_evidence \
+          "partial-host-install-restored-before-forward-recovery" \
+          "1" \
+          || recovery_allowed=0
+      else
+        recovery_allowed=0
+        write_partial_install_recovery_evidence \
+          "partial-host-install-restore-failed" \
+          "0" \
+          || true
+      fi
+    fi
     if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]] \
       && ! ensure_bootstrap_rollout_registration; then
       recovery_allowed=0
@@ -5595,8 +5774,8 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
   || die "live Hermes v3-trader SKILL not found at $HERMES_V3_SKILL_TGT"
 [ -f "$SYSTEM_SNAPSHOT_SCHEMA_TGT" ] \
   || die "live SystemSnapshot schema not found at $SYSTEM_SNAPSHOT_SCHEMA_TGT"
-[ -f "$APP_ROLES_TGT" ] || die "live app_roles not found at $APP_ROLES_TGT"
-[ -f "$DB_POOLS_TGT" ] || die "live pools not found at $DB_POOLS_TGT"
+verify_optional_host_python_module_target "$APP_ROLES_TGT"
+verify_optional_host_python_module_target "$DB_POOLS_TGT"
 [ -d "$WATCHER_ROOT" ] \
   || die "telegram-watcher root missing: $WATCHER_ROOT"
 [ -f "$WATCHER_COMPOSE_FILE" ] \
@@ -7785,8 +7964,22 @@ for h in "${CHANGED_HOST[@]:-}"; do
           >> "$BACKUP_ROOT/new-files.txt"
       fi
       ;;
-    app_roles) bk "$APP_ROLES_TGT" "host__app_roles.py" ;;
-    pools) bk "$DB_POOLS_TGT" "host__pools.py" ;;
+    app_roles)
+      if [ -f "$APP_ROLES_TGT" ]; then
+        bk "$APP_ROLES_TGT" "host__app_roles.py"
+      else
+        printf '%s\n' "$APP_ROLES_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
+    pools)
+      if [ -f "$DB_POOLS_TGT" ]; then
+        bk "$DB_POOLS_TGT" "host__pools.py"
+      else
+        printf '%s\n' "$DB_POOLS_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
   esac
 done
 if [ "$CHANGED_WATCHER_COUNT" -gt 0 ]; then
@@ -7963,8 +8156,12 @@ for h in "${CHANGED_HOST[@]:-}"; do
           "$EXECUTION_DOMAIN_CONTROL_PLANE_TGT"
       fi
       ;;
-	    app_roles) cat host/app_roles.py > "$APP_ROLES_TGT" ;;
-	    pools) cat host/pools.py > "$DB_POOLS_TGT" ;;
+	    app_roles)
+	      install_host_python_module host/app_roles.py "$APP_ROLES_TGT"
+	      ;;
+	    pools)
+	      install_host_python_module host/pools.py "$DB_POOLS_TGT"
+	      ;;
 	  esac
 	done
   if [ "$CHANGED_WATCHER_COUNT" -gt 0 ]; then
@@ -7982,9 +8179,14 @@ for h in "${CHANGED_HOST[@]:-}"; do
 	  || die "post-install mismatch: host/v3_trade.py"
 	cmp -s host/v3-trader/SKILL.md "$HERMES_V3_SKILL_TGT" \
 	  || die "post-install mismatch: host/v3-trader/SKILL.md"
+	cmp -s host/app_roles.py "$APP_ROLES_TGT" \
+	  || die "post-install mismatch: host/app_roles.py"
+	cmp -s host/pools.py "$DB_POOLS_TGT" \
+	  || die "post-install mismatch: host/pools.py"
 	cat "$RELEASE_MANIFEST" > "$T/RELEASE_MANIFEST.json"
 	printf '%s release_id=%s deployed_at=%s\n' \
 	  "$RELEASE_COMMIT" "$RELEASE_ID" "$STAMP" > "$T/DEPLOYED_COMMIT.txt"
+	HOST_RUNTIME_INSTALL_COMPLETE=1
 	echo "== files installed"
 	restart_watcher_runtime
   verify_post_restart_four_channel_account_mapping

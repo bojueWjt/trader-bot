@@ -552,6 +552,46 @@ def connect(_url):
             recreate_section,
         )
 
+    def test_new_control_plane_role_modules_support_first_install(self) -> None:
+        text = DEPLOY.read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            '[ -f "$APP_ROLES_TGT" ] '
+            '|| die "live app_roles not found at $APP_ROLES_TGT"',
+            text,
+        )
+        self.assertNotIn(
+            '[ -f "$DB_POOLS_TGT" ] '
+            '|| die "live pools not found at $DB_POOLS_TGT"',
+            text,
+        )
+        self.assertIn(
+            'if [ -f "$APP_ROLES_TGT" ]; then\n'
+            '        bk "$APP_ROLES_TGT" "host__app_roles.py"\n'
+            '      else\n'
+            "        printf '%s\\n' \"$APP_ROLES_TGT\" \\\n"
+            '          >> "$BACKUP_ROOT/new-files.txt"\n'
+            "      fi",
+            text,
+        )
+        self.assertIn(
+            'if [ -f "$DB_POOLS_TGT" ]; then\n'
+            '        bk "$DB_POOLS_TGT" "host__pools.py"\n'
+            '      else\n'
+            "        printf '%s\\n' \"$DB_POOLS_TGT\" \\\n"
+            '          >> "$BACKUP_ROOT/new-files.txt"\n'
+            "      fi",
+            text,
+        )
+        self.assertIn(
+            'install_host_python_module host/app_roles.py "$APP_ROLES_TGT"',
+            text,
+        )
+        self.assertIn(
+            'install_host_python_module host/pools.py "$DB_POOLS_TGT"',
+            text,
+        )
+
     def test_valid_evidence_recomputes_all_report_hashes(self) -> None:
         result = self._run_validator()
 

@@ -624,3 +624,200 @@ def test_shared_mutation_gate_precedes_migration_and_topology_replacement() -> N
     assert migration_section < migration_gate < recovery_armed < migration
     assert install_section < install_gate < files_installed
     assert topology_section < topology_gate < topology
+
+
+def test_optional_host_module_rejects_same_content_symlink_before_migration(
+    tmp_path: Path,
+) -> None:
+    target_root = tmp_path / "control-plane"
+    api_root = target_root / "api"
+    db_root = target_root / "db"
+    api_root.mkdir(parents=True)
+    db_root.mkdir(parents=True)
+    payload = tmp_path / "app_roles.py"
+    payload.write_text("ROLE = 'operator-query'\n", encoding="utf-8")
+    app_roles_target = api_root / "app_roles.py"
+    app_roles_target.symlink_to(payload)
+    pools_target = db_root / "pools.py"
+
+    source = (
+        _definitions("die", "verify_optional_host_python_module_target")
+        + f"""
+verify_optional_host_python_module_target {app_roles_target}
+verify_optional_host_python_module_target {pools_target}
+"""
+    )
+    result = _run_bash(source, os.environ.copy())
+
+    assert result.returncode != 0
+    assert "optional host module target cannot be a symlink" in result.stderr
+
+    text = DEPLOY.read_text(encoding="utf-8")
+    app_roles_gate = text.index(
+        'verify_optional_host_python_module_target "$APP_ROLES_TGT"',
+    )
+    pools_gate = text.index(
+        'verify_optional_host_python_module_target "$DB_POOLS_TGT"',
+    )
+    migration_section = text.index("# ---------- database schema ----------")
+    assert app_roles_gate < migration_section
+    assert pools_gate < migration_section
+
+
+def test_partial_host_module_install_is_restored_before_forward_recovery(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    api_root = tmp_path / "live" / "api"
+    db_root = tmp_path / "live" / "db"
+    backup_root = tmp_path / "backup"
+    staging.mkdir()
+    api_root.mkdir(parents=True)
+    db_root.mkdir(parents=True)
+    (backup_root / "files").mkdir(parents=True)
+    app_roles_source = staging / "app_roles.py"
+    pools_source = staging / "pools.py"
+    app_roles_source.write_text("ROLE = 'operator-query'\n", encoding="utf-8")
+    pools_source.write_text("POOL = 'writer'\n", encoding="utf-8")
+    app_roles_target = api_root / "app_roles.py"
+    pools_target = db_root / "pools.py"
+    (backup_root / "index.tsv").write_text("", encoding="utf-8")
+    (backup_root / "new-files.txt").write_text(
+        f"{app_roles_target}\n{pools_target}\n",
+        encoding="utf-8",
+    )
+    recovery_log = tmp_path / "recovery.log"
+
+    source = (
+        _definitions(
+            "restore_installed_runtime_files",
+            "rollback_restart_changed_runtimes",
+            "on_err",
+        )
+        + f"""
+BACKUP_ROOT={backup_root}
+APP_ROLES_TGT={app_roles_target}
+DB_POOLS_TGT={pools_target}
+FILES_INSTALLED=1
+HOST_RUNTIME_INSTALL_COMPLETE=0
+BACKUP_CAPTURED=1
+WATCHER_RESTARTED=0
+EXCHANGE_STATE_RESTARTED=0
+HERMES_RESTARTED=0
+POST_MIGRATION_RECOVERY_REQUIRED=1
+POST_MIGRATION_RECOVERY_VERIFIED=0
+MIGRATION_COMMIT_MARKER={tmp_path / "migration-marker.json"}
+DEPLOY_GATE_MODE=maintenance_fence
+ROLLOUT_NODE=trader-v3-node-a
+ROLLOUT_TRACKED=0
+ROLLOUT_FINALIZED=0
+PRESERVE_ROLLOUT_FOR_RETRY=0
+BOOTSTRAP_REGISTRATION_COMPLETED=0
+RELEASE_ID=
+ROLLBACK_IN_PROGRESS=0
+RECREATE_NODES=(trader-v3-node-a)
+
+rollback_restart_watcher_runtime() {{ return 0; }}
+rollback_restart_exchange_state_recorder() {{ return 0; }}
+rollback_restart_hermes_units() {{ return 0; }}
+ensure_bootstrap_rollout_registration() {{ return 0; }}
+acquire_maintenance_fence_after_bootstrap() {{ return 0; }}
+write_bootstrap_recovery_blocked_evidence() {{ return 0; }}
+write_partial_install_recovery_evidence() {{ return 0; }}
+finalize_node_startup_resource_evidence() {{ return 0; }}
+run_reviewed_rollout() {{ return 0; }}
+restore_pre_migration_state() {{ return 90; }}
+docker() {{ return 0; }}
+recover_post_migration_node() {{
+  [ ! -e "$APP_ROLES_TGT" ] || return 71
+  [ ! -e "$DB_POOLS_TGT" ] || return 72
+  printf 'recovered\\n' >{recovery_log}
+  return 0
+}}
+
+printf "ROLE = 'operator-query'\\n" >"$APP_ROLES_TGT"
+ln -s {pools_source} "$DB_POOLS_TGT"
+on_err 47
+"""
+    )
+    result = _run_bash(source, os.environ.copy())
+
+    assert result.returncode == 47, result.stderr
+    assert not app_roles_target.exists()
+    assert not pools_target.exists()
+    assert recovery_log.is_file()
+    assert recovery_log.read_text(encoding="utf-8") == "recovered\n"
+
+
+def test_partial_install_cleanup_failure_blocks_forward_recovery(
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    blocked_target = tmp_path / "blocked-target"
+    recovery_log = tmp_path / "recovery.log"
+    evidence_log = tmp_path / "evidence.log"
+    (backup_root / "files").mkdir(parents=True)
+    blocked_target.mkdir()
+    (backup_root / "index.tsv").write_text("", encoding="utf-8")
+    (backup_root / "new-files.txt").write_text(
+        f"{blocked_target}\n",
+        encoding="utf-8",
+    )
+
+    source = (
+        _definitions(
+            "restore_installed_runtime_files",
+            "rollback_restart_changed_runtimes",
+            "on_err",
+        )
+        + f"""
+BACKUP_ROOT={backup_root}
+FILES_INSTALLED=1
+HOST_RUNTIME_INSTALL_COMPLETE=0
+BACKUP_CAPTURED=1
+WATCHER_RESTARTED=0
+EXCHANGE_STATE_RESTARTED=0
+HERMES_RESTARTED=0
+POST_MIGRATION_RECOVERY_REQUIRED=1
+POST_MIGRATION_RECOVERY_VERIFIED=0
+MIGRATION_COMMIT_MARKER={tmp_path / "migration-marker.json"}
+DEPLOY_GATE_MODE=maintenance_fence
+ROLLOUT_NODE=trader-v3-node-a
+ROLLOUT_TRACKED=0
+ROLLOUT_FINALIZED=0
+PRESERVE_ROLLOUT_FOR_RETRY=0
+BOOTSTRAP_REGISTRATION_COMPLETED=0
+RELEASE_ID=
+ROLLBACK_IN_PROGRESS=0
+RECREATE_NODES=(trader-v3-node-a)
+
+rollback_restart_watcher_runtime() {{ return 0; }}
+rollback_restart_exchange_state_recorder() {{ return 0; }}
+rollback_restart_hermes_units() {{ return 0; }}
+ensure_bootstrap_rollout_registration() {{ return 0; }}
+acquire_maintenance_fence_after_bootstrap() {{ return 0; }}
+write_bootstrap_recovery_blocked_evidence() {{ return 0; }}
+write_partial_install_recovery_evidence() {{
+  printf '%s:%s\\n' "$1" "$2" >{evidence_log}
+  return 0
+}}
+finalize_node_startup_resource_evidence() {{ return 0; }}
+run_reviewed_rollout() {{ return 0; }}
+restore_pre_migration_state() {{ return 90; }}
+docker() {{ return 0; }}
+recover_post_migration_node() {{
+  printf 'unexpected-recovery\\n' >{recovery_log}
+  return 0
+}}
+
+on_err 53
+"""
+    )
+    result = _run_bash(source, os.environ.copy())
+
+    assert result.returncode == 53, result.stderr
+    assert blocked_target.is_dir()
+    assert not recovery_log.exists()
+    assert evidence_log.read_text(encoding="utf-8") == (
+        "partial-host-install-restore-failed:0\n"
+    )
