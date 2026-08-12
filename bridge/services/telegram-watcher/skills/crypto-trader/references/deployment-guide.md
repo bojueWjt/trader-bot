@@ -51,11 +51,14 @@ python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py init-db
 **方式 A：命令行**
 
 ```bash
-# 添加 Binance 账号（testnet）
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py add-account main "YOUR_API_KEY" "YOUR_API_SECRET" --risk 0.01 --testnet
+# 添加可交易主账号（testnet）
+python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py add-account main "MAIN_API_KEY" "MAIN_API_SECRET" --type main --risk 0.01 --testnet
 
-# 设置频道路由
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-channel "-1002198013097" main --name "VIP信号群"
+# 添加可交易子账号；子账号使用自己的 API Key 和 API Secret
+python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py add-account channel-a "SUBACCOUNT_API_KEY" "SUBACCOUNT_API_SECRET" --type subaccount --parent-account main --risk 0.01 --capital-multiplier 2 --testnet
+
+# 频道可以路由到主账号或子账号
+python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-channel "-1002198013097" channel-a --name "VIP信号群"
 
 # 设置币种风险比例
 python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-risk BTCUSDT 0.02
@@ -64,7 +67,13 @@ python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-risk ETHUSDT 0.
 
 **方式 B：Web 管理界面**
 
-启动 telegram-watcher 后访问 `http://localhost:9100`，在「账号」「频道路由」「风控」Tab 中操作。
+启动 telegram-watcher 后访问 `http://localhost:9100`，在「交易账号」中维护主账号、子账号和风险资金系数，在「频道路由」中选择执行账号。初始化辅助项按“目标有效权益 ÷ 初始化实际权益”计算系数，账号仅保存最终系数。`9000` 等目标有效权益只作为初始化输入或测试样例；运行时始终按“当前实时实际权益 × 已保存系数”计算有效权益，使盈利后的仓位预算上升、亏损后的仓位预算下降。已有账号在首次启动时自动归类为主账号；缺少有效风险资金系数的账号保持禁用，配置正数系数后才能启用；已有频道映射保持原目标账号。
+
+### 2.3.1 Binance API 代理
+
+`binance_trade.py` 从显式 `--proxy <url>` 或环境变量 `BINANCE_PROXY` 读取代理，命令行参数优先。两处都为空时直接连接 Binance。
+
+代理值必须是无认证信息的 `http://` 或 `https://` URL。带用户名或密码的 URL、非 HTTP(S) 协议和 `none` 等哨兵值会被拒绝。需要直连时省略 `--proxy` 并清除 `BINANCE_PROXY`。
 
 ### 2.4 启动 telegram-watcher
 
@@ -85,8 +94,8 @@ python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py list-accounts
 python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py list-channels
 python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py list-risks
 
-# 检查 Binance 连接（需要已配置账号）
-python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account main get-balance
+# 检查 Binance 连接和当前实际权益（需要已配置账号）
+python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account main get-equity
 
 # 检查 telegram-watcher
 curl http://localhost:9100/api/status
@@ -118,11 +127,11 @@ python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py list-channels
 # 2. 获取风险比例
 python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py get-risk BTCUSDT --account main
 
-# 3. 获取余额
-python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account main get-balance
+# 3. 获取当前实时实际权益
+python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account main get-equity
 
 # 4. 计算仓位
-python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py calc-position --balance 10000 --risk-ratio 0.02 --entry 65000 --sl 64000
+python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py calc-position --equity 5000 --capital-multiplier 2 --risk-ratio 0.02 --entry 65000 --sl 64000
 
 # 5. 设置杠杆
 python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account main set-leverage BTCUSDT 10

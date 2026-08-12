@@ -20,6 +20,7 @@ def set_mode(cur, account_id: str, instrument_id: str, mode: str) -> None:
         VALUES (%s, %s, %s, jsonb_build_object('mode', %s::text))
         ON CONFLICT (account_id, instrument_id) DO UPDATE
             SET state = jsonb_set(coalesce(risk_state.state, '{}'::jsonb), '{mode}', to_jsonb(%s::text)),
+                version = risk_state.version + 1,
                 updated_at = now()
         """,
         (str(uuid4()), account_id, instrument_id, mode, mode),

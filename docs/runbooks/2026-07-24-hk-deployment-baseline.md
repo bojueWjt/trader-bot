@@ -228,3 +228,157 @@ node 容器本身由 docker 管理（`docker-abc78a7b….scope`），不是 syst
 ## 7. 本基线的失效条件
 
 以下任一发生后，本文件的指纹表作废，需重新采集：容器重建（recreate 脚本执行）、container-patches/ 或 *.py.fixed 任何写入、systemd unit 变更、DEPLOYED_COMMIT.txt 更新。验证门脚本本身不依赖本文件，长期有效。
+
+## 8. 2026-08-08 release identity 与双节点一致性门
+
+### 8.1 目标发布模型
+
+正式路径使用一次构建、按 `sha256:` content digest 部署的 immutable node
+image。Python 业务代码进入 image；A/B 只保留账户配置、secret 和 state
+volume 差异。release manifest 固定 git commit、image digest、归一化 config
+hash、dependency lock hash、release ID 和运行目标文件 hash。
+
+Python bind mounts 属于迁移机制。账户停摆修复验证完成后，逐步删除
+`container-patches` 代码挂载；最终 gate 以 image digest、release labels、
+config hash 和 image 内 target hash 为准。
+
+### 8.2 Bundle 与 immutable build
+
+Redis namespace/autotrim 与 actor 隔离修复依赖以下新增显式挂载：
+
+| bundle 文件 | 仓库源文件 | 容器目标 |
+|---|---|---|
+| `nautilus_config.py` | `services/nautilus-node/persistence/nautilus_config.py` | `/app/persistence/nautilus_config.py` |
+| `health.py` | `services/nautilus-node/runtime/health.py` | `/app/runtime/health.py` |
+| `persistence_init.py` | `services/nautilus-node/persistence/__init__.py` | `/app/persistence/__init__.py` |
+| `approved_intent_client.py` | `services/nautilus-node/data_client/approved_intent_client.py` | `/app/data_client/approved_intent_client.py` |
+
+`runtime/health.py` 已进入 bundle，确保
+`actor_tick_age_seconds`、`restart_required` 和 readiness 503 语义随 release
+进入节点。后续新增运行时模块必须同时进入 `BUNDLE_FILES`、recreate delivery
+plan 和 release manifest；三者执行文件名、target、hash exact-set equality，
+缺少文件和额外文件都会失败。
+
+构建命令：
+
+```bash
+python3 scripts/make_container_bundle.py \
+  /tmp/account-stall-bundle
+
+python3 scripts/build_immutable_node_image.py \
+  --bundle-manifest /tmp/account-stall-bundle/bundle-manifest.json \
+  --base-image sha256:<local-base-image-id> \
+  --iid-output /tmp/account-stall-bundle/derived-image.id
+```
+
+builder 生成仅包含编号 Python payload 和 Dockerfile 的 `0700` 临时 context，
+使用本地 content ID、`docker build --network=none --pull=false`。cfg、env、
+secret 和非 Python payload 无法进入 context。构建结束后记录 derived image
+content ID。
+
+`transition_bind_mount` 仅用于显式 emergency rollback。节点在该模式全程
+保持 HALTED，并执行完整代码 mount exact-set、旧 manifest identity、Redis epoch、
+reconciliation 和 heartbeat writer identity 检查。hardening 正常 rollout 固定使用
+`DELIVERY_MODE=immutable_image` 与 `CONTROL_PLANE_ISOLATION_MODE=require`。
+
+### 8.3 强制门
+
+`scripts/release_manifest.py verify-live` 以 root 身份在 hk 本地执行，校验：
+
+- manifest、bundle 和 recreate delivery plan 文件集合完全一致。
+- bundle payload hash、容器 target hash 与 manifest 一致。
+- immutable target 在 Docker inspect 和 `/proc/PID/mountinfo` 中无 bind mount 覆盖。
+- mountinfo 不含 `//deleted`、`(deleted)`、`\040(deleted)`。
+- 被验证节点使用目标 image content digest、归一化 config hash、release commit、
+  delivery mode 和 release ID labels。
+- dependency lock hash 进入 release ID，审计输出只包含 hash、路径和容器名。
+
+`scripts/verify_hk_deployment.sh` 提供非 root 的独立只读复核，通过
+`/proc/PID/root` 计算双节点 target hash。它能抓住 image digest 相同、
+deleted 计数为零、容器仍运行旧字节的漂移场景。
+
+### 8.4 单节点发布顺序
+
+account-a canary：
+
+```bash
+ROLLOUT_NODE=trader-v3-node-a \
+DELIVERY_MODE=immutable_image \
+CONTROL_PLANE_ISOLATION_MODE=require \
+SKIP_RESUME=1 \
+bash ./hk-deploy-20260803.sh
+```
+
+脚本只 HALT、recreate、验证 account-a。account-b 保持原容器。脚本没有自动
+RESUME 路径，成功和失败均保持目标节点 HALTED/stopped。canary 至少观察 1800
+秒，记录 `release_id`、`verify_live_passed=true`、`canary_halted=true` 和
+`soak_seconds` evidence。
+
+完成同 release、同 order shape 的 testnet emergency-close 证据后，rollout phase
+保持 `account_a_canary`。控制面仅对 account-a 的单个 fresh writer 和有效 single-use
+permit 开放受限 RESUME。canary round trip 完成后立即 HALT，并生成 account-b gate
+所需四类签名报告。
+
+account-b 必须复用 account-a 的 release manifest 和本地 derived image：
+
+```bash
+ROLLOUT_NODE=trader-v3-node-b \
+ACCOUNT_B_ROLLOUT_GATE=1 \
+ACCOUNT_B_RELEASE_MANIFEST=/srv/trader-v3/canary/release-manifest.json \
+ACCOUNT_B_EVIDENCE_FILE=/srv/trader-v3/canary/account-a-evidence.json \
+DELIVERY_MODE=immutable_image \
+CONTROL_PLANE_ISOLATION_MODE=require \
+SKIP_RESUME=1 \
+bash ./hk-deploy-20260803.sh
+```
+
+evidence 中的 `release_id` 必须与目标 manifest 一致。单次脚本调用只允许一个
+节点，account-b 无 evidence、soak 少于 1800 秒、derived image 缺失均会失败。
+exchange、PostgreSQL、fault、live-trade 四类报告均需通过内容级 identity、状态、
+归零和 hash 校验。account-b PASS 后 rollout phase 进入 `fleet_complete`。
+
+### 8.5 Live 配置与风险迁移
+
+生产配置路径固定为：
+
+```text
+/srv/trader-v3/node-a.hk.json
+/srv/trader-v3/node-b.hk.json
+```
+
+`live_node_config.py capture` 同时读取两份 JSON 与两个旧容器的风险环境变量。当前生产
+有效策略为 BNB/BTC/ETH/SOL 四个 instrument 各 `100 USDT`，submit rate
+`50/00:00:01`，modify rate `1/00:00:01`。`trader-v3-live-risk-policy/v2` 将该策略
+原子写入 A/B JSON，并限制迁移 ceiling 为 `100 USDT`。部署失败通过
+`live_node_config.py rollback` 恢复两份原文件。
+
+Nautilus 1.227.0 对 Binance futures margin account 不执行
+`max_notional_per_order` 检查。真实 canary 的 `12 USDT` 上限由单次 target-specific
+permit、data client 校验、strategy 实际名义金额校验、确定性 client order ID 和 durable
+single-use store 强制执行。
+
+### 8.6 Redis Startup Fencing
+
+live node 在 `TradingNodeConfig` 与 `TradingNode(...)` 构造前获取稳定账户 lease。
+每次 acquisition 生成独立 UUID4 candidate，并在 Redis Lua 成功获取 lease 时原子固化。
+该 UUID4 generation 同时进入
+`TradingNodeConfig.instance_id`、cache 与 message bus。该顺序覆盖 Nautilus 构造期间的
+Redis message bus/cache 创建和 `load_cache()`。lease 获取失败会在 Redis cache 初始化前
+终止启动；后续 node assembly 失败会释放 startup lease。暂停超过 freshness 的旧进程恢复
+后继续使用旧 generation，replacement 使用新 generation，两者无法共享写入 keyspace。
+fencing token 负责当前 Redis 历史内的 owner 顺序；独立 UUID4 保证 counter 丢失或备份
+恢复后仍产生新的 persistence generation。lease freshness 与 takeover cutoff 使用 Redis
+`TIME`。
+
+发布 manifest 的 Redis schema epoch 固定为
+`fenced-generation-namespace/v2`。部署门验证两个 live persistence config 都启用
+`use_instance_id=True`，并要求 janitor safety evidence 同时绑定 stable lease namespace 与
+精确 active persistence namespace。
+
+### 8.7 回滚面
+
+每次发布保存 `old-images.tsv`、`containers-before.json`、旧 release metadata
+和 host 文件备份。回滚只 recreate 本次目标节点，使用记录的旧 image 和旧
+mount/config/env 计划，保持 HALTED，再运行对应旧 release 的 `verify-live`。
+account-a 回滚完成后停止 account-b rollout；account-b 回滚不改变已验证的
+account-a canary。

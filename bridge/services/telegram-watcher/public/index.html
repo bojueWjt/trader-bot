@@ -146,6 +146,7 @@
     /* ====== Main ====== */
     .main {
       flex: 1;
+      min-width: 0;
       overflow-y: auto;
       padding: 28px 32px;
     }
@@ -155,6 +156,17 @@
 
     .page-header {
       margin-bottom: 24px;
+    }
+    .page-header-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .page-header-actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
     }
     .page-header h2 {
       font-size: 22px;
@@ -212,10 +224,74 @@
       box-shadow: 0 0 0 3px var(--accent-glow);
     }
     input::placeholder { color: var(--text3); }
+    input:disabled {
+      color: var(--text2);
+      cursor: not-allowed;
+      opacity: 0.75;
+    }
 
     .input-group {
       display: flex;
       gap: 8px;
+    }
+
+    .form-field {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      min-width: 0;
+    }
+    .form-field label,
+    .field-label {
+      color: var(--text2);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .field-help {
+      color: var(--text3);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .form-error {
+      min-height: 18px;
+      margin-top: 10px;
+      color: var(--red);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .is-hidden { display: none !important; }
+
+    .segmented {
+      display: inline-grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      width: min(320px, 100%);
+      padding: 4px;
+      border: 1px solid var(--border2);
+      border-radius: var(--radius-sm);
+      background: var(--surface2);
+    }
+    .segment {
+      min-height: 44px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text2);
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+    }
+    .segment:hover { color: var(--text); }
+    .segment.active {
+      color: #ffffff;
+      background: var(--accent);
+      box-shadow: var(--shadow);
+    }
+    .segment:focus-visible {
+      outline: 2px solid var(--accent2);
+      outline-offset: 2px;
     }
 
     /* ====== Buttons ====== */
@@ -247,6 +323,18 @@
       display: flex;
       gap: 8px;
       margin-top: 12px;
+    }
+    .form-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 14px;
+    }
+    .action-buttons {
+      display: flex;
+      gap: 8px;
+      margin-left: auto;
     }
 
     /* ====== Checkbox ====== */
@@ -284,6 +372,34 @@
     .tbl tr:last-child td { border-bottom: none; }
     .tbl tbody tr { transition: background 0.1s; }
     .tbl tbody tr:hover td { background: rgba(255,255,255,0.02); }
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      overscroll-behavior-inline: contain;
+    }
+    .account-table { min-width: 1040px; }
+    .channel-table { min-width: 760px; }
+    .account-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 160px;
+    }
+    .account-name.subaccount { padding-left: 18px; }
+    .account-branch {
+      color: var(--text3);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .account-meta {
+      margin-top: 3px;
+      color: var(--text3);
+      font-size: 11px;
+    }
+    .row-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+    }
 
     /* ====== Badges ====== */
     .badge {
@@ -300,6 +416,8 @@
     .badge-partial { background: var(--blue-bg); color: var(--blue); }
     .badge-testnet { background: var(--orange-bg); color: var(--orange); }
     .badge-live { background: var(--red-bg); color: var(--red); }
+    .badge-main { background: var(--blue-bg); color: var(--blue); }
+    .badge-subaccount { background: var(--green-bg); color: var(--green); }
 
     .mono { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
 
@@ -436,6 +554,16 @@
       .status-pill { justify-content: center; margin: 0 8px 16px; padding: 8px; }
       .main { padding: 20px 16px; }
       .form-grid { grid-template-columns: 1fr; }
+      .form-grid.cols-3 { grid-template-columns: 1fr; }
+      .page-header-row { flex-direction: column; }
+      .page-header-actions { width: 100%; }
+      .page-header-actions .btn { flex: 1; }
+      .form-actions { align-items: stretch; flex-direction: column; }
+      .action-buttons { width: 100%; margin-left: 0; }
+      .action-buttons .btn { flex: 1; }
+      .btn-group { flex-wrap: wrap; }
+      .input-group { flex-wrap: wrap; }
+      input, select { font-size: 16px; }
     }
   </style>
 </head>
@@ -585,22 +713,86 @@
       <!-- ========== Accounts ========== -->
       <div class="page" id="page-accounts">
         <div class="page-header">
-          <h2>交易账号</h2>
-          <p>管理 Binance 合约账号凭据</p>
-        </div>
-        <div class="card">
-          <div class="card-title">添加账号</div>
-          <div class="form-grid">
-            <input id="acc-id" placeholder="账号名称 (如: main)">
-            <input id="acc-key" placeholder="API Key">
-            <input id="acc-secret" type="password" placeholder="API Secret">
-            <input id="acc-risk" type="number" step="0.001" value="0.01" placeholder="默认风险比例">
+          <div class="page-header-row">
+            <div>
+              <h2>交易账号</h2>
+              <p>主账号与子账号均可作为独立执行账号</p>
+            </div>
+            <div class="page-header-actions">
+              <button class="btn btn-ghost" type="button" onclick="startAccountCreate('main')">添加主账号</button>
+              <button class="btn btn-primary" type="button" onclick="startAccountCreate('subaccount')">添加子账号</button>
+            </div>
           </div>
-          <div class="btn-group" style="justify-content:space-between">
-            <label class="check-label">
-              <input type="checkbox" id="acc-testnet" checked> Testnet 模式
-            </label>
-            <button class="btn btn-primary" onclick="addAccount()">添加账号</button>
+        </div>
+        <div class="card" id="accountFormCard">
+          <div class="card-title" id="accountFormTitle">添加执行账号</div>
+          <div class="form-field" style="margin-bottom:14px">
+            <span class="field-label">账号类型</span>
+            <div class="segmented" role="group" aria-label="账号类型">
+              <button class="segment active" id="accountTypeMain" type="button" aria-pressed="true" onclick="setAccountType('main')">主账号</button>
+              <button class="segment" id="accountTypeSubaccount" type="button" aria-pressed="false" onclick="setAccountType('subaccount')">子账号</button>
+            </div>
+            <span class="field-help">两类账号都使用自己的 Binance API 凭据执行交易。</span>
+          </div>
+          <div class="form-grid">
+            <div class="form-field">
+              <label for="acc-id">账号 ID</label>
+              <input id="acc-id" autocomplete="off" spellcheck="false" placeholder="例如 main 或 channel-a">
+            </div>
+            <div class="form-field">
+              <label for="acc-execution-id">V3 执行账号</label>
+              <input id="acc-execution-id" autocomplete="off" spellcheck="false" placeholder="例如 account-a">
+              <span class="field-help">频道进入 Hermes 后使用这个 ID 路由到独立交易节点。</span>
+            </div>
+            <div class="form-field is-hidden" id="parentAccountField">
+              <label for="acc-parent">所属主账号</label>
+              <select id="acc-parent">
+                <option value="">选择主账号</option>
+              </select>
+            </div>
+            <div class="form-field">
+              <label for="acc-key">API Key</label>
+              <input id="acc-key" autocomplete="off" spellcheck="false" placeholder="Binance API Key">
+            </div>
+            <div class="form-field">
+              <label for="acc-secret">API Secret</label>
+              <input id="acc-secret" type="password" autocomplete="new-password" placeholder="Binance API Secret">
+              <span class="field-help" id="accountCredentialHelp">创建账号时需要完整凭据。</span>
+            </div>
+            <div class="form-field">
+              <label for="acc-risk">默认风险比例</label>
+              <input id="acc-risk" type="number" min="0" step="0.001" value="0.01">
+            </div>
+            <div class="form-field">
+              <label for="acc-capital-multiplier">风险资金系数</label>
+              <input id="acc-capital-multiplier" type="number" min="0.01" step="0.1" placeholder="必须显式配置">
+              <span class="field-help">有效权益 = 当前实时实际权益 × 系数。系数保存后保持不变，仓位随盈亏动态变化。</span>
+            </div>
+            <div class="form-field">
+              <label for="acc-initial-equity">初始化实际权益</label>
+              <input id="acc-initial-equity" type="number" min="0.01" step="0.01" placeholder="当前账号实际权益">
+            </div>
+            <div class="form-field">
+              <label for="acc-target-equity">初始化目标有效权益</label>
+              <input id="acc-target-equity" type="number" min="0.01" step="0.01" placeholder="目标仓位计算基准">
+              <span class="field-help">初始化系数 = 目标有效权益 ÷ 初始化实际权益。两个初始化值只用于计算系数。</span>
+              <button class="btn btn-ghost btn-sm" type="button" onclick="calculateInitialCapitalMultiplier()">计算系数</button>
+            </div>
+          </div>
+          <div class="form-error" id="accountFormError" role="alert"></div>
+          <div class="form-actions">
+            <div class="check-row">
+              <label class="check-label">
+                <input type="checkbox" id="acc-testnet" checked> Testnet 模式
+              </label>
+              <label class="check-label">
+                <input type="checkbox" id="acc-enabled" checked> 启用账号
+              </label>
+            </div>
+            <div class="action-buttons">
+              <button class="btn btn-ghost is-hidden" id="cancelAccountEditButton" type="button" onclick="resetAccountForm()">取消编辑</button>
+              <button class="btn btn-primary" id="saveAccountButton" type="button" onclick="saveAccount()">添加账号</button>
+            </div>
           </div>
         </div>
         <div class="card">
@@ -613,20 +805,29 @@
       <div class="page" id="page-channels">
         <div class="page-header">
           <h2>频道路由</h2>
-          <p>将 Telegram 频道映射到 Binance 交易账号</p>
+          <p>每个频道选择一个主账号或子账号执行新信号</p>
         </div>
         <div class="card">
-          <div class="card-title">添加路由</div>
+          <div class="card-title">添加或改绑路由</div>
           <div class="form-grid cols-3">
-            <input id="ch-id" placeholder="频道 ID (如: -1001234567890)">
-            <input id="ch-name" placeholder="频道名称 (可选)">
-            <select id="ch-account">
-              <option value="">选择目标账号</option>
-            </select>
+            <div class="form-field">
+              <label for="ch-id">频道 ID</label>
+              <input id="ch-id" autocomplete="off" spellcheck="false" placeholder="-1001234567890">
+            </div>
+            <div class="form-field">
+              <label for="ch-name">频道名称</label>
+              <input id="ch-name" autocomplete="off" placeholder="可选">
+            </div>
+            <div class="form-field">
+              <label for="ch-account">执行账号</label>
+              <select id="ch-account">
+                <option value="">选择目标账号</option>
+              </select>
+            </div>
           </div>
           <div class="btn-group" style="justify-content:space-between">
             <button class="btn btn-ghost" onclick="loadDialogsForRouting()">从 Telegram 选择频道</button>
-            <button class="btn btn-primary" onclick="addChannel()">添加路由</button>
+            <button class="btn btn-primary" id="saveChannelButton" onclick="saveChannel()">保存路由</button>
           </div>
           <div class="dialog-pick" id="dialogPickerForRouting"></div>
         </div>
@@ -686,10 +887,14 @@
     </main>
   </div>
 
-  <div class="toast" id="toast"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script>
     let autoRefreshTimer = null;
+    let accountCache = [];
+    let channelCache = [];
+    let editingAccountId = false;
+    let selectedAccountType = 'main';
 
     /* ====== Helpers ====== */
     function toast(msg) {
@@ -701,12 +906,40 @@
     }
 
     async function api(path, opts = {}) {
-      const res = await fetch('/api' + path, {
+      const requestOptions = {
         headers: { 'Content-Type': 'application/json' },
         ...opts,
-        body: opts.body ? JSON.stringify(opts.body) : undefined,
-      });
-      return res.json();
+      };
+      if (opts.body !== undefined) {
+        requestOptions.body = JSON.stringify(opts.body);
+      }
+      const res = await fetch('/api' + path, requestOptions);
+      let payload = {};
+      try {
+        payload = await res.json();
+      } catch (err) {
+        payload = {};
+      }
+      if (!res.ok && !payload.error) {
+        payload.error = `请求失败 (${res.status})`;
+      }
+      return payload;
+    }
+
+    function setButtonBusy(button, busy, busyLabel) {
+      if (!button) {
+        return;
+      }
+      if (busy) {
+        button.dataset.idleLabel = button.textContent;
+        button.textContent = busyLabel;
+        button.disabled = true;
+        return;
+      }
+      if (button.dataset.idleLabel) {
+        button.textContent = button.dataset.idleLabel;
+      }
+      button.disabled = false;
     }
 
     function esc(s) {
@@ -949,97 +1182,546 @@
     async function loadAccounts() {
       try {
         const rows = await api('/trading/accounts');
-        if (rows.error) { document.getElementById('accountList').innerHTML = `<div class="empty">${esc(rows.error)}</div>`; return; }
-        if (!Array.isArray(rows) || rows.length === 0) { document.getElementById('accountList').innerHTML = '<div class="empty">暂无账号</div>'; return; }
-        let html = '<table class="tbl"><thead><tr><th>账号</th><th>API Key</th><th>Secret</th><th>风险</th><th>模式</th><th></th></tr></thead><tbody>';
-        for (const a of rows) {
-          const modeBadge = a.is_testnet ? '<span class="badge badge-testnet">Testnet</span>' : '<span class="badge badge-live">Live</span>';
+        if (rows.error) {
+          document.getElementById('accountList').innerHTML = `<div class="empty">${esc(rows.error)}</div>`;
+          return;
+        }
+        if (!Array.isArray(rows)) {
+          throw new Error('Invalid accounts response');
+        }
+
+        accountCache = rows;
+        const selectedParent = document.getElementById('acc-parent').value;
+        populateParentAccountOptions(selectedParent);
+
+        if (rows.length === 0) {
+          document.getElementById('accountList').innerHTML = '<div class="empty">暂无账号，请先添加主账号</div>';
+          return;
+        }
+
+        let html = '<div class="table-wrap"><table class="tbl account-table"><thead><tr><th>执行账号</th><th>类型</th><th>API 凭据</th><th>风险</th><th>资金系数</th><th>环境</th><th>使用情况</th><th></th></tr></thead><tbody>';
+        for (let index = 0; index < rows.length; index += 1) {
+          const account = rows[index];
+          let modeBadge = '<span class="badge badge-live">Live</span>';
+          if (account.is_testnet) {
+            modeBadge = '<span class="badge badge-testnet">Testnet</span>';
+          }
+          let typeBadge = '<span class="badge badge-main">主账号</span>';
+          let nameClass = 'account-name';
+          let branch = '';
+          let parentMeta = `${Number(account.subaccount_count || 0)} 个子账号`;
+          if (account.account_type === 'subaccount') {
+            typeBadge = '<span class="badge badge-subaccount">子账号</span>';
+            nameClass += ' subaccount';
+            branch = '<span class="account-branch">└</span>';
+            parentMeta = `所属 ${esc(account.parent_account_id)}`;
+          }
+          const routeCount = Number(account.channel_count || 0);
+          const multiplier = Number(account.risk_capital_multiplier);
+          const multiplierConfigured = (
+            Number.isFinite(multiplier)
+            && multiplier > 0
+          );
+          const accountEnabled = Number(account.is_enabled) === 1;
+          let effectiveRisk = '<span class="badge badge-pending">待配置</span>';
+          let multiplierDisplay = '<span class="badge badge-pending">待配置</span>';
+          if (multiplierConfigured) {
+            effectiveRisk = (
+              Number(account.default_risk_ratio)
+              * multiplier
+              * 100
+            ).toFixed(1) + '%';
+            multiplierDisplay = `<strong>${multiplier.toFixed(2)}×</strong>`;
+          }
+          if (!accountEnabled) {
+            effectiveRisk = '<span class="badge badge-pending">未启用</span>';
+            multiplierDisplay += '<div class="account-meta">账号已禁用</div>';
+          }
           html += `<tr>
-            <td><strong>${esc(a.account_id)}</strong></td>
-            <td class="mono">${esc(a.api_key ? a.api_key.substring(0,8) + '...' : '')}</td>
-            <td class="mono">${esc(a.api_secret)}</td>
-            <td>${(a.default_risk_ratio * 100).toFixed(1)}%</td>
+            <td>
+              <div class="${nameClass}">${branch}<strong>${esc(account.account_id)}</strong></div>
+              <div class="account-meta mono">V3 · ${esc(account.execution_account_id)}</div>
+              <div class="account-meta">${parentMeta}</div>
+            </td>
+            <td>${typeBadge}</td>
+            <td>
+              <div class="mono">${esc(account.api_key)}</div>
+              <div class="account-meta mono">${esc(account.api_secret)}</div>
+            </td>
+            <td>
+              <strong>${(Number(account.default_risk_ratio) * 100).toFixed(1)}%</strong>
+              <div class="account-meta">占实际权益 ${effectiveRisk}</div>
+            </td>
+            <td>${multiplierDisplay}</td>
             <td>${modeBadge}</td>
-            <td><button class="btn btn-danger btn-sm" onclick="deleteAccount('${esc(a.account_id)}')">删除</button></td>
+            <td>${routeCount} 个频道</td>
+            <td>
+              <div class="row-actions">
+                <button class="btn btn-ghost btn-sm" type="button" onclick="editAccountByIndex(${index})">编辑</button>
+                <button class="btn btn-danger btn-sm" type="button" onclick="deleteAccountByIndex(${index})">删除</button>
+              </div>
+            </td>
           </tr>`;
         }
-        html += '</tbody></table>';
+        html += '</tbody></table></div>';
         document.getElementById('accountList').innerHTML = html;
       } catch (err) {
-        document.getElementById('accountList').innerHTML = `<div class="empty">加载失败</div>`;
+        document.getElementById('accountList').innerHTML = '<div class="empty">账号加载失败，请稍后重试</div>';
       }
     }
 
-    async function addAccount() {
+    function populateParentAccountOptions(selectedId) {
+      const select = document.getElementById('acc-parent');
+      let html = '<option value="">选择主账号</option>';
+      for (const account of accountCache) {
+        if (
+          account.account_type !== 'main'
+          || Number(account.is_enabled) !== 1
+        ) {
+          continue;
+        }
+        if (editingAccountId && account.account_id === editingAccountId) {
+          continue;
+        }
+        html += `<option value="${esc(account.account_id)}">${esc(account.account_id)}</option>`;
+      }
+      select.innerHTML = html;
+      if (selectedId) {
+        select.value = selectedId;
+      }
+    }
+
+    function setAccountType(accountType) {
+      if (accountType !== 'main' && accountType !== 'subaccount') {
+        return;
+      }
+      selectedAccountType = accountType;
+      const mainButton = document.getElementById('accountTypeMain');
+      const subaccountButton = document.getElementById('accountTypeSubaccount');
+      const parentField = document.getElementById('parentAccountField');
+      const mainSelected = accountType === 'main';
+      mainButton.classList.toggle('active', mainSelected);
+      subaccountButton.classList.toggle('active', !mainSelected);
+      mainButton.setAttribute('aria-pressed', String(mainSelected));
+      subaccountButton.setAttribute('aria-pressed', String(!mainSelected));
+      parentField.classList.toggle('is-hidden', mainSelected);
+      if (mainSelected) {
+        document.getElementById('acc-parent').value = '';
+      }
+      if (!editingAccountId) {
+        let accountLabel = '主账号';
+        if (!mainSelected) {
+          accountLabel = '子账号';
+        }
+        document.getElementById('accountFormTitle').textContent = `添加${accountLabel}`;
+        document.getElementById('saveAccountButton').textContent = `添加${accountLabel}`;
+      }
+    }
+
+    function startAccountCreate(accountType) {
+      resetAccountForm();
+      setAccountType(accountType);
+      if (accountType === 'subaccount') {
+        const mainAccountCount = accountCache.filter((account) => {
+          return account.account_type === 'main';
+        }).length;
+        if (mainAccountCount === 0) {
+          showAccountFormError('请先添加主账号，再创建子账号。');
+        }
+      }
+      document.getElementById('accountFormCard').scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+      document.getElementById('acc-id').focus();
+    }
+
+    function showAccountFormError(message) {
+      document.getElementById('accountFormError').textContent = message || '';
+    }
+
+    function resetAccountForm() {
+      editingAccountId = false;
+      selectedAccountType = 'main';
+      document.getElementById('accountFormTitle').textContent = '添加执行账号';
+      document.getElementById('acc-id').disabled = false;
+      document.getElementById('acc-id').value = '';
+      document.getElementById('acc-execution-id').value = '';
+      document.getElementById('acc-key').value = '';
+      document.getElementById('acc-secret').value = '';
+      document.getElementById('acc-risk').value = '0.01';
+      document.getElementById('acc-capital-multiplier').value = '';
+      document.getElementById('acc-initial-equity').value = '';
+      document.getElementById('acc-target-equity').value = '';
+      document.getElementById('acc-testnet').checked = true;
+      document.getElementById('acc-enabled').checked = true;
+      document.getElementById('accountCredentialHelp').textContent = '创建账号时需要完整凭据。';
+      const saveButton = document.getElementById('saveAccountButton');
+      delete saveButton.dataset.idleLabel;
+      saveButton.textContent = '添加账号';
+      saveButton.disabled = false;
+      document.getElementById('cancelAccountEditButton').classList.add('is-hidden');
+      populateParentAccountOptions('');
+      setAccountType('main');
+      showAccountFormError('');
+    }
+
+    function editAccountByIndex(index) {
+      const account = accountCache[index];
+      if (!account) {
+        return;
+      }
+      editingAccountId = account.account_id;
+      document.getElementById('accountFormTitle').textContent = `编辑执行账号 · ${account.account_id}`;
+      document.getElementById('acc-id').value = account.account_id;
+      document.getElementById('acc-id').disabled = true;
+      document.getElementById('acc-execution-id').value = (
+        account.execution_account_id || account.account_id
+      );
+      document.getElementById('acc-key').value = '';
+      document.getElementById('acc-secret').value = '';
+      document.getElementById('acc-risk').value = String(account.default_risk_ratio);
+      const multiplier = Number(account.risk_capital_multiplier);
+      let multiplierValue = '';
+      if (Number.isFinite(multiplier) && multiplier > 0) {
+        multiplierValue = String(multiplier);
+      }
+      document.getElementById('acc-capital-multiplier').value = multiplierValue;
+      document.getElementById('acc-initial-equity').value = '';
+      document.getElementById('acc-target-equity').value = '';
+      document.getElementById('acc-testnet').checked = Boolean(account.is_testnet);
+      document.getElementById('acc-enabled').checked = (
+        Number(account.is_enabled) === 1
+      );
+      document.getElementById('accountCredentialHelp').textContent = '凭据留空时保留现有值。';
+      document.getElementById('saveAccountButton').textContent = '保存修改';
+      document.getElementById('cancelAccountEditButton').classList.remove('is-hidden');
+      populateParentAccountOptions(account.parent_account_id || '');
+      setAccountType(account.account_type || 'main');
+      if (account.account_type === 'subaccount') {
+        document.getElementById('acc-parent').value = account.parent_account_id || '';
+      }
+      showAccountFormError('');
+      document.getElementById('acc-risk').focus();
+    }
+
+    function calculateInitialCapitalMultiplier() {
+      const initialActualEquity = Number(
+        document.getElementById('acc-initial-equity').value
+      );
+      const targetEffectiveEquity = Number(
+        document.getElementById('acc-target-equity').value
+      );
+      if (!Number.isFinite(initialActualEquity) || initialActualEquity <= 0) {
+        showAccountFormError('初始化实际权益需要填写大于 0 的数字。');
+        document.getElementById('acc-initial-equity').focus();
+        return;
+      }
+      if (!Number.isFinite(targetEffectiveEquity) || targetEffectiveEquity <= 0) {
+        showAccountFormError('初始化目标有效权益需要填写大于 0 的数字。');
+        document.getElementById('acc-target-equity').focus();
+        return;
+      }
+
+      const multiplier = targetEffectiveEquity / initialActualEquity;
+      const roundedMultiplier = Number(multiplier.toFixed(8));
+      document.getElementById('acc-capital-multiplier').value = String(
+        roundedMultiplier
+      );
+      showAccountFormError('');
+    }
+
+    async function saveAccount() {
       const account_id = document.getElementById('acc-id').value.trim();
+      let execution_account_id = document.getElementById('acc-execution-id').value.trim();
       const api_key = document.getElementById('acc-key').value.trim();
       const api_secret = document.getElementById('acc-secret').value.trim();
-      const default_risk_ratio = parseFloat(document.getElementById('acc-risk').value) || 0.01;
+      const default_risk_ratio = Number(document.getElementById('acc-risk').value);
+      const risk_capital_multiplier = Number(
+        document.getElementById('acc-capital-multiplier').value
+      );
       const is_testnet = document.getElementById('acc-testnet').checked;
-      if (!account_id || !api_key || !api_secret) { toast('请填写完整信息'); return; }
-      const r = await api('/trading/accounts', { method: 'POST', body: { account_id, api_key, api_secret, default_risk_ratio, is_testnet } });
-      if (r.ok) {
-        toast('账号已添加');
-        ['acc-id','acc-key','acc-secret'].forEach(id => document.getElementById(id).value = '');
-        document.getElementById('acc-risk').value = '0.01';
-        document.getElementById('acc-testnet').checked = true;
-        loadAccounts();
-      } else toast(r.error || '添加失败');
+      const is_enabled = document.getElementById('acc-enabled').checked;
+      let parent_account_id = '';
+      if (selectedAccountType === 'subaccount') {
+        parent_account_id = document.getElementById('acc-parent').value;
+      }
+      const isEditing = Boolean(editingAccountId);
+
+      showAccountFormError('');
+      if (!account_id) {
+        showAccountFormError('请填写账号 ID。');
+        document.getElementById('acc-id').focus();
+        return;
+      }
+      if (!execution_account_id) {
+        execution_account_id = account_id;
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(execution_account_id)) {
+        showAccountFormError('V3 执行账号只能使用字母、数字、点、下划线或连字符。');
+        document.getElementById('acc-execution-id').focus();
+        return;
+      }
+      if (!isEditing && (!api_key || !api_secret)) {
+        showAccountFormError('创建账号需要 API Key 和 API Secret。');
+        document.getElementById('acc-key').focus();
+        return;
+      }
+      if (!Number.isFinite(default_risk_ratio) || default_risk_ratio < 0) {
+        showAccountFormError('默认风险比例需要填写非负数字。');
+        document.getElementById('acc-risk').focus();
+        return;
+      }
+      if (!Number.isFinite(risk_capital_multiplier) || risk_capital_multiplier <= 0) {
+        showAccountFormError('风险资金系数需要填写大于 0 的数字。');
+        document.getElementById('acc-capital-multiplier').focus();
+        return;
+      }
+      if (selectedAccountType === 'subaccount' && !parent_account_id) {
+        showAccountFormError('请选择所属主账号。');
+        document.getElementById('acc-parent').focus();
+        return;
+      }
+
+      const payload = {
+        account_id,
+        execution_account_id,
+        api_key,
+        api_secret,
+        default_risk_ratio,
+        risk_capital_multiplier,
+        is_testnet,
+        is_enabled,
+        account_type: selectedAccountType,
+        parent_account_id,
+      };
+      let path = '/trading/accounts';
+      let method = 'POST';
+      if (isEditing) {
+        path += '/' + encodeURIComponent(editingAccountId);
+        method = 'PUT';
+      }
+
+      const button = document.getElementById('saveAccountButton');
+      setButtonBusy(button, true, '保存中...');
+      try {
+        const result = await api(path, { method, body: payload });
+        if (!result.ok) {
+          const message = accountApiError(result);
+          showAccountFormError(message);
+          toast(message);
+          return;
+        }
+        let successMessage = '账号已添加';
+        if (isEditing) {
+          successMessage = '账号已更新';
+        }
+        toast(successMessage);
+        resetAccountForm();
+        await loadAccounts();
+      } catch (err) {
+        showAccountFormError('保存失败，请检查 watcher 服务连接。');
+      } finally {
+        setButtonBusy(button, false, '');
+      }
+    }
+
+    function accountApiError(result) {
+      if (result.error === 'Account has subaccounts') {
+        return '该主账号仍有子账号，请先迁移或删除子账号。';
+      }
+      if (result.error === 'Account is used by channel routing') {
+        return '该账号仍被频道使用，请先改绑或删除频道路由。';
+      }
+      if (result.error === 'Account has active orders') {
+        return '该账号仍有活动订单，请先完成订单处理。';
+      }
+      if (result.error) {
+        return result.error;
+      }
+      return '操作失败，请稍后重试。';
+    }
+
+    function deleteAccountByIndex(index) {
+      const account = accountCache[index];
+      if (!account) {
+        return;
+      }
+      deleteAccount(account.account_id);
     }
 
     async function deleteAccount(id) {
-      if (!confirm(`确定删除账号 "${id}"?`)) return;
-      const r = await (await fetch(`/api/trading/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })).json();
-      if (r.ok) { toast('已删除'); loadAccounts(); }
-      else toast(r.error || '删除失败');
+      if (!confirm(`确定删除执行账号 "${id}"?`)) {
+        return;
+      }
+      const result = await api('/trading/accounts/' + encodeURIComponent(id), { method: 'DELETE' });
+      if (!result.ok) {
+        toast(accountApiError(result));
+        return;
+      }
+      if (editingAccountId === id) {
+        resetAccountForm();
+      }
+      toast('账号已删除');
+      await loadAccounts();
     }
 
     /* ====== Channel Routing ====== */
     async function loadChannels() {
       try {
-        const accounts = await api('/trading/accounts');
+        const responses = await Promise.all([
+          api('/trading/accounts'),
+          api('/trading/channels'),
+        ]);
+        const accounts = responses[0];
+        const rows = responses[1];
+        if (!Array.isArray(accounts)) {
+          throw new Error('Invalid accounts response');
+        }
+        accountCache = accounts;
         const sel = document.getElementById('ch-account');
         const cur = sel.value;
-        sel.innerHTML = '<option value="">选择目标账号</option>';
-        if (Array.isArray(accounts)) {
-          for (const a of accounts) sel.innerHTML += `<option value="${esc(a.account_id)}">${esc(a.account_id)}</option>`;
-        }
+        sel.innerHTML = accountSelectOptions(accounts);
         sel.value = cur;
 
-        const rows = await api('/trading/channels');
-        if (rows.error) { document.getElementById('channelList').innerHTML = `<div class="empty">${esc(rows.error)}</div>`; return; }
-        if (!Array.isArray(rows) || rows.length === 0) { document.getElementById('channelList').innerHTML = '<div class="empty">暂无路由</div>'; return; }
-        let html = '<table class="tbl"><thead><tr><th>频道 ID</th><th>名称</th><th>目标账号</th><th></th></tr></thead><tbody>';
-        for (const c of rows) {
+        if (rows.error) {
+          document.getElementById('channelList').innerHTML = `<div class="empty">${esc(rows.error)}</div>`;
+          return;
+        }
+        if (!Array.isArray(rows)) {
+          throw new Error('Invalid channels response');
+        }
+        channelCache = rows;
+        if (rows.length === 0) {
+          document.getElementById('channelList').innerHTML = '<div class="empty">暂无路由</div>';
+          return;
+        }
+        let html = '<div class="table-wrap"><table class="tbl channel-table"><thead><tr><th>频道 ID</th><th>名称</th><th>执行账号</th><th>类型</th><th>所属主账号</th><th></th></tr></thead><tbody>';
+        for (let index = 0; index < rows.length; index += 1) {
+          const channel = rows[index];
+          let typeBadge = '<span class="badge badge-main">主账号</span>';
+          let parentAccount = '—';
+          if (channel.target_account_type === 'subaccount') {
+            typeBadge = '<span class="badge badge-subaccount">子账号</span>';
+            parentAccount = esc(channel.parent_account_id);
+          }
+          let channelName = '<span style="color:var(--text3)">—</span>';
+          if (channel.channel_name) {
+            channelName = esc(channel.channel_name);
+          }
           html += `<tr>
-            <td class="mono">${esc(c.channel_id)}</td>
-            <td>${esc(c.channel_name) || '<span style="color:var(--text3)">—</span>'}</td>
-            <td><strong>${esc(c.target_account_id)}</strong></td>
-            <td><button class="btn btn-danger btn-sm" onclick="deleteChannel('${esc(c.channel_id)}')">删除</button></td>
+            <td class="mono">${esc(channel.channel_id)}</td>
+            <td>${channelName}</td>
+            <td>
+              <strong>${esc(channel.target_account_id)}</strong>
+              <div class="account-meta mono">V3 · ${esc(channel.execution_account_id)}</div>
+            </td>
+            <td>${typeBadge}</td>
+            <td>${parentAccount}</td>
+            <td>
+              <div class="row-actions">
+                <button class="btn btn-ghost btn-sm" type="button" onclick="editChannelByIndex(${index})">改绑</button>
+                <button class="btn btn-danger btn-sm" type="button" onclick="deleteChannelByIndex(${index})">删除</button>
+              </div>
+            </td>
           </tr>`;
         }
-        html += '</tbody></table>';
+        html += '</tbody></table></div>';
         document.getElementById('channelList').innerHTML = html;
       } catch (err) {
-        document.getElementById('channelList').innerHTML = '<div class="empty">加载失败</div>';
+        document.getElementById('channelList').innerHTML = '<div class="empty">路由加载失败，请稍后重试</div>';
       }
     }
 
-    async function addChannel() {
+    function accountSelectOptions(accounts) {
+      let html = '<option value="">选择目标账号</option>';
+      const mainAccounts = accounts.filter((account) => {
+        return account.account_type !== 'subaccount';
+      });
+      for (const mainAccount of mainAccounts) {
+        const enabledChildren = accounts.filter((account) => {
+          return account.account_type === 'subaccount'
+            && account.parent_account_id === mainAccount.account_id
+            && Number(account.is_enabled) === 1;
+        });
+        const mainEnabled = Number(mainAccount.is_enabled) === 1;
+        if (!mainEnabled && enabledChildren.length === 0) {
+          continue;
+        }
+        html += `<optgroup label="主账号 · ${esc(mainAccount.account_id)}">`;
+        if (mainEnabled) {
+          html += `<option value="${esc(mainAccount.account_id)}">主账号 · ${esc(mainAccount.account_id)} → ${esc(mainAccount.execution_account_id)}</option>`;
+        }
+        for (const child of enabledChildren) {
+          html += `<option value="${esc(child.account_id)}">子账号 · ${esc(child.account_id)} → ${esc(child.execution_account_id)}</option>`;
+        }
+        html += '</optgroup>';
+      }
+      return html;
+    }
+
+    function editChannelByIndex(index) {
+      const channel = channelCache[index];
+      if (!channel) {
+        return;
+      }
+      document.getElementById('ch-id').value = channel.channel_id;
+      document.getElementById('ch-name').value = channel.channel_name || '';
+      document.getElementById('ch-account').value = channel.target_account_id;
+      document.getElementById('ch-account').focus();
+      toast('已载入路由，可选择新执行账号');
+    }
+
+    async function saveChannel() {
       const channel_id = document.getElementById('ch-id').value.trim();
       const target_account_id = document.getElementById('ch-account').value;
       const channel_name = document.getElementById('ch-name').value.trim();
-      if (!channel_id || !target_account_id) { toast('请填写频道 ID 并选择目标账号'); return; }
-      const r = await api('/trading/channels', { method: 'POST', body: { channel_id, target_account_id, channel_name } });
-      if (r.ok) { toast('路由已添加'); document.getElementById('ch-id').value = ''; document.getElementById('ch-name').value = ''; loadChannels(); }
-      else toast(r.error || '添加失败');
+      if (!channel_id || !target_account_id) {
+        toast('请填写频道 ID 并选择执行账号');
+        return;
+      }
+      const button = document.getElementById('saveChannelButton');
+      setButtonBusy(button, true, '保存中...');
+      try {
+        const result = await api('/trading/channels', {
+          method: 'POST',
+          body: { channel_id, target_account_id, channel_name },
+        });
+        if (!result.ok) {
+          toast(result.error || '路由保存失败');
+          return;
+        }
+        toast('频道路由已保存');
+        document.getElementById('ch-id').value = '';
+        document.getElementById('ch-name').value = '';
+        document.getElementById('ch-account').value = '';
+        await loadChannels();
+      } catch (err) {
+        toast('路由保存失败，请检查 watcher 服务连接');
+      } finally {
+        setButtonBusy(button, false, '');
+      }
+    }
+
+    function deleteChannelByIndex(index) {
+      const channel = channelCache[index];
+      if (!channel) {
+        return;
+      }
+      deleteChannel(channel.channel_id);
     }
 
     async function deleteChannel(id) {
-      if (!confirm(`确定删除频道路由 "${id}"?`)) return;
-      const r = await (await fetch(`/api/trading/channels/${encodeURIComponent(id)}`, { method: 'DELETE' })).json();
-      if (r.ok) { toast('已删除'); loadChannels(); }
-      else toast(r.error || '删除失败');
+      if (!confirm(`确定删除频道路由 "${id}"?`)) {
+        return;
+      }
+      const result = await api('/trading/channels/' + encodeURIComponent(id), { method: 'DELETE' });
+      if (!result.ok) {
+        toast(result.error || '删除失败');
+        return;
+      }
+      toast('频道路由已删除');
+      await loadChannels();
     }
 
     async function loadDialogsForRouting() {

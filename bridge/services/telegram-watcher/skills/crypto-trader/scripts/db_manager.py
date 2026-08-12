@@ -18,7 +18,9 @@ Usage (import):
 
 import argparse
 import json
+import math
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -26,6 +28,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DEFAULT_DB_PATH = os.path.expanduser("~/projects/trading-data/trading.db")
+CREDENTIAL_ACCOUNT_ID_PATTERN = re.compile(
+    r"^[^\x00-\x1f\x7f]{1,128}$"
+)
+EXECUTION_ACCOUNT_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+)
+ACCOUNT_TYPES = {"main", "subaccount"}
 
 # ---------------------------------------------------------------------------
 # Thread-safe connection management
@@ -63,7 +72,18 @@ CREATE TABLE IF NOT EXISTS account_configs (
     api_key             TEXT NOT NULL,
     api_secret          TEXT NOT NULL,
     default_risk_ratio  REAL DEFAULT 0.01,
-    is_testnet          INTEGER DEFAULT 1
+    is_testnet          INTEGER DEFAULT 1,
+    account_type        TEXT NOT NULL DEFAULT 'main',
+    parent_account_id   TEXT NOT NULL DEFAULT '',
+    execution_account_id TEXT NOT NULL DEFAULT '',
+    risk_capital_multiplier REAL NOT NULL,
+    is_enabled          INTEGER NOT NULL DEFAULT 1,
+    CHECK (account_type IN ('main', 'subaccount')),
+    CHECK (
+      risk_capital_multiplier IS NULL
+      OR risk_capital_multiplier > 0
+    ),
+    CHECK (is_enabled IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS channel_routing (
@@ -132,7 +152,113 @@ class DatabaseManager:
 
     # -- helpers -------------------------------------------------------------
     def _ensure_dir(self):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        directory = os.path.dirname(self.db_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+    def _ensure_schema(self) -> None:
+        self._ensure_dir()
+        self.conn.executescript(SCHEMA_SQL)
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(account_configs)").fetchall()
+        }
+        multiplier_column_was_missing = (
+            "risk_capital_multiplier" not in columns
+        )
+        if "account_type" not in columns:
+            self.conn.execute(
+                "ALTER TABLE account_configs "
+                "ADD COLUMN account_type TEXT NOT NULL DEFAULT 'main'"
+            )
+        if "parent_account_id" not in columns:
+            self.conn.execute(
+                "ALTER TABLE account_configs "
+                "ADD COLUMN parent_account_id TEXT NOT NULL DEFAULT ''"
+            )
+        if multiplier_column_was_missing:
+            self.conn.execute(
+                "ALTER TABLE account_configs "
+                "ADD COLUMN risk_capital_multiplier REAL"
+            )
+        if "execution_account_id" not in columns:
+            self.conn.execute(
+                "ALTER TABLE account_configs "
+                "ADD COLUMN execution_account_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "is_enabled" not in columns:
+            self.conn.execute(
+                "ALTER TABLE account_configs "
+                "ADD COLUMN is_enabled INTEGER NOT NULL DEFAULT 1"
+            )
+        self.conn.executescript(
+            """
+            UPDATE account_configs
+            SET account_type = 'main'
+            WHERE account_type IS NULL
+               OR account_type = ''
+               OR account_type NOT IN ('main', 'subaccount');
+
+            UPDATE account_configs
+            SET parent_account_id = ''
+            WHERE account_type = 'main'
+               OR parent_account_id IS NULL;
+
+            UPDATE account_configs
+            SET execution_account_id = account_id
+            WHERE execution_account_id IS NULL
+               OR execution_account_id = '';
+
+            CREATE INDEX IF NOT EXISTS idx_account_configs_parent
+            ON account_configs (parent_account_id, account_type);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_account_configs_execution_account
+            ON account_configs (execution_account_id);
+            """
+        )
+        if multiplier_column_was_missing:
+            self.conn.execute(
+                "UPDATE account_configs SET is_enabled = 0"
+            )
+        self._disable_accounts_with_invalid_multiplier()
+        channel_columns = {
+            row["name"]
+            for row in self.conn.execute(
+                "PRAGMA table_info(channel_routing)"
+            ).fetchall()
+        }
+        if "channel_name" not in channel_columns:
+            self.conn.execute(
+                "ALTER TABLE channel_routing "
+                "ADD COLUMN channel_name TEXT DEFAULT ''"
+            )
+        self.conn.commit()
+
+    def _disable_accounts_with_invalid_multiplier(self) -> None:
+        rows = self.conn.execute(
+            "SELECT account_id, risk_capital_multiplier "
+            "FROM account_configs"
+        ).fetchall()
+        for row in rows:
+            if self._valid_risk_capital_multiplier(
+                row["risk_capital_multiplier"]
+            ):
+                continue
+            self.conn.execute(
+                "UPDATE account_configs SET is_enabled = 0 "
+                "WHERE account_id = ?",
+                (row["account_id"],),
+            )
+
+    @staticmethod
+    def _valid_risk_capital_multiplier(value: object) -> bool:
+        if value is None or isinstance(value, bool):
+            return False
+        try:
+            multiplier = float(value)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(multiplier) and multiplier > 0
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -149,8 +275,7 @@ class DatabaseManager:
     # -- init ----------------------------------------------------------------
     def init_db(self) -> dict:
         """Create all tables. Returns status dict."""
-        self._ensure_dir()
-        self.conn.executescript(SCHEMA_SQL)
+        self._ensure_schema()
         return {"status": "ok", "message": "Database initialized", "path": self.db_path}
 
     # -- account_configs -----------------------------------------------------
@@ -161,33 +286,181 @@ class DatabaseManager:
         api_secret: str,
         risk_ratio: float = 0.01,
         is_testnet: bool = True,
+        account_type: str = "main",
+        parent_account_id: str = "",
+        risk_capital_multiplier: float | None = None,
+        execution_account_id: str = "",
     ) -> dict:
+        self._ensure_schema()
+        normalized_account_id = str(account_id).strip()
+        normalized_account_type = str(account_type or "main").strip().lower()
+        normalized_parent_account_id = str(parent_account_id or "").strip()
+        normalized_execution_account_id = str(
+            execution_account_id or normalized_account_id
+        ).strip()
+
+        if not CREDENTIAL_ACCOUNT_ID_PATTERN.fullmatch(
+            normalized_account_id
+        ):
+            return {
+                "status": "error",
+                "message": (
+                    "account_id must be 1-128 printable characters"
+                ),
+            }
+        if normalized_account_type not in ACCOUNT_TYPES:
+            return {
+                "status": "error",
+                "message": "account_type must be main or subaccount",
+            }
+        if not EXECUTION_ACCOUNT_ID_PATTERN.fullmatch(
+            normalized_execution_account_id
+        ):
+            return {
+                "status": "error",
+                "message": (
+                    "execution_account_id must use letters, numbers, dots, "
+                    "underscores, or hyphens"
+                ),
+            }
+        if not math.isfinite(risk_ratio) or risk_ratio < 0:
+            return {
+                "status": "error",
+                "message": "risk_ratio must be a non-negative number",
+            }
+        if not self._valid_risk_capital_multiplier(
+            risk_capital_multiplier
+        ):
+            return {
+                "status": "error",
+                "message": (
+                    "risk_capital_multiplier is required and must be "
+                    "greater than 0"
+                ),
+            }
+
+        hierarchy_error = self._validate_account_hierarchy(
+            account_id=normalized_account_id,
+            account_type=normalized_account_type,
+            parent_account_id=normalized_parent_account_id,
+            is_testnet=is_testnet,
+        )
+        if hierarchy_error:
+            return {"status": "error", "message": hierarchy_error}
+
+        existing_execution_account = self.conn.execute(
+            "SELECT account_id FROM account_configs "
+            "WHERE execution_account_id = ?",
+            (normalized_execution_account_id,),
+        ).fetchone()
+        if existing_execution_account:
+            return {
+                "status": "error",
+                "message": "V3 execution account already exists",
+            }
+
         try:
             self.conn.execute(
-                "INSERT INTO account_configs (account_id, api_key, api_secret, default_risk_ratio, is_testnet) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (account_id, api_key, api_secret, risk_ratio, int(is_testnet)),
+                "INSERT INTO account_configs "
+                "(account_id, api_key, api_secret, default_risk_ratio, is_testnet, "
+                "account_type, parent_account_id, risk_capital_multiplier, "
+                "execution_account_id, is_enabled) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                (
+                    normalized_account_id,
+                    api_key,
+                    api_secret,
+                    risk_ratio,
+                    int(is_testnet),
+                    normalized_account_type,
+                    normalized_parent_account_id,
+                    risk_capital_multiplier,
+                    normalized_execution_account_id,
+                ),
             )
             self.conn.commit()
-            return {"status": "ok", "account_id": account_id}
+            return {"status": "ok", "account_id": normalized_account_id}
         except sqlite3.IntegrityError:
-            return {"status": "error", "message": f"Account '{account_id}' already exists"}
+            return {
+                "status": "error",
+                "message": f"Account '{normalized_account_id}' already exists",
+            }
 
     def list_accounts(self) -> list[dict]:
-        rows = self.conn.execute("SELECT * FROM account_configs").fetchall()
+        self._ensure_schema()
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM account_configs
+            ORDER BY
+              CASE
+                WHEN account_type = 'main' THEN account_id
+                ELSE parent_account_id
+              END,
+              CASE account_type WHEN 'main' THEN 0 ELSE 1 END,
+              account_id
+            """
+        ).fetchall()
         return self._rows_to_list(rows)
+
+    def _validate_account_hierarchy(
+        self,
+        account_id: str,
+        account_type: str,
+        parent_account_id: str,
+        is_testnet: bool,
+    ) -> str | bool:
+        if account_type == "main":
+            if parent_account_id:
+                return "Main account cannot have parent_account_id"
+            return False
+
+        if not parent_account_id:
+            return "Subaccount requires parent_account_id"
+        if parent_account_id == account_id:
+            return "Subaccount cannot reference itself"
+
+        parent = self.conn.execute(
+            "SELECT account_type, is_testnet, is_enabled "
+            "FROM account_configs WHERE account_id = ?",
+            (parent_account_id,),
+        ).fetchone()
+        if not parent:
+            return "Parent account not found"
+        if parent["account_type"] != "main":
+            return "Parent account must be a main account"
+        if int(parent["is_enabled"]) != 1:
+            return "Parent account is disabled"
+        if int(parent["is_testnet"]) != int(is_testnet):
+            return "Subaccount environment must match its main account"
+        return False
 
     # -- channel_routing -----------------------------------------------------
     def set_channel(self, channel_id: str, target_account_id: str, channel_name: str = "") -> dict:
+        self._ensure_schema()
+        target = self.conn.execute(
+            "SELECT account_id, is_enabled FROM account_configs "
+            "WHERE account_id = ?",
+            (target_account_id,),
+        ).fetchone()
+        if not target:
+            return {"status": "error", "message": "Target account not found"}
+        if int(target["is_enabled"]) != 1:
+            return {"status": "error", "message": "Target account is disabled"}
+
         self.conn.execute(
-            "INSERT OR REPLACE INTO channel_routing (channel_id, target_account_id, channel_name) "
-            "VALUES (?, ?, ?)",
+            "INSERT INTO channel_routing (channel_id, target_account_id, channel_name) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(channel_id) DO UPDATE SET "
+            "target_account_id = excluded.target_account_id, "
+            "channel_name = excluded.channel_name",
             (channel_id, target_account_id, channel_name),
         )
         self.conn.commit()
         return {"status": "ok", "channel_id": channel_id, "target_account_id": target_account_id}
 
     def list_channels(self) -> list[dict]:
+        self._ensure_schema()
         rows = self.conn.execute("SELECT * FROM channel_routing").fetchall()
         return self._rows_to_list(rows)
 
@@ -393,6 +666,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("api_secret")
     p.add_argument("--risk", type=float, default=0.01, help="Default risk ratio (default: 0.01)")
     p.add_argument("--testnet", action="store_true", default=False, help="Use testnet")
+    p.add_argument(
+        "--type",
+        choices=("main", "subaccount"),
+        default="main",
+        help="Execution account type",
+    )
+    p.add_argument(
+        "--parent-account",
+        default="",
+        help="Required main account ID when --type subaccount",
+    )
+    p.add_argument(
+        "--capital-multiplier",
+        type=float,
+        required=True,
+        help="Risk capital multiplier applied to the account balance",
+    )
+    p.add_argument(
+        "--execution-account",
+        default="",
+        help="Canonical V3 execution account ID (defaults to account_id)",
+    )
 
     # list-accounts
     sub.add_parser("list-accounts", help="List all accounts")
@@ -492,7 +787,19 @@ def main() -> None:
             _json_out(db.init_db())
 
         case "add-account":
-            _json_out(db.add_account(args.account_id, args.api_key, args.api_secret, args.risk, args.testnet))
+            _json_out(
+                db.add_account(
+                    args.account_id,
+                    args.api_key,
+                    args.api_secret,
+                    args.risk,
+                    args.testnet,
+                    args.type,
+                    args.parent_account,
+                    args.capital_multiplier,
+                    args.execution_account,
+                )
+            )
 
         case "list-accounts":
             _json_out(db.list_accounts())

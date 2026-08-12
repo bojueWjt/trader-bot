@@ -26,15 +26,38 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from psycopg2.extras import RealDictCursor
 
+_PSYCOPG2_DRIVER = psycopg2
 _HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+_DB = _HERE.parent / "db"
+_EXECUTION_DOMAIN = _HERE.parents[2] / "packages" / "execution-domain"
+for _module_path in (_HERE, _DB, _EXECUTION_DOMAIN):
+    if str(_module_path) not in sys.path:
+        sys.path.insert(0, str(_module_path))
+
+from execution_domain.control_plane import (  # noqa: E402
+    portfolio_baseline_sha256,
+)
+
+from app_roles import (  # noqa: E402
+    AppRole,
+    build_role_app,
+    current_app_role,
+    expected_database_role_name,
+    resolve_app_role,
+    rollback_only_permission_probe,
+)
+from pools import (  # noqa: E402
+    PoolCheckoutTimeout,
+    checkout_role_connection,
+    close_role_pools,
+)
 
 from snapshot import (  # noqa: E402
     DEFAULT_STALENESS_MS,
     _missing_nodes,
     _worst_reconciliation_state,
     build_system_snapshot,
+    validate_snapshot,
 )
 
 READER_TOKEN_ENV = {
@@ -45,6 +68,151 @@ READER_TOKEN_ENV = {
 }
 
 app = FastAPI(title="Hermes control-plane read API", version="contracts-v1")
+NODE_COMMAND_POLL_LIMIT = 64
+_TRADING_STATE_COMMANDS = frozenset({"HALT", "REDUCE", "RESUME"})
+_COMMAND_TARGET_MAX_AGE_SECONDS = 5.0
+_LIVE_EVIDENCE_MAX_AGE_SECONDS = 5.0
+_TESTNET_EMERGENCY_CLOSE_EVIDENCE_MAX_AGE_SECONDS = 86_400.0
+_LIVE_RECONCILIATION_MAX_LAG_MS = 5_000
+_COMMAND_ACK_STATUSES = frozenset(
+    {"accepted", "running", "completed", "failed"}
+)
+_INCIDENT_SEVERITIES = frozenset({"P0", "P1", "P2"})
+_INCIDENT_SEVERITY_RANK = {
+    "P0": 0,
+    "P1": 1,
+    "P2": 2,
+}
+_INCIDENT_REASON_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,127}$")
+_INCIDENT_SUMMARY_MAX_LENGTH = 2_000
+_ROLLOUT_ACCOUNTS = (
+    "account-a",
+    "account-b",
+    "account-c",
+    "account-d",
+)
+_ROLLOUT_PHASE_ACCOUNT_A_CANARY = "account_a_canary"
+_ROLLOUT_PHASE_ACCOUNT_B = "account_b_rollout"
+_ROLLOUT_PHASE_ACCOUNT_C = "account_c_rollout"
+_ROLLOUT_PHASE_ACCOUNT_D = "account_d_rollout"
+_ROLLOUT_PHASE_FLEET_COMPLETE = "fleet_complete"
+_ROLLOUT_PHASE_ABORTED = "aborted"
+_ACTIVE_ROLLOUT_PHASES = (
+    _ROLLOUT_PHASE_ACCOUNT_A_CANARY,
+    _ROLLOUT_PHASE_ACCOUNT_B,
+    _ROLLOUT_PHASE_ACCOUNT_C,
+    _ROLLOUT_PHASE_ACCOUNT_D,
+)
+_CANARY_PHASE_BY_ACCOUNT = {
+    "account-a": _ROLLOUT_PHASE_ACCOUNT_A_CANARY,
+    "account-b": _ROLLOUT_PHASE_ACCOUNT_B,
+    "account-c": _ROLLOUT_PHASE_ACCOUNT_C,
+    "account-d": _ROLLOUT_PHASE_ACCOUNT_D,
+}
+
+
+def _role_aware_database_connect(database_url: str):
+    role = current_app_role()
+    if role is AppRole.ALL:
+        return _PSYCOPG2_DRIVER.connect(database_url)
+    try:
+        return checkout_role_connection(database_url, role)
+    except PoolCheckoutTimeout as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{role.value} database pool exhausted",
+        ) from exc
+
+
+class _Psycopg2Facade:
+    def __init__(self) -> None:
+        self.connect = _role_aware_database_connect
+
+
+psycopg2 = _Psycopg2Facade()
+
+
+def _database_connection(database_url: str):
+    return psycopg2.connect(database_url)
+
+
+def _verify_database_session_contract(conn, role: AppRole) -> dict[str, str]:
+    expected_database_role = expected_database_role_name(role)
+    permission_probe = rollback_only_permission_probe(role)
+    if permission_probe is False:
+        raise RuntimeError(
+            f"{role.value} rollback-only permission probe is unavailable"
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT session_user, current_user")
+        row = cur.fetchone()
+        if row is None or len(row) != 2:
+            raise RuntimeError("database role identity query returned no row")
+        session_user = str(row[0] or "")
+        current_user = str(row[1] or "")
+        if (
+            session_user != expected_database_role
+            or current_user != expected_database_role
+        ):
+            raise RuntimeError(
+                f"{role.value} database role identity mismatch"
+            )
+
+        cur.execute("SAVEPOINT control_plane_role_permission_probe")
+        forbidden_write_succeeded = False
+        try:
+            cur.execute(permission_probe)
+            forbidden_write_succeeded = True
+        except Exception as exc:
+            if getattr(exc, "pgcode", "") != "42501":
+                cur.execute(
+                    "ROLLBACK TO SAVEPOINT "
+                    "control_plane_role_permission_probe"
+                )
+                raise RuntimeError(
+                    f"{role.value} database permission probe failed"
+                ) from exc
+        finally:
+            cur.execute(
+                "ROLLBACK TO SAVEPOINT "
+                "control_plane_role_permission_probe"
+            )
+            cur.execute(
+                "RELEASE SAVEPOINT control_plane_role_permission_probe"
+            )
+        if forbidden_write_succeeded:
+            raise RuntimeError(
+                f"{role.value} database role has forbidden write access"
+            )
+
+    return {
+        "session_user": session_user,
+        "current_user": current_user,
+        "expected_database_role": expected_database_role,
+    }
+
+
+def _verify_role_database_on_startup(
+    role_app: FastAPI,
+    role: AppRole,
+) -> None:
+    configured_role = os.environ.get(
+        "CONTROL_PLANE_EXPECT_DATABASE_ROLE",
+        "",
+    ).strip()
+    if not configured_role:
+        return
+    expected_database_role_name(role)
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is required for isolated app role")
+    conn = checkout_role_connection(database_url, role)
+    try:
+        identity = _verify_database_session_contract(conn, role)
+    finally:
+        conn.close()
+    role_app.state.database_identity = identity
 
 
 def _reader_tokens() -> dict[str, str]:
@@ -77,7 +245,9 @@ def system_snapshot(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=503, detail="projection store unavailable")
     conn = psycopg2.connect(database_url)
     try:
-        return build_system_snapshot(conn)
+        snapshot = build_system_snapshot(conn)
+        validate_snapshot(snapshot)
+        return snapshot
     finally:
         conn.close()
 
@@ -96,7 +266,9 @@ def _dashboard_snapshot_payload() -> dict:
         raise RuntimeError("projection store unavailable")
     conn = psycopg2.connect(database_url)
     try:
-        return build_system_snapshot(conn)
+        snapshot = build_system_snapshot(conn)
+        validate_snapshot(snapshot)
+        return snapshot
     finally:
         conn.close()
 
@@ -238,8 +410,8 @@ def _nautilus_instrument_id(instr: str | None) -> str | None:
 def _binance_mark_price(symbol: str | None) -> float | None:
     """Live futures mark price for sizing a MARKET order that carries no entry price.
     fapi.binance.com is dest-routed via the JP WireGuard tunnel on hk, so the HK 451
-    geo-block does not apply. Fails soft (returns None) so a fetch error just leaves the
-    order unsized (denied downstream) rather than throwing in the intent-serving path."""
+    geo-block does not apply. Returns None on fetch failure; stop-loss sizing converts
+    that state into a fail-closed 503 response."""
     if not symbol:
         return None
     sym = str(symbol).split("-")[0].split(".")[0].upper()
@@ -270,7 +442,12 @@ _MANAGEMENT_ACTIONS = frozenset(
 _EXECUTION_ORDER_PLAN_METADATA = (
     "authorization",
     "attribution",
+    "canary_permit",
     "disable_take_profits",
+    "equity",
+    "live_open_gate",
+    "request_semantics",
+    "rollout_phase",
 )
 
 # zone-ladder v1 已定参数，改动须过再校准。
@@ -341,6 +518,16 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
     entry_type = raw_entry_type or "market"
     if entry_type == "none":
         entry_type = "market"
+    time_in_force = str(
+        entry.get("time_in_force")
+        or op.get("time_in_force")
+        or ""
+    ).upper()
+    if not time_in_force:
+        if entry_type == "market":
+            time_in_force = "IOC"
+        else:
+            time_in_force = "GTC"
     entry_price = entry.get("price") if entry.get("price") is not None else entry.get("price_min")
     price_min = entry.get("price_min")
     price_max = entry.get("price_max")
@@ -354,6 +541,7 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
         entry_price,
         price_min,
         price_max,
+        time_in_force,
     )
     if entry_type == "zone":
         try:
@@ -381,6 +569,7 @@ def _single_execution_order_plan(
     entry_price,
     price_min,
     price_max,
+    time_in_force: str,
 ) -> dict:
     max_notional = (risk_budget or {}).get("max_notional")
     quantity = op.get("quantity")
@@ -397,8 +586,11 @@ def _single_execution_order_plan(
             quantity = float(max_notional) / float(sizing_price)
         except (TypeError, ValueError, ZeroDivisionError):
             quantity = None
-    out: dict = {"side": b_side, "type": entry_type,
-                 "time_in_force": "IOC" if entry_type == "market" else "GTC"}
+    out: dict = {
+        "side": b_side,
+        "type": entry_type,
+        "time_in_force": time_in_force,
+    }
     if quantity is not None:
         out["quantity"] = str(quantity)
     if entry_type in ("limit", "zone") and entry_price is not None:
@@ -554,6 +746,9 @@ def node_intents(
     authorization: str | None = Header(default=None),
     x_node_id: str | None = Header(default=None),
     x_account_id: str | None = Header(default=None),
+    x_redis_fencing_epoch: str | None = Header(default=None),
+    x_runtime_generation: str | None = Header(default=None),
+    x_lease_fencing_token: str | None = Header(default=None),
 ):
     """A↔B seam: a node pulls approved ApprovedTradeIntentV1 for its account, cursor-based
     (durable, restart-safe). Only this account's approved intents are returned."""
@@ -574,9 +769,17 @@ def node_intents(
         ts, _, iid = after.partition("|")
         cursor_clause = " AND (created_at, intent_id) > (%s, %s)"
         params += [ts, iid]
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=account_id,
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
             cur.execute(
                 "SELECT intent_id, hermes_decision_id, risk_decision_id, schema_version, "
                 "account_id, instrument_id, action::text, order_plan, risk_budget, "
@@ -643,13 +846,53 @@ def issue_operator_command(
     from commands import issue_command
     from audit import dangerous_operation_payload, record_audit_event
 
-    target_nodes = body.get("target_nodes") or []
     scope = _operator_command_scope(body, request_id, reason)
-    conn = psycopg2.connect(database_url)
+    target_nodes = _operator_command_targets(body.get("target_nodes"))
+    account_id = str(scope.get("account_id") or "").strip()
+    if command_type in _TRADING_STATE_COMMANDS and not account_id:
+        raise HTTPException(status_code=400, detail="scope.account_id is required")
+    if command_type in _TRADING_STATE_COMMANDS and not target_nodes:
+        raise HTTPException(
+            status_code=400,
+            detail="state commands require target_nodes",
+        )
+    if (
+        command_type in _TRADING_STATE_COMMANDS
+        and account_id in _ROLLOUT_ACCOUNTS
+        and len(target_nodes) != 1
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{account_id} commands require exactly one target node",
+        )
+    idempotency_key = body.get("idempotency_key") or request_id
+    conn = _database_connection(database_url)
     try:
+        if command_type in _TRADING_STATE_COMMANDS:
+            with conn.cursor() as cur:
+                existing_scope = _operator_command_existing_scope(
+                    cur,
+                    idempotency_key,
+                )
+                if existing_scope is not False:
+                    scope = existing_scope
+                else:
+                    _validate_fresh_command_targets(
+                        cur,
+                        account_id=account_id,
+                        target_nodes=target_nodes,
+                        require_fresh=command_type != "RESUME",
+                    )
+                    if command_type == "RESUME":
+                        _validate_and_arm_resume(
+                            cur,
+                            account_id=account_id,
+                            node_id=target_nodes[0],
+                            scope=scope,
+                        )
         result = issue_command(
             conn, command_type=command_type, requested_by="risk_admin", reason=reason,
-            idempotency_key=body.get("idempotency_key") or request_id,
+            idempotency_key=idempotency_key,
             target_nodes=target_nodes, scope=scope,
         )
         record_audit_event(
@@ -669,6 +912,7 @@ def issue_operator_command(
 
 def _operator_command_scope(body: dict, request_id: str, reason: str) -> dict:
     scope = dict(body.get("scope") or {})
+    scope.pop("live_open_gate", None)
     scope["authorization"] = {
         "authorized_by_type": "user",
         "authorized_by_id": "risk_admin",
@@ -680,6 +924,790 @@ def _operator_command_scope(body: dict, request_id: str, reason: str) -> dict:
     return scope
 
 
+def _operator_command_targets(raw_targets) -> list[str]:
+    if raw_targets is None:
+        return []
+    if not isinstance(raw_targets, list):
+        raise HTTPException(status_code=400, detail="target_nodes must be a list")
+    target_nodes = [str(node_id or "").strip() for node_id in raw_targets]
+    if any(not node_id for node_id in target_nodes):
+        raise HTTPException(
+            status_code=400,
+            detail="target_nodes contains an empty node_id",
+        )
+    if len(set(target_nodes)) != len(target_nodes):
+        raise HTTPException(
+            status_code=400,
+            detail="target_nodes must be unique",
+        )
+    return target_nodes
+
+
+def _operator_command_existing_scope(
+    cur,
+    idempotency_key: str,
+) -> dict | bool:
+    cur.execute(
+        "SELECT scope FROM operator_commands WHERE idempotency_key=%s",
+        (idempotency_key,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return False
+    scope = row[0]
+    if not isinstance(scope, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="persisted operator command scope is invalid",
+        )
+    return dict(scope)
+
+
+def _validate_fresh_command_targets(
+    cur,
+    *,
+    account_id: str,
+    target_nodes: list[str],
+    require_fresh: bool,
+) -> None:
+    freshness_clause = ""
+    params: list = [account_id, target_nodes]
+    if require_fresh:
+        freshness_clause = """
+          AND last_seen_at >= (
+              now() - make_interval(secs => %s)
+          )
+        """
+        params.append(_command_target_max_age_seconds())
+    cur.execute(
+        f"""
+        SELECT node_id
+        FROM node_heartbeats
+        WHERE account_id=%s
+          AND node_id = ANY(%s)
+          {freshness_clause}
+        FOR SHARE
+        """,
+        tuple(params),
+    )
+    matched_nodes = {str(row[0]) for row in cur.fetchall()}
+    if matched_nodes != set(target_nodes):
+        raise HTTPException(
+            status_code=409,
+            detail="target_nodes do not match fresh account binding",
+        )
+
+
+def _command_target_max_age_seconds() -> float:
+    return _bounded_positive_env_seconds(
+        "CONTROL_PLANE_COMMAND_TARGET_MAX_AGE_SECONDS",
+        _COMMAND_TARGET_MAX_AGE_SECONDS,
+        maximum=60.0,
+    )
+
+
+def _live_evidence_max_age_seconds() -> float:
+    return _bounded_positive_env_seconds(
+        "CONTROL_PLANE_LIVE_EVIDENCE_MAX_AGE_SECONDS",
+        _LIVE_EVIDENCE_MAX_AGE_SECONDS,
+        maximum=60.0,
+    )
+
+
+def _testnet_emergency_close_evidence_max_age_seconds() -> float:
+    return _bounded_positive_env_seconds(
+        "CONTROL_PLANE_TESTNET_EMERGENCY_CLOSE_EVIDENCE_MAX_AGE_SECONDS",
+        _TESTNET_EMERGENCY_CLOSE_EVIDENCE_MAX_AGE_SECONDS,
+        maximum=604_800.0,
+    )
+
+
+def _bounded_positive_env_seconds(
+    env_name: str,
+    default: float,
+    *,
+    maximum: float,
+) -> float:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(value) or value <= 0 or value > maximum:
+        return default
+    return value
+
+
+def _validate_and_arm_resume(
+    cur,
+    *,
+    account_id: str,
+    node_id: str,
+    scope: dict,
+) -> None:
+    cur.execute(
+        """
+        SELECT fence_id
+        FROM control_plane_maintenance_fences
+        WHERE domain='trader-v3'
+          AND status='active'
+          AND expires_at > clock_timestamp()
+        LIMIT 1
+        FOR SHARE
+        """
+    )
+    if cur.fetchone() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="RESUME is blocked by active maintenance fence",
+        )
+
+    symbol = _resume_scope_symbol(scope)
+    release_id = str(scope.get("release_id") or "").strip()
+    if not release_id:
+        raise HTTPException(
+            status_code=400,
+            detail="scope.release_id is required for RESUME",
+        )
+    rollout = _reviewed_rollout_state(
+        cur,
+        release_id,
+        lock=True,
+    )
+    live_open_gate = _live_open_gate_from_rollout(rollout)
+    if live_open_gate is False:
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release live open gate is unavailable",
+        )
+
+    raw_permit_id = scope.get("canary_permit_id")
+    canary_request = _is_canary_request(
+        account_id=account_id,
+        raw_permit_id=raw_permit_id,
+    )
+    required_rollout_phase = None
+    if canary_request:
+        required_rollout_phase = _canary_phase_for_account(account_id)
+
+    heartbeat = _load_live_heartbeat(
+        cur,
+        account_id=account_id,
+        node_id=node_id,
+    )
+    _validate_live_heartbeat_evidence(
+        cur,
+        heartbeat=heartbeat,
+        node_id=node_id,
+        account_id=account_id,
+        symbol=symbol,
+        release_id=release_id,
+        expected_trading_state="HALTED",
+        required_rollout_phase=required_rollout_phase,
+    )
+
+    cur.execute(
+        """
+        SELECT 1
+        FROM production_incidents
+        WHERE account_id=%s
+          AND severity IN ('P0', 'P1')
+          AND status='open'
+        LIMIT 1
+        """,
+        (account_id,),
+    )
+    if cur.fetchone() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="account has an open P0/P1 incident",
+        )
+
+    scope["live_open_gate"] = live_open_gate
+    if not canary_request:
+        return
+
+    permit_id = _required_uuid(
+        raw_permit_id,
+        f"scope.canary_permit_id is required for {account_id} RESUME",
+    )
+    cur.execute(
+        """
+        SELECT account_id,
+               symbol,
+               max_notional_usdt,
+               max_cumulative_loss_usdt,
+               max_open_count,
+               consumed_open_count,
+               expires_at,
+               release_id,
+               testnet_emergency_close_evidence_sha256,
+               testnet_emergency_close_verified_at,
+               status
+        FROM live_canary_permits
+        WHERE permit_id=%s
+        FOR UPDATE
+        """,
+        (permit_id,),
+    )
+    permit = cur.fetchone()
+    if permit is None:
+        raise HTTPException(status_code=409, detail="canary permit not found")
+    (
+        permit_account_id,
+        permit_symbol,
+        max_notional,
+        max_cumulative_loss,
+        max_open_count,
+        consumed_open_count,
+        expires_at,
+        permit_release_id,
+        emergency_close_evidence_sha256,
+        emergency_close_verified_at,
+        permit_status,
+    ) = permit
+    if permit_status != "issued":
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit is not available to arm",
+        )
+    if expires_at is None or expires_at <= heartbeat["database_now"]:
+        raise HTTPException(status_code=409, detail="canary permit has expired")
+    if (
+        permit_account_id != account_id
+        or _canonical_symbol(permit_symbol) != symbol
+        or permit_release_id != release_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit scope does not match RESUME",
+        )
+    _validate_canary_permit_machine_evidence(
+        max_notional=max_notional,
+        max_cumulative_loss=max_cumulative_loss,
+        emergency_close_evidence_sha256=emergency_close_evidence_sha256,
+        emergency_close_verified_at=emergency_close_verified_at,
+        database_now=heartbeat["database_now"],
+    )
+    if int(max_open_count) != 1 or int(consumed_open_count) != 0:
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit limits are invalid",
+        )
+    portfolio_baseline_sha256 = _portfolio_baseline_sha256(
+        heartbeat,
+        symbol,
+    )
+    cur.execute(
+        """
+        UPDATE live_canary_permits
+        SET status='armed',
+            armed_at=now(),
+            armed_node_id=%s,
+            portfolio_baseline_sha256=%s
+        WHERE permit_id=%s
+          AND status='issued'
+          AND consumed_open_count=0
+          AND expires_at > now()
+        """,
+        (node_id, portfolio_baseline_sha256, permit_id),
+    )
+    if cur.rowcount != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit could not be armed",
+        )
+    scope["canary_permit"] = _canary_permit_downlink_evidence(
+        permit_id=permit_id,
+        account_id=account_id,
+        symbol=symbol,
+        release_id=release_id,
+        node_id=node_id,
+        max_notional=max_notional,
+        max_cumulative_loss=max_cumulative_loss,
+        expires_at=expires_at,
+        emergency_close_evidence_sha256=emergency_close_evidence_sha256,
+        emergency_close_verified_at=emergency_close_verified_at,
+        portfolio_baseline_sha256=portfolio_baseline_sha256,
+    )
+
+
+def _validate_canary_permit_machine_evidence(
+    *,
+    max_notional,
+    max_cumulative_loss,
+    emergency_close_evidence_sha256,
+    emergency_close_verified_at,
+    database_now: datetime,
+) -> None:
+    try:
+        notional = Decimal(str(max_notional))
+        cumulative_loss = Decimal(str(max_cumulative_loss))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit limits are invalid",
+        ) from exc
+    if (
+        not notional.is_finite()
+        or notional <= 0
+        or notional > Decimal("12")
+        or not cumulative_loss.is_finite()
+        or cumulative_loss <= 0
+        or cumulative_loss >= Decimal("1.5")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit limits are invalid",
+        )
+    evidence_sha256 = str(emergency_close_evidence_sha256 or "").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", evidence_sha256) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="canary testnet emergency close evidence is invalid",
+        )
+    if not _timestamp_is_fresh_with_max_age(
+        emergency_close_verified_at,
+        database_now,
+        _testnet_emergency_close_evidence_max_age_seconds(),
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="canary testnet emergency close evidence is stale",
+        )
+
+
+def _canary_permit_downlink_evidence(
+    *,
+    permit_id: str,
+    account_id: str,
+    symbol: str,
+    release_id: str,
+    node_id: str,
+    max_notional,
+    max_cumulative_loss,
+    expires_at: datetime,
+    emergency_close_evidence_sha256,
+    emergency_close_verified_at: datetime,
+    portfolio_baseline_sha256: str,
+) -> dict:
+    return {
+        "permit_id": permit_id,
+        "account_id": account_id,
+        "symbol": symbol,
+        "target_symbol": symbol,
+        "release_id": release_id,
+        "node_id": node_id,
+        "max_notional_usdt": str(max_notional),
+        "max_cumulative_loss_usdt": str(max_cumulative_loss),
+        "max_open_count": 1,
+        "expires_at": expires_at.isoformat(),
+        "testnet_emergency_close_evidence_sha256": str(
+            emergency_close_evidence_sha256
+        ),
+        "testnet_emergency_close_verified_at": (
+            emergency_close_verified_at.isoformat()
+        ),
+        "portfolio_baseline_sha256": portfolio_baseline_sha256,
+    }
+
+
+def _resume_scope_symbol(scope: dict) -> str:
+    raw_instruments = scope.get("instruments")
+    candidates: list[str] = []
+    if raw_instruments is not None:
+        if not isinstance(raw_instruments, list):
+            raise HTTPException(
+                status_code=400,
+                detail="scope.instruments must be a list",
+            )
+        candidates.extend(str(value or "") for value in raw_instruments)
+    raw_symbol = scope.get("symbol")
+    if raw_symbol:
+        candidates.append(str(raw_symbol))
+    symbols = {_canonical_symbol(value) for value in candidates}
+    symbols.discard("")
+    if len(symbols) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="RESUME requires exactly one target symbol",
+        )
+    return next(iter(symbols))
+
+
+def _canary_phase_for_account(account_id: str) -> str:
+    phase = _CANARY_PHASE_BY_ACCOUNT.get(account_id)
+    if phase is None:
+        raise HTTPException(
+            status_code=400,
+            detail="canary account is not supported",
+        )
+    return phase
+
+
+def _is_canary_request(
+    *,
+    account_id: str,
+    raw_permit_id,
+) -> bool:
+    del account_id
+    return raw_permit_id not in (None, "")
+
+
+def _live_open_rollout_phase(account_id: str) -> str | None:
+    if account_id not in _ROLLOUT_ACCOUNTS:
+        return None
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        raise HTTPException(
+            status_code=503,
+            detail="reviewed release rollout state is unavailable",
+        )
+    conn = _database_connection(database_url)
+    try:
+        with conn.cursor() as cur:
+            rollout = _current_reviewed_rollout_state(cur)
+    finally:
+        conn.close()
+    if rollout is None:
+        return None
+    return rollout["phase"]
+
+
+def _live_open_requires_canary_permit(account_id: str) -> bool:
+    if account_id not in _ROLLOUT_ACCOUNTS:
+        return False
+    phase = _live_open_rollout_phase(account_id)
+    return phase != _ROLLOUT_PHASE_FLEET_COMPLETE
+
+
+def _required_uuid(value, detail: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail=detail)
+    try:
+        return str(UUID(raw))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+def _load_live_heartbeat(
+    cur,
+    *,
+    account_id: str,
+    node_id: str,
+) -> dict:
+    cur.execute(
+        """
+        SELECT status,
+               payload,
+               release_id,
+               image_digest,
+               config_sha256,
+               dependency_lock_sha256,
+               schema_epoch,
+               positions,
+               regular_orders,
+               algo_orders,
+               positions_snapshot_at,
+               regular_orders_snapshot_at,
+               algo_orders_snapshot_at,
+               reconciliation_completed_at,
+               redis_fencing_epoch,
+               runtime_generation,
+               lease_fencing_token,
+               heartbeat_sequence,
+               last_seen_at,
+               now()
+        FROM node_heartbeats
+        WHERE node_id=%s
+          AND account_id=%s
+        FOR SHARE
+        """,
+        (node_id, account_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail="target_nodes do not match fresh account binding",
+        )
+    keys = (
+        "status",
+        "payload",
+        "release_id",
+        "image_digest",
+        "config_sha256",
+        "dependency_lock_sha256",
+        "schema_epoch",
+        "positions",
+        "regular_orders",
+        "algo_orders",
+        "positions_snapshot_at",
+        "regular_orders_snapshot_at",
+        "algo_orders_snapshot_at",
+        "reconciliation_completed_at",
+        "redis_fencing_epoch",
+        "runtime_generation",
+        "lease_fencing_token",
+        "heartbeat_sequence",
+        "last_seen_at",
+        "database_now",
+    )
+    return dict(zip(keys, row))
+
+
+def _validate_live_heartbeat_evidence(
+    cur,
+    *,
+    heartbeat: dict,
+    node_id: str,
+    account_id: str,
+    symbol: str,
+    release_id: str,
+    expected_trading_state: str,
+    required_rollout_phase: str | None = None,
+) -> None:
+    if str(heartbeat["status"] or "").upper() != expected_trading_state:
+        raise HTTPException(
+            status_code=409,
+            detail=f"node must be {expected_trading_state}",
+        )
+    runtime_generation = str(
+        heartbeat.get("runtime_generation") or ""
+    ).strip()
+    redis_fencing_epoch = str(
+        heartbeat.get("redis_fencing_epoch") or ""
+    ).strip()
+    lease_fencing_token = heartbeat.get("lease_fencing_token")
+    heartbeat_sequence = heartbeat.get("heartbeat_sequence")
+    if (
+        not redis_fencing_epoch
+        or not runtime_generation
+        or not isinstance(lease_fencing_token, int)
+        or lease_fencing_token <= 0
+        or not isinstance(heartbeat_sequence, int)
+        or heartbeat_sequence <= 0
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="node heartbeat writer identity is invalid",
+        )
+    active_redis_fencing_epoch = _active_redis_fencing_epoch(
+        cur,
+        lock=False,
+    )
+    if active_redis_fencing_epoch is None:
+        raise HTTPException(
+            status_code=503,
+            detail="active redis fencing epoch is unavailable",
+        )
+    if redis_fencing_epoch != active_redis_fencing_epoch:
+        raise HTTPException(
+            status_code=409,
+            detail="node heartbeat redis fencing epoch is stale",
+        )
+    payload = heartbeat["payload"]
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=409, detail="node readiness evidence is invalid")
+    if payload.get("readiness") is not True:
+        raise HTTPException(status_code=409, detail="node is not ready")
+    try:
+        projection_lag_ms = int(payload.get("projection_lag_ms"))
+    except (TypeError, ValueError):
+        projection_lag_ms = -1
+    if (
+        projection_lag_ms < 0
+        or projection_lag_ms > _LIVE_RECONCILIATION_MAX_LAG_MS
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="node reconciliation evidence is unhealthy",
+        )
+    if str(payload.get("reconciliation_state") or "").lower() != "healthy":
+        raise HTTPException(
+            status_code=409,
+            detail="node reconciliation evidence is unhealthy",
+        )
+
+    now = heartbeat["database_now"]
+    freshness_fields = (
+        "last_seen_at",
+        "positions_snapshot_at",
+        "regular_orders_snapshot_at",
+        "algo_orders_snapshot_at",
+        "reconciliation_completed_at",
+    )
+    if any(
+        not _timestamp_is_fresh(heartbeat.get(field_name), now)
+        for field_name in freshness_fields
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="node heartbeat evidence is stale",
+        )
+
+    cur.execute(
+        """
+        SELECT image_digest,
+               config_sha256,
+               dependency_lock_sha256,
+               schema_epoch
+        FROM reviewed_release_manifests
+        WHERE account_id=%s
+          AND release_id=%s
+          AND review_status='reviewed'
+        """,
+        (account_id, release_id),
+    )
+    manifest = cur.fetchone()
+    node_identity = (
+        heartbeat.get("image_digest"),
+        heartbeat.get("config_sha256"),
+        heartbeat.get("dependency_lock_sha256"),
+        heartbeat.get("schema_epoch"),
+    )
+    if (
+        manifest is None
+        or heartbeat.get("release_id") != release_id
+        or tuple(manifest) != node_identity
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="node release identity does not match reviewed manifest",
+        )
+
+    release_identity = (
+        release_id,
+        heartbeat.get("image_digest"),
+        heartbeat.get("config_sha256"),
+        heartbeat.get("dependency_lock_sha256"),
+        heartbeat.get("schema_epoch"),
+    )
+    if required_rollout_phase is None:
+        _validate_fleet_release_ready(
+            cur,
+            node_id=node_id,
+            account_id=account_id,
+            trading_state=expected_trading_state,
+            release_identity=release_identity,
+        )
+    else:
+        _validate_canary_release_ready(
+            cur,
+            account_id=account_id,
+            required_rollout_phase=required_rollout_phase,
+            expected_trading_state=expected_trading_state,
+            release_identity=release_identity,
+        )
+
+    positions = heartbeat.get("positions")
+    regular_orders = heartbeat.get("regular_orders")
+    algo_orders = heartbeat.get("algo_orders")
+    if not all(
+        isinstance(snapshot, list)
+        for snapshot in (positions, regular_orders, algo_orders)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="node exchange evidence is invalid",
+        )
+    if any(
+        not isinstance(item, dict) or not _snapshot_item_symbol(item)
+        for snapshot in (positions, regular_orders, algo_orders)
+        for item in snapshot
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="node exchange evidence is invalid",
+        )
+    if any(
+        _snapshot_has_nonzero_position(item, symbol)
+        for item in positions
+        if isinstance(item, dict)
+    ):
+        raise HTTPException(status_code=409, detail="target symbol is not flat")
+    if any(
+        _snapshot_item_matches_symbol(item, symbol)
+        for item in regular_orders
+        if isinstance(item, dict)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="target symbol has regular orders",
+        )
+    if any(
+        _snapshot_item_matches_symbol(item, symbol)
+        for item in algo_orders
+        if isinstance(item, dict)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="target symbol has algo orders",
+        )
+
+
+def _timestamp_is_fresh(value, now: datetime) -> bool:
+    return _timestamp_is_fresh_with_max_age(
+        value,
+        now,
+        _live_evidence_max_age_seconds(),
+    )
+
+
+def _timestamp_is_fresh_with_max_age(
+    value,
+    now: datetime,
+    max_age_seconds: float,
+) -> bool:
+    if not isinstance(value, datetime) or not isinstance(now, datetime):
+        return False
+    age_seconds = (now - value).total_seconds()
+    return -1.0 <= age_seconds <= max_age_seconds
+
+
+def _canonical_symbol(value) -> str:
+    return str(value or "").strip().upper().split("-")[0].split(".")[0]
+
+
+def _snapshot_item_matches_symbol(item: dict, symbol: str) -> bool:
+    return _snapshot_item_symbol(item) == symbol
+
+
+def _snapshot_item_symbol(item: dict) -> str:
+    for field_name in ("symbol", "instrument_id", "instrument"):
+        symbol = _canonical_symbol(item.get(field_name))
+        if symbol:
+            return symbol
+    return ""
+
+
+def _snapshot_has_nonzero_position(item: dict, symbol: str) -> bool:
+    if not _snapshot_item_matches_symbol(item, symbol):
+        return False
+    raw_quantity = item.get("quantity")
+    if raw_quantity is None:
+        raw_quantity = item.get("qty")
+    if raw_quantity is None:
+        return True
+    try:
+        return Decimal(str(raw_quantity)) != 0
+    except InvalidOperation:
+        return True
+
+
+def _portfolio_baseline_sha256(heartbeat: dict, target_symbol: str) -> str:
+    try:
+        return portfolio_baseline_sha256(heartbeat, target_symbol)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="node exchange evidence is invalid",
+        ) from exc
+
+
 @app.post("/v1/nodes/{node_id}/events")
 def ingest_execution_event(
     node_id: str,
@@ -687,9 +1715,12 @@ def ingest_execution_event(
     authorization: str | None = Header(default=None),
     x_node_id: str | None = Header(default=None),
     x_account_id: str | None = Header(default=None),
+    x_redis_fencing_epoch: str | None = Header(default=None),
+    x_runtime_generation: str | None = Header(default=None),
+    x_lease_fencing_token: str | None = Header(default=None),
 ):
     """A↔B seam: a node pushes an ExecutionEventEnvelopeV1; idempotent by event_id.
-    Projection hints embedded in payload.{account,position,order} update the read model."""
+    Projection hints embedded in payload.{position,order} update the read model."""
     account_id = str(body.get("account_id") or "").strip()
     require_node(
         authorization,
@@ -712,16 +1743,22 @@ def ingest_execution_event(
     _cp_paths()
     from repository import ProjectionWriter
 
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
+        with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=account_id,
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
         writer = ProjectionWriter(conn)
         event = {**body, "node_id": body.get("node_id") or node_id}
         writer.insert_execution_event(event)
         hints = event.get("payload") or {}
         ev_id, ts = event["event_id"], event.get("ts_event")
-        account_hint = _account_projection_hint(event, hints)
-        if account_hint:
-            writer.upsert_account_projection(account_hint)
         if isinstance(hints.get("position"), dict):
             pos_hint = _normalize_position_hint(
                 {**hints["position"], "event_id": ev_id, "ts_event": ts},
@@ -744,60 +1781,19 @@ def _cp_paths() -> None:
             sys.path.insert(0, str(p))
 
 
-def _first_finite_account_number(payload: dict, *names: str) -> float | None:
-    for name in names:
-        raw = payload.get(name)
-        if raw is None or raw == "":
-            continue
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(value):
-            return value
-    return None
-
-
-def _account_projection_hint(event: dict, hints: dict) -> dict | None:
-    account = hints.get("account")
-    if not isinstance(account, dict):
-        return None
-    account_id = event.get("account_id")
-    if not account_id:
-        return None
-    equity = _first_finite_account_number(account, "equity", "balance", "total")
-    margin = _first_finite_account_number(account, "margin", "margin_balance", "locked")
-    available = _first_finite_account_number(account, "available_balance", "free")
-    if equity is None or equity <= 0:
-        return None
-    if margin is None or margin < 0:
-        return None
-    if available is not None and available < 0:
-        return None
-    normalized = dict(account)
-    normalized["account_id"] = account_id
-    normalized["equity"] = equity
-    normalized["margin"] = margin
-    normalized["available_balance"] = available
-    normalized["event_id"] = event.get("event_id")
-    normalized["last_execution_event_at"] = event.get("ts_event")
-    return normalized
-
-
 # operator_commands.command_type (A) -> node CommandType (B)
 _NODE_COMMAND_TYPE_MAP = {
     "HALT": "halt", "RESUME": "resume", "REDUCE": "set_reducing",
     "CANCEL_ALL": "cancel_all", "CLOSE_ALL": "close_all",
 }
-# node CommandAckStatus (B) -> command_node_acks.status (A)
-_NODE_ACK_STATUS_MAP = {"accepted": "acked", "completed": "acked", "failed": "failed"}
-
-
 @app.post("/v1/nodes/{node_id}/intents/{intent_id}/ack")
 def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
                     authorization: str | None = Header(default=None),
                     x_node_id: str | None = Header(default=None),
-                    x_account_id: str | None = Header(default=None)):
+                    x_account_id: str | None = Header(default=None),
+                    x_redis_fencing_epoch: str | None = Header(default=None),
+                    x_runtime_generation: str | None = Header(default=None),
+                    x_lease_fencing_token: str | None = Header(default=None)):
     """A<->B seam: node acks an intent (received/accepted/executed/rejected/...)."""
     account_id = str(body.get("account_id") or "").strip()
     require_node(
@@ -814,9 +1810,18 @@ def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
     from audit import record_audit_event
 
     status = str(getattr(body.get("status"), "value", body.get("status") or "received")).lower()
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
         intent_status = None
+        with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=account_id,
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
         if status in ("rejected", "expired"):
             with conn.cursor() as cur:
                 cur.execute(
@@ -1060,7 +2065,10 @@ def _derive_projection_from_event(writer, ev: dict) -> None:
 def post_node_events(node_id: str, body: dict = Body(default={}),
                      authorization: str | None = Header(default=None),
                      x_node_id: str | None = Header(default=None),
-                     x_account_id: str | None = Header(default=None)):
+                     x_account_id: str | None = Header(default=None),
+                     x_redis_fencing_epoch: str | None = Header(default=None),
+                     x_runtime_generation: str | None = Header(default=None),
+                     x_lease_fencing_token: str | None = Header(default=None)):
     """A<->B seam: node pushes a batch of ExecutionEventEnvelopeV1; idempotent by event_id."""
     account_id = str(body.get("account_id") or "").strip()
     require_node(
@@ -1076,9 +2084,18 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
     _cp_paths()
     from repository import ProjectionWriter
 
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     acked: list[str] = []
     try:
+        with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=account_id,
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
         writer = ProjectionWriter(conn)
         for ev in body.get("events", []):
             if not ev.get("event_id"):
@@ -1103,9 +2120,6 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
             with conn.cursor() as sp:
                 sp.execute("SAVEPOINT proj")
             try:
-                account_hint = _account_projection_hint(event, hints)
-                if account_hint:
-                    writer.upsert_account_projection(account_hint)
                 if isinstance(hints.get("position"), dict):
                     pos_hint = _normalize_position_hint(
                         {**hints["position"], "event_id": ev_id, "ts_event": ts},
@@ -1132,7 +2146,10 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
 def node_heartbeat(node_id: str, body: dict = Body(default={}),
                    authorization: str | None = Header(default=None),
                    x_node_id: str | None = Header(default=None),
-                   x_account_id: str | None = Header(default=None)):
+                   x_account_id: str | None = Header(default=None),
+                   x_redis_fencing_epoch: str | None = Header(default=None),
+                   x_runtime_generation: str | None = Header(default=None),
+                   x_lease_fencing_token: str | None = Header(default=None)):
     """A<->B seam: node liveness + readiness; feeds snapshot freshness/missing_nodes."""
     account_id = str(body.get("account_id") or "").strip()
     bound_account_id = require_node(
@@ -1147,24 +2164,1615 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
         raise HTTPException(status_code=503, detail="store unavailable")
     from psycopg2.extras import Json
 
-    conn = psycopg2.connect(database_url)
+    positions = _heartbeat_snapshot(body, "positions")
+    regular_orders = _heartbeat_snapshot(
+        body,
+        "regular_orders",
+        fallback_field="open_orders",
+    )
+    algo_orders = _heartbeat_snapshot(body, "algo_orders")
+    positions_snapshot_at = _heartbeat_timestamp(body, "positions_snapshot_at")
+    regular_orders_snapshot_at = _heartbeat_timestamp(
+        body,
+        "regular_orders_snapshot_at",
+    )
+    algo_orders_snapshot_at = _heartbeat_timestamp(
+        body,
+        "algo_orders_snapshot_at",
+    )
+    reconciliation_completed_at = _heartbeat_timestamp(
+        body,
+        "reconciliation_completed_at",
+    )
+    release_id = _optional_identity(body.get("release_id"))
+    image_digest = _optional_identity(body.get("image_digest"))
+    config_sha256 = _optional_identity(body.get("config_sha256"))
+    dependency_lock_sha256 = _optional_identity(
+        body.get("dependency_lock_sha256")
+    )
+    schema_epoch = _optional_identity(body.get("schema_epoch"))
+    release_identity_present = any(
+        value
+        for value in (
+            release_id,
+            image_digest,
+            config_sha256,
+            dependency_lock_sha256,
+            schema_epoch,
+        )
+    )
+    exchange_evidence_complete = (
+        _heartbeat_exchange_evidence_is_complete(body)
+    )
+    if release_identity_present and not exchange_evidence_complete:
+        raise HTTPException(
+            status_code=409,
+            detail="node exchange evidence is missing",
+        )
+    (
+        redis_fencing_epoch,
+        runtime_generation,
+        lease_fencing_token,
+        heartbeat_sequence,
+    ) = _heartbeat_writer_identity(
+        body,
+        required=release_identity_present,
+    )
+    payload = {
+        key: body.get(key)
+        for key in (
+            "readiness",
+            "projection_lag_ms",
+            "reconciliation_state",
+            "last_event_id",
+            "ts",
+            "open_orders",
+        )
+    }
+    conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
+            _validate_heartbeat_writer_headers(
+                body_redis_fencing_epoch=redis_fencing_epoch,
+                body_runtime_generation=runtime_generation,
+                body_lease_fencing_token=lease_fencing_token,
+                header_redis_fencing_epoch=x_redis_fencing_epoch,
+                header_runtime_generation=x_runtime_generation,
+                header_lease_fencing_token=x_lease_fencing_token,
+            )
+            active_redis_fencing_epoch = _active_redis_fencing_epoch(
+                cur,
+                lock=True,
+            )
+            if active_redis_fencing_epoch is None:
+                if redis_fencing_epoch is not None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="active redis fencing epoch is unavailable",
+                    )
+            else:
+                if redis_fencing_epoch is None:
+                    _raise_writer_fence(
+                        "node writer identity is required"
+                    )
+                if redis_fencing_epoch != active_redis_fencing_epoch:
+                    _raise_writer_fence(
+                        "redis fencing epoch mismatch"
+                    )
+            if release_identity_present:
+                cur.execute("SELECT now()")
+                database_now = cur.fetchone()[0]
+                _validate_live_heartbeat_exchange_evidence(
+                    positions=positions,
+                    regular_orders=regular_orders,
+                    algo_orders=algo_orders,
+                    positions_snapshot_at=positions_snapshot_at,
+                    regular_orders_snapshot_at=regular_orders_snapshot_at,
+                    algo_orders_snapshot_at=algo_orders_snapshot_at,
+                    database_now=database_now,
+                )
             cur.execute(
-                "INSERT INTO node_heartbeats (node_id, account_id, status, version, payload, last_seen_at) "
-                "VALUES (%s,%s,%s,%s,%s, now()) "
-                "ON CONFLICT (node_id) DO UPDATE SET account_id=COALESCE(EXCLUDED.account_id, node_heartbeats.account_id), "
-                "status=EXCLUDED.status, version=EXCLUDED.version, payload=EXCLUDED.payload, last_seen_at=now()",
-                (node_id, bound_account_id, str(body.get("trading_state") or "UNKNOWN"),
-                 body.get("version"),
-                 Json({k: body.get(k) for k in
-                       ("readiness", "projection_lag_ms", "reconciliation_state", "last_event_id", "ts",
-                        "open_orders")})),
+                """
+                INSERT INTO node_heartbeats (
+                    node_id,
+                    account_id,
+                    status,
+                    version,
+                    payload,
+                    release_id,
+                    image_digest,
+                    config_sha256,
+                    dependency_lock_sha256,
+                    schema_epoch,
+                    positions,
+                    regular_orders,
+                    algo_orders,
+                    positions_snapshot_at,
+                    regular_orders_snapshot_at,
+                    algo_orders_snapshot_at,
+                    reconciliation_completed_at,
+                    redis_fencing_epoch,
+                    runtime_generation,
+                    lease_fencing_token,
+                    heartbeat_sequence,
+                    last_seen_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, now()
+                )
+                ON CONFLICT (node_id) DO UPDATE SET
+                    account_id=EXCLUDED.account_id,
+                    status=EXCLUDED.status,
+                    version=EXCLUDED.version,
+                    payload=EXCLUDED.payload,
+                    release_id=EXCLUDED.release_id,
+                    image_digest=EXCLUDED.image_digest,
+                    config_sha256=EXCLUDED.config_sha256,
+                    dependency_lock_sha256=EXCLUDED.dependency_lock_sha256,
+                    schema_epoch=EXCLUDED.schema_epoch,
+                    positions=EXCLUDED.positions,
+                    regular_orders=EXCLUDED.regular_orders,
+                    algo_orders=EXCLUDED.algo_orders,
+                    positions_snapshot_at=EXCLUDED.positions_snapshot_at,
+                    regular_orders_snapshot_at=EXCLUDED.regular_orders_snapshot_at,
+                    algo_orders_snapshot_at=EXCLUDED.algo_orders_snapshot_at,
+                    reconciliation_completed_at=EXCLUDED.reconciliation_completed_at,
+                    redis_fencing_epoch=EXCLUDED.redis_fencing_epoch,
+                    runtime_generation=EXCLUDED.runtime_generation,
+                    lease_fencing_token=EXCLUDED.lease_fencing_token,
+                    heartbeat_sequence=EXCLUDED.heartbeat_sequence,
+                    last_seen_at=now()
+                WHERE (
+                    (
+                        node_heartbeats.redis_fencing_epoch IS NULL
+                        AND
+                        node_heartbeats.runtime_generation IS NULL
+                        AND node_heartbeats.lease_fencing_token IS NULL
+                        AND node_heartbeats.heartbeat_sequence IS NULL
+                    )
+                    OR (
+                        node_heartbeats.redis_fencing_epoch
+                            = EXCLUDED.redis_fencing_epoch
+                        AND
+                        node_heartbeats.runtime_generation
+                            = EXCLUDED.runtime_generation
+                        AND node_heartbeats.lease_fencing_token
+                            = EXCLUDED.lease_fencing_token
+                        AND EXCLUDED.heartbeat_sequence
+                            > node_heartbeats.heartbeat_sequence
+                    )
+                    OR (
+                        node_heartbeats.redis_fencing_epoch
+                            = EXCLUDED.redis_fencing_epoch
+                        AND
+                        node_heartbeats.runtime_generation
+                            IS DISTINCT FROM EXCLUDED.runtime_generation
+                        AND EXCLUDED.lease_fencing_token
+                            > COALESCE(
+                                node_heartbeats.lease_fencing_token,
+                                0
+                            )
+                    )
+                    OR (
+                        node_heartbeats.redis_fencing_epoch
+                            IS DISTINCT FROM EXCLUDED.redis_fencing_epoch
+                    )
+                )
+                """,
+                (
+                    node_id,
+                    bound_account_id,
+                    str(body.get("trading_state") or "UNKNOWN"),
+                    body.get("version"),
+                    Json(payload),
+                    release_id,
+                    image_digest,
+                    config_sha256,
+                    dependency_lock_sha256,
+                    schema_epoch,
+                    Json(positions),
+                    Json(regular_orders),
+                    Json(algo_orders),
+                    positions_snapshot_at,
+                    regular_orders_snapshot_at,
+                    algo_orders_snapshot_at,
+                    reconciliation_completed_at,
+                    redis_fencing_epoch,
+                    runtime_generation,
+                    lease_fencing_token,
+                    heartbeat_sequence,
+                ),
+            )
+            if cur.rowcount != 1:
+                _raise_writer_fence("stale heartbeat writer")
+            if exchange_evidence_complete:
+                _revoke_changed_portfolio_baselines(
+                    cur,
+                    account_id=bound_account_id,
+                    node_id=node_id,
+                    heartbeat={
+                        "positions": positions,
+                        "regular_orders": regular_orders,
+                        "algo_orders": algo_orders,
+                    },
+                )
+            receipt = _heartbeat_release_receipt(
+                cur,
+                node_id=node_id,
+                account_id=str(bound_account_id or account_id),
+                trading_state=str(
+                    body.get("trading_state") or "UNKNOWN"
+                ).upper(),
+                redis_fencing_epoch=redis_fencing_epoch,
+                release_identity=(
+                    release_id,
+                    image_digest,
+                    config_sha256,
+                    dependency_lock_sha256,
+                    schema_epoch,
+                ),
             )
         conn.commit()
-        return {"ok": True}
+        return receipt
     finally:
         conn.close()
+
+
+def _heartbeat_release_receipt(
+    cur,
+    *,
+    node_id: str,
+    account_id: str,
+    trading_state: str,
+    redis_fencing_epoch: str | None,
+    release_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+) -> dict:
+    (
+        release_id,
+        image_digest,
+        config_sha256,
+        dependency_lock_sha256,
+        schema_epoch,
+    ) = release_identity
+    cur.execute(
+        """
+        SELECT release_id,
+               image_digest,
+               config_sha256,
+               dependency_lock_sha256,
+               schema_epoch,
+               review_status
+        FROM reviewed_release_manifests
+        WHERE account_id=%s
+          AND release_id=%s
+        """,
+        (account_id, release_id),
+    )
+    manifest_row = cur.fetchone()
+    reviewed_manifest: dict | bool = False
+    release_gate_status = "missing"
+    if manifest_row is not None:
+        reviewed_manifest = _release_identity_payload(manifest_row[:5])
+        review_status = str(manifest_row[5] or "").strip().lower()
+        if review_status != "reviewed":
+            release_gate_status = review_status or "missing"
+        elif tuple(manifest_row[:5]) == release_identity:
+            release_gate_status = "pass"
+        else:
+            release_gate_status = "drift"
+
+    rollout = _reviewed_rollout_state(cur, release_id)
+    rollout_phase = None
+    live_open_mode = None
+    phase_version = None
+    if rollout is not None:
+        rollout_phase = rollout["phase"]
+        phase_version = rollout["phase_version"]
+        live_open_gate = _live_open_gate_from_rollout(rollout)
+        if live_open_gate is not False:
+            live_open_mode = live_open_gate["mode"]
+        rollout_identity = (
+            rollout["release_id"],
+            rollout["image_digest"],
+            rollout["config_sha256"],
+            rollout["dependency_lock_sha256"],
+            rollout["schema_epoch"],
+        )
+        if (
+            release_gate_status == "pass"
+            and rollout_identity != release_identity
+        ):
+            release_gate_status = "drift"
+        if (
+            release_gate_status == "pass"
+            and str(rollout.get("redis_fencing_epoch") or "")
+            != str(redis_fencing_epoch or "")
+        ):
+            release_gate_status = "drift"
+    if (
+        release_gate_status == "pass"
+        and rollout_phase == _ROLLOUT_PHASE_ABORTED
+    ):
+        release_gate_status = "aborted"
+    if release_gate_status == "pass" and rollout is None:
+        release_gate_status = "missing"
+
+    return {
+        "ok": True,
+        "release_gate": {
+            "status": release_gate_status,
+            "release_id": release_id or False,
+            "reviewed_manifest": reviewed_manifest,
+            "rollout_phase": rollout_phase or False,
+            "live_open_mode": live_open_mode or False,
+            "phase_version": phase_version or False,
+        },
+        "peers": _heartbeat_peer_receipts(
+            cur,
+            node_id=node_id,
+            account_id=account_id,
+            trading_state=trading_state,
+            redis_fencing_epoch=redis_fencing_epoch,
+            release_identity=release_identity,
+            rollout_phase=rollout_phase,
+        ),
+    }
+
+
+@app.post("/v1/nodes/{node_id}/incidents")
+def report_node_incident(
+    node_id: str,
+    body: dict = Body(default={}),
+    authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
+    x_redis_fencing_epoch: str | None = Header(default=None),
+    x_runtime_generation: str | None = Header(default=None),
+    x_lease_fencing_token: str | None = Header(default=None),
+):
+    account_id = str(body.get("account_id") or "").strip()
+    if _node_auth_bindings() is False:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "node identity bindings are required "
+                "for incident reporting"
+            ),
+        )
+    bound_account_id = require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
+    severity = str(body.get("severity") or "").strip().upper()
+    if severity not in _INCIDENT_SEVERITIES:
+        raise HTTPException(
+            status_code=400,
+            detail="incident severity must be P0, P1, or P2",
+        )
+    reason = str(body.get("reason") or "").strip().lower()
+    if _INCIDENT_REASON_PATTERN.fullmatch(reason) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="incident reason is invalid",
+        )
+    summary = str(body.get("summary") or "").strip()
+    if not summary:
+        raise HTTPException(
+            status_code=400,
+            detail="incident summary is required",
+        )
+    if len(summary) > _INCIDENT_SUMMARY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail="incident summary is too long",
+        )
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    incident_key = _incident_deduplication_key(
+        account_id=str(bound_account_id),
+        node_id=node_id,
+        reason=reason,
+    )
+    stored_summary = _stored_incident_summary(
+        incident_key=incident_key,
+        node_id=node_id,
+        reason=reason,
+        summary=summary,
+    )
+    summary_prefix = _stored_incident_summary_prefix(
+        incident_key=incident_key,
+        node_id=node_id,
+        reason=reason,
+    )
+
+    conn = _database_connection(database_url)
+    try:
+        with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=str(bound_account_id),
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (incident_key,),
+            )
+            cur.execute(
+                """
+                SELECT incident_id, severity, opened_at
+                FROM production_incidents
+                WHERE account_id=%s
+                  AND status='open'
+                  AND LEFT(summary, char_length(%s))=%s
+                ORDER BY opened_at, incident_id
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (
+                    bound_account_id,
+                    summary_prefix,
+                    summary_prefix,
+                ),
+            )
+            existing = cur.fetchone()
+            deduplicated = existing is not None
+            if existing is None:
+                incident_id = str(uuid4())
+                opened_at = datetime.now(timezone.utc)
+                cur.execute(
+                    """
+                    INSERT INTO production_incidents (
+                        incident_id,
+                        account_id,
+                        severity,
+                        status,
+                        summary,
+                        opened_at
+                    )
+                    VALUES (%s, %s, %s, 'open', %s, %s)
+                    """,
+                    (
+                        incident_id,
+                        bound_account_id,
+                        severity,
+                        stored_summary,
+                        opened_at,
+                    ),
+                )
+            else:
+                incident_id, existing_severity, opened_at = existing
+                severity = _stronger_incident_severity(
+                    str(existing_severity),
+                    severity,
+                )
+                cur.execute(
+                    """
+                    UPDATE production_incidents
+                    SET severity=%s,
+                        summary=%s
+                    WHERE incident_id=%s
+                    """,
+                    (
+                        severity,
+                        stored_summary,
+                        incident_id,
+                    ),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "incident_id": str(incident_id),
+        "account_id": str(bound_account_id),
+        "node_id": node_id,
+        "reason": reason,
+        "severity": severity,
+        "status": "open",
+        "summary": summary,
+        "opened_at": opened_at,
+        "deduplicated": deduplicated,
+    }
+
+
+def _incident_deduplication_key(
+    *,
+    account_id: str,
+    node_id: str,
+    reason: str,
+) -> str:
+    identity = "\x00".join((account_id, node_id, reason))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _stored_incident_summary_prefix(
+    *,
+    incident_key: str,
+    node_id: str,
+    reason: str,
+) -> str:
+    return (
+        f"[node-incident:v1 key={incident_key} "
+        f"node={node_id} reason={reason}] "
+    )
+
+
+def _stored_incident_summary(
+    *,
+    incident_key: str,
+    node_id: str,
+    reason: str,
+    summary: str,
+) -> str:
+    prefix = _stored_incident_summary_prefix(
+        incident_key=incident_key,
+        node_id=node_id,
+        reason=reason,
+    )
+    return prefix + summary
+
+
+def _stronger_incident_severity(current: str, reported: str) -> str:
+    current_rank = _INCIDENT_SEVERITY_RANK.get(current)
+    reported_rank = _INCIDENT_SEVERITY_RANK.get(reported)
+    if current_rank is None:
+        return reported
+    if reported_rank is None:
+        return current
+    if reported_rank < current_rank:
+        return reported
+    return current
+
+
+def _heartbeat_peer_receipts(
+    cur,
+    *,
+    node_id: str,
+    account_id: str,
+    trading_state: str,
+    redis_fencing_epoch: str | None,
+    release_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+    rollout_phase: str | None,
+) -> list[dict]:
+    bindings = _node_auth_bindings()
+    if bindings is False:
+        return []
+    peer_ids = sorted(
+        candidate
+        for candidate, binding in bindings.items()
+        if (
+            candidate != node_id
+            and binding["account_id"] != account_id
+        )
+    )
+    if not peer_ids:
+        return []
+    cur.execute(
+        """
+        SELECT node_id,
+               account_id,
+               release_id,
+               image_digest,
+               config_sha256,
+               dependency_lock_sha256,
+               schema_epoch,
+               redis_fencing_epoch,
+               status,
+               GREATEST(
+                   0,
+                   EXTRACT(EPOCH FROM (now() - last_seen_at))
+               )
+        FROM node_heartbeats
+        WHERE node_id = ANY(%s)
+        ORDER BY node_id
+        """,
+        (peer_ids,),
+    )
+    rows = {
+        str(row[0]): row
+        for row in cur.fetchall()
+    }
+    max_age = _live_evidence_max_age_seconds()
+    active_rollout = _active_reviewed_rollout(cur)
+    receipts = []
+    for peer_id in peer_ids:
+        binding = bindings[peer_id]
+        row = rows.get(peer_id)
+        if row is None:
+            receipts.append(
+                {
+                    "node_id": peer_id,
+                    "account_id": binding["account_id"],
+                    "release_id": False,
+                    "image_digest": False,
+                    "config_sha256": False,
+                    "dependency_lock_sha256": False,
+                    "schema_epoch": False,
+                    "redis_fencing_epoch": False,
+                    "freshness_age_seconds": False,
+                    "fresh": False,
+                    "identity_matches": False,
+                    "status": _missing_peer_status(
+                        account_id=account_id,
+                        trading_state=trading_state,
+                        peer_account_id=binding["account_id"],
+                        release_identity=release_identity,
+                        rollout_phase=rollout_phase,
+                    ),
+                }
+            )
+            continue
+        peer_identity = tuple(row[2:7])
+        peer_redis_fencing_epoch = str(row[7] or "").strip()
+        peer_trading_state = str(row[8] or "").upper()
+        age_seconds = float(row[9])
+        fresh = age_seconds <= max_age
+        identity_matches = (
+            peer_identity == release_identity
+            and peer_redis_fencing_epoch
+            == str(redis_fencing_epoch or "")
+        )
+        peer_status = _peer_release_status(
+            account_id=account_id,
+            trading_state=trading_state,
+            peer_account_id=str(row[1] or binding["account_id"]),
+            peer_trading_state=peer_trading_state,
+            release_identity=release_identity,
+            peer_identity=peer_identity,
+            fresh=fresh,
+            identity_matches=identity_matches,
+            rollout_phase=rollout_phase,
+            active_rollout=active_rollout,
+        )
+        receipts.append(
+            {
+                "node_id": peer_id,
+                "account_id": str(row[1] or binding["account_id"]),
+                **_release_identity_payload(peer_identity),
+                "redis_fencing_epoch": peer_redis_fencing_epoch or False,
+                "freshness_age_seconds": age_seconds,
+                "fresh": fresh,
+                "identity_matches": identity_matches,
+                "status": peer_status,
+            }
+        )
+    return receipts
+
+
+def _validate_fleet_release_ready(
+    cur,
+    *,
+    node_id: str,
+    account_id: str,
+    trading_state: str,
+    release_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+) -> None:
+    release_id = release_identity[0]
+    rollout = _reviewed_rollout_state(cur, release_id)
+    rollout_phase = None
+    if rollout is not None:
+        rollout_phase = rollout["phase"]
+    if rollout_phase != _ROLLOUT_PHASE_FLEET_COMPLETE:
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release rollout is not fleet_complete",
+        )
+    rollout_identity = (
+        rollout["release_id"],
+        rollout["image_digest"],
+        rollout["config_sha256"],
+        rollout["dependency_lock_sha256"],
+        rollout["schema_epoch"],
+    )
+    if rollout_identity != release_identity:
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release rollout identity drift",
+        )
+    _validate_reviewed_fleet_manifests(
+        cur,
+        release_identity=release_identity,
+    )
+    peers = _heartbeat_peer_receipts(
+        cur,
+        node_id=node_id,
+        account_id=account_id,
+        trading_state=trading_state,
+        redis_fencing_epoch=_active_redis_fencing_epoch(
+            cur,
+            lock=False,
+        ),
+        release_identity=release_identity,
+        rollout_phase=rollout_phase,
+    )
+    if not peers:
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release peer heartbeat is missing",
+        )
+    if any(peer["status"] != "consistent" for peer in peers):
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release peer heartbeat is not fleet-consistent",
+        )
+
+
+def _validate_canary_release_ready(
+    cur,
+    *,
+    account_id: str,
+    required_rollout_phase: str,
+    expected_trading_state: str,
+    release_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+) -> None:
+    expected_phase = _canary_phase_for_account(account_id)
+    if required_rollout_phase != expected_phase:
+        raise HTTPException(
+            status_code=409,
+            detail="canary rollout phase does not match account",
+        )
+    rollout = _reviewed_rollout_state(cur, release_identity[0])
+    if rollout is None or rollout["phase"] != required_rollout_phase:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{account_id} canary requires rollout phase "
+                f"{required_rollout_phase}"
+            ),
+        )
+    rollout_identity = (
+        rollout["release_id"],
+        rollout["image_digest"],
+        rollout["config_sha256"],
+        rollout["dependency_lock_sha256"],
+        rollout["schema_epoch"],
+    )
+    if rollout_identity != release_identity:
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release rollout identity drift",
+        )
+    active_redis_fencing_epoch = _active_redis_fencing_epoch(
+        cur,
+        lock=False,
+    )
+    if (
+        active_redis_fencing_epoch is None
+        or rollout["redis_fencing_epoch"]
+        != active_redis_fencing_epoch
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release rollout Redis fencing epoch drift",
+        )
+    _validate_reviewed_fleet_manifests(
+        cur,
+        release_identity=release_identity,
+    )
+
+    account_index = _ROLLOUT_ACCOUNTS.index(account_id)
+    upgraded_accounts = set(
+        _ROLLOUT_ACCOUNTS[: account_index + 1]
+    )
+    expected_accounts = _ROLLOUT_ACCOUNTS
+    cur.execute(
+        """
+        SELECT account_id,
+               node_id,
+               release_id,
+               image_digest,
+               config_sha256,
+               dependency_lock_sha256,
+               schema_epoch,
+               redis_fencing_epoch,
+               status,
+               GREATEST(
+                   0,
+                   EXTRACT(EPOCH FROM (now() - last_seen_at))
+               )
+        FROM node_heartbeats
+        WHERE account_id = ANY(%s)
+        ORDER BY account_id, node_id
+        FOR SHARE
+        """,
+        (list(expected_accounts),),
+    )
+    rows = cur.fetchall()
+    if len(rows) != len(expected_accounts):
+        raise HTTPException(
+            status_code=409,
+            detail="canary rollout heartbeat set is incomplete",
+        )
+    seen_accounts: set[str] = set()
+    max_age = _live_evidence_max_age_seconds()
+    for row in rows:
+        heartbeat_account_id = str(row[0])
+        heartbeat_node_id = str(row[1])
+        if heartbeat_account_id in seen_accounts:
+            raise HTTPException(
+                status_code=409,
+                detail="canary rollout requires one node per account",
+            )
+        seen_accounts.add(heartbeat_account_id)
+        expected_node_id = f"nautilus-node-{heartbeat_account_id}"
+        if heartbeat_node_id != expected_node_id:
+            raise HTTPException(
+                status_code=409,
+                detail="canary rollout node identity is invalid",
+            )
+        heartbeat_identity = tuple(row[2:7])
+        if heartbeat_account_id in upgraded_accounts:
+            if heartbeat_identity != release_identity:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "canary rollout heartbeat release identity drift"
+                    ),
+                )
+        else:
+            if heartbeat_identity == release_identity:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{heartbeat_account_id} must remain on an "
+                        "approved old release during canary rollout"
+                    ),
+                )
+            cur.execute(
+                """
+                SELECT 1
+                FROM reviewed_release_manifests
+                WHERE account_id=%s
+                  AND release_id=%s
+                  AND image_digest=%s
+                  AND config_sha256=%s
+                  AND dependency_lock_sha256=%s
+                  AND schema_epoch=%s
+                  AND review_status='reviewed'
+                """,
+                (
+                    heartbeat_account_id,
+                    *heartbeat_identity,
+                ),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{heartbeat_account_id} old release is not "
+                        "approved"
+                    ),
+                )
+        if str(row[7]) != active_redis_fencing_epoch:
+            raise HTTPException(
+                status_code=409,
+                detail="canary rollout heartbeat Redis fencing epoch drift",
+            )
+        expected_state = "HALTED"
+        if heartbeat_account_id == account_id:
+            expected_state = expected_trading_state
+        if str(row[8] or "").upper() != expected_state:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{heartbeat_account_id} must be {expected_state} "
+                    "during canary rollout"
+                ),
+            )
+        if float(row[9]) > max_age:
+            raise HTTPException(
+                status_code=409,
+                detail="canary rollout heartbeat is stale",
+            )
+    if seen_accounts != set(expected_accounts):
+        raise HTTPException(
+            status_code=409,
+            detail="canary rollout heartbeat set is incomplete",
+        )
+
+
+def _reviewed_rollout_state(
+    cur,
+    release_id: str | None,
+    *,
+    lock: bool = False,
+) -> dict | None:
+    if not release_id:
+        return None
+    lock_clause = ""
+    if lock:
+        lock_clause = " FOR SHARE"
+    cur.execute(
+        """
+        SELECT release_id,
+               redis_fencing_epoch,
+               image_digest,
+               config_sha256,
+               dependency_lock_sha256,
+               schema_epoch,
+               phase,
+               phase_version
+        FROM reviewed_release_rollouts
+        WHERE release_id=%s
+        """
+        + lock_clause,
+        (release_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "release_id": str(row[0]),
+        "redis_fencing_epoch": str(row[1]),
+        "image_digest": str(row[2]),
+        "config_sha256": str(row[3]),
+        "dependency_lock_sha256": str(row[4]),
+        "schema_epoch": str(row[5]),
+        "phase": str(row[6]),
+        "phase_version": row[7],
+    }
+
+
+def _current_reviewed_rollout_state(
+    cur,
+    *,
+    lock: bool = False,
+) -> dict | None:
+    lock_clause = ""
+    if lock:
+        lock_clause = " FOR SHARE"
+    cur.execute(
+        """
+        SELECT release_id,
+               redis_fencing_epoch,
+               image_digest,
+               config_sha256,
+               dependency_lock_sha256,
+               schema_epoch,
+               phase,
+               phase_version
+        FROM reviewed_release_rollouts
+        ORDER BY created_at DESC, release_id DESC
+        LIMIT 1
+        """
+        + lock_clause
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "release_id": str(row[0]),
+        "redis_fencing_epoch": str(row[1]),
+        "image_digest": str(row[2]),
+        "config_sha256": str(row[3]),
+        "dependency_lock_sha256": str(row[4]),
+        "schema_epoch": str(row[5]),
+        "phase": str(row[6]),
+        "phase_version": row[7],
+    }
+
+
+def _live_open_gate_from_rollout(
+    rollout: dict | None,
+) -> dict | bool:
+    if not isinstance(rollout, dict):
+        return False
+    release_id = str(rollout.get("release_id") or "").strip()
+    rollout_phase = str(rollout.get("phase") or "").strip()
+    phase_version = rollout.get("phase_version")
+    valid_phases = set(_ACTIVE_ROLLOUT_PHASES)
+    valid_phases.add(_ROLLOUT_PHASE_FLEET_COMPLETE)
+    if (
+        not release_id
+        or rollout_phase not in valid_phases
+        or isinstance(phase_version, bool)
+        or not isinstance(phase_version, int)
+        or phase_version < 1
+    ):
+        return False
+    mode = "canary_only"
+    if rollout_phase == _ROLLOUT_PHASE_FLEET_COMPLETE:
+        mode = "normal"
+    return {
+        "mode": mode,
+        "release_id": release_id,
+        "rollout_phase": rollout_phase,
+        "phase_version": phase_version,
+    }
+
+
+def _validate_reviewed_fleet_manifests(
+    cur,
+    *,
+    release_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+) -> None:
+    cur.execute(
+        """
+        SELECT account_id,
+               release_id,
+               image_digest,
+               config_sha256,
+               dependency_lock_sha256,
+               schema_epoch,
+               review_status
+        FROM reviewed_release_manifests
+        WHERE release_id=%s
+          AND account_id = ANY(%s)
+        ORDER BY account_id
+        """,
+        (
+            release_identity[0],
+            list(_ROLLOUT_ACCOUNTS),
+        ),
+    )
+    rows = cur.fetchall()
+    if [str(row[0]) for row in rows] != list(_ROLLOUT_ACCOUNTS):
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release fleet registration is incomplete",
+        )
+    for row in rows:
+        manifest_identity = tuple(row[1:6])
+        review_status = str(row[6] or "").strip().lower()
+        if (
+            manifest_identity != release_identity
+            or review_status != "reviewed"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="reviewed release fleet registration drift",
+            )
+
+
+def _active_reviewed_rollout(cur) -> dict | None:
+    cur.execute(
+        """
+        SELECT release_id,
+               phase
+        FROM reviewed_release_rollouts
+        WHERE phase = ANY(%s)
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (list(_ACTIVE_ROLLOUT_PHASES),),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "release_id": str(row[0]),
+        "phase": str(row[1]),
+    }
+
+
+def _missing_peer_status(
+    *,
+    account_id: str,
+    trading_state: str,
+    peer_account_id: str,
+    release_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+    rollout_phase: str | None,
+) -> str:
+    if (
+        account_id == "account-a"
+        and trading_state == "HALTED"
+        and peer_account_id == "account-b"
+        and rollout_phase == _ROLLOUT_PHASE_ACCOUNT_A_CANARY
+        and release_identity[0]
+    ):
+        return "rollout_pending"
+    return "missing"
+
+
+def _peer_release_status(
+    *,
+    account_id: str,
+    trading_state: str,
+    peer_account_id: str,
+    peer_trading_state: str,
+    release_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+    peer_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+    fresh: bool,
+    identity_matches: bool,
+    rollout_phase: str | None,
+    active_rollout: dict | None,
+) -> str:
+    if fresh and identity_matches:
+        return "consistent"
+    if (
+        account_id == "account-a"
+        and trading_state == "HALTED"
+        and peer_account_id == "account-b"
+        and rollout_phase == _ROLLOUT_PHASE_ACCOUNT_A_CANARY
+        and release_identity[0]
+    ):
+        return "rollout_pending"
+    if (
+        account_id == "account-b"
+        and peer_account_id == "account-a"
+        and fresh
+        and peer_trading_state == "HALTED"
+        and active_rollout is not None
+        and active_rollout["phase"] == _ROLLOUT_PHASE_ACCOUNT_A_CANARY
+        and peer_identity[0] == active_rollout["release_id"]
+    ):
+        return "rollout_pending"
+    if not fresh:
+        return "stale"
+    return "identity_drift"
+
+
+def _release_identity_payload(values) -> dict:
+    (
+        release_id,
+        image_digest,
+        config_sha256,
+        dependency_lock_sha256,
+        schema_epoch,
+    ) = values
+    return {
+        "release_id": release_id or False,
+        "image_digest": image_digest or False,
+        "config_sha256": config_sha256 or False,
+        "dependency_lock_sha256": dependency_lock_sha256 or False,
+        "schema_epoch": schema_epoch or False,
+    }
+
+
+def _heartbeat_snapshot(
+    body: dict,
+    field_name: str,
+    *,
+    fallback_field: str | None = None,
+) -> list[dict]:
+    value = body.get(field_name)
+    if value is None and fallback_field:
+        value = body.get(fallback_field)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be a list",
+        )
+    if any(not isinstance(item, dict) for item in value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} entries must be objects",
+        )
+    return [dict(item) for item in value]
+
+
+def _heartbeat_exchange_evidence_is_complete(body: dict) -> bool:
+    snapshot_fields = (
+        "positions",
+        "regular_orders",
+        "algo_orders",
+    )
+    timestamp_fields = (
+        "positions_snapshot_at",
+        "regular_orders_snapshot_at",
+        "algo_orders_snapshot_at",
+    )
+    for field_name in snapshot_fields:
+        if body.get(field_name) is None:
+            return False
+    for field_name in timestamp_fields:
+        value = body.get(field_name)
+        if value is None or value == "":
+            return False
+    return True
+
+
+def _validate_live_heartbeat_exchange_evidence(
+    *,
+    positions: list[dict],
+    regular_orders: list[dict],
+    algo_orders: list[dict],
+    positions_snapshot_at: datetime | None,
+    regular_orders_snapshot_at: datetime | None,
+    algo_orders_snapshot_at: datetime | None,
+    database_now: datetime,
+) -> None:
+    snapshots = (
+        positions,
+        regular_orders,
+        algo_orders,
+    )
+    if any(
+        not _snapshot_item_symbol(item)
+        for snapshot in snapshots
+        for item in snapshot
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="node exchange evidence is invalid",
+        )
+    snapshot_times = (
+        positions_snapshot_at,
+        regular_orders_snapshot_at,
+        algo_orders_snapshot_at,
+    )
+    if any(
+        not _timestamp_is_fresh(value, database_now)
+        for value in snapshot_times
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="node exchange evidence is stale",
+        )
+
+
+def _heartbeat_timestamp(body: dict, field_name: str) -> datetime | None:
+    value = body.get(field_name)
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name} must be an ISO-8601 timestamp",
+            ) from exc
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be an ISO-8601 timestamp",
+        )
+    if parsed.tzinfo is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must include a timezone",
+        )
+    return parsed
+
+
+def _optional_identity(value) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _optional_uuid4_identity(
+    value,
+    *,
+    field_name: str,
+) -> str | None:
+    normalized = _optional_identity(value)
+    if normalized is None:
+        return None
+    try:
+        parsed = UUID(normalized)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be a canonical UUID4",
+        ) from exc
+    if parsed.version != 4 or str(parsed) != normalized:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be a canonical UUID4",
+        )
+    return normalized
+
+
+def _heartbeat_writer_identity(
+    body: dict,
+    *,
+    required: bool,
+) -> tuple[str | None, str | None, int | None, int | None]:
+    redis_fencing_epoch = _optional_uuid4_identity(
+        body.get("redis_fencing_epoch"),
+        field_name="redis_fencing_epoch",
+    )
+    runtime_generation = _optional_identity(body.get("runtime_generation"))
+    lease_fencing_token = _positive_integer_or_none(
+        body.get("lease_fencing_token")
+    )
+    heartbeat_sequence = _positive_integer_or_none(
+        body.get("heartbeat_sequence")
+    )
+    values = (
+        redis_fencing_epoch,
+        runtime_generation,
+        lease_fencing_token,
+        heartbeat_sequence,
+    )
+    if all(value is None for value in values) and not required:
+        return None, None, None, None
+    if any(value is None for value in values):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "live heartbeat requires redis_fencing_epoch, "
+                "runtime_generation, lease_fencing_token, "
+                "and heartbeat_sequence"
+            ),
+        )
+    return (
+        redis_fencing_epoch,
+        runtime_generation,
+        lease_fencing_token,
+        heartbeat_sequence,
+    )
+
+
+def _active_redis_fencing_epoch(
+    cur,
+    *,
+    lock: bool,
+) -> str | None:
+    lock_clause = ""
+    if lock:
+        lock_clause = " FOR SHARE"
+    cur.execute(
+        """
+        SELECT redis_fencing_epoch
+        FROM redis_fencing_epochs
+        WHERE domain='trader-v3'
+          AND status='active'
+        """
+        + lock_clause
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0])
+
+
+def _require_node_writer(
+    cur,
+    *,
+    node_id: str,
+    account_id: str,
+    redis_fencing_epoch: str | None,
+    runtime_generation: str | None,
+    lease_fencing_token: str | int | None,
+) -> None:
+    active_epoch = _active_redis_fencing_epoch(cur, lock=True)
+    identity = _node_writer_header_identity(
+        redis_fencing_epoch=redis_fencing_epoch,
+        runtime_generation=runtime_generation,
+        lease_fencing_token=lease_fencing_token,
+    )
+    if active_epoch is None:
+        if identity is None:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="active redis fencing epoch is unavailable",
+        )
+    if identity is None:
+        _raise_writer_fence("node writer identity is required")
+    (
+        provided_epoch,
+        provided_generation,
+        provided_token,
+    ) = identity
+    if provided_epoch != active_epoch:
+        _raise_writer_fence("redis fencing epoch mismatch")
+    cur.execute(
+        """
+        SELECT redis_fencing_epoch::text,
+               runtime_generation,
+               lease_fencing_token
+        FROM node_heartbeats
+        WHERE node_id=%s
+          AND account_id=%s
+        FOR SHARE
+        """,
+        (node_id, account_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        _raise_writer_fence("node writer heartbeat is missing")
+    expected_epoch = str(row[0] or "").strip()
+    expected_generation = str(row[1] or "").strip()
+    expected_token = row[2]
+    if expected_epoch != provided_epoch:
+        _raise_writer_fence("redis fencing epoch mismatch")
+    if expected_generation != provided_generation:
+        _raise_writer_fence("runtime generation mismatch")
+    if expected_token != provided_token:
+        _raise_writer_fence("lease fencing token mismatch")
+
+
+def _node_writer_header_identity(
+    *,
+    redis_fencing_epoch: str | None,
+    runtime_generation: str | None,
+    lease_fencing_token: str | int | None,
+) -> tuple[str, str, int] | None:
+    raw_values = (
+        redis_fencing_epoch,
+        runtime_generation,
+        lease_fencing_token,
+    )
+    if all(value is None or value == "" for value in raw_values):
+        return None
+    if any(value is None or value == "" for value in raw_values):
+        _raise_writer_fence("node writer identity is incomplete")
+    epoch = str(redis_fencing_epoch).strip()
+    try:
+        parsed_epoch = UUID(epoch)
+    except ValueError:
+        _raise_writer_fence("redis fencing epoch is invalid")
+    if parsed_epoch.version != 4 or str(parsed_epoch) != epoch:
+        _raise_writer_fence("redis fencing epoch is invalid")
+    generation = str(runtime_generation).strip()
+    if not generation:
+        _raise_writer_fence("runtime generation is invalid")
+    token = _writer_fencing_token(lease_fencing_token)
+    return epoch, generation, token
+
+
+def _writer_fencing_token(value: str | int | None) -> int:
+    if isinstance(value, bool):
+        _raise_writer_fence("lease fencing token is invalid")
+    normalized = str(value or "").strip()
+    if re.fullmatch(r"[1-9][0-9]*", normalized) is None:
+        _raise_writer_fence("lease fencing token is invalid")
+    return int(normalized)
+
+
+def _validate_heartbeat_writer_headers(
+    *,
+    body_redis_fencing_epoch: str | None,
+    body_runtime_generation: str | None,
+    body_lease_fencing_token: int | None,
+    header_redis_fencing_epoch: str | None,
+    header_runtime_generation: str | None,
+    header_lease_fencing_token: str | None,
+) -> None:
+    header_identity = _node_writer_header_identity(
+        redis_fencing_epoch=header_redis_fencing_epoch,
+        runtime_generation=header_runtime_generation,
+        lease_fencing_token=header_lease_fencing_token,
+    )
+    if header_identity is None:
+        return
+    body_identity = (
+        body_redis_fencing_epoch,
+        body_runtime_generation,
+        body_lease_fencing_token,
+    )
+    if header_identity != body_identity:
+        _raise_writer_fence(
+            "heartbeat writer identity mismatch"
+        )
+
+
+def _raise_writer_fence(detail: str) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail=detail,
+        headers={"X-Writer-Fence-Rejected": "1"},
+    )
+
+
+def _positive_integer_or_none(value) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise HTTPException(
+            status_code=400,
+            detail="heartbeat writer counters must be positive integers",
+        )
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="heartbeat writer counters must be positive integers",
+        ) from exc
+    if parsed <= 0 or str(parsed) != str(value).strip():
+        raise HTTPException(
+            status_code=400,
+            detail="heartbeat writer counters must be positive integers",
+        )
+    return parsed
+
+
+def _revoke_changed_portfolio_baselines(
+    cur,
+    *,
+    account_id: str,
+    node_id: str,
+    heartbeat: dict,
+) -> None:
+    if account_id not in _ROLLOUT_ACCOUNTS:
+        return
+    cur.execute(
+        """
+        SELECT permit_id,
+               symbol,
+               portfolio_baseline_sha256
+        FROM live_canary_permits
+        WHERE account_id=%s
+          AND armed_node_id=%s
+          AND status='armed'
+        FOR UPDATE
+        """,
+        (account_id, node_id),
+    )
+    for permit_id, target_symbol, expected_baseline in cur.fetchall():
+        current_baseline = _portfolio_baseline_sha256(
+            heartbeat,
+            _canonical_symbol(target_symbol),
+        )
+        if current_baseline == expected_baseline:
+            continue
+        cur.execute(
+            """
+            UPDATE live_canary_permits
+            SET status='revoked'
+            WHERE permit_id=%s
+              AND status='armed'
+            """,
+            (permit_id,),
+        )
 
 
 @app.get("/v1/nodes/{node_id}/commands")
@@ -1175,6 +3783,9 @@ def node_commands(
     authorization: str | None = Header(default=None),
     x_node_id: str | None = Header(default=None),
     x_account_id: str | None = Header(default=None),
+    x_redis_fencing_epoch: str | None = Header(default=None),
+    x_runtime_generation: str | None = Header(default=None),
+    x_lease_fencing_token: str | None = Header(default=None),
 ):
     """A<->B seam: node polls its pending operator commands (kill-switch path)."""
     bound_account_id = require_node(
@@ -1187,20 +3798,33 @@ def node_commands(
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=str(bound_account_id or account_id),
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
             cur.execute(
                 "SELECT oc.command_id::text, oc.command_type, oc.scope, oc.created_at "
                 "FROM operator_commands oc JOIN command_node_acks na ON na.command_id=oc.command_id "
-                "WHERE na.node_id=%s AND na.status='pending' ORDER BY oc.created_at",
-                (node_id,),
+                "WHERE na.node_id=%s AND na.status='pending' "
+                "AND oc.scope->>'account_id'=%s "
+                "ORDER BY oc.created_at LIMIT %s",
+                (
+                    node_id,
+                    str(bound_account_id or account_id),
+                    NODE_COMMAND_POLL_LIMIT,
+                ),
             )
             rows = cur.fetchall()
         commands = []
         for row in rows:
             args = dict(row[2] or {})
-            args["account_id"] = bound_account_id
             commands.append(
                 {
                     "command_id": row[0],
@@ -1218,7 +3842,10 @@ def node_commands(
 def ack_node_command(node_id: str, command_id: str, body: dict = Body(default={}),
                      authorization: str | None = Header(default=None),
                      x_node_id: str | None = Header(default=None),
-                     x_account_id: str | None = Header(default=None)):
+                     x_account_id: str | None = Header(default=None),
+                     x_redis_fencing_epoch: str | None = Header(default=None),
+                     x_runtime_generation: str | None = Header(default=None),
+                     x_lease_fencing_token: str | None = Header(default=None)):
     """A<->B seam: node acks an operator command; recomputes the command's rollup."""
     account_id = str(body.get("account_id") or "").strip()
     require_node(
@@ -1231,16 +3858,151 @@ def ack_node_command(node_id: str, command_id: str, body: dict = Body(default={}
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
-    _cp_paths()
-    from commands import record_ack
-
-    status = _NODE_ACK_STATUS_MAP.get(str(body.get("status")), "acked")
-    conn = psycopg2.connect(database_url)
+    status = str(body.get("status") or "").strip().lower()
+    if status not in _COMMAND_ACK_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid command ack status",
+        )
+    ack_result = body.get("result")
+    if ack_result is None:
+        ack_result = {}
+    if not isinstance(ack_result, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="command ack result must be an object",
+        )
+    ack_detail = body.get("error")
+    if ack_detail is None:
+        ack_detail = body.get("detail")
+    if ack_detail is not None:
+        ack_detail = str(ack_detail)
+    conn = _database_connection(database_url)
     try:
-        record_ack(conn, command_id, node_id, status=status, detail=body.get("error"))
+        from psycopg2.extras import Json
+
+        with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=account_id,
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
+            cur.execute(
+                """
+                SELECT node_ack.status
+                FROM command_node_acks AS node_ack
+                JOIN operator_commands AS command
+                  ON node_ack.command_id=command.command_id
+                WHERE node_ack.command_id=%s
+                  AND node_ack.node_id=%s
+                  AND command.scope->>'account_id'=%s
+                FOR UPDATE OF node_ack
+                """,
+                (
+                    command_id,
+                    node_id,
+                    account_id,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="unknown command/node/account binding",
+                )
+            current_status = str(row[0])
+            if not _command_ack_transition_allowed(current_status, status):
+                raise HTTPException(
+                    status_code=409,
+                    detail="invalid command ack transition",
+                )
+            cur.execute(
+                """
+                UPDATE command_node_acks
+                SET status=%s,
+                    detail=COALESCE(%s, detail),
+                    result=result || %s,
+                    ack_at=now()
+                WHERE command_id=%s
+                  AND node_id=%s
+                """,
+                (
+                    status,
+                    ack_detail,
+                    Json(ack_result),
+                    command_id,
+                    node_id,
+                ),
+            )
+            _recompute_operator_command_status(cur, command_id)
+        conn.commit()
         return {"ok": True}
     finally:
         conn.close()
+
+
+def _command_ack_transition_allowed(
+    current_status: str,
+    requested_status: str,
+) -> bool:
+    if current_status == requested_status:
+        return True
+    allowed_transitions = {
+        "pending": {"accepted", "running", "completed", "failed"},
+        "accepted": {"running", "completed", "failed"},
+        "running": {"completed", "failed"},
+        "acked": {"completed"},
+        "completed": set(),
+        "failed": set(),
+    }
+    return requested_status in allowed_transitions.get(current_status, set())
+
+
+def _recompute_operator_command_status(cur, command_id: str) -> None:
+    cur.execute(
+        """
+        SELECT status
+        FROM command_node_acks
+        WHERE command_id=%s
+        FOR UPDATE
+        """,
+        (command_id,),
+    )
+    statuses = [str(row[0]) for row in cur.fetchall()]
+    terminal = {"completed", "failed"}
+    if not statuses or all(status == "completed" for status in statuses):
+        rollup_status = "completed"
+    elif all(status == "failed" for status in statuses):
+        rollup_status = "failed"
+    elif all(status in terminal for status in statuses):
+        rollup_status = "partial"
+    elif any(status == "running" for status in statuses):
+        rollup_status = "running"
+    elif any(status in {"accepted", "completed"} for status in statuses):
+        rollup_status = "accepted"
+    elif any(status == "acked" for status in statuses):
+        rollup_status = "acknowledged"
+    else:
+        rollup_status = "pending"
+    cur.execute(
+        """
+        UPDATE operator_commands
+        SET status=%s,
+            completed_at=CASE
+                WHEN %s AND completed_at IS NULL THEN now()
+                ELSE completed_at
+            END
+        WHERE command_id=%s
+        """,
+        (
+            rollup_status,
+            rollup_status in {"completed", "partial", "failed"},
+            command_id,
+        ),
+    )
 
 
 @app.get("/v1/accounts/{account_id}")
@@ -1250,6 +4012,9 @@ def account_generated_at(
     authorization: str | None = Header(default=None),
     x_node_id: str | None = Header(default=None),
     x_account_id: str | None = Header(default=None),
+    x_redis_fencing_epoch: str | None = Header(default=None),
+    x_runtime_generation: str | None = Header(default=None),
+    x_lease_fencing_token: str | None = Header(default=None),
 ):
     """A<->B seam: node reads the snapshot freshness (generated_at) for its account."""
     require_node(
@@ -1262,8 +4027,17 @@ def account_generated_at(
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
+        with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=account_id,
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
         snap = build_system_snapshot(conn)
         return {"account_id": account_id, "generated_at": snap.get("generated_at")}
     finally:
@@ -1277,6 +4051,9 @@ def node_exchange_state(
     authorization: str | None = Header(default=None),
     x_node_id: str | None = Header(default=None),
     x_account_id: str | None = Header(default=None),
+    x_redis_fencing_epoch: str | None = Header(default=None),
+    x_runtime_generation: str | None = Header(default=None),
+    x_lease_fencing_token: str | None = Header(default=None),
 ):
     """Return one account's read-only venue mirror for node reconciliation."""
     require_node(
@@ -1289,8 +4066,17 @@ def node_exchange_state(
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
+        with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=account_id,
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT to_regclass('public.exchange_state_mirror') IS NOT NULL AS present"
@@ -1331,7 +4117,7 @@ def _read_conn() -> "psycopg2.extensions.connection":
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="projection store unavailable")
-    return psycopg2.connect(database_url)
+    return _database_connection(database_url)
 
 
 def _f(value):
@@ -1915,17 +4701,402 @@ _EXECUTABLE_PARENT_ACTIONS = frozenset(
         "cancel_order",
     }
 )
-_OPERATOR_ACCOUNTS = ("account-a", "account-b")
+_DEFAULT_OPERATOR_ACCOUNTS = (
+    "account-a",
+    "account-b",
+    "account-c",
+    "account-d",
+)
+_OPERATOR_ACCOUNT_ID_RE = re.compile(r"^account-[a-z0-9][a-z0-9-]{0,31}$")
 _ORDER_AUTHORIZATION_TYPES = ("user", "channel")
 _INTERNAL_ORDER_SERVICE_RE = re.compile(r"internal|watchdog|reconciler", re.IGNORECASE)
 _TG_SIGNAL_REF_RE = re.compile(
     r"(?:^|-)tg-sig-c(?P<channel>\d+)-m(?P<message>\d+)(?:-e\d+)?(?:$|-)"
 )
-_WATCHER_TRADING_DB = os.environ.get(
-    "WATCHER_TRADING_DB",
-    "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db",
+_DEFAULT_WATCHER_TRADING_DB = (
+    "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db"
 )
+_WATCHER_TRADING_DB_ENVS = (
+    "TRADER_TRADING_DB_PATH",
+    "WATCHER_TRADING_DB",
+    "TRADING_DB_PATH",
+)
+
+
+def _resolve_watcher_trading_db_path(env: dict[str, str] | None = None) -> str:
+    if env is None:
+        env = os.environ
+    configured = []
+    for name in _WATCHER_TRADING_DB_ENVS:
+        value = str(env.get(name) or "").strip()
+        if value:
+            configured.append((name, value))
+    if not configured:
+        return _DEFAULT_WATCHER_TRADING_DB
+    canonical_name, canonical_value = configured[0]
+    for name, value in configured[1:]:
+        if value != canonical_value:
+            raise RuntimeError(
+                "conflicting trading DB path environment: "
+                f"{canonical_name}={canonical_value} {name}={value}"
+            )
+    return canonical_value
+
+
+_WATCHER_TRADING_DB = _resolve_watcher_trading_db_path()
 _ATTRIBUTION_SHADOW_LOG = "/srv/trader-v3/logs/attribution-shadow.jsonl"
+
+
+def _operator_account_registry() -> dict[str, dict]:
+    raw = os.environ.get("OPERATOR_ACCOUNT_REGISTRY_JSON", "").strip()
+    if not raw:
+        return {
+            account_id: {}
+            for account_id in _DEFAULT_OPERATOR_ACCOUNTS
+        }
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="operator account registry JSON is invalid",
+        ) from exc
+    if not isinstance(payload, dict) or not payload:
+        raise HTTPException(
+            status_code=503,
+            detail="operator account registry must be a non-empty object",
+        )
+
+    registry: dict[str, dict] = {}
+    for raw_account_id, raw_config in payload.items():
+        account_id = str(raw_account_id or "").strip()
+        if not _OPERATOR_ACCOUNT_ID_RE.fullmatch(account_id):
+            raise HTTPException(
+                status_code=503,
+                detail="operator account registry contains an invalid account_id",
+            )
+        if not isinstance(raw_config, dict):
+            raise HTTPException(
+                status_code=503,
+                detail=f"operator account registry entry for {account_id} is invalid",
+            )
+        if "effective_equity" in raw_config:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"operator account registry {account_id}.effective_equity "
+                    "is unsupported; configure risk_capital_multiplier in the "
+                    "watcher account registry"
+                ),
+            )
+        registry[account_id] = {}
+    return registry
+
+
+def _operator_accounts() -> tuple[str, ...]:
+    return tuple(_operator_account_registry())
+
+
+def _watcher_account_is_enabled(row, account_columns: set[str]) -> bool:
+    for field_name in ("is_enabled", "enabled"):
+        if field_name not in account_columns:
+            continue
+        value = str(row[field_name] or "").strip().lower()
+        if value not in {"1", "active", "enabled", "true"}:
+            return False
+    if "status" not in account_columns:
+        return True
+    status = str(row["status"] or "").strip().lower()
+    return not status or status in {"1", "active", "enabled", "true"}
+
+
+def _channel_risk_capital_multiplier(
+    channel_id: str,
+    account_id: str,
+) -> float:
+    import sqlite3
+
+    normalized_channel_id = str(channel_id or "").strip()
+    if not normalized_channel_id:
+        raise HTTPException(
+            status_code=503,
+            detail="channel risk route has no channel_id",
+        )
+    try:
+        conn = sqlite3.connect(
+            f"file:{_WATCHER_TRADING_DB}?mode=ro",
+            uri=True,
+        )
+        conn.row_factory = sqlite3.Row
+        try:
+            account_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(account_configs)"
+                ).fetchall()
+            }
+            route_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(channel_routing)"
+                ).fetchall()
+            }
+            required_account_columns = {
+                "account_id",
+                "account_type",
+                "parent_account_id",
+                "execution_account_id",
+                "risk_capital_multiplier",
+            }
+            if not required_account_columns <= account_columns:
+                raise HTTPException(
+                    status_code=503,
+                    detail="watcher account routing schema is unavailable",
+                )
+            if not {"channel_id", "target_account_id"} <= route_columns:
+                raise HTTPException(
+                    status_code=503,
+                    detail="watcher channel routing schema is unavailable",
+                )
+            fields = [
+                "route.target_account_id AS target_account_id",
+                "account.account_id AS account_id",
+                "account.execution_account_id AS execution_account_id",
+                "(SELECT COUNT(*) FROM account_configs AS candidate "
+                "WHERE candidate.execution_account_id = "
+                "account.execution_account_id) AS execution_account_count",
+                "account.account_type AS account_type",
+                "account.parent_account_id AS parent_account_id",
+                "(SELECT COUNT(*) FROM account_configs AS parent "
+                "WHERE parent.account_id = account.parent_account_id "
+                "AND lower(trim(parent.account_type)) = 'main') "
+                "AS parent_main_account_count",
+                "account.risk_capital_multiplier "
+                "AS risk_capital_multiplier",
+            ]
+            for field_name in ("is_enabled", "enabled", "status"):
+                if field_name in account_columns:
+                    fields.append(f"account.{field_name} AS {field_name}")
+            rows = conn.execute(
+                "SELECT "
+                + ", ".join(fields)
+                + " FROM channel_routing AS route "
+                + "LEFT JOIN account_configs AS account "
+                + "ON account.account_id = route.target_account_id "
+                + "WHERE route.channel_id = ?",
+                (normalized_channel_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher channel risk route is unavailable",
+        ) from exc
+
+    if len(rows) != 1:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"channel {normalized_channel_id} must resolve to exactly "
+                "one execution account"
+            ),
+        )
+    row = rows[0]
+    target_account_id = str(row["target_account_id"] or "").strip()
+    credential_account_id = str(row["account_id"] or "").strip()
+    execution_account_id = str(
+        row["execution_account_id"] or ""
+    ).strip()
+    if not credential_account_id or target_account_id != credential_account_id:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher channel route target account is invalid",
+        )
+    if execution_account_id != account_id:
+        raise HTTPException(
+            status_code=409,
+            detail="watcher channel route conflicts with requested account_id",
+        )
+    try:
+        execution_account_count = int(row["execution_account_count"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher execution account identity is invalid",
+        ) from exc
+    if execution_account_count != 1:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher execution account identity must be unique",
+        )
+    account_type = str(row["account_type"] or "").strip().lower()
+    parent_account_id = str(row["parent_account_id"] or "").strip()
+    if account_type == "main":
+        if parent_account_id:
+            raise HTTPException(
+                status_code=503,
+                detail="watcher main account hierarchy is invalid",
+            )
+    elif account_type == "subaccount":
+        try:
+            parent_main_account_count = int(row["parent_main_account_count"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="watcher subaccount parent identity is invalid",
+            ) from exc
+        if not parent_account_id or parent_main_account_count != 1:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "watcher subaccount parent must resolve to exactly "
+                    "one main account"
+                ),
+            )
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher account type is invalid",
+        )
+    if not _watcher_account_is_enabled(row, account_columns):
+        raise HTTPException(
+            status_code=503,
+            detail="watcher channel route target account is disabled",
+        )
+    try:
+        multiplier = float(row["risk_capital_multiplier"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher channel risk capital multiplier is invalid",
+        ) from exc
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher channel risk capital multiplier is invalid",
+        )
+    return multiplier
+
+
+def _account_risk_capital_multiplier(account_id: str) -> float:
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(
+            f"file:{_WATCHER_TRADING_DB}?mode=ro",
+            uri=True,
+        )
+        conn.row_factory = sqlite3.Row
+        try:
+            account_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(account_configs)"
+                ).fetchall()
+            }
+            required_account_columns = {
+                "account_id",
+                "account_type",
+                "parent_account_id",
+                "execution_account_id",
+                "risk_capital_multiplier",
+            }
+            if not required_account_columns <= account_columns:
+                raise HTTPException(
+                    status_code=503,
+                    detail="watcher account risk schema is unavailable",
+                )
+            fields = [
+                "account.account_id AS account_id",
+                "account.account_type AS account_type",
+                "account.parent_account_id AS parent_account_id",
+                "(SELECT COUNT(*) FROM account_configs AS parent "
+                "WHERE parent.account_id = account.parent_account_id "
+                "AND lower(trim(parent.account_type)) = 'main') "
+                "AS parent_main_account_count",
+                "account.execution_account_id AS execution_account_id",
+                "account.risk_capital_multiplier "
+                "AS risk_capital_multiplier",
+            ]
+            for field_name in ("is_enabled", "enabled", "status"):
+                if field_name in account_columns:
+                    fields.append(f"account.{field_name} AS {field_name}")
+            rows = conn.execute(
+                "SELECT "
+                + ", ".join(fields)
+                + " FROM account_configs AS account "
+                + "WHERE account.execution_account_id = ?",
+                (account_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher account risk configuration is unavailable",
+        ) from exc
+
+    if len(rows) != 1:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"execution account {account_id} must resolve to exactly "
+                "one risk configuration"
+            ),
+        )
+    row = rows[0]
+    account_type = str(row["account_type"] or "").strip().lower()
+    parent_account_id = str(row["parent_account_id"] or "").strip()
+    if account_type == "main":
+        if parent_account_id:
+            raise HTTPException(
+                status_code=503,
+                detail="watcher main account hierarchy is invalid",
+            )
+    elif account_type == "subaccount":
+        try:
+            parent_main_account_count = int(row["parent_main_account_count"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="watcher subaccount parent identity is invalid",
+            ) from exc
+        if not parent_account_id or parent_main_account_count != 1:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "watcher subaccount parent must resolve to exactly "
+                    "one main account"
+                ),
+            )
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher account type is invalid",
+        )
+    if not _watcher_account_is_enabled(row, account_columns):
+        raise HTTPException(
+            status_code=503,
+            detail="watcher account risk configuration is disabled",
+        )
+    try:
+        multiplier = float(row["risk_capital_multiplier"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher account risk capital multiplier is invalid",
+        ) from exc
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail="watcher account risk capital multiplier is invalid",
+        )
+    return multiplier
 
 
 def _channel_from_signal_ref(value) -> str | bool:
@@ -1964,11 +5135,12 @@ def _authorized_parent(
     except ValueError:
         raise HTTPException(status_code=400, detail="parent_intent_id must be a uuid")
 
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT account_id, instrument_id, action::text, status::text, order_plan "
+                "SELECT account_id, instrument_id, action::text, status::text, "
+                "order_plan, target_position_id "
                 "FROM trade_intents "
                 "WHERE intent_id::text=%s",
                 (parent_intent_id,),
@@ -1982,13 +5154,8 @@ def _authorized_parent(
             status_code=400,
             detail="parent_intent_id does not reference an authorized trade intent",
         )
-    (
-        parent_account,
-        parent_instrument,
-        parent_action,
-        parent_status,
-        parent_plan,
-    ) = row
+    parent_account, parent_instrument, parent_action, parent_status, parent_plan = row[:5]
+    parent_target_position_id = row[5] if len(row) > 5 else False
     if parent_account != account_id:
         raise HTTPException(
             status_code=400,
@@ -2034,7 +5201,23 @@ def _authorized_parent(
             status_code=400,
             detail="parent_intent_id authorization evidence is incomplete",
         )
-    return parent_authorization
+    parent_side = str(
+        plan.get("position_side")
+        or plan.get("side")
+        or ""
+    ).strip().lower()
+    target_position_id = str(parent_target_position_id or "").strip()
+    if not target_position_id and parent_side in ("long", "short"):
+        target_position_id = str(
+            _canonical_position_id(
+                _nautilus_instrument_id(parent_instrument),
+                parent_side,
+            )
+            or ""
+        )
+    result = dict(parent_authorization)
+    result["_target_position_id"] = target_position_id or False
+    return result
 
 
 def _order_authorization(
@@ -2076,6 +5259,7 @@ def _order_authorization(
         parent_type = str(parent_authorization.get("authorized_by_type") or "").strip()
         parent_id = str(parent_authorization.get("authorized_by_id") or "").strip()
         parent_message = str(parent_authorization.get("source_message_id") or "").strip()
+        target_position_id = parent_authorization.get("_target_position_id") or False
         if (
             authorized_by_type != parent_type
             or authorized_by_id != parent_id
@@ -2092,6 +5276,7 @@ def _order_authorization(
             "source_message_id": parent_message,
             "created_by_service": created_by_service,
             "parent_intent_id": parent_intent_id,
+            "_target_position_id": target_position_id,
         }
 
     if authorized_by_type == "channel":
@@ -2168,6 +5353,177 @@ def _canonical_order_request(body: dict, authorization: dict) -> dict:
     return canonical
 
 
+def _operator_request_semantics(
+    *,
+    action: str,
+    account_id: str,
+    symbol: str,
+    position_side: str | None,
+    client_ref: str,
+    order_plan: dict,
+    target_position_id: str | bool,
+    body: dict,
+    valid_seconds: int,
+) -> dict:
+    semantic_plan = {
+        key: value
+        for key, value in order_plan.items()
+        if key not in {
+            "authorization",
+            "attribution",
+            "canary_permit",
+            "equity",
+            "request_semantics",
+        }
+    }
+    payload = {
+        "version": "operator-management-v1",
+        "action": action,
+        "account_id": account_id,
+        "instrument_id": symbol,
+        "position_side": position_side or False,
+        "client_ref": client_ref,
+        "entry_ref": str(body.get("entry_ref") or "").strip() or False,
+        "channel": str(body.get("channel") or "").strip() or False,
+        "parent_intent_id": str(body.get("parent_intent_id") or "").strip() or False,
+        "target_position_id": target_position_id or False,
+        "valid_seconds": valid_seconds,
+        "order_plan": semantic_plan,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode()
+    return {
+        "version": payload["version"],
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _operator_open_request_semantics(
+    *,
+    body: dict,
+    account_id: str,
+    symbol: str,
+    client_ref: str,
+    authorization: dict,
+) -> dict:
+    canonical = _canonical_order_request(body, authorization)
+    canonical.pop("live_open_gate", None)
+    payload = {
+        "version": "operator-open-v1",
+        "action": "open_position",
+        "account_id": account_id,
+        "instrument_id": symbol,
+        "client_ref": client_ref,
+        "request": canonical,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode()
+    return {
+        "version": payload["version"],
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _operator_open_replay(
+    database_url: str,
+    *,
+    account_id: str,
+    symbol: str,
+    client_ref: str,
+    authorization: dict,
+    request_semantics: dict,
+) -> dict | bool:
+    idempotency_key = hashlib.sha256(
+        f"operator|{account_id}|{client_ref}".encode()
+    ).hexdigest()
+    conn = _database_connection(database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT intent_id::text,
+                       status::text,
+                       valid_until,
+                       order_plan,
+                       risk_budget,
+                       target_position_id
+                FROM trade_intents
+                WHERE idempotency_key=%s
+                """,
+                (idempotency_key,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return False
+    order_plan = row[3]
+    if not isinstance(order_plan, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="persisted open intent order_plan is invalid",
+        )
+    persisted_authorization = order_plan.get("authorization")
+    if (
+        _stable_authorization_evidence(persisted_authorization)
+        != _stable_authorization_evidence(authorization)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="idempotency key authorization evidence mismatch",
+        )
+    persisted_semantics = order_plan.get("request_semantics")
+    if not isinstance(persisted_semantics, dict):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "legacy idempotency record has no request semantics; "
+                "retry with a new client_ref"
+            ),
+        )
+    if persisted_semantics.get("sha256") != request_semantics["sha256"]:
+        raise HTTPException(
+            status_code=409,
+            detail="idempotency key request payload mismatch",
+        )
+    risk_budget = row[4]
+    if not isinstance(risk_budget, dict):
+        risk_budget = {}
+    return {
+        "intent_id": row[0],
+        "status": row[1],
+        "replay": True,
+        "account_id": account_id,
+        "instrument_id": symbol,
+        "action": "open_position",
+        "order_plan": order_plan,
+        "execution_preview": _safe_execution_preview(
+            order_plan,
+            risk_budget,
+            symbol,
+            "open_position",
+        ),
+        "risk_budget": risk_budget,
+        "valid_until": (
+            row[2].isoformat()
+            if row[2]
+            else None
+        ),
+        "authorization": persisted_authorization,
+        "target_position_id": row[5] or False,
+    }
+
+
 def _write_attribution_shadow(event: dict) -> None:
     path = os.environ.get("ATTRIBUTION_SHADOW_LOG", _ATTRIBUTION_SHADOW_LOG)
     try:
@@ -2179,10 +5535,10 @@ def _write_attribution_shadow(event: dict) -> None:
 
 def _attribution_intent(database_url: str, account_id: str, entry_ref: str):
     accounts = [account_id]
-    for candidate in _OPERATOR_ACCOUNTS:
+    for candidate in _operator_accounts():
         if candidate != account_id:
             accounts.append(candidate)
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
             for candidate in accounts:
@@ -2206,18 +5562,150 @@ def _attribution_intent(database_url: str, account_id: str, entry_ref: str):
     return False
 
 
+def _channel_management_entry_account(
+    database_url: str,
+    *,
+    requested_account_id: str,
+    symbol: str,
+    channel: str,
+    entry_ref: str,
+    position_side: str | None,
+) -> str:
+    if not entry_ref or not channel or channel == "operator":
+        return requested_account_id
+    row = _attribution_intent(
+        database_url,
+        requested_account_id,
+        entry_ref,
+    )
+    if not row:
+        return requested_account_id
+
+    _, entry_action, entry_symbol, entry_account, order_plan, raw_channel, source_ref = row
+    owner_channel = str(raw_channel or "").strip()
+    if owner_channel == "hermes-operator":
+        parsed_channel = _channel_from_signal_ref(source_ref)
+        if parsed_channel:
+            owner_channel = str(parsed_channel)
+    entry_plan = order_plan or {}
+    entry_side = str(entry_plan.get("side") or "").strip().lower()
+    identity_matches = (
+        entry_action == "open_position"
+        and _attribution_symbol(entry_symbol) == symbol
+        and owner_channel == channel
+    )
+    if position_side:
+        identity_matches = identity_matches and entry_side == position_side
+    if not identity_matches:
+        return requested_account_id
+    normalized_account = str(entry_account or "").strip()
+    if normalized_account not in _operator_accounts():
+        return requested_account_id
+    return normalized_account
+
+
+def _cancel_order_owner(
+    database_url: str,
+    *,
+    client_order_id: str,
+    account_id: str | bool,
+    symbol: str,
+) -> dict:
+    intent_id = str(UUID(hex=client_order_id[1:33]))
+    conn = _database_connection(database_url)
+    try:
+        with conn.cursor() as cur:
+            account_predicate = ""
+            params: tuple = (
+                client_order_id,
+                intent_id,
+                symbol,
+                symbol,
+            )
+            if account_id:
+                account_predicate = (
+                    " AND op.account_id=%s"
+                    " AND ti.account_id=%s"
+                )
+                params = (
+                    client_order_id,
+                    account_id,
+                    account_id,
+                    intent_id,
+                    symbol,
+                    symbol,
+                )
+            cur.execute(
+                f"""
+                SELECT ti.intent_id::text,
+                       ti.account_id,
+                       ti.instrument_id,
+                       ti.order_plan,
+                       rm.channel_id,
+                       rm.source_message_id
+                FROM orders_projection AS op
+                JOIN trade_intents AS ti
+                  ON ti.intent_id = op.intent_id
+                JOIN hermes_decisions AS hd
+                  ON hd.decision_id = ti.hermes_decision_id
+                JOIN raw_messages AS rm
+                  ON rm.id = hd.raw_message_id
+                WHERE op.client_order_id=%s
+                  AND op.account_id=ti.account_id
+                  {account_predicate}
+                  AND ti.intent_id::text=%s
+                  AND upper(split_part(op.instrument_id, '-', 1))=%s
+                  AND upper(split_part(ti.instrument_id, '-', 1))=%s
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if len(rows) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "client_order_id does not belong to the requested "
+                "account and instrument"
+            ),
+        )
+    row = rows[0]
+    order_plan = row[3] or {}
+    authorization = order_plan.get("authorization")
+    if not isinstance(authorization, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="cancel_order owner intent has no authorization evidence",
+        )
+    owner_channel = str(row[4] or "").strip()
+    if owner_channel == "hermes-operator":
+        parsed_channel = _channel_from_signal_ref(row[5])
+        if parsed_channel:
+            owner_channel = str(parsed_channel)
+    return {
+        "intent_id": str(row[0]),
+        "account_id": str(row[1]),
+        "instrument_id": str(row[2]),
+        "owner_channel": owner_channel or False,
+        "authorization": authorization,
+    }
+
+
 def _attribution_symbol(value) -> str:
     return str(value or "").upper().split("-")[0].split(".")[0]
 
 
 def _resolve_attribution(database_url: str, action: str, symbol: str,
                          account_id: str, channel: str, entry_ref: str,
-                         position_side: str | None) -> tuple[dict, str | bool]:
+                         position_side: str | None) -> tuple[dict, str | bool, str | bool]:
     resolution = "none"
     owner_channel: str | bool = False
     channel_match: bool | str = "unknown"
     errors = []
     hard_error: str | bool = False
+    target_position_id: str | bool = False
     bypass = channel == "operator"
 
     row = False
@@ -2251,6 +5739,14 @@ def _resolve_attribution(database_url: str, action: str, symbol: str,
             )
         entry_plan = order_plan or {}
         entry_side = str(entry_plan.get("side") or "").lower()
+        if entry_side in ("long", "short"):
+            target_position_id = (
+                _canonical_position_id(
+                    _nautilus_instrument_id(entry_symbol),
+                    entry_side,
+                )
+                or False
+            )
         if position_side:
             if entry_side != position_side:
                 errors.append(f"position_side_mismatch:{entry_side or 'unknown'}")
@@ -2292,7 +5788,7 @@ def _resolve_attribution(database_url: str, action: str, symbol: str,
         "bypass": bypass,
         "error": error,
     }
-    return event, hard_error
+    return event, hard_error, target_position_id
 
 
 def _operator_caps() -> dict:
@@ -2307,56 +5803,74 @@ def _operator_caps() -> dict:
     }
 
 
-def _account_equity(account_id: str) -> float | None:
-    """Return fresh projected equity, with an env value only for first bootstrap."""
-    max_age_raw = os.environ.get("OPERATOR_EQUITY_MAX_AGE_SECONDS", "180")
+def _account_financial_state(account_id: str) -> dict[str, float] | bool:
+    """Return fresh real equity and available balance from the projection DB."""
+    max_age_raw = os.environ.get("OPERATOR_EQUITY_MAX_AGE_SECONDS", "60")
     try:
         max_age_seconds = max(1.0, float(max_age_raw))
     except ValueError:
-        max_age_seconds = 180.0
-    if not math.isfinite(max_age_seconds) or max_age_seconds > 3600:
-        max_age_seconds = 180.0
+        max_age_seconds = 60.0
+    if not math.isfinite(max_age_seconds) or max_age_seconds > 60:
+        max_age_seconds = 60.0
 
     database_url = os.environ.get("DATABASE_URL", "").strip()
-    if database_url:
+    if not database_url:
+        return False
+    try:
+        conn = _database_connection(database_url)
         try:
-            conn = psycopg2.connect(database_url)
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT equity, EXTRACT(EPOCH FROM (now() - updated_at)) "
-                        "FROM accounts_projection WHERE account_id=%s "
-                        "ORDER BY updated_at DESC LIMIT 1",
-                        (account_id,),
-                    )
-                    row = cur.fetchone()
-            finally:
-                conn.close()
-        except Exception:
-            return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT equity, available_balance, "
+                    "payload->>'account_snapshot_source', "
+                    "payload->>'account_snapshot_fetched_at', "
+                    "EXTRACT(EPOCH FROM ("
+                    "now() - "
+                    "(payload->>'account_snapshot_fetched_at')::timestamptz"
+                    ")) "
+                    "FROM accounts_projection WHERE account_id=%s "
+                    "LIMIT 1",
+                    (account_id,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    if not row or row[1] is None:
+        return False
+    snapshot_source = str(row[2] or "").strip()
+    snapshot_fetched_at = str(row[3] or "").strip()
+    if snapshot_source != "binance_fapi_account_v3":
+        return False
+    if not snapshot_fetched_at:
+        return False
+    try:
+        equity = float(row[0])
+        available_balance = float(row[1])
+        age_seconds = float(row[4])
+    except (TypeError, ValueError):
+        return False
+    if not all(
+        math.isfinite(value)
+        for value in (equity, available_balance, age_seconds)
+    ):
+        return False
+    if equity <= 0 or available_balance < 0:
+        return False
+    if age_seconds < 0 or age_seconds > max_age_seconds:
+        return False
+    return {
+        "real_equity": equity,
+        "available_balance": available_balance,
+    }
 
-        if row:
-            try:
-                equity = float(row[0])
-                age_seconds = float(row[1])
-            except (TypeError, ValueError):
-                return None
-            if not math.isfinite(equity) or not math.isfinite(age_seconds):
-                return None
-            if equity <= 0 or age_seconds < 0 or age_seconds > max_age_seconds:
-                return None
-            return equity
 
-    env_key = "OPERATOR_EQUITY_" + account_id.upper().replace("-", "_")
-    raw = os.environ.get(env_key, "").strip()
-    if raw:
-        try:
-            equity = float(raw)
-        except ValueError:
-            return None
-        if math.isfinite(equity) and equity > 0:
-            return equity
-    return None
+def _account_equity(account_id: str) -> float | None:
+    state = _account_financial_state(account_id)
+    if not state:
+        return None
+    return state["real_equity"]
 
 
 def _symbol_risk_ratio(symbol: str) -> float:
@@ -2381,18 +5895,43 @@ def _symbol_risk_ratio(symbol: str) -> float:
 
 def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
                      entry_price, entry_price_min, entry_price_max,
-                     stop_loss, caps, checks) -> float:
+                     stop_loss, leverage, caps, checks,
+                     risk_capital_multiplier=False) -> float:
     """Risk-based sizing: notional = equity * risk_ratio / stop_distance.
     Hard cap (fail closed): loss at stop <= max_risk_fraction of equity.
     Without a stop loss the order cannot be risk-checked, so an explicit
     notional is required and capped at no_sl_equity_fraction of equity."""
-    equity = _account_equity(account_id)
-    if equity is None:
+    state = _account_financial_state(account_id)
+    if not state:
         raise HTTPException(
             status_code=503,
-            detail=f"account equity unknown for {account_id}: set OPERATOR_EQUITY_"
-                   f"{account_id.upper().replace('-', '_')} in the control-plane env",
+            detail=f"fresh account financial state unavailable for {account_id}",
         )
+    real_equity = state["real_equity"]
+    available_balance = state["available_balance"]
+    try:
+        multiplier = float(risk_capital_multiplier)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="account risk capital multiplier is unavailable",
+        ) from exc
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail="account risk capital multiplier is invalid",
+        )
+    effective_equity = real_equity * multiplier
+    checks.append(
+        {
+            "name": "account_equity_basis",
+            "passed": True,
+            "real_equity": real_equity,
+            "available_balance": available_balance,
+            "effective_equity": effective_equity,
+            "risk_capital_multiplier": multiplier,
+        }
+    )
     # price reference for the stop distance
     if entry_type == "limit":
         ref = entry_price
@@ -2408,6 +5947,12 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
     else:
         ref = _binance_mark_price(symbol)
 
+    if entry_type == "market" and stop_loss is not None and not ref:
+        raise HTTPException(
+            status_code=503,
+            detail=f"live mark price unavailable for {symbol} stop-loss sizing",
+        )
+
     notional: float
     if stop_loss is not None and ref:
         if side == "short" and stop_loss <= ref:
@@ -2416,17 +5961,35 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
             raise HTTPException(status_code=400, detail="long stop_loss must be below entry")
         stop_frac = abs(ref - stop_loss) / ref
         risk_ratio = _symbol_risk_ratio(symbol)
-        auto = equity * risk_ratio / stop_frac
+        auto = effective_equity * risk_ratio / stop_frac
+        allow_canary_override = (
+            caps.get("_canary_explicit_notional_override") is True
+        )
+        if (
+            explicit_notional is not None
+            and explicit_notional > auto + 1e-9
+            and not allow_canary_override
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"explicit notional {explicit_notional:.1f}U exceeds "
+                    f"dynamic auto sizing {auto:.1f}U"
+                ),
+            )
         notional = explicit_notional if explicit_notional is not None else auto
-        max_risk = equity * caps["max_risk_fraction"]
+        max_risk = effective_equity * caps["max_risk_fraction"]
         est_risk = notional * stop_frac
         if est_risk > max_risk + 1e-9:
             raise HTTPException(
                 status_code=400,
                 detail=f"loss at stop ~{est_risk:.1f}U exceeds per-order risk cap "
-                       f"{max_risk:.1f}U ({caps['max_risk_fraction']:.0%} of equity {equity:.0f}U)",
+                       f"{max_risk:.1f}U ({caps['max_risk_fraction']:.0%} of "
+                       f"effective equity {effective_equity:.0f}U)",
             )
-        checks.append({"name": "risk_sizing", "passed": True, "equity": equity,
+        checks.append({"name": "risk_sizing", "passed": True,
+                       "real_equity": real_equity,
+                       "effective_equity": effective_equity,
                        "risk_ratio": risk_ratio, "stop_frac": round(stop_frac, 5),
                        "sizing_price": ref, "notional": round(notional, 1),
                        "est_risk": round(est_risk, 1), "risk_cap": round(max_risk, 1),
@@ -2438,7 +6001,7 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
                 detail="auto-sizing needs a stop_loss (and a resolvable price); "
                        "pass notional_usdt explicitly for stop-less orders",
             )
-        ceiling = equity * caps["no_sl_equity_fraction"]
+        ceiling = effective_equity * caps["no_sl_equity_fraction"]
         if explicit_notional > ceiling:
             raise HTTPException(
                 status_code=400,
@@ -2449,10 +6012,34 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
         checks.append({"name": "no_sl_notional_cap", "passed": True,
                        "notional": notional, "ceiling": round(ceiling, 1)})
 
-    lev_ceiling = equity * caps["max_leverage"]
-    if notional > lev_ceiling:
-        raise HTTPException(status_code=400,
-                            detail=f"notional {notional:.0f}U exceeds equity*max_leverage {lev_ceiling:.0f}U")
+    hard_leverage = leverage or caps["max_leverage"]
+    real_equity_ceiling = real_equity * hard_leverage
+    if notional > real_equity_ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"notional {notional:.0f}U exceeds real_equity*leverage "
+                f"{real_equity_ceiling:.0f}U"
+            ),
+        )
+    available_ceiling = available_balance * hard_leverage
+    if notional > available_ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"notional {notional:.0f}U exceeds available_balance*leverage "
+                f"{available_ceiling:.0f}U"
+            ),
+        )
+    checks.append(
+        {
+            "name": "real_funds_gate",
+            "passed": True,
+            "leverage": hard_leverage,
+            "real_equity_ceiling": round(real_equity_ceiling, 1),
+            "available_balance_ceiling": round(available_ceiling, 1),
+        }
+    )
     if caps["max_notional"] and notional > caps["max_notional"]:
         raise HTTPException(status_code=400,
                             detail=f"notional {notional:.0f}U exceeds OPERATOR_MAX_NOTIONAL_USDT {caps['max_notional']:.0f}U")
@@ -2470,7 +6057,7 @@ def _validate_stop_direction(symbol: str, account_id: str, stop_loss: float,
         return
     side = None
     try:
-        conn = psycopg2.connect(database_url)
+        conn = _database_connection(database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2513,7 +6100,7 @@ def _validate_take_profit_direction(symbol: str, account_id: str, take_profits: 
         return
     side = None
     try:
-        conn = psycopg2.connect(database_url)
+        conn = _database_connection(database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2574,9 +6161,210 @@ def _op_num(value, field: str, required: bool = False):
         num = float(value)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail=f"{field} must be a number")
-    if num <= 0:
+    if not math.isfinite(num) or num <= 0:
         raise HTTPException(status_code=400, detail=f"{field} must be > 0")
     return num
+
+
+def _op_decimal(value, field: str, required: bool = False) -> Decimal | None:
+    if value is None:
+        if required:
+            raise HTTPException(status_code=400, detail=f"{field} required")
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field} must be a number")
+    if not number.is_finite() or number <= 0:
+        raise HTTPException(status_code=400, detail=f"{field} must be > 0")
+    return number
+
+
+def _lock_canary_permit(
+    cur,
+    *,
+    raw_permit_id,
+    account_id: str,
+    symbol: str,
+    notional: Decimal,
+) -> dict:
+    permit_id = _required_uuid(
+        raw_permit_id,
+        f"canary_permit_id is required for {account_id} open_position",
+    )
+    cur.execute(
+        """
+        SELECT account_id,
+               symbol,
+               max_notional_usdt,
+               max_cumulative_loss_usdt,
+               max_open_count,
+               consumed_open_count,
+               expires_at,
+               release_id,
+               testnet_emergency_close_evidence_sha256,
+               testnet_emergency_close_verified_at,
+               status,
+               armed_node_id,
+               portfolio_baseline_sha256,
+               now()
+        FROM live_canary_permits
+        WHERE permit_id=%s
+        FOR UPDATE
+        """,
+        (permit_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=409, detail="canary permit not found")
+    (
+        permit_account_id,
+        permit_symbol,
+        max_notional,
+        max_cumulative_loss,
+        max_open_count,
+        consumed_open_count,
+        expires_at,
+        release_id,
+        emergency_close_evidence_sha256,
+        emergency_close_verified_at,
+        permit_status,
+        armed_node_id,
+        portfolio_baseline_sha256,
+        database_now,
+    ) = row
+    if permit_status == "consumed" or int(consumed_open_count) >= 1:
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit has already been consumed",
+        )
+    if permit_status != "armed":
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit is not armed",
+        )
+    if expires_at is None or expires_at <= database_now:
+        raise HTTPException(status_code=409, detail="canary permit has expired")
+    if (
+        permit_account_id != account_id
+        or _canonical_symbol(permit_symbol) != symbol
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit scope does not match order",
+        )
+    if int(max_open_count) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit open count is invalid",
+        )
+    _validate_canary_permit_machine_evidence(
+        max_notional=max_notional,
+        max_cumulative_loss=max_cumulative_loss,
+        emergency_close_evidence_sha256=emergency_close_evidence_sha256,
+        emergency_close_verified_at=emergency_close_verified_at,
+        database_now=database_now,
+    )
+    if (
+        not isinstance(portfolio_baseline_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", portfolio_baseline_sha256) is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="canary permit portfolio baseline is invalid",
+        )
+    if notional > Decimal(str(max_notional)):
+        raise HTTPException(
+            status_code=400,
+            detail="canary notional exceeds permit limit",
+        )
+
+    node_id = str(armed_node_id or "").strip()
+    if not node_id:
+        cur.execute(
+            """
+            SELECT node_id
+            FROM node_heartbeats
+            WHERE account_id=%s
+              AND status='ACTIVE'
+              AND last_seen_at >= (
+                  now() - make_interval(secs => %s)
+              )
+            ORDER BY node_id
+            FOR SHARE
+            """,
+            (account_id, _command_target_max_age_seconds()),
+        )
+        active_nodes = [str(active_row[0]) for active_row in cur.fetchall()]
+        if len(active_nodes) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{account_id} requires exactly one fresh ACTIVE node"
+                ),
+            )
+        node_id = active_nodes[0]
+
+    heartbeat = _load_live_heartbeat(
+        cur,
+        account_id=account_id,
+        node_id=node_id,
+    )
+    _validate_live_heartbeat_evidence(
+        cur,
+        heartbeat=heartbeat,
+        node_id=node_id,
+        account_id=account_id,
+        symbol=symbol,
+        release_id=str(release_id),
+        expected_trading_state="ACTIVE",
+        required_rollout_phase=_canary_phase_for_account(account_id),
+    )
+    current_baseline = _portfolio_baseline_sha256(heartbeat, symbol)
+    if current_baseline != portfolio_baseline_sha256:
+        cur.execute(
+            """
+            UPDATE live_canary_permits
+            SET status='revoked'
+            WHERE permit_id=%s
+              AND status='armed'
+            """,
+            (permit_id,),
+        )
+        cur.connection.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="non-target portfolio baseline changed",
+        )
+    cur.execute(
+        """
+        SELECT 1
+        FROM production_incidents
+        WHERE account_id=%s
+          AND severity IN ('P0', 'P1')
+          AND status='open'
+        LIMIT 1
+        """,
+        (account_id,),
+    )
+    if cur.fetchone() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="account has an open P0/P1 incident",
+        )
+    return _canary_permit_downlink_evidence(
+        permit_id=permit_id,
+        account_id=account_id,
+        symbol=symbol,
+        release_id=str(release_id),
+        node_id=node_id,
+        max_notional=max_notional,
+        max_cumulative_loss=max_cumulative_loss,
+        expires_at=expires_at,
+        emergency_close_evidence_sha256=emergency_close_evidence_sha256,
+        emergency_close_verified_at=emergency_close_verified_at,
+        portfolio_baseline_sha256=portfolio_baseline_sha256,
+    )
 
 
 @app.post("/v1/operator/orders")
@@ -2607,13 +6395,38 @@ def operator_order(
         account_id = str(
             os.environ.get("OPERATOR_DEFAULT_ACCOUNT", "account-a")
         ).strip()
-    if account_id not in _OPERATOR_ACCOUNTS:
-        raise HTTPException(status_code=400, detail=f"account_id must be one of {list(_OPERATOR_ACCOUNTS)}")
+    operator_accounts = _operator_accounts()
+    if account_id not in operator_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"account_id must be one of {list(operator_accounts)}",
+        )
     reason = str(body.get("reason") or "").strip()
     if not reason:
         raise HTTPException(status_code=400, detail="reason required (audit trail)")
     source = str(body.get("source") or "hermes-agent")[:64]
     client_ref = str(body.get("client_ref") or "").strip()
+    open_raw_channel = "hermes-operator"
+    open_has_provenance = False
+    open_risk_capital_multiplier: float | bool = False
+    if action == "open_position":
+        open_raw_channel, open_has_provenance = _open_source_channel(
+            body,
+            client_ref,
+        )
+        if open_raw_channel not in ("hermes-operator", "operator"):
+            open_risk_capital_multiplier = (
+                _channel_risk_capital_multiplier(
+                    open_raw_channel,
+                    account_id,
+                )
+            )
+        else:
+            open_risk_capital_multiplier = (
+                _account_risk_capital_multiplier(account_id)
+            )
+    authorization_evidence: dict | None = None
+    open_request_semantics: dict | bool = False
 
     caps = _operator_caps()
     checks = [{"name": "operator_auth", "passed": True}]
@@ -2630,6 +6443,141 @@ def operator_order(
         raise HTTPException(status_code=400, detail="limit entry requires entry.price")
     if entry_type == "zone" and (entry_price_min is None or entry_price_max is None):
         raise HTTPException(status_code=400, detail="zone entry requires entry.price_min + entry.price_max")
+    entry_time_in_force = str(entry.get("time_in_force") or "").upper()
+    if not entry_time_in_force:
+        if entry_type == "market":
+            entry_time_in_force = "IOC"
+        else:
+            entry_time_in_force = "GTC"
+    database_url = os.environ.get("DATABASE_URL")
+    if action == "open_position" and not client_ref:
+        raise HTTPException(
+            status_code=400,
+            detail="open_position requires client_ref (idempotency key): use the "
+                   "signal message id, or a stable slug for verbal orders",
+        )
+    if action == "open_position" and not dry_run:
+        if not database_url:
+            raise HTTPException(
+                status_code=503,
+                detail="intent store unavailable",
+            )
+        request_id = str(x_request_id or client_ref or "").strip()
+        authorization_evidence = _order_authorization(
+            body,
+            database_url,
+            account_id,
+            symbol,
+            reason,
+            source,
+            role,
+            request_id,
+            client_ref,
+        )
+        authorization_evidence.pop("_target_position_id", False)
+        if (
+            authorization_evidence["authorized_by_type"] == "channel"
+            and open_raw_channel
+            != authorization_evidence["authorized_by_id"]
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "channel authorization does not match source channel"
+                ),
+            )
+        if (
+            authorization_evidence["authorized_by_type"] == "channel"
+            and not open_has_provenance
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "channel authorization requires source_channel "
+                    "or canonical client_ref"
+                ),
+            )
+        if (
+            open_raw_channel not in ("hermes-operator", "operator")
+            and authorization_evidence["authorized_by_type"] != "channel"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "channel-sourced order requires "
+                    "authorized_by_type=channel"
+                ),
+            )
+        open_request_semantics = _operator_open_request_semantics(
+            body=body,
+            account_id=account_id,
+            symbol=symbol,
+            client_ref=client_ref,
+            authorization=authorization_evidence,
+        )
+        replay = _operator_open_replay(
+            database_url,
+            account_id=account_id,
+            symbol=symbol,
+            client_ref=client_ref,
+            authorization=authorization_evidence,
+            request_semantics=open_request_semantics,
+        )
+        if replay is not False:
+            return replay
+    raw_canary_permit_id = body.get("canary_permit_id")
+    rollout_requires_canary = False
+    if (
+        action == "open_position"
+        and not dry_run
+        and account_id in _ROLLOUT_ACCOUNTS
+    ):
+        rollout_requires_canary = _live_open_requires_canary_permit(
+            account_id
+        )
+    canary_open = (
+        action == "open_position"
+        and not dry_run
+        and (
+            rollout_requires_canary
+            or _is_canary_request(
+                account_id=account_id,
+                raw_permit_id=raw_canary_permit_id,
+            )
+        )
+    )
+    canary_quantity = None
+    canary_price = None
+    if canary_open:
+        _canary_phase_for_account(account_id)
+        if entry_type != "limit":
+            raise HTTPException(
+                status_code=400,
+                detail=f"{account_id} canary entry.type must be limit",
+            )
+        if entry_time_in_force != "IOC":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{account_id} canary time_in_force must be IOC"
+                ),
+            )
+        canary_quantity = _op_decimal(
+            body.get("quantity"),
+            f"{account_id} canary quantity",
+        )
+        if canary_quantity is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{account_id} canary requires explicit quantity"
+                ),
+            )
+        canary_price = _op_decimal(
+            entry.get("price"),
+            f"{account_id} canary entry.price",
+            required=True,
+        )
 
     side = str(body.get("side") or "").lower() or None
     # Hedge mode holds LONG and SHORT simultaneously: management actions on a
@@ -2639,9 +6587,12 @@ def operator_order(
     if position_side is not None and position_side not in ("long", "short"):
         raise HTTPException(status_code=400, detail="position_side must be long|short")
     leverage = _op_num(body.get("leverage"), "leverage")
+    if leverage is not None and leverage <= 0:
+        raise HTTPException(status_code=400, detail="leverage must be greater than zero")
     if leverage is not None and leverage > caps["max_leverage"]:
         raise HTTPException(status_code=400, detail=f"leverage {leverage} exceeds cap {caps['max_leverage']}")
     cancel_client_order_id = None
+    cancel_order_owner = False
     if action == "cancel_order":
         cancel_client_order_id = str(body.get("client_order_id") or "").strip()
         # Only OUR deterministic ids are cancellable: external/manual orders on
@@ -2652,37 +6603,45 @@ def operator_order(
                 detail="cancel_order requires client_order_id in system format "
                        "(B + 32 hex + 2 digits); external orders cannot be cancelled here",
             )
-        # Format alone is forgeable: the embedded uuid must reference an intent WE
-        # issued. This is the actual ownership proof (adversarial review P1-1).
-        _own_db = os.environ.get("DATABASE_URL")
-        if _own_db:
-            _own_conn = psycopg2.connect(_own_db)
-            try:
-                with _own_conn.cursor() as _own_cur:
-                    _own_cur.execute(
-                        "SELECT 1 FROM trade_intents WHERE intent_id::text = %s",
-                        (str(UUID(hex=cancel_client_order_id[1:33])),),
-                    )
-                    if _own_cur.fetchone() is None:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="client_order_id does not belong to a system intent",
-                        )
-            finally:
-                _own_conn.close()
+    raw_authorization_type = str(
+        body.get("authorized_by_type") or ""
+    ).strip().lower()
+    channel_authorized_management = (
+        action in _OPERATOR_MANAGEMENT_ACTIONS
+        and raw_authorization_type == "channel"
+    )
+    if channel_authorized_management:
+        if not database_url:
+            raise HTTPException(status_code=503, detail="intent store unavailable")
+        channel = str(body.get("channel") or "").strip()
+        if action == "cancel_order":
+            cancel_order_owner = _cancel_order_owner(
+                database_url,
+                client_order_id=cancel_client_order_id,
+                account_id=False,
+                symbol=symbol,
+            )
+            account_id = cancel_order_owner["account_id"]
+            if account_id not in operator_accounts:
+                raise HTTPException(
+                    status_code=503,
+                    detail="cancel_order owner account is not registered",
+                )
+        else:
+            entry_ref = str(body.get("entry_ref") or "").strip()
+            account_id = _channel_management_entry_account(
+                database_url,
+                requested_account_id=account_id,
+                symbol=symbol,
+                channel=channel,
+                entry_ref=entry_ref,
+                position_side=position_side,
+            )
     stop_loss = _op_num(body.get("stop_loss"), "stop_loss")
     if action == "move_stop_loss":
         if stop_loss is None:
             raise HTTPException(status_code=400, detail="move_stop_loss requires stop_loss")
         _validate_stop_direction(symbol, account_id, stop_loss, position_side)
-    if action == "open_position" and not client_ref:
-        # The caller is an LLM: a timeout-retry without an idempotency key would
-        # double the position (hedge mode never blocks a second open).
-        raise HTTPException(
-            status_code=400,
-            detail="open_position requires client_ref (idempotency key): use the "
-                   "signal message id, or a stable slug for verbal orders",
-        )
     if action in _OPERATOR_MANAGEMENT_ACTIONS and not client_ref:
         raise HTTPException(
             status_code=400,
@@ -2748,14 +6707,49 @@ def operator_order(
 
     notional = None
     quantity = None
+    canary_actual_notional = None
     if action == "open_position":
         if side not in ("long", "short"):
             raise HTTPException(status_code=400, detail="side must be long|short for open_position")
+        explicit_notional = _op_num(
+            body.get("notional_usdt"),
+            "notional_usdt",
+        )
+        if canary_open:
+            if canary_quantity is None or canary_price is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{account_id} canary quantity and price are required"
+                    ),
+                )
+            quantity = format(canary_quantity, "f")
+            canary_actual_notional = canary_quantity * canary_price
+            raw_explicit_notional = body.get("notional_usdt")
+            declared_notional = _op_decimal(
+                raw_explicit_notional,
+                "notional_usdt",
+            )
+            if declared_notional is not None:
+                if declared_notional != canary_actual_notional:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"{account_id} canary notional_usdt must equal "
+                            "quantity * entry.price"
+                        ),
+                    )
+            explicit_notional = float(canary_actual_notional)
+        sizing_caps = caps
+        if canary_open:
+            sizing_caps = dict(caps)
+            sizing_caps["_canary_explicit_notional_override"] = True
         notional = _size_open_order(
-            _op_num(body.get("notional_usdt"), "notional_usdt"),
+            explicit_notional,
             symbol, account_id, side, entry_type,
             entry_price, entry_price_min, entry_price_max,
-            stop_loss, caps, checks,
+            stop_loss, leverage, sizing_caps, checks,
+            open_risk_capital_multiplier,
         )
     elif action == "partial_close":
         quantity = _op_num(body.get("quantity"), "quantity", required=True)
@@ -2781,8 +6775,13 @@ def operator_order(
     else:
         order_plan = {
             "side": side,
-            "entry": {"type": entry_type, "price": entry_price,
-                      "price_min": entry_price_min, "price_max": entry_price_max},
+            "entry": {
+                "type": entry_type,
+                "time_in_force": entry_time_in_force,
+                "price": entry_price,
+                "price_min": entry_price_min,
+                "price_max": entry_price_max,
+            },
             "stop_loss": stop_loss,
             "take_profits": take_profits,
             "leverage": leverage,
@@ -2791,36 +6790,55 @@ def operator_order(
             order_plan["expire_hours"] = expire_hours
         if quantity is not None:
             order_plan["quantity"] = str(quantity)
+        if canary_open and canary_price is not None:
+            order_plan["entry"]["price"] = format(canary_price, "f")
         if position_side and action in ("close_position", "partial_close"):
             order_plan["position_side"] = position_side
     # Shape must match the node RiskBudget contract exactly (extra=forbid,
     # all three fields required): risk_fraction/max_notional/max_leverage.
+    risk_max_notional = notional
+    if risk_max_notional is None:
+        risk_max_notional = 0.0
+    if canary_actual_notional is not None:
+        risk_max_notional = format(canary_actual_notional, "f")
     risk_budget: dict = {
         "risk_fraction": 0.0,
-        "max_notional": notional if notional is not None else 0.0,
+        "max_notional": risk_max_notional,
         "max_leverage": leverage or caps["max_leverage"],
     }
 
     raw_channel = "hermes-operator"
     has_provenance = False
     if action == "open_position":
-        raw_channel, has_provenance = _open_source_channel(body, client_ref)
+        raw_channel = open_raw_channel
+        has_provenance = open_has_provenance
 
-    database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="intent store unavailable")
+    if action == "cancel_order" and not cancel_order_owner:
+        cancel_order_owner = _cancel_order_owner(
+            database_url,
+            client_order_id=cancel_client_order_id,
+            account_id=account_id,
+            symbol=symbol,
+        )
 
     request_id = str(x_request_id or client_ref or "").strip()
-    authorization_evidence = _order_authorization(
-        body,
-        database_url,
-        account_id,
-        symbol,
-        reason,
-        source,
-        role,
-        request_id,
-        client_ref,
+    if authorization_evidence is None:
+        authorization_evidence = _order_authorization(
+            body,
+            database_url,
+            account_id,
+            symbol,
+            reason,
+            source,
+            role,
+            request_id,
+            client_ref,
+        )
+    parent_target_position_id = (
+        authorization_evidence.pop("_target_position_id", False)
+        or False
     )
     if (
         authorization_evidence["authorized_by_type"] == "channel"
@@ -2850,8 +6868,24 @@ def operator_order(
         and authorization_evidence["authorized_by_type"] == "channel"
     ):
         raw_channel = authorization_evidence["authorized_by_id"]
+        if not position_side and action != "cancel_order":
+            raise HTTPException(
+                status_code=400,
+                detail="channel management requires position_side",
+            )
+    if (
+        action == "cancel_order"
+        and authorization_evidence["authorized_by_type"] == "channel"
+    ):
+        owner_channel = cancel_order_owner["owner_channel"]
+        if owner_channel != authorization_evidence["authorized_by_id"]:
+            raise HTTPException(
+                status_code=400,
+                detail="cancel_order authorization channel does not own order",
+            )
 
     attribution = False
+    attribution_target_position_id: str | bool = False
     if action in _OPERATOR_MANAGEMENT_ACTIONS:
         channel = str(body.get("channel") or "").strip()
         if (
@@ -2864,9 +6898,32 @@ def operator_order(
                 detail="channel-sourced management requires authorized_by_type=channel",
             )
         entry_ref = str(body.get("entry_ref") or "").strip()
-        attribution_event, hard_error = _resolve_attribution(
-            database_url, action, symbol, account_id, channel, entry_ref, position_side
-        )
+        if action == "cancel_order":
+            owner_channel = cancel_order_owner["owner_channel"]
+            channel_match: bool | str = "unknown"
+            if channel and owner_channel:
+                channel_match = channel == owner_channel
+            attribution_event = {
+                "resolution": "order",
+                "owner_channel": owner_channel,
+                "channel_match": channel_match,
+                "would_reject": channel_match is False,
+            }
+            hard_error = False
+        else:
+            (
+                attribution_event,
+                hard_error,
+                attribution_target_position_id,
+            ) = _resolve_attribution(
+                database_url,
+                action,
+                symbol,
+                account_id,
+                channel,
+                entry_ref,
+                position_side,
+            )
         if not dry_run:
             _write_attribution_shadow(attribution_event)
         attribution = {
@@ -2880,7 +6937,7 @@ def operator_order(
         if authorization_evidence["authorized_by_type"] == "channel":
             channel_valid = (
                 channel == authorization_evidence["authorized_by_id"]
-                and attribution_event["resolution"] == "intent"
+                and attribution_event["resolution"] in {"intent", "order"}
                 and attribution_event["channel_match"] is True
                 and attribution_event["would_reject"] is False
             )
@@ -2890,9 +6947,100 @@ def operator_order(
                     detail="channel authorization attribution failed",
                 )
 
+    target_position_id: str | bool = parent_target_position_id
+    if attribution_target_position_id:
+        if (
+            target_position_id
+            and target_position_id != attribution_target_position_id
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="parent_intent_id and entry_ref resolve different positions",
+            )
+        target_position_id = attribution_target_position_id
+    if (
+        not target_position_id
+        and action in _OPERATOR_MANAGEMENT_ACTIONS
+        and action != "cancel_order"
+        and position_side
+    ):
+        target_position_id = (
+            _canonical_position_id(
+                _nautilus_instrument_id(symbol),
+                position_side,
+            )
+            or False
+        )
+    supplied_target_position_id = str(
+        body.get("target_position_id") or ""
+    ).strip()
+    if (
+        supplied_target_position_id
+        and supplied_target_position_id != str(target_position_id or "")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="target_position_id does not match server-resolved position",
+        )
+    if (
+        action in _OPERATOR_MANAGEMENT_ACTIONS
+        and action != "cancel_order"
+        and not target_position_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "management action requires a server-resolved "
+                "target_position_id; pass parent_intent_id, entry_ref, "
+                "or position_side"
+            ),
+        )
+
+    equity_evidence = next(
+        (
+            check
+            for check in checks
+            if check.get("name") == "account_equity_basis"
+        ),
+        False,
+    )
+    if equity_evidence:
+        order_plan["equity"] = {
+            "real_equity": equity_evidence["real_equity"],
+            "available_balance": equity_evidence["available_balance"],
+            "risk_capital_multiplier": (
+                equity_evidence["risk_capital_multiplier"]
+            ),
+            "effective_equity": equity_evidence["effective_equity"],
+        }
     order_plan["authorization"] = authorization_evidence
     if attribution:
         order_plan["attribution"] = attribution
+    request_semantics = False
+    if action == "open_position":
+        if open_request_semantics is False:
+            open_request_semantics = _operator_open_request_semantics(
+                body=body,
+                account_id=account_id,
+                symbol=symbol,
+                client_ref=client_ref,
+                authorization=authorization_evidence,
+            )
+        request_semantics = open_request_semantics
+        order_plan["request_semantics"] = request_semantics
+    elif action in _OPERATOR_MANAGEMENT_ACTIONS:
+        request_semantics = _operator_request_semantics(
+            action=action,
+            account_id=account_id,
+            symbol=symbol,
+            position_side=position_side,
+            client_ref=client_ref,
+            order_plan=order_plan,
+            target_position_id=target_position_id,
+            body=body,
+            valid_seconds=valid_seconds,
+        )
+        order_plan["request_semantics"] = request_semantics
     canonical_request = _canonical_order_request(body, authorization_evidence)
 
     if dry_run:
@@ -2907,6 +7055,7 @@ def operator_order(
             "order_plan_preview": order_plan_preview,
             "authorization": authorization_evidence,
             "attribution": attribution,
+            "target_position_id": target_position_id,
         }
 
     now = datetime.now(timezone.utc)
@@ -2923,11 +7072,17 @@ def operator_order(
     message_type = "new_signal" if action == "open_position" else "position_update"
     valid_until = now + timedelta(seconds=valid_seconds)
 
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT intent_id::text, status::text, valid_until, order_plan "
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(%s, 0))",
+                (idem,),
+            )
+            cur.execute(
+                "SELECT intent_id::text, status::text, valid_until, order_plan, "
+                "risk_budget "
                 "FROM trade_intents WHERE idempotency_key=%s",
                 (idem,),
             )
@@ -2943,14 +7098,80 @@ def operator_order(
                         status_code=409,
                         detail="idempotency key authorization evidence mismatch",
                     )
+                persisted_semantics = existing_plan.get("request_semantics")
+                if request_semantics:
+                    if not isinstance(persisted_semantics, dict):
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "legacy idempotency record has no request "
+                                "semantics; retry with a new client_ref"
+                            ),
+                        )
+                    persisted_semantic_hash = False
+                    persisted_semantic_hash = persisted_semantics.get("sha256")
+                    if persisted_semantic_hash != request_semantics["sha256"]:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="idempotency key request payload mismatch",
+                        )
                 replay_response = {
                     "intent_id": existing[0], "status": existing[1], "replay": True,
                     "valid_until": existing[2].isoformat() if existing[2] else None,
+                    "order_plan": existing_plan,
+                    "risk_budget": existing[4] or {},
                 }
                 if attribution:
                     replay_response["attribution"] = attribution
                 replay_response["authorization"] = persisted_authorization
+                replay_response["target_position_id"] = target_position_id
                 return replay_response
+            if action == "open_position":
+                rollout = _current_reviewed_rollout_state(
+                    cur,
+                    lock=True,
+                )
+                live_open_gate = _live_open_gate_from_rollout(rollout)
+                if account_id in _ROLLOUT_ACCOUNTS:
+                    if live_open_gate is False:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "reviewed release live open gate "
+                                "is unavailable"
+                            ),
+                        )
+                    if (
+                        live_open_gate["mode"] == "canary_only"
+                        and not canary_open
+                    ):
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"canary_permit_id is required for "
+                                f"{account_id}"
+                            ),
+                        )
+                if live_open_gate is not False:
+                    order_plan["live_open_gate"] = live_open_gate
+                    order_plan["rollout_phase"] = (
+                        live_open_gate["rollout_phase"]
+                    )
+            canary_evidence = None
+            if canary_open:
+                if canary_actual_notional is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{account_id} canary notional is required",
+                    )
+                canary_evidence = _lock_canary_permit(
+                    cur,
+                    raw_permit_id=raw_canary_permit_id,
+                    account_id=account_id,
+                    symbol=symbol,
+                    notional=canary_actual_notional,
+                )
+                order_plan["canary_permit"] = canary_evidence
             cur.execute(
                 "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version, "
                 "source_received_at, author_id, content_hash, message_text, raw_payload) "
@@ -3011,8 +7232,33 @@ def operator_order(
                 "valid_until, idempotency_key, approved_at) "
                 "VALUES (%s,%s,%s,'1.0',%s,%s,%s,'approved',%s,%s,%s,%s,%s, now())",
                 (intent_id, dec_id, risk_id, account_id, symbol, action, Json(order_plan),
-                 Json(risk_budget), body.get("target_position_id"), valid_until, idem),
+                 Json(risk_budget), target_position_id or None, valid_until, idem),
             )
+            if canary_evidence is not None:
+                cur.execute(
+                    """
+                    UPDATE live_canary_permits
+                    SET status='consumed',
+                        consumed_open_count=1,
+                        consumed_at=now(),
+                        consumed_intent_id=%s,
+                        armed_node_id=COALESCE(armed_node_id, %s)
+                    WHERE permit_id=%s
+                      AND status='armed'
+                      AND consumed_open_count=0
+                      AND expires_at > now()
+                    """,
+                    (
+                        intent_id,
+                        canary_evidence["node_id"],
+                        canary_evidence["permit_id"],
+                    ),
+                )
+                if cur.rowcount != 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="canary permit could not be consumed",
+                    )
             cur.execute(
                 "INSERT INTO audit_events (audit_event_id, event_type, aggregate_type, "
                 "aggregate_id, actor, raw_message_id, hermes_decision_id, "
@@ -3033,6 +7279,23 @@ def operator_order(
                             "account_id": account_id,
                             "instrument_id": symbol,
                             "client_ref": client_ref,
+                            "target_position_id": target_position_id or False,
+                            "real_equity": (
+                                equity_evidence["real_equity"]
+                                if equity_evidence
+                                else False
+                            ),
+                            "effective_equity": (
+                                equity_evidence["effective_equity"]
+                                if equity_evidence
+                                else False
+                            ),
+                            "risk_capital_multiplier": (
+                                equity_evidence["risk_capital_multiplier"]
+                                if equity_evidence
+                                else False
+                            ),
+                            "request_semantics": request_semantics,
                         }
                     ),
                 ),
@@ -3064,6 +7327,7 @@ def operator_order(
         "risk_budget": risk_budget,
         "valid_until": valid_until.isoformat(),
         "authorization": authorization_evidence,
+        "target_position_id": target_position_id or False,
     }
     if attribution:
         response["attribution"] = attribution
@@ -3082,7 +7346,7 @@ def operator_order_status(intent_id: str, authorization: str | None = Header(def
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise HTTPException(status_code=503, detail="store unavailable")
-    conn = psycopg2.connect(database_url)
+    conn = _database_connection(database_url)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -3116,3 +7380,56 @@ def operator_order_status(intent_id: str, authorization: str | None = Header(def
         conn.close()
     return jsonable_encoder({"intent": intent, "orders": orders,
                              "execution_events": events, "open_positions": positions})
+
+
+@app.get("/health/role", name="role_database_health")
+def role_database_health():
+    role = current_app_role()
+    if role is AppRole.ALL:
+        raise HTTPException(
+            status_code=503,
+            detail="isolated control-plane app role is required",
+        )
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        raise HTTPException(
+            status_code=503,
+            detail="database role health is unavailable",
+        )
+    conn = _database_connection(database_url)
+    try:
+        identity = _verify_database_session_contract(conn, role)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="database role health check failed",
+        ) from exc
+    finally:
+        conn.close()
+    return {
+        "status": "healthy",
+        "app_role": role.value,
+        **identity,
+        "rollback_only_permission_probe": "pass",
+    }
+
+
+all_role_app = app
+
+
+def create_app(role: AppRole | str | None = None) -> FastAPI:
+    resolved = resolve_app_role(role)
+    role_app = build_role_app(all_role_app, resolved)
+    if resolved is not AppRole.ALL:
+        role_app.router.on_startup.append(
+            lambda: _verify_role_database_on_startup(role_app, resolved)
+        )
+        role_app.router.on_shutdown.append(
+            lambda: close_role_pools(resolved)
+        )
+    return role_app
+
+
+app = create_app()

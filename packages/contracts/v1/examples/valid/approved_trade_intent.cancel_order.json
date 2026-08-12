@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "intent_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "decision_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "risk_decision_id": "11111111-2222-4333-8444-555555555555",
+  "account_id": "acct-main",
+  "instrument_id": "SOLUSDT-PERP.BINANCE",
+  "action": "cancel_order",
+  "order_plan": {
+    "cancel_client_order_id": "Bbbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb01"
+  },
+  "risk_budget": {
+    "risk_fraction": 0,
+    "max_notional": 0,
+    "max_leverage": 0
+  },
+  "target_position_id": null,
+  "valid_until": "2026-08-12T02:30:00Z",
+  "idempotency_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "approved_at": "2026-08-12T02:00:00Z"
+}

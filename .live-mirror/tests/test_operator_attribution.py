@@ -15,7 +15,7 @@ def _open_body(client_ref="tg-sig-c1002136478186-m5026"):
         "symbol": "BTCUSDT",
         "side": "long",
         "notional_usdt": 100,
-        "account_id": "account-a",
+        "account_id": "account-b",
         "reason": "test open",
         "client_ref": client_ref,
         "authorized_by_type": "channel",
@@ -173,6 +173,42 @@ def test_non_dry_run_requires_explicit_account_before_writes(
     assert response.status_code == 400
     assert "account_id is required" in response.json()["detail"]
     _assert_no_order_writes(fake_db)
+
+
+@pytest.mark.parametrize(
+    "account_id",
+    ["account-a", "account-b", "account-c", "account-d"],
+)
+def test_configured_four_account_registry_accepts_each_account(
+    api_client,
+    auth_headers,
+    fake_db,
+    monkeypatch,
+    account_id,
+):
+    monkeypatch.setenv(
+        "OPERATOR_ACCOUNT_REGISTRY_JSON",
+        json.dumps(
+            {
+                candidate: {}
+                for candidate in (
+                    "account-a",
+                    "account-b",
+                    "account-c",
+                    "account-d",
+                )
+            }
+        ),
+    )
+    body = _open_body(f"tg-sig-c1002136478186-m{5026 + len(fake_db.executions)}")
+    body["account_id"] = account_id
+    if account_id == "account-a":
+        body["dry_run"] = True
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    assert response.json()["account_id"] == account_id
 
 
 def test_non_dry_run_requires_authorization_evidence_before_writes(
@@ -391,6 +427,38 @@ def test_internal_source_persists_matching_parent_authorization(
     assert authorization["parent_intent_id"] == parent_intent_id
 
 
+def test_management_persists_target_position_from_parent_intent(
+    api_client,
+    auth_headers,
+    fake_db,
+    monkeypatch,
+):
+    parent_intent_id = "11111111-1111-1111-1111-111111111111"
+    monkeypatch.setattr(
+        read_api,
+        "_authorized_parent",
+        lambda *args: {
+            "authorized_by_type": "user",
+            "authorized_by_id": "balen",
+            "source_message_id": "original-user-request",
+            "_target_position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        },
+    )
+    body = _manage_body(
+        source="position-reconciler",
+        created_by_service="position-reconciler",
+        parent_intent_id=parent_intent_id,
+        source_message_id="original-user-request",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    assert response.json()["target_position_id"] == "BTCUSDT-PERP.BINANCE-LONG"
+    _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
+    assert intent_params[8] == "BTCUSDT-PERP.BINANCE-LONG"
+
+
 def test_user_authorization_is_persisted_in_every_audit_payload(
     api_client, auth_headers, fake_db
 ):
@@ -462,8 +530,78 @@ def test_channel_management_authorization_requires_and_persists_attribution(
     _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
     assert _json_value(intent_params[6])["authorization"] == expected
     assert _json_value(intent_params[6])["attribution"]["resolution"] == "intent"
+    assert intent_params[8] == "BTCUSDT-PERP.BINANCE-LONG"
+    assert response.json()["target_position_id"] == "BTCUSDT-PERP.BINANCE-LONG"
     _, outbox_params = _insert(fake_db, "INSERT INTO outbox_events")
     assert _json_value(outbox_params[2])["authorization"] == expected
+
+
+def test_channel_management_uses_original_entry_account_after_route_change(
+    api_client,
+    auth_headers,
+    fake_db,
+):
+    entry_ref = "tg-sig-c1002136478186-m5026"
+    _seed_entry(fake_db, entry_ref, account="account-a")
+    body = _manage_body(
+        account_id="account-c",
+        channel="-1002136478186",
+        entry_ref=entry_ref,
+        source_message_id="tg-sig-c1002136478186-m6011",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
+    assert intent_params[3] == "account-a"
+    assert response.json()["attribution"] == {
+        "resolution": "intent",
+        "owner_channel": "-1002136478186",
+        "channel_match": True,
+        "would_reject": False,
+    }
+
+
+def test_open_persists_real_and_effective_equity_in_intent_and_audit(
+    api_client,
+    auth_headers,
+    fake_db,
+    monkeypatch,
+):
+    def fake_size(*args):
+        checks = args[-2]
+        checks.append(
+            {
+                "name": "account_equity_basis",
+                "passed": True,
+                "real_equity": 5000.0,
+                "available_balance": 1000.0,
+                "effective_equity": 9000.0,
+                "risk_capital_multiplier": 1.8,
+            }
+        )
+        return 900.0
+
+    monkeypatch.setattr(read_api, "_size_open_order", fake_size)
+    body = _open_body("tg-sig-c1002136478186-m6001")
+    body["account_id"] = "account-b"
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 200
+    _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
+    assert _json_value(intent_params[6])["equity"] == {
+        "real_equity": 5000.0,
+        "available_balance": 1000.0,
+        "risk_capital_multiplier": 1.8,
+        "effective_equity": 9000.0,
+    }
+    _, audit_params = _insert(fake_db, "INSERT INTO audit_events")
+    audit = _json_value(audit_params[7])
+    assert audit["real_equity"] == 5000.0
+    assert audit["effective_equity"] == 9000.0
+    assert audit["risk_capital_multiplier"] == 1.8
 
 
 def test_empty_take_profits_without_disable_flag_is_rejected(
@@ -666,6 +804,174 @@ def test_management_requires_stable_client_ref(
     assert "stable operation ref" in response.json()["detail"]
 
 
+def _cancel_body(
+    *,
+    channel: str = "-1002136478186",
+    account_id: str = "account-a",
+    symbol: str = "BTCUSDT",
+) -> dict:
+    client_order_id = "B" + ("a" * 32) + "01"
+    source_message_id = "tg-sig-c1002136478186-m7002"
+    return {
+        "action": "cancel_order",
+        "symbol": symbol,
+        "client_order_id": client_order_id,
+        "account_id": account_id,
+        "reason": "cancel owned resting order",
+        "client_ref": "cancel-owned-order-7002",
+        "channel": channel,
+        "authorized_by_type": "channel",
+        "authorized_by_id": channel,
+        "source_message_id": source_message_id,
+        "created_by_service": "hermes-agent",
+    }
+
+
+def _seed_cancel_owner(
+    fake_db,
+    *,
+    account_id: str = "account-a",
+    symbol: str = "BTCUSDT",
+    channel: str = "-1002136478186",
+) -> None:
+    fake_db.cancel_owner = [
+        (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            account_id,
+            symbol,
+            {
+                "authorization": {
+                    "authorized_by_type": "channel",
+                    "authorized_by_id": channel,
+                    "source_message_id": (
+                        "tg-sig-c1002136478186-m7001"
+                    ),
+                }
+            },
+            channel,
+            "tg-sig-c1002136478186-m7001",
+        )
+    ]
+
+
+def test_cancel_order_binds_account_instrument_intent_and_channel(
+    api_client,
+    auth_headers,
+    fake_db,
+) -> None:
+    _seed_cancel_owner(fake_db)
+
+    response = _post(
+        api_client,
+        auth_headers,
+        _cancel_body(),
+    )
+
+    assert response.status_code == 200
+    ownership_query = next(
+        item
+        for item in fake_db.executions
+        if "FROM orders_projection AS op" in item[0]
+    )
+    assert ownership_query[1] == (
+        "B" + ("a" * 32) + "01",
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "BTCUSDT",
+        "BTCUSDT",
+    )
+
+
+def test_channel_cancel_uses_order_owner_after_channel_account_remap(
+    api_client,
+    auth_headers,
+    fake_db,
+) -> None:
+    _seed_cancel_owner(fake_db, account_id="account-a")
+    response = _post(
+        api_client,
+        auth_headers,
+        _cancel_body(account_id="account-c"),
+    )
+
+    assert response.status_code == 200
+    _, intent_params = _insert(fake_db, "INSERT INTO trade_intents")
+    assert intent_params[3] == "account-a"
+
+
+def test_user_cancel_rejects_cross_account(
+    api_client,
+    auth_headers,
+    fake_db,
+) -> None:
+    _seed_cancel_owner(fake_db, account_id="account-a")
+    body = _cancel_body(account_id="account-b")
+    body.pop("channel")
+    body["authorized_by_type"] = "user"
+    body["authorized_by_id"] = "balen"
+    body["source_message_id"] = "user-cancel-7002"
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "account and instrument" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_cancel_order_rejects_cross_instrument(
+    api_client,
+    auth_headers,
+    fake_db,
+) -> None:
+    _seed_cancel_owner(fake_db)
+
+    response = _post(
+        api_client,
+        auth_headers,
+        _cancel_body(symbol="ETHUSDT"),
+    )
+
+    assert response.status_code == 400
+    assert "account and instrument" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_cancel_order_rejects_authorization_from_another_channel(
+    api_client,
+    auth_headers,
+    fake_db,
+) -> None:
+    _seed_cancel_owner(fake_db)
+    body = _cancel_body(channel="-1002198013097")
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "authorization channel does not own order" in (
+        response.json()["detail"]
+    )
+    _assert_no_order_writes(fake_db)
+
+
+def test_channel_management_requires_explicit_position_side(
+    api_client,
+    auth_headers,
+    fake_db,
+) -> None:
+    body = _manage_body(
+        channel="-1002136478186",
+        position_side=None,
+        entry_ref="tg-sig-c1002136478186-m7001",
+    )
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "channel management requires position_side" in (
+        response.json()["detail"]
+    )
+    _assert_no_order_writes(fake_db)
+
+
 def test_management_idempotency_v2_replays_existing_intent(
     api_client, auth_headers, fake_db, tmp_path
 ):
@@ -684,6 +990,72 @@ def test_management_idempotency_v2_replays_existing_intent(
     assert "attribution" in second.json()
     log_lines = (tmp_path / "attribution.jsonl").read_text().splitlines()
     assert len(log_lines) == 2
+
+
+def test_management_requires_server_resolved_target_position(
+    api_client,
+    auth_headers,
+    fake_db,
+):
+    body = _manage_body(position_side=None)
+
+    response = _post(api_client, auth_headers, body)
+
+    assert response.status_code == 400
+    assert "server-resolved target_position_id" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
+
+
+def test_management_idempotency_locks_before_lookup(
+    api_client,
+    auth_headers,
+    fake_db,
+):
+    response = _post(api_client, auth_headers, _manage_body())
+
+    assert response.status_code == 200
+    statements = [sql for sql, _params in fake_db.executions]
+    lock_index = next(
+        index
+        for index, sql in enumerate(statements)
+        if sql.startswith("SELECT pg_advisory_xact_lock")
+    )
+    lookup_index = next(
+        index
+        for index, sql in enumerate(statements)
+        if sql.startswith(
+            "SELECT intent_id::text, status::text, valid_until, order_plan"
+        )
+    )
+    assert lock_index < lookup_index
+
+
+def test_legacy_management_idempotency_record_requires_new_ref(
+    api_client,
+    auth_headers,
+    fake_db,
+):
+    body = _manage_body()
+    first = _post(api_client, auth_headers, body)
+    assert first.status_code == 200
+
+    expected = hashlib.sha256(
+        b"operator-v2|account-a|close_position|BTCUSDT|long|close-btc-5026"
+    ).hexdigest()
+    existing = fake_db.intents_by_idem[expected]
+    legacy_plan = dict(existing[3])
+    legacy_plan.pop("request_semantics")
+    fake_db.intents_by_idem[expected] = (
+        existing[0],
+        existing[1],
+        existing[2],
+        legacy_plan,
+    )
+
+    second = _post(api_client, auth_headers, body)
+
+    assert second.status_code == 409
+    assert "legacy idempotency record" in second.json()["detail"]
 
 
 def test_management_idempotency_replays_when_request_id_changes(
@@ -711,6 +1083,52 @@ def test_management_idempotency_replays_when_request_id_changes(
         second.json()["authorization"]["source_message_id"]
         == body["client_ref"]
     )
+    assert sum(
+        sql.startswith("INSERT INTO raw_messages")
+        for sql, _params in fake_db.executions
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "field", "changed_value"),
+    [
+        (
+            _manage_body(action="partial_close", quantity=0.01),
+            "quantity",
+            0.02,
+        ),
+        (
+            _manage_body(action="move_stop_loss", stop_loss=60000),
+            "stop_loss",
+            61000,
+        ),
+        (
+            _manage_body(
+                action="replace_take_profits",
+                take_profits=[{"price": 70000, "quantity": 0.01}],
+            ),
+            "take_profits",
+            [{"price": 71000, "quantity": 0.01}],
+        ),
+    ],
+)
+def test_management_idempotency_rejects_changed_request_semantics(
+    api_client,
+    auth_headers,
+    fake_db,
+    body,
+    field,
+    changed_value,
+):
+    first = _post(api_client, auth_headers, body)
+    changed = dict(body)
+    changed[field] = changed_value
+
+    second = _post(api_client, auth_headers, changed)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["detail"] == "idempotency key request payload mismatch"
     assert sum(
         sql.startswith("INSERT INTO raw_messages")
         for sql, _params in fake_db.executions
@@ -759,7 +1177,7 @@ def test_open_keeps_legacy_idempotency_formula(api_client, auth_headers, fake_db
     response = _post(api_client, auth_headers, body)
 
     expected = hashlib.sha256(
-        b"operator|account-a|tg-sig-c1002136478186-m5026"
+        b"operator|account-b|tg-sig-c1002136478186-m5026"
     ).hexdigest()
     assert response.status_code == 200
     assert expected in fake_db.intents_by_idem
@@ -856,7 +1274,6 @@ def test_direct_user_management_can_reference_operator_channel(
     ("entry_account", "entry_symbol", "expected"),
     [
         ("account-a", "ETHUSDT", "instrument"),
-        ("account-b", "BTCUSDT", "account"),
     ],
 )
 def test_shadow_rejects_pure_entry_identity_mismatch(
@@ -890,6 +1307,29 @@ def test_shadow_rejects_pure_entry_identity_mismatch(
     event = json.loads(log_path.read_text().strip())
     assert event["would_reject"] is True
     assert expected in event["error"]
+
+
+def test_user_management_rejects_entry_from_another_account(
+    api_client,
+    auth_headers,
+    fake_db,
+):
+    entry_ref = "tg-sig-c1002136478186-m5026"
+    _seed_entry(
+        fake_db,
+        entry_ref,
+        account="account-b",
+    )
+
+    response = _post(
+        api_client,
+        auth_headers,
+        _manage_body(entry_ref=entry_ref),
+    )
+
+    assert response.status_code == 400
+    assert "account" in response.json()["detail"]
+    _assert_no_order_writes(fake_db)
 
 
 def test_shadow_side_mismatch_rejects_channel_management(

@@ -52,12 +52,13 @@
         "close_position",
         "move_stop_loss",
         "move_stop_to_entry",
-        "replace_take_profits"
+        "replace_take_profits",
+        "cancel_order"
       ]
     },
     "order_plan": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "side": {
           "type": "string",
@@ -195,6 +196,185 @@
               "format": "date-time"
             }
           }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional additive order-management execution hints. Absence preserves legacy/default v1 behavior.",
+      "properties": {
+        "order_type": {
+          "type": "string",
+          "enum": [
+            "market",
+            "limit",
+            "zone"
+          ]
+        },
+        "time_in_force": {
+          "type": "string",
+          "enum": [
+            "GTC",
+            "IOC",
+            "FOK",
+            "GTD"
+          ]
+        },
+        "post_only": {
+          "type": "boolean"
+        },
+        "reduce_only": {
+          "type": "boolean"
+        },
+        "max_slippage_bps": {
+          "type": "number",
+          "minimum": 0
+        },
+        "limit_price": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "zone": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "low": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "high": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
+    },
+    "protection": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional additive order-management protection hints. Absence preserves legacy/default v1 behavior.",
+      "properties": {
+        "require_stop": {
+          "type": "boolean"
+        },
+        "stop": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "stop_market",
+                "stop_limit"
+              ]
+            },
+            "trigger_basis": {
+              "type": "string",
+              "enum": [
+                "mark",
+                "last"
+              ]
+            },
+            "price": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "distance_pct": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "take_profits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "price": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "r_multiple": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "fraction": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1
+              },
+              "quantity": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "time_in_force": {
+                "type": "string",
+                "enum": [
+                  "GTC",
+                  "IOC",
+                  "FOK",
+                  "GTD"
+                ]
+              }
+            }
+          }
+        },
+        "breakeven": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "trigger_r": {
+              "type": "number",
+              "minimum": 0
+            },
+            "offset_bps": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "trailing": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "activation_r": {
+              "type": "number",
+              "minimum": 0
+            },
+            "callback_rate": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "min_step": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "sizing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional additive order-management sizing hint. Absence preserves legacy/default v1 behavior.",
+      "properties": {
+        "quantity": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
         }
       }
     },

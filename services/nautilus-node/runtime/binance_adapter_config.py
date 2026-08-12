@@ -40,6 +40,9 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
     }.get(env_name, ("TESTNET", "SANDBOX", "DEMO"))
     environment = _enum_value(BinanceEnvironment, env_candidates)
     instrument_provider = BinanceInstrumentProviderConfig(load_all=True)
+    proxy_url = config.binance.proxy_url
+    if proxy_url is False:
+        proxy_url = None
 
     data_config = BinanceDataClientConfig(
         api_key=config.binance.credentials.api_key,
@@ -47,6 +50,7 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
         account_type=account_type,
         environment=environment,
         instrument_provider=instrument_provider,
+        proxy_url=proxy_url,
     )
     exec_config = BinanceExecClientConfig(
         api_key=config.binance.credentials.api_key,
@@ -54,6 +58,7 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
         account_type=account_type,
         environment=environment,
         instrument_provider=instrument_provider,
+        proxy_url=proxy_url,
         # The live Binance accounts run in Hedge Mode, where Binance/Nautilus reject
         # reduce_only (positionSide is used instead). Testnet runs one-way — the tested
         # path — where reduce_only is valid, so keep it there unchanged.

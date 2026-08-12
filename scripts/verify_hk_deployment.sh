@@ -9,7 +9,11 @@
 #   1. 期望清单里每个远端路径的 sha256 与期望值一致；
 #   2. container-patches 文件必须在清单声明容器目标路径，并以精确的
 #      source + destination 对出现在两个 nautilus node 进程的
-#      /proc/PID/mountinfo 中。
+#      /proc/PID/mountinfo 中；
+#   3. 每个容器目标文件通过 /proc/PID/root 再算一次 sha256，必须与
+#      host source 和清单三方一致；
+#   4. 两个 node 的 mountinfo 均不得含 "//deleted"、"(deleted)" 或
+#      "\040(deleted)"。
 #
 # 用法：
 #   scripts/verify_hk_deployment.sh manifest.txt
@@ -95,7 +99,9 @@ fi
 # ---- 生成远端只读检查脚本，一次 ssh 完成全部核对 ----
 # 远端输出协议（TSV）：
 #   HASH <path> <actual_sha|MISSING|UNREADABLE>
+#   TARGET <pid> <destination> <actual_sha|MISSING|UNREADABLE>
 #   MOUNT <pid> <src> <dst>          （node 进程 mountinfo 中的全部挂载对）
+#   DELETED <pid> <count>
 #   PIDS <pid...>                    （发现的 node 进程）
 remote_script='
 export LC_ALL=C
@@ -112,8 +118,33 @@ for pid in $(pgrep -f "app.run_node" | sort -n); do
 done
 echo -e "PIDS\t$pids"
 for pid in $pids; do
+  deleted_count=$(awk '"'"'
+    {
+      for (i = 1; i <= NF; i++) {
+        if (index($i, "//deleted") > 0 ||
+            index($i, "(deleted)") > 0 ||
+            index($i, "\\040(deleted)") > 0) {
+          count++
+          break
+        }
+      }
+    }
+    END { print count + 0 }
+  '"'"' "/proc/$pid/mountinfo" 2>/dev/null)
+  echo -e "DELETED\t$pid\t$deleted_count"
   awk -v pid="$pid" '"'"'{print "MOUNT\t" pid "\t" $4 "\t" $5}'"'"' \
     "/proc/$pid/mountinfo" 2>/dev/null
+  while IFS=$'"'"'\t'"'"' read -r want path destination; do
+    [ -n "$destination" ] || continue
+    target="/proc/$pid/root$destination"
+    if [ ! -e "$target" ]; then
+      echo -e "TARGET\t$pid\t$destination\tMISSING"
+    elif [ ! -r "$target" ]; then
+      echo -e "TARGET\t$pid\t$destination\tUNREADABLE"
+    else
+      echo -e "TARGET\t$pid\t$destination\t$(sha256sum "$target" | cut -d" " -f1)"
+    fi
+  done <<< "$MANIFEST"
 done
 '
 
@@ -136,6 +167,19 @@ if [ "$pid_count" -ne 2 ]; then
   echo "FAIL: 期望恰好 2 个 nautilus node 进程 (app.run_node)，实际 $pid_count 个"
   fail=1
 fi
+for pid in $node_pids; do
+  deleted_count="$(awk -F'\t' -v pid="$pid" \
+    '$1=="DELETED" && $2==pid {print $3; exit}' <<<"$remote_out")"
+  if ! [[ "$deleted_count" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: pid=${pid} 未返回 deleted mount 计数"
+    fail=1
+  elif [ "$deleted_count" -ne 0 ]; then
+    echo "FAIL: pid=${pid} mountinfo 含 ${deleted_count} 个 deleted mount"
+    fail=1
+  else
+    echo "OK:   pid=${pid} mountinfo 无 deleted mount"
+  fi
+done
 
 while IFS=$'\t' read -r want path expected_dst; do
   actual="$(awk -F'\t' -v p="$path" '$1=="HASH" && $2==p {print $3; exit}' <<<"$remote_out")"
@@ -158,6 +202,32 @@ while IFS=$'\t' read -r want path expected_dst; do
   # 声明了容器目标的文件：source + destination 必须逐节点精确唯一。
   if [ -n "$expected_dst" ]; then
     for pid in $node_pids; do
+      target_hash="$(awk -F'\t' -v pid="$pid" -v dst="$expected_dst" \
+        '$1=="TARGET" && $2==pid && $3==dst {print $4; exit}' \
+        <<<"$remote_out")"
+      case "$target_hash" in
+        MISSING)
+          echo "FAIL: pid=${pid} 容器目标不存在: $expected_dst"
+          fail=1
+          ;;
+        UNREADABLE)
+          echo "FAIL: pid=${pid} 容器目标不可读: $expected_dst"
+          fail=1
+          ;;
+        "$want")
+          echo "OK:   pid=${pid} target sha256 匹配: $expected_dst"
+          ;;
+        "")
+          echo "FAIL: pid=${pid} 未返回 target sha256: $expected_dst"
+          fail=1
+          ;;
+        *)
+          echo "FAIL: pid=${pid} target sha256 不符: $expected_dst"
+          echo "      期望 $want"
+          echo "      实际 $target_hash"
+          fail=1
+          ;;
+      esac
       exact_count="$(awk -F'\t' -v pid="$pid" -v src="$path" -v dst="$expected_dst" \
         '$1=="MOUNT" && $2==pid && $3==src && $4==dst {count++} END{print count+0}' \
         <<<"$remote_out")"
@@ -187,5 +257,5 @@ if [ "$fail" -ne 0 ]; then
   echo "结果: FAIL — 存在差异，部署未通过验证门。修复后重跑本脚本。"
   exit 1
 fi
-echo "结果: PASS — 清单内全部文件哈希匹配，声明的 source + destination 挂载对均已在两个 node 进程生效。"
+echo "结果: PASS — host/source、双节点 target 哈希、挂载对与 deleted mount 检查全部通过。"
 exit 0

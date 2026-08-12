@@ -56,6 +56,7 @@ class _CapturedDataConfig:
         account_type: object,
         environment: object,
         instrument_provider: object,
+        proxy_url: str | None,
     ) -> None:
         self.kwargs = {
             "api_key": api_key,
@@ -63,6 +64,7 @@ class _CapturedDataConfig:
             "account_type": account_type,
             "environment": environment,
             "instrument_provider": instrument_provider,
+            "proxy_url": proxy_url,
         }
 
 
@@ -75,6 +77,7 @@ class _CapturedExecConfig(_CapturedDataConfig):
         account_type: object,
         environment: object,
         instrument_provider: object,
+        proxy_url: str | None,
         use_reduce_only: bool,
         recv_window_ms: int,
     ) -> None:
@@ -84,6 +87,7 @@ class _CapturedExecConfig(_CapturedDataConfig):
             account_type=account_type,
             environment=environment,
             instrument_provider=instrument_provider,
+            proxy_url=proxy_url,
         )
         self.kwargs["use_reduce_only"] = use_reduce_only
         self.kwargs["recv_window_ms"] = recv_window_ms
@@ -111,6 +115,7 @@ class BinanceAdapterConfigTest(unittest.TestCase):
             config = SimpleNamespace(
                 binance=SimpleNamespace(
                     environment="live",
+                    proxy_url="http://100.107.72.78:13128",
                     credentials=SimpleNamespace(
                         api_key="api-key",
                         api_secret="api-secret",
@@ -118,9 +123,17 @@ class BinanceAdapterConfigTest(unittest.TestCase):
                 )
             )
 
-            _data_config, exec_config = module.build_binance_client_configs(config)
+            data_config, exec_config = module.build_binance_client_configs(config)
 
         self.assertEqual(exec_config.kwargs["recv_window_ms"], 30_000)
+        self.assertEqual(
+            data_config.kwargs["proxy_url"],
+            "http://100.107.72.78:13128",
+        )
+        self.assertEqual(
+            exec_config.kwargs["proxy_url"],
+            "http://100.107.72.78:13128",
+        )
 
     def test_futures_account_initialization_uses_configured_recv_window(self) -> None:
         source = FUTURES_PATCH_PATH.read_text(encoding="utf-8")

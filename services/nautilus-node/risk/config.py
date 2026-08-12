@@ -65,15 +65,38 @@ def build_risk_engine_config(config: RiskLimitConfig) -> Any:
     return RiskEngineConfig(**build_live_risk_engine_kwargs(config))
 
 
-def _validate_limit_config(config: RiskLimitConfig) -> None:
+def build_live_entry_notional_inventory(
+    config: RiskLimitConfig,
+) -> tuple[
+    tuple[str, str],
+    ...,
+]:
+    """Return validated entry caps for the serializable strategy config."""
+
+    inventory = _validate_limit_config(config)
+    return tuple(
+        (instrument_id, format(cap, "f"))
+        for instrument_id, cap in inventory
+    )
+
+
+def _validate_limit_config(
+    config: RiskLimitConfig,
+) -> tuple[tuple[str, Decimal], ...]:
     if not config.max_notional_per_order:
         raise ValueError("max_notional_per_order must not be empty")
+    inventory: list[tuple[str, Decimal]] = []
     for instrument_id, value in config.max_notional_per_order.items():
         if not instrument_id:
             raise ValueError("max_notional_per_order instrument id must be non-empty")
-        _positive_decimal(str(value), f"max_notional_per_order[{instrument_id}]")
+        cap = _positive_decimal(
+            str(value),
+            f"max_notional_per_order[{instrument_id}]",
+        )
+        inventory.append((str(instrument_id), cap))
     _parse_rate(config.max_order_submit_rate, "max_order_submit_rate")
     _parse_rate(config.max_order_modify_rate, "max_order_modify_rate")
+    return tuple(sorted(inventory))
 
 
 def _parse_rate(value: str, label: str) -> tuple[int, str]:
@@ -97,6 +120,6 @@ def _positive_decimal(value: str, label: str) -> Decimal:
         number = Decimal(value)
     except InvalidOperation as exc:
         raise ValueError(f"{label} must be a decimal value") from exc
-    if number <= 0:
+    if not number.is_finite() or number <= 0:
         raise ValueError(f"{label} must be positive")
     return number

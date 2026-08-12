@@ -107,6 +107,95 @@
           "type": "array",
           "items": true
         },
+        "market_prices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "venue_symbol",
+              "source",
+              "mark_price",
+              "last_price",
+              "bid_price",
+              "ask_price",
+              "last_event_at",
+              "stale"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "venue_symbol": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "mark_price": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "last_price": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "bid_price": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "ask_price": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "last_event_at": {
+                "type": [
+                  "null",
+                  "string"
+                ],
+                "format": "date-time"
+              },
+              "stale": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "exchange_state": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "payload",
+              "updated_at",
+              "stale"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "payload": {},
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "stale": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
         "recent_messages": {
           "type": "array",
           "items": true
@@ -131,4 +220,3 @@
     }
   }
 }
-

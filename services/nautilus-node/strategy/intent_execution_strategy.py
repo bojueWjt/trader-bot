@@ -1,16 +1,41 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
 import tempfile
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
-from typing import Any, Callable, Iterable, Optional
-from uuid import UUID
+from enum import Enum
+from hashlib import sha256
+from pathlib import Path
+from queue import Empty, Full, Queue
+from threading import Lock
+from typing import Any, Callable, Iterable, Mapping, Optional
+from uuid import UUID, uuid4
 
+from runtime.bounded_task_worker import BoundedTaskWorker
+from runtime.live_canary_execution import (
+    JsonLiveCanaryExecutionStore,
+    LiveCanaryClaimResult,
+    LiveCanaryExecutionIdentity,
+    LiveCanaryFill,
+    LiveCanaryLossDecision,
+    LiveCanaryMark,
+    is_live_canary_account,
+    live_canary_permit_required,
+    live_open_gate_denial,
+    normalize_live_open_gate,
+)
+from runtime.intent_execution_inbox import (
+    IntentDispatchResult,
+    IntentExecutionIdentity,
+    IntentExecutionState,
+    IntentRegisterResult,
+    JsonIntentExecutionInbox,
+)
 from strategy.intent_execution_planner import (
     CANCEL_ORDER,
     InstrumentSpec,
@@ -28,6 +53,43 @@ from strategy.intent_execution_planner import (
 )
 
 
+_TERMINAL_EXCHANGE_PENDING = object()
+
+
+class _DurableIoTaskKind(str, Enum):
+    INTENT_EXCHANGE_CONFIRMED = "intent_exchange_confirmed"
+    INTENT_RECEIVE = "intent_receive"
+    PREPARE_SUBMIT = "prepare_submit"
+    MANAGEMENT_PREPARE = "management_prepare"
+    MANAGEMENT_COMPLETE = "management_complete"
+    RECOVERY_CONFIRMED = "recovery_confirmed"
+    CANARY_MARK_DISPATCHED = "canary_mark_dispatched"
+    PROTECTION_STASH_PERSIST = "protection_stash_persist"
+
+
+@dataclass(frozen=True)
+class _DurableIoTask:
+    kind: _DurableIoTaskKind
+    operation_id: str = ""
+    client_order_id: str = ""
+    intent: Any = False
+    intent_execution: IntentExecutionIdentity | bool = False
+    intent_payload: Mapping[str, Any] | bool = False
+    client_order_ids: tuple[str, ...] = ()
+    plans: tuple[OrderPlan, ...] = ()
+    live_canary_execution: LiveCanaryExecutionIdentity | bool = False
+    protection_payload: Mapping[str, Any] | bool = False
+    protection_version: int = 0
+    protection_payload_sha256: str = ""
+    continuation: Mapping[str, Any] | bool = False
+
+
+@dataclass(frozen=True)
+class _DurableIoResult:
+    task: _DurableIoTask
+    outcome: Any = False
+
+
 try:  # pragma: no cover - Nautilus is unavailable on local Py3.14 dev hosts.
     from nautilus_trader.trading.strategy import Strategy  # type: ignore[import-not-found]
     from nautilus_trader.trading.config import StrategyConfig  # type: ignore[import-not-found]
@@ -40,6 +102,11 @@ try:  # pragma: no cover - Nautilus is unavailable on local Py3.14 dev hosts.
         account_id: str = ""
         node_id: str = ""
         trading_state: str = "HALTED"
+        environment: str = "testnet"
+        release_id: str = ""
+        live_canary_execution_path: str = ""
+        intent_execution_inbox_path: str = ""
+        live_entry_notional_inventory: tuple[tuple[str, str], ...] = ()
         existing_intent_ids: tuple[str, ...] = ()
 
 except ImportError:  # pragma: no cover - local dev fallback without Nautilus
@@ -53,6 +120,11 @@ except ImportError:  # pragma: no cover - local dev fallback without Nautilus
         account_id: str = ""
         node_id: str = ""
         trading_state: str = "HALTED"
+        environment: str = "testnet"
+        release_id: str = ""
+        live_canary_execution_path: str = ""
+        intent_execution_inbox_path: str = ""
+        live_entry_notional_inventory: tuple[tuple[str, str], ...] = ()
         existing_intent_ids: tuple[str, ...] = ()
 
 
@@ -72,6 +144,10 @@ class IntentExecutionStrategy(Strategy):
     intent id. Tags carry the full intent trace.
     """
 
+    _DURABLE_IO_QUEUE_CAPACITY = 128
+    _DURABLE_IO_TASK_TIMEOUT_SECONDS = 1.0
+    _DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS = 2.0
+
     def __init__(self, config: IntentExecutionStrategyConfig) -> None:
         try:
             super().__init__(config=config)
@@ -84,17 +160,118 @@ class IntentExecutionStrategy(Strategy):
         self._protection_event_reporter: Optional[
             Callable[[dict[str, Any]], bool]
         ] = None
+        self._live_canary_risk_reporter: Optional[
+            Callable[[dict[str, Any]], bool]
+        ] = None
+        self._live_canary_halt_handler: Optional[
+            Callable[[str], None]
+        ] = None
+        self._live_canary_portfolio_baseline: Optional[
+            Callable[[str], str | bool]
+        ] = None
+        self._live_rollout_phase_getter: Optional[
+            Callable[[], str | None]
+        ] = None
+        self._live_open_gate_getter: Optional[
+            Callable[[], Mapping[str, Any] | bool]
+        ] = None
+        self._live_canary_monitor_targets: dict[str, str] = {}
+        self._live_canary_monitor_baselines: dict[str, tuple[str, str]] = {}
         self._entry_protection_stash: dict[str, dict[str, Any]] = {}
         self._quick_fill_windows: dict[str, list[datetime]] = {}
         self._orphan_cancel_attempts: dict[str, int] = {}
         self._reported_protection_denials: set[tuple[str, str]] = set()
         self._exchange_cancel_adapter: Any = False
         self._exchange_state_mirror: Any = False
+        self._terminal_exchange_worker: Any = False
+        self._terminal_exchange_halt_handler: Optional[
+            Callable[[str], None]
+        ] = None
+        self._terminal_exchange_mailbox: Queue[Any] = Queue(
+            maxsize=128
+        )
+        self._pending_terminal_exchange: dict[
+            str,
+            dict[str, Any],
+        ] = {}
+        self._terminal_command_request_ids: dict[str, str] = {}
+        self._terminal_command_results: dict[
+            str,
+            dict[str, Any],
+        ] = {}
+        inventory = tuple(
+            getattr(config, "live_entry_notional_inventory", ()) or ()
+        )
+        self._live_entry_notional_caps = (
+            _parse_live_entry_notional_inventory(inventory)
+        )
+        execution_path = str(
+            getattr(config, "live_canary_execution_path", "") or ""
+        ).strip()
+        if not execution_path:
+            execution_path = os.path.join(
+                os.environ.get("NODE_STATE_DIR") or "/state",
+                "live_canary_execution.json",
+            )
+        self._live_canary_execution_store = (
+            JsonLiveCanaryExecutionStore(execution_path)
+        )
+        inbox_path = str(
+            getattr(config, "intent_execution_inbox_path", "") or ""
+        ).strip()
+        if not inbox_path:
+            if execution_path:
+                inbox_path = str(
+                    Path(execution_path).with_name(
+                        "intent_execution_inbox.json"
+                    )
+                )
+            else:
+                inbox_path = os.path.join(
+                    os.environ.get("NODE_STATE_DIR") or "/state",
+                    "intent_execution_inbox.json",
+                )
+        self._intent_execution_inbox = JsonIntentExecutionInbox(
+            inbox_path
+        )
+        self._strategy_stopping = False
+        self._durable_io_halted_reason = ""
+        self._durable_io_halt_lock = Lock()
+        self._protection_stash_version = 0
+        self._protection_stash_persisted_version = 0
+        self._protection_durable_continuations: dict[
+            int,
+            list[Mapping[str, Any]],
+        ] = {}
+        self._durable_io_mailbox: Queue[_DurableIoResult] = Queue(
+            maxsize=self._DURABLE_IO_QUEUE_CAPACITY
+        )
+        worker_name = str(
+            getattr(config, "node_id", "")
+            or getattr(config, "account_id", "")
+            or "strategy"
+        )
+        self._durable_io_worker = BoundedTaskWorker(
+            f"{worker_name}.intent-durable-io",
+            self._process_durable_io_task,
+            capacity=self._DURABLE_IO_QUEUE_CAPACITY,
+            task_timeout_seconds=(
+                self._DURABLE_IO_TASK_TIMEOUT_SECONDS
+            ),
+            on_overflow=self._halt_durable_io,
+            on_error=self._halt_durable_io,
+        )
 
     def set_trading_state_getter(self, getter: Optional[Callable[[], Any]]) -> None:
         """Inject the node's live trading-state source. Kept out of the serializable
         StrategyConfig; node wiring calls this after construction."""
         self._trading_state_getter = getter
+
+    def set_durable_io_fatal_handler(
+        self,
+        handler: Optional[Callable[[str], None]],
+    ) -> None:
+        self._durable_io_worker.set_timeout_handler(handler)
 
     def set_denial_reporter(self, reporter: Optional[Callable[[Any, OrderDenied], None]]) -> None:
         """Inject best-effort denial reporting without making StrategyConfig carry
@@ -107,11 +284,110 @@ class IntentExecutionStrategy(Strategy):
     ) -> None:
         self._protection_event_reporter = reporter
 
+    def set_live_canary_risk_reporter(
+        self,
+        reporter: Optional[Callable[[dict[str, Any]], bool]],
+    ) -> None:
+        self._live_canary_risk_reporter = reporter
+
+    def set_live_canary_halt_handler(
+        self,
+        handler: Optional[Callable[[str], None]],
+    ) -> None:
+        self._live_canary_halt_handler = handler
+
+    def set_live_canary_portfolio_baseline_getter(
+        self,
+        getter: Optional[Callable[[str], str | bool]],
+    ) -> None:
+        self._live_canary_portfolio_baseline = getter
+
+    def set_live_rollout_phase_getter(
+        self,
+        getter: Optional[Callable[[], str | None]],
+    ) -> None:
+        self._live_rollout_phase_getter = getter
+
+    def set_live_open_gate_getter(
+        self,
+        getter: Optional[
+            Callable[[], Mapping[str, Any] | bool]
+        ],
+    ) -> None:
+        self._live_open_gate_getter = getter
+
     def set_exchange_cancel_adapter(self, adapter: Any, mirror: Any) -> None:
         self._exchange_cancel_adapter = adapter
         self._exchange_state_mirror = mirror
 
+    def set_terminal_exchange_worker(
+        self,
+        worker: Any,
+        halt_handler: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self._terminal_exchange_worker = worker
+        self._terminal_exchange_halt_handler = halt_handler
+
+    def enqueue_terminal_exchange_result(self, result: Any) -> None:
+        try:
+            self._terminal_exchange_mailbox.put_nowait(result)
+        except Full:
+            self._halt_terminal_exchange(
+                "terminal exchange result mailbox capacity exceeded"
+            )
+
+    def drain_terminal_exchange_mailbox(
+        self,
+        *,
+        max_results: int = 16,
+    ) -> int:
+        if max_results < 1:
+            raise ValueError("max_results must be positive")
+        drained = 0
+        while drained < max_results:
+            try:
+                result = self._terminal_exchange_mailbox.get_nowait()
+            except Empty:
+                break
+            try:
+                self._on_terminal_exchange_result(result)
+            finally:
+                self._terminal_exchange_mailbox.task_done()
+            drained += 1
+        return drained
+
+    def _requires_live_canary_runtime(self) -> bool:
+        return (
+            is_live_canary_account(
+                getattr(self.config, "account_id", "")
+            )
+            and str(getattr(self.config, "environment", "")).lower()
+            == "live"
+        )
+
+    def _live_canary_loss_topic(self) -> str:
+        return f"live-canary.loss.{self.config.account_id}"
+
+    def publish_live_canary_loss_decision(
+        self,
+        decision: LiveCanaryLossDecision,
+    ) -> None:
+        message_bus = getattr(self, "msgbus", None)
+        publish = getattr(message_bus, "publish", None)
+        if not callable(publish):
+            raise RuntimeError(
+                "live canary loss decision message bus is unavailable"
+            )
+        publish(
+            topic=self._live_canary_loss_topic(),
+            msg=decision,
+        )
+
     def on_start(self) -> None:
+        self._strategy_stopping = False
+        self._require_running_terminal_exchange_worker()
+        self._durable_io_worker.start()
+        self._register_durable_io_mailbox_timer()
         # C-08 host-verify fix: subscribe_data(data_type) is rejected for clientless
         # custom data in Nautilus 1.227.0 (it requires client_id/instrument_id).
         # Approved intents are internal actor->strategy data, so deliver them over the
@@ -126,11 +402,155 @@ class IntentExecutionStrategy(Strategy):
             topic=f"node.commands.{self.config.account_id}",
             handler=self._on_node_command,
         )
+        if self._requires_live_canary_runtime():
+            if self._live_canary_risk_reporter is None:
+                raise RuntimeError(
+                    "live canary account requires canary risk reporter"
+                )
+            if self._live_canary_halt_handler is None:
+                raise RuntimeError(
+                    "live canary account requires canary halt handler"
+                )
+            self.msgbus.subscribe(  # type: ignore[attr-defined]
+                topic=self._live_canary_loss_topic(),
+                handler=self._on_live_canary_loss_decision,
+            )
+            for (
+                client_order_id,
+                instrument_id,
+                symbol,
+                portfolio_baseline,
+            ) in (
+                self._live_canary_execution_store.active_monitor_contexts()
+            ):
+                self._live_canary_monitor_targets[
+                    client_order_id
+                ] = instrument_id
+                self._live_canary_monitor_baselines[
+                    client_order_id
+                ] = (symbol, portfolio_baseline)
+            self._live_canary_risk_reporter({"kind": "recover"})
+            self._register_live_canary_mark_timer()
+            self._queue_live_canary_mark_checks()
         self._entry_protection_stash = self._load_entry_protection_stash()
         self._schedule_startup_protection_syncs()
-        if self._refresh_exchange_state():
+        self._register_terminal_exchange_mailbox_timer()
+        if self._terminal_exchange_worker:
+            self._queue_exchange_refresh(
+                purpose="startup_reconcile",
+                continuation={"kind": "reconcile"},
+            )
+        elif self._refresh_exchange_state():
             self._retry_pending_take_profit_disables()
         self._register_exchange_state_timer()
+
+    def _require_running_terminal_exchange_worker(self) -> None:
+        if (
+            not self._exchange_cancel_adapter
+            and not self._exchange_state_mirror
+        ):
+            return
+        worker = self._terminal_exchange_worker
+        if not worker:
+            raise RuntimeError(
+                "exchange dependencies require terminal exchange worker"
+            )
+        snapshot = getattr(worker, "snapshot", None)
+        if not callable(snapshot):
+            raise RuntimeError(
+                "terminal exchange worker health is unavailable"
+            )
+        if not snapshot().running:
+            raise RuntimeError(
+                "terminal exchange worker must be running before strategy start"
+            )
+
+    def _register_terminal_exchange_mailbox_timer(self) -> None:
+        if not self._terminal_exchange_worker:
+            return
+        clock = getattr(self, "clock", None)
+        set_timer = (
+            getattr(clock, "set_timer", None)
+            if clock is not None
+            else None
+        )
+        if not callable(set_timer):
+            return
+        interval = timedelta(milliseconds=10)
+        try:
+            set_timer(
+                name="terminal-exchange.mailbox",
+                interval=interval,
+                callback=self._on_terminal_exchange_mailbox_timer,
+            )
+            return
+        except TypeError:
+            pass
+        set_timer(
+            "terminal-exchange.mailbox",
+            interval,
+            self._on_terminal_exchange_mailbox_timer,
+        )
+
+    def _register_durable_io_mailbox_timer(self) -> None:
+        clock = getattr(self, "clock", None)
+        set_timer = getattr(clock, "set_timer", None)
+        if not callable(set_timer):
+            return
+        interval = timedelta(milliseconds=10)
+        try:
+            set_timer(
+                name="strategy.durable-io.mailbox",
+                interval=interval,
+                callback=self._on_durable_io_mailbox_timer,
+            )
+            return
+        except TypeError:
+            pass
+        set_timer(
+            "strategy.durable-io.mailbox",
+            interval,
+            self._on_durable_io_mailbox_timer,
+        )
+
+    def _on_durable_io_mailbox_timer(
+        self,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        if self._strategy_stopping:
+            return
+        self.drain_durable_io_mailbox()
+
+    def drain_durable_io_mailbox(
+        self,
+        *,
+        max_results: int = 16,
+    ) -> int:
+        if max_results < 1:
+            raise ValueError("max_results must be positive")
+        drained = 0
+        while drained < max_results:
+            try:
+                result = self._durable_io_mailbox.get_nowait()
+            except Empty:
+                break
+            try:
+                if self._strategy_stopping:
+                    self._discard_durable_io_result(result)
+                else:
+                    self._on_durable_io_result(result)
+            finally:
+                self._durable_io_mailbox.task_done()
+            drained += 1
+        return drained
+
+    def _on_terminal_exchange_mailbox_timer(
+        self,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        self.drain_terminal_exchange_mailbox()
 
     def _register_exchange_state_timer(self) -> None:
         clock = getattr(self, "clock", None)
@@ -150,6 +570,12 @@ class IntentExecutionStrategy(Strategy):
         set_timer("exchange-state.reconcile", interval, self._on_exchange_state_timer)
 
     def _on_exchange_state_timer(self, *_args: Any, **_kwargs: Any) -> None:
+        if self._terminal_exchange_worker:
+            self._queue_exchange_refresh(
+                purpose="periodic_reconcile",
+                continuation={"kind": "reconcile"},
+            )
+            return
         if self._refresh_exchange_state():
             self._retry_pending_take_profit_disables()
 
@@ -275,40 +701,12 @@ class IntentExecutionStrategy(Strategy):
         self._retry_pending_tp_market_fallback_events(intent_key, stash)
 
     def _persist_entry_protection_stash(self) -> bool:
-        path = self._protection_stash_path()
-        directory = os.path.dirname(path)
-        tmp_path = ""
-        fd = -1
         try:
-            os.makedirs(directory, exist_ok=True)
-            payload = {
-                str(intent_key): self._jsonable_protection_stash_value(value)
-                for intent_key, value in self._entry_protection_stash.items()
-                if isinstance(value, dict)
-            }
-            fd, tmp_path = tempfile.mkstemp(
-                prefix=f".{self._PROTECTION_STASH_FILENAME}.tmp.",
-                dir=directory,
-                text=True,
+            self._write_entry_protection_stash(
+                self._entry_protection_stash_payload()
             )
-            with os.fdopen(fd, "w") as fh:
-                fd = -1
-                json.dump(payload, fh, sort_keys=True, separators=(",", ":"), default=str)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_path, path)
             return True
         except Exception as exc:
-            if fd >= 0:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            try:
-                if tmp_path and os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            except OSError:
-                pass
             log = getattr(self, "log", None)
             if log is not None and hasattr(log, "error"):
                 log.error(f"protection stash persist failed: {exc!r}")
@@ -316,6 +714,79 @@ class IntentExecutionStrategy(Strategy):
                 OrderDenied("protection_stash_persist_failed", repr(exc))
             )
             return False
+
+    def _entry_protection_stash_payload(self) -> dict[str, Any]:
+        return {
+            str(intent_key): copy.deepcopy(
+                self._jsonable_protection_stash_value(value)
+            )
+            for intent_key, value in self._entry_protection_stash.items()
+            if isinstance(value, dict)
+        }
+
+    def _write_entry_protection_stash(
+        self,
+        payload: Mapping[str, Any],
+    ) -> None:
+        path = Path(self._protection_stash_path())
+        directory = path.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self._PROTECTION_STASH_FILENAME}.tmp.",
+            dir=str(directory),
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w") as tmp:
+                json.dump(
+                    dict(payload),
+                    tmp,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_name, path)
+            _fsync_strategy_directory(directory)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+
+    def _queue_entry_protection_stash_persist(
+        self,
+        *,
+        continuation: Mapping[str, Any] | bool = False,
+    ) -> bool:
+        payload = self._entry_protection_stash_payload()
+        self._protection_stash_version += 1
+        version = self._protection_stash_version
+        pending_continuations: list[Mapping[str, Any]] = []
+        for queued_version in tuple(
+            self._protection_durable_continuations
+        ):
+            pending_continuations.extend(
+                self._protection_durable_continuations.pop(
+                    queued_version
+                )
+            )
+        if isinstance(continuation, Mapping):
+            pending_continuations.append(dict(continuation))
+        if pending_continuations:
+            self._protection_durable_continuations[
+                version
+            ] = pending_continuations
+        payload_sha256 = _protection_payload_sha256(payload)
+        return self._submit_durable_io_task(
+            _DurableIoTask(
+                kind=_DurableIoTaskKind.PROTECTION_STASH_PERSIST,
+                operation_id=uuid4().hex,
+                protection_payload=payload,
+                protection_version=version,
+                protection_payload_sha256=payload_sha256,
+                continuation={"kind": "protection_persisted"},
+            )
+        )
 
     def _jsonable_protection_stash_value(self, value: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -349,13 +820,11 @@ class IntentExecutionStrategy(Strategy):
 
     def _on_intent_msg(self, intent: Any) -> None:
         # msgbus delivers the ApprovedTradeIntentV1 directly.
-        if intent is not None:
-            self._handle_intent(intent)
+        if intent is None:
+            return
+        self._queue_intent_receive(intent)
 
     def _on_node_command(self, cmd: Any) -> None:
-        """Execute operator cancel_all / close_all. Best-effort per item: a failure on
-        one order/position is recorded but does not stop the rest (kill-switch must be
-        as complete as possible)."""
         if not _node_command_has_authorization(cmd):
             self._record_denial(
                 OrderDenied(
@@ -365,20 +834,571 @@ class IntentExecutionStrategy(Strategy):
             )
             return
         ctype = getattr(cmd, "type", cmd)
-        ctype = str(getattr(ctype, "value", ctype))
-        if ctype == "cancel_all":
-            for order in self._all_open_orders():
-                try:
-                    self.cancel_order(order)  # type: ignore[attr-defined]
-                except Exception as exc:
-                    self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
-        elif ctype == "close_all":
-            for position in self._all_open_positions():
-                try:
-                    # Nautilus submits a reduce-only market order to flatten.
-                    self.close_position(position)  # type: ignore[attr-defined]
-                except Exception as exc:
-                    self._record_denial(OrderDenied("position_close_failed", repr(exc)))
+        ctype = str(getattr(ctype, "value", ctype)).lower()
+        if ctype not in {"cancel_all", "close_all"}:
+            return
+        command_id = str(getattr(cmd, "command_id", "") or "").strip()
+        args = getattr(cmd, "args", {})
+        if not isinstance(args, dict):
+            return
+        command_account_id = str(
+            args.get("account_id") or self.config.account_id
+        ).strip()
+        if command_account_id != str(self.config.account_id):
+            self._record_denial(
+                OrderDenied(
+                    "command_account_mismatch",
+                    command_account_id,
+                )
+            )
+            return
+        try:
+            instrument_ids = _terminal_command_instrument_ids(args)
+        except ValueError as exc:
+            self._record_denial(
+                OrderDenied("terminal_command_scope_invalid", str(exc))
+            )
+            return
+
+        dispatched_at = datetime.now(timezone.utc)
+        if command_id:
+            completed = self._terminal_command_results.get(command_id)
+            if completed is not None:
+                self._publish_terminal_command_result(dict(completed))
+                return
+            if command_id in self._terminal_command_request_ids:
+                return
+        if self._terminal_exchange_worker:
+            self._queue_terminal_command(
+                command_id=command_id,
+                command_type=ctype,
+                instrument_ids=instrument_ids,
+                dispatched_at=dispatched_at,
+            )
+            return
+        operations: list[dict[str, Any]] = []
+        errors: list[str] = []
+        self._cancel_terminal_orders(
+            instrument_ids,
+            operations,
+            errors,
+        )
+        if ctype == "close_all":
+            self._close_terminal_positions(
+                instrument_ids,
+                operations,
+                errors,
+            )
+        payload = {
+            "command_id": command_id,
+            "command_type": ctype,
+            "account_id": str(self.config.account_id),
+            "instrument_ids": list(instrument_ids),
+            "operations": operations,
+            "errors": errors,
+            "dispatched_at": dispatched_at.isoformat(),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if command_id:
+            self._remember_terminal_command_result(
+                command_id,
+                payload,
+            )
+            self._publish_terminal_command_result(payload)
+
+    def _queue_terminal_command(
+        self,
+        *,
+        command_id: str,
+        command_type: str,
+        instrument_ids: tuple[str, ...],
+        dispatched_at: datetime,
+    ) -> bool:
+        if not command_id:
+            self._record_denial(
+                OrderDenied(
+                    "terminal_command_id_required",
+                    command_type,
+                )
+            )
+            return False
+        from runtime.exchange_cancel_adapter import (
+            TerminalExchangeRequest,
+        )
+
+        request_id = f"terminal-command:{command_id}"
+        request = TerminalExchangeRequest(
+            request_id=request_id,
+            account_id=str(self.config.account_id),
+            operation="terminal_command",
+            purpose=command_type,
+            deadline_monotonic=(
+                self._terminal_exchange_worker.new_deadline()
+            ),
+            instrument_ids=instrument_ids,
+        )
+        self._pending_terminal_exchange[request_id] = {
+            "kind": "terminal_command",
+            "command_id": command_id,
+            "command_type": command_type,
+            "instrument_ids": instrument_ids,
+            "dispatched_at": dispatched_at,
+        }
+        self._terminal_command_request_ids[command_id] = request_id
+        if self._terminal_exchange_worker.submit(request):
+            return True
+        self._pending_terminal_exchange.pop(request_id, None)
+        self._terminal_command_request_ids.pop(command_id, None)
+        self._record_denial(
+            OrderDenied(
+                "terminal_exchange_queue_rejected",
+                command_id,
+            )
+        )
+        return False
+
+    def _queue_exchange_refresh(
+        self,
+        *,
+        purpose: str,
+        continuation: dict[str, Any],
+    ) -> bool:
+        worker = self._terminal_exchange_worker
+        if not worker:
+            return False
+        kind = str(continuation.get("kind") or "")
+        intent = continuation.get("intent")
+        request_id = ""
+        if intent is not None:
+            intent_id = str(getattr(intent, "intent_id", "") or "")
+            for pending in self._pending_terminal_exchange.values():
+                pending_intent = pending.get("intent")
+                pending_intent_id = str(
+                    getattr(pending_intent, "intent_id", "") or ""
+                )
+                if (
+                    str(pending.get("kind") or "")
+                    == "intent_refresh"
+                    and pending_intent_id == intent_id
+                ):
+                    return True
+            request_id = (
+                f"intent-refresh:{intent_id}:{uuid4().hex}"
+            )
+        else:
+            for pending_id, pending in (
+                self._pending_terminal_exchange.items()
+            ):
+                if (
+                    str(pending.get("kind") or "") == kind
+                    and str(pending.get("purpose") or "") == purpose
+                ):
+                    return True
+            request_id = f"exchange-refresh:{purpose}:{uuid4().hex}"
+        from runtime.exchange_cancel_adapter import (
+            TerminalExchangeRequest,
+        )
+
+        request = TerminalExchangeRequest(
+            request_id=request_id,
+            account_id=str(self.config.account_id),
+            operation="refresh",
+            purpose=purpose,
+            deadline_monotonic=worker.new_deadline(),
+        )
+        pending = dict(continuation)
+        pending["purpose"] = purpose
+        self._pending_terminal_exchange[request_id] = pending
+        if worker.submit(request):
+            return True
+        self._pending_terminal_exchange.pop(request_id, None)
+        denial = OrderDenied(
+            "terminal_exchange_queue_rejected",
+            purpose,
+        )
+        self._record_denial(denial)
+        if intent is not None:
+            self._report_denial(intent, denial)
+        return False
+
+    def _on_terminal_exchange_result(self, result: Any) -> None:
+        request_id = str(
+            getattr(result, "request_id", "") or ""
+        )
+        if not request_id:
+            self._halt_terminal_exchange(
+                "terminal exchange result missing request_id"
+            )
+            return
+        account_id = str(
+            getattr(result, "account_id", "") or ""
+        )
+        if account_id != str(self.config.account_id):
+            self._halt_terminal_exchange(
+                "terminal exchange result account mismatch"
+            )
+            return
+        pending = self._pending_terminal_exchange.pop(
+            request_id,
+            None,
+        )
+        if pending is None:
+            return
+        kind = str(pending.get("kind") or "")
+        if kind == "terminal_command":
+            self._complete_terminal_command(result, pending)
+            return
+        if kind == "intent_refresh":
+            self._complete_intent_refresh(result, pending)
+            return
+        if kind == "management_cancel":
+            self._complete_management_cancels(result, pending)
+            return
+        if kind == "take_profit_retry":
+            self._complete_take_profit_retry(result, pending)
+            return
+        if kind == "reconcile":
+            if self._terminal_exchange_result_failed(result):
+                self._record_terminal_exchange_failure(
+                    result,
+                    purpose=str(pending.get("purpose") or "reconcile"),
+                )
+                return
+            self._retry_pending_take_profit_disables()
+
+    def _complete_terminal_command(
+        self,
+        result: Any,
+        pending: dict[str, Any],
+    ) -> None:
+        command_id = str(pending["command_id"])
+        command_type = str(pending["command_type"])
+        instrument_ids = tuple(pending["instrument_ids"])
+        operations = [
+            self._terminal_cancel_outcome_payload(outcome)
+            for outcome in tuple(
+                getattr(result, "cancel_outcomes", ()) or ()
+            )
+        ]
+        errors = [
+            str(operation["error"])
+            for operation in operations
+            if operation["status"] == "failed"
+        ]
+        result_error = str(getattr(result, "error", "") or "")
+        if result_error:
+            errors.append(result_error)
+            self._record_denial(
+                OrderDenied(
+                    "terminal_exchange_operation_failed",
+                    result_error,
+                )
+            )
+        if command_type == "close_all":
+            self._close_terminal_positions(
+                instrument_ids,
+                operations,
+                errors,
+            )
+        dispatched_at = pending["dispatched_at"]
+        payload = {
+            "command_id": command_id,
+            "command_type": command_type,
+            "account_id": str(self.config.account_id),
+            "instrument_ids": list(instrument_ids),
+            "operations": operations,
+            "errors": errors,
+            "dispatched_at": dispatched_at.isoformat(),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._terminal_command_request_ids.pop(command_id, None)
+        self._remember_terminal_command_result(
+            command_id,
+            payload,
+        )
+        self._publish_terminal_command_result(payload)
+
+    def _remember_terminal_command_result(
+        self,
+        command_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        self._terminal_command_results[command_id] = copy.deepcopy(
+            payload
+        )
+        while len(self._terminal_command_results) > 256:
+            oldest_command_id = next(
+                iter(self._terminal_command_results)
+            )
+            self._terminal_command_results.pop(
+                oldest_command_id,
+                None,
+            )
+
+    @staticmethod
+    def _terminal_cancel_outcome_payload(
+        outcome: Any,
+    ) -> dict[str, Any]:
+        request = getattr(outcome, "request", None)
+        symbol = str(getattr(request, "symbol", "") or "")
+        payload = {
+            "kind": "cancel_order",
+            "instrument_id": f"{symbol}-PERP.BINANCE",
+            "symbol": symbol,
+            "position_side": str(
+                getattr(request, "position_side", "") or ""
+            ),
+            "order_kind": str(
+                getattr(request, "order_kind", "") or ""
+            ),
+            "venue_order_id": str(
+                getattr(request, "venue_order_id", "") or ""
+            ),
+            "client_order_id": str(
+                getattr(request, "client_order_id", "") or ""
+            ),
+            "status": str(
+                getattr(outcome, "status", "") or "failed"
+            ),
+        }
+        result_outcome = str(
+            getattr(outcome, "outcome", "") or ""
+        )
+        terminal_status = str(
+            getattr(outcome, "terminal_status", "") or ""
+        )
+        error = str(getattr(outcome, "error", "") or "")
+        if result_outcome:
+            payload["outcome"] = result_outcome
+        if terminal_status:
+            payload["terminal_status"] = terminal_status
+        if error:
+            payload["error"] = error
+        return payload
+
+    def _complete_intent_refresh(
+        self,
+        result: Any,
+        pending: dict[str, Any],
+    ) -> None:
+        intent = pending["intent"]
+        if self._terminal_exchange_result_failed(result):
+            denial = self._record_terminal_exchange_failure(
+                result,
+                purpose=str(pending.get("purpose") or "intent_refresh"),
+            )
+            self._report_denial(intent, denial)
+            return
+        self._handle_intent_ready(
+            intent,
+            exchange_state_ready=True,
+            durable_async=bool(
+                pending.get("durable_async", False)
+            ),
+        )
+
+    @staticmethod
+    def _terminal_exchange_result_failed(result: Any) -> bool:
+        return bool(
+            str(getattr(result, "error", "") or "")
+        )
+
+    def _record_terminal_exchange_failure(
+        self,
+        result: Any,
+        *,
+        purpose: str,
+    ) -> OrderDenied:
+        detail = str(getattr(result, "error", "") or "")
+        denial = OrderDenied(
+            "exchange_state_refresh_failed",
+            f"{purpose}:{detail}",
+        )
+        self._record_denial(denial)
+        return denial
+
+    def _halt_terminal_exchange(self, reason: str) -> None:
+        handler = self._terminal_exchange_halt_handler
+        if handler is not None:
+            handler(str(reason))
+        self._record_denial(
+            OrderDenied(
+                "terminal_exchange_halted",
+                str(reason),
+            )
+        )
+
+    def _cancel_terminal_orders(
+        self,
+        instrument_ids: tuple[str, ...],
+        operations: list[dict[str, Any]],
+        errors: list[str],
+    ) -> None:
+        if self._exchange_cancel_adapter and self._exchange_state_mirror:
+            try:
+                orders = tuple(self._exchange_state_mirror.refresh())
+            except Exception as exc:
+                detail = f"exchange order snapshot failed: {exc!r}"
+                errors.append(detail)
+                self._record_denial(
+                    OrderDenied("exchange_state_refresh_failed", repr(exc))
+                )
+                return
+            for order in orders:
+                instrument_id = str(
+                    getattr(order, "instrument_id", "") or ""
+                )
+                if not _terminal_instrument_matches(
+                    instrument_id,
+                    instrument_ids,
+                ):
+                    continue
+                operation = self._cancel_terminal_exchange_order(order)
+                operations.append(operation)
+                if operation["status"] == "failed":
+                    errors.append(str(operation["error"]))
+            return
+
+        environment = str(
+            getattr(self.config, "environment", "")
+        ).lower()
+        if environment == "live":
+            errors.append("exchange cancel adapter unavailable")
+            return
+        for order in self._all_open_orders():
+            instrument_id = str(
+                getattr(order, "instrument_id", "") or ""
+            )
+            if not _terminal_instrument_matches(
+                instrument_id,
+                instrument_ids,
+            ):
+                continue
+            client_order_id = str(
+                getattr(order, "client_order_id", "") or ""
+            )
+            operation = {
+                "kind": "cancel_order",
+                "instrument_id": instrument_id,
+                "client_order_id": client_order_id,
+                "status": "requested",
+            }
+            try:
+                self.cancel_order(order)  # type: ignore[attr-defined]
+            except Exception as exc:
+                operation["status"] = "failed"
+                operation["error"] = repr(exc)
+                errors.append(repr(exc))
+                self._record_denial(
+                    OrderDenied("order_cancel_failed", repr(exc))
+                )
+            operations.append(operation)
+
+    def _cancel_terminal_exchange_order(
+        self,
+        order: Any,
+    ) -> dict[str, Any]:
+        from runtime.exchange_cancel_adapter import CancelOrderRequest
+
+        operation = {
+            "kind": "cancel_order",
+            "instrument_id": str(
+                getattr(order, "instrument_id", "") or ""
+            ),
+            "symbol": str(getattr(order, "symbol", "") or ""),
+            "position_side": str(
+                getattr(order, "position_side", "") or ""
+            ),
+            "order_kind": str(getattr(order, "order_kind", "") or ""),
+            "venue_order_id": str(
+                getattr(order, "venue_order_id", "") or ""
+            ),
+            "client_order_id": str(
+                getattr(order, "client_order_id", "") or ""
+            ),
+            "status": "requested",
+        }
+        request = CancelOrderRequest(
+            account_id=str(getattr(order, "account_id", "") or ""),
+            symbol=operation["symbol"],
+            position_side=operation["position_side"],
+            order_kind=operation["order_kind"],
+            venue_order_id=operation["venue_order_id"] or None,
+            client_order_id=operation["client_order_id"] or None,
+        )
+        try:
+            result = self._exchange_cancel_adapter.cancel(
+                "cancel_order",
+                request,
+            )
+            operation["status"] = "confirmed"
+            operation["outcome"] = str(
+                getattr(result, "outcome", "") or ""
+            )
+            operation["terminal_status"] = str(
+                getattr(result, "terminal_status", "") or ""
+            )
+        except Exception as exc:
+            operation["status"] = "failed"
+            operation["error"] = repr(exc)
+            self._record_denial(
+                OrderDenied("order_cancel_failed", repr(exc))
+            )
+        return operation
+
+    def _close_terminal_positions(
+        self,
+        instrument_ids: tuple[str, ...],
+        operations: list[dict[str, Any]],
+        errors: list[str],
+    ) -> None:
+        for position in self._all_open_positions():
+            instrument_id = str(
+                getattr(position, "instrument_id", "") or ""
+            )
+            if not _terminal_instrument_matches(
+                instrument_id,
+                instrument_ids,
+            ):
+                continue
+            operation = {
+                "kind": "close_position",
+                "position_id": _position_id(position) or "",
+                "instrument_id": instrument_id,
+                "position_side": _position_side(position),
+                "quantity": _position_quantity(position),
+                "reduce_only": True,
+                "status": "requested",
+            }
+            try:
+                self.close_position(position)  # type: ignore[attr-defined]
+            except Exception as exc:
+                operation["status"] = "failed"
+                operation["error"] = repr(exc)
+                errors.append(repr(exc))
+                self._record_denial(
+                    OrderDenied("position_close_failed", repr(exc))
+                )
+            operations.append(operation)
+
+    def _publish_terminal_command_result(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        message_bus = getattr(self, "msgbus", None)
+        publish = getattr(message_bus, "publish", None)
+        if not callable(publish):
+            self._record_denial(
+                OrderDenied(
+                    "terminal_command_result_bus_unavailable",
+                    str(payload.get("command_id") or ""),
+                )
+            )
+            return
+        publish(
+            topic=f"node.command-results.{self.config.account_id}",
+            msg=payload,
+        )
 
     def _all_open_orders(self) -> tuple[Any, ...]:
         cache = getattr(self, "cache", None)
@@ -416,12 +1436,152 @@ class IntentExecutionStrategy(Strategy):
         intent = _intent_from_custom_data(data)
         if intent is None:
             return
-        self._handle_intent(intent)
+        self._queue_intent_receive(intent)
+
+    def _queue_intent_receive(self, intent: Any) -> bool:
+        try:
+            execution_identity = _intent_execution_identity(intent)
+            intent_payload = _intent_execution_payload(intent)
+        except Exception as exc:
+            denial = OrderDenied(
+                "durable_intent_identity_invalid",
+                repr(exc),
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return False
+        submitted = self._submit_durable_io_task(
+            _DurableIoTask(
+                kind=_DurableIoTaskKind.INTENT_RECEIVE,
+                intent=intent,
+                intent_execution=execution_identity,
+                intent_payload=intent_payload,
+                continuation={"kind": "intent_received"},
+            )
+        )
+        if submitted:
+            return True
+        denial = self.denials[-1] if self.denials else OrderDenied(
+            "durable_intent_queue_rejected",
+            execution_identity.intent_id,
+        )
+        self._report_denial(intent, denial)
+        return False
 
     def _handle_intent(self, intent: Any) -> None:
+        """Synchronous internal seam retained for recovery tools and unit tests."""
+        execution_identity = _intent_execution_identity(intent)
+        task = _DurableIoTask(
+            kind=_DurableIoTaskKind.INTENT_RECEIVE,
+            intent=intent,
+            intent_execution=execution_identity,
+            intent_payload=_intent_execution_payload(intent),
+        )
+        try:
+            outcome = self._process_intent_receive_task(task)
+        except RuntimeError as exc:
+            denial = OrderDenied(
+                "durable_intent_receipt_failed",
+                repr(exc),
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return
+        self._continue_intent_after_receive(
+            intent,
+            execution_identity,
+            outcome,
+            durable_async=False,
+        )
+
+    def _continue_intent_after_receive(
+        self,
+        intent: Any,
+        execution_identity: IntentExecutionIdentity,
+        outcome: Mapping[str, Any],
+        *,
+        durable_async: bool,
+    ) -> None:
+        register_result = outcome.get("register_result", False)
+        if register_result in {
+            IntentRegisterResult.INTENT_CONFLICT,
+            IntentRegisterResult.IDEMPOTENCY_CONFLICT,
+        }:
+            denial = OrderDenied(
+                "durable_intent_identity_conflict",
+                str(getattr(intent, "intent_id", "")),
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return
+        durable_record = outcome.get("record", False)
+        if durable_record is False:
+            denial = OrderDenied(
+                "durable_intent_receipt_missing",
+                str(getattr(intent, "intent_id", "")),
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return
+        if (
+            durable_record.state
+            is IntentExecutionState.EXCHANGE_CONFIRMED
+        ):
+            self._processed_intent_ids.add(
+                execution_identity.intent_id
+            )
+            return
+        if durable_record.state is IntentExecutionState.REJECTED:
+            denial = OrderDenied(
+                "durable_intent_rejected",
+                durable_record.rejection_reason,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return
+        if durable_record.state is IntentExecutionState.DISPATCHED:
+            if self._durable_intent_orders_exist(durable_record):
+                if durable_async:
+                    self._submit_durable_io_task(
+                        _DurableIoTask(
+                            kind=(
+                                _DurableIoTaskKind.RECOVERY_CONFIRMED
+                            ),
+                            intent=intent,
+                            intent_execution=execution_identity,
+                            continuation={
+                                "kind": "intent_recovery_confirmed",
+                            },
+                        )
+                    )
+                else:
+                    self._intent_execution_inbox.mark_exchange_confirmed(
+                        execution_identity
+                    )
+                    self._processed_intent_ids.add(
+                        execution_identity.intent_id
+                    )
+                return
+            denial = OrderDenied(
+                "intent_exchange_confirmation_required",
+                execution_identity.intent_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return
+
         raw_action = getattr(intent, "action", "")
         action = str(getattr(raw_action, "value", raw_action))
         raw_order_plan = getattr(intent, "order_plan", {}) or {}
+        canary_denial = self._live_canary_intent_denial(
+            intent,
+            action=action,
+            order_plan=raw_order_plan,
+        )
+        if canary_denial is not None:
+            self._record_denial(canary_denial)
+            self._report_denial(intent, canary_denial)
+            return
         disabling_take_profits = (
             action == "replace_take_profits"
             and raw_order_plan.get("disable_take_profits") is True
@@ -434,6 +1594,16 @@ class IntentExecutionStrategy(Strategy):
             "move_stop_to_entry",
             "replace_take_profits",
         }
+        if needs_exchange_state and self._terminal_exchange_worker:
+            self._queue_exchange_refresh(
+                purpose=f"intent:{intent.intent_id}",
+                continuation={
+                    "kind": "intent_refresh",
+                    "intent": intent,
+                    "durable_async": durable_async,
+                },
+            )
+            return
         exchange_state_ready = False
         if needs_exchange_state and not disabling_take_profits:
             exchange_state_ready = self._refresh_exchange_state()
@@ -448,6 +1618,22 @@ class IntentExecutionStrategy(Strategy):
             )
             self._report_denial(intent, denial)
             return
+        self._handle_intent_ready(
+            intent,
+            exchange_state_ready=exchange_state_ready,
+            durable_async=durable_async,
+        )
+
+    def _handle_intent_ready(
+        self,
+        intent: Any,
+        *,
+        exchange_state_ready: bool,
+        durable_async: bool = False,
+    ) -> None:
+        raw_action = getattr(intent, "action", "")
+        action = str(getattr(raw_action, "value", raw_action))
+        raw_order_plan = getattr(intent, "order_plan", {}) or {}
         context = PlannerContext(
             account_id=self.config.account_id,
             trading_state=self._trading_state(),
@@ -464,7 +1650,14 @@ class IntentExecutionStrategy(Strategy):
             ),
         )
         if str(raw_order_plan.get("type", "")).lower() == "zone_ladder":
-            self._handle_zone_ladder(intent, raw_order_plan, context, action)
+            self._handle_zone_ladder(
+                intent,
+                raw_order_plan,
+                context,
+                action,
+                intent_execution=_intent_execution_identity(intent),
+                durable_async=durable_async,
+            )
             return
 
         result = plan_intent_execution(intent, context)
@@ -474,8 +1667,36 @@ class IntentExecutionStrategy(Strategy):
             return
 
         if isinstance(result, ManagementPlan):
-            submitted = self._submit_management_plan(result)
+            if durable_async:
+                self._queue_management_plan_after_persist(
+                    result,
+                    source_intent=intent,
+                )
+                return
+            submitted = self._submit_management_plan(
+                result,
+                source_intent=intent,
+            )
+            if submitted is _TERMINAL_EXCHANGE_PENDING:
+                return
         else:
+            live_canary_execution = self._live_canary_execution_identity(
+                intent,
+                result,
+            )
+            if isinstance(live_canary_execution, OrderDenied):
+                self._record_denial(live_canary_execution)
+                self._report_denial(intent, live_canary_execution)
+                return
+            if durable_async:
+                self._queue_single_intent_submit(
+                    intent,
+                    result,
+                    live_canary_execution=live_canary_execution,
+                    intent_execution=_intent_execution_identity(intent),
+                    action=action,
+                )
+                return
             protection_preimage: Optional[dict[str, dict[str, Any]]] = None
             protection_ready = True
             if action in ("open_position", "add_position"):
@@ -484,7 +1705,11 @@ class IntentExecutionStrategy(Strategy):
                 )
                 protection_ready = self._stash_entry_protection(intent, result)
             if protection_ready:
-                submitted = self._submit_order_plan(result)
+                submitted = self._submit_order_plan(
+                    result,
+                    live_canary_execution=live_canary_execution,
+                    intent_execution=_intent_execution_identity(intent),
+                )
             else:
                 submitted = False
             if (
@@ -503,7 +1728,316 @@ class IntentExecutionStrategy(Strategy):
             )
             self._report_denial(intent, denial)
 
+    def _live_canary_intent_denial(
+        self,
+        intent: Any,
+        *,
+        action: str,
+        order_plan: dict[str, Any],
+    ) -> OrderDenied | None:
+        canary_applies = self._live_canary_applies(
+            action=action,
+            order_plan=order_plan,
+        )
+        if canary_applies and action != "open_position":
+            return OrderDenied("canary_open_position_only", action)
+        gate_denial = self._live_open_gate_intent_denial(
+            intent,
+            action=action,
+            order_plan=order_plan,
+        )
+        if gate_denial is not None:
+            return gate_denial
+        if not canary_applies:
+            return None
+        permit = order_plan.get("canary_permit")
+        if not isinstance(permit, dict):
+            return OrderDenied("canary_permit_missing", str(intent.intent_id))
+        raw_permit_id = str(permit.get("permit_id") or "").strip()
+        try:
+            UUID(raw_permit_id)
+        except ValueError:
+            return OrderDenied("canary_permit_invalid", raw_permit_id)
+        expected_release_id = str(
+            getattr(self.config, "release_id", "") or ""
+        ).strip()
+        if not expected_release_id:
+            return OrderDenied(
+                "canary_release_missing",
+                str(intent.intent_id),
+            )
+        permit_identity = (
+            str(permit.get("account_id") or "").strip(),
+            str(permit.get("node_id") or "").strip(),
+            str(permit.get("release_id") or "").strip(),
+        )
+        expected_identity = (
+            str(getattr(self.config, "account_id", "")).strip(),
+            str(getattr(self.config, "node_id", "")).strip(),
+            expected_release_id,
+        )
+        if permit_identity != expected_identity:
+            return OrderDenied(
+                "canary_identity_mismatch",
+                str(intent.intent_id),
+            )
+        expires_at = _permit_expiry(permit.get("expires_at"))
+        if expires_at is False:
+            return OrderDenied(
+                "canary_permit_expiry_invalid",
+                str(intent.intent_id),
+            )
+        if expires_at <= _aware_datetime(self._now()):
+            return OrderDenied(
+                "canary_permit_expired",
+                expires_at.isoformat(),
+            )
+        permit_symbol = _canonical_symbol(permit.get("symbol"))
+        intent_symbol = _canonical_symbol(
+            getattr(intent, "instrument_id", "")
+        )
+        if not permit_symbol or permit_symbol != intent_symbol:
+            return OrderDenied(
+                "canary_symbol_mismatch",
+                str(intent.intent_id),
+            )
+        expected_baseline = str(
+            permit.get("portfolio_baseline_sha256") or ""
+        ).strip()
+        if re.fullmatch(r"[0-9a-f]{64}", expected_baseline) is None:
+            return OrderDenied(
+                "canary_portfolio_baseline_invalid",
+                str(intent.intent_id),
+            )
+        baseline_provider = self._live_canary_portfolio_baseline
+        if baseline_provider is None:
+            return OrderDenied(
+                "canary_portfolio_baseline_unavailable",
+                str(intent.intent_id),
+            )
+        try:
+            current_baseline = baseline_provider(permit_symbol)
+        except Exception as exc:
+            return OrderDenied(
+                "canary_portfolio_baseline_unavailable",
+                repr(exc),
+            )
+        current_baseline = str(current_baseline or "").strip()
+        if re.fullmatch(r"[0-9a-f]{64}", current_baseline) is None:
+            return OrderDenied(
+                "canary_portfolio_baseline_unavailable",
+                str(intent.intent_id),
+            )
+        if current_baseline != expected_baseline:
+            return OrderDenied(
+                "canary_portfolio_baseline_drift",
+                str(intent.intent_id),
+            )
+        permit_notional = _positive_canary_decimal(
+            permit.get("max_notional_usdt")
+        )
+        permit_loss_limit = _positive_canary_decimal(
+            permit.get("max_cumulative_loss_usdt")
+        )
+        risk_budget = getattr(intent, "risk_budget", None)
+        intent_notional = _positive_canary_decimal(
+            getattr(risk_budget, "max_notional", None)
+        )
+        if (
+            permit_notional is None
+            or permit_loss_limit is None
+            or intent_notional is None
+        ):
+            return OrderDenied(
+                "canary_notional_invalid",
+                str(intent.intent_id),
+            )
+        if (
+            permit_notional > Decimal("12")
+            or intent_notional > permit_notional
+        ):
+            return OrderDenied(
+                "canary_notional_exceeded",
+                str(intent.intent_id),
+            )
+        if permit_loss_limit >= Decimal("1.5"):
+            return OrderDenied(
+                "canary_loss_limit_exceeded",
+                str(intent.intent_id),
+            )
+        if str(order_plan.get("type") or "").strip().lower() != "limit":
+            return OrderDenied(
+                "canary_limit_ioc_required",
+                str(intent.intent_id),
+            )
+        if (
+            str(order_plan.get("time_in_force") or "").strip().upper()
+            != "IOC"
+        ):
+            return OrderDenied(
+                "canary_limit_ioc_required",
+                str(intent.intent_id),
+            )
+        quantity = _positive_canary_decimal(order_plan.get("quantity"))
+        price = _positive_canary_decimal(order_plan.get("price"))
+        if quantity is None or price is None:
+            return OrderDenied(
+                "canary_limit_quantity_price_required",
+                str(intent.intent_id),
+            )
+        return None
+
+    def _live_open_gate_intent_denial(
+        self,
+        intent: Any,
+        *,
+        action: str,
+        order_plan: Mapping[str, Any],
+    ) -> OrderDenied | None:
+        if not self._requires_live_canary_runtime():
+            return None
+        if action not in {"open_position", "add_position"}:
+            return None
+        if isinstance(order_plan.get("canary_permit"), Mapping):
+            return None
+        trusted_gate = self._live_open_gate()
+        normalized_trusted = normalize_live_open_gate(trusted_gate)
+        if normalized_trusted is False:
+            return OrderDenied(
+                "live_open_gate_unavailable",
+                str(getattr(intent, "intent_id", "")),
+            )
+        if normalized_trusted["mode"] == "canary_only":
+            return OrderDenied(
+                "canary_permit_missing",
+                str(getattr(intent, "intent_id", "")),
+            )
+        expected_release_id = str(
+            getattr(self.config, "release_id", "") or ""
+        ).strip()
+        denial = live_open_gate_denial(
+            order_plan.get("live_open_gate"),
+            trusted_gate=normalized_trusted,
+            expected_release_id=expected_release_id,
+            require_normal=True,
+        )
+        if denial is None:
+            return None
+        return OrderDenied(
+            denial,
+            str(getattr(intent, "intent_id", "")),
+        )
+
+    def _live_canary_applies(
+        self,
+        *,
+        action: str,
+        order_plan: Mapping[str, Any],
+    ) -> bool:
+        if not self._requires_live_canary_runtime():
+            return False
+        if action not in {"open_position", "add_position"}:
+            return False
+        account_id = getattr(self.config, "account_id", "")
+        rollout_phase = str(
+            order_plan.get("rollout_phase") or ""
+        ).strip()
+        if not rollout_phase:
+            rollout_phase = self._live_rollout_phase()
+        if live_canary_permit_required(
+            account_id,
+            rollout_phase,
+        ):
+            return True
+        return "canary_permit" in order_plan
+
+    def _live_canary_execution_identity(
+        self,
+        intent: Any,
+        plan: OrderPlan,
+    ) -> LiveCanaryExecutionIdentity | OrderDenied | bool:
+        if not self._requires_live_canary_runtime():
+            return False
+        if plan.reduce_only:
+            return False
+        order_plan = getattr(intent, "order_plan", {}) or {}
+        account_id = getattr(self.config, "account_id", "")
+        rollout_phase = str(
+            order_plan.get("rollout_phase") or ""
+        ).strip()
+        if not rollout_phase:
+            rollout_phase = self._live_rollout_phase()
+        if (
+            not live_canary_permit_required(
+                account_id,
+                rollout_phase,
+            )
+            and "canary_permit" not in order_plan
+        ):
+            return False
+        permit = order_plan.get("canary_permit")
+        if not isinstance(permit, dict):
+            return OrderDenied(
+                "canary_permit_missing",
+                str(plan.intent_id),
+            )
+        try:
+            return LiveCanaryExecutionIdentity(
+                permit_id=str(permit.get("permit_id") or ""),
+                release_id=str(permit.get("release_id") or ""),
+                intent_id=str(plan.intent_id),
+                client_order_id=str(plan.client_order_id),
+                account_id=str(permit.get("account_id") or ""),
+                node_id=str(permit.get("node_id") or ""),
+                symbol=_canonical_symbol(permit.get("symbol")),
+                max_notional_usdt=str(
+                    permit.get("max_notional_usdt") or ""
+                ),
+                max_cumulative_loss_usdt=str(
+                    permit.get("max_cumulative_loss_usdt") or ""
+                ),
+                authorized_limit_price_usdt=str(plan.price or ""),
+                expires_at=str(permit.get("expires_at") or ""),
+                portfolio_baseline_sha256=str(
+                    permit.get("portfolio_baseline_sha256") or ""
+                ),
+            ).normalized()
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return OrderDenied(
+                "canary_execution_identity_invalid",
+                repr(exc),
+            )
+
+    def _live_rollout_phase(self) -> str | None:
+        getter = self._live_rollout_phase_getter
+        if getter is None:
+            return None
+        try:
+            phase = getter()
+        except Exception:
+            return None
+        normalized = str(phase or "").strip()
+        return normalized or None
+
+    def _live_open_gate(self) -> Mapping[str, Any] | bool:
+        getter = self._live_open_gate_getter
+        if getter is None:
+            return False
+        try:
+            return getter()
+        except Exception:
+            return False
+
     def _stash_entry_protection(self, intent: Any, plan: OrderPlan) -> bool:
+        if not self._stage_entry_protection(intent, plan):
+            return False
+        return self._persist_entry_protection_stash()
+
+    def _stage_entry_protection(
+        self,
+        intent: Any,
+        plan: OrderPlan,
+    ) -> bool:
         order_plan = getattr(intent, "order_plan", {}) or {}
         stop_loss = order_plan.get("stop_loss")
         take_profits = order_plan.get("take_profits")
@@ -519,7 +2053,6 @@ class IntentExecutionStrategy(Strategy):
         source_message_id = authorization["source_message_id"]
         parent_intent_id = authorization["parent_intent_id"]
         same_source_owner: Optional[tuple[str, dict[str, Any]]] = None
-        owner_changed = False
         for key, other in tuple(self._entry_protection_stash.items()):
             if str(other.get("instrument_id")) != plan.instrument_id:
                 continue
@@ -530,13 +2063,10 @@ class IntentExecutionStrategy(Strategy):
             if other_source_message_id == source_message_id:
                 same_source_owner = (key, other)
                 continue
-            owner_changed = True
             self._entry_protection_stash.pop(key, None)
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + key)
 
         if stop_loss is None and not take_profits:
-            if owner_changed:
-                return self._persist_entry_protection_stash()
             return True
 
         if same_source_owner is not None:
@@ -562,7 +2092,60 @@ class IntentExecutionStrategy(Strategy):
             "tp_consumed": {},
             "pending_cancel_ids": (),
         }
-        return self._persist_entry_protection_stash()
+        return True
+
+    def _queue_single_intent_submit(
+        self,
+        intent: Any,
+        plan: OrderPlan,
+        *,
+        live_canary_execution: LiveCanaryExecutionIdentity | bool,
+        intent_execution: IntentExecutionIdentity,
+        action: str,
+    ) -> bool:
+        protection_preimage: Mapping[str, Any] | bool = False
+        protection_payload: Mapping[str, Any] | bool = False
+        if action in {"open_position", "add_position"}:
+            protection_preimage = copy.deepcopy(
+                self._entry_protection_stash
+            )
+            if not self._stage_entry_protection(intent, plan):
+                denial = self.denials[-1] if self.denials else OrderDenied(
+                    "protection_stash_invalid",
+                    str(plan.intent_id),
+                )
+                self._report_denial(intent, denial)
+                return False
+            if self._entry_protection_stash != protection_preimage:
+                protection_payload = (
+                    self._entry_protection_stash_payload()
+                )
+        task = _DurableIoTask(
+            kind=_DurableIoTaskKind.PREPARE_SUBMIT,
+            intent=intent,
+            intent_execution=intent_execution,
+            client_order_ids=(str(plan.client_order_id),),
+            plans=(plan,),
+            live_canary_execution=live_canary_execution,
+            protection_payload=protection_payload,
+            continuation={
+                "kind": "prepare_submit",
+                "mode": "single",
+                "protection_preimage": protection_preimage,
+            },
+        )
+        if self._submit_durable_io_task(task):
+            return True
+        if isinstance(protection_preimage, Mapping):
+            self._entry_protection_stash = copy.deepcopy(
+                dict(protection_preimage)
+            )
+        denial = self.denials[-1] if self.denials else OrderDenied(
+            "intent_dispatch_queue_rejected",
+            intent_execution.intent_id,
+        )
+        self._report_denial(intent, denial)
+        return False
 
     def _handle_zone_ladder(
         self,
@@ -570,11 +2153,107 @@ class IntentExecutionStrategy(Strategy):
         order_plan: dict[str, Any],
         context: PlannerContext,
         action: str,
+        *,
+        intent_execution: IntentExecutionIdentity,
+        durable_async: bool = False,
     ) -> None:
         plans = self._zone_ladder_order_plans(intent, order_plan, context, action)
         if isinstance(plans, OrderDenied):
             self._record_denial(plans)
             self._report_denial(intent, plans)
+            return
+
+        if durable_async:
+            protection_preimage = copy.deepcopy(
+                self._entry_protection_stash
+            )
+            if not self._stage_entry_protection(intent, plans[0]):
+                self._entry_protection_stash = protection_preimage
+                denial = self.denials[-1] if self.denials else OrderDenied(
+                    "protection_stash_invalid",
+                    str(plans[0].intent_id),
+                )
+                self._report_denial(intent, denial)
+                return
+            stash = self._entry_protection_stash.get(
+                str(plans[0].intent_id)
+            )
+            if stash is not None:
+                stash["entry_sequence_max"] = 9
+                stash["protection_sequence_start"] = 11
+            protection_payload: Mapping[str, Any] | bool = False
+            if self._entry_protection_stash != protection_preimage:
+                protection_payload = (
+                    self._entry_protection_stash_payload()
+                )
+            task = _DurableIoTask(
+                kind=_DurableIoTaskKind.PREPARE_SUBMIT,
+                intent=intent,
+                intent_execution=intent_execution,
+                client_order_ids=tuple(
+                    plan.client_order_id for plan in plans
+                ),
+                plans=plans,
+                protection_payload=protection_payload,
+                continuation={
+                    "kind": "prepare_submit",
+                    "mode": "zone_ladder",
+                    "protection_preimage": protection_preimage,
+                },
+            )
+            if self._submit_durable_io_task(task):
+                return
+            self._entry_protection_stash = protection_preimage
+            denial = self.denials[-1] if self.denials else OrderDenied(
+                "intent_dispatch_queue_rejected",
+                intent_execution.intent_id,
+            )
+            self._report_denial(intent, denial)
+            return
+
+        try:
+            dispatch_result = self._intent_execution_inbox.begin_dispatch(
+                intent_execution,
+                tuple(plan.client_order_id for plan in plans),
+            )
+        except RuntimeError as exc:
+            denial = OrderDenied(
+                "intent_dispatch_persist_failed",
+                repr(exc),
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return
+        if dispatch_result is IntentDispatchResult.EXCHANGE_CONFIRMED:
+            self._processed_intent_ids.add(intent_execution.intent_id)
+            return
+        if dispatch_result is IntentDispatchResult.REJECTED:
+            denial = OrderDenied(
+                "durable_intent_rejected",
+                intent_execution.intent_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return
+        if dispatch_result is IntentDispatchResult.RECOVERY_REQUIRED:
+            record = self._intent_execution_inbox.get(intent_execution)
+            if (
+                record is not False
+                and self._durable_intent_orders_exist(record)
+            ):
+                self._intent_execution_inbox.mark_exchange_confirmed(
+                    intent_execution
+                )
+                self._processed_intent_ids.add(
+                    intent_execution.intent_id
+                )
+                return
+            denial = OrderDenied(
+                "intent_exchange_confirmation_required",
+                intent_execution.intent_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
             return
 
         protection_preimage = copy.deepcopy(self._entry_protection_stash)
@@ -733,7 +2412,17 @@ class IntentExecutionStrategy(Strategy):
     )
     _PROTECTION_TIMER_PREFIX = "protsync-"
 
+    def on_order_submitted(self, event: Any) -> None:
+        del event
+
+    def on_order_accepted(self, event: Any) -> None:
+        self._confirm_durable_intent_order_event(event)
+        self._confirm_live_canary_order_event(event)
+
     def on_order_filled(self, event: Any) -> None:
+        self._confirm_durable_intent_order_event(event)
+        self._confirm_live_canary_order_event(event)
+        self._queue_live_canary_fill(event)
         client_order_id = _event_client_order_id(event)
         if client_order_id is None:
             return
@@ -752,9 +2441,15 @@ class IntentExecutionStrategy(Strategy):
                         qty,
                     )
             self._record_quick_protection_fill(intent_key, stash, role_info)
-            self._persist_entry_protection_stash()
+            continuation: Mapping[str, Any] | bool = False
             if not stash.get("protection_frozen"):
-                self._schedule_protection_sync(intent_key)
+                continuation = {
+                    "kind": "protection_schedule",
+                    "intent_key": intent_key,
+                }
+            self._queue_entry_protection_stash_persist(
+                continuation=continuation
+            )
             return
         try:
             trace = decode_client_order_id(client_order_id)
@@ -958,13 +2653,31 @@ class IntentExecutionStrategy(Strategy):
             return False
 
     def on_stop(self) -> None:
+        self._strategy_stopping = True
+        self._cancel_clock_timer("strategy.durable-io.mailbox")
         self._cancel_clock_timer("exchange-state.reconcile")
+        self._cancel_clock_timer("terminal-exchange.mailbox")
+        self._cancel_clock_timer("live-canary.mark-to-market")
         for intent_key in tuple(self._entry_protection_stash):
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
+        self._durable_io_worker.stop(
+            timeout_seconds=self._DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS
+        )
+        self.drain_durable_io_mailbox(
+            max_results=self._DURABLE_IO_QUEUE_CAPACITY
+        )
 
     def on_event(self, event: Any) -> None:
+        if self._strategy_stopping:
+            return
         # TimeEvent fallback path for clocks whose set_time_alert has no callback arg.
         name = getattr(event, "name", None)
+        if str(name or "") == "strategy.durable-io.mailbox":
+            self.drain_durable_io_mailbox()
+            return
+        if str(name or "") == "terminal-exchange.mailbox":
+            self.drain_terminal_exchange_mailbox()
+            return
         if name is not None and str(name).startswith(self._PROTECTION_TIMER_PREFIX):
             self._sync_protection(str(name)[len(self._PROTECTION_TIMER_PREFIX):])
 
@@ -974,18 +2687,1090 @@ class IntentExecutionStrategy(Strategy):
     # immediately trigger") leaves the position naked exactly when price is
     # attacking the stop. Any terminal event on a protection id re-arms the sync.
     def on_order_rejected(self, event: Any) -> None:
+        self._confirm_durable_intent_order_event(event)
+        self._confirm_live_canary_order_event(event)
         self._on_protection_order_terminal(event, count_retry=True)
 
     def on_order_denied(self, event: Any) -> None:
         self._on_protection_order_terminal(event, count_retry=True)
 
     def on_order_canceled(self, event: Any) -> None:
+        self._confirm_durable_intent_order_event(event)
+        self._confirm_live_canary_order_event(event)
         # Usually our own make-before-break cancel confirmations: resync to
         # verify convergence, but do NOT feed the backoff counter (review P2-3).
         self._on_protection_order_terminal(event, count_retry=False)
 
     def on_order_expired(self, event: Any) -> None:
+        self._confirm_durable_intent_order_event(event)
+        self._confirm_live_canary_order_event(event)
         self._on_protection_order_terminal(event, count_retry=True)
+
+    def _confirm_durable_intent_order_event(self, event: Any) -> None:
+        client_order_id = _event_client_order_id(event)
+        if client_order_id is None:
+            return
+        self._submit_durable_io_task(
+            _DurableIoTask(
+                kind=_DurableIoTaskKind.INTENT_EXCHANGE_CONFIRMED,
+                client_order_id=client_order_id,
+            )
+        )
+
+    def _submit_durable_io_task(
+        self,
+        task: _DurableIoTask,
+    ) -> bool:
+        if self._strategy_stopping:
+            return False
+        if self._durable_io_halted_reason:
+            return False
+        if not self._durable_io_worker.snapshot().running:
+            self._durable_io_worker.start()
+        return self._durable_io_worker.submit(task)
+
+    def _process_durable_io_task(
+        self,
+        task: _DurableIoTask,
+    ) -> None:
+        if task.kind is _DurableIoTaskKind.INTENT_EXCHANGE_CONFIRMED:
+            self._intent_execution_inbox.mark_exchange_confirmed_by_client_order_id(
+                task.client_order_id
+            )
+            return
+        outcome: Any = False
+        if task.kind is _DurableIoTaskKind.INTENT_RECEIVE:
+            outcome = self._process_intent_receive_task(task)
+        elif task.kind is _DurableIoTaskKind.PREPARE_SUBMIT:
+            outcome = self._process_prepare_submit_task(task)
+        elif task.kind is _DurableIoTaskKind.MANAGEMENT_PREPARE:
+            outcome = self._process_management_prepare_task(task)
+        elif task.kind is _DurableIoTaskKind.MANAGEMENT_COMPLETE:
+            self._process_management_complete_task(task)
+            outcome = True
+        elif task.kind is _DurableIoTaskKind.RECOVERY_CONFIRMED:
+            self._process_recovery_confirmed_task(task)
+            outcome = True
+        elif task.kind is _DurableIoTaskKind.CANARY_MARK_DISPATCHED:
+            identity = task.live_canary_execution
+            if not isinstance(
+                identity,
+                LiveCanaryExecutionIdentity,
+            ):
+                raise ValueError(
+                    "canary mark-dispatched task requires identity"
+                )
+            self._live_canary_execution_store.mark_dispatched(identity)
+            outcome = True
+        elif task.kind is _DurableIoTaskKind.PROTECTION_STASH_PERSIST:
+            payload = task.protection_payload
+            if not isinstance(payload, Mapping):
+                raise ValueError(
+                    "protection stash task requires payload"
+                )
+            if not task.operation_id:
+                raise ValueError(
+                    "protection stash task requires operation_id"
+                )
+            if task.protection_version < 1:
+                raise ValueError(
+                    "protection stash task requires version"
+                )
+            expected_sha256 = _protection_payload_sha256(payload)
+            if task.protection_payload_sha256 != expected_sha256:
+                raise ValueError(
+                    "protection stash task payload digest mismatch"
+                )
+            self._write_entry_protection_stash(payload)
+            outcome = True
+        else:
+            raise ValueError(f"unsupported durable I/O task: {task.kind}")
+        if task.continuation is not False:
+            self._publish_durable_io_result(
+                _DurableIoResult(task=task, outcome=outcome)
+            )
+
+    def _publish_durable_io_result(
+        self,
+        result: _DurableIoResult,
+    ) -> None:
+        if self._strategy_stopping:
+            return
+        try:
+            self._durable_io_mailbox.put_nowait(result)
+        except Full:
+            self._halt_durable_io(
+                "strategy durable I/O result mailbox capacity exceeded"
+            )
+
+    def _on_durable_io_result(
+        self,
+        result: _DurableIoResult,
+    ) -> None:
+        if self._strategy_stopping or self._durable_io_halted_reason:
+            self._discard_durable_io_result(result)
+            return
+        continuation = result.task.continuation
+        if not isinstance(continuation, Mapping):
+            return
+        kind = str(continuation.get("kind") or "")
+        if kind == "intent_received":
+            self._on_intent_received_result(result)
+            return
+        if kind == "prepare_submit":
+            self._on_prepare_submit_result(result)
+            return
+        if kind == "management_prepared":
+            self._on_management_prepared_result(result)
+            return
+        if kind == "management_completed":
+            identity = result.task.intent_execution
+            if isinstance(identity, IntentExecutionIdentity):
+                self._processed_intent_ids.add(identity.intent_id)
+            return
+        if kind == "intent_recovery_confirmed":
+            identity = result.task.intent_execution
+            if isinstance(identity, IntentExecutionIdentity):
+                self._processed_intent_ids.add(identity.intent_id)
+            return
+        if kind == "canary_dispatched":
+            identity = result.task.live_canary_execution
+            if isinstance(identity, LiveCanaryExecutionIdentity):
+                self._after_live_canary_dispatched(identity)
+            intent_execution = result.task.intent_execution
+            if isinstance(intent_execution, IntentExecutionIdentity):
+                self._processed_intent_ids.add(
+                    intent_execution.intent_id
+                )
+            return
+        if kind == "protection_persisted":
+            self._on_protection_persisted_result(result)
+            return
+        self._halt_durable_io(
+            f"unsupported durable I/O continuation: {kind}"
+        )
+
+    def _discard_durable_io_result(
+        self,
+        result: _DurableIoResult,
+    ) -> None:
+        task = result.task
+        if task.kind in {
+            _DurableIoTaskKind.PREPARE_SUBMIT,
+            _DurableIoTaskKind.MANAGEMENT_PREPARE,
+        }:
+            self._restore_prepare_submit_preimage(task)
+            return
+        if (
+            task.kind
+            is _DurableIoTaskKind.PROTECTION_STASH_PERSIST
+            and task.protection_version > 0
+        ):
+            self._protection_durable_continuations.pop(
+                task.protection_version,
+                None,
+            )
+
+    def _on_protection_persisted_result(
+        self,
+        result: _DurableIoResult,
+    ) -> None:
+        version = result.task.protection_version
+        if version < 1:
+            self._halt_durable_io(
+                "protection persist result missing version"
+            )
+            return
+        self._protection_stash_persisted_version = max(
+            self._protection_stash_persisted_version,
+            version,
+        )
+        if version != self._protection_stash_version:
+            return
+        continuations = self._protection_durable_continuations.pop(
+            version,
+            [],
+        )
+        for continuation in continuations:
+            self._run_protection_continuation(continuation)
+
+    def _run_protection_continuation(
+        self,
+        continuation: Mapping[str, Any],
+    ) -> None:
+        kind = str(continuation.get("kind") or "")
+        if kind == "protection_retry":
+            self._continue_protection_retry(continuation)
+            return
+        if kind == "protection_schedule":
+            intent_key = str(
+                continuation.get("intent_key") or ""
+            )
+            if intent_key:
+                self._schedule_protection_sync(intent_key)
+            return
+        if kind == "protection_schedule_delay":
+            intent_key = str(
+                continuation.get("intent_key") or ""
+            )
+            raw_delay = continuation.get("delay_seconds", False)
+            delay_seconds: float | None = None
+            if raw_delay is not False:
+                delay_seconds = float(raw_delay)
+            if intent_key:
+                self._schedule_protection_sync(
+                    intent_key,
+                    delay_seconds=delay_seconds,
+                )
+            return
+        if kind == "protection_submit_revision":
+            self._continue_protection_revision_submit(
+                continuation
+            )
+            return
+        if kind == "management_dispatch_after_persist":
+            self._queue_management_dispatch_task(
+                continuation
+            )
+            return
+        if kind == "management_finalize_after_persist":
+            plan = continuation.get("plan")
+            source_intent = continuation.get("source_intent")
+            if not isinstance(plan, ManagementPlan):
+                self._halt_durable_io(
+                    "management finalize continuation missing plan"
+                )
+                return
+            self._queue_management_complete_task(
+                plan,
+                source_intent=source_intent,
+            )
+            return
+        if kind == "take_profit_retry_after_persist":
+            intent_key = str(
+                continuation.get("intent_key") or ""
+            )
+            stash = self._entry_protection_stash.get(intent_key)
+            requests = continuation.get("requests")
+            if isinstance(stash, dict) and isinstance(requests, tuple):
+                self._queue_take_profit_retry(
+                    intent_key=intent_key,
+                    stash=stash,
+                    requests=requests,
+                )
+            return
+        if kind == "immediate_tp_market_fallback":
+            self._continue_immediate_tp_market_fallback(
+                continuation
+            )
+            return
+        self._halt_durable_io(
+            f"unsupported protection continuation: {kind}"
+        )
+
+    def _on_intent_received_result(
+        self,
+        result: _DurableIoResult,
+    ) -> None:
+        task = result.task
+        identity = task.intent_execution
+        if not isinstance(identity, IntentExecutionIdentity):
+            self._halt_durable_io(
+                "intent receipt continuation missing identity"
+            )
+            return
+        if not isinstance(result.outcome, Mapping):
+            self._halt_durable_io(
+                "intent receipt continuation missing outcome"
+            )
+            return
+        self._continue_intent_after_receive(
+            task.intent,
+            identity,
+            result.outcome,
+            durable_async=True,
+        )
+
+    def _on_prepare_submit_result(
+        self,
+        result: _DurableIoResult,
+    ) -> None:
+        task = result.task
+        outcome = result.outcome
+        if not isinstance(outcome, Mapping):
+            self._halt_durable_io(
+                "prepare-submit continuation missing outcome"
+            )
+            return
+        intent = task.intent
+        intent_execution = task.intent_execution
+        if not isinstance(intent_execution, IntentExecutionIdentity):
+            self._halt_durable_io(
+                "prepare-submit continuation missing intent identity"
+            )
+            return
+        dispatch_result = outcome.get("dispatch_result", False)
+        if dispatch_result is IntentDispatchResult.EXCHANGE_CONFIRMED:
+            self._processed_intent_ids.add(intent_execution.intent_id)
+            return
+        if dispatch_result is IntentDispatchResult.REJECTED:
+            denial = OrderDenied(
+                "durable_intent_rejected",
+                intent_execution.intent_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            self._restore_prepare_submit_preimage(task)
+            return
+        if dispatch_result is IntentDispatchResult.RECOVERY_REQUIRED:
+            record = outcome.get("durable_record", False)
+            if (
+                record is not False
+                and self._durable_intent_orders_exist(record)
+            ):
+                self._queue_recovery_confirmation(task)
+                return
+            denial = OrderDenied(
+                "intent_exchange_confirmation_required",
+                intent_execution.intent_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            self._restore_prepare_submit_preimage(task)
+            return
+
+        claim_result = outcome.get("claim_result", False)
+        if claim_result is LiveCanaryClaimResult.PERMIT_CONFLICT:
+            live_canary = task.live_canary_execution
+            permit_id = str(
+                getattr(live_canary, "permit_id", "") or ""
+            )
+            denial = OrderDenied(
+                "canary_permit_already_claimed",
+                permit_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            self._restore_prepare_submit_preimage(task)
+            return
+        if claim_result is LiveCanaryClaimResult.RECOVERY_REQUIRED:
+            plans = task.plans
+            if (
+                len(plans) == 1
+                and self._live_canary_order_exists(plans[0])
+            ):
+                self._queue_recovery_confirmation(task)
+                return
+            live_canary = task.live_canary_execution
+            client_order_id = str(
+                getattr(live_canary, "client_order_id", "") or ""
+            )
+            denial = OrderDenied(
+                "canary_exchange_confirmation_required",
+                client_order_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            self._restore_prepare_submit_preimage(task)
+            return
+
+        if (
+            any(not plan.reduce_only for plan in task.plans)
+            and self._trading_state().upper() != "ACTIVE"
+        ):
+            denial = OrderDenied(
+                "trading_not_active",
+                self._trading_state(),
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            self._restore_prepare_submit_preimage(task)
+            return
+
+        submitted_plans: list[OrderPlan] = []
+        for plan in task.plans:
+            if not self._submit_order_plan_after_durable_prepare(
+                plan,
+                live_canary_execution=task.live_canary_execution,
+            ):
+                break
+            submitted_plans.append(plan)
+        if len(submitted_plans) != len(task.plans):
+            self._cancel_partial_prepared_submit(
+                task,
+                submitted_plans,
+            )
+            denial = self.denials[-1] if self.denials else OrderDenied(
+                "order_submit_failed",
+                intent_execution.intent_id,
+            )
+            self._report_denial(intent, denial)
+            return
+
+        live_canary = task.live_canary_execution
+        if isinstance(live_canary, LiveCanaryExecutionIdentity):
+            self._submit_durable_io_task(
+                _DurableIoTask(
+                    kind=_DurableIoTaskKind.CANARY_MARK_DISPATCHED,
+                    intent=intent,
+                    intent_execution=intent_execution,
+                    live_canary_execution=live_canary,
+                    continuation={"kind": "canary_dispatched"},
+                )
+            )
+            return
+        self._processed_intent_ids.add(intent_execution.intent_id)
+
+    def _on_management_prepared_result(
+        self,
+        result: _DurableIoResult,
+    ) -> None:
+        task = result.task
+        identity = task.intent_execution
+        continuation = task.continuation
+        if not isinstance(identity, IntentExecutionIdentity):
+            self._halt_durable_io(
+                "management prepare continuation missing identity"
+            )
+            return
+        if not isinstance(continuation, Mapping):
+            self._halt_durable_io(
+                "management prepare continuation missing payload"
+            )
+            return
+        if not isinstance(result.outcome, Mapping):
+            self._halt_durable_io(
+                "management prepare continuation missing outcome"
+            )
+            return
+        dispatch_result = result.outcome.get(
+            "dispatch_result",
+            False,
+        )
+        if dispatch_result is IntentDispatchResult.EXCHANGE_CONFIRMED:
+            self._processed_intent_ids.add(identity.intent_id)
+            return
+        source_intent = task.intent
+        if dispatch_result is IntentDispatchResult.REJECTED:
+            denial = OrderDenied(
+                "durable_intent_rejected",
+                identity.intent_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(source_intent, denial)
+            self._restore_prepare_submit_preimage(task)
+            return
+        if dispatch_result is IntentDispatchResult.RECOVERY_REQUIRED:
+            denial = OrderDenied(
+                "management_terminal_confirmation_required",
+                identity.intent_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(source_intent, denial)
+            return
+        if dispatch_result is not IntentDispatchResult.READY:
+            self._halt_durable_io(
+                "management prepare continuation has invalid dispatch result"
+            )
+            return
+        self._continue_management_after_persist(continuation)
+
+    def _queue_recovery_confirmation(
+        self,
+        task: _DurableIoTask,
+    ) -> bool:
+        return self._submit_durable_io_task(
+            _DurableIoTask(
+                kind=_DurableIoTaskKind.RECOVERY_CONFIRMED,
+                intent=task.intent,
+                intent_execution=task.intent_execution,
+                live_canary_execution=task.live_canary_execution,
+                continuation={
+                    "kind": "intent_recovery_confirmed",
+                },
+            )
+        )
+
+    def _restore_prepare_submit_preimage(
+        self,
+        task: _DurableIoTask,
+    ) -> None:
+        continuation = task.continuation
+        if not isinstance(continuation, Mapping):
+            return
+        preimage = continuation.get("protection_preimage", False)
+        if not isinstance(preimage, Mapping):
+            return
+        self._entry_protection_stash = copy.deepcopy(dict(preimage))
+
+    def _cancel_partial_prepared_submit(
+        self,
+        task: _DurableIoTask,
+        submitted_plans: list[OrderPlan],
+    ) -> None:
+        continuation = task.continuation
+        mode = ""
+        if isinstance(continuation, Mapping):
+            mode = str(continuation.get("mode") or "")
+        if mode != "zone_ladder":
+            return
+        for plan in submitted_plans:
+            self._cancel_order_by_client_order_id(
+                plan.instrument_id,
+                plan.client_order_id,
+            )
+
+    def _continue_protection_retry(
+        self,
+        continuation: Mapping[str, Any],
+    ) -> None:
+        intent_key = str(continuation.get("intent_key") or "")
+        if not intent_key:
+            return
+        stash = self._entry_protection_stash.get(intent_key)
+        if not isinstance(stash, dict):
+            return
+        count_retry = bool(
+            continuation.get("count_retry", True)
+        )
+        self._reschedule_protection_sync(
+            intent_key,
+            stash,
+            count_retry=count_retry,
+        )
+
+    def _process_intent_receive_task(
+        self,
+        task: _DurableIoTask,
+    ) -> dict[str, Any]:
+        identity = task.intent_execution
+        payload = task.intent_payload
+        if not isinstance(identity, IntentExecutionIdentity):
+            raise ValueError("intent receive task requires identity")
+        if not isinstance(payload, Mapping):
+            raise ValueError("intent receive task requires payload")
+        record = self._intent_execution_inbox.get(identity)
+        register_result: IntentRegisterResult | bool = False
+        if record is False:
+            register_result = (
+                self._intent_execution_inbox.register_received(
+                    identity,
+                    payload,
+                )
+            )
+            record = self._intent_execution_inbox.get(identity)
+        return {
+            "record": record,
+            "register_result": register_result,
+        }
+
+    def _process_prepare_submit_task(
+        self,
+        task: _DurableIoTask,
+    ) -> dict[str, Any]:
+        intent_execution = task.intent_execution
+        dispatch_result: IntentDispatchResult | bool = False
+        durable_record: Any = False
+        if isinstance(intent_execution, IntentExecutionIdentity):
+            dispatch_result = (
+                self._intent_execution_inbox.begin_dispatch(
+                    intent_execution,
+                    task.client_order_ids,
+                )
+            )
+            if (
+                dispatch_result
+                is IntentDispatchResult.RECOVERY_REQUIRED
+            ):
+                durable_record = self._intent_execution_inbox.get(
+                    intent_execution
+                )
+                return {
+                    "dispatch_result": dispatch_result,
+                    "durable_record": durable_record,
+                    "claim_result": False,
+                }
+            if dispatch_result in {
+                IntentDispatchResult.EXCHANGE_CONFIRMED,
+                IntentDispatchResult.REJECTED,
+            }:
+                return {
+                    "dispatch_result": dispatch_result,
+                    "durable_record": False,
+                    "claim_result": False,
+                }
+        claim_result: LiveCanaryClaimResult | bool = False
+        live_canary = task.live_canary_execution
+        if isinstance(live_canary, LiveCanaryExecutionIdentity):
+            claim_result = self._live_canary_execution_store.claim(
+                live_canary
+            )
+            if claim_result is LiveCanaryClaimResult.PERMIT_CONFLICT:
+                if isinstance(
+                    intent_execution,
+                    IntentExecutionIdentity,
+                ):
+                    self._intent_execution_inbox.mark_rejected(
+                        intent_execution,
+                        "canary_permit_already_claimed",
+                    )
+                return {
+                    "dispatch_result": dispatch_result,
+                    "durable_record": False,
+                    "claim_result": claim_result,
+                }
+        protection_payload = task.protection_payload
+        if isinstance(protection_payload, Mapping):
+            self._write_entry_protection_stash(protection_payload)
+        return {
+            "dispatch_result": dispatch_result,
+            "durable_record": durable_record,
+            "claim_result": claim_result,
+        }
+
+    def _process_management_prepare_task(
+        self,
+        task: _DurableIoTask,
+    ) -> dict[str, Any]:
+        identity = task.intent_execution
+        if not isinstance(identity, IntentExecutionIdentity):
+            raise ValueError(
+                "management prepare task requires intent identity"
+            )
+        dispatch_result = self._intent_execution_inbox.begin_dispatch(
+            identity,
+            task.client_order_ids,
+        )
+        return {"dispatch_result": dispatch_result}
+
+    def _process_management_complete_task(
+        self,
+        task: _DurableIoTask,
+    ) -> None:
+        identity = task.intent_execution
+        if not isinstance(identity, IntentExecutionIdentity):
+            raise ValueError(
+                "management complete task requires intent identity"
+            )
+        self._intent_execution_inbox.mark_exchange_confirmed(identity)
+
+    def _process_recovery_confirmed_task(
+        self,
+        task: _DurableIoTask,
+    ) -> None:
+        live_canary = task.live_canary_execution
+        if isinstance(live_canary, LiveCanaryExecutionIdentity):
+            self._live_canary_execution_store.mark_exchange_confirmed(
+                live_canary
+            )
+        intent_execution = task.intent_execution
+        if isinstance(intent_execution, IntentExecutionIdentity):
+            self._intent_execution_inbox.mark_exchange_confirmed(
+                intent_execution
+            )
+
+    def wait_for_durable_io(self, *, timeout_seconds: float) -> bool:
+        return self._durable_io_worker.wait_empty(
+            timeout_seconds=timeout_seconds
+        )
+
+    @property
+    def durable_io_halted_reason(self) -> str:
+        return self._durable_io_halted_reason
+
+    def _halt_durable_io(self, reason: str) -> None:
+        halt_reason = f"strategy durable I/O failed: {str(reason).strip()}"
+        with self._durable_io_halt_lock:
+            if self._durable_io_halted_reason:
+                return
+            self._durable_io_halted_reason = halt_reason
+        handler = self._terminal_exchange_halt_handler
+        if handler is None and self._requires_live_canary_runtime():
+            handler = self._live_canary_halt_handler
+        if handler is not None:
+            handler(halt_reason)
+        self._record_denial(
+            OrderDenied(
+                "strategy_durable_io_halted",
+                halt_reason,
+            )
+        )
+
+    def _confirm_live_canary_order_event(self, event: Any) -> None:
+        if not self._requires_live_canary_runtime():
+            return
+        client_order_id = _event_client_order_id(event)
+        if client_order_id is None:
+            return
+        reporter = self._live_canary_risk_reporter
+        if reporter is None:
+            self._halt_live_canary(
+                "live canary risk reporter is unavailable"
+            )
+            return
+        accepted = reporter(
+            {
+                "kind": "exchange_confirmed",
+                "client_order_id": client_order_id,
+            }
+        )
+        if accepted:
+            return
+        self._halt_live_canary(
+            "live canary risk reporter queue rejected exchange event"
+        )
+
+    def _queue_live_canary_fill(self, event: Any) -> None:
+        if not self._requires_live_canary_runtime():
+            return
+        reporter = self._live_canary_risk_reporter
+        if reporter is None:
+            self._halt_live_canary(
+                "live canary risk reporter is unavailable"
+            )
+            return
+        payload = self._live_canary_fill_payload(event)
+        if payload is False:
+            return
+        client_order_id = str(
+            payload.get("client_order_id") or ""
+        ).strip()
+        instrument_id = str(
+            payload.get("instrument_id") or ""
+        ).strip()
+        if client_order_id and instrument_id != "UNKNOWN":
+            self._live_canary_monitor_targets[
+                client_order_id
+            ] = instrument_id
+        accepted = reporter(
+            {
+                "kind": "fill",
+                "fill": payload,
+            }
+        )
+        if accepted:
+            return
+        self._halt_live_canary(
+            "live canary risk reporter queue rejected fill"
+        )
+
+    def _register_live_canary_mark_timer(self) -> None:
+        clock = getattr(self, "clock", None)
+        set_timer = getattr(clock, "set_timer", None)
+        if not callable(set_timer):
+            return
+        interval = timedelta(seconds=1)
+        try:
+            set_timer(
+                name="live-canary.mark-to-market",
+                interval=interval,
+                callback=self._on_live_canary_mark_timer,
+            )
+            return
+        except TypeError:
+            pass
+        set_timer(
+            "live-canary.mark-to-market",
+            interval,
+            self._on_live_canary_mark_timer,
+        )
+
+    def _on_live_canary_mark_timer(
+        self,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        self._queue_live_canary_mark_checks()
+
+    def _queue_live_canary_mark_checks(self) -> None:
+        reporter = self._live_canary_risk_reporter
+        if reporter is None:
+            self._halt_live_canary(
+                "live canary risk reporter is unavailable"
+            )
+            return
+        for client_order_id, instrument_id in tuple(
+            self._live_canary_monitor_targets.items()
+        ):
+            accepted = reporter(
+                {
+                    "kind": "mark",
+                    "mark": self._live_canary_mark_payload(
+                        client_order_id,
+                        instrument_id,
+                    ),
+                }
+            )
+            if accepted:
+                continue
+            self._halt_live_canary(
+                "live canary risk reporter queue rejected mark"
+            )
+            return
+
+    def _live_canary_mark_payload(
+        self,
+        client_order_id: str,
+        instrument_id: str,
+    ) -> dict[str, str]:
+        evaluated_at = _aware_datetime(self._now())
+        update = self._cache_mark_price(instrument_id)
+        mark_price = _positive_canary_decimal(
+            getattr(update, "value", None)
+        )
+        accounting_errors = []
+        if mark_price is None:
+            accounting_errors.append("mark price is unavailable")
+        raw_ts_event = getattr(update, "ts_event", None)
+        try:
+            ts_event = int(raw_ts_event)
+        except (TypeError, ValueError, OverflowError):
+            ts_event = 0
+            accounting_errors.append(
+                "mark price timestamp is unavailable"
+            )
+        observed_at = evaluated_at
+        if ts_event > 0:
+            observed_at = datetime.fromtimestamp(
+                ts_event / 1_000_000_000,
+                tz=timezone.utc,
+            )
+        baseline_context = self._live_canary_monitor_baselines.get(
+            client_order_id
+        )
+        if baseline_context is None:
+            accounting_errors.append(
+                "portfolio baseline context is unavailable"
+            )
+        else:
+            symbol, expected_baseline = baseline_context
+            baseline_provider = self._live_canary_portfolio_baseline
+            if baseline_provider is None:
+                accounting_errors.append(
+                    "portfolio baseline provider is unavailable"
+                )
+            else:
+                try:
+                    current_baseline = baseline_provider(symbol)
+                except Exception:
+                    current_baseline = False
+                current_baseline = str(
+                    current_baseline or ""
+                ).strip()
+                if current_baseline != expected_baseline:
+                    accounting_errors.append(
+                        "portfolio baseline drifted after permit consumption"
+                    )
+        mark_price_text = "0"
+        if mark_price is not None:
+            mark_price_text = format(mark_price, "f")
+        return {
+            "client_order_id": client_order_id,
+            "instrument_id": instrument_id,
+            "mark_price_usdt": mark_price_text,
+            "observed_at": observed_at.isoformat(),
+            "evaluated_at": evaluated_at.isoformat(),
+            "accounting_error": "; ".join(accounting_errors),
+        }
+
+    def _live_canary_fill_payload(
+        self,
+        event: Any,
+    ) -> dict[str, Any] | bool:
+        client_order_id = _event_client_order_id(event)
+        if client_order_id is None:
+            return False
+        instrument_id = _event_instrument_id(event)
+        side = _event_order_side(event)
+        quantity = _event_last_qty(event)
+        price = _event_fill_price(event)
+        fee, fee_error = _event_fee_usdt(event)
+        accounting_errors = []
+        if instrument_id is None:
+            accounting_errors.append("fill instrument_id is unavailable")
+        if side is None:
+            accounting_errors.append("fill side is unavailable")
+        if quantity is None:
+            accounting_errors.append("fill quantity is unavailable")
+        if price is None:
+            accounting_errors.append("fill price is unavailable")
+        if fee_error:
+            accounting_errors.append(fee_error)
+        mark_price = "0"
+        if instrument_id is not None:
+            mark_update = self._cache_mark_price(instrument_id)
+            mark_value = getattr(mark_update, "value", None)
+            parsed_mark = _positive_canary_decimal(mark_value)
+            if parsed_mark is not None:
+                mark_price = format(parsed_mark, "f")
+            else:
+                accounting_errors.append("mark price is unavailable")
+        fill_id = _event_fill_id(
+            event,
+            client_order_id=client_order_id,
+            quantity=quantity,
+            price=price,
+        )
+        reduce_only = _event_reduce_only(event)
+        if client_order_id.endswith("99"):
+            reduce_only = True
+        return {
+            "fill_id": fill_id,
+            "client_order_id": client_order_id,
+            "instrument_id": instrument_id or "UNKNOWN",
+            "side": side or "UNKNOWN",
+            "quantity": quantity or "0",
+            "price_usdt": price or "0",
+            "fee_usdt": fee,
+            "mark_price_usdt": mark_price,
+            "reduce_only": reduce_only,
+            "occurred_at": _event_occurred_at(event),
+            "accounting_error": "; ".join(accounting_errors),
+        }
+
+    def process_live_canary_risk_task(
+        self,
+        task: dict[str, Any],
+    ) -> tuple[LiveCanaryLossDecision, ...]:
+        kind = str(task.get("kind") or "").strip()
+        if kind == "recover":
+            return self._live_canary_execution_store.pending_close_decisions()
+        if kind == "close_dispatched":
+            identity = task.get("identity")
+            if not isinstance(identity, LiveCanaryExecutionIdentity):
+                raise ValueError(
+                    "close_dispatched task requires canary identity"
+                )
+            self._live_canary_execution_store.mark_close_dispatched(identity)
+            return ()
+        if kind == "exchange_confirmed":
+            self._live_canary_execution_store.mark_exchange_confirmed_by_client_order_id(
+                str(task.get("client_order_id") or "")
+            )
+            return ()
+        if kind == "mark":
+            raw_mark = task.get("mark")
+            if not isinstance(raw_mark, dict):
+                raise ValueError(
+                    "live canary mark task requires mark payload"
+                )
+            decision = self._live_canary_execution_store.record_mark(
+                LiveCanaryMark(**raw_mark)
+            )
+            if decision is False:
+                return ()
+            return (decision,)
+        if kind != "fill":
+            raise ValueError(f"unsupported live canary risk task: {kind}")
+        raw_fill = task.get("fill")
+        if not isinstance(raw_fill, dict):
+            raise ValueError("live canary fill task requires fill payload")
+        decision = self._live_canary_execution_store.record_fill(
+            LiveCanaryFill(**raw_fill)
+        )
+        if decision is False:
+            return ()
+        return (decision,)
+
+    def _on_live_canary_loss_decision(self, decision: Any) -> None:
+        if not isinstance(decision, LiveCanaryLossDecision):
+            self._halt_live_canary(
+                "live canary risk worker returned an invalid decision"
+            )
+            return
+        expected_identity = (
+            str(getattr(self.config, "account_id", "")).strip(),
+            str(getattr(self.config, "node_id", "")).strip(),
+            str(getattr(self.config, "release_id", "")).strip(),
+        )
+        actual_identity = (
+            decision.identity.account_id,
+            decision.identity.node_id,
+            decision.identity.release_id,
+        )
+        if actual_identity != expected_identity:
+            self._halt_live_canary(
+                "live canary loss decision identity mismatch"
+            )
+            return
+        self._halt_live_canary(decision.halt_reason)
+        self._report_live_canary_loss_breach(decision)
+        plan = OrderPlan(
+            intent_id=UUID(decision.identity.intent_id),
+            client_order_id=decision.close_client_order_id,
+            tags=(
+                f"intent_id={decision.identity.intent_id}",
+                f"canary_permit_id={decision.identity.permit_id}",
+                "lifecycle_role=live_canary_emergency_close",
+            ),
+            instrument_id=decision.instrument_id,
+            side=decision.close_side,
+            order_type="MARKET",
+            quantity=decision.close_quantity,
+            price=None,
+            time_in_force="IOC",
+            reduce_only=True,
+        )
+        submitted = self._live_canary_order_exists(plan)
+        if not submitted:
+            submitted = self._submit_order_plan(plan)
+        if not submitted:
+            self._record_denial(
+                OrderDenied(
+                    "canary_emergency_close_submit_failed",
+                    decision.close_client_order_id,
+                )
+            )
+            return
+        reporter = self._live_canary_risk_reporter
+        if reporter is None:
+            return
+        reporter(
+            {
+                "kind": "close_dispatched",
+                "identity": decision.identity,
+            }
+        )
+
+    def _halt_live_canary(self, reason: str) -> None:
+        handler = self._live_canary_halt_handler
+        if handler is not None:
+            handler(reason)
+        self._record_denial(
+            OrderDenied(
+                "canary_loss_limit_halted",
+                reason,
+            )
+        )
+
+    def _report_live_canary_loss_breach(
+        self,
+        decision: LiveCanaryLossDecision,
+    ) -> None:
+        reporter = self._protection_event_reporter
+        if reporter is None:
+            return
+        reporter(
+            {
+                "event_type": "LiveCanaryLossLimitBreached",
+                "event_key": decision.identity.permit_id,
+                "intent_id": decision.identity.intent_id,
+                "client_order_id": decision.close_client_order_id,
+                "instrument_id": decision.instrument_id,
+                "ts_event": self._now(),
+                "payload": {
+                    "permit_id": decision.identity.permit_id,
+                    "current_loss_usdt": decision.current_loss_usdt,
+                    "peak_loss_usdt": decision.peak_loss_usdt,
+                    "max_cumulative_loss_usdt": (
+                        decision.max_cumulative_loss_usdt
+                    ),
+                    "close_side": decision.close_side,
+                    "close_quantity": decision.close_quantity,
+                    "halt_reason": decision.halt_reason,
+                },
+            }
+        )
 
     def on_order_cancel_rejected(self, event: Any) -> None:
         client_order_id = _event_client_order_id(event)
@@ -1008,7 +3793,7 @@ class IntentExecutionStrategy(Strategy):
             }
             if client_order_id not in live_ids:
                 self._remove_pending_cancel_id(stash, client_order_id)
-                self._persist_entry_protection_stash()
+                self._queue_entry_protection_stash_persist()
             return
 
     def _on_protection_order_terminal(self, event: Any, count_retry: bool = True) -> None:
@@ -1018,7 +3803,7 @@ class IntentExecutionStrategy(Strategy):
         for stash in self._entry_protection_stash.values():
             if client_order_id in tuple(stash.get("pending_cancel_ids") or ()):
                 self._remove_pending_cancel_id(stash, client_order_id)
-                self._persist_entry_protection_stash()
+                self._queue_entry_protection_stash_persist()
                 return
         role_match = self._protection_role_for_order(
             client_order_id,
@@ -1045,7 +3830,6 @@ class IntentExecutionStrategy(Strategy):
                     client_order_id,
                     role_info,
                 )
-                self._persist_entry_protection_stash()
                 return
             if role_info.get("market_fallback"):
                 fallback = stash.get("tp_market_fallbacks")
@@ -1060,11 +3844,16 @@ class IntentExecutionStrategy(Strategy):
                     "market_fallback_failed",
                     denial_reason="take_profit_market_fallback_failed",
                 )
-                self._persist_entry_protection_stash()
+                self._queue_entry_protection_stash_persist()
                 return
             stash["protected_quantity"] = None
-            self._persist_entry_protection_stash()
-            self._reschedule_protection_sync(intent_key, stash, count_retry=count_retry)
+            self._queue_entry_protection_stash_persist(
+                continuation={
+                    "kind": "protection_retry",
+                    "intent_key": intent_key,
+                    "count_retry": count_retry,
+                }
+            )
             return
         try:
             trace = decode_client_order_id(client_order_id)
@@ -1099,8 +3888,13 @@ class IntentExecutionStrategy(Strategy):
         )
         if client_order_id in tuple(stash.get("protection_ids") or ()):
             stash["protected_quantity"] = None  # current/adopted revision lost a leg
-        self._persist_entry_protection_stash()
-        self._reschedule_protection_sync(intent_key, stash, count_retry=count_retry)
+        self._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "protection_retry",
+                "intent_key": intent_key,
+                "count_retry": count_retry,
+            }
+        )
 
     def _record_protection_terminal_event(
         self,
@@ -1244,14 +4038,6 @@ class IntentExecutionStrategy(Strategy):
             "event_sent": False,
         }
         fallbacks[fallback_id] = state
-        if not self._persist_entry_protection_stash():
-            self._freeze_protection(
-                intent_key,
-                stash,
-                "market_fallback_state_persist_failed",
-                denial_reason="take_profit_market_fallback_state_persist_failed",
-            )
-            return False
         plan = OrderPlan(
             intent_id=UUID(intent_key),
             client_order_id=fallback_id,
@@ -1264,6 +4050,54 @@ class IntentExecutionStrategy(Strategy):
             time_in_force="GTC",
             reduce_only=True,
         )
+        queued = self._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "immediate_tp_market_fallback",
+                "intent_key": intent_key,
+                "source_client_order_id": source_client_order_id,
+                "fallback_id": fallback_id,
+                "tp_price": tp_price,
+                "event": event,
+                "plan": plan,
+            }
+        )
+        if not queued:
+            self._freeze_protection(
+                intent_key,
+                stash,
+                "market_fallback_state_persist_failed",
+                denial_reason="take_profit_market_fallback_state_persist_failed",
+            )
+            return False
+        return True
+
+    def _continue_immediate_tp_market_fallback(
+        self,
+        continuation: Mapping[str, Any],
+    ) -> None:
+        intent_key = str(continuation.get("intent_key") or "")
+        fallback_id = str(continuation.get("fallback_id") or "")
+        source_client_order_id = str(
+            continuation.get("source_client_order_id") or ""
+        )
+        tp_price = str(continuation.get("tp_price") or "")
+        plan = continuation.get("plan")
+        if not intent_key or not fallback_id:
+            return
+        if not isinstance(plan, OrderPlan):
+            self._halt_durable_io(
+                "immediate TP fallback continuation missing plan"
+            )
+            return
+        stash = self._entry_protection_stash.get(intent_key)
+        if not isinstance(stash, dict):
+            return
+        fallbacks = stash.get("tp_market_fallbacks")
+        if not isinstance(fallbacks, dict):
+            return
+        state = fallbacks.get(fallback_id)
+        if not isinstance(state, dict):
+            return
         if not self._submit_order_plan(plan):
             state["status"] = "failed"
             state["failed_at"] = self._now().isoformat()
@@ -1273,7 +4107,8 @@ class IntentExecutionStrategy(Strategy):
                 "market_fallback_submit_failed",
                 denial_reason="take_profit_market_fallback_submit_failed",
             )
-            return False
+            self._queue_entry_protection_stash_persist()
+            return
         state["status"] = "submitted"
         state["submitted_at"] = self._now().isoformat()
         protection_ids = tuple(
@@ -1292,6 +4127,8 @@ class IntentExecutionStrategy(Strategy):
             source_client_order_id=source_client_order_id,
         )
         terminal = stash.get("last_protection_terminal_event")
+        quantity = str(state.get("quantity") or "")
+        event_key = str(state.get("event_key") or "")
         payload = {
             "source_client_order_id": source_client_order_id,
             "fallback_client_order_id": fallback_id,
@@ -1317,7 +4154,7 @@ class IntentExecutionStrategy(Strategy):
             client_order_id=fallback_id,
             payload=payload,
         )
-        return True
+        self._queue_entry_protection_stash_persist()
 
     def _tp_market_fallback_tags(
         self,
@@ -1498,10 +4335,10 @@ class IntentExecutionStrategy(Strategy):
         stash.pop("sync_scheduled", None)
         self._normalize_protection_stash(intent_key, stash)
         if stash.get("protection_frozen"):
-            self._persist_entry_protection_stash()
+            self._queue_entry_protection_stash_persist()
             return
         if not self._has_authorized_protection_parent(intent_key, stash):
-            self._persist_entry_protection_stash()
+            self._queue_entry_protection_stash_persist()
             return
         instrument_id = str(stash["instrument_id"])
         instrument = self._instrument_spec(instrument_id)
@@ -1530,7 +4367,7 @@ class IntentExecutionStrategy(Strategy):
             for order in live:
                 self._cancel_order_object(order)
             self._entry_protection_stash.pop(intent_key, None)
-            self._persist_entry_protection_stash()
+            self._queue_entry_protection_stash_persist()
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
             return
 
@@ -1576,7 +4413,8 @@ class IntentExecutionStrategy(Strategy):
                     plan,
                 )
             stash.pop("sync_retries", None)
-            self._persist_entry_protection_stash()
+            stash.pop("pending_protection_revision", None)
+            self._queue_entry_protection_stash_persist()
             return
 
         desired = plans_for_adoption
@@ -1596,8 +4434,9 @@ class IntentExecutionStrategy(Strategy):
             stash["protection_ids"] = tuple(keep_ids)
             stash["protected_quantity"] = quantity
             stash.pop("sync_retries", None)
+            stash.pop("pending_protection_revision", None)
             self._prune_protection_roles(intent_key, stash)
-            self._persist_entry_protection_stash()
+            self._queue_entry_protection_stash_persist()
             return
 
         revision = int(stash.get("protection_revision", -1)) + 1
@@ -1608,7 +4447,7 @@ class IntentExecutionStrategy(Strategy):
                 "revisions_exhausted",
                 denial_reason="protection_revisions_exhausted",
             )
-            self._persist_entry_protection_stash()
+            self._queue_entry_protection_stash_persist()
             return
 
         revision_plans = self._protection_order_plans(
@@ -1627,11 +4466,52 @@ class IntentExecutionStrategy(Strategy):
         if not plans:
             return
 
-        # Make-before-break: place the new revision FIRST, cancel the old set only
-        # after something actually went out. All protections are reduce-only, so a
-        # brief overlap cannot over-close the position; the reverse order (the old
-        # code) is what produced a naked position when the re-place step failed.
         stash["protection_revision"] = revision
+        stash["pending_protection_revision"] = {
+            "revision": revision,
+            "client_order_ids": tuple(
+                plan.client_order_id for plan in plans
+            ),
+            "quantity": quantity,
+            "created_at": self._now().isoformat(),
+        }
+        self._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "protection_submit_revision",
+                "intent_key": intent_key,
+                "plans": plans,
+                "live_orders": live,
+                "keep_ids": keep_ids,
+                "replace_ids": tuple(replace_ids),
+                "quantity": quantity,
+            }
+        )
+
+    def _continue_protection_revision_submit(
+        self,
+        continuation: Mapping[str, Any],
+    ) -> None:
+        intent_key = str(continuation.get("intent_key") or "")
+        stash = self._entry_protection_stash.get(intent_key)
+        if not isinstance(stash, dict):
+            return
+        plans = continuation.get("plans")
+        if not isinstance(plans, tuple):
+            self._halt_durable_io(
+                "protection revision continuation missing plans"
+            )
+            return
+        pending = stash.get("pending_protection_revision")
+        if not isinstance(pending, dict):
+            return
+        expected_ids = tuple(
+            str(value)
+            for value in pending.get("client_order_ids", ())
+        )
+        plan_ids = tuple(plan.client_order_id for plan in plans)
+        if expected_ids != plan_ids:
+            return
+
         submitted_ids: list[str] = []
         for plan in plans:
             if self._submit_order_plan(plan):
@@ -1639,9 +4519,18 @@ class IntentExecutionStrategy(Strategy):
                 self._register_protection_role(intent_key, stash, plan.client_order_id, plan)
         if not submitted_ids:
             stash["protected_quantity"] = None
-            self._persist_entry_protection_stash()
+            stash.pop("pending_protection_revision", None)
             self._reschedule_protection_sync(intent_key, stash, count_retry=True)
             return
+        keep_ids = tuple(
+            str(value)
+            for value in continuation.get("keep_ids", ())
+        )
+        replace_ids = {
+            str(value)
+            for value in continuation.get("replace_ids", ())
+        }
+        live = tuple(continuation.get("live_orders", ()))
         keep = set(keep_ids) | set(submitted_ids)
         for order in live:
             oid = str(getattr(order, "client_order_id", ""))
@@ -1653,13 +4542,17 @@ class IntentExecutionStrategy(Strategy):
             if cid
         )
         if len(submitted_ids) == len(plans):
-            stash["protected_quantity"] = quantity
+            stash["protected_quantity"] = str(
+                continuation.get("quantity") or ""
+            )
         else:
             stash["protected_quantity"] = None
+        stash.pop("pending_protection_revision", None)
         self._prune_protection_roles(intent_key, stash)
-        self._persist_entry_protection_stash()
         if len(submitted_ids) != len(plans):
             self._reschedule_protection_sync(intent_key, stash, count_retry=True)
+            return
+        self._queue_entry_protection_stash_persist()
 
     def _has_authorized_protection_parent(
         self,
@@ -1700,8 +4593,10 @@ class IntentExecutionStrategy(Strategy):
                     "take_profit_authorization",
                 )
             )
-        for role, field, authorization_field in required:
-            parent_intent_id = str(stash.get(field) or "")
+        for role, parent_field, authorization_field in required:
+            parent_intent_id = str(
+                stash.get(parent_field) or ""
+            )
             authorization = stash.get(authorization_field)
             if (
                 _valid_uuid_text(parent_intent_id)
@@ -2084,12 +4979,21 @@ class IntentExecutionStrategy(Strategy):
             if retries > self._PROTECTION_MAX_RETRIES:
                 self._record_denial(OrderDenied("protection_sync_stuck", intent_key))
                 stash.pop("sync_retries", None)
+                self._queue_entry_protection_stash_persist()
                 return
             delay_seconds = min(
                 self._PROTECTION_SYNC_DELAY_S * (2 ** (retries - 1)),
                 60.0,
             )
-        self._schedule_protection_sync(intent_key, delay_seconds=delay_seconds)
+        continuation: dict[str, Any] = {
+            "kind": "protection_schedule_delay",
+            "intent_key": intent_key,
+        }
+        if delay_seconds is not None:
+            continuation["delay_seconds"] = delay_seconds
+        self._queue_entry_protection_stash_persist(
+            continuation=continuation
+        )
 
     def _live_protection_orders(
         self,
@@ -2337,6 +5241,8 @@ class IntentExecutionStrategy(Strategy):
         return tuple(result)
 
     def _trading_state(self) -> str:
+        if self._durable_io_halted_reason:
+            return "HALTED"
         if self._trading_state_getter is not None:
             raw_state = self._trading_state_getter()
         else:
@@ -2346,7 +5252,10 @@ class IntentExecutionStrategy(Strategy):
     def _now(self) -> datetime:
         clock = getattr(self, "clock", None)
         if clock is not None and hasattr(clock, "utc_now"):
-            return clock.utc_now()
+            try:
+                return clock.utc_now()
+            except NotImplementedError:
+                pass
         return datetime.now(timezone.utc)
 
     def _instrument_spec(self, instrument_id: str) -> Optional[InstrumentSpec]:
@@ -2530,7 +5439,133 @@ class IntentExecutionStrategy(Strategy):
         except Exception:
             return str(instrument_id)
 
-    def _submit_order_plan(self, plan: OrderPlan) -> bool:
+    def _submit_order_plan_after_durable_prepare(
+        self,
+        plan: OrderPlan,
+        *,
+        live_canary_execution: LiveCanaryExecutionIdentity | bool,
+    ) -> bool:
+        requires_live_canary = (
+            str(getattr(self.config, "account_id", "")) == "account-a"
+            and str(getattr(self.config, "environment", "")).lower()
+            == "live"
+            and not plan.reduce_only
+        )
+        if requires_live_canary and not isinstance(
+            live_canary_execution,
+            LiveCanaryExecutionIdentity,
+        ):
+            self._record_denial(
+                OrderDenied(
+                    "canary_execution_context_missing",
+                    str(plan.intent_id),
+                )
+            )
+            return False
+        if isinstance(
+            live_canary_execution,
+            LiveCanaryExecutionIdentity,
+        ):
+            canary_denial = self._live_canary_plan_denial(
+                plan,
+                live_canary_execution,
+            )
+            if canary_denial is not None:
+                self._record_denial(canary_denial)
+                return False
+
+        instrument = self._cache_instrument(plan.instrument_id)
+        if instrument is None:
+            self._record_denial(
+                OrderDenied(
+                    "instrument_not_found",
+                    plan.instrument_id,
+                )
+            )
+            return False
+        try:
+            order = self._build_nautilus_order(
+                self._plan_for_submission(plan),
+                instrument,
+            )
+        except Exception as exc:
+            self._record_denial(
+                OrderDenied("order_submit_failed", repr(exc))
+            )
+            return False
+        entry_denial = self._live_entry_notional_denial(plan, order)
+        if entry_denial is not None:
+            self._record_denial(entry_denial)
+            return False
+
+        if isinstance(
+            live_canary_execution,
+            LiveCanaryExecutionIdentity,
+        ):
+            client_order_id = (
+                live_canary_execution.client_order_id
+            )
+            self._live_canary_monitor_targets[
+                client_order_id
+            ] = plan.instrument_id
+            self._live_canary_monitor_baselines[
+                client_order_id
+            ] = (
+                live_canary_execution.symbol,
+                live_canary_execution.portfolio_baseline_sha256,
+            )
+        try:
+            position_id = self._hedge_position_id(order, plan)
+            if position_id is not None:
+                self.submit_order(  # type: ignore[attr-defined]
+                    order,
+                    position_id=position_id,
+                )
+            else:
+                self.submit_order(order)  # type: ignore[attr-defined]
+        except Exception as exc:
+            self._record_denial(
+                OrderDenied("order_submit_failed", repr(exc))
+            )
+            return False
+        return True
+
+    def _submit_order_plan(
+        self,
+        plan: OrderPlan,
+        *,
+        live_canary_execution: LiveCanaryExecutionIdentity | bool = False,
+        intent_execution: IntentExecutionIdentity | bool = False,
+    ) -> bool:
+        requires_live_canary = (
+            str(getattr(self.config, "account_id", "")) == "account-a"
+            and str(getattr(self.config, "environment", "")).lower()
+            == "live"
+            and not plan.reduce_only
+        )
+        if requires_live_canary and not isinstance(
+            live_canary_execution,
+            LiveCanaryExecutionIdentity,
+        ):
+            self._record_denial(
+                OrderDenied(
+                    "canary_execution_context_missing",
+                    str(plan.intent_id),
+                )
+            )
+            return False
+        if isinstance(
+            live_canary_execution,
+            LiveCanaryExecutionIdentity,
+        ):
+            canary_denial = self._live_canary_plan_denial(
+                plan,
+                live_canary_execution,
+            )
+            if canary_denial is not None:
+                self._record_denial(canary_denial)
+                return False
+
         instrument = self._cache_instrument(plan.instrument_id)
         if instrument is None:
             self._record_denial(OrderDenied("instrument_not_found", plan.instrument_id))
@@ -2538,18 +5573,471 @@ class IntentExecutionStrategy(Strategy):
 
         try:
             # NOTE: order kwargs may drop the internal reduce_only flag (external
-            # position quirk, see _plan_for_submission) but the position BOOK is
-            # always derived from the ORIGINAL plan's semantics.
-            order = self._build_nautilus_order(self._plan_for_submission(plan), instrument)
+            # position quirk, see _plan_for_submission) but the live-entry gate
+            # always uses the ORIGINAL plan semantics.
+            order = self._build_nautilus_order(
+                self._plan_for_submission(plan),
+                instrument,
+            )
+        except Exception as exc:
+            self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
+            return False
+
+        entry_denial = self._live_entry_notional_denial(plan, order)
+        if entry_denial is not None:
+            self._record_denial(entry_denial)
+            return False
+
+        if isinstance(intent_execution, IntentExecutionIdentity):
+            try:
+                dispatch_result = (
+                    self._intent_execution_inbox.begin_dispatch(
+                        intent_execution,
+                        (str(plan.client_order_id),),
+                    )
+                )
+            except RuntimeError as exc:
+                self._record_denial(
+                    OrderDenied(
+                        "intent_dispatch_persist_failed",
+                        repr(exc),
+                    )
+                )
+                return False
+            if (
+                dispatch_result
+                is IntentDispatchResult.EXCHANGE_CONFIRMED
+            ):
+                return True
+            if dispatch_result is IntentDispatchResult.REJECTED:
+                self._record_denial(
+                    OrderDenied(
+                        "durable_intent_rejected",
+                        intent_execution.intent_id,
+                    )
+                )
+                return False
+            if (
+                dispatch_result
+                is IntentDispatchResult.RECOVERY_REQUIRED
+            ):
+                record = self._intent_execution_inbox.get(
+                    intent_execution
+                )
+                if (
+                    record is not False
+                    and self._durable_intent_orders_exist(record)
+                ):
+                    self._intent_execution_inbox.mark_exchange_confirmed(
+                        intent_execution
+                    )
+                    return True
+                self._record_denial(
+                    OrderDenied(
+                        "intent_exchange_confirmation_required",
+                        intent_execution.intent_id,
+                    )
+                )
+                return False
+
+        if isinstance(
+            live_canary_execution,
+            LiveCanaryExecutionIdentity,
+        ):
+            self._live_canary_monitor_targets[
+                live_canary_execution.client_order_id
+            ] = plan.instrument_id
+            self._live_canary_monitor_baselines[
+                live_canary_execution.client_order_id
+            ] = (
+                live_canary_execution.symbol,
+                live_canary_execution.portfolio_baseline_sha256,
+            )
+            try:
+                claim_result = self._live_canary_execution_store.claim(
+                    live_canary_execution
+                )
+            except RuntimeError as exc:
+                self._record_denial(
+                    OrderDenied(
+                        "canary_execution_claim_failed",
+                        repr(exc),
+                    )
+                )
+                return False
+            if claim_result is LiveCanaryClaimResult.PERMIT_CONFLICT:
+                if isinstance(
+                    intent_execution,
+                    IntentExecutionIdentity,
+                ):
+                    self._intent_execution_inbox.mark_rejected(
+                        intent_execution,
+                        "canary_permit_already_claimed",
+                    )
+                self._record_denial(
+                    OrderDenied(
+                        "canary_permit_already_claimed",
+                        live_canary_execution.permit_id,
+                    )
+                )
+                return False
+            if claim_result is LiveCanaryClaimResult.RECOVERY_REQUIRED:
+                if self._live_canary_order_exists(plan):
+                    self._live_canary_execution_store.mark_exchange_confirmed(
+                        live_canary_execution
+                    )
+                    if isinstance(
+                        intent_execution,
+                        IntentExecutionIdentity,
+                    ):
+                        self._intent_execution_inbox.mark_exchange_confirmed(
+                            intent_execution
+                        )
+                    return True
+                self._record_denial(
+                    OrderDenied(
+                        "canary_exchange_confirmation_required",
+                        live_canary_execution.client_order_id,
+                    )
+                )
+                return False
+
+        try:
             position_id = self._hedge_position_id(order, plan)
             if position_id is not None:
                 self.submit_order(order, position_id=position_id)  # type: ignore[attr-defined]
             else:
                 self.submit_order(order)  # type: ignore[attr-defined]
-            return True
         except Exception as exc:  # Fail closed: no silent drops on adapter/API mismatch.
             self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
             return False
+        if isinstance(
+            live_canary_execution,
+            LiveCanaryExecutionIdentity,
+        ):
+            self._mark_live_canary_dispatched(
+                live_canary_execution
+            )
+            self._after_live_canary_dispatched(live_canary_execution)
+        return True
+
+    def _live_entry_notional_denial(
+        self,
+        plan: OrderPlan,
+        order: Any,
+    ) -> OrderDenied | None:
+        environment = str(
+            getattr(self.config, "environment", "")
+        ).lower()
+        if environment != "live":
+            return None
+        if plan.reduce_only:
+            return None
+
+        cap = self._live_entry_notional_caps.get(plan.instrument_id)
+        if cap is None:
+            return OrderDenied(
+                "live_entry_instrument_not_allowed",
+                f"instrument={plan.instrument_id}",
+            )
+
+        quantity = _positive_canary_decimal(
+            getattr(order, "quantity", None)
+        )
+        if quantity is None:
+            return OrderDenied(
+                "live_entry_quantity_invalid",
+                f"instrument={plan.instrument_id}",
+            )
+
+        if plan.order_type == "MARKET":
+            price_or_denial = self._fresh_live_mark_price(
+                plan.instrument_id
+            )
+            if isinstance(price_or_denial, OrderDenied):
+                return price_or_denial
+            price = price_or_denial
+        else:
+            price = _positive_canary_decimal(
+                getattr(order, "price", None)
+            )
+            if price is None:
+                return OrderDenied(
+                    "live_entry_limit_price_required",
+                    f"instrument={plan.instrument_id}",
+                )
+
+        actual_notional = quantity * price
+        if actual_notional > cap:
+            return OrderDenied(
+                "live_entry_notional_exceeded",
+                (
+                    f"instrument={plan.instrument_id}:"
+                    f"actual={format(actual_notional, 'f')}:"
+                    f"cap={format(cap, 'f')}"
+                ),
+            )
+        return None
+
+    def _fresh_live_mark_price(
+        self,
+        instrument_id: str,
+    ) -> Decimal | OrderDenied:
+        update = self._cache_mark_price(instrument_id)
+        if not update:
+            return OrderDenied(
+                "live_entry_mark_price_unavailable",
+                f"instrument={instrument_id}",
+            )
+        price = _positive_canary_decimal(
+            getattr(update, "value", None)
+        )
+        if price is None:
+            return OrderDenied(
+                "live_entry_mark_price_unavailable",
+                f"instrument={instrument_id}",
+            )
+        raw_ts_event = getattr(update, "ts_event", None)
+        try:
+            ts_event = int(raw_ts_event)
+        except (TypeError, ValueError, OverflowError):
+            return OrderDenied(
+                "live_entry_mark_price_unavailable",
+                f"instrument={instrument_id}",
+            )
+        now_ns = int(self._now().timestamp() * 1_000_000_000)
+        age_ns = now_ns - ts_event
+        max_age_ns = 10 * 1_000_000_000
+        max_future_skew_ns = 1_000_000_000
+        if age_ns < -max_future_skew_ns or age_ns > max_age_ns:
+            age_seconds = Decimal(age_ns) / Decimal(1_000_000_000)
+            return OrderDenied(
+                "live_entry_mark_price_stale",
+                (
+                    f"instrument={instrument_id}:"
+                    f"age_seconds={format(age_seconds, 'f')}"
+                ),
+            )
+        return price
+
+    def _cache_mark_price(self, instrument_id: str) -> Any:
+        cache = getattr(self, "cache", None)
+        if cache is None:
+            return False
+        method = getattr(cache, "mark_price", None)
+        if not callable(method):
+            return False
+        typed_instrument_id = self._as_instrument_id(instrument_id)
+        for candidate in (typed_instrument_id, instrument_id):
+            try:
+                return method(candidate) or False
+            except (TypeError, ValueError):
+                continue
+            except Exception:
+                return False
+        return False
+
+    def _live_canary_plan_denial(
+        self,
+        plan: OrderPlan,
+        identity: LiveCanaryExecutionIdentity,
+    ) -> OrderDenied | None:
+        expected_runtime_identity = (
+            str(getattr(self.config, "account_id", "")).strip(),
+            str(getattr(self.config, "node_id", "")).strip(),
+            str(getattr(self.config, "release_id", "")).strip(),
+        )
+        actual_runtime_identity = (
+            identity.account_id,
+            identity.node_id,
+            identity.release_id,
+        )
+        if actual_runtime_identity != expected_runtime_identity:
+            return OrderDenied(
+                "canary_execution_identity_mismatch",
+                str(plan.intent_id),
+            )
+        if str(plan.intent_id) != identity.intent_id:
+            return OrderDenied(
+                "canary_execution_identity_mismatch",
+                str(plan.intent_id),
+            )
+        if str(plan.client_order_id) != identity.client_order_id:
+            return OrderDenied(
+                "canary_execution_identity_mismatch",
+                str(plan.client_order_id),
+            )
+        expires_at = _permit_expiry(identity.expires_at)
+        if expires_at is False:
+            return OrderDenied(
+                "canary_permit_expiry_invalid",
+                str(plan.intent_id),
+            )
+        if expires_at <= _aware_datetime(self._now()):
+            return OrderDenied(
+                "canary_permit_expired",
+                expires_at.isoformat(),
+            )
+        baseline_provider = self._live_canary_portfolio_baseline
+        if baseline_provider is None:
+            return OrderDenied(
+                "canary_portfolio_baseline_unavailable",
+                str(plan.intent_id),
+            )
+        try:
+            current_baseline = baseline_provider(identity.symbol)
+        except Exception as exc:
+            return OrderDenied(
+                "canary_portfolio_baseline_unavailable",
+                repr(exc),
+            )
+        current_baseline = str(current_baseline or "").strip()
+        if current_baseline != identity.portfolio_baseline_sha256:
+            return OrderDenied(
+                "canary_portfolio_baseline_drift",
+                str(plan.intent_id),
+            )
+        if _canonical_symbol(plan.instrument_id) != identity.symbol:
+            return OrderDenied(
+                "canary_symbol_mismatch",
+                str(plan.instrument_id),
+            )
+        if plan.order_type != "LIMIT" or plan.time_in_force != "IOC":
+            return OrderDenied(
+                "canary_limit_ioc_required",
+                str(plan.intent_id),
+            )
+        quantity = _positive_canary_decimal(plan.quantity)
+        price = _positive_canary_decimal(plan.price)
+        permit_notional = _positive_canary_decimal(
+            identity.max_notional_usdt
+        )
+        permit_loss_limit = _positive_canary_decimal(
+            identity.max_cumulative_loss_usdt
+        )
+        if (
+            quantity is None
+            or price is None
+            or permit_notional is None
+            or permit_loss_limit is None
+        ):
+            return OrderDenied(
+                "canary_limit_quantity_price_required",
+                str(plan.intent_id),
+            )
+        actual_notional = quantity * price
+        if permit_notional > Decimal("12"):
+            return OrderDenied(
+                "canary_notional_exceeded",
+                f"permit={format(permit_notional, 'f')}",
+            )
+        if actual_notional > permit_notional:
+            return OrderDenied(
+                "canary_notional_exceeded",
+                (
+                    f"actual={format(actual_notional, 'f')}:"
+                    f"permit={format(permit_notional, 'f')}"
+                ),
+            )
+        if actual_notional > Decimal("12"):
+            return OrderDenied(
+                "canary_notional_exceeded",
+                f"actual={format(actual_notional, 'f')}:hard_cap=12",
+            )
+        if permit_loss_limit >= Decimal("1.5"):
+            return OrderDenied(
+                "canary_loss_limit_exceeded",
+                (
+                    f"permit={format(permit_loss_limit, 'f')}:"
+                    "hard_cap=1.5"
+                ),
+            )
+        return None
+
+    def _live_canary_order_exists(self, plan: OrderPlan) -> bool:
+        return self._client_order_id_exists(
+            plan.instrument_id,
+            str(plan.client_order_id),
+        )
+
+    def _durable_intent_orders_exist(self, record: Any) -> bool:
+        client_order_ids = tuple(
+            str(value)
+            for value in getattr(record, "client_order_ids", ())
+        )
+        if not client_order_ids:
+            return False
+        instrument_id = str(
+            getattr(record, "instrument_id", "")
+        )
+        if not instrument_id:
+            return False
+        return all(
+            self._client_order_id_exists(
+                instrument_id,
+                client_order_id,
+            )
+            for client_order_id in client_order_ids
+        )
+
+    def _client_order_id_exists(
+        self,
+        instrument_id: str,
+        client_order_id: str,
+    ) -> bool:
+        target = str(client_order_id)
+        for order in self._cache_orders(instrument_id):
+            if str(getattr(order, "client_order_id", "")) == target:
+                return True
+        cache = getattr(self, "cache", None)
+        if cache is not None:
+            orders_method = getattr(cache, "orders", None)
+            if callable(orders_method):
+                try:
+                    all_orders = orders_method()
+                except TypeError:
+                    all_orders = ()
+                for order in all_orders or ():
+                    if str(getattr(order, "client_order_id", "")) == target:
+                        return True
+        mirror = self._exchange_state_mirror
+        if not mirror:
+            return False
+        find_order = getattr(mirror, "find_order", None)
+        if callable(find_order):
+            try:
+                found = find_order(instrument_id, target)
+            except Exception:
+                found = False
+            if found:
+                return True
+        orders_for_instrument = getattr(
+            mirror,
+            "orders_for_instrument",
+            None,
+        )
+        if not callable(orders_for_instrument):
+            return False
+        try:
+            orders = orders_for_instrument(instrument_id)
+        except Exception:
+            return False
+        for order in orders or ():
+            if str(getattr(order, "client_order_id", "")) == target:
+                return True
+        return False
+
+    def _after_live_canary_dispatched(
+        self,
+        identity: LiveCanaryExecutionIdentity,
+    ) -> None:
+        del identity
+
+    def _mark_live_canary_dispatched(
+        self,
+        identity: LiveCanaryExecutionIdentity,
+    ) -> None:
+        self._live_canary_execution_store.mark_dispatched(identity)
 
     def _plan_for_submission(self, plan: OrderPlan) -> OrderPlan:
         """Hedge-mode reconciliation quirk (live incident 2026-07-07): a node
@@ -2604,7 +6092,271 @@ class IntentExecutionStrategy(Strategy):
             book = "LONG" if is_buy else "SHORT"
         return PositionId(f"{order.instrument_id}-{book}")
 
-    def _submit_management_plan(self, plan: ManagementPlan) -> bool:
+    def _queue_management_plan_after_persist(
+        self,
+        plan: ManagementPlan,
+        *,
+        source_intent: Any,
+    ) -> bool:
+        parent_intent_id = _management_parent_intent_id(plan)
+        if not _authorization_matches_parent(
+            plan.authorization,
+            parent_intent_id,
+        ):
+            denial = OrderDenied(
+                "management_authorization_missing",
+                str(plan.intent_id),
+            )
+            self._record_denial(denial)
+            self._report_denial(source_intent, denial)
+            return False
+        if not self._terminal_exchange_worker:
+            environment = str(
+                getattr(self.config, "environment", "")
+            ).lower()
+            if environment == "live":
+                denial = OrderDenied(
+                    "management_terminal_worker_required",
+                    str(plan.intent_id),
+                )
+                self._record_denial(denial)
+                self._report_denial(source_intent, denial)
+                return False
+            submitted = self._submit_management_plan(
+                plan,
+                source_intent=source_intent,
+            )
+            if not submitted:
+                denial = self.denials[-1] if self.denials else OrderDenied(
+                    "management_submit_failed",
+                    str(plan.intent_id),
+                )
+                self._report_denial(source_intent, denial)
+            return bool(submitted)
+
+        if plan.action == CANCEL_ORDER:
+            requests = self._management_cancel_requests(
+                plan.instrument_id,
+                tuple(plan.cancel_order_ids),
+            )
+            if requests is False:
+                denial = self.denials[-1]
+                self._report_denial(source_intent, denial)
+                return False
+            return self._queue_management_dispatch_task(
+                {
+                    "plan": plan,
+                    "source_intent": source_intent,
+                    "cancel_order_ids": tuple(plan.cancel_order_ids),
+                    "disabling_take_profits": False,
+                }
+            )
+
+        disabling_take_profits = (
+            str(plan.action) == "replace_take_profits"
+            and plan.disable_take_profits
+        )
+        cancel_order_ids = self._management_cancel_order_ids(plan)
+        if cancel_order_ids is None:
+            denial = self.denials[-1]
+            self._report_denial(source_intent, denial)
+            return False
+        protection_preimage = copy.deepcopy(
+            self._entry_protection_stash
+        )
+        tombstone_state = "disabled"
+        if disabling_take_profits:
+            tombstone_state = "cancel_pending"
+        if not self._absorb_management_plan(
+            plan,
+            take_profit_tombstone_state=tombstone_state,
+            persist=False,
+        ):
+            denial = self.denials[-1]
+            self._report_denial(source_intent, denial)
+            return False
+        if disabling_take_profits and not (
+            self._set_take_profit_disable_pending_ids(
+                plan,
+                cancel_order_ids,
+                persist=False,
+            )
+        ):
+            self._entry_protection_stash = protection_preimage
+            denial = self.denials[-1]
+            self._report_denial(source_intent, denial)
+            return False
+        queued = self._queue_entry_protection_stash_persist(
+            continuation={
+                "kind": "management_dispatch_after_persist",
+                "plan": plan,
+                "source_intent": source_intent,
+                "cancel_order_ids": cancel_order_ids,
+                "disabling_take_profits": (
+                    disabling_take_profits
+                ),
+            }
+        )
+        if queued:
+            return True
+        self._entry_protection_stash = protection_preimage
+        denial = self.denials[-1] if self.denials else OrderDenied(
+            "management_persist_queue_rejected",
+            str(plan.intent_id),
+        )
+        self._report_denial(source_intent, denial)
+        return False
+
+    def _queue_management_dispatch_task(
+        self,
+        continuation: Mapping[str, Any],
+    ) -> bool:
+        plan = continuation.get("plan")
+        source_intent = continuation.get("source_intent")
+        if not isinstance(plan, ManagementPlan):
+            self._halt_durable_io(
+                "management dispatch continuation missing plan"
+            )
+            return False
+        try:
+            identity = _intent_execution_identity(source_intent)
+            operation_ids = _management_operation_ids(plan)
+        except Exception as exc:
+            denial = OrderDenied(
+                "management_durable_identity_invalid",
+                repr(exc),
+            )
+            self._record_denial(denial)
+            self._report_denial(source_intent, denial)
+            return False
+        task_continuation = dict(continuation)
+        task_continuation["kind"] = "management_prepared"
+        queued = self._submit_durable_io_task(
+            _DurableIoTask(
+                kind=_DurableIoTaskKind.MANAGEMENT_PREPARE,
+                intent=source_intent,
+                intent_execution=identity,
+                client_order_ids=operation_ids,
+                continuation=task_continuation,
+            )
+        )
+        if queued:
+            return True
+        denial = self.denials[-1] if self.denials else OrderDenied(
+            "management_dispatch_queue_rejected",
+            str(plan.intent_id),
+        )
+        self._report_denial(source_intent, denial)
+        return False
+
+    def _continue_management_after_persist(
+        self,
+        continuation: Mapping[str, Any],
+    ) -> None:
+        plan = continuation.get("plan")
+        source_intent = continuation.get("source_intent")
+        if not isinstance(plan, ManagementPlan):
+            self._halt_durable_io(
+                "management continuation missing plan"
+            )
+            return
+        cancel_order_ids = tuple(
+            str(value)
+            for value in continuation.get(
+                "cancel_order_ids",
+                (),
+            )
+        )
+        disabling_take_profits = bool(
+            continuation.get("disabling_take_profits", False)
+        )
+        if not disabling_take_profits:
+            for order_plan in plan.orders:
+                if self._submit_order_plan(order_plan):
+                    continue
+                denial = self.denials[-1] if self.denials else OrderDenied(
+                    "management_submit_failed",
+                    str(plan.intent_id),
+                )
+                self._report_denial(source_intent, denial)
+                return
+        if cancel_order_ids:
+            requests = self._management_cancel_requests(
+                plan.instrument_id,
+                cancel_order_ids,
+            )
+            if requests is False:
+                denial = self.denials[-1]
+                self._report_denial(source_intent, denial)
+                return
+            self._queue_management_cancel_batch(
+                plan=plan,
+                source_intent=source_intent,
+                requests=requests,
+                finalize_take_profit_disable=(
+                    disabling_take_profits
+                ),
+            )
+            return
+        if disabling_take_profits:
+            if not self._finalize_take_profit_disable(
+                plan,
+                persist=False,
+            ):
+                denial = self.denials[-1]
+                self._report_denial(source_intent, denial)
+                return
+            self._queue_entry_protection_stash_persist(
+                continuation={
+                    "kind": "management_finalize_after_persist",
+                    "plan": plan,
+                    "source_intent": source_intent,
+                }
+            )
+            return
+        self._queue_management_complete_task(
+            plan,
+            source_intent=source_intent,
+        )
+
+    def _queue_management_complete_task(
+        self,
+        plan: ManagementPlan,
+        *,
+        source_intent: Any,
+    ) -> bool:
+        try:
+            identity = _intent_execution_identity(source_intent)
+        except Exception as exc:
+            self._halt_durable_io(
+                f"management completion identity invalid: {exc!r}"
+            )
+            denial = self.denials[-1]
+            self._report_denial(source_intent, denial)
+            return False
+        queued = self._submit_durable_io_task(
+            _DurableIoTask(
+                kind=_DurableIoTaskKind.MANAGEMENT_COMPLETE,
+                intent=source_intent,
+                intent_execution=identity,
+                continuation={"kind": "management_completed"},
+            )
+        )
+        if queued:
+            return True
+        self._halt_durable_io(
+            "management completion queue rejected"
+        )
+        denial = self.denials[-1]
+        self._report_denial(source_intent, denial)
+        return False
+
+    def _submit_management_plan(
+        self,
+        plan: ManagementPlan,
+        *,
+        source_intent: Any = None,
+    ) -> Any:
         parent_intent_id = _management_parent_intent_id(plan)
         if not _authorization_matches_parent(
             plan.authorization,
@@ -2617,6 +6369,11 @@ class IntentExecutionStrategy(Strategy):
                 )
             )
             return False
+        if self._terminal_exchange_worker:
+            return self._submit_management_plan_via_lane(
+                plan,
+                source_intent=source_intent,
+            )
         if plan.action == CANCEL_ORDER:
             for client_order_id in plan.cancel_order_ids:
                 if not self._cancel_via_exchange_adapter(
@@ -2671,6 +6428,238 @@ class IntentExecutionStrategy(Strategy):
             ):
                 return False
         return True
+
+    def _submit_management_plan_via_lane(
+        self,
+        plan: ManagementPlan,
+        *,
+        source_intent: Any,
+    ) -> Any:
+        if source_intent is None:
+            self._record_denial(
+                OrderDenied(
+                    "management_source_intent_missing",
+                    str(plan.intent_id),
+                )
+            )
+            return False
+        disabling_take_profits = (
+            str(plan.action) == "replace_take_profits"
+            and plan.disable_take_profits
+        )
+        if plan.action == CANCEL_ORDER:
+            cancel_order_ids = tuple(plan.cancel_order_ids)
+        elif disabling_take_profits:
+            if not self._absorb_management_plan(
+                plan,
+                take_profit_tombstone_state="cancel_pending",
+            ):
+                return False
+            cancel_order_ids = self._management_cancel_order_ids(plan)
+            if cancel_order_ids is None:
+                return False
+            if not self._set_take_profit_disable_pending_ids(
+                plan,
+                cancel_order_ids,
+            ):
+                return False
+        else:
+            cancel_order_ids = self._management_cancel_order_ids(plan)
+            if cancel_order_ids is None:
+                return False
+            if not self._absorb_management_plan(plan):
+                return False
+            for order_plan in plan.orders:
+                if not self._submit_order_plan(order_plan):
+                    return False
+        if not cancel_order_ids:
+            if disabling_take_profits:
+                return self._finalize_take_profit_disable(plan)
+            return True
+        requests = self._management_cancel_requests(
+            plan.instrument_id,
+            cancel_order_ids,
+        )
+        if requests is False:
+            return False
+        return self._queue_management_cancel_batch(
+            plan=plan,
+            source_intent=source_intent,
+            requests=requests,
+            finalize_take_profit_disable=disabling_take_profits,
+        )
+
+    def _management_cancel_requests(
+        self,
+        instrument_id: str,
+        client_order_ids: tuple[str, ...],
+    ) -> tuple[Any, ...] | bool:
+        mirror = self._exchange_state_mirror
+        find_order = getattr(mirror, "find_order", None)
+        if not callable(find_order):
+            self._record_denial(
+                OrderDenied(
+                    "exchange_cancel_adapter_unavailable",
+                    instrument_id,
+                )
+            )
+            return False
+        from runtime.exchange_cancel_adapter import CancelOrderRequest
+
+        requests: list[CancelOrderRequest] = []
+        for client_order_id in client_order_ids:
+            try:
+                order = find_order(instrument_id, client_order_id)
+            except Exception as exc:
+                self._record_denial(
+                    OrderDenied(
+                        "exchange_state_refresh_failed",
+                        repr(exc),
+                    )
+                )
+                return False
+            if not order:
+                self._record_denial(
+                    OrderDenied(
+                        "order_cancel_not_found",
+                        client_order_id,
+                    )
+                )
+                return False
+            venue_order_id = _optional_str(
+                getattr(order, "venue_order_id", None)
+            )
+            requests.append(
+                CancelOrderRequest(
+                    account_id=str(
+                        getattr(order, "account_id", "") or ""
+                    ),
+                    symbol=str(getattr(order, "symbol", "") or ""),
+                    position_side=str(
+                        getattr(order, "position_side", "") or ""
+                    ),
+                    order_kind=str(
+                        getattr(order, "order_kind", "") or ""
+                    ),
+                    venue_order_id=venue_order_id,
+                    client_order_id=client_order_id,
+                )
+            )
+        return tuple(requests)
+
+    def _queue_management_cancel_batch(
+        self,
+        *,
+        plan: ManagementPlan,
+        source_intent: Any,
+        requests: tuple[Any, ...],
+        finalize_take_profit_disable: bool,
+    ) -> Any:
+        from runtime.exchange_cancel_adapter import (
+            TerminalExchangeRequest,
+        )
+
+        request_id = f"management-cancel:{plan.intent_id}"
+        request = TerminalExchangeRequest(
+            request_id=request_id,
+            account_id=str(self.config.account_id),
+            operation="cancel_batch",
+            purpose=f"management:{plan.action}",
+            deadline_monotonic=(
+                self._terminal_exchange_worker.new_deadline()
+            ),
+            cancel_requests=requests,
+        )
+        self._pending_terminal_exchange[request_id] = {
+            "kind": "management_cancel",
+            "intent": source_intent,
+            "plan": plan,
+            "expected_cancel_ids": tuple(
+                str(request.client_order_id or "")
+                for request in requests
+            ),
+            "finalize_take_profit_disable": (
+                finalize_take_profit_disable
+            ),
+        }
+        if self._terminal_exchange_worker.submit(request):
+            return _TERMINAL_EXCHANGE_PENDING
+        self._pending_terminal_exchange.pop(request_id, None)
+        self._record_denial(
+            OrderDenied(
+                "terminal_exchange_queue_rejected",
+                str(plan.intent_id),
+            )
+        )
+        return False
+
+    def _complete_management_cancels(
+        self,
+        result: Any,
+        pending: dict[str, Any],
+    ) -> None:
+        intent = pending["intent"]
+        plan = pending["plan"]
+        failure = str(getattr(result, "error", "") or "")
+        observed_cancel_ids: set[str] = set()
+        if not failure:
+            for outcome in tuple(
+                getattr(result, "cancel_outcomes", ()) or ()
+            ):
+                request = getattr(outcome, "request", None)
+                observed_cancel_ids.add(
+                    str(
+                        getattr(
+                            request,
+                            "client_order_id",
+                            "",
+                        )
+                        or ""
+                    )
+                )
+                if str(getattr(outcome, "status", "")) == "confirmed":
+                    continue
+                failure = str(
+                    getattr(outcome, "error", "") or ""
+                )
+                if not failure:
+                    failure = "order cancellation was not confirmed"
+                break
+        expected_cancel_ids = {
+            str(client_order_id)
+            for client_order_id in pending["expected_cancel_ids"]
+        }
+        if not failure and observed_cancel_ids != expected_cancel_ids:
+            failure = (
+                "order cancellation result set mismatch: "
+                f"expected={sorted(expected_cancel_ids)}:"
+                f"observed={sorted(observed_cancel_ids)}"
+            )
+        if failure:
+            denial = OrderDenied("order_cancel_failed", failure)
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
+            return
+        if pending["finalize_take_profit_disable"]:
+            if not self._finalize_take_profit_disable(
+                plan,
+                persist=False,
+            ):
+                denial = self.denials[-1]
+                self._report_denial(intent, denial)
+                return
+            self._queue_entry_protection_stash_persist(
+                continuation={
+                    "kind": "management_finalize_after_persist",
+                    "plan": plan,
+                    "source_intent": intent,
+                }
+            )
+            return
+        self._queue_management_complete_task(
+            plan,
+            source_intent=intent,
+        )
 
     def _management_cancel_order_ids(
         self,
@@ -2815,6 +6804,7 @@ class IntentExecutionStrategy(Strategy):
         plan: ManagementPlan,
         *,
         take_profit_tombstone_state: str = "disabled",
+        persist: bool = True,
     ) -> bool:
         """Keep entry stashes coherent with operator-managed protections: without
         this, a later entry fill re-places SL/TP at the ORIGINAL signal prices and
@@ -2903,6 +6893,8 @@ class IntentExecutionStrategy(Strategy):
                         order_plan,
                     )
             stash["protected_quantity"] = None
+        if not persist:
+            return True
         if self._persist_entry_protection_stash():
             return True
         for key, value in preimage.items():
@@ -2913,6 +6905,8 @@ class IntentExecutionStrategy(Strategy):
         self,
         plan: ManagementPlan,
         cancel_order_ids: tuple[str, ...],
+        *,
+        persist: bool = True,
     ) -> bool:
         targeted = [
             (intent_key, stash)
@@ -2947,6 +6941,8 @@ class IntentExecutionStrategy(Strategy):
                 )
                 return False
             tombstone["pending_cancel_ids"] = pending_ids
+        if not persist:
+            return True
         if self._persist_entry_protection_stash():
             return True
         for key, value in preimage.items():
@@ -2954,6 +6950,9 @@ class IntentExecutionStrategy(Strategy):
         return False
 
     def _retry_pending_take_profit_disables(self) -> None:
+        if self._terminal_exchange_worker:
+            self._queue_pending_take_profit_disable_retries()
+            return
         mirror = self._exchange_state_mirror
         orders_for_instrument = (
             getattr(mirror, "orders_for_instrument", None) if mirror else None
@@ -3019,7 +7018,198 @@ class IntentExecutionStrategy(Strategy):
                 tombstone["completed_at"] = self._now().isoformat()
             self._persist_entry_protection_stash()
 
-    def _finalize_take_profit_disable(self, plan: ManagementPlan) -> bool:
+    def _queue_pending_take_profit_disable_retries(self) -> None:
+        mirror = self._exchange_state_mirror
+        orders_for_instrument = (
+            getattr(mirror, "orders_for_instrument", None)
+            if mirror
+            else None
+        )
+        if not callable(orders_for_instrument):
+            return
+        for intent_key, stash in (
+            self._entry_protection_stash.items()
+        ):
+            if stash.get("_take_profit_retry_request_id"):
+                continue
+            tombstone = stash.get("take_profit_tombstone")
+            parent_intent_id = stash.get(
+                "take_profit_parent_intent_id"
+            )
+            if (
+                not _valid_take_profit_tombstone(
+                    tombstone,
+                    parent_intent_id,
+                )
+                or str(tombstone.get("state") or "")
+                != "cancel_pending"
+            ):
+                continue
+            instrument_id = str(stash.get("instrument_id") or "")
+            if not instrument_id:
+                continue
+            try:
+                mirror_orders = tuple(
+                    orders_for_instrument(instrument_id)
+                )
+            except Exception as exc:
+                self._record_denial(
+                    OrderDenied(
+                        "exchange_state_refresh_failed",
+                        repr(exc),
+                    )
+                )
+                continue
+            live_ids = {
+                str(getattr(order, "client_order_id", ""))
+                for order in mirror_orders
+                if str(getattr(order, "client_order_id", ""))
+            }
+            pending_ids = {
+                str(client_order_id)
+                for client_order_id in tombstone.get(
+                    "pending_cancel_ids",
+                    [],
+                )
+                if str(client_order_id)
+            }
+            roles = stash.get("protection_roles")
+            if isinstance(roles, dict):
+                for client_order_id, role_info in roles.items():
+                    if not isinstance(role_info, dict):
+                        continue
+                    if (
+                        str(role_info.get("role") or "")
+                        != "take_profit"
+                    ):
+                        continue
+                    normalized_id = str(client_order_id)
+                    if normalized_id in live_ids:
+                        pending_ids.add(normalized_id)
+            active_pending_ids = tuple(
+                sorted(pending_ids.intersection(live_ids))
+            )
+            tombstone["pending_cancel_ids"] = list(
+                active_pending_ids
+            )
+            if not active_pending_ids:
+                tombstone["state"] = "disabled"
+                tombstone["completed_at"] = self._now().isoformat()
+                self._queue_entry_protection_stash_persist()
+                continue
+            requests = self._management_cancel_requests(
+                instrument_id,
+                active_pending_ids,
+            )
+            if requests is False:
+                continue
+            self._queue_entry_protection_stash_persist(
+                continuation={
+                    "kind": "take_profit_retry_after_persist",
+                    "intent_key": intent_key,
+                    "requests": requests,
+                }
+            )
+
+    def _queue_take_profit_retry(
+        self,
+        *,
+        intent_key: str,
+        stash: dict[str, Any],
+        requests: tuple[Any, ...],
+    ) -> bool:
+        from runtime.exchange_cancel_adapter import (
+            TerminalExchangeRequest,
+        )
+
+        request_id = (
+            f"take-profit-retry:{intent_key}:{uuid4().hex}"
+        )
+        request = TerminalExchangeRequest(
+            request_id=request_id,
+            account_id=str(self.config.account_id),
+            operation="cancel_batch",
+            purpose="take_profit_disable_retry",
+            deadline_monotonic=(
+                self._terminal_exchange_worker.new_deadline()
+            ),
+            cancel_requests=requests,
+        )
+        stash["_take_profit_retry_request_id"] = request_id
+        self._pending_terminal_exchange[request_id] = {
+            "kind": "take_profit_retry",
+            "intent_key": intent_key,
+        }
+        if self._terminal_exchange_worker.submit(request):
+            return True
+        stash.pop("_take_profit_retry_request_id", None)
+        self._pending_terminal_exchange.pop(request_id, None)
+        self._record_denial(
+            OrderDenied(
+                "terminal_exchange_queue_rejected",
+                intent_key,
+            )
+        )
+        return False
+
+    def _complete_take_profit_retry(
+        self,
+        result: Any,
+        pending: dict[str, Any],
+    ) -> None:
+        intent_key = str(pending["intent_key"])
+        stash = self._entry_protection_stash.get(intent_key)
+        if not isinstance(stash, dict):
+            return
+        stash.pop("_take_profit_retry_request_id", None)
+        tombstone = stash.get("take_profit_tombstone")
+        if not isinstance(tombstone, dict):
+            return
+        pending_ids = {
+            str(client_order_id)
+            for client_order_id in tombstone.get(
+                "pending_cancel_ids",
+                [],
+            )
+            if str(client_order_id)
+        }
+        for outcome in tuple(
+            getattr(result, "cancel_outcomes", ()) or ()
+        ):
+            request = getattr(outcome, "request", None)
+            client_order_id = str(
+                getattr(request, "client_order_id", "") or ""
+            )
+            if str(getattr(outcome, "status", "")) == "confirmed":
+                pending_ids.discard(client_order_id)
+                continue
+            error = str(getattr(outcome, "error", "") or "")
+            self._record_denial(
+                OrderDenied(
+                    "order_cancel_failed",
+                    error or client_order_id,
+                )
+            )
+        result_error = str(getattr(result, "error", "") or "")
+        if result_error:
+            self._record_denial(
+                OrderDenied(
+                    "order_cancel_failed",
+                    result_error,
+                )
+            )
+        tombstone["pending_cancel_ids"] = sorted(pending_ids)
+        if not pending_ids:
+            tombstone["state"] = "disabled"
+            tombstone["completed_at"] = self._now().isoformat()
+        self._queue_entry_protection_stash_persist()
+
+    def _finalize_take_profit_disable(
+        self,
+        plan: ManagementPlan,
+        *,
+        persist: bool = True,
+    ) -> bool:
         targeted: list[tuple[str, dict[str, Any]]] = []
         for intent_key, stash in self._entry_protection_stash.items():
             if self._management_plan_targets_stash(plan, stash):
@@ -3047,6 +7237,8 @@ class IntentExecutionStrategy(Strategy):
             tombstone["state"] = "disabled"
             tombstone["completed_at"] = self._now().isoformat()
             tombstone["pending_cancel_ids"] = []
+        if not persist:
+            return True
         if self._persist_entry_protection_stash():
             return True
         for key, value in preimage.items():
@@ -3233,6 +7425,144 @@ def _event_last_qty(event: Any) -> Optional[str]:
             if value is not None:
                 return str(value)
     return None
+
+
+def _event_fill_price(event: Any) -> Optional[str]:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        for name in (
+            "last_px",
+            "last_price",
+            "price",
+            "average_price",
+            "avg_px",
+        ):
+            value = getattr(holder, name, None)
+            if value is not None:
+                return _decimalish_to_str(value)
+    return None
+
+
+def _event_fee_usdt(event: Any) -> tuple[str, str]:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        for name in ("commission", "fee", "fees"):
+            value = getattr(holder, name, None)
+            if value is None:
+                continue
+            amount = _money_amount(value)
+            currency = _money_currency(value)
+            if amount is None:
+                return "0", "fill fee amount is unavailable"
+            if currency and currency not in {"USDT", "USDC"}:
+                return (
+                    "0",
+                    f"fill fee currency is unsupported: {currency}",
+                )
+            if not currency:
+                return "0", "fill fee currency is unavailable"
+            return amount, ""
+    return "0", "fill fee is unavailable"
+
+
+def _money_amount(value: Any) -> Optional[str]:
+    for name in ("as_decimal", "to_decimal"):
+        method = getattr(value, name, None)
+        if callable(method):
+            try:
+                return str(method())
+            except Exception:
+                return None
+    for name in ("amount", "value", "raw"):
+        raw = getattr(value, name, None)
+        parsed = _decimal_text(raw)
+        if parsed is not None:
+            return parsed
+    return _decimal_text(value)
+
+
+def _money_currency(value: Any) -> str:
+    currency = getattr(value, "currency", None)
+    if currency is not None:
+        code = getattr(currency, "code", getattr(currency, "value", currency))
+        return str(code).strip().upper()
+    match = re.search(r"\b(USDT|USDC)\b", str(value).upper())
+    if match is None:
+        return ""
+    return match.group(1)
+
+
+def _decimal_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    match = re.search(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", text)
+    if match is None:
+        return None
+    try:
+        number = Decimal(match.group(0))
+    except InvalidOperation:
+        return None
+    if not number.is_finite() or number < 0:
+        return None
+    return format(number, "f")
+
+
+def _event_reduce_only(event: Any) -> bool:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        value = getattr(holder, "reduce_only", None)
+        if value is not None:
+            return bool(value)
+    return False
+
+
+def _event_fill_id(
+    event: Any,
+    *,
+    client_order_id: str,
+    quantity: Optional[str],
+    price: Optional[str],
+) -> str:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        for name in ("trade_id", "venue_trade_id", "fill_id", "event_id"):
+            value = getattr(holder, name, None)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    material = json.dumps(
+        {
+            "client_order_id": client_order_id,
+            "quantity": quantity or "",
+            "price": price or "",
+            "ts_event": _event_text_field(
+                event,
+                "ts_event",
+                "timestamp",
+                "occurred_at",
+            )
+            or "",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "fill-" + sha256(material.encode("utf-8")).hexdigest()
+
+
+def _event_occurred_at(event: Any) -> str:
+    raw = _event_text_field(
+        event,
+        "occurred_at",
+        "timestamp",
+        "ts_event",
+    )
+    if raw:
+        return raw
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _market_fallback_client_order_id(source_client_order_id: str) -> str:
@@ -3570,12 +7900,64 @@ def _node_command_has_authorization(cmd: Any) -> bool:
     )
 
 
+def _terminal_command_instrument_ids(
+    args: dict[str, Any],
+) -> tuple[str, ...]:
+    raw = args.get("instrument_ids")
+    alias = args.get("instruments")
+    if raw is not None and alias is not None and raw != alias:
+        raise ValueError("instrument scope fields disagree")
+    if raw is None:
+        raw = alias
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("instrument_ids must be a list")
+    result = []
+    seen = set()
+    for item in raw:
+        value = str(item or "").strip()
+        if not value:
+            raise ValueError(
+                "instrument_ids must contain non-empty strings"
+            )
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return tuple(result)
+
+
+def _terminal_instrument_matches(
+    instrument_id: str,
+    instrument_ids: tuple[str, ...],
+) -> bool:
+    if not instrument_ids:
+        return True
+    target = _canonical_symbol(instrument_id)
+    return any(
+        _canonical_symbol(candidate) == target
+        for candidate in instrument_ids
+    )
+
+
 def _management_parent_intent_id(plan: ManagementPlan) -> str:
     authorization = dict(plan.authorization or {})
     supplied_parent = str(authorization.get("parent_intent_id") or "").strip()
     if _valid_uuid_text(supplied_parent):
         return supplied_parent
     return str(plan.intent_id)
+
+
+def _management_operation_ids(
+    plan: ManagementPlan,
+) -> tuple[str, ...]:
+    return (
+        encode_client_order_id(
+            UUID(str(plan.intent_id)),
+            sequence=99,
+        ),
+    )
 
 
 def _position_book_from_id(position_id: Any) -> str:
@@ -3708,6 +8090,152 @@ def _optional_str(value: Any) -> Optional[str]:
     if value is None:
         return None
     return _decimalish_to_str(value)
+
+
+def _canonical_symbol(value: Any) -> str:
+    return str(value or "").strip().upper().split("-")[0].split(".")[0]
+
+
+def _positive_canary_decimal(value: Any) -> Decimal | None:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not number.is_finite() or number <= 0:
+        return None
+    return number
+
+
+def _intent_execution_identity(intent: Any) -> IntentExecutionIdentity:
+    raw_action = getattr(intent, "action", "")
+    action = str(getattr(raw_action, "value", raw_action))
+    return IntentExecutionIdentity(
+        account_id=str(getattr(intent, "account_id", "")),
+        intent_id=str(getattr(intent, "intent_id", "")),
+        idempotency_key=str(
+            getattr(intent, "idempotency_key", "")
+        ),
+        instrument_id=str(getattr(intent, "instrument_id", "")),
+        action=action,
+    ).normalized()
+
+
+def _intent_execution_payload(intent: Any) -> dict[str, Any]:
+    model_dump = getattr(intent, "model_dump", None)
+    if callable(model_dump):
+        payload = model_dump(mode="json")
+        if isinstance(payload, dict):
+            return payload
+    fields = (
+        "schema_version",
+        "intent_id",
+        "decision_id",
+        "risk_decision_id",
+        "idempotency_key",
+        "account_id",
+        "instrument_id",
+        "action",
+        "valid_until",
+        "risk_budget",
+        "order_plan",
+        "target_position_id",
+        "approved_at",
+    )
+    payload = {}
+    for field_name in fields:
+        if not hasattr(intent, field_name):
+            continue
+        payload[field_name] = _jsonable_intent_value(
+            getattr(intent, field_name)
+        )
+    payload.setdefault("schema_version", "1.0")
+    return payload
+
+
+def _jsonable_intent_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return _aware_datetime(value).isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Enum):
+        return _jsonable_intent_value(value.value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _jsonable_intent_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_intent_value(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _jsonable_intent_value(model_dump(mode="json"))
+    raw_values = getattr(value, "__dict__", None)
+    if isinstance(raw_values, dict):
+        return {
+            str(key): _jsonable_intent_value(item)
+            for key, item in raw_values.items()
+            if not str(key).startswith("_")
+        }
+    return value
+
+
+def _permit_expiry(value: Any) -> datetime | bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        return False
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_live_entry_notional_inventory(
+    inventory: Iterable[tuple[Any, Any]],
+) -> dict[str, Decimal]:
+    caps: dict[str, Decimal] = {}
+    for raw_instrument_id, raw_cap in inventory:
+        instrument_id = str(raw_instrument_id).strip()
+        if not instrument_id:
+            raise ValueError(
+                "live entry notional inventory instrument must be non-empty"
+            )
+        if instrument_id in caps:
+            raise ValueError(
+                f"duplicate live entry notional inventory instrument: {instrument_id}"
+            )
+        cap = _positive_canary_decimal(raw_cap)
+        if cap is None:
+            raise ValueError(
+                f"live entry notional cap must be positive: {instrument_id}"
+            )
+        caps[instrument_id] = cap
+    return caps
+
+
+def _fsync_strategy_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _protection_payload_sha256(
+    payload: Mapping[str, Any],
+) -> str:
+    encoded = json.dumps(
+        dict(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 def _make_quantity(instrument: Any, quantity: str) -> Any:

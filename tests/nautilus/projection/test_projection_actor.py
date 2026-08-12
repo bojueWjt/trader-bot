@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -24,6 +24,7 @@ from projection import (  # noqa: E402
     ProjectionConfig,
     ProjectionEventMapper,
 )
+from projection.actor import ProjectionIngestOutcome  # noqa: E402
 
 
 ACCOUNT_ID = "acct-1"
@@ -107,6 +108,41 @@ class ProjectionActorTests(unittest.TestCase):
         self.assertEqual(len(sink.posted_batches), 1)
         self.assertEqual(len(sink.posted_batches[0]), 1)
         self.assertEqual(actor.spool.pending_count, 0)
+
+    def test_ingest_event_returns_explicit_durability_outcome(self) -> None:
+        sink = _RecordingSink(fail=True)
+        actor = _actor(self._tmp_spool(), sink=sink)
+        event = _Event(
+            "OrderAccepted",
+            ts_event=10,
+            client_order_id="coid-outcome",
+        )
+
+        durable = actor.ingest_event(event)
+        deduped = actor.ingest_event(event)
+        ignored = actor.ingest_event(
+            _Event(
+                "UnsupportedExecutionEvent",
+                ts_event=11,
+                client_order_id="coid-ignored",
+            )
+        )
+
+        self.assertEqual(
+            durable.outcome,
+            ProjectionIngestOutcome.DURABLE,
+        )
+        self.assertIsNotNone(durable.event_id)
+        self.assertEqual(
+            deduped.outcome,
+            ProjectionIngestOutcome.DEDUPED,
+        )
+        self.assertEqual(deduped.event_id, durable.event_id)
+        self.assertEqual(
+            ignored.outcome,
+            ProjectionIngestOutcome.IGNORED,
+        )
+        self.assertIsNone(ignored.event_id)
 
     def test_offline_spool_replays_in_event_time_order_and_clears_only_acked(self) -> None:
         sink = _RecordingSink(fail=True)

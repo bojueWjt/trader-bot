@@ -8,7 +8,8 @@ Claude calls this script via Bash to place orders, query positions, etc.
 Usage (CLI):
     python3 binance_trade.py get-price BTCUSDT
     python3 binance_trade.py --db ~/projects/trading-data/trading.db --account main place-order BTCUSDT BUY 0.01
-    python3 binance_trade.py calc-position --balance 10000 --risk-ratio 0.02 --entry 60000 --sl 59000
+    python3 binance_trade.py calc-position --equity 10000 --capital-multiplier 1 --risk-ratio 0.02 --entry 60000 --sl 59000
+    python3 binance_trade.py calc-capital-multiplier --initial-equity 5000 --target-equity 10000
 
 Usage (import):
     from binance_trade import BinanceTrader
@@ -18,8 +19,10 @@ Usage (import):
 
 import argparse
 import json
+import math
 import os
 import sys
+from urllib.parse import urlsplit
 
 
 # ---------------------------------------------------------------------------
@@ -29,11 +32,7 @@ class BinanceTrader:
     """High-level interface to Binance Futures trading."""
 
     TESTNET_URL = "https://testnet.binancefuture.com"
-
-    # Default proxy: SSH tunnel to Tencent Cloud Squid
-    # Tunnel: ssh -f -N -L 13128:127.0.0.1:13128 ubuntu@43.156.121.74
-    # Reason: Clash TUN fake-ip breaks Python requests' HTTPS CONNECT via remote proxy
-    DEFAULT_PROXY = "http://binance_proxy:ProxyPass2026!@127.0.0.1:13128"
+    PROXY_ENV = "BINANCE_PROXY"
 
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True, proxy: str = None):
         from binance.client import Client
@@ -42,10 +41,27 @@ class BinanceTrader:
         self.api_secret = api_secret
         self.testnet = testnet
 
-        # Proxy: explicit arg > env var > default
-        proxy_url = proxy or os.environ.get("BINANCE_PROXY", self.DEFAULT_PROXY)
+        proxy_url = proxy
+        if proxy_url is None:
+            proxy_url = os.environ.get(self.PROXY_ENV, "")
+        proxy_url = proxy_url.strip()
         requests_params = None
-        if proxy_url and proxy_url.lower() != "none":
+        if proxy_url:
+            parsed_proxy = urlsplit(proxy_url)
+            if (
+                parsed_proxy.scheme not in {"http", "https"}
+                or not parsed_proxy.hostname
+            ):
+                raise ValueError(
+                    "--proxy or BINANCE_PROXY must be an http(s) URL"
+                )
+            if (
+                parsed_proxy.username is not None
+                or parsed_proxy.password is not None
+            ):
+                raise ValueError(
+                    "--proxy or BINANCE_PROXY must not contain credentials"
+                )
             requests_params = {
                 "proxies": {
                     "https": proxy_url,
@@ -78,39 +94,98 @@ class BinanceTrader:
 
     # -- account -------------------------------------------------------------
     def get_balance(self, asset: str = "USDT") -> float:
-        """Get futures account balance for a given asset."""
+        """Get futures wallet balance for a given asset."""
         balances = self.client.futures_account_balance()
         for b in balances:
             if b["asset"] == asset:
                 return float(b["balance"])
         return 0.0
 
+    def get_equity(self) -> float:
+        """Get current USDT-M account equity, including unrealized PnL."""
+        account = self.client.futures_account()
+        raw_equity = account.get("totalMarginBalance")
+        if raw_equity is None or raw_equity == "":
+            raise ValueError("totalMarginBalance missing from futures account")
+
+        equity = float(raw_equity)
+        if not math.isfinite(equity) or equity < 0:
+            raise ValueError("totalMarginBalance must be a non-negative number")
+        return equity
+
     # -- position sizing (pure math) ----------------------------------------
+    @staticmethod
+    def calculate_risk_capital_multiplier(
+        initial_actual_equity: float,
+        target_effective_equity: float,
+    ) -> float:
+        """Calculate the one-time configured multiplier for an account."""
+        if (
+            not math.isfinite(initial_actual_equity)
+            or initial_actual_equity <= 0
+        ):
+            raise ValueError("initial_actual_equity must be greater than 0")
+        if (
+            not math.isfinite(target_effective_equity)
+            or target_effective_equity <= 0
+        ):
+            raise ValueError("target_effective_equity must be greater than 0")
+        return target_effective_equity / initial_actual_equity
+
     @staticmethod
     def calculate_position_size(
         balance: float,
         risk_ratio: float,
         entry_price: float,
         stop_loss: float,
+        risk_capital_multiplier: float,
     ) -> dict:
         """Calculate position size based on risk parameters.
 
-        Formula: qty = (balance * risk_ratio) / abs(entry_price - stop_loss)
+        Formula:
+        actual_equity = current live account equity
+        effective_equity = actual_equity * risk_capital_multiplier
+        qty = (effective_equity * risk_ratio) / abs(entry_price - stop_loss)
 
-        Returns dict with quantity, risk_amount, and distance.
+        The balance argument is retained for compatibility and represents
+        current actual equity. The configured multiplier stays fixed while
+        actual equity changes with profit and loss.
         If entry_price == stop_loss, returns quantity=0 to prevent division by zero.
         """
+        if not math.isfinite(balance) or balance < 0:
+            raise ValueError("actual equity must be a non-negative number")
+        if not math.isfinite(risk_ratio) or risk_ratio < 0:
+            raise ValueError("risk_ratio must be a non-negative number")
+        if (
+            not math.isfinite(risk_capital_multiplier)
+            or risk_capital_multiplier <= 0
+        ):
+            raise ValueError("risk_capital_multiplier must be greater than 0")
+
         distance = abs(entry_price - stop_loss)
-        risk_amount = balance * risk_ratio
+        effective_equity = balance * risk_capital_multiplier
+        risk_amount = effective_equity * risk_ratio
 
         if distance == 0:
-            return {"quantity": 0.0, "risk_amount": risk_amount, "distance": 0.0}
+            return {
+                "quantity": 0.0,
+                "risk_amount": risk_amount,
+                "distance": 0.0,
+                "actual_equity": balance,
+                "effective_equity": effective_equity,
+                "effective_balance": effective_equity,
+                "risk_capital_multiplier": risk_capital_multiplier,
+            }
 
         quantity = risk_amount / distance
         return {
             "quantity": round(quantity, 8),
             "risk_amount": round(risk_amount, 8),
             "distance": round(distance, 8),
+            "actual_equity": round(balance, 8),
+            "effective_equity": round(effective_equity, 8),
+            "effective_balance": round(effective_equity, 8),
+            "risk_capital_multiplier": risk_capital_multiplier,
         }
 
     # -- order placement -----------------------------------------------------
@@ -307,7 +382,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", default=None, help="Binance API Key (or env BINANCE_API_KEY)")
     parser.add_argument("--api-secret", default=None, help="Binance API Secret (or env BINANCE_API_SECRET)")
     parser.add_argument("--testnet", action=argparse.BooleanOptionalAction, default=True, help="Use testnet (default: True). Use --no-testnet for production.")
-    parser.add_argument("--proxy", default=None, help="HTTP proxy URL for Binance API (default: built-in proxy). Use --proxy none to disable.")
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        help=(
+            "Explicit unauthenticated http(s) proxy URL. When omitted, reads "
+            "BINANCE_PROXY; when both are unset, connects directly."
+        ),
+    )
     parser.add_argument("--db", default=None, help="Path to SQLite database for credential lookup")
     parser.add_argument("--account", default=None, help="Account ID to load from database")
 
@@ -322,17 +404,61 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("symbol", help="Trading pair symbol (e.g. BTCUSDT)")
 
     # 2. get-balance
-    p = sub.add_parser("get-balance", help="Get futures account balance")
+    p = sub.add_parser("get-balance", help="Get futures wallet balance")
     p.add_argument("--asset", default="USDT", help="Asset to query (default: USDT)")
 
-    # 3. calc-position
+    # 2b. get-equity
+    sub.add_parser(
+        "get-equity",
+        help="Get current account equity including unrealized PnL",
+    )
+
+    # 3. calc-capital-multiplier
+    p = sub.add_parser(
+        "calc-capital-multiplier",
+        help="Calculate an initial risk capital multiplier",
+    )
+    p.add_argument(
+        "--initial-equity",
+        type=float,
+        required=True,
+        help="Actual account equity at initialization",
+    )
+    p.add_argument(
+        "--target-equity",
+        type=float,
+        required=True,
+        help=(
+            "Initialization-only target effective equity; runtime saves and "
+            "uses the resulting multiplier"
+        ),
+    )
+
+    # 4. calc-position
     p = sub.add_parser("calc-position", help="Calculate position size (pure math, no API)")
-    p.add_argument("--balance", type=float, required=True, help="Account balance")
+    p.add_argument(
+        "--equity",
+        "--balance",
+        dest="actual_equity",
+        type=float,
+        required=True,
+        help=(
+            "Current live actual equity; --balance remains a compatible alias"
+        ),
+    )
     p.add_argument("--risk-ratio", type=float, required=True, help="Risk ratio (e.g. 0.02 for 2%%)")
+    p.add_argument(
+        "--capital-multiplier",
+        type=float,
+        required=True,
+        help=(
+            "Saved risk capital multiplier applied to current actual equity"
+        ),
+    )
     p.add_argument("--entry", type=float, required=True, help="Entry price")
     p.add_argument("--sl", type=float, required=True, help="Stop loss price")
 
-    # 4. place-order
+    # 5. place-order
     p = sub.add_parser("place-order", help="Place an order (MARKET or LIMIT)")
     p.add_argument("symbol", help="Trading pair symbol")
     p.add_argument("side", help="BUY or SELL")
@@ -341,7 +467,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--price", type=float, default=None, help="Limit price (required for LIMIT orders)")
     p.add_argument("--position-side", default=None, choices=["LONG", "SHORT", "BOTH"], help="Position side for hedge mode (LONG/SHORT/BOTH)")
 
-    # 5. place-sl
+    # 6. place-sl
     p = sub.add_parser("place-sl", help="Place a stop loss order (STOP_MARKET, reduceOnly)")
     p.add_argument("symbol", help="Trading pair symbol")
     p.add_argument("side", help="BUY or SELL (opposite of position direction)")
@@ -349,7 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("stop_price", type=float, help="Stop trigger price")
     p.add_argument("--position-side", default=None, choices=["LONG", "SHORT", "BOTH"], help="Position side for hedge mode")
 
-    # 6. place-tp
+    # 7. place-tp
     p = sub.add_parser("place-tp", help="Place a take profit order (TAKE_PROFIT_MARKET, reduceOnly)")
     p.add_argument("symbol", help="Trading pair symbol")
     p.add_argument("side", help="BUY or SELL (opposite of position direction)")
@@ -357,24 +483,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("stop_price", type=float, help="Take profit trigger price")
     p.add_argument("--position-side", default=None, choices=["LONG", "SHORT", "BOTH"], help="Position side for hedge mode")
 
-    # 7. cancel-order
+    # 8. cancel-order
     p = sub.add_parser("cancel-order", help="Cancel a specific order")
     p.add_argument("symbol", help="Trading pair symbol")
     p.add_argument("order_id", type=int, help="Binance order ID to cancel")
 
-    # 8. cancel-all
+    # 9. cancel-all
     p = sub.add_parser("cancel-all", help="Cancel all open orders for a symbol")
     p.add_argument("symbol", help="Trading pair symbol")
 
-    # 9. get-position
+    # 10. get-position
     p = sub.add_parser("get-position", help="Query current position for a symbol")
     p.add_argument("symbol", help="Trading pair symbol")
 
-    # 10. get-orders
+    # 11. get-orders
     p = sub.add_parser("get-orders", help="Query all open orders for a symbol")
     p.add_argument("symbol", help="Trading pair symbol")
 
-    # 11. set-leverage
+    # 12. set-leverage
     p = sub.add_parser("set-leverage", help="Set leverage for a symbol")
     p.add_argument("symbol", help="Trading pair symbol")
     p.add_argument("leverage", type=int, help="Leverage multiplier (e.g. 10)")
@@ -392,13 +518,28 @@ def main() -> None:
     if not args.command:
         _error_exit("No command specified. Use --help for usage.")
 
-    # calc-position is pure math -- no API credentials needed
+    # Pure calculations need no API credentials.
+    if args.command == "calc-capital-multiplier":
+        multiplier = BinanceTrader.calculate_risk_capital_multiplier(
+            initial_actual_equity=args.initial_equity,
+            target_effective_equity=args.target_equity,
+        )
+        _json_out(
+            {
+                "initial_actual_equity": args.initial_equity,
+                "target_effective_equity": args.target_equity,
+                "risk_capital_multiplier": multiplier,
+            }
+        )
+        return
+
     if args.command == "calc-position":
         result = BinanceTrader.calculate_position_size(
-            balance=args.balance,
+            balance=args.actual_equity,
             risk_ratio=args.risk_ratio,
             entry_price=args.entry,
             stop_loss=args.sl,
+            risk_capital_multiplier=args.capital_multiplier,
         )
         _json_out(result)
         return
@@ -431,6 +572,10 @@ def main() -> None:
             case "get-balance":
                 balance = trader.get_balance(args.asset)
                 _json_out({"asset": args.asset, "balance": balance})
+
+            case "get-equity":
+                equity = trader.get_equity()
+                _json_out({"asset": "USDT", "equity": equity})
 
             case "place-order":
                 ps = getattr(args, 'position_side', None)

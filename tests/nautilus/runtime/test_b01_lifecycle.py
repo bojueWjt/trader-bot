@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,9 +19,25 @@ from config.node_config import (  # noqa: E402
     CredentialResolutionError,
     load_node_config,
 )
-from execution_domain.control_plane import TradingState  # noqa: E402
+from execution_domain.contracts import ReconciliationState  # noqa: E402
+from execution_domain.control_plane import (  # noqa: E402
+    HeartbeatReceipt,
+    ReleaseGateReceipt,
+    TradingState,
+)
 from execution_domain.testing import InMemoryControlPlane  # noqa: E402
-from runtime.lifecycle import DependencyName, NodeLifecycle  # noqa: E402
+from runtime.health import HealthService  # noqa: E402
+from runtime.lifecycle import (  # noqa: E402
+    ActorTickWatchdog,
+    DependencyName,
+    NodeLifecycle,
+)
+from runtime.reconciliation import (  # noqa: E402
+    ReconciliationDatasetSummary,
+    ReconciliationProof,
+)
+
+REDIS_FENCING_EPOCH = "11111111-1111-4111-8111-111111111111"
 
 
 def test_two_account_configs_keep_process_identity_and_secrets_isolated(
@@ -71,16 +89,430 @@ def test_startup_is_halted_and_readiness_requires_all_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _load_account_a(monkeypatch)
-    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
 
     assert lifecycle.trading_state is TradingState.HALTED
     assert lifecycle.readiness.ready is False
 
-    for dependency in DependencyName:
-        lifecycle.mark_dependency_ready(dependency)
+    _mark_all_dependencies_ready(lifecycle, clock)
 
     assert lifecycle.readiness.ready is True
     assert lifecycle.trading_state is TradingState.HALTED
+
+
+def test_health_service_exposes_runtime_provider_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    health = HealthService(lifecycle)
+    health.register_provider(
+        "control_plane_session",
+        lambda: {
+            "started": True,
+            "lanes": {
+                "heartbeat": {
+                    "queue_depth": 0,
+                    "capacity": 1,
+                },
+            },
+        },
+    )
+
+    response = health.readiness()
+
+    assert response.status_code == 503
+    assert response.body["providers"]["control_plane_session"] == {
+        "started": True,
+        "lanes": {
+            "heartbeat": {
+                "queue_depth": 0,
+                "capacity": 1,
+            },
+        },
+    }
+    assert response.body["health_provider_errors"] == {}
+
+
+def test_health_provider_failure_forces_readiness_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    _mark_all_dependencies_ready(lifecycle, clock)
+    health = HealthService(lifecycle)
+
+    def failed_provider() -> object:
+        raise RuntimeError("snapshot unavailable")
+
+    health.register_provider("redis_runtime_safety", failed_provider)
+
+    response = health.readiness()
+
+    assert response.status_code == 503
+    assert response.body["ready"] is False
+    assert response.body["health_provider_errors"] == {
+        "redis_runtime_safety": "snapshot unavailable",
+    }
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "expected_issue"),
+    [
+        ({"running": False, "halted": False}, "running=false"),
+        ({"running": True, "halted": True}, "halted=true"),
+    ],
+)
+def test_redis_runtime_safety_snapshot_forces_readiness_503(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: dict[str, bool],
+    expected_issue: str,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    _mark_all_dependencies_ready(lifecycle, clock)
+    health = HealthService(lifecycle)
+    health.register_provider(
+        "redis_runtime_safety",
+        lambda: snapshot,
+    )
+
+    response = health.readiness()
+
+    assert response.status_code == 503
+    assert response.body["ready"] is False
+    assert expected_issue in response.body["health_provider_issues"][
+        "redis_runtime_safety"
+    ]
+
+
+def test_session_process_liveness_false_forces_both_health_surfaces_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    _mark_all_dependencies_ready(lifecycle, clock)
+    health = HealthService(lifecycle)
+    health.register_provider(
+        "control_plane_session",
+        lambda: {
+            "started": True,
+            "stopped": False,
+            "process_liveness": False,
+            "lanes": {},
+        },
+    )
+
+    live = health.liveness()
+    ready = health.readiness()
+
+    assert live.status_code == 503
+    assert live.body["live"] is False
+    assert ready.status_code == 503
+    assert ready.body["ready"] is False
+    assert "process_liveness=false" in ready.body[
+        "health_provider_issues"
+    ]["control_plane_session"]
+
+
+def test_session_lane_circuit_and_queue_pressure_force_readiness_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    _mark_all_dependencies_ready(lifecycle, clock)
+    health = HealthService(lifecycle)
+    health.register_provider(
+        "control_plane_session",
+        lambda: {
+            "started": True,
+            "stopped": False,
+            "process_liveness": True,
+            "lanes": {
+                "heartbeat": {
+                    "circuit_state": "open",
+                    "queue_pressure": "normal",
+                },
+                "execution_event": {
+                    "circuit_state": "closed",
+                    "queue_pressure": "degraded",
+                },
+            },
+        },
+    )
+
+    live = health.liveness()
+    ready = health.readiness()
+
+    assert live.status_code == 200
+    assert ready.status_code == 503
+    issues = ready.body["health_provider_issues"][
+        "control_plane_session"
+    ]
+    assert "heartbeat.circuit_state=open" in issues
+    assert "execution_event.queue_pressure=degraded" in issues
+
+
+def test_live_startup_ignores_active_environment_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    live_config = replace(
+        config,
+        binance=replace(config.binance, environment="live"),
+    )
+    monkeypatch.setenv("NAUTILUS_INITIAL_TRADING_STATE", "ACTIVE")
+    monkeypatch.setenv(
+        "TRADER_RELEASE_IMAGE_DIGEST",
+        "sha256:" + ("1" * 64),
+    )
+    monkeypatch.setenv("TRADER_RELEASE_CONFIG_SHA256", "2" * 64)
+    monkeypatch.setenv(
+        "TRADER_RELEASE_DEPENDENCY_LOCK_SHA256",
+        "3" * 64,
+    )
+    monkeypatch.setenv(
+        "TRADER_RELEASE_SCHEMA_EPOCH",
+        "0014_cancel_order_contract",
+    )
+
+    lifecycle = NodeLifecycle(config=live_config, clock=_FixedClock())
+
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.halt_reason == "startup"
+
+
+def test_reconciliation_dependency_requires_a_real_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+
+    for dependency in DependencyName:
+        lifecycle.mark_dependency_ready(dependency)
+
+    assert lifecycle.readiness.ready is False
+    assert DependencyName.RECONCILIATION in lifecycle.readiness.missing
+    assert lifecycle.reconciliation.status == "missing"
+    with pytest.raises(RuntimeError, match="reconciliation proof is missing"):
+        lifecycle.apply_operator_state(
+            TradingState.ACTIVE,
+            reason="operator resume",
+        )
+
+
+def test_resume_requires_fresh_healthy_reconciliation_proof_with_matching_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(
+        config=config,
+        clock=clock,
+        reconciliation_proof_max_age=timedelta(seconds=30),
+    )
+    for dependency in DependencyName:
+        if dependency is not DependencyName.RECONCILIATION:
+            lifecycle.mark_dependency_ready(dependency)
+
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(
+            config,
+            completed_at=clock.now(),
+            release_id="wrong-release",
+        )
+    )
+    assert lifecycle.reconciliation.status == "identity_mismatch"
+    with pytest.raises(RuntimeError, match="identity does not match"):
+        lifecycle.apply_operator_state(
+            TradingState.ACTIVE,
+            reason="operator resume",
+        )
+
+    lifecycle.record_reconciliation_proof(
+        ReconciliationProof(
+            account_id=config.account_id,
+            node_id=config.node_id,
+            release_id="release-a",
+            state=ReconciliationState.FAILED,
+            orders=ReconciliationDatasetSummary.from_records([]),
+            positions=ReconciliationDatasetSummary.from_records([]),
+            fills=ReconciliationDatasetSummary.from_records([]),
+            completed_at=clock.now(),
+        )
+    )
+    assert lifecycle.reconciliation.status == "unhealthy"
+    with pytest.raises(RuntimeError, match="is not healthy"):
+        lifecycle.apply_operator_state(
+            TradingState.ACTIVE,
+            reason="operator resume",
+        )
+
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(config, completed_at=clock.now())
+    )
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+    assert lifecycle.trading_state is TradingState.ACTIVE
+
+    clock.advance(timedelta(seconds=31))
+    lifecycle.evaluate_safety()
+
+    assert lifecycle.reconciliation.status == "stale"
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.halt_reason == "reconciliation proof is stale"
+    with pytest.raises(RuntimeError, match="reconciliation proof is stale"):
+        lifecycle.apply_operator_state(
+            TradingState.ACTIVE,
+            reason="operator resume",
+        )
+
+
+def test_reconciliation_generation_fences_old_completion_and_blocks_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    for dependency in DependencyName:
+        if dependency is not DependencyName.RECONCILIATION:
+            lifecycle.mark_dependency_ready(dependency)
+
+    first_generation = lifecycle.begin_reconciliation()
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(
+            config,
+            completed_at=clock.now(),
+            generation=first_generation,
+        )
+    )
+    assert lifecycle.reconciliation.status == "healthy"
+
+    second_generation = lifecycle.begin_reconciliation()
+
+    assert second_generation == first_generation + 1
+    assert lifecycle.reconciliation.status == "in_flight"
+    with pytest.raises(RuntimeError, match="reconciliation is in flight"):
+        lifecycle.apply_operator_state(
+            TradingState.ACTIVE,
+            reason="operator resume",
+        )
+
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(
+            config,
+            completed_at=clock.now(),
+            generation=first_generation,
+        )
+    )
+
+    assert lifecycle.reconciliation.status == "in_flight"
+
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(
+            config,
+            completed_at=clock.now(),
+            generation=second_generation,
+        )
+    )
+
+    assert lifecycle.reconciliation.status == "healthy"
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+    assert lifecycle.trading_state is TradingState.ACTIVE
+
+
+def test_ready_reports_reconciliation_proof_status_and_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(
+        config=config,
+        clock=clock,
+        reconciliation_proof_max_age=timedelta(seconds=30),
+    )
+    health = HealthService(lifecycle)
+
+    pending = health.readiness()
+    assert pending.body["reconciliation_status"] == "missing"
+    assert pending.body["reconciliation_proof_age_seconds"] is None
+
+    _mark_all_dependencies_ready(lifecycle, clock)
+    clock.advance(timedelta(seconds=12))
+    ready = health.readiness()
+
+    assert ready.status_code == 200
+    assert ready.body["reconciliation_status"] == "healthy"
+    assert ready.body["reconciliation_proof_age_seconds"] == 12.0
+    assert ready.body["reconciliation_proof_fresh"] is True
+
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+    clock.advance(timedelta(seconds=19))
+    stale = health.readiness()
+
+    assert stale.status_code == 503
+    assert stale.body["reconciliation_status"] == "stale"
+    assert stale.body["reconciliation_proof_age_seconds"] == 31.0
+    assert lifecycle.trading_state is TradingState.HALTED
+
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(config, completed_at=clock.now())
+    )
+    assert lifecycle.readiness.ready is True
+    assert lifecycle.trading_state is TradingState.HALTED
+
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+    assert lifecycle.trading_state is TradingState.ACTIVE
+
+
+def test_runtime_without_release_identity_rejects_reconciliation_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(
+        config=config,
+        clock=clock,
+        release_id="",
+    )
+    for dependency in DependencyName:
+        if dependency is not DependencyName.RECONCILIATION:
+            lifecycle.mark_dependency_ready(dependency)
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(config, completed_at=clock.now())
+    )
+
+    assert lifecycle.reconciliation.status == "release_identity_missing"
+    with pytest.raises(RuntimeError, match="runtime release identity is missing"):
+        lifecycle.apply_operator_state(
+            TradingState.ACTIVE,
+            reason="operator resume",
+        )
+
+
+def test_reconciliation_summary_digest_is_stable_and_rejects_opaque_records() -> None:
+    first = ReconciliationDatasetSummary.from_records(
+        [
+            {"venue_order_id": "order-2", "quantity": "2"},
+            {"venue_order_id": "order-1", "quantity": "1"},
+        ]
+    )
+    second = ReconciliationDatasetSummary.from_records(
+        [
+            {"quantity": "1", "venue_order_id": "order-1"},
+            {"quantity": "2", "venue_order_id": "order-2"},
+        ]
+    )
+
+    assert first == second
+    with pytest.raises(TypeError, match="stable scalars"):
+        ReconciliationDatasetSummary.from_records([object()])
 
 
 def test_heartbeat_carries_the_runtime_account_identity(
@@ -94,6 +526,219 @@ def test_heartbeat_carries_the_runtime_account_identity(
     assert heartbeat.account_id == config.account_id
 
 
+def test_live_heartbeat_release_drift_is_sticky_halted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    live_config = replace(
+        config,
+        binance=replace(config.binance, environment="live"),
+    )
+    monkeypatch.setenv(
+        "TRADER_RELEASE_IMAGE_DIGEST",
+        "sha256:" + ("1" * 64),
+    )
+    monkeypatch.setenv("TRADER_RELEASE_CONFIG_SHA256", "2" * 64)
+    monkeypatch.setenv(
+        "TRADER_RELEASE_DEPENDENCY_LOCK_SHA256",
+        "3" * 64,
+    )
+    monkeypatch.setenv(
+        "TRADER_RELEASE_SCHEMA_EPOCH",
+        "0014_cancel_order_contract",
+    )
+
+    class ControlPlane:
+        def heartbeat(self, node_id, heartbeat):
+            del node_id, heartbeat
+            return HeartbeatReceipt(
+                release_gate=ReleaseGateReceipt(
+                    status="drift",
+                    release_id="release-a",
+                    reviewed_manifest=None,
+                ),
+            )
+
+    lifecycle = NodeLifecycle(
+        config=live_config,
+        clock=_FixedClock(),
+        control_plane=ControlPlane(),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="heartbeat release gate failed: drift",
+    ):
+        lifecycle.send_heartbeat()
+
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert DependencyName.CONTROL_PLANE in lifecycle.readiness.missing
+    assert "heartbeat release gate failed: drift" in lifecycle.halt_reason
+
+
+def test_heartbeat_receipt_updates_rollout_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    assert lifecycle.rollout_phase is None
+
+    lifecycle.record_heartbeat_receipt(
+        HeartbeatReceipt(
+            release_gate=ReleaseGateReceipt(
+                status="pass",
+                release_id="release-a",
+                reviewed_manifest=None,
+                rollout_phase="fleet_complete",
+                live_open_mode="normal",
+                phase_version=5,
+            ),
+        )
+    )
+
+    assert lifecycle.rollout_phase == "fleet_complete"
+    assert lifecycle.live_open_gate == {
+        "mode": "normal",
+        "release_id": "release-a",
+        "rollout_phase": "fleet_complete",
+        "phase_version": 5,
+    }
+
+
+def test_live_open_gate_validation_rejects_stale_phase_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    lifecycle.record_heartbeat_receipt(
+        HeartbeatReceipt(
+            release_gate=ReleaseGateReceipt(
+                status="pass",
+                release_id="release-a",
+                reviewed_manifest=None,
+                rollout_phase="fleet_complete",
+                live_open_mode="normal",
+                phase_version=5,
+            ),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="live_open_gate_mismatch"):
+        lifecycle.validate_live_open_gate(
+            {
+                "mode": "normal",
+                "release_id": "release-a",
+                "rollout_phase": "fleet_complete",
+                "phase_version": 4,
+            },
+            require_normal=True,
+        )
+
+
+def test_heartbeat_build_monotonically_fences_runtime_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    lifecycle.configure_lease(
+        redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        generation=41,
+        freshness_seconds=10,
+    )
+
+    first = lifecycle.build_heartbeat()
+    second = lifecycle.build_heartbeat()
+
+    assert first.runtime_generation == lifecycle.runtime_generation
+    assert second.runtime_generation == lifecycle.runtime_generation
+    assert first.redis_fencing_epoch == REDIS_FENCING_EPOCH
+    assert second.redis_fencing_epoch == REDIS_FENCING_EPOCH
+    assert first.lease_fencing_token == 41
+    assert second.lease_fencing_token == 41
+    assert first.heartbeat_sequence == 1
+    assert second.heartbeat_sequence == 2
+
+
+def test_heartbeat_carries_release_identity_exchange_evidence_and_proof_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "TRADER_RELEASE_IMAGE_DIGEST",
+        "sha256:" + ("1" * 64),
+    )
+    monkeypatch.setenv("TRADER_RELEASE_CONFIG_SHA256", "2" * 64)
+    monkeypatch.setenv(
+        "TRADER_RELEASE_DEPENDENCY_LOCK_SHA256",
+        "3" * 64,
+    )
+    monkeypatch.setenv(
+        "TRADER_RELEASE_SCHEMA_EPOCH",
+        "0014_cancel_order_contract",
+    )
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    generation = lifecycle.begin_reconciliation()
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(
+            config,
+            completed_at=clock.now(),
+            generation=generation,
+        )
+    )
+
+    heartbeat = lifecycle.build_heartbeat(
+        exchange_evidence={
+            "positions": [{"symbol": "ETHUSDT", "quantity": "-0.01"}],
+            "regular_orders": [
+                {"symbol": "BTCUSDT", "client_order_id": "regular-1"}
+            ],
+            "algo_orders": [
+                {"symbol": "ETHUSDT", "client_order_id": "algo-1"}
+            ],
+            "fetched_at": clock.now(),
+        }
+    )
+
+    assert heartbeat.release_id == "release-a"
+    assert heartbeat.image_digest == "sha256:" + ("1" * 64)
+    assert heartbeat.config_sha256 == "2" * 64
+    assert heartbeat.dependency_lock_sha256 == "3" * 64
+    assert heartbeat.schema_epoch == "0014_cancel_order_contract"
+    assert heartbeat.positions == (
+        {"symbol": "ETHUSDT", "quantity": "-0.01"},
+    )
+    assert heartbeat.regular_orders_snapshot_at == clock.now()
+    assert heartbeat.algo_orders_snapshot_at == clock.now()
+    assert heartbeat.reconciliation_completed_at == clock.now()
+
+
+def test_heartbeat_build_enriches_open_orders_from_registered_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    lifecycle.set_open_orders_provider(
+        lambda: [
+            {
+                "client_order_id": "order-1",
+                "instrument_id": "BTCUSDT-PERP.BINANCE",
+                "side": "BUY",
+            }
+        ]
+    )
+
+    heartbeat = lifecycle.build_heartbeat()
+
+    assert heartbeat.open_orders == (
+        {
+            "client_order_id": "order-1",
+            "instrument_id": "BTCUSDT-PERP.BINANCE",
+            "side": "BUY",
+        },
+    )
+
+
 def test_control_plane_loss_and_stale_snapshot_auto_halt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -102,8 +747,7 @@ def test_control_plane_loss_and_stale_snapshot_auto_halt(
     control_plane = InMemoryControlPlane(now=clock.now)
     lifecycle = NodeLifecycle(config=config, clock=clock, control_plane=control_plane)
 
-    for dependency in DependencyName:
-        lifecycle.mark_dependency_ready(dependency)
+    _mark_all_dependencies_ready(lifecycle, clock)
     lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
     control_plane.record_snapshot(account_id=config.account_id, generated_at=clock.now())
 
@@ -129,11 +773,236 @@ def test_control_plane_loss_and_stale_snapshot_auto_halt(
     assert lifecycle.halt_reason == "control-plane snapshot stale"
 
 
+def test_dependency_recovery_keeps_node_halted_until_explicit_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    _mark_all_dependencies_ready(lifecycle, clock)
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+
+    lifecycle.mark_dependency_failed(
+        DependencyName.COMMAND_STREAM,
+        "operator command poll stale",
+    )
+    lifecycle.mark_dependency_ready(DependencyName.COMMAND_STREAM)
+
+    assert lifecycle.readiness.ready is True
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.halt_reason == "command_stream failed: operator command poll stale"
+
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+
+    assert lifecycle.trading_state is TradingState.ACTIVE
+
+
+def test_redis_runtime_safety_failure_requires_restart_and_stays_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    _mark_all_dependencies_ready(lifecycle, clock)
+    lifecycle.apply_operator_state(
+        TradingState.ACTIVE,
+        reason="operator resume",
+    )
+
+    lifecycle.mark_dependency_failed(
+        DependencyName.REDIS,
+        "Redis runtime safety stream byte limit exceeded",
+    )
+    lifecycle.mark_dependency_ready(DependencyName.REDIS)
+
+    assert lifecycle.restart_required is True
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert DependencyName.REDIS in lifecycle.readiness.missing
+    with pytest.raises(RuntimeError, match="restart is required"):
+        lifecycle.apply_operator_state(
+            TradingState.ACTIVE,
+            reason="operator resume",
+        )
+
+    replacement = NodeLifecycle(config=config, clock=clock)
+
+    assert replacement.restart_required is False
+    assert replacement.trading_state is TradingState.HALTED
+
+
+def test_stale_lease_generation_halts_active_and_requires_refresh_then_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    monotonic = _FixedMonotonic()
+    lifecycle = NodeLifecycle(
+        config=config,
+        clock=clock,
+        monotonic=monotonic,
+    )
+    _mark_all_dependencies_ready(lifecycle, clock)
+    lifecycle.configure_lease(
+        redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        generation=41,
+        freshness_seconds=10,
+    )
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+
+    monotonic.advance(11)
+
+    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.halt_reason == "Redis namespace lease freshness expired"
+    with pytest.raises(RuntimeError, match="lease freshness expired"):
+        lifecycle.apply_operator_state(
+            TradingState.ACTIVE,
+            reason="operator resume",
+        )
+
+    lifecycle.record_lease_refresh(
+        redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        generation=41,
+    )
+
+    assert lifecycle.trading_state is TradingState.HALTED
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+    assert lifecycle.trading_state is TradingState.ACTIVE
+
+
+def test_risk_generation_rejects_stale_runtime_reconciliation_and_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    lifecycle.configure_lease(
+        redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        generation=9,
+        freshness_seconds=10,
+    )
+
+    with pytest.raises(RuntimeError, match="runtime generation"):
+        lifecycle.validate_risk_generation(
+            runtime_generation="old-runtime",
+            reconciliation_generation=lifecycle.reconciliation_generation,
+            lease_generation=9,
+        )
+    with pytest.raises(RuntimeError, match="reconciliation generation"):
+        lifecycle.validate_risk_generation(
+            runtime_generation=lifecycle.runtime_generation,
+            reconciliation_generation=lifecycle.reconciliation_generation + 1,
+            lease_generation=9,
+        )
+    with pytest.raises(RuntimeError, match="lease generation"):
+        lifecycle.validate_risk_generation(
+            runtime_generation=lifecycle.runtime_generation,
+            reconciliation_generation=lifecycle.reconciliation_generation,
+            lease_generation=8,
+        )
+
+
+def test_actor_tick_watchdog_halts_without_actor_timer_and_requires_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    _mark_all_dependencies_ready(lifecycle, clock)
+    lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
+    stale_ages: list[float] = []
+    restart_ages: list[float] = []
+    watchdog = ActorTickWatchdog(
+        lifecycle,
+        stale_after_seconds=0.02,
+        restart_after_seconds=0.05,
+        check_interval_seconds=0.005,
+        on_stale=stale_ages.append,
+        on_restart_required=restart_ages.append,
+    )
+
+    watchdog.start()
+    try:
+        assert _wait_until(
+            lambda: lifecycle.trading_state is TradingState.HALTED,
+            timeout=0.5,
+        )
+        assert DependencyName.COMMAND_STREAM in lifecycle.readiness.missing
+        assert lifecycle.actor_tick_age_seconds >= 0.02
+        assert _wait_until(lambda: len(stale_ages) == 1, timeout=0.5)
+        assert _wait_until(lambda: lifecycle.restart_required, timeout=0.5)
+        assert _wait_until(lambda: len(restart_ages) == 1, timeout=0.5)
+        health = HealthService(lifecycle)
+        live = health.liveness()
+        ready = health.readiness()
+
+        assert live.status_code == 503
+        assert live.body["live"] is False
+        assert live.body["actor_tick_age_seconds"] >= 0.05
+        assert live.body["restart_required"] is True
+        assert ready.status_code == 503
+        assert ready.body["ready"] is False
+        assert ready.body["actor_tick_age_seconds"] >= 0.05
+        assert ready.body["restart_required"] is True
+
+        watchdog.record_tick()
+        lifecycle.mark_dependency_ready(DependencyName.COMMAND_STREAM)
+
+        assert lifecycle.restart_required is True
+        assert DependencyName.COMMAND_STREAM in lifecycle.readiness.missing
+        with pytest.raises(RuntimeError, match="restart is required"):
+            lifecycle.apply_operator_state(
+                TradingState.ACTIVE,
+                reason="operator resume",
+            )
+    finally:
+        watchdog.stop()
+
+    watchdog.start()
+    try:
+        assert _wait_until(lambda: len(stale_ages) == 2, timeout=0.5)
+        assert _wait_until(lambda: len(restart_ages) == 2, timeout=0.5)
+    finally:
+        watchdog.stop()
+
+
 def _load_account_a(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BINANCE_ACCOUNT_A_API_KEY", "account-a-key")
     monkeypatch.setenv("BINANCE_ACCOUNT_A_API_SECRET", "account-a-secret")
     monkeypatch.setenv("CONTROL_PLANE_ACCOUNT_A_TOKEN", "node-a-token")
+    monkeypatch.setenv("TRADER_RELEASE_ID", "release-a")
     return load_node_config(SERVICE_ROOT / "config" / "examples" / "account-a.sandbox.json")
+
+
+def _mark_all_dependencies_ready(
+    lifecycle: NodeLifecycle,
+    clock: "_FixedClock",
+) -> None:
+    for dependency in DependencyName:
+        if dependency is DependencyName.RECONCILIATION:
+            continue
+        lifecycle.mark_dependency_ready(dependency)
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(lifecycle.config, completed_at=clock.now())
+    )
+
+
+def _healthy_proof(
+    config,
+    *,
+    completed_at: datetime,
+    release_id: str = "release-a",
+    generation: int = 0,
+) -> ReconciliationProof:
+    return ReconciliationProof(
+        account_id=config.account_id,
+        node_id=config.node_id,
+        release_id=release_id,
+        state=ReconciliationState.HEALTHY,
+        orders=ReconciliationDatasetSummary.from_records([]),
+        positions=ReconciliationDatasetSummary.from_records([]),
+        fills=ReconciliationDatasetSummary.from_records([]),
+        completed_at=completed_at,
+        generation=generation,
+    )
 
 
 class _FixedClock:
@@ -148,3 +1017,23 @@ class _FixedClock:
 
     def advance(self, delta: timedelta) -> None:
         self._value += delta
+
+
+class _FixedMonotonic:
+    def __init__(self) -> None:
+        self._value = 100.0
+
+    def __call__(self) -> float:
+        return self._value
+
+    def advance(self, seconds: float) -> None:
+        self._value += seconds
+
+
+def _wait_until(predicate, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.001)
+    return bool(predicate())

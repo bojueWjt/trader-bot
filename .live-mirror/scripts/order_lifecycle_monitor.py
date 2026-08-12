@@ -99,6 +99,9 @@ BRAIN_PROBES = (
     ("fallback", "https://open.bigmodel.cn/api/anthropic/v1/messages", "BIGMODEL_API_KEY",
      "anthropic", "glm-5.2"),
 )
+# 告警文案从 BRAIN_PROBES 取模型名,避免换模型后文案漂移(2026-08-04 前曾写死 gpt-5.5 误导排障)
+BRAIN_PRIMARY_MODEL = BRAIN_PROBES[0][4]
+BRAIN_FALLBACK_MODEL = BRAIN_PROBES[1][4]
 V3_SKILL = "v3-trader"
 
 
@@ -873,14 +876,14 @@ def brain_alert_decision(results: dict, state: dict, now_ts: float) -> str | Non
         if now_ts - float(state.get(key, 0)) < 1800:
             return None
         state[key] = now_ts
-        return ("🚨 交易大脑双通道全部断供(主 gpt-5.5 与备胎 glm-5.2 均探活失败)。"
+        return (f"🚨 交易大脑双通道全部断供(主 {BRAIN_PRIMARY_MODEL} 与备胎 {BRAIN_FALLBACK_MODEL} 均探活失败)。"
                 "信号将进入重试队列不会丢,但暂时无人决策——请尽快检查模型通道。")
     key = "brainalert:primary"
     if now_ts - float(state.get(key, 0)) < 3600:
         return None
     state[key] = now_ts
-    return ("⚠️ 交易大脑主通道(gpt-5.5)探活连续失败,已由备胎 glm-5.2 承接。"
-            "决策质量可能略降,建议尽快检查 new-api 的 codex 通道。")
+    return (f"⚠️ 交易大脑主通道({BRAIN_PRIMARY_MODEL})探活连续失败,已由备胎 {BRAIN_FALLBACK_MODEL} 承接。"
+            "决策质量可能略降,建议尽快检查 new-api 的模型通道。")
 
 
 def sweep_brain(state: dict, dry_run: bool, now_ts: float | None = None,

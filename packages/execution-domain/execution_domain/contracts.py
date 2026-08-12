@@ -44,6 +44,7 @@ class IntentAction(str, Enum):
     MOVE_STOP_LOSS = "move_stop_loss"
     MOVE_STOP_TO_ENTRY = "move_stop_to_entry"
     REPLACE_TAKE_PROFITS = "replace_take_profits"
+    CANCEL_ORDER = "cancel_order"
 
 
 #: Actions that may only reduce an existing position (all exits are reduce_only).

@@ -136,36 +136,55 @@ python3 scripts/db_manager.py --db ~/projects/trading-data/trading.db record-sig
 根据消息来源的 channel_id 查找对应的 Binance 账户：
 
 ```bash
+python3 scripts/db_manager.py list-accounts
 python3 scripts/db_manager.py list-channels
 ```
 
-在返回的 JSON 中找到 `channel_id` 对应的 `target_account_id`。如果 channel_id 不在路由表中，提示用户配置。
+在返回的 JSON 中找到 `channel_id` 对应的 `target_account_id`，再从账号列表读取该账号的 `risk_capital_multiplier`。目标可以是主账号或子账号，两类账号都保存独立 API 凭据并按 `account_id` 执行。`account_type=subaccount` 时，`parent_account_id` 标识所属主账号。channel_id 未配置时，提示用户在 Telegram Watcher 配置页添加路由。
+
+将解析结果保存为执行账号，后续风险查询、余额查询、下单、撤单和仓位管理都使用同一个 ID：
+
+```bash
+TARGET_ACCOUNT_ID="<target_account_id>"
+RISK_CAPITAL_MULTIPLIER="<risk_capital_multiplier>"
+```
 
 ### Step 3: 仓位计算
 
 #### 3a. 获取风险比例
 
 ```bash
-python3 scripts/db_manager.py get-risk BTCUSDT --account main
+python3 scripts/db_manager.py get-risk BTCUSDT --account "$TARGET_ACCOUNT_ID"
 ```
 
 风险回退链：`symbol_risk_configs` → 账户 `default_risk_ratio` → 全局默认 0.01 (1%)。
 
-#### 3b. 获取账户余额
+#### 3b. 获取当前实时实际权益
 
 ```bash
-python3 scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account main get-balance
+python3 scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account "$TARGET_ACCOUNT_ID" get-equity
 ```
+
+`get-equity` 读取 Binance Futures `totalMarginBalance`，包含当前未实现盈亏。每次新开仓都重新读取，账号盈利后仓位基准增大，账号亏损后仓位基准收缩。
 
 #### 3c. 计算仓位大小
 
 ```bash
-python3 scripts/binance_trade.py calc-position --balance 10000 --risk-ratio 0.02 --entry 65000 --sl 64000
+python3 scripts/binance_trade.py calc-position --equity 5000 --capital-multiplier "$RISK_CAPITAL_MULTIPLIER" --risk-ratio 0.02 --entry 65000 --sl 64000
 ```
 
-公式：`quantity = (balance * risk_ratio) / abs(entry_price - stop_loss)`
+公式：
 
-返回 JSON 包含 `quantity`、`risk_amount`、`distance`。
+```text
+effective_equity = current_actual_equity * risk_capital_multiplier
+quantity = (effective_equity * risk_ratio) / abs(entry_price - stop_loss)
+```
+
+`risk_capital_multiplier` 是账号配置值。初始化时可通过 `calc-capital-multiplier --initial-equity <初始化实际权益> --target-equity <目标有效权益>` 计算一次并保存；后续继续使用已保存系数与每次读取的实时实际权益。`9000` 等目标有效权益只用于初始化或测试样例，运行时有效权益始终由实时实际权益与已保存系数相乘得到。
+
+需要为 Binance API 配置代理时，使用显式 `--proxy <url>` 或环境变量 `BINANCE_PROXY`。代理必须是无认证信息的 `http://` 或 `https://` URL；两处都为空时使用直连。
+
+返回 JSON 包含 `quantity`、`risk_amount`、`distance`、`actual_equity`、`effective_equity`、兼容字段 `effective_balance` 和 `risk_capital_multiplier`。
 
 详细说明参见 `references/position-sizing.md`。
 
@@ -452,8 +471,8 @@ python3 scripts/binance_trade.py --db ~/projects/trading-data/trading.db --accou
 # 3. 查询活跃订单
 python3 scripts/db_manager.py --db ~/projects/trading-data/trading.db list-orders --status OPEN
 
-# 4. 获取账户余额
-python3 scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account jiataotx get-balance
+# 4. 获取账户实时实际权益
+python3 scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account jiataotx get-equity
 ```
 
 ### 日报格式
@@ -462,7 +481,7 @@ python3 scripts/binance_trade.py --db ~/projects/trading-data/trading.db --accou
 📊 交易日报 — YYYY-MM-DD
 
 💰 账户概览
-余额：$XXXX | 总浮盈亏：$XX
+实际权益：$XXXX | 总浮盈亏：$XX
 
 📈 当前持仓
 • BTCUSDT SHORT -0.035 @ 71028 | 浮盈 $XX | SL 72800
@@ -569,7 +588,7 @@ for p in positions:
 | 子命令 | 用途 | 示例 |
 |--------|------|------|
 | `init-db` | 初始化数据库表 | `python3 scripts/db_manager.py init-db` |
-| `add-account` | 添加 Binance 账户 | `python3 scripts/db_manager.py add-account main KEY SECRET --risk 0.01 --testnet` |
+| `add-account` | 添加 Binance 账户 | `python3 scripts/db_manager.py add-account main KEY SECRET --risk 0.01 --capital-multiplier 2 --testnet` |
 | `list-accounts` | 列出所有账户 | `python3 scripts/db_manager.py list-accounts` |
 | `set-channel` | 设置频道路由 | `python3 scripts/db_manager.py set-channel ch_123 main --name "VIP群"` |
 | `list-channels` | 列出所有频道路由 | `python3 scripts/db_manager.py list-channels` |
@@ -594,8 +613,10 @@ for p in positions:
 |--------|------|----------|------|
 | `get-price` | 查询当前价格 | YES | `python3 scripts/binance_trade.py --db ... --account main get-price BTCUSDT` |
 | `get-bookticker` | 查询买1卖1价格 | YES | `python3 scripts/binance_trade.py --db ... --account main get-bookticker BTCUSDT` |
-| `get-balance` | 查询账户余额 | YES | `python3 scripts/binance_trade.py --db ... --account main get-balance` |
-| `calc-position` | 计算仓位大小 | NO | `python3 scripts/binance_trade.py calc-position --balance 10000 --risk-ratio 0.02 --entry 65000 --sl 64000` |
+| `get-balance` | 查询钱包余额（兼容命令） | YES | `python3 scripts/binance_trade.py --db ... --account main get-balance` |
+| `get-equity` | 查询当前实际权益 | YES | `python3 scripts/binance_trade.py --db ... --account main get-equity` |
+| `calc-capital-multiplier` | 初始化风险资金系数 | NO | `python3 scripts/binance_trade.py calc-capital-multiplier --initial-equity 5000 --target-equity 10000` |
+| `calc-position` | 计算仓位大小 | NO | `python3 scripts/binance_trade.py calc-position --equity 5000 --capital-multiplier 2 --risk-ratio 0.02 --entry 65000 --sl 64000` |
 | `place-order` | 下单 | YES | `python3 scripts/binance_trade.py --db ... --account main place-order BTCUSDT BUY 0.015` |
 | `place-sl` | 下止损单 | YES | `python3 scripts/binance_trade.py --db ... --account main place-sl BTCUSDT SELL 0.015 64000` |
 | `place-tp` | 下止盈单 | YES | `python3 scripts/binance_trade.py --db ... --account main place-tp BTCUSDT SELL 0.015 68000` |
@@ -617,7 +638,7 @@ for p in positions:
 
 ## Important Rules
 
-1. **NEVER** 在未确认账户余额充足的情况下下单。先 `get-balance`，再计算。
+1. 下单前先用 `get-equity` 获取仓位计算基准，并核对交易所可用余额能够覆盖保证金。
 2. **ALWAYS** 在下单前设置杠杆（`set-leverage`）。
 3. **ALWAYS** SL/TP 使用 reduceOnly（`place-sl` 和 `place-tp` 已自动处理）。
 4. SL/TP 方向必须与持仓方向**相反**：

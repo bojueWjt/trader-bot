@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 from types import ModuleType
@@ -91,7 +92,7 @@ def test_snapshot_account_preserves_position_risk_mark_price(monkeypatch) -> Non
         "/fapi/v1/openAlgoOrders": {"orders": []},
     }
 
-    def fake_signed_get(base, path, key, secret, params=None):
+    def fake_signed_get(base, path, key, secret, params=None, opener=None):
         return responses[path]
 
     monkeypatch.setattr(recorder, "signed_get", fake_signed_get)
@@ -124,7 +125,7 @@ def test_snapshot_account_builds_canonical_summary_from_usdm_account_v3(monkeypa
         "/fapi/v1/openAlgoOrders": {"orders": []},
     }
 
-    def fake_signed_get(base, path, key, secret, params=None):
+    def fake_signed_get(base, path, key, secret, params=None, opener=None):
         requested_paths.append(path)
         return responses[path]
 
@@ -139,6 +140,78 @@ def test_snapshot_account_builds_canonical_summary_from_usdm_account_v3(monkeypa
         "margin": "225.25",
         "free": "1025.25",
     }
+
+
+def test_build_binance_opener_reads_proxy_environment(monkeypatch) -> None:
+    recorder = _load_recorder()
+    monkeypatch.setenv(
+        "BINANCE_PROXY_URL",
+        "http://100.107.72.78:13128",
+    )
+
+    opener = recorder.build_binance_opener()
+
+    proxy_handlers = [
+        handler
+        for handler in opener.handlers
+        if isinstance(handler, recorder.urllib.request.ProxyHandler)
+    ]
+    assert proxy_handlers[0].proxies == {
+        "http": "http://100.107.72.78:13128",
+        "https": "http://100.107.72.78:13128",
+    }
+
+
+@pytest.mark.parametrize(
+    ("proxy_url", "expected_error"),
+    [
+        (
+            "file:///tmp/binance-proxy",
+            "BINANCE_PROXY_URL must be an http(s) URL",
+        ),
+        (
+            "https://user:secret@proxy.example.test:8443",
+            "BINANCE_PROXY_URL must not contain credentials",
+        ),
+    ],
+)
+def test_build_binance_opener_rejects_unsafe_proxy_urls(
+    proxy_url,
+    expected_error,
+) -> None:
+    recorder = _load_recorder()
+
+    with pytest.raises(ValueError, match=expected_error.replace("(", "\\(").replace(")", "\\)")):
+        recorder.build_binance_opener(proxy_url)
+
+
+def test_signed_get_uses_supplied_proxy_opener() -> None:
+    recorder = _load_recorder()
+
+    class RecordingOpener:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def open(self, request, timeout):
+            self.requests.append((request, timeout))
+            return io.BytesIO(b"{}")
+
+    opener = RecordingOpener()
+
+    recorder.signed_get(
+        "https://fapi.binance.com",
+        "/fapi/v1/openOrders",
+        "api-key",
+        "api-secret",
+        opener=opener,
+    )
+
+    assert len(opener.requests) == 1
+    request, timeout = opener.requests[0]
+    assert request.full_url.startswith(
+        "https://fapi.binance.com/fapi/v1/openOrders?"
+    )
+    assert timeout == 15
 
 
 def test_run_once_upserts_exchange_and_account_projections_in_one_transaction(monkeypatch) -> None:
@@ -165,7 +238,11 @@ def test_run_once_upserts_exchange_and_account_projections_in_one_transaction(mo
         {"account-a": ("trader-v3-node-a", "BINANCE_ACCOUNT_A")},
     )
     monkeypatch.setattr(recorder, "container_keys", lambda container, prefix: ("key", "secret"))
-    monkeypatch.setattr(recorder, "snapshot_account", lambda base, key, secret: snapshot)
+    monkeypatch.setattr(
+        recorder,
+        "snapshot_account",
+        lambda base, key, secret, opener=None: snapshot,
+    )
 
     recorder.run_once(conn, "https://example.invalid")
 
@@ -206,17 +283,17 @@ def test_run_once_upserts_exchange_and_account_projections_in_one_transaction(mo
                 "availableBalance": "900.00",
             },
             "totalMarginBalance missing",
-        ),
-        (
-            {
-                "totalMarginBalance": "0",
-                "totalInitialMargin": "0",
-                "availableBalance": "0",
-            },
-            "totalMarginBalance must be positive",
-        ),
-    ],
-)
+            ),
+            (
+                {
+                    "totalMarginBalance": "-0.01",
+                    "totalInitialMargin": "0",
+                    "availableBalance": "0",
+                },
+                "totalMarginBalance must be non-negative",
+            ),
+        ],
+    )
 def test_run_once_invalid_account_summary_preserves_existing_rows(
     monkeypatch,
     capsys,
@@ -232,7 +309,7 @@ def test_run_once_invalid_account_summary_preserves_existing_rows(
     )
     monkeypatch.setattr(recorder, "container_keys", lambda container, prefix: ("key", "secret"))
 
-    def fake_signed_get(base, path, key, secret, params=None):
+    def fake_signed_get(base, path, key, secret, params=None, opener=None):
         assert path == "/fapi/v3/account"
         return account_info
 
@@ -268,7 +345,11 @@ def test_run_once_rolls_back_when_account_projection_write_fails(monkeypatch) ->
         {"account-a": ("trader-v3-node-a", "BINANCE_ACCOUNT_A")},
     )
     monkeypatch.setattr(recorder, "container_keys", lambda container, prefix: ("key", "secret"))
-    monkeypatch.setattr(recorder, "snapshot_account", lambda base, key, secret: snapshot)
+    monkeypatch.setattr(
+        recorder,
+        "snapshot_account",
+        lambda base, key, secret, opener=None: snapshot,
+    )
 
     with pytest.raises(RuntimeError, match="account projection write failed"):
         recorder.run_once(conn, "https://example.invalid")

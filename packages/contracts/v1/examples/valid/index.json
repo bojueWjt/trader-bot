@@ -1,7 +1,9 @@
 {
   "approved_trade_intent": [
+    "approved_trade_intent.cancel_order.json",
     "approved_trade_intent.move_stop_loss.json",
     "approved_trade_intent.open_position.json",
+    "approved_trade_intent.open_with_protection.json",
     "approved_trade_intent.zone_ladder_v11.json",
     "approved_trade_intent.zone_wire_v10.json"
   ],

@@ -21,6 +21,8 @@ services:
       PYTHONPATH: /work/apps/api
       RISK_STATE_PATH: /work/.runtime/risk-state.json
       SIGNAL_STORE_URL: sqlite:////data/signal_store.db
+      TRADER_TRADING_DB_PATH: /data/watcher-trading.db
+      WATCHER_TRADING_DB: /data/watcher-trading.db
       AUTH_USERNAME: ${AUTH_USERNAME:-}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-}
       AUTH_ROLE: ${AUTH_ROLE:-risk_admin}
@@ -62,6 +64,7 @@ services:
     environment:
       SIGNAL_STORE_URL: sqlite:////data/signal_store.db
       # channel_routing lookup source for per-account signal filtering
+      TRADER_TRADING_DB_PATH: /data/watcher-trading.db
       TRADING_DB_PATH: /data/watcher-trading.db
       # telegram stays off until real bot token is injected (M4-02 follow-up)
       FREQTRADE__TELEGRAM__ENABLED: "false"
@@ -97,6 +100,7 @@ services:
     command: trade --config /freqtrade/user_data/${FREQTRADE_CONFIG_B:-config_dry_run.json} --strategy SignalStrategy
     environment:
       SIGNAL_STORE_URL: sqlite:////data/signal_store.db
+      TRADER_TRADING_DB_PATH: /data/watcher-trading.db
       TRADING_DB_PATH: /data/watcher-trading.db
       FREQTRADE__TELEGRAM__ENABLED: "false"
       FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_API_USERNAME:-freqtrade-dry}
@@ -129,6 +133,8 @@ services:
       SIGNAL_IMPORTER_REMOTE_HOST: ""
       SIGNAL_IMPORTER_CWD: /app
       SIGNAL_STORE_URL: sqlite:////data/signal_store.db
+      TRADER_TRADING_DB_PATH: /data/watcher-trading.db
+      WATCHER_TRADING_DB: /data/watcher-trading.db
       TRADING_DB_PATH: /data/watcher-trading.db
       # M3-04: the python importer (invoked here via execFile) reads these to
       # query freqtrade for the signal pair's current position (advisory context)

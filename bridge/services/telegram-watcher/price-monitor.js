@@ -3,24 +3,15 @@
  * 
  * 从 trading.db 读取 price_alerts 表
  * 定期通过 Binance API 查价格
- * 到价时触发 trader agent 做订单管理
+ * 到价时记录告警状态。订单管理统一由 V3/Hermes ingress 处理。
  */
 
 const https = require("https");
-const { execFile } = require("child_process");
 const Database = require("better-sqlite3");
-const path = require("path");
-const os = require("os");
 const { isEnabledByDefault } = require("./lib/env-flags");
 
 const TRADING_DB_PATH = process.env.TRADING_DB_PATH || "/Users/balen/.openclaw/workspace-trader/trading.db";
-const HERMES = process.env.HERMES_BIN || "/Users/balen/.hermes/hermes-agent/venv/bin/hermes";
 const PRICE_MONITOR_ENABLED = isEnabledByDefault(process.env.PRICE_MONITOR_ENABLED);
-const HERMES_ENV = {
-  ...process.env,
-  HERMES_PROFILE: process.env.HERMES_PROFILE || "trader",
-  HERMES_ACCEPT_HOOKS: "1",
-};
 
 // Binance API base URLs
 const BINANCE_FUTURES_API = "fapi.binance.com";
@@ -197,66 +188,14 @@ function fetchAllPrices() {
 }
 
 /**
- * Trigger trader agent via Hermes cron
+ * Record that execution remains delegated to the V3 order-management path.
  */
 function triggerTrader(alert, currentPrice) {
-  if (!PRICE_MONITOR_ENABLED) {
-    console.log("[price-monitor] Hermes price monitor disabled");
-    return false;
-  }
-
-  const message = `⚠️ 价格警报触发！
-
-品种：${alert.symbol}
-当前价：${currentPrice}
-目标价：${alert.target_price}
-类型：${alert.alert_type}
-方向：${alert.direction === "above" ? "上穿" : "下穿"}
-订单ID：#${alert.order_id}
-${alert.quantity ? `操作数量：${alert.quantity}` : ""}
-${alert.note ? `备注：${alert.note}` : ""}
-
-请按照 crypto-trader skill 流程执行订单管理：
-1. 查询订单 #${alert.order_id} 的当前状态和持仓
-2. 根据警报类型执行操作（${alert.alert_type} → 部分平仓/全部平仓/移动止损等）
-3. 用 message 工具通过 accountId=trader channel=telegram target=telegram:balen 发送操作结果`;
-
-  const jobName = `price-alert-${alert.id}-${alert.symbol}`;
-  const addArgs = [
-    "cron", "create",
-    new Date().toISOString(),
-    message,
-    "--name", jobName,
-    "--deliver", "local",
-    "--repeat", "1",
-    "--skill", "crypto-trader",
-    "--workdir", "/Users/balen/.openclaw/workspace-trader",
-  ];
-
-  execFile(HERMES, addArgs, { timeout: 30000, env: HERMES_ENV }, (err, stdout, stderr) => {
-    if (err) {
-      console.log(`[price-monitor] hermes cron create error: ${err.message}`);
-      if (stderr) console.log(`[price-monitor] hermes stderr: ${String(stderr).substring(0, 300)}`);
-      return;
-    }
-    const match = stdout.match(/Created job:\s*(\S+)/);
-    const jobId = match && match[1];
-    if (!jobId) {
-      console.log(`[price-monitor] No job ID in hermes output: ${stdout.substring(0, 300)}`);
-      return;
-    }
-    console.log(`[price-monitor] hermes cron job created: ${jobId}`);
-
-    execFile(HERMES, ["cron", "run", jobId, "--accept-hooks"], { timeout: 10000, env: HERMES_ENV }, (runErr, runOut, runStderr) => {
-      if (runErr) {
-        console.log(`[price-monitor] hermes cron run error: ${runErr.message}`);
-        if (runStderr) console.log(`[price-monitor] hermes run stderr: ${String(runStderr).substring(0, 300)}`);
-        return;
-      }
-      console.log(`[price-monitor] hermes cron run queued: ${jobId}`);
-    });
-  });
-  return true;
+  console.log(
+    `[price-monitor] alert ${alert.id} recorded for ${alert.symbol} `
+    + `at ${currentPrice}; V3 owns order management`
+  );
+  return false;
 }
 
 /**

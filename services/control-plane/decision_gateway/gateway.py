@@ -36,6 +36,26 @@ from order_management.execution_jobs import create_execution_job_for_approved_in
 from policy import RiskPolicy  # noqa: E402
 
 SCHEMA_PATH = _REPO_ROOT / "packages" / "contracts" / "v1" / "hermes_decision.v1.json"
+_LIVE_OPEN_ACTIONS = frozenset({"open_position", "add_position"})
+_ROLLOUT_PHASE_FLEET_COMPLETE = "fleet_complete"
+_ROLLOUT_PHASE_ABORTED = "aborted"
+_LIVE_OPEN_GATED_ACCOUNTS = frozenset(
+    {
+        "account-a",
+        "account-b",
+        "account-c",
+        "account-d",
+    }
+)
+_ROLLOUT_PHASES = frozenset(
+    {
+        "account_a_canary",
+        "account_b_rollout",
+        "account_c_rollout",
+        "account_d_rollout",
+        _ROLLOUT_PHASE_FLEET_COMPLETE,
+    }
+)
 
 
 class GatewayError(RuntimeError):
@@ -125,7 +145,15 @@ def process_one_decision(
                 outcome.checks = list(outcome.checks) + [
                     {"name": "context_freshness", "passed": False}
                 ]
-            return _write_outcome(cur, row, outcome, decision=decision, policy=policy)
+            live_open_gate = _apply_live_open_rollout_gate(cur, row, outcome)
+            return _write_outcome(
+                cur,
+                row,
+                outcome,
+                decision=decision,
+                policy=policy,
+                live_open_gate=live_open_gate,
+            )
 
 
 def _freshness_problem(row: dict[str, Any], decision: dict[str, Any], policy: RiskPolicy) -> str | None:
@@ -159,6 +187,7 @@ def _write_outcome(
     *,
     decision: dict[str, Any] | None = None,
     policy: RiskPolicy | None = None,
+    live_open_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     risk_decision_id = str(uuid4())
     cur.execute(
@@ -185,7 +214,13 @@ def _write_outcome(
 
     if outcome.status == "approved" and decision is not None and policy is not None:
         result["intent_id"] = _write_trade_intent(
-            cur, row, outcome, decision, policy, risk_decision_id
+            cur,
+            row,
+            outcome,
+            decision,
+            policy,
+            risk_decision_id,
+            live_open_gate=live_open_gate,
         )
         if result["intent_id"] is not None:
             create_execution_job_for_approved_intent(
@@ -197,7 +232,14 @@ def _write_outcome(
 
 
 def _write_trade_intent(
-    cur, row, outcome, decision, policy, risk_decision_id
+    cur,
+    row,
+    outcome,
+    decision,
+    policy,
+    risk_decision_id,
+    *,
+    live_open_gate: dict[str, Any] | None = None,
 ) -> str | None:
     idempotency_key = _idempotency_key(row, outcome)
     cur.execute(
@@ -218,6 +260,8 @@ def _write_trade_intent(
         "leverage": intent.get("leverage"),
         "authorization": authorization,
     }
+    if live_open_gate is not None:
+        order_plan["live_open_gate"] = dict(live_open_gate)
     intent_id = str(uuid4())
     cur.execute(
         """
@@ -257,6 +301,108 @@ def _write_trade_intent(
         ),
     )
     return intent_id
+
+
+def _apply_live_open_rollout_gate(
+    cur,
+    row: dict[str, Any],
+    outcome: "governor.RiskDecision",
+) -> dict[str, Any] | None:
+    action = str(row.get("action") or "")
+    if outcome.status != "approved" or action not in _LIVE_OPEN_ACTIONS:
+        return None
+    account_id = str(outcome.account_id or "").strip()
+    if account_id not in _LIVE_OPEN_GATED_ACCOUNTS:
+        return None
+
+    live_open_gate = _current_live_open_gate(cur)
+    if live_open_gate is None:
+        outcome.status = "needs_review"
+        outcome.reason = (
+            "live_open_gate_unavailable: reviewed release rollout missing"
+        )
+        outcome.checks = list(outcome.checks) + [
+            {
+                "name": "live_open_gate",
+                "passed": False,
+                "detail": "reviewed release rollout missing",
+            }
+        ]
+        return None
+    if live_open_gate["mode"] == "normal":
+        outcome.checks = list(outcome.checks) + [
+            {
+                "name": "live_open_gate",
+                "passed": True,
+                "detail": _live_open_gate_detail(live_open_gate),
+            }
+        ]
+        return live_open_gate
+
+    outcome.status = "needs_review"
+    outcome.reason = (
+        "live_open_gate_canary_only: opening action held until "
+        "fleet_complete; canary opens require the operator permit path"
+    )
+    outcome.checks = list(outcome.checks) + [
+        {
+            "name": "live_open_gate",
+            "passed": False,
+            "detail": _live_open_gate_detail(live_open_gate),
+        }
+    ]
+    return live_open_gate
+
+
+def _current_live_open_gate(cur) -> dict[str, Any] | None:
+    # Serialize rollout transitions with the risk decision and intent insert.
+    cur.execute("LOCK TABLE reviewed_release_rollouts IN SHARE MODE")
+    cur.execute(
+        """
+        SELECT release_id,
+               phase,
+               phase_version
+        FROM reviewed_release_rollouts
+        ORDER BY created_at DESC, release_id DESC
+        LIMIT 1
+        """
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+
+    release_id = str(row["release_id"] or "").strip()
+    rollout_phase = str(row["phase"] or "").strip()
+    phase_version = row["phase_version"]
+    if rollout_phase == _ROLLOUT_PHASE_ABORTED:
+        return None
+    if (
+        not release_id
+        or rollout_phase not in _ROLLOUT_PHASES
+        or isinstance(phase_version, bool)
+        or not isinstance(phase_version, int)
+        or phase_version < 1
+    ):
+        raise GatewayError("reviewed release rollout state is invalid")
+
+    mode = "canary_only"
+    if rollout_phase == _ROLLOUT_PHASE_FLEET_COMPLETE:
+        mode = "normal"
+    return {
+        "mode": mode,
+        "release_id": release_id,
+        "rollout_phase": rollout_phase,
+        "phase_version": phase_version,
+    }
+
+
+def _live_open_gate_detail(live_open_gate: dict[str, Any]) -> str:
+    return (
+        f"release_id={live_open_gate['release_id']} "
+        f"rollout_phase={live_open_gate['rollout_phase']} "
+        f"phase_version={live_open_gate['phase_version']} "
+        f"mode={live_open_gate['mode']}"
+    )
 
 
 def _raw_message_authorization(cur, row: dict[str, Any]) -> dict[str, Any]:

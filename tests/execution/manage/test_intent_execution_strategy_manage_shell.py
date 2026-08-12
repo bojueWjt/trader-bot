@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+import time
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -13,7 +15,9 @@ from uuid import UUID, uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
+EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
 sys.path.insert(0, str(SERVICE_ROOT))
+sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 from strategy.intent_execution_planner import (  # noqa: E402
     InstrumentSpec,
@@ -22,6 +26,10 @@ from strategy.intent_execution_planner import (  # noqa: E402
 from strategy.intent_execution_strategy import (  # noqa: E402
     IntentExecutionStrategy,
     IntentExecutionStrategyConfig,
+)
+from runtime.intent_execution_inbox import (  # noqa: E402
+    IntentExecutionIdentity,
+    IntentExecutionState,
 )
 
 
@@ -32,6 +40,97 @@ NOW = datetime(2026, 6, 19, 12, tzinfo=timezone.utc)
 
 
 class StrategyManageShellTest(unittest.TestCase):
+    def test_async_management_persists_terminal_state_and_replay_is_inert(
+        self,
+    ) -> None:
+        intent = _intent(
+            action="move_stop_loss",
+            order_plan={"stop_price": "26000.114"},
+        )
+        old_stop = SimpleNamespace(
+            account_id=ACCOUNT_ID,
+            symbol="BTCUSDT",
+            position_side="LONG",
+            order_kind="regular",
+            venue_order_id="venue-old-stop",
+            client_order_id="old-stop",
+            instrument_id=INSTRUMENT_ID,
+            order_type="STOP_MARKET",
+            side="SELL",
+            quantity="0.5",
+            trigger_price="25500",
+            tags=(
+                f"position_id={POSITION_ID}",
+                "lifecycle_role=stop_loss",
+            ),
+        )
+        strategy = _HarnessStrategy(orders=[old_stop])
+        worker = _RecordingTerminalWorker()
+        strategy.set_terminal_exchange_worker(worker)
+
+        try:
+            self.assertTrue(strategy._queue_intent_receive(intent))
+            _pump_durable(strategy)
+            refresh = worker.requests[-1]
+            strategy._on_terminal_exchange_result(
+                SimpleNamespace(
+                    request_id=refresh.request_id,
+                    account_id=ACCOUNT_ID,
+                    error="",
+                )
+            )
+            _pump_durable(strategy)
+
+            cancel = worker.requests[-1]
+            cancel_outcomes = tuple(
+                SimpleNamespace(
+                    request=request,
+                    status="confirmed",
+                    error="",
+                )
+                for request in cancel.cancel_requests
+            )
+            strategy._on_terminal_exchange_result(
+                SimpleNamespace(
+                    request_id=cancel.request_id,
+                    account_id=ACCOUNT_ID,
+                    error="",
+                    cancel_outcomes=cancel_outcomes,
+                )
+            )
+            _pump_durable(strategy)
+
+            identity = strategy._intent_execution_inbox.pending()
+            self.assertEqual(identity, ())
+            record = strategy._intent_execution_inbox.get(
+                IntentExecutionIdentity(
+                    account_id=intent.account_id,
+                    intent_id=str(intent.intent_id),
+                    idempotency_key=intent.idempotency_key,
+                    instrument_id=intent.instrument_id,
+                    action=intent.action,
+                )
+            )
+            self.assertTrue(record)
+            self.assertEqual(
+                record.state,
+                IntentExecutionState.EXCHANGE_CONFIRMED,
+            )
+            submit_count = len(strategy.submitted_plans)
+            request_count = len(worker.requests)
+
+            strategy._processed_intent_ids.clear()
+            self.assertTrue(strategy._queue_intent_receive(intent))
+            _pump_durable(strategy)
+
+            self.assertEqual(
+                len(strategy.submitted_plans),
+                submit_count,
+            )
+            self.assertEqual(len(worker.requests), request_count)
+        finally:
+            strategy.on_stop()
+
     def test_on_data_replaces_stop_by_cancelling_cached_stop_and_submitting_new_one(self) -> None:
         intent = _intent(
             action="move_stop_loss",
@@ -331,10 +430,15 @@ class StrategyManageShellTest(unittest.TestCase):
 
 class _HarnessStrategy(IntentExecutionStrategy):
     def __init__(self, positions=None, orders=None, fail_cancel=False):
+        state_dir = Path(tempfile.mkdtemp())
+        self._state_dir = state_dir
         super().__init__(
             IntentExecutionStrategyConfig(
                 account_id=ACCOUNT_ID,
                 trading_state="ACTIVE",
+                intent_execution_inbox_path=str(
+                    state_dir / "intent-execution-inbox.json"
+                ),
             )
         )
         self._positions = list(positions or [_position()])
@@ -345,6 +449,11 @@ class _HarnessStrategy(IntentExecutionStrategy):
         self.set_exchange_cancel_adapter(
             False,
             _FreshMirror(tuple(self._orders)),
+        )
+
+    def _protection_stash_path(self) -> str:
+        return str(
+            self._state_dir / self._PROTECTION_STASH_FILENAME
         )
 
     def _now(self):
@@ -398,6 +507,18 @@ class _FreshMirror:
             if str(getattr(order, "client_order_id", "")) == str(client_order_id):
                 return order
         return False
+
+
+class _RecordingTerminalWorker:
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+
+    def new_deadline(self) -> float:
+        return time.monotonic() + 1.0
+
+    def submit(self, request: Any) -> bool:
+        self.requests.append(request)
+        return True
 
 
 def _position(position_id: str = POSITION_ID):
@@ -499,6 +620,22 @@ def _intent(**overrides):
     )
     values["order_plan"] = order_plan
     return _Intent(**values)
+
+
+def _pump_durable(strategy: IntentExecutionStrategy) -> None:
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        strategy.drain_durable_io_mailbox()
+        snapshot = strategy._durable_io_worker.snapshot()
+        if (
+            not snapshot.in_flight
+            and snapshot.queue_depth == 0
+            and strategy._durable_io_mailbox.empty()
+        ):
+            strategy.drain_durable_io_mailbox()
+            return
+        time.sleep(0.001)
+    raise AssertionError("durable I/O did not quiesce")
 
 
 if __name__ == "__main__":

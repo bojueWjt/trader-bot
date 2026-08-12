@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from dataclasses import dataclass
@@ -34,6 +35,31 @@ ACCOUNT_ID = "account-a"
 INSTRUMENT_ID = "BTCUSDT-PERP.BINANCE"
 POSITION_ID = "BTCUSDT-PERP.BINANCE-LONG"
 NOW = datetime(2026, 7, 29, 12, 30, tzinfo=timezone.utc)
+
+
+def _pump_durable(strategy: IntentExecutionStrategy) -> None:
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        strategy.drain_durable_io_mailbox()
+        snapshot = strategy._durable_io_worker.snapshot()
+        if (
+            not snapshot.in_flight
+            and snapshot.queue_depth == 0
+            and strategy._durable_io_mailbox.empty()
+        ):
+            strategy.drain_durable_io_mailbox()
+            return
+        time.sleep(0.001)
+    strategy.drain_durable_io_mailbox()
+    raise AssertionError("durable I/O did not quiesce")
+
+
+def _sync_protection(
+    strategy: IntentExecutionStrategy,
+    intent_key: str,
+) -> None:
+    strategy._sync_protection(intent_key)
+    _pump_durable(strategy)
 
 
 class TakeProfitTombstoneTest(unittest.TestCase):
@@ -78,7 +104,6 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             Path(tempfile.mkdtemp()),
             orders=_live_protection_orders(),
         )
-        strategy.cache = SimpleNamespace(orders_open=lambda: strategy._orders)
 
         strategy._on_node_command(
             SimpleNamespace(type="cancel_all", args={})
@@ -91,7 +116,6 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             Path(tempfile.mkdtemp()),
             orders=_live_protection_orders(),
         )
-        strategy.cache = SimpleNamespace(orders_open=lambda: strategy._orders)
 
         strategy._on_node_command(
             SimpleNamespace(
@@ -186,7 +210,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             strategy.submitted_plans.clear()
             for _ in range(3):
-                strategy._sync_protection(str(entry_intent_id))
+                _sync_protection(strategy, str(entry_intent_id))
 
             self.assertEqual(
                 [
@@ -255,7 +279,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             strategy._orders = [strategy._orders[0]]
             strategy.submitted_plans.clear()
-            strategy._sync_protection(str(entry_intent_id))
+            _sync_protection(strategy, str(entry_intent_id))
 
             tp_plans = [
                 plan
@@ -306,8 +330,8 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             restarted = _Strategy(state_path, orders=[_live_protection_orders()[0]])
             restarted._entry_protection_stash = restarted._load_entry_protection_stash()
-            restarted._sync_protection(str(entry_intent_id))
-            restarted._sync_protection(str(entry_intent_id))
+            _sync_protection(restarted, str(entry_intent_id))
+            _sync_protection(restarted, str(entry_intent_id))
 
             stash = restarted._entry_protection_stash[str(entry_intent_id)]
             self.assertIn("take_profit_tombstone", stash)
@@ -419,7 +443,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 "pending_cancel_ids": (),
             }
 
-            strategy._sync_protection(str(entry_intent_id))
+            _sync_protection(strategy, str(entry_intent_id))
 
             self.assertEqual(strategy.submitted_plans, [])
             self.assertEqual(strategy.denials[-1].reason, "protection_parent_intent_missing")
@@ -443,7 +467,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 "pending_cancel_ids": (),
             }
 
-            strategy._sync_protection(str(entry_intent_id))
+            _sync_protection(strategy, str(entry_intent_id))
 
             self.assertEqual(strategy.submitted_plans, [])
             self.assertEqual(strategy.cancelled_client_order_ids, [])
@@ -492,7 +516,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             stash = strategy._entry_protection_stash[str(entry_intent_id)]
             stash["take_profit_tombstone"] = {}
 
-            strategy._sync_protection(str(entry_intent_id))
+            _sync_protection(strategy, str(entry_intent_id))
 
             self.assertEqual(strategy.submitted_plans, [])
             self.assertEqual(strategy.cancelled_client_order_ids, [])
@@ -527,7 +551,9 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             with patch(
                 "strategy.intent_execution_strategy.os.replace",
-                side_effect=OSError("disk full"),
+                side_effect=_replace_failure_for(
+                    strategy._protection_stash_path()
+                ),
             ):
                 strategy._handle_intent(disable_intent)
 
@@ -619,7 +645,9 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             with patch(
                 "strategy.intent_execution_strategy.os.replace",
-                side_effect=OSError("disk full"),
+                side_effect=_replace_failure_for(
+                    strategy._protection_stash_path()
+                ),
             ):
                 strategy._handle_intent(entry)
 
@@ -693,7 +721,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 "parent_intent_id": str(entry_intent_id),
             }
 
-            strategy._sync_protection(str(entry_intent_id))
+            _sync_protection(strategy, str(entry_intent_id))
 
             self.assertEqual(strategy.submitted_plans, [])
             self.assertEqual(strategy.cancelled_client_order_ids, [])
@@ -750,7 +778,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 "pending_cancel_ids": (),
             }
 
-            strategy._sync_protection(str(legacy_intent_id))
+            _sync_protection(strategy, str(legacy_intent_id))
 
             self.assertEqual(strategy.submitted_plans, [])
             self.assertEqual(strategy.cancelled_client_order_ids, [])
@@ -1085,7 +1113,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 "exchange_state_refresh_failed",
             )
             strategy.submitted_plans.clear()
-            strategy._sync_protection(str(entry_intent_id))
+            _sync_protection(strategy, str(entry_intent_id))
             self.assertEqual(
                 [
                     plan
@@ -1207,6 +1235,9 @@ class _Strategy(IntentExecutionStrategy):
             IntentExecutionStrategyConfig(
                 account_id=ACCOUNT_ID,
                 trading_state="ACTIVE",
+                intent_execution_inbox_path=str(
+                    state_dir / "intent-execution-inbox.json"
+                ),
             )
         )
         _install_exchange_cancel_test_module()
@@ -1347,6 +1378,18 @@ class _StrategyCancelAdapter:
                 if str(order.client_order_id) != client_order_id
             )
         return SimpleNamespace(outcome="canceled", terminal_status="CANCELED")
+
+
+def _replace_failure_for(destination_path: str):
+    expected_destination = Path(destination_path)
+    real_replace = os.replace
+
+    def replace(source: str, destination: str | Path) -> None:
+        if Path(destination) == expected_destination:
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    return replace
 
 
 def _install_exchange_cancel_test_module() -> None:

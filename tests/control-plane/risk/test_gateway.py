@@ -11,6 +11,21 @@ from connection import transaction
 from policy import RiskPolicy
 
 POLICY = RiskPolicy(default_account_id="acct-1")
+ROLLOUT_ACCOUNTS = ("account-a", "account-b", "account-c", "account-d")
+ROLLOUT_PHASE_BY_ACCOUNT = {
+    "account-a": "account_a_canary",
+    "account-b": "account_b_rollout",
+    "account-c": "account_c_rollout",
+    "account-d": "account_d_rollout",
+}
+ROLLOUT_PHASE_VERSION = {
+    "account_a_canary": 1,
+    "account_b_rollout": 2,
+    "account_c_rollout": 3,
+    "account_d_rollout": 4,
+    "fleet_complete": 5,
+    "aborted": 2,
+}
 
 
 def seed_decision(
@@ -81,10 +96,182 @@ def seed_risk_state(conn, account_id="acct-1", instrument="BTCUSDT", mode="ACTIV
         )
 
 
+def seed_node_heartbeat(conn, account_id="acct-1"):
+    with transaction(conn), conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO node_heartbeats (
+                node_id,
+                account_id,
+                status,
+                last_seen_at
+            )
+            VALUES (%s, %s, 'ACTIVE', now())
+            """,
+            (f"node-{account_id}", account_id),
+        )
+
+
+def seed_reviewed_release_rollout(
+    conn,
+    *,
+    phase: str,
+    release_id: str = "release-a",
+    created_age_minutes: int = 0,
+) -> dict:
+    redis_epoch = _active_redis_epoch(conn)
+    image_digest = "sha256:" + ("1" * 64)
+    config_sha256 = "2" * 64
+    dependency_lock_sha256 = "3" * 64
+    schema_epoch = "0013_four_account_rollout"
+    with transaction(conn), conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO reviewed_release_rollouts (
+                release_id,
+                redis_fencing_epoch,
+                image_digest,
+                config_sha256,
+                dependency_lock_sha256,
+                schema_epoch,
+                manifest_sha256,
+                bundle_manifest_sha256,
+                registration_idempotency_key,
+                phase,
+                phase_version,
+                reviewed_by,
+                reviewed_at,
+                created_at
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                'account_a_canary', 1,
+                'risk-test-reviewer',
+                now(),
+                now() - (%s * interval '1 minute')
+            )
+            """,
+            (
+                release_id,
+                redis_epoch,
+                image_digest,
+                config_sha256,
+                dependency_lock_sha256,
+                schema_epoch,
+                "4" * 64,
+                "5" * 64,
+                f"{release_id}-registration",
+                created_age_minutes,
+            ),
+        )
+        if phase == "aborted":
+            cur.execute(
+                """
+                UPDATE reviewed_release_rollouts
+                SET phase='aborted',
+                    phase_version=2
+                WHERE release_id=%s
+                """,
+                (release_id,),
+            )
+        else:
+            sequence = (
+                ("account_b_rollout", 2),
+                ("account_c_rollout", 3),
+                ("account_d_rollout", 4),
+                ("fleet_complete", 5),
+            )
+            for next_phase, phase_version in sequence:
+                if phase == "account_a_canary":
+                    break
+                cur.execute(
+                    """
+                    UPDATE reviewed_release_rollouts
+                    SET phase=%s,
+                        phase_version=%s
+                    WHERE release_id=%s
+                    """,
+                    (next_phase, phase_version, release_id),
+                )
+                if next_phase == phase:
+                    break
+    return {
+        "release_id": release_id,
+        "rollout_phase": phase,
+        "phase_version": ROLLOUT_PHASE_VERSION[phase],
+    }
+
+
+def _active_redis_epoch(conn) -> str:
+    existing = _one(
+        conn,
+        """
+        SELECT redis_fencing_epoch::text
+        FROM redis_fencing_epochs
+        WHERE status='active'
+        LIMIT 1
+        """,
+    )
+    if existing:
+        return existing[0]
+    redis_epoch = str(uuid4())
+    with transaction(conn), conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO redis_fencing_epochs (
+                redis_fencing_epoch,
+                domain,
+                status,
+                marker_sha256,
+                capacity_evidence_sha256,
+                initial_redis_run_id,
+                active_volume,
+                activated_by,
+                activated_at
+            )
+            VALUES (
+                %s, 'trader-v3', 'active',
+                %s, %s, %s,
+                'risk-test-volume',
+                'risk-test',
+                now()
+            )
+            """,
+            (
+                redis_epoch,
+                "6" * 64,
+                "7" * 64,
+                "8" * 40,
+            ),
+        )
+    return redis_epoch
+
+
 def _one(conn, sql, params=()):
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return cur.fetchone()
+
+
+def _live_open_gate_check(checks, *, passed: bool):
+    matches = [
+        check
+        for check in checks
+        if check.get("name") == "live_open_gate"
+        and check.get("passed") is passed
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+@pytest.fixture(autouse=True)
+def cleanup_rollout_state(db_conn):
+    yield
+    with transaction(db_conn), db_conn.cursor() as cur:
+        cur.execute("DELETE FROM live_canary_permits")
+        cur.execute("DELETE FROM reviewed_release_rollout_events")
+        cur.execute("DELETE FROM reviewed_release_rollouts")
 
 
 def test_no_pending_returns_none(db_conn):
@@ -98,6 +285,7 @@ def test_approved_decision_writes_risk_decision_intent_and_outbox(db_conn):
         source_message_id="tg-msg-5026",
     )
     seed_risk_state(db_conn)
+    seed_node_heartbeat(db_conn)
     result = gateway.process_one_decision(db_conn, policy=POLICY)
 
     assert result["status"] == "approved"
@@ -141,6 +329,7 @@ def test_user_raw_message_builds_user_authorization(db_conn):
         author_id="balen",
     )
     seed_risk_state(db_conn)
+    seed_node_heartbeat(db_conn)
 
     result = gateway.process_one_decision(db_conn, policy=POLICY)
 
@@ -159,9 +348,148 @@ def test_user_raw_message_builds_user_authorization(db_conn):
     }
 
 
+@pytest.mark.parametrize("account_id", ROLLOUT_ACCOUNTS)
+def test_rollout_accounts_fail_closed_when_rollout_gate_is_missing(db_conn, account_id):
+    seed_decision(db_conn, target_account_id=account_id)
+    seed_risk_state(db_conn, account_id=account_id)
+    seed_node_heartbeat(db_conn, account_id=account_id)
+
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "needs_review"
+    assert result["intent_id"] is None
+    assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+    checks = _one(
+        db_conn,
+        "SELECT checks FROM risk_decisions WHERE risk_decision_id=%s",
+        (result["risk_decision_id"],),
+    )[0]
+    _live_open_gate_check(checks, passed=False)
+
+
+@pytest.mark.parametrize("account_id", ROLLOUT_ACCOUNTS)
+def test_rollout_accounts_hold_channel_open_during_canary_only_gate(
+    db_conn,
+    account_id,
+):
+    phase = ROLLOUT_PHASE_BY_ACCOUNT[account_id]
+    expected_gate = seed_reviewed_release_rollout(db_conn, phase=phase)
+    seed_decision(db_conn, target_account_id=account_id)
+    seed_risk_state(db_conn, account_id=account_id)
+    seed_node_heartbeat(db_conn, account_id=account_id)
+
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "needs_review"
+    assert result["intent_id"] is None
+    assert result["reason"] == (
+        "live_open_gate_canary_only: opening action held until "
+        "fleet_complete; canary opens require the operator permit path"
+    )
+    assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+    checks = _one(
+        db_conn,
+        "SELECT checks FROM risk_decisions WHERE risk_decision_id=%s",
+        (result["risk_decision_id"],),
+    )[0]
+    gate_check = _live_open_gate_check(checks, passed=False)
+    assert expected_gate["release_id"] in gate_check["detail"]
+    assert expected_gate["rollout_phase"] in gate_check["detail"]
+    assert f"phase_version={expected_gate['phase_version']}" in gate_check["detail"]
+    assert "mode=canary_only" in gate_check["detail"]
+
+
+@pytest.mark.parametrize("account_id", ROLLOUT_ACCOUNTS)
+def test_rollout_accounts_stamp_normal_gate_after_fleet_complete(
+    db_conn,
+    account_id,
+):
+    expected_gate = seed_reviewed_release_rollout(
+        db_conn,
+        phase="fleet_complete",
+    )
+    seed_decision(db_conn, target_account_id=account_id)
+    seed_risk_state(db_conn, account_id=account_id)
+    seed_node_heartbeat(db_conn, account_id=account_id)
+
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "approved"
+    assert result["intent_id"] is not None
+    order_plan = _one(
+        db_conn,
+        "SELECT order_plan FROM trade_intents WHERE intent_id=%s",
+        (result["intent_id"],),
+    )[0]
+    assert order_plan["live_open_gate"] == {
+        "mode": "normal",
+        "release_id": expected_gate["release_id"],
+        "rollout_phase": "fleet_complete",
+        "phase_version": expected_gate["phase_version"],
+    }
+    checks = _one(
+        db_conn,
+        "SELECT checks FROM risk_decisions WHERE risk_decision_id=%s",
+        (result["risk_decision_id"],),
+    )[0]
+    gate_check = _live_open_gate_check(checks, passed=True)
+    assert expected_gate["release_id"] in gate_check["detail"]
+    assert "rollout_phase=fleet_complete" in gate_check["detail"]
+    assert f"phase_version={expected_gate['phase_version']}" in gate_check["detail"]
+    assert "mode=normal" in gate_check["detail"]
+
+
+def test_legacy_account_open_remains_compatible_during_rollout(db_conn):
+    seed_reviewed_release_rollout(db_conn, phase="account_a_canary")
+    dec_id = seed_decision(db_conn, target_account_id="acct-1")
+    seed_risk_state(db_conn, account_id="acct-1")
+    seed_node_heartbeat(db_conn, account_id="acct-1")
+
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "approved"
+    assert result["intent_id"] is not None
+    order_plan = _one(
+        db_conn,
+        "SELECT order_plan FROM trade_intents WHERE hermes_decision_id=%s",
+        (dec_id,),
+    )[0]
+    assert "live_open_gate" not in order_plan
+
+
+def test_latest_aborted_rollout_fails_closed_over_older_fleet_complete(db_conn):
+    seed_reviewed_release_rollout(
+        db_conn,
+        phase="fleet_complete",
+        release_id="release-old",
+        created_age_minutes=10,
+    )
+    seed_reviewed_release_rollout(
+        db_conn,
+        phase="aborted",
+        release_id="release-new",
+    )
+    seed_decision(db_conn, target_account_id="account-a")
+    seed_risk_state(db_conn, account_id="account-a")
+    seed_node_heartbeat(db_conn, account_id="account-a")
+
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
+    assert result["status"] == "needs_review"
+    assert result["intent_id"] is None
+    assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+    checks = _one(
+        db_conn,
+        "SELECT checks FROM risk_decisions WHERE risk_decision_id=%s",
+        (result["risk_decision_id"],),
+    )[0]
+    _live_open_gate_check(checks, passed=False)
+
+
 def test_idempotent_second_pass_makes_no_duplicate(db_conn):
     seed_decision(db_conn)
     seed_risk_state(db_conn)
+    seed_node_heartbeat(db_conn)
     first = gateway.process_one_decision(db_conn, policy=POLICY)
     second = gateway.process_one_decision(db_conn, policy=POLICY)
 
@@ -186,6 +514,25 @@ def test_missing_risk_state_fails_closed_to_needs_review(db_conn):
     # Fail closed: needs_review, no intent (this was a fail-OPEN approval before).
     seed_decision(db_conn)
     result = gateway.process_one_decision(db_conn, policy=POLICY)
+    assert result["status"] == "needs_review"
+    assert result["intent_id"] is None
+    assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0
+
+
+def test_stale_node_heartbeat_holds_approval(db_conn):
+    seed_decision(db_conn)
+    seed_risk_state(db_conn)
+    seed_node_heartbeat(db_conn)
+    with transaction(db_conn), db_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE node_heartbeats
+            SET last_seen_at = now() - interval '2 minutes'
+            """
+        )
+
+    result = gateway.process_one_decision(db_conn, policy=POLICY)
+
     assert result["status"] == "needs_review"
     assert result["intent_id"] is None
     assert _one(db_conn, "SELECT count(*) FROM trade_intents")[0] == 0

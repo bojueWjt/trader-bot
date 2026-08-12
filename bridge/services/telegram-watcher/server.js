@@ -4,7 +4,6 @@ const fs = require("fs");
 const { TelegramClient, Api } = require("telegram");
 const { StringSession } = require("telegram/sessions");
 const { NewMessage } = require("telegram/events");
-const { triggerHermesCron } = require("./lib/hermes-cron");
 const { createWatchedEntryHandler } = require("./lib/watched-entry-routing");
 const {
   chatIdFromEntity,
@@ -56,82 +55,13 @@ function gracefulShutdown() {
 // --- Price Monitor ---
 const priceMonitor = require("./price-monitor");
 
-// --- Forward to Hermes trader agent via cron wake event ---
-const http = require("http");
-
-function forwardToTrader(entry) {
-  if (wasForwarded(entry.chatId, entry.id)) {
-    return;
-  }
-  markForwarded(entry.chatId, entry.id);
-
-  const header = `[${entry.chatTitle}] ${entry.sender}`;
-  const body = entry.text || "(media)";
-
-  // Build media attachment info
-  let mediaSection = "";
-  if (entry.media && entry.media.path) {
-    const isImage = entry.media.mimeType && entry.media.mimeType.startsWith("image/");
-    mediaSection = `\n附件: ${entry.media.type} (${entry.media.mimeType})
-文件路径: ${entry.media.path}`;
-    if (isImage) {
-      mediaSection += `\n⚠️ 这是一张图片，请用 image 工具分析图片内容，提取其中的交易信号文字（币种、方向、入场价、止损、止盈等）。`;
-    }
-  }
-
-  const text = `收到新的 Telegram 频道消息，请按照 crypto-trader skill 流程处理：
-
-1. 分类消息：交易信号→解析参数→计算仓位→下单，行情分析→存 briefing，无关→忽略
-2. 直接在最终响应中给出处理结果；不要在 cron job 内主动调用 send_message，Hermes 会通过 --deliver telegram 自动投递最终响应。
-
-来源: ${header}
-时间: ${entry.date}
-频道ID: ${entry.chatId}
-消息内容:
-${body}${mediaSection}`;
-
-  const jobName = `signal-${entry.chatId}-${entry.id}`;
-  triggerHermesCron({
-    logPrefix: "forward",
-    name: jobName,
-    prompt: text,
-    timeoutSeconds: 120,
-  });
-}
-
 const app = express();
 
 const CONFIG_PATH = path.join(__dirname, "config.json");
 const MESSAGES_PATH = path.join(__dirname, "messages.json");
 const MEDIA_DIR = process.env.WATCHER_MEDIA_DIR || path.join(__dirname, "media");
-const FORWARDED_PATH = path.join(__dirname, "forwarded.json");
 if (!fs.existsSync(MEDIA_DIR)) {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
-}
-
-// --- Forwarded tracking (avoid re-sending on restart) ---
-let forwardedIds = new Set();
-try {
-  const saved = JSON.parse(fs.readFileSync(FORWARDED_PATH, "utf-8"));
-  if (Array.isArray(saved)) {
-    forwardedIds = new Set(saved.slice(-1000)); // keep last 1000
-  }
-  console.log(`[watcher] Loaded ${forwardedIds.size} forwarded IDs`);
-} catch {}
-
-function markForwarded(chatId, msgId) {
-  const key = `${chatId}:${msgId}`;
-  forwardedIds.add(key);
-  // trim to last 1000
-  const arr = [...forwardedIds];
-  if (arr.length > 1000) {
-    forwardedIds = new Set(arr.slice(-1000));
-  }
-  try { fs.writeFileSync(FORWARDED_PATH, JSON.stringify([...forwardedIds])); } catch {}
-}
-
-function wasForwarded(chatId, msgId) {
-  return forwardedIds.has(`${chatId}:${msgId}`);
 }
 
 app.use(express.json());
@@ -223,7 +153,6 @@ async function loadMessageMedia(c, message) {
 const handleWatchedEntry = createWatchedEntryHandler({
   pushMessage,
   saveTelegramMessage,
-  traderCronForwarder: forwardToTrader,
 });
 
 // --- Telegram ---
@@ -313,34 +242,6 @@ async function startListening() {
             chatTitle = chat.title || chat.username || chatId;
           }
         } catch {}
-
-        // Manual /report command (private chat)
-        if (text.trim() === "/report" || text.trim() === "日报") {
-          const header = `[${chatTitle}] ${senderName}`;
-          const messageText = `收到手动日报请求，请生成当日交易日报并发布到 Hexo。
-
-要求：
-1) 生成今日数据 JSON
-2) 用 report_renderer.py 渲染（会自动生图 + 写入 Hexo）
-3) 确保 Hexo server 运行（8462）
-4) 发送链接：
-   - 日报：https://blog.balen.wang/blog/report/YYYY-MM-DD/
-   - 归档：https://blog.balen.wang/blog/report/
-
-来源: ${header}
-时间: ${new Date(message.date * 1000).toISOString()}
-频道ID: ${chatId}
-消息内容:
-${text}`;
-
-          const jobName = `manual-report-${chatId}-${message.id}`;
-          triggerHermesCron({
-            logPrefix: "manual-report",
-            name: jobName,
-            prompt: messageText,
-            timeoutSeconds: 180,
-          });
-        }
 
         let mediaInfo = false;
         try {

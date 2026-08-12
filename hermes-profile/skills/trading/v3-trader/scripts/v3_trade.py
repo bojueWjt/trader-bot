@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -17,6 +18,231 @@ import urllib.request
 
 BASE = os.environ.get("V3_CONTROL_PLANE_URL", "http://127.0.0.1:8080")
 ENV_FILE = os.environ.get("V3_ENV_FILE", "/srv/trader-v3/.env.v3")
+DEFAULT_TRADING_DB_PATH = "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db"
+CANONICAL_TRADING_DB_ENV = "TRADER_TRADING_DB_PATH"
+LEGACY_TRADING_DB_ENVS = ("WATCHER_TRADING_DB", "TRADING_DB_PATH")
+TRADING_DB_ENV_NAMES = (CANONICAL_TRADING_DB_ENV, *LEGACY_TRADING_DB_ENVS)
+
+
+def resolve_trading_db_path(env: dict[str, str] | None = None) -> str:
+    if env is None:
+        env = os.environ
+    configured: list[tuple[str, str]] = []
+    for name in TRADING_DB_ENV_NAMES:
+        value = str(env.get(name) or "").strip()
+        if value:
+            configured.append((name, value))
+    if not configured:
+        return DEFAULT_TRADING_DB_PATH
+    canonical_name, canonical_value = configured[0]
+    for name, value in configured[1:]:
+        if value != canonical_value:
+            raise RuntimeError(
+                "conflicting trading DB path environment: "
+                f"{canonical_name}={canonical_value} {name}={value}"
+            )
+    return canonical_value
+
+
+WATCHER_TRADING_DB = resolve_trading_db_path()
+_DEFAULT_OPERATOR_ACCOUNTS = (
+    "account-a",
+    "account-b",
+    "account-c",
+    "account-d",
+)
+_ACCOUNT_ID_RE = re.compile(r"^account-[a-z0-9][a-z0-9-]{0,31}$")
+_CHANNEL_ID_RE = re.compile(r"^-?\d+$")
+_ENABLED_ACCOUNT_STATUSES = frozenset({"1", "active", "enabled", "true"})
+
+
+def _configured_operator_accounts() -> tuple[str, ...]:
+    raw_accounts = os.environ.get("V3_OPERATOR_ACCOUNTS", "").strip()
+    if raw_accounts:
+        accounts = tuple(
+            account.strip()
+            for account in raw_accounts.split(",")
+            if account.strip()
+        )
+    else:
+        raw_registry = os.environ.get(
+            "OPERATOR_ACCOUNT_REGISTRY_JSON",
+            "",
+        ).strip()
+        if not raw_registry:
+            return _DEFAULT_OPERATOR_ACCOUNTS
+        try:
+            registry = json.loads(raw_registry)
+        except (TypeError, ValueError) as exc:
+            raise argparse.ArgumentTypeError(
+                "OPERATOR_ACCOUNT_REGISTRY_JSON is invalid"
+            ) from exc
+        if not isinstance(registry, dict) or not registry:
+            raise argparse.ArgumentTypeError(
+                "OPERATOR_ACCOUNT_REGISTRY_JSON must be a non-empty object"
+            )
+        accounts = tuple(str(account or "").strip() for account in registry)
+
+    if not accounts or len(set(accounts)) != len(accounts):
+        raise argparse.ArgumentTypeError(
+            "configured operator accounts must be non-empty and unique"
+        )
+    if any(_ACCOUNT_ID_RE.fullmatch(account) is None for account in accounts):
+        raise argparse.ArgumentTypeError(
+            "configured operator account id is invalid"
+        )
+    return accounts
+
+
+def _operator_account_arg(value: str) -> str:
+    account_id = str(value or "").strip()
+    accounts = _configured_operator_accounts()
+    if account_id not in accounts:
+        allowed = ", ".join(accounts)
+        raise argparse.ArgumentTypeError(
+            f"account must be one of: {allowed}"
+        )
+    return account_id
+
+
+def _channel_route_error(message: str) -> None:
+    print(json.dumps({"error": message}, ensure_ascii=False))
+    sys.exit(1)
+
+
+def _table_columns(
+    conn: sqlite3.Connection,
+    table_name: str,
+) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+def _route_account_is_enabled(
+    row: sqlite3.Row,
+    account_columns: set[str],
+) -> bool:
+    for field_name in ("is_enabled", "enabled"):
+        if field_name not in account_columns:
+            continue
+        value = str(row[field_name] or "").strip().lower()
+        if value not in _ENABLED_ACCOUNT_STATUSES:
+            return False
+    if "status" not in account_columns:
+        return True
+    status = str(row["status"] or "").strip().lower()
+    if not status:
+        return True
+    return status in _ENABLED_ACCOUNT_STATUSES
+
+
+def _channel_execution_account(channel_id: str) -> str:
+    normalized_channel = str(channel_id or "").strip()
+    if _CHANNEL_ID_RE.fullmatch(normalized_channel) is None:
+        _channel_route_error("channel route requires a numeric Telegram channel id")
+
+    try:
+        conn = sqlite3.connect(
+            f"file:{WATCHER_TRADING_DB}?mode=ro",
+            uri=True,
+        )
+        conn.row_factory = sqlite3.Row
+        try:
+            account_columns = _table_columns(conn, "account_configs")
+            route_columns = _table_columns(conn, "channel_routing")
+            required_account_columns = {
+                "account_id",
+                "account_type",
+                "parent_account_id",
+                "execution_account_id",
+            }
+            if not required_account_columns <= account_columns:
+                _channel_route_error(
+                    "account routing schema requires account identity, "
+                    "hierarchy, and execution identity"
+                )
+            if not {"channel_id", "target_account_id"} <= route_columns:
+                _channel_route_error(
+                    "channel routing schema requires channel_id and "
+                    "target_account_id"
+                )
+
+            fields = [
+                "route.target_account_id AS target_account_id",
+                "account.account_id AS account_id",
+                "account.execution_account_id AS execution_account_id",
+                "(SELECT COUNT(*) FROM account_configs AS candidate "
+                "WHERE candidate.execution_account_id = "
+                "account.execution_account_id) AS execution_account_count",
+                "account.account_type AS account_type",
+                "account.parent_account_id AS parent_account_id",
+                "(SELECT COUNT(*) FROM account_configs AS parent "
+                "WHERE parent.account_id = account.parent_account_id "
+                "AND lower(trim(parent.account_type)) = 'main') "
+                "AS parent_main_account_count",
+            ]
+            for field_name in ("is_enabled", "enabled", "status"):
+                if field_name in account_columns:
+                    fields.append(f"account.{field_name} AS {field_name}")
+            rows = conn.execute(
+                "SELECT "
+                + ", ".join(fields)
+                + " FROM channel_routing AS route "
+                + "LEFT JOIN account_configs AS account "
+                + "ON account.account_id = route.target_account_id "
+                + "WHERE route.channel_id = ?",
+                (normalized_channel,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error) as exc:
+        _channel_route_error(f"channel routing lookup failed: {exc}")
+
+    if len(rows) != 1:
+        _channel_route_error(
+            f"channel {normalized_channel} must resolve to exactly one account"
+        )
+    row = rows[0]
+    target_account = str(row["target_account_id"] or "").strip()
+    credential_account = str(row["account_id"] or "").strip()
+    execution_account = str(row["execution_account_id"] or "").strip()
+    if not credential_account or credential_account != target_account:
+        _channel_route_error("channel route target credential account is invalid")
+    if _ACCOUNT_ID_RE.fullmatch(execution_account) is None:
+        _channel_route_error("channel route execution account is invalid")
+    try:
+        execution_account_count = int(row["execution_account_count"])
+    except (TypeError, ValueError):
+        _channel_route_error("channel route execution account identity is invalid")
+    if execution_account_count != 1:
+        _channel_route_error("channel route execution account must be unique")
+    account_type = str(row["account_type"] or "").strip().lower()
+    parent_account = str(row["parent_account_id"] or "").strip()
+    if account_type == "main":
+        if parent_account:
+            _channel_route_error(
+                "channel route main account must not have a parent"
+            )
+    elif account_type == "subaccount":
+        try:
+            parent_main_account_count = int(row["parent_main_account_count"])
+        except (TypeError, ValueError):
+            _channel_route_error(
+                "channel route subaccount parent identity is invalid"
+            )
+        if not parent_account or parent_main_account_count != 1:
+            _channel_route_error(
+                "channel route subaccount parent must resolve to one main account"
+            )
+    else:
+        _channel_route_error("channel route account type is invalid")
+    if execution_account not in _configured_operator_accounts():
+        _channel_route_error(
+            f"channel route execution account {execution_account} is not registered"
+        )
+    if not _route_account_is_enabled(row, account_columns):
+        _channel_route_error("channel route target credential account is disabled")
+    return execution_account
 
 
 def _token() -> str:
@@ -72,9 +298,74 @@ _TERMINAL_EVENTS = {"orderfilled", "orderrejected", "orderdenied", "ordercancele
 _TG_OPEN_REF_RE = re.compile(
     r"tg-sig-c(?P<channel>\d+)-m(?P<message>\d+)(?:-e\d+)?"
 )
+_TG_SIGNAL_REF_RE = re.compile(
+    r"(?:^|-)tg-sig-c(?P<channel>\d+)-m(?P<message>\d+)"
+    r"(?:-e\d+)?(?:$|-)"
+)
 _OPERATOR_OPEN_REF_RE = re.compile(
     r"operator(?:-[a-z0-9][a-z0-9._-]*)?"
 )
+
+
+def _channel_from_signal_ref(value: str | None) -> str | bool:
+    ref = str(value or "").strip()
+    if not ref:
+        return False
+    match = _TG_SIGNAL_REF_RE.search(ref)
+    if match is None:
+        return False
+    return "-" + match.group("channel")
+
+
+def _require_channel_account_route(args, action: str) -> None:
+    channel = str(getattr(args, "channel", "") or "").strip()
+    authorized_by_type = str(args.authorized_by_type or "").strip().lower()
+    authorized_by_id = str(args.authorized_by_id or "").strip()
+    source_message_id = str(args.source_message_id or "").strip()
+
+    if channel == "operator":
+        if authorized_by_type == "channel":
+            _channel_route_error(
+                f"{action} operator request cannot use channel authorization"
+            )
+        return
+    if not channel:
+        if authorized_by_type == "channel":
+            _channel_route_error(
+                f"{action} channel authorization requires --channel"
+            )
+        return
+    if authorized_by_type != "channel":
+        _channel_route_error(
+            f"{action} Telegram channel request requires "
+            "--authorized-by-type channel"
+        )
+    if authorized_by_id != channel:
+        _channel_route_error(
+            f"{action} --authorized-by-id must match --channel"
+        )
+
+    source_channel = _channel_from_signal_ref(source_message_id)
+    if source_channel != channel:
+        _channel_route_error(
+            f"{action} --source-message-id must encode the same channel"
+        )
+
+    if action != "open":
+        entry_ref = str(getattr(args, "entry_ref", "") or "").strip()
+        entry_channel = _channel_from_signal_ref(entry_ref)
+        if entry_channel != channel:
+            _channel_route_error(
+                f"{action} --entry-ref must encode the same channel"
+            )
+
+    if action == "open":
+        route_account = _channel_execution_account(channel)
+        if args.account != route_account:
+            _channel_route_error(
+                f"{action} account conflicts with channel route: "
+                f"{channel} requires {route_account}"
+            )
 
 
 def _report(intent_id: str, wait: bool) -> dict:
@@ -139,6 +430,7 @@ def _require_open_provenance(args) -> str:
 
     if channel == "operator":
         if _OPERATOR_OPEN_REF_RE.fullmatch(client_ref):
+            _require_channel_account_route(args, "open")
             return channel
         print(json.dumps({
             "error": "operator open requires --ref operator or "
@@ -161,6 +453,7 @@ def _require_open_provenance(args) -> str:
             "client_ref": client_ref,
         }, ensure_ascii=False))
         sys.exit(1)
+    _require_channel_account_route(args, "open")
     return channel
 
 
@@ -219,6 +512,8 @@ def cmd_open(args) -> None:
         entry["price_min"] = args.price_min
     if args.price_max is not None:
         entry["price_max"] = args.price_max
+    if args.time_in_force is not None:
+        entry["time_in_force"] = args.time_in_force
     reason = args.reason
     if getattr(args, "entry_offset", False):
         reason = reason + _apply_entry_offset(entry, args.side)
@@ -235,6 +530,10 @@ def cmd_open(args) -> None:
     _add_authorization_context(payload, args)
     if args.notional is not None:
         payload["notional_usdt"] = args.notional
+    if args.quantity is not None:
+        payload["quantity"] = args.quantity
+    if args.canary_permit_id is not None:
+        payload["canary_permit_id"] = args.canary_permit_id
     if args.sl is not None:
         payload["stop_loss"] = args.sl
     if args.tp:
@@ -249,25 +548,25 @@ def cmd_open(args) -> None:
 
 
 def _require_management_ref(args, action: str) -> None:
-    if args.ref:
-        return
-    symbol = re.sub(r"usdt$", "", str(args.symbol).lower())
-    entry_ref = str(getattr(args, "entry_ref", "") or "").strip()
-    suffix = entry_ref
-    if not suffix:
-        channel = str(getattr(args, "channel", "") or "").strip().lstrip("-")
-        if channel:
-            suffix = f"tg-sig-c{channel}-m<message-id>"
-        else:
-            suffix = "<stable-operation-id>"
-    suggestion = f"{action}-{symbol}-{suffix}"
-    print(json.dumps({
-        "error": "--ref is required for management actions; pass a stable operation "
-                 "ref and reuse it for every retry",
-        "suggested_ref": suggestion,
-        "example": f"--ref {suggestion}",
-    }, ensure_ascii=False))
-    sys.exit(1)
+    if not args.ref:
+        symbol = re.sub(r"usdt$", "", str(args.symbol).lower())
+        entry_ref = str(getattr(args, "entry_ref", "") or "").strip()
+        suffix = entry_ref
+        if not suffix:
+            channel = str(getattr(args, "channel", "") or "").strip().lstrip("-")
+            if channel:
+                suffix = f"tg-sig-c{channel}-m<message-id>"
+            else:
+                suffix = "<stable-operation-id>"
+        suggestion = f"{action}-{symbol}-{suffix}"
+        print(json.dumps({
+            "error": "--ref is required for management actions; pass a stable operation "
+                     "ref and reuse it for every retry",
+            "suggested_ref": suggestion,
+            "example": f"--ref {suggestion}",
+        }, ensure_ascii=False))
+        sys.exit(1)
+    _require_channel_account_route(args, action)
 
 
 def _add_attribution_context(payload: dict, args) -> None:
@@ -288,8 +587,7 @@ def cmd_close(args) -> None:
         "reason": args.reason,
         "source": "hermes-agent",
     }
-    if getattr(args, "side", None):
-        payload["position_side"] = args.side
+    payload["position_side"] = args.side
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
     _add_authorization_context(payload, args)
@@ -307,8 +605,7 @@ def cmd_partial(args) -> None:
         "reason": args.reason,
         "source": "hermes-agent",
     }
-    if getattr(args, "side", None):
-        payload["position_side"] = args.side
+    payload["position_side"] = args.side
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
     _add_authorization_context(payload, args)
@@ -365,8 +662,7 @@ def cmd_set_sl(args) -> None:
         "reason": args.reason,
         "source": "hermes-agent",
     }
-    if getattr(args, "side", None):
-        payload["position_side"] = args.side
+    payload["position_side"] = args.side
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
     _add_authorization_context(payload, args)
@@ -401,8 +697,7 @@ def cmd_set_tps(args) -> None:
         "reason": args.reason,
         "source": "hermes-agent",
     }
-    if getattr(args, "side", None):
-        payload["position_side"] = args.side
+    payload["position_side"] = args.side
     payload["client_ref"] = args.ref
     _add_attribution_context(payload, args)
     _add_authorization_context(payload, args)
@@ -497,7 +792,7 @@ def main() -> None:
         p.add_argument(
             "--account",
             required=True,
-            choices=["account-a", "account-b"],
+            type=_operator_account_arg,
         )
         if needs_reason:
             p.add_argument("--reason", required=True, help="audit reason (why this order)")
@@ -546,6 +841,28 @@ def main() -> None:
     p.add_argument("--price", type=float, default=None)
     p.add_argument("--price-min", type=float, default=None)
     p.add_argument("--price-max", type=float, default=None)
+    p.add_argument(
+        "--time-in-force",
+        "--time_in_force",
+        dest="time_in_force",
+        choices=["GTC", "IOC"],
+        default=None,
+        help="explicit entry time in force; live canary orders require IOC",
+    )
+    p.add_argument(
+        "--quantity",
+        type=float,
+        default=None,
+        help="explicit base quantity for a reviewed live canary; omit for "
+             "normal server-side risk sizing",
+    )
+    p.add_argument(
+        "--canary-permit-id",
+        "--canary_permit_id",
+        dest="canary_permit_id",
+        default=None,
+        help="armed reviewed-release permit id for a live canary order",
+    )
     p.add_argument("--entry-offset", action="store_true",
                    help="signal wording is fuzzy (附近/左右/约): shift entry "
                         "prices 0.1%% toward fill (long up / short down). "
@@ -562,31 +879,31 @@ def main() -> None:
 
     p = sub.add_parser("close", help="close the whole position on a symbol")
     p.add_argument("symbol")
-    p.add_argument("--side", choices=["long", "short"], default=None,
-                   help="hedge mode: which book to manage when the symbol holds both long and short")
+    p.add_argument("--side", choices=["long", "short"], required=True,
+                   help="position book to manage")
     common(p, management=True)
     p.set_defaults(fn=cmd_close)
 
     p = sub.add_parser("partial", help="partially close a position")
     p.add_argument("symbol")
-    p.add_argument("--side", choices=["long", "short"], default=None,
-                   help="hedge mode: which book to manage when the symbol holds both long and short")
+    p.add_argument("--side", choices=["long", "short"], required=True,
+                   help="position book to manage")
     p.add_argument("--quantity", type=float, required=True, help="base quantity to close")
     common(p, management=True)
     p.set_defaults(fn=cmd_partial)
 
     p = sub.add_parser("set-sl", help="move/replace the stop loss on an open position")
     p.add_argument("symbol")
-    p.add_argument("--side", choices=["long", "short"], default=None,
-                   help="hedge mode: which book to manage when the symbol holds both long and short")
+    p.add_argument("--side", choices=["long", "short"], required=True,
+                   help="position book to manage")
     p.add_argument("--sl", type=float, required=True, help="new stop loss price")
     common(p, management=True)
     p.set_defaults(fn=cmd_set_sl)
 
     p = sub.add_parser("set-tps", help="replace ALL take profits on an open position")
     p.add_argument("symbol")
-    p.add_argument("--side", choices=["long", "short"], default=None,
-                   help="hedge mode: which book to manage when the symbol holds both long and short")
+    p.add_argument("--side", choices=["long", "short"], required=True,
+                   help="position book to manage")
     p.add_argument("--tp", required=True, help="take profit price(s), comma separated")
     p.add_argument("--qty", default=None,
                    help="optional per-tier quantities, comma separated; omit to split "

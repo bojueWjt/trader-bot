@@ -11,40 +11,64 @@ CONFIG_DIR = REPO_ROOT / "infra" / "compose" / "config"
 
 
 class MultiAccountComposeTopologyTests(unittest.TestCase):
-    def test_compose_declares_two_isolated_account_nodes(self) -> None:
+    def test_compose_declares_four_isolated_account_nodes(self) -> None:
         compose = COMPOSE_PATH.read_text(encoding="utf-8")
 
-        # two per-account node services, pinned image (overridable), node entrypoint
-        self.assertIn("nautilus-node-account-a:", compose)
-        self.assertIn("nautilus-node-account-b:", compose)
+        # Per-account node services use a pinned image and node entrypoint.
+        for suffix, port in zip(("a", "b", "c", "d"), range(8081, 8085)):
+            self.assertIn(f"nautilus-node-account-{suffix}:", compose)
+            self.assertIn(
+                f"NODE_CONFIG_PATH: /app/config/account-{suffix}.sandbox.json",
+                compose,
+            )
+            self.assertIn(f"NAUTILUS_HEALTH_PORT: {port}", compose)
+            self.assertIn(f"account-{suffix}-spool:", compose)
+            self.assertIn(
+                f"binance_account_{suffix}_api_key",
+                compose,
+            )
+            self.assertIn(
+                f"control_plane_account_{suffix}_token",
+                compose,
+            )
         self.assertIn("${NAUTILUS_NODE_IMAGE:-", compose)
-        # each node is driven by its own mounted config file (account specifics live in JSON)
-        self.assertIn("NODE_CONFIG_PATH: /app/config/account-a.sandbox.json", compose)
-        self.assertIn("NODE_CONFIG_PATH: /app/config/account-b.sandbox.json", compose)
-        # isolated spool volumes + per-account secrets
-        self.assertIn("account-a-spool:", compose)
-        self.assertIn("account-b-spool:", compose)
-        self.assertIn("binance_account_a_api_key", compose)
-        self.assertIn("binance_account_b_api_key", compose)
-        self.assertIn("control_plane_account_a_token", compose)
-        self.assertIn("control_plane_account_b_token", compose)
         # internal-only network, no published ports
         self.assertIn("internal: true", compose)
         self.assertNotIn("\n    ports:", compose)
 
     def test_per_account_config_files_are_isolated_and_default_safe(self) -> None:
-        account_a = json.loads((CONFIG_DIR / "account-a.sandbox.json").read_text("utf-8"))
-        account_b = json.loads((CONFIG_DIR / "account-b.sandbox.json").read_text("utf-8"))
+        configs = [
+            json.loads(
+                (CONFIG_DIR / f"account-{suffix}.sandbox.json").read_text("utf-8")
+            )
+            for suffix in ("a", "b", "c", "d")
+        ]
 
-        self.assertEqual(account_a["account_id"], "account-a")
-        self.assertEqual(account_b["account_id"], "account-b")
-        # default-safe: testnet only (iron rule #10)
-        self.assertEqual(account_a["binance"]["environment"], "testnet")
-        self.assertEqual(account_b["binance"]["environment"], "testnet")
-        # isolation: trader_id and redis key prefix must differ across accounts
-        self.assertNotEqual(account_a["trader_id"], account_b["trader_id"])
-        self.assertNotEqual(
-            account_a["redis"]["key_prefix"], account_b["redis"]["key_prefix"]
+        self.assertEqual(
+            {config["account_id"] for config in configs},
+            {"account-a", "account-b", "account-c", "account-d"},
+        )
+        self.assertEqual(
+            {config["binance"]["environment"] for config in configs},
+            {"testnet"},
+        )
+        self.assertEqual(len({config["trader_id"] for config in configs}), 4)
+        self.assertEqual(
+            len({config["instance_id"] for config in configs}),
+            4,
+        )
+        self.assertEqual(
+            len({config["redis"]["key_prefix"] for config in configs}),
+            4,
+        )
+        self.assertEqual(
+            len(
+                {
+                    config["control_plane"]["token"]["env"]
+                    for config in configs
+                }
+            ),
+            4,
         )
 
 

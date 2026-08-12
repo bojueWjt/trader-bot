@@ -102,27 +102,6 @@ class ProjectionWriter:
                  payload["event_type"], payload["ts_event"], Json(payload.get("payload") or {})),
             )
 
-    def upsert_account_projection(self, payload: dict) -> None:
-        with self.conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO accounts_projection
-                    (account_id, currency, equity, margin, available_balance, reconciliation_state,
-                     last_execution_event_at, updated_from_event_id, updated_at, payload)
-                VALUES (%s,%s,%s,%s,%s, COALESCE(%s,'healthy')::reconciliation_state_v1, %s,%s, now(), %s)
-                ON CONFLICT (account_id) DO UPDATE SET
-                    currency=EXCLUDED.currency, equity=EXCLUDED.equity, margin=EXCLUDED.margin,
-                    available_balance=EXCLUDED.available_balance,
-                    reconciliation_state=EXCLUDED.reconciliation_state,
-                    last_execution_event_at=EXCLUDED.last_execution_event_at,
-                    updated_from_event_id=EXCLUDED.updated_from_event_id, updated_at=now(), payload=EXCLUDED.payload
-                """,
-                (payload["account_id"], payload.get("currency", "USDT"), payload.get("equity", 0),
-                 payload.get("margin", 0), payload.get("available_balance"),
-                 payload.get("reconciliation_state"), payload.get("last_execution_event_at"),
-                 payload.get("event_id"), Json(payload.get("payload") or {})),
-            )
-
     def upsert_position_projection(self, payload: dict) -> None:
         with self.conn.cursor() as cur:
             cur.execute(

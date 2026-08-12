@@ -33,8 +33,11 @@ import psycopg2
 ACCOUNTS = {
     "account-a": ("trader-v3-node-a", "BINANCE_ACCOUNT_A"),
     "account-b": ("trader-v3-node-b", "BINANCE_ACCOUNT_B"),
+    "account-c": ("trader-v3-node-c", "BINANCE_ACCOUNT_C"),
+    "account-d": ("trader-v3-node-d", "BINANCE_ACCOUNT_D"),
 }
 BINANCE_RECV_WINDOW_MS = 30_000
+BINANCE_PROXY_ENV = "BINANCE_PROXY_URL"
 
 UPSERT_SQL = """
 INSERT INTO exchange_state_mirror (account_id, payload, updated_at)
@@ -83,7 +86,47 @@ def container_keys(container: str, prefix: str) -> tuple[str, str] | None:
     return None
 
 
-def signed_get(base: str, path: str, key: str, sec: str, params: dict | None = None) -> object:
+def build_binance_opener(proxy_url: str | None = None):
+    configured_proxy = proxy_url
+    if configured_proxy is None:
+        configured_proxy = os.environ.get(BINANCE_PROXY_ENV, "")
+    configured_proxy = configured_proxy.strip()
+
+    proxies: dict[str, str] = {}
+    if configured_proxy:
+        parsed_proxy = urllib.parse.urlsplit(configured_proxy)
+        if (
+            parsed_proxy.scheme not in {"http", "https"}
+            or not parsed_proxy.hostname
+        ):
+            raise ValueError(
+                f"{BINANCE_PROXY_ENV} must be an http(s) URL"
+            )
+        if (
+            parsed_proxy.username is not None
+            or parsed_proxy.password is not None
+        ):
+            raise ValueError(
+                f"{BINANCE_PROXY_ENV} must not contain credentials"
+            )
+        proxies = {
+            "http": configured_proxy,
+            "https": configured_proxy,
+        }
+
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler(proxies)
+    )
+
+
+def signed_get(
+    base: str,
+    path: str,
+    key: str,
+    sec: str,
+    params: dict | None = None,
+    opener=None,
+) -> object:
     q = dict(params or {})
     q["recvWindow"] = BINANCE_RECV_WINDOW_MS
     q["timestamp"] = int(time.time() * 1000)
@@ -92,8 +135,11 @@ def signed_get(base: str, path: str, key: str, sec: str, params: dict | None = N
     req = urllib.request.Request(
         f"{base}{path}?{query}&signature={sig}", headers={"X-MBX-APIKEY": key}
     )
+    request_opener = opener
+    if request_opener is None:
+        request_opener = build_binance_opener()
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with request_opener.open(req, timeout=15) as resp:
             return json.load(resp)
     except HTTPError as exc:
         raw = exc.read()
@@ -158,8 +204,8 @@ def canonical_account_summary(account_info: dict) -> dict:
     equity = _required_decimal(account_info, "totalMarginBalance")
     margin = _required_decimal(account_info, "totalInitialMargin")
     available = _required_decimal(account_info, "availableBalance")
-    if equity <= 0:
-        raise ValueError("totalMarginBalance must be positive")
+    if equity < 0:
+        raise ValueError("totalMarginBalance must be non-negative")
     if margin < 0:
         raise ValueError("totalInitialMargin must be non-negative")
     if available < 0:
@@ -185,18 +231,45 @@ def _required_decimal(payload: dict, field: str) -> Decimal:
     return value
 
 
-def snapshot_account(base: str, key: str, sec: str) -> dict:
-    account_info = signed_get(base, "/fapi/v3/account", key, sec)
+def snapshot_account(base: str, key: str, sec: str, opener=None) -> dict:
+    request_opener = opener
+    if request_opener is None:
+        request_opener = build_binance_opener()
+    account_info = signed_get(
+        base,
+        "/fapi/v3/account",
+        key,
+        sec,
+        opener=request_opener,
+    )
     if not isinstance(account_info, dict):
         raise TypeError("account information response must be an object")
     account = canonical_account_summary(account_info)
-    positions = [p for p in signed_get(base, "/fapi/v2/positionRisk", key, sec)
+    positions = [p for p in signed_get(
+        base,
+        "/fapi/v2/positionRisk",
+        key,
+        sec,
+        opener=request_opener,
+    )
                  if float(p.get("positionAmt") or 0) != 0]
     regular = [
         slim_order(o, "regular")
-        for o in signed_get(base, "/fapi/v1/openOrders", key, sec)
+        for o in signed_get(
+            base,
+            "/fapi/v1/openOrders",
+            key,
+            sec,
+            opener=request_opener,
+        )
     ]
-    algo_raw = signed_get(base, "/fapi/v1/openAlgoOrders", key, sec)
+    algo_raw = signed_get(
+        base,
+        "/fapi/v1/openAlgoOrders",
+        key,
+        sec,
+        opener=request_opener,
+    )
     algo_rows = algo_raw.get("orders", algo_raw) if isinstance(algo_raw, dict) else algo_raw
     algo = [slim_order(o, "algo") for o in algo_rows]
     return {
@@ -216,13 +289,20 @@ def snapshot_account(base: str, key: str, sec: str) -> dict:
     }
 
 
-def run_once(conn, base: str) -> None:
+def run_once(conn, base: str, opener=None) -> None:
+    request_opener = opener
+    if request_opener is None:
+        request_opener = build_binance_opener()
     for account_id, (container, prefix) in ACCOUNTS.items():
         creds = container_keys(container, prefix)
         if not creds:
             continue
         try:
-            payload = snapshot_account(base, *creds)
+            payload = snapshot_account(
+                base,
+                *creds,
+                opener=request_opener,
+            )
         except Exception as exc:  # noqa: BLE001 - stale row is the failure signal
             log(f"{account_id}: exchange fetch failed, leaving row stale: {exc}")
             continue
@@ -262,11 +342,12 @@ def main() -> None:
     if not args.db_url:
         print("DATABASE_URL not set and --db-url missing", file=sys.stderr)
         sys.exit(2)
+    opener = build_binance_opener()
     conn = psycopg2.connect(args.db_url)
     log(f"exchange state recorder start interval={args.interval}s base={args.base_url}")
     while True:
         try:
-            run_once(conn, args.base_url)
+            run_once(conn, args.base_url, opener=opener)
         except psycopg2.Error as exc:
             log(f"db error, reconnecting: {exc}")
             try:

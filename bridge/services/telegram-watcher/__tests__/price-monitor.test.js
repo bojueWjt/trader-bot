@@ -78,9 +78,9 @@ test("disabled price monitor start leaves interval idle", () => {
   }
 });
 
-test("disabled price monitor skips Hermes cron trigger", () => {
+test("price alert never invokes a direct execution process", () => {
   const { cleanup, priceMonitor } = loadPriceMonitor(
-    { PRICE_MONITOR_ENABLED: "0" },
+    { PRICE_MONITOR_ENABLED: "1" },
     () => {
       throw new Error("execFile should stay idle");
     }

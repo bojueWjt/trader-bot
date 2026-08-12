@@ -5,7 +5,42 @@ const {
   sanitizeForResponse,
 } = require("./safe-log");
 
-const TRADING_DB_PATH = process.env.TRADING_DB_PATH || "/Users/balen/.openclaw/workspace-trader/trading.db";
+const DEFAULT_TRADING_DB_PATH = "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db";
+const CANONICAL_TRADING_DB_ENV = "TRADER_TRADING_DB_PATH";
+const LEGACY_TRADING_DB_ENVS = ["WATCHER_TRADING_DB", "TRADING_DB_PATH"];
+const TRADING_DB_PATH = resolveTradingDbPath(process.env);
+const CREDENTIAL_ACCOUNT_ID_PATTERN = /^[^\u0000-\u001F\u007F]{1,128}$/u;
+const EXECUTION_ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const ACCOUNT_TYPES = new Set(["main", "subaccount"]);
+const ACTIVE_ORDER_STATUSES = ["PENDING", "OPEN", "PARTIAL_CLOSED"];
+
+function normalizeDbPath(value) {
+  return String(value || "").trim();
+}
+
+function resolveTradingDbPath(env) {
+  const configured = [];
+  for (const name of [CANONICAL_TRADING_DB_ENV, ...LEGACY_TRADING_DB_ENVS]) {
+    const value = normalizeDbPath(env[name]);
+    if (value) {
+      configured.push({ name, value });
+    }
+  }
+  if (!configured.length) {
+    return DEFAULT_TRADING_DB_PATH;
+  }
+  const canonical = configured[0].value;
+  for (const item of configured.slice(1)) {
+    if (item.value !== canonical) {
+      throw new Error(
+        "conflicting trading DB path environment: "
+        + `${configured[0].name}=${canonical} `
+        + `${item.name}=${item.value}`
+      );
+    }
+  }
+  return canonical;
+}
 
 function getTradingDb() {
   const db = new Database(TRADING_DB_PATH);
@@ -22,7 +57,18 @@ CREATE TABLE IF NOT EXISTS account_configs (
     api_key             TEXT NOT NULL,
     api_secret          TEXT NOT NULL,
     default_risk_ratio  REAL DEFAULT 0.01,
-    is_testnet          INTEGER DEFAULT 1
+    is_testnet          INTEGER DEFAULT 1,
+    account_type        TEXT NOT NULL DEFAULT 'main',
+    parent_account_id   TEXT NOT NULL DEFAULT '',
+    execution_account_id TEXT NOT NULL DEFAULT '',
+    risk_capital_multiplier REAL NOT NULL,
+    is_enabled          INTEGER NOT NULL DEFAULT 1,
+    CHECK (account_type IN ('main', 'subaccount')),
+    CHECK (
+      risk_capital_multiplier IS NULL
+      OR risk_capital_multiplier > 0
+    ),
+    CHECK (is_enabled IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS channel_routing (
@@ -80,11 +126,118 @@ function ensureTradingTables() {
   try {
     db = getTradingDb();
     db.exec(TRADING_SCHEMA_SQL);
+    migrateAccountSchema(db);
   } catch (err) {
     console.log("[db] Failed to ensure trading tables:", safeErrorMessage(err));
   } finally {
     closeDb(db);
   }
+}
+
+function migrateAccountSchema(db) {
+  const columns = new Set(
+    db.prepare("PRAGMA table_info(account_configs)").all().map((row) => {
+      return row.name;
+    })
+  );
+  const multiplierColumnWasMissing = !columns.has("risk_capital_multiplier");
+
+  if (!columns.has("account_type")) {
+    db.exec("ALTER TABLE account_configs ADD COLUMN account_type TEXT NOT NULL DEFAULT 'main'");
+  }
+  if (!columns.has("parent_account_id")) {
+    db.exec("ALTER TABLE account_configs ADD COLUMN parent_account_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (multiplierColumnWasMissing) {
+    db.exec(
+      "ALTER TABLE account_configs "
+      + "ADD COLUMN risk_capital_multiplier REAL"
+    );
+  }
+  if (!columns.has("execution_account_id")) {
+    db.exec(
+      "ALTER TABLE account_configs "
+      + "ADD COLUMN execution_account_id TEXT NOT NULL DEFAULT ''"
+    );
+  }
+  if (!columns.has("is_enabled")) {
+    db.exec(
+      "ALTER TABLE account_configs "
+      + "ADD COLUMN is_enabled INTEGER NOT NULL DEFAULT 1"
+    );
+  }
+
+  db.exec(`
+    UPDATE account_configs
+    SET account_type = 'main'
+    WHERE account_type IS NULL
+       OR account_type = ''
+       OR account_type NOT IN ('main', 'subaccount');
+
+    UPDATE account_configs
+    SET parent_account_id = ''
+    WHERE account_type = 'main'
+       OR parent_account_id IS NULL;
+
+    UPDATE account_configs
+    SET execution_account_id = account_id
+    WHERE execution_account_id IS NULL
+       OR execution_account_id = '';
+
+    CREATE INDEX IF NOT EXISTS idx_account_configs_parent
+    ON account_configs (parent_account_id, account_type);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_account_configs_execution_account
+    ON account_configs (execution_account_id);
+  `);
+
+  if (multiplierColumnWasMissing) {
+    db.exec("UPDATE account_configs SET is_enabled = 0");
+  }
+  disableAccountsWithInvalidMultiplier(db);
+  migrateChannelRoutingSchema(db);
+}
+
+function migrateChannelRoutingSchema(db) {
+  const columns = new Set(
+    db.prepare("PRAGMA table_info(channel_routing)").all().map((row) => {
+      return row.name;
+    })
+  );
+  if (columns.size === 0) {
+    return;
+  }
+  if (!columns.has("channel_name")) {
+    db.exec(
+      "ALTER TABLE channel_routing "
+      + "ADD COLUMN channel_name TEXT DEFAULT ''"
+    );
+  }
+}
+
+function disableAccountsWithInvalidMultiplier(db) {
+  const rows = db.prepare(`
+    SELECT account_id, risk_capital_multiplier
+    FROM account_configs
+  `).all();
+  const disableAccount = db.prepare(`
+    UPDATE account_configs
+    SET is_enabled = 0
+    WHERE account_id = ?
+  `);
+  const disableInvalidAccounts = db.transaction((accounts) => {
+    for (const account of accounts) {
+      const multiplier = Number(account.risk_capital_multiplier);
+      if (
+        account.risk_capital_multiplier === null
+        || !Number.isFinite(multiplier)
+        || multiplier <= 0
+      ) {
+        disableAccount.run(account.account_id);
+      }
+    }
+  });
+  disableInvalidAccounts(rows);
 }
 
 function ensureTelegramMessagesTable() {
@@ -159,7 +312,29 @@ function registerAccountRoutes(app) {
     let db;
     try {
       db = getTradingDb();
-      const rows = db.prepare("SELECT * FROM account_configs").all();
+      const rows = db.prepare(`
+        SELECT
+          account.*,
+          (
+            SELECT COUNT(*)
+            FROM channel_routing AS route
+            WHERE route.target_account_id = account.account_id
+          ) AS channel_count,
+          (
+            SELECT COUNT(*)
+            FROM account_configs AS child
+            WHERE child.account_type = 'subaccount'
+              AND child.parent_account_id = account.account_id
+          ) AS subaccount_count
+        FROM account_configs AS account
+        ORDER BY
+          CASE
+            WHEN account.account_type = 'main' THEN account.account_id
+            ELSE account.parent_account_id
+          END,
+          CASE account.account_type WHEN 'main' THEN 0 ELSE 1 END,
+          account.account_id
+      `).all();
       const masked = rows.map((row) => {
         return maskAccountConfig(row);
       });
@@ -174,23 +349,254 @@ function registerAccountRoutes(app) {
   app.post("/api/trading/accounts", (req, res) => {
     let db;
     try {
-      const { account_id, api_key, api_secret, default_risk_ratio, is_testnet } = req.body;
-      if (!account_id || !api_key || !api_secret) {
+      const body = req.body || {};
+      const accountId = normalizedText(body.account_id);
+      const apiKey = normalizedText(body.api_key);
+      const apiSecret = normalizedText(body.api_secret);
+      const accountType = normalizeAccountType(body.account_type);
+      const parentAccountId = normalizedText(body.parent_account_id);
+      let executionAccountId = normalizedText(body.execution_account_id);
+      if (!executionAccountId) {
+        executionAccountId = accountId;
+      }
+      const testnetResult = normalizeTestnet(body.is_testnet, false);
+      const riskResult = normalizeRiskRatio(body.default_risk_ratio, 0.01);
+      const multiplierResult = normalizeRiskCapitalMultiplier(
+        body.risk_capital_multiplier
+      );
+      const enabledResult = normalizeEnabled(body.is_enabled, true);
+
+      if (!accountId || !apiKey || !apiSecret) {
         return res.status(400).json({ error: "Missing required fields: account_id, api_key, api_secret" });
       }
-      let defaultRiskRatio = default_risk_ratio;
-      if (defaultRiskRatio === undefined || defaultRiskRatio === null) {
-        defaultRiskRatio = 0.01;
+      if (!CREDENTIAL_ACCOUNT_ID_PATTERN.test(accountId)) {
+        return res.status(400).json({ error: "account_id must be 1-128 printable characters" });
       }
-      const riskVal = Number(defaultRiskRatio);
-      if (!isFinite(riskVal) || riskVal < 0) {
+      if (!EXECUTION_ACCOUNT_ID_PATTERN.test(executionAccountId)) {
+        return res.status(400).json({ error: "execution_account_id must use letters, numbers, dots, underscores, or hyphens" });
+      }
+      if (!accountType) {
+        return res.status(400).json({ error: "account_type must be main or subaccount" });
+      }
+      if (!testnetResult.ok) {
+        return res.status(400).json({ error: "is_testnet must be a boolean" });
+      }
+      if (!riskResult.ok) {
         return res.status(400).json({ error: "default_risk_ratio must be a non-negative number" });
       }
+      if (!multiplierResult.ok) {
+        return res.status(400).json({
+          error: "risk_capital_multiplier is required and must be greater than 0",
+        });
+      }
+      if (!enabledResult.ok) {
+        return res.status(400).json({ error: "is_enabled must be a boolean" });
+      }
+
       db = getTradingDb();
-      db.prepare(
-        "INSERT INTO account_configs (account_id, api_key, api_secret, default_risk_ratio, is_testnet) VALUES (?, ?, ?, ?, ?)"
-      ).run(account_id, api_key, api_secret, riskVal, is_testnet ? 1 : 0);
-      res.json({ ok: true, account_id });
+      const existingExecutionAccount = getAccountByExecutionId(
+        db,
+        executionAccountId
+      );
+      if (existingExecutionAccount) {
+        return res.status(409).json({ error: "V3 execution account already exists" });
+      }
+      const isTestnet = testnetResult.value;
+      const hierarchyError = validateAccountHierarchy(db, {
+        accountId,
+        accountType,
+        parentAccountId,
+        isTestnet,
+      });
+      if (hierarchyError) {
+        return res.status(hierarchyError.status).json({ error: hierarchyError.error });
+      }
+
+      db.prepare(`
+        INSERT INTO account_configs (
+          account_id,
+          api_key,
+          api_secret,
+          default_risk_ratio,
+          is_testnet,
+          account_type,
+          parent_account_id,
+          execution_account_id,
+          risk_capital_multiplier,
+          is_enabled
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        accountId,
+        apiKey,
+        apiSecret,
+        riskResult.value,
+        isTestnet,
+        accountType,
+        parentAccountId,
+        executionAccountId,
+        multiplierResult.value,
+        enabledResult.value
+      );
+      res.json({ ok: true, account_id: accountId });
+    } catch (err) {
+      if (isDuplicateAccountError(err)) {
+        return res.status(409).json({ error: "Account already exists" });
+      }
+      sendServerError(res, err);
+    } finally {
+      closeDb(db);
+    }
+  });
+
+  app.put("/api/trading/accounts/:id", (req, res) => {
+    let db;
+    try {
+      const accountId = normalizedText(req.params.id);
+      const body = req.body || {};
+      db = getTradingDb();
+      const current = getAccount(db, accountId);
+      if (!current) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+
+      let accountType = current.account_type;
+      if (body.account_type !== undefined) {
+        accountType = normalizeAccountType(body.account_type);
+      }
+      if (!accountType) {
+        return res.status(400).json({ error: "account_type must be main or subaccount" });
+      }
+
+      let parentAccountId = current.parent_account_id || "";
+      if (body.parent_account_id !== undefined) {
+        parentAccountId = normalizedText(body.parent_account_id);
+      }
+      if (accountType === "main") {
+        parentAccountId = "";
+      }
+      let executionAccountId = current.execution_account_id || current.account_id;
+      if (body.execution_account_id !== undefined) {
+        executionAccountId = normalizedText(body.execution_account_id);
+      }
+      if (!EXECUTION_ACCOUNT_ID_PATTERN.test(executionAccountId)) {
+        return res.status(400).json({ error: "execution_account_id must use letters, numbers, dots, underscores, or hyphens" });
+      }
+      const existingExecutionAccount = getAccountByExecutionId(
+        db,
+        executionAccountId
+      );
+      if (
+        existingExecutionAccount
+        && existingExecutionAccount.account_id !== accountId
+      ) {
+        return res.status(409).json({ error: "V3 execution account already exists" });
+      }
+
+      const testnetResult = normalizeTestnet(body.is_testnet, Boolean(current.is_testnet));
+      if (!testnetResult.ok) {
+        return res.status(400).json({ error: "is_testnet must be a boolean" });
+      }
+      const isTestnet = testnetResult.value;
+      const riskResult = normalizeRiskRatio(body.default_risk_ratio, current.default_risk_ratio);
+      if (!riskResult.ok) {
+        return res.status(400).json({ error: "default_risk_ratio must be a non-negative number" });
+      }
+      let multiplierCandidate = current.risk_capital_multiplier;
+      const multiplierWasProvided = (
+        body.risk_capital_multiplier !== undefined
+      );
+      if (multiplierWasProvided) {
+        multiplierCandidate = body.risk_capital_multiplier;
+      }
+      const multiplierResult = normalizeRiskCapitalMultiplier(
+        multiplierCandidate
+      );
+      if (!multiplierResult.ok) {
+        return res.status(400).json({ error: "risk_capital_multiplier must be greater than 0" });
+      }
+      const enabledResult = normalizeEnabled(
+        body.is_enabled,
+        Number(current.is_enabled) === 1
+      );
+      if (!enabledResult.ok) {
+        return res.status(400).json({ error: "is_enabled must be a boolean" });
+      }
+      const isEnabled = enabledResult.value;
+      if (
+        Number(current.is_enabled) !== 1
+        && isEnabled === 1
+        && !multiplierWasProvided
+      ) {
+        return res.status(400).json({
+          error: "enabling an account requires an explicit risk_capital_multiplier",
+        });
+      }
+
+      let apiKey = current.api_key;
+      const requestedApiKey = normalizedText(body.api_key);
+      if (requestedApiKey) {
+        apiKey = requestedApiKey;
+      }
+      let apiSecret = current.api_secret;
+      const requestedApiSecret = normalizedText(body.api_secret);
+      if (requestedApiSecret) {
+        apiSecret = requestedApiSecret;
+      }
+
+      const childCount = getChildAccountCount(db, accountId);
+      if (accountType === "subaccount" && childCount > 0) {
+        return res.status(409).json({ error: "Move or remove child accounts before changing this main account" });
+      }
+      if (accountType === "main" && childCount > 0) {
+        const mismatchedChild = db.prepare(`
+          SELECT account_id
+          FROM account_configs
+          WHERE parent_account_id = ?
+            AND account_type = 'subaccount'
+            AND is_testnet != ?
+          LIMIT 1
+        `).get(accountId, isTestnet);
+        if (mismatchedChild) {
+          return res.status(409).json({ error: "Main account environment must match all child accounts" });
+        }
+      }
+
+      const hierarchyError = validateAccountHierarchy(db, {
+        accountId,
+        accountType,
+        parentAccountId,
+        isTestnet,
+      });
+      if (hierarchyError) {
+        return res.status(hierarchyError.status).json({ error: hierarchyError.error });
+      }
+
+      db.prepare(`
+        UPDATE account_configs
+        SET api_key = ?,
+            api_secret = ?,
+            default_risk_ratio = ?,
+            is_testnet = ?,
+            account_type = ?,
+            parent_account_id = ?,
+            execution_account_id = ?,
+            risk_capital_multiplier = ?,
+            is_enabled = ?
+        WHERE account_id = ?
+      `).run(
+        apiKey,
+        apiSecret,
+        riskResult.value,
+        isTestnet,
+        accountType,
+        parentAccountId,
+        executionAccountId,
+        multiplierResult.value,
+        isEnabled,
+        accountId
+      );
+      res.json({ ok: true, account_id: accountId });
     } catch (err) {
       sendServerError(res, err);
     } finally {
@@ -202,10 +608,47 @@ function registerAccountRoutes(app) {
     let db;
     try {
       db = getTradingDb();
-      const result = db.prepare("DELETE FROM account_configs WHERE account_id = ?").run(req.params.id);
-      if (result.changes === 0) {
+      const accountId = normalizedText(req.params.id);
+      const account = getAccount(db, accountId);
+      if (!account) {
         return res.status(404).json({ error: "Account not found" });
       }
+
+      const childCount = getChildAccountCount(db, accountId);
+      if (childCount > 0) {
+        return res.status(409).json({
+          error: "Account has subaccounts",
+          subaccount_count: childCount,
+        });
+      }
+
+      const channelCount = db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM channel_routing
+        WHERE target_account_id = ?
+      `).get(accountId).count;
+      if (channelCount > 0) {
+        return res.status(409).json({
+          error: "Account is used by channel routing",
+          channel_count: channelCount,
+        });
+      }
+
+      const placeholders = ACTIVE_ORDER_STATUSES.map(() => "?").join(", ");
+      const activeOrderCount = db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM active_orders
+        WHERE account_id = ?
+          AND status IN (${placeholders})
+      `).get(accountId, ...ACTIVE_ORDER_STATUSES).count;
+      if (activeOrderCount > 0) {
+        return res.status(409).json({
+          error: "Account has active orders",
+          active_order_count: activeOrderCount,
+        });
+      }
+
+      db.prepare("DELETE FROM account_configs WHERE account_id = ?").run(accountId);
       res.json({ ok: true });
     } catch (err) {
       sendServerError(res, err);
@@ -220,7 +663,20 @@ function registerChannelRoutes(app) {
     let db;
     try {
       db = getTradingDb();
-      const rows = db.prepare("SELECT * FROM channel_routing").all();
+      const rows = db.prepare(`
+        SELECT
+          route.channel_id,
+          route.target_account_id,
+          route.channel_name,
+          account.account_type AS target_account_type,
+          account.parent_account_id,
+          account.execution_account_id,
+          account.is_enabled AS target_is_enabled
+        FROM channel_routing AS route
+        LEFT JOIN account_configs AS account
+          ON account.account_id = route.target_account_id
+        ORDER BY route.channel_name, route.channel_id
+      `).all();
       res.json(sanitizeForResponse(rows));
     } catch (err) {
       sendServerError(res, err);
@@ -232,15 +688,33 @@ function registerChannelRoutes(app) {
   app.post("/api/trading/channels", (req, res) => {
     let db;
     try {
-      const { channel_id, target_account_id, channel_name } = req.body;
-      if (!channel_id || !target_account_id) {
+      const body = req.body || {};
+      const channelId = normalizedText(body.channel_id);
+      const targetAccountId = normalizedText(body.target_account_id);
+      const channelName = normalizedText(body.channel_name);
+      if (!channelId || !targetAccountId) {
         return res.status(400).json({ error: "Missing required fields: channel_id, target_account_id" });
       }
       db = getTradingDb();
-      db.prepare(
-        "INSERT OR REPLACE INTO channel_routing (channel_id, target_account_id, channel_name) VALUES (?, ?, ?)"
-      ).run(channel_id, target_account_id, channel_name || "");
-      res.json({ ok: true, channel_id, target_account_id });
+      const targetAccount = getAccount(db, targetAccountId);
+      if (!targetAccount) {
+        return res.status(400).json({ error: "Target account not found" });
+      }
+      if (Number(targetAccount.is_enabled) !== 1) {
+        return res.status(400).json({ error: "Target account is disabled" });
+      }
+      db.prepare(`
+        INSERT INTO channel_routing (channel_id, target_account_id, channel_name)
+        VALUES (?, ?, ?)
+        ON CONFLICT(channel_id) DO UPDATE SET
+          target_account_id = excluded.target_account_id,
+          channel_name = excluded.channel_name
+      `).run(channelId, targetAccountId, channelName);
+      res.json({
+        ok: true,
+        channel_id: channelId,
+        target_account_id: targetAccountId,
+      });
     } catch (err) {
       sendServerError(res, err);
     } finally {
@@ -486,6 +960,176 @@ function maskAccountConfig(row) {
   };
 }
 
+function normalizedText(value) {
+  if (value === undefined || value === null || value === false) {
+    return "";
+  }
+  return String(value).trim();
+}
+
+function normalizeAccountType(value) {
+  const normalized = normalizedText(value).toLowerCase();
+  if (!normalized) {
+    return "main";
+  }
+  if (!ACCOUNT_TYPES.has(normalized)) {
+    return false;
+  }
+  return normalized;
+}
+
+function normalizeTestnet(value, fallback) {
+  if (value === undefined || value === null || value === "") {
+    let fallbackValue = 0;
+    if (fallback) {
+      fallbackValue = 1;
+    }
+    return { ok: true, value: fallbackValue };
+  }
+  if (value === true || value === 1 || value === "1" || value === "true") {
+    return { ok: true, value: 1 };
+  }
+  if (value === false || value === 0 || value === "0" || value === "false") {
+    return { ok: true, value: 0 };
+  }
+  return { ok: false };
+}
+
+function normalizeEnabled(value, fallback) {
+  return normalizeTestnet(value, fallback);
+}
+
+function normalizeRiskRatio(value, fallback) {
+  let candidate = value;
+  if (candidate === undefined || candidate === null || candidate === "") {
+    candidate = fallback;
+  }
+  const numeric = Number(candidate);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return { ok: false };
+  }
+  return { ok: true, value: numeric };
+}
+
+function normalizeRiskCapitalMultiplier(value) {
+  if (
+    value === undefined
+    || value === null
+    || value === ""
+    || typeof value === "boolean"
+  ) {
+    return { ok: false };
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return { ok: false };
+  }
+  return { ok: true, value: numeric };
+}
+
+function getAccount(db, accountId) {
+  return db.prepare(`
+    SELECT
+      account_id,
+      api_key,
+      api_secret,
+      default_risk_ratio,
+      is_testnet,
+      account_type,
+      parent_account_id,
+      execution_account_id,
+      risk_capital_multiplier,
+      is_enabled
+    FROM account_configs
+    WHERE account_id = ?
+  `).get(accountId);
+}
+
+function getChildAccountCount(db, accountId) {
+  const result = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM account_configs
+    WHERE account_type = 'subaccount'
+      AND parent_account_id = ?
+  `).get(accountId);
+  return result.count;
+}
+
+function getAccountByExecutionId(db, executionAccountId) {
+  return db.prepare(`
+    SELECT account_id
+    FROM account_configs
+    WHERE execution_account_id = ?
+  `).get(executionAccountId);
+}
+
+function validateAccountHierarchy(db, account) {
+  const {
+    accountId,
+    accountType,
+    parentAccountId,
+    isTestnet,
+  } = account;
+
+  if (accountType === "main") {
+    if (parentAccountId) {
+      return {
+        status: 400,
+        error: "Main account cannot have parent_account_id",
+      };
+    }
+    return false;
+  }
+
+  if (!parentAccountId) {
+    return {
+      status: 400,
+      error: "Subaccount requires parent_account_id",
+    };
+  }
+  if (parentAccountId === accountId) {
+    return {
+      status: 400,
+      error: "Subaccount cannot reference itself",
+    };
+  }
+
+  const parent = getAccount(db, parentAccountId);
+  if (!parent) {
+    return {
+      status: 400,
+      error: "Parent account not found",
+    };
+  }
+  if (parent.account_type !== "main") {
+    return {
+      status: 400,
+      error: "Parent account must be a main account",
+    };
+  }
+  if (Number(parent.is_enabled) !== 1) {
+    return {
+      status: 400,
+      error: "Parent account is disabled",
+    };
+  }
+  if (Number(parent.is_testnet) !== Number(isTestnet)) {
+    return {
+      status: 400,
+      error: "Subaccount environment must match its main account",
+    };
+  }
+  return false;
+}
+
+function isDuplicateAccountError(err) {
+  if (!err) {
+    return false;
+  }
+  return err.code === "SQLITE_CONSTRAINT_PRIMARYKEY"
+    || err.code === "SQLITE_CONSTRAINT_UNIQUE";
+}
+
 function sendServerError(res, err) {
   console.log("[trading-api] request failed:", safeErrorMessage(err));
   res.status(500).json({ error: "Internal server error" });
@@ -501,4 +1145,15 @@ module.exports = {
   ensureTelegramMessagesTable,
   registerTradingApi,
   saveTelegramMessage,
+  __test: {
+    DEFAULT_TRADING_DB_PATH,
+    resolveTradingDbPath,
+    migrateAccountSchema,
+    normalizeAccountType,
+    normalizeEnabled,
+    normalizeRiskCapitalMultiplier,
+    normalizeRiskRatio,
+    normalizeTestnet,
+    validateAccountHierarchy,
+  },
 };

@@ -7,7 +7,12 @@ from typing import Any, Callable
 
 from db.connection import transaction
 
-from .db_helpers import create_reconciliation_run, decimal_or_none, record_reconciliation_finding, update_reconciliation_run
+from .db_helpers import (
+    create_reconciliation_run,
+    decimal_or_none,
+    record_reconciliation_finding,
+    update_reconciliation_run,
+)
 
 
 @dataclass(frozen=True)
@@ -148,30 +153,103 @@ def _position_findings(conn, account_id: str, venue_snapshot: dict[str, Any], ru
             (account_id,),
         )
         rows = cur.fetchall()
-    for position_key, local_quantity, local_status in rows:
+    local_positions = {
+        str(position_key): (
+            decimal_or_none(local_quantity) or Decimal(0),
+            str(local_status),
+        )
+        for position_key, local_quantity, local_status in rows
+    }
+    for position_key, (local_quantity, local_status) in local_positions.items():
         venue_position = venue_positions.get(position_key)
         if venue_position is None:
+            if local_quantity == 0:
+                continue
+            findings.append(
+                _record_position_drift(
+                    conn,
+                    account_id=account_id,
+                    run_id=run_id,
+                    position_key=position_key,
+                    local_quantity=local_quantity,
+                    venue_quantity=Decimal(0),
+                    local_status=local_status,
+                    venue_status="missing",
+                    drift_kind="venue_missing",
+                    missing_side="venue",
+                )
+            )
             continue
-        venue_quantity = decimal_or_none(venue_position.get("quantity")) or Decimal("0")
+        venue_quantity = decimal_or_none(venue_position.get("quantity")) or Decimal(0)
         venue_status = str(venue_position.get("status"))
         if venue_quantity != local_quantity or venue_status != local_status:
             findings.append(
-                record_reconciliation_finding(
+                _record_position_drift(
                     conn,
-                    reconciliation_run_id=run_id,
                     account_id=account_id,
-                    finding_type="position_drift",
-                    severity="error",
+                    run_id=run_id,
                     position_key=position_key,
-                    payload={
-                        "local_quantity": str(local_quantity),
-                        "venue_quantity": str(venue_quantity),
-                        "local_status": local_status,
-                        "venue_status": venue_status,
-                    },
+                    local_quantity=local_quantity,
+                    venue_quantity=venue_quantity,
+                    local_status=local_status,
+                    venue_status=venue_status,
                 )
             )
+    for position_key, venue_position in venue_positions.items():
+        if position_key in local_positions:
+            continue
+        venue_quantity = decimal_or_none(venue_position.get("quantity")) or Decimal(0)
+        if venue_quantity == 0:
+            continue
+        findings.append(
+            _record_position_drift(
+                conn,
+                account_id=account_id,
+                run_id=run_id,
+                position_key=position_key,
+                local_quantity=Decimal(0),
+                venue_quantity=venue_quantity,
+                local_status="missing",
+                venue_status=str(venue_position.get("status")),
+                drift_kind="local_missing",
+                missing_side="local",
+            )
+        )
     return findings
+
+
+def _record_position_drift(
+    conn,
+    *,
+    account_id: str,
+    run_id: str,
+    position_key: str,
+    local_quantity: Decimal,
+    venue_quantity: Decimal,
+    local_status: str,
+    venue_status: str,
+    drift_kind: str | None = None,
+    missing_side: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "local_quantity": str(local_quantity),
+        "venue_quantity": str(venue_quantity),
+        "local_status": local_status,
+        "venue_status": venue_status,
+    }
+    if drift_kind:
+        payload["drift_kind"] = drift_kind
+    if missing_side:
+        payload["missing_side"] = missing_side
+    return record_reconciliation_finding(
+        conn,
+        reconciliation_run_id=run_id,
+        account_id=account_id,
+        finding_type="position_drift",
+        severity="error",
+        position_key=position_key,
+        payload=payload,
+    )
 
 
 def _account_findings(conn, account_id: str, venue_snapshot: dict[str, Any], run_id: str) -> list[dict[str, Any]]:

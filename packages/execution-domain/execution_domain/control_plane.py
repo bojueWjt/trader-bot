@@ -9,14 +9,18 @@ so transport (pull vs. push) can change without touching execution logic.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 from uuid import UUID
 
 from .contracts import (
-    ApprovedTradeIntentV1,
     ExecutionEventEnvelopeV1,
     ReconciliationState,
 )
@@ -26,12 +30,22 @@ __all__ = [
     "IntentAckStatus",
     "CommandType",
     "CommandAckStatus",
+    "IncidentSeverity",
     "IntentItem",
     "IntentBatch",
     "NodeCommand",
     "Heartbeat",
+    "ProductionIncidentReport",
+    "ProductionIncidentReceipt",
+    "NodeWriterIdentity",
+    "ReleaseIdentity",
+    "ReleaseGateReceipt",
+    "PeerIdentityReceipt",
+    "HeartbeatReceipt",
+    "portfolio_baseline_sha256",
     "ControlPlaneIntentSource",
     "ExecutionEventSink",
+    "ProductionIncidentSink",
     "NodeCommandChannel",
     "ControlPlaneSnapshotSource",
     "ControlPlaneClient",
@@ -66,14 +80,113 @@ class CommandType(str, Enum):
 
 class CommandAckStatus(str, Enum):
     ACCEPTED = "accepted"
+    RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class IncidentSeverity(str, Enum):
+    P0 = "P0"
+    P1 = "P1"
+    P2 = "P2"
+
+
+_PORTFOLIO_SNAPSHOT_FIELDS = (
+    "positions",
+    "regular_orders",
+    "algo_orders",
+)
+_PORTFOLIO_VOLATILE_FIELDS = frozenset(
+    {
+        "mark_price",
+        "unrealized_profit",
+        "liquidation_price",
+        "update_time",
+    }
+)
+_PORTFOLIO_DECIMAL_FIELD_PATTERN = re.compile(
+    r"(?:amount|margin|price|quantity|qty|rate)$"
+)
+
+
+def portfolio_baseline_sha256(
+    snapshot: Mapping[str, Any],
+    target_symbol: str,
+) -> str:
+    """Hash canonical non-target positions and orders from exchange evidence."""
+    snapshots: dict[str, list[Any]] = {}
+    for field_name in _PORTFOLIO_SNAPSHOT_FIELDS:
+        rows = snapshot.get(field_name)
+        if not isinstance(rows, list):
+            raise ValueError("portfolio snapshot fields must be lists")
+        canonical_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("portfolio snapshot rows must be objects")
+            if _portfolio_snapshot_item_symbol(row) == target_symbol:
+                continue
+            canonical_rows.append(_canonical_portfolio_value(row))
+        canonical_rows.sort(key=_canonical_json)
+        snapshots[field_name] = canonical_rows
+    payload = _canonical_json(snapshots).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _portfolio_snapshot_item_symbol(item: dict[str, Any]) -> str:
+    for field_name in ("symbol", "instrument_id", "instrument"):
+        symbol = _canonical_portfolio_symbol(item.get(field_name))
+        if symbol:
+            return symbol
+    return ""
+
+
+def _canonical_portfolio_symbol(value: Any) -> str:
+    return str(value or "").strip().upper().split("-")[0].split(".")[0]
+
+
+def _canonical_portfolio_value(value: Any, field_name: str = "") -> Any:
+    if isinstance(value, dict):
+        normalized = {}
+        for key in sorted(value):
+            normalized_key = str(key)
+            if normalized_key in _PORTFOLIO_VOLATILE_FIELDS:
+                continue
+            normalized[normalized_key] = _canonical_portfolio_value(
+                value[key],
+                normalized_key,
+            )
+        return normalized
+    if isinstance(value, list):
+        normalized_items = [
+            _canonical_portfolio_value(item, field_name)
+            for item in value
+        ]
+        normalized_items.sort(key=_canonical_json)
+        return normalized_items
+    if field_name == "symbol":
+        return _canonical_portfolio_symbol(value)
+    if _PORTFOLIO_DECIMAL_FIELD_PATTERN.search(field_name):
+        try:
+            numeric = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return str(value)
+        if numeric.is_finite():
+            return format(numeric.normalize(), "f")
+    return value
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 @dataclass(frozen=True)
 class IntentItem:
     cursor: str
-    intent: ApprovedTradeIntentV1
+    intent: Any
 
 
 @dataclass(frozen=True)
@@ -98,11 +211,143 @@ class Heartbeat:
     readiness: bool
     projection_lag_ms: int
     reconciliation_state: ReconciliationState
+    redis_fencing_epoch: Optional[str] = None
+    runtime_generation: Optional[str] = None
+    lease_fencing_token: Optional[int] = None
+    heartbeat_sequence: Optional[int] = None
     last_event_id: Optional[str] = None
+    release_id: Optional[str] = None
+    image_digest: Optional[str] = None
+    config_sha256: Optional[str] = None
+    dependency_lock_sha256: Optional[str] = None
+    schema_epoch: Optional[str] = None
+    positions: tuple[dict[str, Any], ...] | None = None
+    regular_orders: tuple[dict[str, Any], ...] | None = None
+    algo_orders: tuple[dict[str, Any], ...] | None = None
+    positions_snapshot_at: Optional[datetime] = None
+    regular_orders_snapshot_at: Optional[datetime] = None
+    algo_orders_snapshot_at: Optional[datetime] = None
+    reconciliation_completed_at: Optional[datetime] = None
+    open_orders: tuple[dict[str, Any], ...] | None = None
 
     def __post_init__(self) -> None:
         if not str(self.account_id).strip():
             raise ValueError("heartbeat account_id is required")
+
+
+@dataclass(frozen=True)
+class ProductionIncidentReport:
+    account_id: str
+    severity: IncidentSeverity
+    reason: str
+    summary: str
+
+    def __post_init__(self) -> None:
+        if not str(self.account_id).strip():
+            raise ValueError("incident account_id is required")
+        if not isinstance(self.severity, IncidentSeverity):
+            raise ValueError("incident severity is invalid")
+        if not str(self.reason).strip():
+            raise ValueError("incident reason is required")
+        if not str(self.summary).strip():
+            raise ValueError("incident summary is required")
+
+
+@dataclass(frozen=True)
+class ProductionIncidentReceipt:
+    incident_id: str
+    account_id: str
+    node_id: str
+    reason: str
+    severity: IncidentSeverity
+    status: str
+    summary: str
+    opened_at: datetime
+    deduplicated: bool
+
+
+@dataclass(frozen=True)
+class NodeWriterIdentity:
+    redis_fencing_epoch: str
+    runtime_generation: str
+    lease_fencing_token: int
+
+    def __post_init__(self) -> None:
+        epoch = str(self.redis_fencing_epoch or "").strip()
+        try:
+            parsed_epoch = UUID(epoch)
+        except ValueError as exc:
+            raise ValueError(
+                "redis_fencing_epoch must be a canonical UUID4"
+            ) from exc
+        if parsed_epoch.version != 4 or str(parsed_epoch) != epoch:
+            raise ValueError(
+                "redis_fencing_epoch must be a canonical UUID4"
+            )
+        generation = str(self.runtime_generation or "").strip()
+        if not generation:
+            raise ValueError("runtime_generation is required")
+        token = self.lease_fencing_token
+        if isinstance(token, bool) or not isinstance(token, int):
+            raise ValueError("lease_fencing_token must be an integer")
+        if token < 1:
+            raise ValueError("lease_fencing_token must be positive")
+        object.__setattr__(self, "redis_fencing_epoch", epoch)
+        object.__setattr__(self, "runtime_generation", generation)
+
+
+@dataclass(frozen=True)
+class ReleaseIdentity:
+    release_id: Optional[str]
+    image_digest: Optional[str]
+    config_sha256: Optional[str]
+    dependency_lock_sha256: Optional[str]
+    schema_epoch: Optional[str]
+
+
+@dataclass(frozen=True)
+class ReleaseGateReceipt:
+    status: str
+    release_id: Optional[str]
+    reviewed_manifest: Optional[ReleaseIdentity]
+    rollout_phase: Optional[str] = None
+    live_open_mode: Optional[str] = None
+    phase_version: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class PeerIdentityReceipt:
+    node_id: str
+    account_id: Optional[str]
+    release_id: Optional[str]
+    image_digest: Optional[str]
+    config_sha256: Optional[str]
+    dependency_lock_sha256: Optional[str]
+    schema_epoch: Optional[str]
+    redis_fencing_epoch: Optional[str]
+    freshness_age_seconds: Optional[float]
+    fresh: bool
+    identity_matches: bool
+    status: str = "unknown"
+
+
+@dataclass(frozen=True)
+class HeartbeatReceipt:
+    release_gate: ReleaseGateReceipt
+    peers: tuple[PeerIdentityReceipt, ...] = ()
+
+    @property
+    def requires_sticky_halt(self) -> bool:
+        if self.release_gate.status != "pass":
+            return True
+        for peer in self.peers:
+            if peer.status == "rollout_pending":
+                continue
+            if peer.status != "consistent":
+                return True
+            if not peer.fresh or not peer.identity_matches:
+                return True
+        return False
 
 
 @runtime_checkable
@@ -138,7 +383,18 @@ class ExecutionEventSink(Protocol):
         accepted; only those may leave the local spool."""
         ...
 
-    def heartbeat(self, node_id: str, hb: Heartbeat) -> None: ...
+    def heartbeat(self, node_id: str, hb: Heartbeat) -> HeartbeatReceipt: ...
+
+
+@runtime_checkable
+class ProductionIncidentSink(Protocol):
+    """Durable node-authenticated production incident reporting."""
+
+    def report_incident(
+        self,
+        node_id: str,
+        report: ProductionIncidentReport,
+    ) -> ProductionIncidentReceipt: ...
 
 
 @runtime_checkable

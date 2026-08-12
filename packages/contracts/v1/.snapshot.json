@@ -6,13 +6,16 @@
         "action",
         "approved_at",
         "decision_id",
+        "execution",
         "idempotency_key",
         "instrument_id",
         "intent_id",
         "order_plan",
+        "protection",
         "risk_budget",
         "risk_decision_id",
         "schema_version",
+        "sizing",
         "target_position_id",
         "valid_until"
       ],
@@ -62,6 +65,80 @@
     "decision_id": {
       "type": [
         "string"
+      ]
+    },
+    "execution": {
+      "properties": [
+        "limit_price",
+        "max_slippage_bps",
+        "order_type",
+        "post_only",
+        "reduce_only",
+        "time_in_force",
+        "zone"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "execution.limit_price": {
+      "type": [
+        "number"
+      ]
+    },
+    "execution.max_slippage_bps": {
+      "type": [
+        "number"
+      ]
+    },
+    "execution.order_type": {
+      "enum": [
+        "\"limit\"",
+        "\"market\"",
+        "\"zone\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "execution.post_only": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "execution.reduce_only": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "execution.time_in_force": {
+      "enum": [
+        "\"FOK\"",
+        "\"GTC\"",
+        "\"GTD\"",
+        "\"IOC\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "execution.zone": {
+      "properties": [
+        "high",
+        "low"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "execution.zone.high": {
+      "type": [
+        "number"
+      ]
+    },
+    "execution.zone.low": {
+      "type": [
+        "number"
       ]
     },
     "idempotency_key": {
@@ -307,6 +384,166 @@
         "string"
       ]
     },
+    "protection": {
+      "properties": [
+        "breakeven",
+        "require_stop",
+        "stop",
+        "take_profits",
+        "trailing"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "protection.breakeven": {
+      "properties": [
+        "enabled",
+        "offset_bps",
+        "trigger_r"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "protection.breakeven.enabled": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "protection.breakeven.offset_bps": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.breakeven.trigger_r": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.require_stop": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "protection.stop": {
+      "properties": [
+        "distance_pct",
+        "price",
+        "trigger_basis",
+        "type"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "protection.stop.distance_pct": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.stop.price": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.stop.trigger_basis": {
+      "enum": [
+        "\"last\"",
+        "\"mark\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "protection.stop.type": {
+      "enum": [
+        "\"stop_limit\"",
+        "\"stop_market\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "protection.take_profits": {
+      "type": [
+        "array"
+      ]
+    },
+    "protection.take_profits[]": {
+      "properties": [
+        "fraction",
+        "price",
+        "quantity",
+        "r_multiple",
+        "time_in_force"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "protection.take_profits[].fraction": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.take_profits[].price": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.take_profits[].quantity": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.take_profits[].r_multiple": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.take_profits[].time_in_force": {
+      "enum": [
+        "\"FOK\"",
+        "\"GTC\"",
+        "\"GTD\"",
+        "\"IOC\""
+      ],
+      "type": [
+        "string"
+      ]
+    },
+    "protection.trailing": {
+      "properties": [
+        "activation_r",
+        "callback_rate",
+        "enabled",
+        "min_step"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "protection.trailing.activation_r": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.trailing.callback_rate": {
+      "type": [
+        "number"
+      ]
+    },
+    "protection.trailing.enabled": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "protection.trailing.min_step": {
+      "type": [
+        "number"
+      ]
+    },
     "risk_budget": {
       "properties": [
         "max_leverage",
@@ -346,6 +583,25 @@
       "const": "\"1.0\"",
       "type": [
         "string"
+      ]
+    },
+    "sizing": {
+      "properties": [
+        "fraction",
+        "quantity"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "sizing.fraction": {
+      "type": [
+        "number"
+      ]
+    },
+    "sizing.quantity": {
+      "type": [
+        "number"
       ]
     },
     "target_position_id": {
@@ -811,7 +1067,9 @@
         "account",
         "audit_trail",
         "balances",
+        "exchange_state",
         "hermes_decisions",
+        "market_prices",
         "node_health",
         "orders",
         "positions",
@@ -867,9 +1125,128 @@
         "number"
       ]
     },
+    "data.exchange_state": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.exchange_state[]": {
+      "properties": [
+        "account_id",
+        "payload",
+        "stale",
+        "updated_at"
+      ],
+      "required": [
+        "account_id",
+        "payload",
+        "stale",
+        "updated_at"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "data.exchange_state[].account_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "data.exchange_state[].stale": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "data.exchange_state[].updated_at": {
+      "type": [
+        "string"
+      ]
+    },
     "data.hermes_decisions": {
       "type": [
         "array"
+      ]
+    },
+    "data.market_prices": {
+      "type": [
+        "array"
+      ]
+    },
+    "data.market_prices[]": {
+      "properties": [
+        "account_id",
+        "ask_price",
+        "bid_price",
+        "last_event_at",
+        "last_price",
+        "mark_price",
+        "source",
+        "stale",
+        "venue_symbol"
+      ],
+      "required": [
+        "account_id",
+        "ask_price",
+        "bid_price",
+        "last_event_at",
+        "last_price",
+        "mark_price",
+        "source",
+        "stale",
+        "venue_symbol"
+      ],
+      "type": [
+        "object"
+      ]
+    },
+    "data.market_prices[].account_id": {
+      "type": [
+        "string"
+      ]
+    },
+    "data.market_prices[].ask_price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "data.market_prices[].bid_price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "data.market_prices[].last_event_at": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "data.market_prices[].last_price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "data.market_prices[].mark_price": {
+      "type": [
+        "null",
+        "number"
+      ]
+    },
+    "data.market_prices[].source": {
+      "type": [
+        "string"
+      ]
+    },
+    "data.market_prices[].stale": {
+      "type": [
+        "boolean"
+      ]
+    },
+    "data.market_prices[].venue_symbol": {
+      "type": [
+        "string"
       ]
     },
     "data.node_health": {

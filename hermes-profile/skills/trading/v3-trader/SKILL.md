@@ -24,7 +24,7 @@ description: 通过 trader-v3 控制面下单、管理合约仓位、查询交�
 10. 执行结果(成交/拒绝/超时)必须原样反馈给用户,不要美化失败。
 11. **复盘/总结类消息零交易动作(2026-07-14 事故规则)**:消息主体是已实现盈亏回顾(含战绩百分比)、策略复盘、经验教训、行情感想,且没有给出新的带点位的操作指令——一律不产生任何交易动作(不开、不平、不减、不动保护单),回复「🔕 这条是复盘/总结帖,不操作」,只记入上下文。存疑时按复盘处理并请用户确认:宁可漏动作,不可误动作。
 12. **动仓前必验归属(频道纪律,2026-07-14 事故规则)**:处理频道消息时你只代表该频道。任何 close/partial/set-sl/set-tps 之前,必须先确认目标仓位的入场归属:用 `v3_query intents --symbol <symbol>` 找到该仓在场的入场 intent,再 `v3_query intent <id前8位>` 看审计链源头是哪个频道的消息。归属不是本频道 → **不动**,回复「该仓位归属 XX 频道的信号,本频道消息不操作它」。用户口头指令不受此限,但回复必须说明被操作仓位的归属。同一币种同方向若混有多个频道的在场入场(多笔不同来源的入场 intent 都未平),禁止整仓 close——改为按本频道入场数量 partial,或转用户确认。
-13. **管理动作参数纪律(2026-07-14 加固)**:close/partial/set-sl/set-tps/cancel 必须带 --ref(该次操作自己的稳定幂等号,如 close-btc-tg-sig-...-m5026;超时重试必须复用同一个 ref,禁止换 ref 重试)。处理频道消息时,close/partial 还必须带 --channel <本频道id> 和 --entry-ref <目标仓位入场时的 client_ref>;服务端会记录归属校验结果,返回里的 attribution.would_reject=true 说明归属存疑,必须在回复中向用户说明。查不到入场 ref 的仓位(历史仓/手动仓)→ 不动,转用户确认。
+13. **管理动作参数纪律(2026-07-14 加固)**:close/partial/set-sl/set-tps/cancel 必须带 --ref(该次操作自己的稳定幂等号,如 close-btc-tg-sig-...-m5026;超时重试必须复用同一个 ref,禁止换 ref 重试)。处理频道消息时,close/partial 还必须带 --channel <本频道id> 和 --entry-ref <目标仓位入场时的 client_ref>;控制面会根据原开仓 intent 或原订单规范化最终执行账号,频道改绑只影响新增风险。服务端会记录归属校验结果,返回里的 attribution.would_reject=true 说明归属存疑,必须在回复中向用户说明。查不到入场 ref 的仓位(历史仓/手动仓)→ 不动,转用户确认。
 
 ## 查询系统(v3_query.py — 回答任何"现在什么情况"之前先查它)
 
@@ -63,49 +63,117 @@ V3=/srv/hermes/profiles/trader/skills/trading/v3-trader/scripts/v3_trade.py
 # 开仓(市价做空,自动定量:带 --sl 即可,不传 --notional)
 python3 $V3 open BTCUSDT short --sl 63000 --tp 60000,58500 \
   --reason "频道X信号: BTC空 入场CMP" \
-  --channel -1002136478186 --ref tg-sig-c1002136478186-m12345
+  --account account-a \
+  --channel -1002136478186 \
+  --authorized-by-type channel \
+  --authorized-by-id -1002136478186 \
+  --source-message-id tg-sig-c1002136478186-m12345 \
+  --ref tg-sig-c1002136478186-m12345
 
 # 一条信号含多个入场价(首次入场+加仓/分批): 每个价位单独一笔 open,
 # --ref 必须加稳定后缀区分(-e1 首入、-e2 加仓),否则第二笔会被幂等去重吞掉。
 # 每笔独立自动定量(各约2%风险);若信号明示加仓量更小,给加仓单显式 --notional。
-python3 $V3 open BTCUSDT short --entry-type limit --price 62663 --sl 64229 --reason "..." --channel -1002136478186 --ref tg-sig-c1002136478186-m4374-e1
-python3 $V3 open BTCUSDT short --entry-type limit --price 63457 --sl 64229 --reason "..." --channel -1002136478186 --ref tg-sig-c1002136478186-m4374-e2
+python3 $V3 open BTCUSDT short --entry-type limit --price 62663 --sl 64229 \
+  --reason "频道信号首入" --account account-a \
+  --channel -1002136478186 --authorized-by-type channel \
+  --authorized-by-id -1002136478186 \
+  --source-message-id tg-sig-c1002136478186-m4374 \
+  --ref tg-sig-c1002136478186-m4374-e1
+python3 $V3 open BTCUSDT short --entry-type limit --price 63457 --sl 64229 \
+  --reason "频道信号加仓" --account account-a \
+  --channel -1002136478186 --authorized-by-type channel \
+  --authorized-by-id -1002136478186 \
+  --source-message-id tg-sig-c1002136478186-m4374 \
+  --ref tg-sig-c1002136478186-m4374-e2
 
 # 限价/区间入场(同样自动定量)
-python3 $V3 open ETHUSDT long --entry-type limit --price 2400 --sl 2320 --reason "..." --channel operator --ref operator-eth-long-2400
-python3 $V3 open SOLUSDT short --entry-type zone --price-min 145 --price-max 148 --sl 152 --reason "..." --channel operator --ref operator-sol-short-zone
+python3 $V3 open ETHUSDT long --entry-type limit --price 2400 --sl 2320 \
+  --reason "用户指令: ETH限价多" --account account-a --channel operator \
+  --authorized-by-type user --authorized-by-id balen \
+  --source-message-id operator-request-eth-2400 \
+  --ref operator-eth-long-2400
+python3 $V3 open SOLUSDT short --entry-type zone --price-min 145 \
+  --price-max 148 --sl 152 --reason "用户指令: SOL区间空" \
+  --account account-a --channel operator --authorized-by-type user \
+  --authorized-by-id balen --source-message-id operator-request-sol-zone \
+  --ref operator-sol-short-zone
 
 # 信号没给止损 → 必须显式小额 --notional 并说明
-python3 $V3 open BTCUSDT short --notional 300 --reason "XX信号无SL,固定小额" --channel operator --ref operator-btc-short-no-sl
+python3 $V3 open BTCUSDT short --notional 300 \
+  --reason "用户指令无SL,固定小额" --account account-a \
+  --channel operator --authorized-by-type user --authorized-by-id balen \
+  --source-message-id operator-request-btc-no-sl \
+  --ref operator-btc-short-no-sl
+
+# 审核发布 canary: 仅在 permit 已签发并 armed 后使用,名义金额不得超过 12 USDT。
+# quantity 必须按实时价格和交易所步进预先计算;正常交易不传这三个 canary 参数。
+# CLI 同时接受 --time-in-force/--time_in_force 与 --canary-permit-id/--canary_permit_id。
+python3 $V3 open SOLUSDT long --entry-type limit --price 145 \
+  --time-in-force IOC --quantity 0.08 --notional 11.6 \
+  --canary-permit-id <permit-id> --reason "审核发布 account-a canary" \
+  --account account-a --channel operator --authorized-by-type user \
+  --authorized-by-id balen --source-message-id operator-canary-account-a \
+  --ref operator-account-a-canary
 
 # 整仓平掉某币种(市价 reduce-only)。管理动作一律要 --ref(本次操作的稳定幂等号,重试必须复用同一个);
 # 处理频道消息时再带 --channel <本频道id> 与 --entry-ref <该仓入场时的 client_ref>(从 v3_query intent 审计链取)
-python3 $V3 close BTCUSDT --reason "用户口头指令: 平掉BTC空" --ref close-btc-verbal-0714
-python3 $V3 close BTCUSDT --reason "C02-舒琴消息3900: 平掉BTC多" --ref close-btc-tg-sig-c1002136478186-m3900 \
-  --channel -1002136478186 --entry-ref tg-sig-c1002136478186-m3856
+python3 $V3 close BTCUSDT --side short \
+  --reason "用户口头指令: 平掉BTC空" --account account-a \
+  --authorized-by-type user --authorized-by-id balen \
+  --source-message-id operator-request-close-btc \
+  --ref close-btc-verbal-0714
+python3 $V3 close BTCUSDT --side long \
+  --reason "C02-舒琴消息3900: 平掉BTC多" --account account-a \
+  --channel -1002136478186 \
+  --entry-ref tg-sig-c1002136478186-m3856 \
+  --authorized-by-type channel --authorized-by-id -1002136478186 \
+  --source-message-id tg-sig-c1002136478186-m3900 \
+  --ref close-btc-tg-sig-c1002136478186-m3900
 
 # 部分平仓(按币的数量;--ref/--channel/--entry-ref 规则同上)
-python3 $V3 partial SOLUSDT --quantity 0.05 --reason "信号: TP1到,减半" --ref partial-sol-tg-sig-c1002136478186-m3901
+python3 $V3 partial SOLUSDT --side long --quantity 0.05 \
+  --reason "信号: TP1到,减半" --account account-a \
+  --channel -1002136478186 \
+  --entry-ref tg-sig-c1002136478186-m3856 \
+  --authorized-by-type channel --authorized-by-id -1002136478186 \
+  --source-message-id tg-sig-c1002136478186-m3901 \
+  --ref partial-sol-tg-sig-c1002136478186-m3901
 
 # 调整已有仓位的止损(自动撤旧止损、按当前仓位数量重挂,reduce-only)
-python3 $V3 set-sl BTCUSDT --sl 62500 --reason "信号: 止损上移到成本" --ref tg-12346
+python3 $V3 set-sl BTCUSDT --side short --sl 62500 \
+  --reason "用户指令: 止损上移到成本" --account account-a \
+  --authorized-by-type user --authorized-by-id balen \
+  --source-message-id operator-request-btc-sl \
+  --ref set-sl-btc-operator-12346
 
-# 同一币种多空双持(对冲模式)时,close/partial/set-sl/set-tps 必须加 --side 指明动哪边,
-# 否则节点无法定位仓位会拒绝(position_not_unique)
-python3 $V3 set-sl ETHUSDT --sl 1725 --side long --reason "用户指令: 多单止损调到1725" 
+# 管理动作必须加 --side 指明 long/short 仓位簿。
+python3 $V3 set-sl ETHUSDT --sl 1725 --side long \
+  --reason "用户指令: 多单止损调到1725" --account account-a \
+  --authorized-by-type user --authorized-by-id balen \
+  --source-message-id operator-request-eth-sl \
+  --ref set-sl-eth-long-1725
 
 # 替换已有仓位的全部止盈档(不给 --qty 时按当前仓位均分;会撤掉旧止盈)
-python3 $V3 set-tps BTCUSDT --tp 61500,60800,60000 --reason "信号: 三档止盈" --ref tg-12346
+python3 $V3 set-tps BTCUSDT --side short --tp 61500,60800,60000 \
+  --reason "用户指令: 三档止盈" --account account-a \
+  --authorized-by-type user --authorized-by-id balen \
+  --source-message-id operator-request-btc-tps \
+  --ref set-tps-btc-operator-12346
 
 # 撤销单笔系统挂单(只能撤系统下的单,外部/手动单不可撤;订单号用完整35位)
-python3 $V3 cancel WLDUSDT --order B<32位hex><2位序号> --reason "48h超龄撤单" --ref ttl-<订单号后8位>
+python3 $V3 cancel WLDUSDT --order B<32位hex><2位序号> \
+  --reason "48h超龄撤单" --account account-a \
+  --authorized-by-type user --authorized-by-id balen \
+  --source-message-id operator-request-cancel-wld \
+  --ref ttl-<订单号后8位>
 # cancel 的 --ref 每张订单必须独立(用订单号后缀),复用同一个 ref 会被幂等去重、第二张单撤不掉
 
 # 查某笔订单执行状态 / 查全部持仓与余额
 python3 $V3 status <intent_id>
 python3 $V3 positions
 
-# 账户: 默认 account-a,需要时 --account account-b
+# 账户: 每个写命令都显式传 --account account-a|account-b|account-c|account-d。
+# 频道开仓时账号必须匹配 watcher 当前路由;管理动作由控制面按原开仓归属规范化。
 ```
 
 ## 输出解读

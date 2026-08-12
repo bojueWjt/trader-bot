@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Callable, Protocol, Sequence
 
 from .contracts import ExecutionEventEnvelopeV1
@@ -22,6 +24,22 @@ class ProjectionHealth(Protocol):
     def mark_projection_ready(self) -> None: ...
 
     def mark_projection_failed(self, reason: str) -> None: ...
+
+    def mark_projection_degraded(self, reason: str) -> None: ...
+
+    def clear_projection_degraded(self) -> None: ...
+
+
+class ProjectionIngestOutcome(str, Enum):
+    DURABLE = "DURABLE"
+    DEDUPED = "DEDUPED"
+    IGNORED = "IGNORED"
+
+
+@dataclass(frozen=True)
+class ProjectionIngestResult:
+    outcome: ProjectionIngestOutcome
+    event_id: str | None
 
 
 class ProjectionActor:
@@ -46,16 +64,43 @@ class ProjectionActor:
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._mapper = mapper or ProjectionEventMapper(config, now=self._now)
         self._health = health
+        self._egress_degraded_reason = ""
+        self._egress_halted_reason = ""
+        self._sync_spool_pressure()
+
+    @property
+    def egress_degraded_reason(self) -> str:
+        return self._egress_degraded_reason
+
+    @property
+    def egress_halted_reason(self) -> str:
+        return self._egress_halted_reason
 
     def on_event(self, event: Any) -> str | None:
+        result = self.ingest_event(event)
+        if result.outcome is ProjectionIngestOutcome.IGNORED:
+            return None
+        self.flush()
+        return result.event_id
+
+    def ingest_event(self, event: Any) -> ProjectionIngestResult:
         envelope = self._mapper.to_envelope(event)
         if envelope is None:
-            return None
+            return ProjectionIngestResult(
+                outcome=ProjectionIngestOutcome.IGNORED,
+                event_id=None,
+            )
         appended = self.spool.append_once(envelope)
+        self._sync_spool_pressure()
         if appended:
             self._record_projection_progress(envelope)
-        self.flush()
-        return envelope.event_id
+            outcome = ProjectionIngestOutcome.DURABLE
+        else:
+            outcome = ProjectionIngestOutcome.DEDUPED
+        return ProjectionIngestResult(
+            outcome=outcome,
+            event_id=envelope.event_id,
+        )
 
     def flush(self) -> list[str]:
         pending = self.spool.pending_events(limit=self.config.max_flush_batch_size)
@@ -64,9 +109,12 @@ class ProjectionActor:
         try:
             acked = self._sink.post_events(self.config.node_id, pending)
         except Exception:
-            self._mark_projection_failed("control-plane execution-event sink unavailable")
+            self._mark_projection_failed(
+                "control-plane execution-event sink unavailable"
+            )
             return []
         self.spool.mark_acked(acked)
+        self._sync_spool_pressure()
         if acked:
             last_event_id = acked[-1]
             last_event = _find_event(pending, last_event_id)
@@ -75,6 +123,41 @@ class ProjectionActor:
         if self.spool.pending_count == 0:
             self._mark_projection_ready()
         return acked
+
+    def mark_egress_degraded(self, reason: str) -> None:
+        if self._egress_halted_reason:
+            return
+        if self._egress_degraded_reason == reason:
+            return
+        self._egress_degraded_reason = reason
+        marker = getattr(self._health, "mark_projection_degraded", None)
+        if callable(marker):
+            marker(reason)
+
+    def clear_egress_degraded(self) -> None:
+        if self._egress_halted_reason:
+            return
+        if not self._egress_degraded_reason:
+            return
+        self._egress_degraded_reason = ""
+        clearer = getattr(self._health, "clear_projection_degraded", None)
+        if callable(clearer):
+            clearer()
+
+    def halt_egress(self, reason: str) -> None:
+        if self._egress_halted_reason:
+            return
+        self._egress_halted_reason = reason
+        self._mark_projection_failed(reason)
+
+    def _sync_spool_pressure(self) -> None:
+        if self.spool.is_degraded:
+            self.mark_egress_degraded(
+                "execution event spool usage "
+                f"{self.spool.usage_ratio:.1%} exceeds degraded threshold"
+            )
+            return
+        self.clear_egress_degraded()
 
     def _record_projection_progress(self, envelope: ExecutionEventEnvelopeV1) -> None:
         lag_ms = _lag_ms(now=self._now(), ts_event=envelope.ts_event)
@@ -86,11 +169,14 @@ class ProjectionActor:
                     f"{lag_ms}ms exceeds {self.config.lag_degrade_threshold_ms}ms"
                 )
             else:
-                self._health.mark_projection_ready()
+                self._mark_projection_ready()
 
     def _mark_projection_ready(self) -> None:
-        if self._health is not None:
-            self._health.mark_projection_ready()
+        if self._health is None:
+            return
+        if self._egress_halted_reason:
+            return
+        self._health.mark_projection_ready()
 
     def _mark_projection_failed(self, reason: str) -> None:
         if self._health is not None:
@@ -121,6 +207,18 @@ class LifecycleProjectionHealth:
         except ModuleNotFoundError:
             return
         self._lifecycle.mark_dependency_failed(DependencyName.PROJECTION, reason)
+
+    def mark_projection_degraded(self, reason: str) -> None:
+        recorder = getattr(self._lifecycle, "record_projection_degraded", None)
+        if callable(recorder):
+            recorder(reason)
+            return
+        print(f"[ProjectionActor] DEGRADED: {reason}", flush=True)
+
+    def clear_projection_degraded(self) -> None:
+        clearer = getattr(self._lifecycle, "clear_projection_degraded", None)
+        if callable(clearer):
+            clearer()
 
 
 def _find_event(

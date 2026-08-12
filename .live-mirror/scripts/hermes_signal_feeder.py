@@ -24,13 +24,43 @@ import sqlite3
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+import math
+from typing import Any, Callable
 
 WATCHER_DB = "/var/lib/docker/volumes/trader_signal-data/_data/signal_store.db"
+DEFAULT_TRADING_DB_PATH = "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db"
+CANONICAL_TRADING_DB_ENV = "TRADER_TRADING_DB_PATH"
+LEGACY_TRADING_DB_ENVS = ("WATCHER_TRADING_DB", "TRADING_DB_PATH")
+TRADING_DB_ENV_NAMES = (CANONICAL_TRADING_DB_ENV, *LEGACY_TRADING_DB_ENVS)
+
+
+def resolve_trading_db_path(env: dict[str, str] | None = None) -> str:
+    if env is None:
+        env = os.environ
+    configured: list[tuple[str, str]] = []
+    for name in TRADING_DB_ENV_NAMES:
+        value = str(env.get(name) or "").strip()
+        if value:
+            configured.append((name, value))
+    if not configured:
+        return DEFAULT_TRADING_DB_PATH
+    canonical_name, canonical_value = configured[0]
+    for name, value in configured[1:]:
+        if value != canonical_value:
+            raise RuntimeError(
+                "conflicting trading DB path environment: "
+                f"{canonical_name}={canonical_value} {name}={value}"
+            )
+    return canonical_value
+
+
+WATCHER_TRADING_DB = resolve_trading_db_path()
 WATCHER_ROOT = "/var/lib/docker/volumes/trader_signal-data/_data"  # container /data -> here
 V3_MEDIA = "/srv/trader-v3/media"
 STATE = "/srv/trader-v3/scripts/.hermes_feeder_cursor"
+PENDING_STATE = "/srv/trader-v3/scripts/.hermes_feeder_pending.json"
 LOCK = "/srv/trader-v3/scripts/.hermes_feeder.lock"
 CHANNEL_CONTEXT_DIR = "/srv/trader-v3/scripts/.channel_ctx"
 HERMES_OUTPUT_DIR = "/srv/hermes/profiles/trader/cron/output"
@@ -71,6 +101,23 @@ _INVISIBLE_TABLE = {
     for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF,
               0x202A, 0x202B, 0x202C, 0x202D, 0x202E)
 }
+_ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_DISABLED_ACCOUNT_STATUSES = frozenset(
+    {"0", "disabled", "inactive", "suspended", "deleted", "false"}
+)
+_ENABLED_ACCOUNT_STATUSES = frozenset({"1", "active", "enabled", "true"})
+
+
+@dataclass(frozen=True)
+class ChannelAccountRoute:
+    channel_id: str
+    target_account_id: str
+    execution_account_id: str
+    risk_capital_multiplier: float
+
+
+class ChannelRouteError(RuntimeError):
+    pass
 
 
 def sanitize_prompt(prompt: str) -> str:
@@ -86,6 +133,9 @@ BLOCKED_NOTICE_TEMPLATE = """一条频道消息被安全防护拦截,没有进�
 PROMPT_TEMPLATE = """收到新的交易频道消息,你是交易决策者,请处理:
 
 频道: {channel_name} ({channel_id})
+路由凭据账号(审计): {target_account_id}
+固定执行账号: {execution_account_id}
+风险资金系数(审计): {risk_capital_multiplier}
 批次消息ID: {message_ids}
 时间范围: {time_range}
 
@@ -97,7 +147,7 @@ PROMPT_TEMPLATE = """收到新的交易频道消息,你是交易决策者,请处
 {media_block}
 处理要求:
 1. 先判断这是什么: 可执行的交易信号 / 已有仓位的更新指令(止盈止损调整、平仓) / 行情分析 / 噪音。
-2. 如果是可执行信号或仓位指令: 使用 v3-trader skill 的 v3_trade.py 执行。开仓不传 --notional(系统按风险配置自动定量),但信号给了止损就必须传 --sl;信号无止损时才显式给一个小额 --notional 并在回复里说明。必带 --reason 引用本批次消息;--ref 必须用【对应那条消息自己】的 tg-<signal_id>(正文块中逐条给出),同一批次里不同消息的交易禁止共用 ref(平仓/减仓同样)。信号给了多个入场价(如首次入场+加仓价)时每个价位都要单独挂一笔,--ref 加档位后缀(tg-{signal_id}-e1、-e2)避免被幂等去重。缺少关键参数(如方向或币种)时不要猜,标记为无法执行。
+2. 如果是可执行信号或仓位指令: 使用 v3-trader skill 的 v3_trade.py 执行。open/close/partial/set-sl/set-tps/disable-tps/cancel 必须使用 --account {execution_account_id} --channel {channel_id} --authorized-by-type channel --authorized-by-id {channel_id}，并把对应正文块的“交易ref”原样传给 --source-message-id；管理动作还必须用 --entry-ref 指向本频道原始开仓 ref。新开仓账号由频道当前路由安全边界动态解析；管理动作的最终账号由控制面根据原开仓 intent 或原订单归属规范化，因此频道改绑只影响新增风险。Hermes 无权选择或改写最终账号。账户、频道、授权主体或 entry-ref 不一致时拒绝执行并报告。开仓不传 --notional(系统按风险配置自动定量),但信号给了止损就必须传 --sl;信号无止损时才显式给一个小额 --notional 并在回复里说明。必带 --reason 引用本批次消息;--ref 必须使用【对应那条消息自己】的交易ref(正文块中逐条给出),同一批次里不同消息的交易禁止共用 ref(平仓/减仓同样)。信号给了多个入场价(如首次入场+加仓价)时每个价位都要单独挂一笔,--ref 在该交易ref后追加档位后缀(-e1、-e2)避免被幂等去重。缺少关键参数(如方向或币种)时不要猜,标记为无法执行。
 3. 纯图片消息若上下文显示同频道刚有文字消息则视为其附图,结合判断,不当独立信号。
 4. “锁定X%利润”= 按当前仓位的X%执行部分平仓,不算缺参数。
 5. 除非信号明确给出新的止盈价位,不要替换原止盈计划,尤其不要拿“未来反向入场区”当止盈。
@@ -117,15 +167,230 @@ def load_cursor() -> str | None:
 
 def save_cursor(value: str) -> None:
     tmp = STATE + ".tmp"
-    with open(tmp, "w") as fh:
+    with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(value)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, STATE)
+
+
+def load_pending_delivery() -> dict[str, Any] | None:
+    try:
+        with open(PENDING_STATE) as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"pending delivery state is unreadable: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise RuntimeError("pending delivery state must be a JSON object")
+    return raw
+
+
+def save_pending_delivery(state: dict[str, Any]) -> None:
+    tmp = PENDING_STATE + ".tmp"
+    os.makedirs(os.path.dirname(PENDING_STATE), exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, sort_keys=True)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, PENDING_STATE)
+
+
+def clear_pending_delivery() -> None:
+    try:
+        os.unlink(PENDING_STATE)
+    except FileNotFoundError:
+        return
+
+
+def commit_batch_cursor(value: str) -> None:
+    save_cursor(value)
+    clear_pending_delivery()
+
+
+def reconcile_committed_pending(cursor: str | None) -> None:
+    if not cursor:
+        return
+    pending = load_pending_delivery()
+    if pending is None:
+        return
+    status = str(pending.get("status") or "")
+    last_cursor = str(pending.get("last_cursor") or "")
+    if status in {"succeeded", "skipped"} and last_cursor == cursor:
+        clear_pending_delivery()
 
 
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{WATCHER_DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _trading_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(f"file:{WATCHER_TRADING_DB}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except sqlite3.Error as exc:
+        raise ChannelRouteError(
+            f"channel routing schema is unavailable: {exc}"
+        ) from exc
+    return {str(row["name"]) for row in rows}
+
+
+def _account_is_enabled(
+    row: sqlite3.Row,
+    account_columns: set[str],
+) -> bool:
+    for flag_name in ("is_enabled", "enabled"):
+        if flag_name not in account_columns:
+            continue
+        value = str(row[flag_name] or "").strip().lower()
+        if value in _ENABLED_ACCOUNT_STATUSES:
+            continue
+        return False
+    if "status" not in account_columns:
+        return True
+    status = str(row["status"] or "").strip().lower()
+    if status in _ENABLED_ACCOUNT_STATUSES or not status:
+        return True
+    if status in _DISABLED_ACCOUNT_STATUSES:
+        return False
+    return False
+
+
+def resolve_channel_account(channel_id: Any) -> ChannelAccountRoute:
+    normalized_channel_id = str(channel_id or "").strip()
+    if not normalized_channel_id:
+        raise ChannelRouteError("channel_id is missing")
+
+    conn = _trading_connection()
+    try:
+        account_columns = _table_columns(conn, "account_configs")
+        route_columns = _table_columns(conn, "channel_routing")
+        required_account_columns = {
+            "account_id",
+            "execution_account_id",
+            "risk_capital_multiplier",
+        }
+        required_route_columns = {"channel_id", "target_account_id"}
+        if not required_account_columns <= account_columns:
+            raise ChannelRouteError(
+                "account_configs requires account_id, execution_account_id, "
+                "and risk_capital_multiplier"
+            )
+        if not required_route_columns <= route_columns:
+            raise ChannelRouteError(
+                "channel_routing requires channel_id and target_account_id"
+            )
+
+        fields = [
+            "route.target_account_id AS target_account_id",
+            "account.account_id AS account_id",
+            "account.execution_account_id AS execution_account_id",
+            "(SELECT COUNT(*) FROM account_configs AS execution_account "
+            "WHERE execution_account.execution_account_id = "
+            "account.execution_account_id) AS execution_account_count",
+        ]
+        if "account_type" in account_columns:
+            fields.append("account.account_type AS account_type")
+        else:
+            fields.append("'main' AS account_type")
+        if "parent_account_id" in account_columns:
+            fields.append("account.parent_account_id AS parent_account_id")
+        else:
+            fields.append("'' AS parent_account_id")
+        if {
+            "account_type",
+            "parent_account_id",
+        } <= account_columns:
+            fields.append(
+                "(SELECT COUNT(*) FROM account_configs AS parent_account "
+                "WHERE parent_account.account_id = account.parent_account_id "
+                "AND LOWER(TRIM(parent_account.account_type)) = 'main') "
+                "AS parent_main_account_count"
+            )
+        else:
+            fields.append("0 AS parent_main_account_count")
+        fields.append(
+            "account.risk_capital_multiplier AS risk_capital_multiplier"
+        )
+        for field_name in ("is_enabled", "enabled", "status"):
+            if field_name in account_columns:
+                fields.append(f"account.{field_name} AS {field_name}")
+
+        rows = conn.execute(
+            "SELECT "
+            + ", ".join(fields)
+            + " FROM channel_routing AS route "
+            + "LEFT JOIN account_configs AS account "
+            + "ON account.account_id = route.target_account_id "
+            + "WHERE route.channel_id = ?",
+            (normalized_channel_id,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise ChannelRouteError(
+            f"channel routing lookup failed: {exc}"
+        ) from exc
+    finally:
+        conn.close()
+
+    if len(rows) != 1:
+        raise ChannelRouteError(
+            f"channel_id {normalized_channel_id!r} matched {len(rows)} routes"
+        )
+
+    row = rows[0]
+    target_account_id = str(row["target_account_id"] or "").strip()
+    account_id = str(row["account_id"] or "").strip()
+    execution_account_id = str(row["execution_account_id"] or "").strip()
+    if not account_id or target_account_id != account_id:
+        raise ChannelRouteError("route target account is missing or invalid")
+    if _ACCOUNT_ID_RE.fullmatch(execution_account_id) is None:
+        raise ChannelRouteError("route execution_account_id is invalid")
+    try:
+        execution_account_count = int(row["execution_account_count"])
+    except (TypeError, ValueError):
+        raise ChannelRouteError("route execution_account_id uniqueness is invalid")
+    if execution_account_count != 1:
+        raise ChannelRouteError("route execution_account_id must be unique")
+    account_type = str(row["account_type"] or "").strip().lower()
+    if account_type not in {"main", "subaccount"}:
+        raise ChannelRouteError("route target account_type is invalid")
+    parent_account_id = str(row["parent_account_id"] or "").strip()
+    if account_type == "subaccount":
+        if not parent_account_id:
+            raise ChannelRouteError("subaccount parent_account_id is missing")
+        try:
+            parent_main_account_count = int(row["parent_main_account_count"])
+        except (TypeError, ValueError):
+            raise ChannelRouteError(
+                "subaccount parent account relationship is invalid"
+            )
+        if parent_main_account_count != 1:
+            raise ChannelRouteError(
+                "subaccount parent must resolve to one main account"
+            )
+    try:
+        multiplier = float(row["risk_capital_multiplier"])
+    except (TypeError, ValueError):
+        raise ChannelRouteError("route target risk_capital_multiplier is invalid")
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        raise ChannelRouteError("route target risk_capital_multiplier is invalid")
+    if not _account_is_enabled(row, account_columns):
+        raise ChannelRouteError("route target account is disabled")
+    return ChannelAccountRoute(
+        channel_id=normalized_channel_id,
+        target_account_id=target_account_id,
+        execution_account_id=execution_account_id,
+        risk_capital_multiplier=multiplier,
+    )
 
 
 def latest_cursor(conn: sqlite3.Connection) -> str | None:
@@ -203,6 +468,17 @@ def _signal_channel(sig: Any) -> str:
 def _signal_message_id(sig: Any) -> str:
     payload = _payload(sig)
     return str(payload.get("source_message_id") or _row_get(sig, "signal_id"))
+
+
+def _canonical_signal_ref(sig: Any) -> str:
+    payload = _payload(sig)
+    channel_id = str(payload.get("source_channel_id") or "").strip().lstrip("-")
+    message_id = str(payload.get("source_message_id") or "").strip()
+    if not channel_id.isdigit() or not message_id.isdigit():
+        raise ChannelRouteError(
+            "signal requires numeric source_channel_id and source_message_id"
+        )
+    return f"tg-sig-c{channel_id}-m{message_id}"
 
 
 def select_deliverable_batch(rows: list[Any], now: datetime | None = None) -> list[Any]:
@@ -295,6 +571,7 @@ def build_prompt(sig_or_batch: Any) -> str:
     first_payload = payloads[0] if payloads else {}
     channel_name = first_payload.get("source_channel_name") or "unknown"
     channel_id = first_payload.get("source_channel_id") or "unknown"
+    route = resolve_channel_account(channel_id)
     message_ids = ", ".join(_signal_message_id(sig) for sig in batch)
     times = [str(_row_get(sig, "received_at")) for sig in batch]
     if len(times) == 1:
@@ -309,6 +586,7 @@ def build_prompt(sig_or_batch: Any) -> str:
         blocks.append(
             f"- 消息ID: {_signal_message_id(sig)}\n"
             f"  signal_id: {_row_get(sig, 'signal_id')}\n"
+            f"  交易ref: {_canonical_signal_ref(sig)}\n"
             f"  时间: {_row_get(sig, 'received_at')}\n"
             f"  正文:\n{text}"
         )
@@ -321,12 +599,14 @@ def build_prompt(sig_or_batch: Any) -> str:
     return sanitize_prompt(PROMPT_TEMPLATE.format(
         channel_name=channel_name,
         channel_id=channel_id,
+        target_account_id=route.target_account_id,
+        execution_account_id=route.execution_account_id,
+        risk_capital_multiplier=format(route.risk_capital_multiplier, ".8g"),
         message_ids=message_ids,
         time_range=time_range,
         channel_context=context,
         message_block="\n\n".join(blocks),
         media_block=media_block,
-        signal_id=_row_get(batch[-1], "signal_id"),
     ))
 
 
@@ -351,7 +631,12 @@ def notify_blocked(sig: Any, dry_run: bool, reason: str | None = None) -> None:
         log(f"blocked-notice failed for {_row_get(sig, 'signal_id')}: {exc}")
 
 
-def run_hermes(prompt: str, name: str, dry_run: bool) -> str | None:
+def run_hermes(
+    prompt: str,
+    name: str,
+    dry_run: bool,
+    on_job_created: Callable[[str], None] | None = None,
+) -> str | None:
     schedule = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
     create_cmd = [
         HERMES_BIN, "cron", "create", schedule, prompt,
@@ -368,13 +653,25 @@ def run_hermes(prompt: str, name: str, dry_run: bool) -> str | None:
         log(f"cron create failed rc={out.returncode} stdout={out.stdout[-300:]!r} stderr={out.stderr[-300:]!r}")
         return None
     job_id = match.group(1)
-    run = subprocess.run(
-        [HERMES_BIN, "cron", "run", job_id, "--accept-hooks"],
-        env=HERMES_ENV, capture_output=True, text=True, timeout=RUN_TIMEOUT,
-    )
+    if on_job_created is not None:
+        on_job_created(job_id)
+    try:
+        run = subprocess.run(
+            [HERMES_BIN, "cron", "run", job_id, "--accept-hooks"],
+            env=HERMES_ENV, capture_output=True, text=True, timeout=RUN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        log(
+            f"cron run {job_id} timed out locally after {exc.timeout}s; "
+            "job remains pending for output observation"
+        )
+        return job_id
     if run.returncode != 0:
-        log(f"cron run {job_id} failed rc={run.returncode} stderr={run.stderr[-300:]!r}")
-        return None
+        log(
+            f"cron run {job_id} failed rc={run.returncode} "
+            f"stderr={run.stderr[-300:]!r}; observing created job"
+        )
+        return job_id
     log(f"handled via job {job_id}: {(run.stdout or '')[-160:]!r}")
     return job_id
 
@@ -382,8 +679,7 @@ def run_hermes(prompt: str, name: str, dry_run: bool) -> str | None:
 def _job_id_from_record(record: Any, name: str) -> str | None:
     if not isinstance(record, dict):
         return None
-    record_name = str(record.get("name") or record.get("job_name") or "")
-    if record_name != name:
+    if str(record.get("name") or "") != name:
         return None
     job_id = record.get("id")
     if not job_id:
@@ -493,16 +789,16 @@ def _latest_markdown_response(job_id: str) -> str | None:
     return response or None
 
 
-def capture_hermes_response(job_id: str, sleep_func=time.sleep) -> str:
+def capture_hermes_response(job_id: str, sleep_func=time.sleep) -> str | None:
     if not job_id or job_id == "dry-run":
-        return "(结果未捕获)"
+        return None
     deadline = time.monotonic() + RESPONSE_CAPTURE_SECONDS
     while True:
         response = _latest_markdown_response(job_id)
         if response is not None:
             return response
         if time.monotonic() >= deadline:
-            return "(结果未捕获)"
+            return None
         sleep_func(2)
 
 
@@ -529,35 +825,6 @@ def is_brain_failure(response: str) -> bool:
     return any(marker in text for marker in BRAIN_FAILURE_MARKERS)
 
 
-def deliver_batch(
-    batch: list[Any],
-    dry_run: bool,
-    now_func=time.time,
-    sleep_func=time.sleep,
-    existing_job_id: str | None = None,
-) -> bool:
-    if not batch:
-        return True
-    prompt = build_prompt(batch)
-    first_id = _row_get(batch[0], "signal_id")
-    last_id = _row_get(batch[-1], "signal_id")
-    name = f"signal-{first_id}" if first_id == last_id else f"signal-{first_id}-{last_id}"
-    job_id = existing_job_id
-    if job_id:
-        log(f"reusing existing Hermes job {job_id} for {name}")
-    else:
-        job_id = run_hermes(prompt, name=name, dry_run=dry_run)
-    if not job_id:
-        return False
-    if not dry_run:
-        response = capture_hermes_response(str(job_id), sleep_func=sleep_func)
-        if is_brain_failure(response):
-            log(f"brain failure for job {job_id}: {response[:120]!r}; will retry batch")
-            return False
-        append_channel_context(batch, response, now=_coerce_now(now_func()))
-    return True
-
-
 def _batch_job_name(batch: list[Any]) -> str:
     first_id = _row_get(batch[0], "signal_id")
     last_id = _row_get(batch[-1], "signal_id")
@@ -566,120 +833,241 @@ def _batch_job_name(batch: list[Any]) -> str:
     return f"signal-{first_id}-{last_id}"
 
 
-def _failed_batch_attempt(
+def _new_pending_delivery(batch: list[Any]) -> dict[str, Any]:
+    return {
+        "batch_key": _signal_cursor(batch[0]),
+        "last_cursor": _signal_cursor(batch[-1]),
+        "job_name": _batch_job_name(batch),
+        "job_id": "",
+        "status": "ready",
+        "attempts": 0,
+        "retry_after": 0.0,
+        "dispatched_at": 0.0,
+    }
+
+
+def _record_delivery_failure(
     batch: list[Any],
-    key: str,
+    pending: dict[str, Any],
     dry_run: bool,
-    attempts: dict[str, int],
-    retry_after: dict[str, float],
-    timeout_keys: set[str],
     now_ts: float,
 ) -> str:
-    attempt = attempts.get(key, 0) + 1
-    attempts[key] = attempt
-    if attempt < MAX_ATTEMPTS:
-        delay = BRAIN_RETRY_DELAY_SECONDS * attempt
-        retry_after[key] = now_ts + delay
+    attempts = int(pending.get("attempts") or 0) + 1
+    pending["attempts"] = attempts
+    pending["job_id"] = ""
+    pending["dispatched_at"] = 0.0
+    if attempts < MAX_ATTEMPTS:
+        delay = BRAIN_RETRY_DELAY_SECONDS * attempts
+        pending["status"] = "retry"
+        pending["retry_after"] = now_ts + delay
+        save_pending_delivery(pending)
         log(
-            f"attempt {attempt}/{MAX_ATTEMPTS} failed for {key}; "
-            f"retry after {int(delay)}s"
+            f"attempt {attempts}/{MAX_ATTEMPTS} failed for "
+            f"{pending['batch_key']}; retry after {int(delay)}s"
         )
         return "retry"
-    log(f"SKIPPING poison batch starting {key} after {MAX_ATTEMPTS} attempts")
+
     reason = (
-        f"连续 {MAX_ATTEMPTS} 次投递失败,已跳过。"
-        "其中发生本地 Hermes 超时；远端 cron job 可能仍在运行，存在双 job 风险。"
+        f"连续 {MAX_ATTEMPTS} 次交易大脑处理失败,已跳过。"
+        "系统已确认每次 job 都以失败响应结束。"
     )
-    if key not in timeout_keys:
-        reason = (
-            f"连续 {MAX_ATTEMPTS} 次投递失败"
-            "(内容触发安全防护或投递异常),已跳过"
-        )
     for sig in batch:
         notify_blocked(sig, dry_run=dry_run, reason=reason)
-    attempts.pop(key, None)
-    retry_after.pop(key, None)
-    timeout_keys.discard(key)
+    pending["status"] = "skipped"
+    pending["retry_after"] = 0.0
+    save_pending_delivery(pending)
     return "skip"
+
+
+def _record_delivery_success(
+    batch: list[Any],
+    pending: dict[str, Any],
+    response: str,
+    now_ts: float,
+) -> str:
+    pending["status"] = "succeeded"
+    pending["response"] = response
+    pending["retry_after"] = 0.0
+    save_pending_delivery(pending)
+    if not bool(pending.get("context_written")):
+        append_channel_context(batch, response, now=_coerce_now(now_ts))
+        pending["context_written"] = True
+        save_pending_delivery(pending)
+    return "success"
+
+
+def _block_unroutable_batch(
+    batch: list[Any],
+    pending: dict[str, Any],
+    dry_run: bool,
+    reason: str,
+) -> str:
+    notice_reason = (
+        f"频道账号路由校验失败: {reason}。"
+        "系统已拒绝本条消息的新增风险。"
+    )
+    previous_reason = str(pending.get("route_error") or "")
+    if (
+        str(pending.get("status") or "") != "route_blocked"
+        or previous_reason != reason
+    ):
+        for sig in batch:
+            notify_blocked(sig, dry_run=dry_run, reason=notice_reason)
+    if not dry_run:
+        pending["status"] = "route_blocked"
+        pending["route_error"] = reason
+        pending["job_id"] = ""
+        pending["retry_after"] = 0.0
+        save_pending_delivery(pending)
+    return "blocked"
+
+
+def _recover_uncertain_dispatch(
+    batch: list[Any],
+    pending: dict[str, Any],
+    dry_run: bool,
+    now_ts: float,
+) -> str | None:
+    name = str(pending["job_name"])
+    lookup = find_existing_cron_job(name)
+    if lookup is False:
+        log(
+            f"dispatch recovery deferred for {pending['batch_key']}: "
+            "cron job lookup unavailable"
+        )
+        return "pending"
+    if lookup:
+        pending["job_id"] = str(lookup)
+        pending["status"] = "observing"
+        pending["retry_after"] = 0.0
+        save_pending_delivery(pending)
+        return None
+    return _record_delivery_failure(batch, pending, dry_run, now_ts)
 
 
 def attempt_batch_delivery(
     batch: list[Any],
     dry_run: bool,
-    attempts: dict[str, int],
-    retry_after: dict[str, float],
-    timeout_keys: set[str],
     now_ts: float | None = None,
 ) -> str:
-    """Try one batch and return success, retry, or skip.
-
-    A prior local timeout makes the cron create/run outcome uncertain. The
-    exact signal job name is queried before retrying so an existing remote job
-    is reused. A confirmed absence permits a new dispatch.
-    """
+    if not batch:
+        return "success"
     if now_ts is None:
         now_ts = time.time()
+
+    pending = load_pending_delivery()
     key = _signal_cursor(batch[0])
-    existing_job_id = None
-    if key in timeout_keys:
-        name = _batch_job_name(batch)
-        lookup = find_existing_cron_job(name)
-        if lookup is False:
+    if pending is None:
+        pending = _new_pending_delivery(batch)
+    elif str(pending.get("batch_key") or "") != key:
+        log(
+            f"pending delivery mismatch: state={pending.get('batch_key')!r} "
+            f"current={key!r}; cursor remains unchanged"
+        )
+        return "pending"
+
+    status = str(pending.get("status") or "")
+    if status == "skipped":
+        return "skip"
+    if status == "succeeded":
+        response = str(pending.get("response") or "")
+        if response and not bool(pending.get("context_written")):
+            append_channel_context(batch, response, now=_coerce_now(now_ts))
+            pending["context_written"] = True
+            save_pending_delivery(pending)
+        return "success"
+
+    retry_after = float(pending.get("retry_after") or 0)
+    if now_ts < retry_after:
+        return "retry"
+
+    job_id = str(pending.get("job_id") or "")
+    if not job_id and status == "dispatching":
+        recovery_result = _recover_uncertain_dispatch(
+            batch,
+            pending,
+            dry_run,
+            now_ts,
+        )
+        if recovery_result is not None:
+            return recovery_result
+        job_id = str(pending.get("job_id") or "")
+
+    if job_id:
+        response = _latest_markdown_response(job_id)
+        if response is None:
+            return "pending"
+        if is_brain_failure(response):
             log(
-                f"retry deferred for {key}: cron job lookup unavailable; "
-                "remote execution state is uncertain and has 双 job 风险"
+                f"brain failure for job {job_id}: "
+                f"{response[:120]!r}; scheduling a new job"
             )
-            return _failed_batch_attempt(
+            return _record_delivery_failure(
                 batch,
-                key,
+                pending,
                 dry_run,
-                attempts,
-                retry_after,
-                timeout_keys,
                 now_ts,
             )
-        if lookup:
-            existing_job_id = str(lookup)
-        else:
-            log(
-                f"no existing cron job found for {key}; redispatching with "
-                "双 job 风险 because the prior local timeout may have hidden creation"
-            )
+        return _record_delivery_success(batch, pending, response, now_ts)
+
     try:
-        ok = deliver_batch(
-            batch,
-            dry_run=dry_run,
-            existing_job_id=existing_job_id,
-        )
-    except subprocess.TimeoutExpired as exc:
-        timeout_keys.add(key)
+        prompt = build_prompt(batch)
+    except ChannelRouteError as exc:
         log(
-            f"hermes invocation timed out for {key}: {exc}; attempt counts as "
-            "failed and remote cron may still be running (双 job 风险)"
+            f"channel route rejected for {key}: {exc}; "
+            "new-risk Hermes dispatch is blocked"
         )
-        return _failed_batch_attempt(
+        return _block_unroutable_batch(
             batch,
-            key,
+            pending,
             dry_run,
-            attempts,
-            retry_after,
-            timeout_keys,
+            str(exc),
+        )
+    name = str(pending["job_name"])
+    if dry_run:
+        job_id = run_hermes(prompt, name=name, dry_run=True)
+        return "success" if job_id else "retry"
+
+    pending.pop("route_error", None)
+    pending["status"] = "dispatching"
+    pending["retry_after"] = 0.0
+    save_pending_delivery(pending)
+
+    def remember_job(created_job_id: str) -> None:
+        pending["job_id"] = created_job_id
+        pending["status"] = "observing"
+        pending["dispatched_at"] = now_ts
+        pending["retry_after"] = 0.0
+        save_pending_delivery(pending)
+
+    job_id = run_hermes(
+        prompt,
+        name=name,
+        dry_run=False,
+        on_job_created=remember_job,
+    )
+    if not job_id:
+        recovery_result = _recover_uncertain_dispatch(
+            batch,
+            pending,
+            dry_run,
             now_ts,
         )
-    if not ok:
-        return _failed_batch_attempt(
-            batch,
-            key,
-            dry_run,
-            attempts,
-            retry_after,
-            timeout_keys,
-            now_ts,
-        )
-    attempts.pop(key, None)
-    retry_after.pop(key, None)
-    timeout_keys.discard(key)
-    return "success"
+        if recovery_result is not None:
+            return recovery_result
+        job_id = str(pending.get("job_id") or "")
+    elif not str(pending.get("job_id") or ""):
+        pending["job_id"] = str(job_id)
+        pending["status"] = "observing"
+        pending["dispatched_at"] = now_ts
+        save_pending_delivery(pending)
+
+    response = _latest_markdown_response(str(job_id))
+    if response is None:
+        return "pending"
+    if is_brain_failure(response):
+        return _record_delivery_failure(batch, pending, dry_run, now_ts)
+    return _record_delivery_success(batch, pending, response, now_ts)
 
 
 def compress_channel_contexts(now_func=time.time) -> None:
@@ -727,9 +1115,7 @@ def main() -> None:
         sys.exit(1)
 
     cursor = load_cursor()
-    attempts: dict[str, int] = {}
-    retry_after: dict[str, float] = {}
-    timeout_keys: set[str] = set()
+    reconcile_committed_pending(cursor)
     log(f"feeder start cursor={cursor!r} dry_run={args.dry_run}")
 
     while True:
@@ -748,27 +1134,21 @@ def main() -> None:
                     batch = select_deliverable_batch(rows)
                     if not batch:
                         break
-                    key = _signal_cursor(batch[0])
-                    if time.time() < retry_after.get(key, 0):
-                        break  # backoff window after a brain failure
                     result = attempt_batch_delivery(
                         batch,
                         dry_run=args.dry_run,
-                        attempts=attempts,
-                        retry_after=retry_after,
-                        timeout_keys=timeout_keys,
                     )
-                    if result == "retry":
+                    if result in {"blocked", "pending", "retry"}:
                         break
                     cursor = _signal_cursor(batch[-1])
                     if not args.dry_run:
-                        save_cursor(cursor)
+                        commit_batch_cursor(cursor)
             finally:
                 conn.close()
         except sqlite3.OperationalError as exc:
             log(f"watcher db unavailable: {exc}")
         except subprocess.TimeoutExpired as exc:
-            log(f"unexpected subprocess timeout outside batch accounting: {exc}")
+            log(f"hermes invocation timed out: {exc}")
         except Exception as exc:  # noqa: BLE001 - a poison row must not kill all channels
             log(f"UNEXPECTED feeder error (continuing): {exc!r}")
         if args.once:

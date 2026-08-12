@@ -1,0 +1,400 @@
+# Account Stall 修复重新复盘与收敛计划
+
+日期：2026-08-09
+状态：Meta-reviewed，仅授权 Phase A
+生产结论：NO-GO，account-a/account-b 保持 HALTED，禁止真实交易
+
+## 1. 决策
+
+当前工作停止继续扩展功能，转入收敛模式。
+
+本计划经 Claude 元复核后，当前只允许执行 Phase A。Phase B 及后续阶段必须等待
+Phase A 冻结测试 inventory 与契约差异矩阵，并对当前 stall 机制给出可复现结论。
+
+后续交付面保持四类：
+
+1. Node stall 核心运行时修复。
+2. Redis fencing、容量和恢复安全。
+3. 不可变 release、部署互斥和 maintenance fence。
+4. 可复跑验证证据与生产 gate。
+
+Attention、Hermes 通知、channel strategy、普通业务功能和非 account-stall
+重构退出本轮交付范围。现有相关改动保持原状，不回滚、不覆盖。
+
+## 2. 当前证据
+
+基线 HEAD 为 `7368641e98c410b3c6edbe4ab3ea8f72cf5efe1d`，分支为
+`codex/account-stall-hardening`。工作树包含 168 个修改或未跟踪文件，其中 61 个 tracked
+修改、107 个 untracked 文件，已混入其他任务。
+
+2026-08-09 可复现基线见
+`docs/evidence/2026-08-09-account-stall-test-baseline.md`：
+
+| 验证面 | 结果 | 判定 |
+|---|---:|---|
+| `tests/execution tests/nautilus`，538 collected，Nautilus 1.227.0 | 523 passed, 4 failed, 11 skipped, 22 subtests passed | 4 个失败均为 live runtime resource fail-open |
+| release 聚焦套件 | 29 passed, 48 failed | FAIL |
+| deployment 聚焦套件 | 36 passed, 34 failed, 2 skipped, 30 subtests passed | FAIL |
+| maintenance fence + rollout API | 8 passed, 8 failed | fence 数据层可用；rollout 调用契约未同步 |
+
+2026-08-08 incident 中的 `491 passed, 21 skipped` 与上述数字对应不同日期、不同工作树和
+不同测试 inventory。2026-08-08 没有保存 collect-only 清单，两个结果只能分别证明各自
+时点的选择范围，不能计算回归差值。
+
+根因事实按历史生产字节与当前工作树分开：
+
+| 事实 | 结论 |
+|---|---|
+| 最早同类 stall | 2026-07-02 14:18:15 UTC |
+| 首次明确 poller freeze | 2026-07-07 |
+| Redis 变更 lineage | `81f356a` 于 2026-06-19 21:08:21 UTC 引入持久 Redis cache/message bus 与 per-account prefix 派生 |
+| 历史生产直接根因 | 旧生产运行字节在 Nautilus actor callback 中执行同步 HTTP/外部 I/O，生产 traceback 已证实 |
+| 当前工作树状态 | heartbeat、command、ACK、terminal 等外部 I/O 已进入专用 executor/worker |
+| 当前残余 stall 机制 | 未证实；线程池饱和、队列背压、shutdown 等仅为待检验假设 |
+| 历史放大因素 | 随机 Redis namespace、无界 streams、内存/swap/AOF/I/O 压力 |
+| 历史发布因素 | bind-mounted hotpatch、deleted inode、A/B 运行字节漂移 |
+
+## 3. 为什么持续返工
+
+### 3.1 范围失控
+
+原始目标是修复 account-a stall。实现过程同时引入控制面角色隔离、release
+attestation、SBOM、maintenance fence、A/B rollout、live permit 和真实交易执行器。
+这些能力分别合理，组合后形成了一个跨 Node、Redis、PostgreSQL、systemd、Docker 和
+交易所的发布平台改造。
+
+### 3.2 缺少集成边界
+
+团队协议要求 Executor 使用独立 worktree 和原子提交。实际实现集中在一个已有大量改动的
+工作树中，运行时修复、发布工具、测试 fixture 和其他业务改动缺少可独立回滚的 commit
+边界。
+
+### 3.3 契约存在多个真相源
+
+当前存在三个代码级 contract owner，分属两个契约：
+
+- 应用 runtime resources：`services/nautilus-node/config/node_config.py` 与
+  `scripts/release_manifest.py` 分别定义字段、默认值和校验。
+- host systemd/Docker resources：`scripts/make_account_stall_release.py` 与
+  `scripts/release_manifest.py` 分别定义 schema/constraints。
+- `tests/deployment/test_account_stall_systemd_resources.py` 继续重复字段集合和 parser。
+
+`scripts/build_immutable_node_image.py` 与 `scripts/hk-deploy-20260803.sh` 属于 consumer；
+`infra/systemd/*.conf` 只提供具体数值。当前最危险的漂移是
+`node_config.py` 允许部分 resource group 使用默认值，`release_manifest.py` 要求全部
+group 显式存在。字段增加或可选性变化后，遗漏会生成数十个级联失败。
+
+### 3.4 安全上下文依赖环境变量
+
+live runtime 是否强制完整资源配置，当前由 manifest schema 和 release purpose
+环境变量共同决定。调用方、测试和节点启动缺少一个显式、类型化的 release context。
+相同 live 配置在不同进程环境中可能得到不同验证结论。
+
+### 3.5 Shell 函数依赖隐式全局状态
+
+operation lock、maintenance fence、路径和 systemd topology 通过大量 Shell 全局变量传递。
+函数级测试抽取单个函数后出现未绑定 UID/GID、缺 helper 和路径漂移，说明接口过浅且依赖
+集合不可见。
+
+### 3.6 测试基线没有随协议冻结
+
+strict v3、完整 runtime resources、reviewed payload lock、migration exact-set 和
+maintenance fence 进入实现后，旧 fixture 继续构造 v2/部分资源对象。当前大量失败属于
+协议升级后的 fixture 漂移；少量失败属于真实生产路径缺陷。
+
+## 4. 剩余失败的真实聚类
+
+当前各聚焦套件中的失败按根因收敛为以下八组：
+
+| ID | 类型 | 根因 | 影响 |
+|---|---|---|---|
+| GAP-0 | 诊断缺口 | 历史同步 callback I/O 已在当前代码中 offload，当前残余 stall 机制没有 red-capable repro | 无法验证“stall 主路径无回归”，任何 stall 修复缺少目标 |
+| GAP-1 | 产品/契约缺陷 | Node 使用环境变量推导 strict live context，并与 manifest 存在 resource group 必填/可选分歧 | 4 个 runtime 失败；可能绕过 release-bound 容量限制或形成反向契约漂移 |
+| GAP-2 | 产品缺陷 | Redis rebaseline 的 `$SCRIPT_DIR/infra/...` 默认值解析到不存在的 `scripts/infra/...` | Redis rebaseline 大量级联失败；真实脚本无法读取仓库根目录的资源契约 |
+| GAP-3 | 契约缺陷 | systemd parser、consumer type 和实际 drop-in 应用方式未统一 | release builder 在生成 source manifest 前失败 |
+| GAP-4 | Fixture 路径漂移 | dependency lock 与 release-source-manifest fixture 路径未对齐 immutable build 读取契约 | 非生产放置缺陷；immutable build 测试提前失败 |
+| GAP-5 | Fixture 漂移 | release/rollout node config 仍只提供 Redis 和 journal 两组资源 | strict v3 manifest 与 rollout 测试级联失败 |
+| GAP-6 | 接口断点 | rollout mutation 新增 operation lock 和 maintenance fence，直接调用测试未提供 | 8 个 control-plane rollout 失败 |
+| GAP-7 | Harness 结构漂移 | deployment Shell fixture 缺真实 migration runner、真实 `flock` 与 fence env，假二进制可能掩盖失败 | 需要一次真实 red run 后才能确定级联范围 |
+
+修复时先关闭 GAP-0，再按 GAP-1 到 GAP-7 逐组归零。禁止按单个失败逐条打补丁。
+
+## 5. 目标架构调整
+
+### 5.1 明确契约所有权
+
+本轮不新建覆盖整个发布链路的 `ReleaseContractV3` 大模块。先消除已经造成失败的重复
+定义和可选性分歧：
+
+| 契约 | 当前定义位置 | 目标 owner 与消费方 |
+|---|---|---|
+| Application runtime resources 字段、必填集合、允许集合、默认值和类型 | `node_config.py`、`release_manifest.py` | 在 `packages/` 下建立可独立导入的纯模块；Node 与 manifest 共同消费 |
+| Release envelope、source inventory、attestation、SBOM、migration exact-set | `scripts/release_manifest.py` | builder、rollout、deploy verifier |
+| Host systemd-to-Docker schema、constraints 和 projection | `make_account_stall_release.py`、`release_manifest.py`、测试 parser | builder 暴露归一化 host resource model；manifest 与测试共同消费 |
+
+Phase B 行为修改前先提取共享 required/allowed field sets，并建立 Node/manifest
+parity matrix。归一化 hash 属于拟新增产物，完成共享模块后由该模块统一提供。测试通过
+统一 fixture factory 生成合法 strict v3 物料，再对单一字段做负向变异。禁止在测试文件
+内继续手写一套 runtime resource defaults。
+
+systemd projection 只消费 systemd parser 生成的归一化 host resource model，不重复声明
+字段 schema 或 constraints。应用 runtime resources 和 host systemd resources 保持两个
+清晰契约，各自只有一个 owner。
+
+### 5.2 Explicit Runtime Context
+
+共享字段集合与 Node/manifest parity 建立后，移除当前基于环境变量猜测 strict 模式的
+逻辑。`binance.environment=live` 始终要求完整 runtime resources，testnet/sandbox 保留
+兼容默认值。emergency rollback 必须携带已经物化的完整 live 配置并保持 HALTED，不能
+依赖缺字段默认值。
+
+只有后续出现两个真实调用模式且无法由该 invariant 表达时，才引入类型化
+`release_context` 参数。本轮禁止提前扩大接口。
+
+### 5.3 Operation Guard
+
+先将本地 `flock` 和 PostgreSQL maintenance fence 的 Shell 实现提取为一个共享 helper：
+
+```text
+acquire -> verify(stage) -> mutate -> renew/verify -> release
+```
+
+deploy、Redis rebaseline、control-plane isolation 和 janitor source 同一个 helper；
+rollout 继续使用现有 Python lock/fence 校验并验证继承的 FD/token。共享 helper 稳定后，
+再根据重复度决定是否需要 Python guard CLI，本轮不预先增加该接口。
+
+### 5.4 Deterministic Payload Root
+
+全部发布工具接收一个显式 `release_root`。资源文件、migration runner、lock、SBOM 和
+manifest 路径从 validated source manifest 解析。禁止使用 `SCRIPT_DIR` 或当前目录猜测
+仓库布局。
+
+### 5.5 Source Authority 与测试根目录
+
+`services/` 是应用源码的 canonical source。`.live-mirror/` 是历史生产运行字节的证据副本
+和 drift comparator；它只用于取证与差异验证，任何迁移都需要独立范围和 review。
+
+测试使用显式 test mode 与临时 `TRADER_ROOT`。`hk-deploy-20260803.sh` 的
+`/srv/trader-v3` 默认值只服务生产入口，测试 fixture 不读取或写入共享生产根目录。
+
+## 6. 执行计划
+
+### Phase A：隔离和冻结
+
+目标：建立可审查、可回滚、可复现的工作面，并用当前代码重新诊断 stall。
+
+| 项目 | 动作 | 验收 |
+|---|---|---|
+| A1 | 从 `7368641` 创建干净 worktree/分支 | 新 worktree `git status` 为空 |
+| A2 | 建立 source authority 与 in-scope 文件清单 | `services/` 标记为 canonical；`.live-mirror/` 标记为生产证据/drift comparator；每个文件标记所属域 |
+| A3 | 固定测试环境、命令、inventory、hash 与现有契约差异矩阵 | 保存依赖版本、四组 path list、`pytest --collect-only` node-id 清单、SHA-256、Node/manifest 必填差异 |
+| A4 | 隔离测试根目录 | 显式 test mode 与临时 `TRADER_ROOT`；测试不接触共享 `/srv/trader-v3` |
+| A5 | 构建当前代码 stall fault-injection loop | 阻塞 HTTP、饱和 executor/queue、并发 shutdown 与 terminal worker；独立观测 actor tick 和各 lane progress |
+| A6 | 对同时包含其他任务的文件做 hunk 审计 | Attention/Hermes/channel 变更不进入 account-stall patch |
+| A7 | 按模块导入现有实现 | 每个模块形成独立 commit，禁止一次导入全部工作树 |
+
+当前 stall repro 的 red 判据是：故障注入期间 actor tick age 超过 2 秒，或 heartbeat、
+command poll、ACK、intent 任一 progress clock 在 worker 可恢复后持续冻结。测试必须直接
+驱动当前 executor/worker 接线。只验证函数返回或线程存活不满足该判据。
+
+退出条件：
+
+1. 干净分支包含可解释的原子提交，当前混合工作树保持不变。
+2. 四组测试 inventory、hash、命令、版本和失败映射已保存。
+3. 当前 stall 机制得到可重复 red 证据，或明确记录为“当前残余机制未证实”。
+4. Reviewer 对 GAP-0 给出结论后，才授权 Phase B 或条件式 Phase B-S。
+
+### Phase B：Runtime Resource 契约安全
+
+目标：完成 GAP-1。该阶段只处理 runtime resource fail-closed 和契约 parity。
+
+| 项目 | 动作 | 验收 |
+|---|---|---|
+| B1 | 提取共享 runtime resource required/allowed sets、defaults 和类型约束 | Node 与 manifest import 同一份定义 |
+| B2 | 建立 Node/manifest parity matrix | 完整、缺字段、多字段、类型错误、testnet default 对同一输入结论一致 |
+| B3 | 移除 live 环境变量双门 | 任意 live 配置缺任一资源字段都 fail-closed |
+| B4 | 保留 testnet defaults | testnet/sandbox 兼容测试 PASS |
+| B5 | emergency rollback 使用完整物化配置 | HALTED rollback 也要求完整字段 |
+| B6 | 复跑 execution/Nautilus | 当前 4 个 runtime 失败归零，无新增失败，skip 逐项说明来源 |
+| B7 | 复跑真实 Nautilus 入口 | projection host integration 1 项和三个 importer 文件中的 simulated engine 7 项 PASS |
+
+真实入口为：
+
+- `tests/nautilus/projection/test_projection_hk.py::ProjectionHostNautilusTests::test_projection_actor_receives_real_nautilus_on_event_callbacks`
+- `tests/execution/open/test_intent_execution_strategy_hk.py` 中 2 项
+- `tests/execution/manage/test_intent_execution_strategy_manage_hk.py` 中 3 项
+- `tests/nautilus/risk/test_nautilus_integration_hk.py` 中 2 项
+
+`tests/nautilus_simulated_harness.py` 是共享 harness 库，不作为独立测试入口计数。
+
+退出条件：Node/manifest parity matrix PASS，当前 4 个 runtime 失败归零，HALT 和恢复语义
+保持通过。本阶段不声明当前 stall 主路径已经修复。
+
+### Phase B-S：条件式 Stall 修复
+
+授权条件：Phase A 通过当前代码复现 GAP-0，并给出最小 red-capable loop。
+
+| 项目 | 动作 | 验收 |
+|---|---|---|
+| B-S1 | 对已证实机制实施最小修复 | 修改范围与 Phase A repro 的 load-bearing 路径一致 |
+| B-S2 | 将最小 repro 固化为回归测试 | 修复前 RED，修复后 GREEN |
+| B-S3 | 执行队列饱和、blocked I/O、shutdown 和恢复压力循环 | actor tick 与各 lane progress 满足阈值 |
+| B-S4 | 复跑 execution/Nautilus 与真实入口 | 无新增失败，HALT、恢复和终态语义保持通过 |
+
+退出条件：原始 fault-injection loop 与最小回归测试均 PASS。Phase A 未复现当前机制时，
+Phase B-S 保持未授权。
+
+### Phase C：契约所有权和 release fixture 收敛
+
+目标：完成 GAP-3、GAP-4、GAP-5，深化 Phase B 的共享 runtime resource 模块并消除
+重复 fixture。
+
+| 项目 | 动作 | 验收 |
+|---|---|---|
+| C1 | 定义 canonical fixture factory | 所有 release/rollout 测试共享合法 strict v3 base fixture |
+| C2 | 统一 systemd resource parser、schema/constraints 和 consumer enum | 四个资源文件均可生成确定性 Docker/systemd contract |
+| C3 | 将归一化与 hash 收入共享 runtime resource 模块 | Node 与 manifest 对同一输入产生同一归一化结果和 hash |
+| C4 | 绑定 reviewed payload root | lock、migration、SBOM、source manifest 和 checksums 必须来自同一 release root |
+| C5 | 纳入 migration `0012_control_plane_maintenance_fence` | migration exact-set 和 up/down hash PASS |
+| C6 | 完成 build attestation 和 reviewer trust proof | 任一 source/image/lock/migration/SBOM 漂移均 fail-closed |
+| C7 | 复跑 release 聚焦套件 | 0 failed，测试清单无永久 skip |
+
+退出条件：release builder 可生成完整 payload；strict v3 verifier 对合法物料 PASS，对每类
+漂移 FAIL。
+
+### Phase D：Operation Guard 和部署闭环
+
+目标：完成 GAP-2、GAP-6、GAP-7。
+
+| 项目 | 动作 | 验收 |
+|---|---|---|
+| D1 | 修复 Redis resource path，改为 release-root 解析 | rebaseline 正常和故障注入测试 PASS |
+| D2 | rollout API 统一 operation guard fixture | register/advance/status 语义 PASS |
+| D3 | 先用真实 `flock`、migration runner 和 fence env 建立 GAP-7 red run，再修 fixture | topology rollback、secret/role/resource 校验 PASS |
+| D4 | 四个 Shell mutation 路径 source 同一 guard helper | deploy/rebaseline/isolation/janitor/rollout 不可并发 |
+| D5 | 每个不可逆阶段前重新 verify fence | lease 过期、owner/token 漂移立即停止 |
+| D6 | 复跑 deployment/control-plane | 聚焦套件全部 PASS；shell fail-closed PASS |
+
+退出条件：本地锁、DB fence、rollout phase 和 Redis epoch 形成一条可审计事务链。
+
+### Phase E：真实依赖与 Linux 发布验证
+
+目标：证明 macOS fixture 之外的部署行为。
+
+| 项目 | 动作 | 验收 |
+|---|---|---|
+| E1 | Linux 执行真实 `flock` 继承测试 | deploy、rollout、janitor、rebaseline 互斥 PASS |
+| E2 | PostgreSQL 16.14 全迁移和恢复 | migration、backup hash、restore/list validation PASS |
+| E3 | Redis 8.10.0 replacement/restart/janitor | fencing、容量、retention、重启恢复 PASS |
+| E4 | Docker `--network=none` immutable build | image digest、labels、SBOM、attestation PASS |
+| E5 | 容器内 import smoke test | release exact-set 全部模块可导入 |
+
+退出条件：产生一个可部署、按 digest 固定、通过独立 reviewer 的 release artifact。
+
+### Phase F：生产只读预检
+
+目标：重新获得 2026-08-09 之后的新鲜生产事实。
+
+| 项目 | 动作 | 验收 |
+|---|---|---|
+| F1 | 只读采集 A/B 容器、heartbeat、tick、mountinfo 和 `/version` | 证据带绝对时间和哈希 |
+| F2 | 只读采集 Redis、内存、swap、AOF 和 keyspace | 容量计划使用新鲜数据 |
+| F3 | 只读采集 PostgreSQL migration、writer 和 incidents | 两账户状态可证明 |
+| F4 | 生成 GO/NO-GO 报告 | 任一证据陈旧或冲突即 NO-GO |
+
+退出条件：Reviewer 和 Evidence Auditor 对同一 release digest 签署 PASS。
+
+### Phase G：HALTED canary 和真实小额交易
+
+目标：在所有前置门通过后完成 account-a 单次 12 USDT SOLUSDT round trip。
+
+| 项目 | 动作 | 验收 |
+|---|---|---|
+| G1 | 部署 account-a immutable digest，保持 HALTED | 无 deleted inode，release identity 完整 |
+| G2 | HALTED soak 和故障注入 | tick、heartbeat、projection、reconciliation 保持阈值 |
+| G3 | testnet 同形状 emergency close | `LIMIT + IOC` 与 reduce-only close PASS |
+| G4 | 单次 permit、restricted RESUME 和 round trip | 名义金额不超过 12 USDT，净亏损低于 1.5 USDT |
+| G5 | 精确平仓、HALT、目标归零、组合签名复核 | SOLUSDT position/orders 为零，非目标组合不变 |
+| G6 | account-b rollout | account-a 证据签名后才允许进入 fleet complete |
+
+退出条件：四层证据齐全，A/B 运行同一 digest，目标账户恢复期望 HALTED/ACTIVE 状态。
+
+## 7. Agent 分工
+
+| 角色 | 写入范围 | 禁止事项 |
+|---|---|---|
+| Runtime Executor | Node config、runtime、projection、execution 对应测试 | release/deployment 文件 |
+| Release Executor | canonical release contract、builder、manifest、release tests | Node 交易策略 |
+| Deployment Executor | operation guard、deploy/isolation/rebaseline、deployment tests | release schema自行扩展 |
+| Reviewer | 只读 diff、接口、状态机、回滚和测试审查 | 直接修改或合并 |
+| Evidence Auditor | 只读核对命令、版本、digest、测试和生产证据 | 生产 mutation |
+| Planner/Integrator | 拆分任务、集成已 review commit、维护 gate | 同时展开多个相互依赖 Phase |
+
+同一文件只有一个写入 owner。每个 Executor 完成一个 Phase 后停止，等待 Reviewer
+结论。禁止再次在共享脏工作树内并行写同一文件。
+
+## 8. 每阶段强制证据
+
+每个 Phase 必须提供：
+
+1. 目标 commit 和允许修改的文件列表。
+2. 精确依赖版本、测试 path list、collect-only inventory 和 SHA-256。
+3. 一个已经执行过的 red-capable 反馈命令。
+4. PASS 数量、skip 数量和 skip 原因。
+5. 负向故障注入结果。
+6. 回滚面和残余风险。
+7. Reviewer 的 P0/P1 findings 为零。
+
+测试数量只能证明对应测试面。macOS fixture 结果不能替代 Linux、Docker、Redis、
+PostgreSQL 或生产证据。
+
+## 9. 停止条件
+
+出现以下任一情况时保持 NO-GO：
+
+- 工作树重新混入无关功能。
+- GAP-0 缺少当前代码的可重复诊断结论。
+- 测试结果缺命令、依赖版本、inventory 或 hash。
+- canonical contract 出现第二套字段定义。
+- Node 与 manifest 对 resource group 的必填/可选结论不同。
+- live hardening 仍依赖环境变量猜测 release context。
+- operation guard 任一 mutation 路径可绕过。
+- release 或 deployment 聚焦测试存在失败。
+- Linux immutable build、真实 Redis/PostgreSQL 或 rollback 验证缺失。
+- 生产事实超过 gate 规定的新鲜度。
+- account-a 或 account-b 存在开放 P0/P1 incident。
+
+## 10. 第一执行批次
+
+第一批只执行 Phase A：
+
+1. 创建干净 worktree。
+2. 冻结 source authority、文件范围、临时测试根和四组测试 inventory。
+3. 固化环境、命令、collection hash、失败清单与 `491 -> 523` 的证据边界。
+4. 对当前 executor/worker 接线建立 stall fault-injection loop。
+5. 对 GAP-0 给出“已复现机制”或“当前残余机制未证实”的 Reviewer 结论。
+6. 形成独立 commit 和 Phase B/Phase B-S 授权建议。
+
+Phase A PASS 前，不修改 runtime/release/deployment 行为，不执行 SSH、生产只读采集、生产
+mutation、节点 restart 或真实交易。
+
+## 11. Claude Review 状态
+
+Claude Opus 于 2026-08-09 使用只读方式核验计划、事故记录、关键实现和测试。首轮 review
+及其二次 `PASS` 记录见
+`docs/reviews/2026-08-09-account-stall-replan-claude-review.md`。
+
+后续元复核发现 M1 根因时态混淆、M2 测试证据不可复现、M3 runtime resource
+可选性漂移三项阻断问题，因此二次 `PASS` 已被 supersede。吸收后的结论与授权范围见
+`docs/reviews/2026-08-09-account-stall-replan-claude-meta-review.md`。
+
+当前采纳结论：
+
+1. 历史生产同步 callback I/O 与当前 residual stall 机制分开记录。
+2. GAP-0、测试 inventory 和契约差异矩阵属于 Phase A 硬 gate。
+3. Phase B 只处理 runtime resource fail-closed 与 Node/manifest parity。
+4. Phase B-S 只在当前代码复现 stall 后授权。
+5. Runtime resources 与 host resources 保持两个单一 owner 契约。
+6. rollout 的 8 个失败按调用 fixture 漂移处理。
+7. 首轮使用共享 Shell guard helper，Python guard CLI 延后。
+8. GO gate 使用零失败、无新增回归、skip 有解释和 inventory 可比性。

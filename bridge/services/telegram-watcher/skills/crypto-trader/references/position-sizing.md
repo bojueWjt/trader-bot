@@ -3,18 +3,48 @@
 ## 核心公式
 
 ```
-quantity = (balance × risk_ratio) / abs(entry_price - stop_loss)
+effective_equity = current_actual_equity × risk_capital_multiplier
+quantity = (effective_equity × risk_ratio) / abs(entry_price - stop_loss)
 ```
 
 | 变量 | 含义 | 来源 |
 |------|------|------|
-| `balance` | 账户 USDT 可用余额 | `binance_trade.py get-balance` |
+| `current_actual_equity` | 账户当前实时实际权益，包含未实现盈亏 | `binance_trade.py get-equity` |
+| `risk_capital_multiplier` | 账号风险资金倍数 | `account_configs` |
+| `effective_equity` | 参与仓位计算的有效权益 | `current_actual_equity × risk_capital_multiplier` |
 | `risk_ratio` | 单笔最大亏损占余额比例 | `db_manager.py get-risk` |
 | `entry_price` | 计划入场价格 | 信号消息 |
 | `stop_loss` | 止损价格 | 信号消息 |
 | `quantity` | 计算出的开仓数量（币本位） | 输出 |
 
-**含义：** 如果价格从 entry 移动到 SL 被止损，亏损金额恰好等于 `balance × risk_ratio`。
+**含义：** 如果价格从 entry 移动到 SL 被止损，亏损金额等于 `effective_equity × risk_ratio`。固定系数乘以实时实际权益形成反向马丁格尔效果：盈利后仓位预算上升，亏损后仓位预算下降。缺少有效系数的迁移账号保持禁用，配置正数系数后才能参与路由和下单。
+
+## 风险资金倍数
+
+风险资金倍数配置在执行账号上，可用于资金拆分后的仓位基准恢复：
+
+```text
+总资金 10000
+两个子账号实际余额各 5000
+两个子账号 risk_capital_multiplier 各为 2
+每个账号 effective_equity = 5000 × 2 = 10000
+```
+
+初始化公式：
+
+```text
+risk_capital_multiplier = target_effective_equity ÷ initial_actual_equity
+```
+
+初始化完成后保存系数。每次开仓重新读取当前实际权益并乘以同一个系数：
+
+```text
+初始化实际权益 5000，目标有效权益 10000，保存系数 2
+亏损后当前实际权益 4700，有效权益 9400
+盈利后当前实际权益 5300，有效权益 10600
+```
+
+这套动态变化形成反向马丁格尔仓位管理。交易所保证金检查继续基于每个账号的真实余额。
 
 ## 风险比例回退链
 
@@ -59,24 +89,26 @@ python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-risk ETHUSDT 0.
 
 ```bash
 python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py calc-position \
-  --balance 10000 --risk-ratio 0.02 --entry 65000 --sl 64000
+  --equity 5000 --capital-multiplier 2 \
+  --risk-ratio 0.02 --entry 65000 --sl 64000
 ```
 
 **计算过程：**
 
 ```
-risk_amount = 10000 × 0.02 = $200
-distance    = |65000 - 64000| = 1000
-quantity    = 200 / 1000 = 0.2 BTC
+effective_equity  = 5000 × 2 = $10000
+risk_amount       = 10000 × 0.02 = $200
+distance          = |65000 - 64000| = 1000
+quantity          = 200 / 1000 = 0.2 BTC
 ```
 
 **返回：**
 
 ```json
-{"quantity": 0.2, "risk_amount": 200.0, "distance": 1000.0}
+{"quantity": 0.2, "risk_amount": 200.0, "distance": 1000.0, "actual_equity": 5000.0, "effective_equity": 10000.0, "effective_balance": 10000.0, "risk_capital_multiplier": 2.0}
 ```
 
-**验证：** 如果 BTC 从 65000 跌到 64000（跌 1000），持有 0.2 BTC 的亏损 = 0.2 × 1000 = $200 = 余额的 2%。
+**验证：** 如果 BTC 从 65000 跌到 64000（跌 1000），持有 0.2 BTC 的亏损为 $200，即有效余额的 2%。
 
 ### 示例 2：ETH 做空，1.5% 风险
 
@@ -84,7 +116,8 @@ quantity    = 200 / 1000 = 0.2 BTC
 
 ```bash
 python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py calc-position \
-  --balance 5000 --risk-ratio 0.015 --entry 3200 --sl 3300
+  --balance 5000 --capital-multiplier 1 \
+  --risk-ratio 0.015 --entry 3200 --sl 3300
 ```
 
 **计算过程：**
@@ -98,7 +131,7 @@ quantity    = 75 / 100 = 0.75 ETH
 **返回：**
 
 ```json
-{"quantity": 0.75, "risk_amount": 75.0, "distance": 100.0}
+{"quantity": 0.75, "risk_amount": 75.0, "distance": 100.0, "actual_equity": 5000.0, "effective_equity": 5000.0, "effective_balance": 5000.0, "risk_capital_multiplier": 1.0}
 ```
 
 ### 示例 3：山寨币做多，默认 1% 风险
@@ -107,7 +140,8 @@ quantity    = 75 / 100 = 0.75 ETH
 
 ```bash
 python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py calc-position \
-  --balance 8000 --risk-ratio 0.01 --entry 150 --sl 142
+  --balance 8000 --capital-multiplier 1 \
+  --risk-ratio 0.01 --entry 150 --sl 142
 ```
 
 **计算过程：**
@@ -121,7 +155,7 @@ quantity    = 80 / 8 = 10 SOL
 **返回：**
 
 ```json
-{"quantity": 10.0, "risk_amount": 80.0, "distance": 8.0}
+{"quantity": 10.0, "risk_amount": 80.0, "distance": 8.0, "actual_equity": 8000.0, "effective_equity": 8000.0, "effective_balance": 8000.0, "risk_capital_multiplier": 1.0}
 ```
 
 ## 杠杆与仓位的关系

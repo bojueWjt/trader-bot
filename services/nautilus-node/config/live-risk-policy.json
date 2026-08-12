@@ -1,0 +1,37 @@
+{
+  "entry_contract": {
+    "max_notional_usdt": "12",
+    "time_in_force": "IOC",
+    "type": "limit"
+  },
+  "legacy_migration_contract": {
+    "allowed_instruments": [
+      "BNBUSDT-PERP.BINANCE",
+      "BTCUSDT-PERP.BINANCE",
+      "ETHUSDT-PERP.BINANCE",
+      "SOLUSDT-PERP.BINANCE"
+    ],
+    "default_order_modify_rate": "1/00:00:01",
+    "default_order_submit_rate": "50/00:00:01",
+    "max_notional_ceiling_usdt": "100"
+  },
+  "runtime_resource_contract": {
+    "command_journal": {
+      "max_bytes": 16777216
+    },
+    "redis": {
+      "critical_window_seconds": 30,
+      "memory_critical_ratio": 0.85,
+      "memory_degraded_ratio": 0.75,
+      "memory_warning_ratio": 0.6,
+      "sample_interval_seconds": 5,
+      "scan_count": 500,
+      "stream_max_bytes": 67108864,
+      "stream_max_entries": 100000,
+      "thread_join_timeout_seconds": 5,
+      "total_stream_max_bytes": 268435456
+    },
+    "schema_version": "trader-v3-runtime-resources/v1"
+  },
+  "schema_version": "trader-v3-live-risk-policy/v2"
+}

@@ -1,20 +1,16 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const { createWatchedEntryHandler } = require("../lib/watched-entry-routing");
 
 function createRecorder(env) {
   const calls = [];
-  const logs = [];
   let importerCalls = 0;
   let approvedWrites = 0;
   const handler = createWatchedEntryHandler({
     env,
-    logger: {
-      log(line) {
-        logs.push(String(line));
-      },
-    },
     pushMessage(entry) {
       calls.push(["push", entry.id]);
     },
@@ -27,16 +23,13 @@ function createRecorder(env) {
     importSignalToFreqtrade(entry) {
       importerCalls += 1;
     },
-    traderCronForwarder(entry) {
-      calls.push(["forward", entry.id]);
-    },
   });
 
-  return { calls, handler, logs, getImporterCalls: () => importerCalls, getApprovedWrites: () => approvedWrites };
+  return { calls, handler, getImporterCalls: () => importerCalls, getApprovedWrites: () => approvedWrites };
 }
 
 test("watched entry routing defaults to collection only", () => {
-  const { calls, handler, logs } = createRecorder({});
+  const { calls, handler } = createRecorder({});
 
   handler({ id: 11 });
 
@@ -44,11 +37,10 @@ test("watched entry routing defaults to collection only", () => {
     ["push", 11],
     ["save", 11],
   ]);
-  assert.deepEqual(logs, ["[forward] Hermes trader cron disabled"]);
 });
 
-test("watched entry routing requires explicit Hermes cron enablement to forward", () => {
-  const { calls, handler, logs } = createRecorder({
+test("watched entry routing stays collection only when legacy flag is enabled", () => {
+  const { calls, handler } = createRecorder({
     HERMES_TRADER_CRON_ENABLED: "1",
   });
 
@@ -57,9 +49,7 @@ test("watched entry routing requires explicit Hermes cron enablement to forward"
   assert.deepEqual(calls, [
     ["push", 12],
     ["save", 12],
-    ["forward", 12],
   ]);
-  assert.deepEqual(logs, []);
 });
 
 test("default disabled importer and Hermes path add zero risk commands", () => {
@@ -73,4 +63,27 @@ test("default disabled importer and Hermes path add zero risk commands", () => {
   ]);
   assert.equal(getImporterCalls(), 0);
   assert.equal(getApprovedWrites(), 0);
+});
+
+test("watcher server keeps direct Hermes trader cron detached", () => {
+  const serverPath = path.join(__dirname, "..", "server.js");
+  const source = fs.readFileSync(serverPath, "utf8");
+
+  assert.doesNotMatch(source, /lib\/hermes-cron/);
+  assert.doesNotMatch(source, /triggerHermesCron/);
+  assert.doesNotMatch(source, /traderCronForwarder:/);
+});
+
+test("watcher source contains no direct Hermes execution path", () => {
+  const watcherRoot = path.join(__dirname, "..");
+  const sources = [
+    "server.js",
+    "price-monitor.js",
+    path.join("lib", "watched-entry-routing.js"),
+  ].map((file) => {
+    return fs.readFileSync(path.join(watcherRoot, file), "utf8");
+  }).join("\n");
+
+  assert.doesNotMatch(sources, /hermes-agent|crypto-trader|cron", "run/);
+  assert.doesNotMatch(sources, /execFile\s*\(/);
 });

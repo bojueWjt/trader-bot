@@ -73,6 +73,7 @@ read_api = _load_module("live_mirror_read_api", API_PATH)
 class FakeDB:
     def __init__(self):
         self.attribution_by_idem = {}
+        self.cancel_owner = False
         self.intents_by_idem = {}
         self.executions = []
         self.connections = []
@@ -131,8 +132,38 @@ class FakeCursor:
             self.result = self.db.intents_by_idem.get(params[0], False)
             return
 
-        if compact.startswith("SELECT 1 FROM trade_intents WHERE intent_id::text = %s"):
-            self.result = (1,)
+        if (
+            "FROM orders_projection AS op" in compact
+            and "JOIN trade_intents AS ti" in compact
+        ):
+            rows = self.db.cancel_owner or []
+            matched = []
+            for row in rows:
+                row_intent_id = str(row[0])
+                row_account_id = str(row[1])
+                row_symbol = str(row[2]).upper().split("-")[0]
+                if len(params) == 4:
+                    intent_matches = row_intent_id == str(params[1])
+                    symbol_matches = (
+                        row_symbol == str(params[2]).upper()
+                        and row_symbol == str(params[3]).upper()
+                    )
+                    if intent_matches and symbol_matches:
+                        matched.append(row)
+                    continue
+                if len(params) == 6:
+                    account_matches = (
+                        row_account_id == str(params[1])
+                        and row_account_id == str(params[2])
+                    )
+                    intent_matches = row_intent_id == str(params[3])
+                    symbol_matches = (
+                        row_symbol == str(params[4]).upper()
+                        and row_symbol == str(params[5]).upper()
+                    )
+                    if account_matches and intent_matches and symbol_matches:
+                        matched.append(row)
+            self.result = matched
             return
 
         if compact.startswith("SELECT side FROM positions_projection"):
@@ -167,6 +198,16 @@ def fake_db(monkeypatch):
     db = FakeDB()
     monkeypatch.setattr(read_api.psycopg2, "connect", db.connect)
     monkeypatch.setattr(read_api, "_size_open_order", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(
+        read_api,
+        "_channel_risk_capital_multiplier",
+        lambda *args, **kwargs: 1.0,
+    )
+    monkeypatch.setattr(
+        read_api,
+        "_account_risk_capital_multiplier",
+        lambda *args, **kwargs: 1.0,
+    )
     monkeypatch.setattr(read_api, "_validate_stop_direction", lambda *args, **kwargs: None)
     monkeypatch.setattr(read_api, "_safe_execution_preview", lambda *args, **kwargs: {})
     return db

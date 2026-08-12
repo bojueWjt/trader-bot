@@ -53,7 +53,8 @@
         "close_position",
         "move_stop_loss",
         "move_stop_to_entry",
-        "replace_take_profits"
+        "replace_take_profits",
+        "cancel_order"
       ]
     },
     "order_plan": {
