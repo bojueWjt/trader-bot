@@ -4,8 +4,10 @@ import sys
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -42,7 +44,7 @@ class IntentExecutionPlannerTest(unittest.TestCase):
         self.assertEqual(decoded.intent_id, intent_id)
         self.assertEqual(decoded.sequence, 7)
 
-    def test_market_open_maps_to_market_order_with_rounded_quantity_and_trace_tags(
+    def test_market_open_rounds_quantity_down_and_preserves_trace_tags(
         self,
     ) -> None:
         intent = _intent(
@@ -56,7 +58,7 @@ class IntentExecutionPlannerTest(unittest.TestCase):
         assert isinstance(result, OrderPlan)
         self.assertEqual(result.order_type, "MARKET")
         self.assertEqual(result.side, "BUY")
-        self.assertEqual(result.quantity, "0.124")
+        self.assertEqual(result.quantity, "0.123")
         self.assertIsNone(result.price)
         self.assertEqual(result.time_in_force, "IOC")
         self.assertEqual(decode_client_order_id(result.client_order_id).intent_id, intent.intent_id)
@@ -83,9 +85,94 @@ class IntentExecutionPlannerTest(unittest.TestCase):
         assert isinstance(result, OrderPlan)
         self.assertEqual(result.order_type, "LIMIT")
         self.assertEqual(result.side, "BUY")
-        self.assertEqual(result.quantity, "0.124")
+        self.assertEqual(result.quantity, "0.123")
         self.assertEqual(result.price, "27123.46")
         self.assertEqual(result.time_in_force, "GTC")
+
+    def test_open_plan_preserves_dynamic_9000_effective_equity_budget(self) -> None:
+        intent = _intent(
+            order_plan={
+                "type": "limit",
+                "side": "buy",
+                "quantity": "9",
+                "price": "100",
+            },
+            risk_budget=SimpleNamespace(max_notional="900"),
+        )
+
+        result = plan_intent_execution(intent, _context())
+
+        self.assertIsInstance(result, OrderPlan)
+        assert isinstance(result, OrderPlan)
+        self.assertEqual(result.approved_max_notional, "900")
+        self.assertEqual(Decimal(result.quantity) * Decimal(result.price or "0"), Decimal("900"))
+
+    def test_open_quantity_rounds_down_at_half_increment_and_keeps_budget_boundary(
+        self,
+    ) -> None:
+        intent = _intent(
+            order_plan={
+                "type": "limit",
+                "side": "buy",
+                "quantity": "9.005",
+                "price": "100",
+            },
+            risk_budget={"max_notional": "900"},
+        )
+        context = _context(
+            instrument=InstrumentSpec(
+                instrument_id=INSTRUMENT_ID,
+                price_increment="0.01",
+                quantity_increment="0.01",
+            ),
+        )
+
+        result = plan_intent_execution(intent, context)
+
+        self.assertIsInstance(result, OrderPlan)
+        assert isinstance(result, OrderPlan)
+        self.assertEqual(result.quantity, "9.00")
+        self.assertEqual(result.price, "100.00")
+        self.assertEqual(result.approved_max_notional, "900")
+
+    def test_open_limit_order_over_approved_budget_is_denied_after_rounding(
+        self,
+    ) -> None:
+        intent = _intent(
+            order_plan={
+                "type": "limit",
+                "side": "buy",
+                "quantity": "9.011",
+                "price": "100",
+            },
+            risk_budget=SimpleNamespace(max_notional="900"),
+        )
+        context = _context(
+            instrument=InstrumentSpec(
+                instrument_id=INSTRUMENT_ID,
+                price_increment="0.01",
+                quantity_increment="0.01",
+            ),
+        )
+
+        self.assertEqual(
+            plan_intent_execution(intent, context),
+            OrderDenied(
+                reason="approved_max_notional_exceeded",
+                detail="actual=901.0000:approved=900",
+            ),
+        )
+
+    def test_open_requires_a_positive_approved_budget(self) -> None:
+        intent = _intent(risk_budget={"max_notional": "0"})
+
+        self.assertEqual(
+            plan_intent_execution(intent, _context()),
+            OrderDenied(
+                reason="approved_max_notional_invalid",
+                detail="risk_budget.max_notional",
+            ),
+        )
 
     def test_zone_maps_to_boundary_limit_order(self) -> None:
         buy_intent = _intent(
@@ -232,6 +319,7 @@ class _Intent:
     instrument_id: str
     action: str
     order_plan: dict[str, Any]
+    risk_budget: Any
     valid_until: datetime
     idempotency_key: str
     approved_at: datetime
@@ -249,6 +337,7 @@ def _intent(**overrides: Any) -> _Intent:
         "instrument_id": INSTRUMENT_ID,
         "action": "open_position",
         "order_plan": {"type": "market", "side": "buy", "quantity": "1"},
+        "risk_budget": SimpleNamespace(max_notional="100000"),
         "target_position_id": None,
         "valid_until": NOW + timedelta(minutes=5),
         "idempotency_key": sha256(str(intent_id).encode("ascii")).hexdigest(),

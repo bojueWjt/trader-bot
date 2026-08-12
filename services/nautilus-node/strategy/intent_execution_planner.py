@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any, Mapping, Optional
 from uuid import UUID
 
@@ -99,6 +99,7 @@ class OrderPlan:
     post_only: bool = False
     max_slippage_bps: Optional[str] = None
     guard_price: Optional[str] = None
+    approved_max_notional: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,17 @@ def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | M
     order_spec = _build_order_spec(entry_order_plan, context.instrument)
     if isinstance(order_spec, OrderDenied):
         return order_spec
+    approved_max_notional = _approved_max_notional(intent)
+    if isinstance(approved_max_notional, OrderDenied):
+        return approved_max_notional
+    if order_spec.price is not None:
+        budget_denial = _deny_if_order_exceeds_approved_notional(
+            quantity=order_spec.quantity,
+            price=order_spec.price,
+            approved_max_notional=approved_max_notional,
+        )
+        if budget_denial is not None:
+            return budget_denial
 
     return OrderPlan(
         intent_id=intent_id,
@@ -211,6 +223,7 @@ def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | M
         post_only=bool(entry_order_plan.get("post_only") or False),
         max_slippage_bps=_optional_decimal_string(entry_order_plan.get("max_slippage_bps")),
         guard_price=_guard_price(entry_order_plan, context.instrument),
+        approved_max_notional=format(approved_max_notional, "f"),
     )
 
 
@@ -420,7 +433,7 @@ def _entry_order_plan(intent: Any, context: PlannerContext) -> dict[str, Any] | 
 
 def _build_order_spec(order_plan: dict[str, Any], instrument: InstrumentSpec) -> _OrderSpec | OrderDenied:
     order_type = str(order_plan.get("type", "")).lower()
-    quantity = _rounded_positive(
+    quantity = _rounded_down_positive(
         order_plan.get("quantity"),
         instrument.quantity_increment,
         "quantity",
@@ -807,6 +820,15 @@ def _rounded_positive(raw: Any, increment: str, field: str) -> str | OrderDenied
     return _round_to_increment(value, increment, field)
 
 
+def _rounded_down_positive(raw: Any, increment: str, field: str) -> str | OrderDenied:
+    value = _decimal(raw, field)
+    if isinstance(value, OrderDenied):
+        return value
+    if value <= Decimal("0"):
+        return OrderDenied("unsupported_order_spec", field)
+    return _round_down_to_increment(value, increment, field)
+
+
 def _round_to_increment(value: Decimal, increment: str, field: str) -> str | OrderDenied:
     step = _decimal(increment, f"{field}.increment")
     if isinstance(step, OrderDenied):
@@ -815,6 +837,64 @@ def _round_to_increment(value: Decimal, increment: str, field: str) -> str | Ord
         return OrderDenied("unsupported_order_spec", f"{field}.increment")
     snapped = (value / step).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * step
     return format(snapped.quantize(step), "f")
+
+
+def _round_down_to_increment(
+    value: Decimal,
+    increment: str,
+    field: str,
+) -> str | OrderDenied:
+    step = _decimal(increment, f"{field}.increment")
+    if isinstance(step, OrderDenied):
+        return step
+    if step <= Decimal("0"):
+        return OrderDenied("unsupported_order_spec", f"{field}.increment")
+    snapped = (value / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
+    if snapped <= Decimal("0"):
+        return OrderDenied("unsupported_order_spec", field)
+    return format(snapped.quantize(step), "f")
+
+
+def _approved_max_notional(intent: Any) -> Decimal | OrderDenied:
+    risk_budget = getattr(intent, "risk_budget", None)
+    raw_max_notional = _get(risk_budget, "max_notional")
+    try:
+        max_notional = Decimal(str(raw_max_notional))
+    except (InvalidOperation, TypeError, ValueError):
+        return OrderDenied(
+            "approved_max_notional_invalid",
+            "risk_budget.max_notional",
+        )
+    if not max_notional.is_finite() or max_notional <= Decimal("0"):
+        return OrderDenied(
+            "approved_max_notional_invalid",
+            "risk_budget.max_notional",
+        )
+    return max_notional
+
+
+def _deny_if_order_exceeds_approved_notional(
+    *,
+    quantity: str,
+    price: str,
+    approved_max_notional: Decimal,
+) -> OrderDenied | None:
+    try:
+        actual_notional = Decimal(quantity) * Decimal(price)
+    except (InvalidOperation, TypeError, ValueError):
+        return OrderDenied(
+            "approved_max_notional_invalid",
+            "order quantity or price",
+        )
+    if actual_notional > approved_max_notional:
+        return OrderDenied(
+            "approved_max_notional_exceeded",
+            (
+                f"actual={format(actual_notional, 'f')}:"
+                f"approved={format(approved_max_notional, 'f')}"
+            ),
+        )
+    return None
 
 
 def _decimal(raw: Any, field: str) -> Decimal | OrderDenied:
