@@ -557,6 +557,57 @@ def _copy_release_files(
     return files
 
 
+def _validate_live_risk_policy(output_dir: Path) -> None:
+    release_manifest_path = output_dir / "release_manifest.py"
+    policy_path = output_dir / "live-risk-policy.json"
+    validator = """
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+release_manifest_path = Path(sys.argv[1])
+policy_path = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location(
+    "release_payload_manifest",
+    release_manifest_path,
+)
+if spec is None or spec.loader is None:
+    raise SystemExit("release manifest module cannot be loaded")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+policy = json.loads(policy_path.read_text(encoding="utf-8"))
+module._validated_runtime_resources(
+    policy.get("runtime_resource_contract"),
+    label="live risk policy runtime_resource_contract",
+)
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            validator,
+            str(release_manifest_path),
+            str(policy_path),
+        ],
+        cwd=output_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        if not detail:
+            detail = result.stdout.strip()
+        if not detail:
+            detail = "runtime resource validation failed"
+        raise ReleaseBundleError(
+            "release live risk policy runtime resource contract is invalid: "
+            f"{detail}"
+        )
+
+
 def _write_source_manifest(
     output_dir: Path,
     *,
@@ -928,6 +979,7 @@ def build_release(
             staging_dir,
             source_commit,
         )
+        _validate_live_risk_policy(staging_dir)
         migration_manifest_path = _write_migration_manifest(staging_dir)
         watcher_runtime_manifest_path = (
             _write_watcher_runtime_manifest(

@@ -19,6 +19,20 @@
     "command_journal": {
       "max_bytes": 16777216
     },
+    "control_plane_session": {
+      "circuit_reset_seconds": 5,
+      "command_ack_capacity": 256,
+      "command_delivery_capacity": 128,
+      "execution_event_capacity": 1024,
+      "intent_delivery_capacity": 256,
+      "operation_timeout_seconds": 15,
+      "queue_degraded_ratio": 0.8,
+      "retry_base_delay_seconds": 0.05,
+      "retry_budget": 3,
+      "retry_jitter_ratio": 0.2,
+      "retry_max_delay_seconds": 1.0,
+      "shutdown_timeout_seconds": 1
+    },
     "redis": {
       "critical_window_seconds": 30,
       "memory_critical_ratio": 0.85,
@@ -30,6 +44,26 @@
       "stream_max_entries": 100000,
       "thread_join_timeout_seconds": 5,
       "total_stream_max_bytes": 268435456
+    },
+    "reporter_workers": {
+      "denial_queue_capacity": 256,
+      "incident_queue_capacity": 64,
+      "live_canary_risk_queue_capacity": 128,
+      "protection_event_queue_capacity": 1024,
+      "shutdown_timeout_seconds": 5,
+      "task_timeout_seconds": 5
+    },
+    "strategy_durable_io": {
+      "queue_capacity": 128,
+      "shutdown_timeout_seconds": 2,
+      "task_timeout_seconds": 1
+    },
+    "terminal_exchange": {
+      "degraded_ratio": 0.8,
+      "queue_capacity": 64,
+      "result_queue_capacity": 128,
+      "shutdown_timeout_seconds": 7,
+      "total_deadline_seconds": 6
     },
     "schema_version": "trader-v3-runtime-resources/v1"
   },

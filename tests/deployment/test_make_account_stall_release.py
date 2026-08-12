@@ -21,6 +21,7 @@ release = importlib.util.module_from_spec(SPEC)
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 SPEC.loader.exec_module(release)
 import make_container_bundle as container_bundle
+import release_manifest as release_manifest_contract
 
 EXPECTED_REDIS_SCHEMA_EPOCH = "fenced-generation-namespace/v2"
 EXECUTOR_SOURCE_PATH = "scripts/account_a_live_trade_executor.py"
@@ -183,7 +184,11 @@ def _seed_repo(root: Path) -> None:
     for source_relative, _destination_relative in release.RELEASE_FILES:
         path = root / source_relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        if source_relative in release.SYSTEMD_RESOURCE_FILES:
+        if source_relative in {
+            *release.SYSTEMD_RESOURCE_FILES,
+            "scripts/release_manifest.py",
+            "services/nautilus-node/config/live-risk-policy.json",
+        }:
             source = REPO_ROOT / source_relative
             path.write_bytes(source.read_bytes())
         else:
@@ -221,6 +226,32 @@ def test_release_builder_includes_four_account_rollout_migration() -> None:
         "up": release.MIGRATION_CANCEL_ORDER_CONTRACT_UP,
         "down": release.MIGRATION_CANCEL_ORDER_CONTRACT_DOWN,
         "prerequisites": [release.MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP],
+    }
+
+
+def test_reviewed_live_risk_policy_has_complete_runtime_resources() -> None:
+    policy_path = (
+        REPO_ROOT
+        / "services"
+        / "nautilus-node"
+        / "config"
+        / "live-risk-policy.json"
+    )
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+
+    validated = release_manifest_contract._validated_runtime_resources(
+        policy["runtime_resource_contract"],
+        label="live risk policy runtime_resource_contract",
+    )
+
+    assert set(validated) == {
+        "schema_version",
+        "redis",
+        "command_journal",
+        "control_plane_session",
+        "strategy_durable_io",
+        "terminal_exchange",
+        "reporter_workers",
     }
 
 
@@ -511,6 +542,37 @@ def test_release_builder_writes_complete_checksummed_payload(
         check=False,
     )
     assert verified.returncode == 0
+
+
+def test_release_builder_rejects_incomplete_live_risk_policy(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    policy_path = (
+        repo
+        / "services"
+        / "nautilus-node"
+        / "config"
+        / "live-risk-policy.json"
+    )
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    del policy["runtime_resource_contract"]["reporter_workers"]
+    policy_path.write_text(
+        json.dumps(policy, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _commit_path(repo, policy_path, "break live risk policy")
+    output = tmp_path / "release"
+
+    with pytest.raises(
+        release.ReleaseBundleError,
+        match="live risk policy runtime resource contract is invalid",
+    ):
+        release.build_release(repo, output)
+
+    assert not output.exists()
 
 
 def test_release_contract_rejects_missing_watcher_runtime_file(
