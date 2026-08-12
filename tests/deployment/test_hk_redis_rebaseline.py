@@ -817,8 +817,10 @@ def test_success_generates_verified_evidence_and_executable_rollback(
     assert capacity["initial_redis_run_id"] == capacity["active_redis_run_id"]
     assert capacity["control_keys_reinitialized"] is True
     assert capacity["maxmemory_policy"] == "noeviction"
-    assert capacity["memory_limit_bytes"] == int(2.5 * 1024**3)
-    assert capacity["memory_swap_limit_bytes"] == int(2.5 * 1024**3)
+    assert capacity["maxmemory_bytes"] == 512 * 1024**2
+    assert capacity["other_services_reserve_bytes"] == 2304 * 1024**2
+    assert capacity["memory_limit_bytes"] == 640 * 1024**2
+    assert capacity["memory_swap_limit_bytes"] == 640 * 1024**2
     assert capacity["runtime_resource_policy"] == {
         "schema_version": "trader-v3-runtime-resources/v1",
         "namespace_schema_epoch": "fenced-generation-namespace/v2",

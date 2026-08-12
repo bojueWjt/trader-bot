@@ -538,7 +538,7 @@ def connect(_url):
         )
         bootstrap_bash_loop = recreate_section.index(
             'for node in "${RECREATE_NODES[@]}"; do\n'
-            '    bash "$T/recreate-$node.sh"',
+            '  recreate_release_node "$node"',
             generate_loop,
         )
         verify_loop = recreate_section.index(

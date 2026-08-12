@@ -90,7 +90,8 @@ class NodePatchMountContractTest(unittest.TestCase):
         )
         self.assertIn('SKIP_RESUME="${SKIP_RESUME:-1}"', deploy)
         self.assertIn("build_immutable_node_image.py", deploy)
-        self.assertIn('bash "$T/recreate-$ROLLOUT_NODE.sh"', deploy)
+        self.assertIn('bash "$T/recreate-$node.sh"', deploy)
+        self.assertIn('recreate_release_node "$node"', deploy)
         self.assertNotIn('for node in "${ALL_NODES[@]}"; do\n  bash', deploy)
         self.assertIn(
             'ROLLOUT_NODE="${ROLLOUT_NODE:-trader-v3-node-a}"',

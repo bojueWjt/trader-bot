@@ -22,6 +22,10 @@ ACCOUNT_STALL_OPERATION_LOCK_GID="${ACCOUNT_STALL_OPERATION_LOCK_GID:-$(id -g)}"
 ACCOUNT_STALL_OPERATION_TIMEOUT_SECONDS="${ACCOUNT_STALL_OPERATION_TIMEOUT_SECONDS:-30}"
 ACCOUNT_STALL_FENCE_LEASE_SECONDS="${ACCOUNT_STALL_FENCE_LEASE_SECONDS:-120}"
 ACCOUNT_STALL_HEARTBEAT_MAX_AGE_SECONDS="${ACCOUNT_STALL_HEARTBEAT_MAX_AGE_SECONDS:-15}"
+NODE_STARTUP_MEMINFO_PATH="${NODE_STARTUP_MEMINFO_PATH:-/proc/meminfo}"
+NODE_STARTUP_MIN_AVAILABLE_BYTES=$((3 * 1024 * 1024 * 1024))
+NODE_STARTUP_RESOURCE_EVIDENCE="$BACKUP_ROOT/node-startup-resources.jsonl"
+NODE_RELEASE_MEMORY_LIMIT_BYTES=""
 RELEASE_TOOL="$STAGING/release_manifest.py"
 REVIEWED_ROLLOUT_TOOL="$STAGING/reviewed_release_rollout.py"
 GEN_RECREATE="$STAGING/hk-gen-recreate-patched.py"
@@ -35,6 +39,7 @@ LIVE_TRADE_HTTP_ADAPTER="$STAGING/account_a_live_trade_http_adapter.py"
 BOOTSTRAP_CONTROL_PLANE_ROLES="$STAGING/bootstrap_control_plane_roles.py"
 RELEASE_MANIFEST="$STAGING/release-manifest.json"
 RELEASE_SOURCE_MANIFEST="$STAGING/release-source-manifest.json"
+SYSTEMD_RESOURCE_CONTRACT="$STAGING/systemd-resource-contract.json"
 DEPENDENCY_LOCK="${RELEASE_DEPENDENCY_LOCK:-$STAGING/uv.node.lock}"
 PG_BACKUP_TIMEOUT_SECONDS="${PG_BACKUP_TIMEOUT_SECONDS:-300}"
 PG_DUMP_BIN="${PG_DUMP_BIN:-pg_dump}"
@@ -2428,6 +2433,140 @@ verify_node_ready_halted() {
   [ "$ok" = "1" ] || die "$node did not reach ready+HALTED"
   echo "== $node ready (HALTED/startup)"
 }
+write_node_startup_resource_evidence() {
+  python3 - \
+    "$NODE_STARTUP_RESOURCE_EVIDENCE" \
+    "$1" \
+    "$2" \
+    "$3" \
+    "$4" \
+    "$5" \
+    "$NODE_STARTUP_MIN_AVAILABLE_BYTES" \
+    "$6" \
+    "$7" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import sys
+
+(
+    output_raw,
+    node,
+    memory_limit,
+    memory_current,
+    memory_peak,
+    host_available,
+    host_minimum,
+    oom_killed,
+    restart_count,
+) = sys.argv[1:]
+output = Path(output_raw)
+if output.is_symlink():
+    raise SystemExit("node startup resource evidence cannot be a symlink")
+payload = {
+    "schema_version": "trader-v3-node-startup-resources/v1",
+    "captured_at": datetime.now(timezone.utc).isoformat(),
+    "node": node,
+    "memory_limit_bytes": int(memory_limit),
+    "memory_current_bytes": int(memory_current),
+    "memory_peak_bytes": int(memory_peak),
+    "host_mem_available_bytes": int(host_available),
+    "host_min_available_bytes": int(host_minimum),
+    "oom_killed": oom_killed == "true",
+    "restart_count": int(restart_count),
+}
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(output, flags, 0o600)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.write(
+        descriptor,
+        (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+    )
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+verify_node_startup_memory_reserve() {
+  local node="$1"
+  local available_bytes
+  local current_bytes
+  local memory_limit_bytes
+  local oom_killed
+  local peak_bytes
+  local restart_count
+  read -r oom_killed restart_count memory_limit_bytes < <(
+    docker inspect \
+      --format '{{.State.OOMKilled}} {{.RestartCount}} {{.HostConfig.Memory}}' \
+      "$node"
+  )
+  current_bytes="$(
+    docker exec "$node" cat /sys/fs/cgroup/memory.current 2>/dev/null \
+      || docker exec "$node" \
+        cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null
+  )"
+  peak_bytes="$(
+    docker exec "$node" cat /sys/fs/cgroup/memory.peak 2>/dev/null \
+      || docker exec "$node" \
+        cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null
+  )"
+  available_bytes="$(
+    awk '/^MemAvailable:/ {printf "%.0f", $2 * 1024}' \
+      "$NODE_STARTUP_MEMINFO_PATH"
+  )"
+  [ "$oom_killed" = "false" ] \
+    || die "$node was OOM-killed during startup"
+  [ "$restart_count" = "0" ] \
+    || die "$node restarted during startup"
+  [[ "$memory_limit_bytes" =~ ^[1-9][0-9]*$ ]] \
+    || die "$node startup memory limit is invalid"
+  [ "$memory_limit_bytes" = "$NODE_RELEASE_MEMORY_LIMIT_BYTES" ] \
+    || die "$node startup memory limit differs from release contract"
+  [[ "$current_bytes" =~ ^[1-9][0-9]*$ ]] \
+    || die "$node startup memory.current is invalid"
+  [[ "$peak_bytes" =~ ^[1-9][0-9]*$ ]] \
+    || die "$node startup memory.peak is invalid"
+  [ "$current_bytes" -le "$peak_bytes" ] \
+    || die "$node startup memory.current exceeds memory.peak"
+  [ "$peak_bytes" -le "$memory_limit_bytes" ] \
+    || die "$node startup memory.peak exceeds its release limit"
+  [[ "$available_bytes" =~ ^[0-9]+$ ]] \
+    || die "$node startup MemAvailable is unavailable"
+  [ "$available_bytes" -ge "$NODE_STARTUP_MIN_AVAILABLE_BYTES" ] \
+    || die "$node startup left MemAvailable below 3 GiB"
+  write_node_startup_resource_evidence \
+    "$node" \
+    "$memory_limit_bytes" \
+    "$current_bytes" \
+    "$peak_bytes" \
+    "$available_bytes" \
+    "$oom_killed" \
+    "$restart_count"
+  echo "== $node startup resources verified: memory_current=$current_bytes memory_peak=$peak_bytes memory_limit=$memory_limit_bytes MemAvailable=$available_bytes OOMKilled=false RestartCount=0"
+}
+finalize_node_startup_resource_evidence() {
+  if [ ! -f "$NODE_STARTUP_RESOURCE_EVIDENCE" ]; then
+    return
+  fi
+  chmod 0400 "$NODE_STARTUP_RESOURCE_EVIDENCE"
+  refresh_backup_checksums
+}
+recreate_release_node() {
+  local node="$1"
+  local port
+  verify_maintenance_fence "node-recreate-$node"
+  bash "$T/recreate-$node.sh"
+  verify_node_ready_halted "$node"
+  port="$(node_ready_port "$node")"
+  verify_version_endpoint "$port"
+  verify_node_startup_memory_reserve "$node"
+}
 verify_version_endpoint() {
   local port="$1"
   python3 - \
@@ -3709,6 +3848,7 @@ SH
 }
 recover_post_migration_node() {
   local node
+  local recovery_port
   local recovery_dir
   local recovery_expectation
   local recovery_env
@@ -3791,6 +3931,16 @@ PY
       RECOVERY_CONTAINER="$node" \
       PATH="$POST_MIGRATION_RECOVERY_BIN:$PATH" \
         bash "$recovery_script"; then
+      return 1
+    fi
+    if ! verify_node_ready_halted "$node"; then
+      return 1
+    fi
+    recovery_port="$(node_ready_port "$node")"
+    if ! verify_version_endpoint "$recovery_port"; then
+      return 1
+    fi
+    if ! verify_node_startup_memory_reserve "$node"; then
       return 1
     fi
     if ! verify_post_migration_recovery "$recovery_expectation"; then
@@ -3975,6 +4125,8 @@ on_err() {
       >/dev/null 2>&1 \
       || echo "!! reviewed rollout abort recording FAILED" >&2
   fi
+  finalize_node_startup_resource_evidence \
+    || echo "!! node startup resource evidence finalization FAILED" >&2
   echo "!! rollback evidence: $BACKUP_ROOT" >&2
   exit "$failed_status"
 }
@@ -3988,6 +4140,8 @@ sha256sum -c SHA256SUMS >/dev/null || die "staging payload integrity check faile
 [ -f bundle-manifest.json ] || die "bundle-manifest.json missing"
 [ -f "$RELEASE_SOURCE_MANIFEST" ] \
   || die "release-source-manifest.json missing"
+[ -f "$SYSTEMD_RESOURCE_CONTRACT" ] \
+  || die "systemd-resource-contract.json missing"
 [ -f "$RELEASE_TOOL" ] || die "release_manifest.py missing in staging"
 [ -f "$REVIEWED_ROLLOUT_TOOL" ] \
   || die "reviewed_release_rollout.py missing in staging"
@@ -4093,6 +4247,7 @@ fi
 for required in \
   bundle-manifest.json \
   release-source-manifest.json \
+  systemd-resource-contract.json \
   release_manifest.py \
   reviewed_release_rollout.py \
   hk-gen-recreate-patched.py \
@@ -4292,16 +4447,20 @@ PY
 [ "$REDIS_SCHEMA_EPOCH" = "fenced-generation-namespace/v2" ] \
   || die "reviewed Redis schema epoch mismatch"
 
+RELEASE_RESOURCE_LIMITS="$(
 python3 - \
   "$REDIS_COLD_BACKUP_MANIFEST" \
   "$REDIS_CAPACITY_EVIDENCE" \
   "$T/redis-rebaseline" \
   "$REDIS_SCHEMA_EPOCH" \
-  "$LIVE_RISK_POLICY" <<'PY'
+  "$LIVE_RISK_POLICY" \
+  "$RELEASE_TOOL" \
+  "$SYSTEMD_RESOURCE_CONTRACT" <<'PY'
 # REDIS_EVIDENCE_V3_VALIDATOR_BEGIN
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -4317,6 +4476,8 @@ capacity_path = Path(sys.argv[2]).resolve()
 trusted_root = Path(sys.argv[3]).resolve()
 expected_redis_epoch = sys.argv[4]
 risk_policy_path = Path(sys.argv[5]).resolve()
+release_tool_path = Path(sys.argv[6]).resolve()
+resource_contract_path = Path(sys.argv[7]).resolve()
 backup = json.loads(backup_path.read_text(encoding="utf-8"))
 capacity = json.loads(capacity_path.read_text(encoding="utf-8"))
 risk_policy = json.loads(risk_policy_path.read_text(encoding="utf-8"))
@@ -4493,6 +4654,35 @@ if capacity.get("runtime_resource_policy") != expected_runtime_resource_policy:
     raise SystemExit(
         "Redis capacity runtime resource policy differs from release"
     )
+
+module_name = "_trader_release_manifest_validator"
+module_spec = importlib.util.spec_from_file_location(
+    module_name,
+    release_tool_path,
+)
+if module_spec is None or module_spec.loader is None:
+    raise SystemExit("release manifest validator could not be loaded")
+release_manifest = importlib.util.module_from_spec(module_spec)
+sys.modules[module_name] = release_manifest
+module_spec.loader.exec_module(release_manifest)
+validated_resource_contract = (
+    release_manifest.validate_systemd_resource_contract(
+        resource_contract_path,
+        payload_root=resource_contract_path.parent,
+    )
+)
+release_host_config = release_manifest.docker_resource_contract(
+    validated_resource_contract,
+    release_manifest.REDIS_DOCKER_RESOURCE_ARTIFACT,
+)
+node_release_host_config = release_manifest.docker_resource_contract(
+    validated_resource_contract,
+    release_manifest.NODE_DOCKER_RESOURCE_ARTIFACT,
+)
+release_redis_memory_bytes = int(release_host_config["memory_bytes"])
+release_redis_memory_swap_bytes = int(
+    release_host_config["memory_swap_bytes"]
+)
 
 
 def parse_timestamp(document, key):
@@ -4798,6 +4988,18 @@ if numbers["required_container_bytes"] != expected_required_container:
     raise SystemExit("Redis capacity container budget calculation mismatch")
 if numbers["redis_cgroup_limit_bytes"] < expected_required_container:
     raise SystemExit("Redis cgroup limit lacks maxmemory headroom")
+if numbers["redis_cgroup_limit_bytes"] != release_redis_memory_bytes:
+    raise SystemExit(
+        "Redis capacity cgroup differs from release resource contract"
+    )
+if numbers["memory_limit_bytes"] != release_redis_memory_bytes:
+    raise SystemExit(
+        "Redis capacity memory limit differs from release resource contract"
+    )
+if numbers["memory_swap_limit_bytes"] != release_redis_memory_swap_bytes:
+    raise SystemExit(
+        "Redis capacity memory swap differs from release resource contract"
+    )
 if numbers["memory_limit_bytes"] != numbers["redis_cgroup_limit_bytes"]:
     raise SystemExit("Redis capacity memory limit differs from cgroup plan")
 if numbers["memory_swap_limit_bytes"] != numbers["redis_cgroup_limit_bytes"]:
@@ -4963,8 +5165,25 @@ if set(runtime_checks) != expected_runtime_checks:
     raise SystemExit("Redis capacity runtime checks are incomplete")
 if any(value is not True for value in runtime_checks.values()):
     raise SystemExit("Redis capacity runtime check did not pass")
+print(
+    f"{int(node_release_host_config['memory_bytes'])}\t"
+    f"{release_redis_memory_bytes}\t"
+    f"{release_redis_memory_swap_bytes}"
+)
 # REDIS_EVIDENCE_V3_VALIDATOR_END
 PY
+)"
+read -r \
+  NODE_RELEASE_MEMORY_LIMIT_BYTES \
+  REDIS_RELEASE_MEMORY_LIMIT_BYTES \
+  REDIS_RELEASE_MEMORY_SWAP_BYTES \
+  <<<"$RELEASE_RESOURCE_LIMITS"
+[[ "$NODE_RELEASE_MEMORY_LIMIT_BYTES" =~ ^[1-9][0-9]*$ ]] \
+  || die "release node memory limit is invalid"
+[[ "$REDIS_RELEASE_MEMORY_LIMIT_BYTES" =~ ^[1-9][0-9]*$ ]] \
+  || die "release Redis memory limit is invalid"
+[ "$REDIS_RELEASE_MEMORY_SWAP_BYTES" = "$REDIS_RELEASE_MEMORY_LIMIT_BYTES" ] \
+  || die "release Redis memory swap contract is invalid"
 
 REDIS_IMAGE="$(docker inspect --format '{{.Image}}' trader-v3-redis)"
 [ -n "$REDIS_IMAGE" ] || die "running Redis image digest is missing"
@@ -5119,9 +5338,12 @@ python3 - \
   "$CURRENT_REDIS_MEMORY_SWAP" \
   "$HOST_TOTAL_BYTES" \
   "$HOST_AVAILABLE_BYTES" \
-  "$CURRENT_REDIS_INSPECT" <<'PY'
+  "$CURRENT_REDIS_INSPECT" \
+  "$RELEASE_TOOL" \
+  "$SYSTEMD_RESOURCE_CONTRACT" <<'PY'
 # REDIS_LIVE_STATE_VALIDATOR_BEGIN
 import hashlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -5146,10 +5368,32 @@ from uuid import UUID
     host_total,
     host_available,
     inspect_raw,
+    release_tool_path,
+    resource_contract_path,
 ) = sys.argv[1:]
 backup = json.load(open(backup_path, encoding="utf-8"))
 capacity = json.load(open(capacity_path, encoding="utf-8"))
 inspected = json.loads(inspect_raw)[0]
+module_name = "_trader_live_release_manifest_validator"
+module_spec = importlib.util.spec_from_file_location(
+    module_name,
+    release_tool_path,
+)
+if module_spec is None or module_spec.loader is None:
+    raise SystemExit("release manifest validator could not be loaded")
+release_manifest = importlib.util.module_from_spec(module_spec)
+sys.modules[module_name] = release_manifest
+module_spec.loader.exec_module(release_manifest)
+validated_resource_contract = (
+    release_manifest.validate_systemd_resource_contract(
+        Path(resource_contract_path),
+        payload_root=Path(resource_contract_path).parent,
+    )
+)
+release_host_config = release_manifest.docker_resource_contract(
+    validated_resource_contract,
+    release_manifest.REDIS_DOCKER_RESOURCE_ARTIFACT,
+)
 
 expected_run_id = str(capacity["active_redis_run_id"])
 if run_id != expected_run_id:
@@ -5191,6 +5435,12 @@ if int(memory_swap) != int(capacity["memory_swap_limit_bytes"]):
     raise SystemExit("running Redis MemorySwap differs from capacity evidence")
 if int(memory_swap) != int(memory_limit):
     raise SystemExit("running Redis permits swap beyond its memory limit")
+if int(memory_limit) != int(release_host_config["memory_bytes"]):
+    raise SystemExit("running Redis memory differs from release resource contract")
+if int(memory_swap) != int(release_host_config["memory_swap_bytes"]):
+    raise SystemExit(
+        "running Redis memory swap differs from release resource contract"
+    )
 if (
     appendonly != capacity["active_appendonly"]
     or int(aof_enabled) != int(capacity["active_aof_enabled"])
@@ -7754,18 +8004,11 @@ for node in "${RECREATE_NODES[@]}"; do
   generate_release_recreate "$RELEASE_MANIFEST" "$node"
 done
 ROLLOUT_RECREATE_STARTED=1
-if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
-  verify_maintenance_fence "node-recreate-fleet"
-  for node in "${RECREATE_NODES[@]}"; do
-    bash "$T/recreate-$node.sh"
-  done
-else
-  for node in "${RECREATE_NODES[@]}"; do
-    verify_maintenance_fence "node-recreate-$node"
-    bash "$T/recreate-$node.sh"
-  done
-fi
+for node in "${RECREATE_NODES[@]}"; do
+  recreate_release_node "$node"
+done
 verify_release_nodes "${RECREATE_NODES[@]}"
+finalize_node_startup_resource_evidence
 if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
   acquire_maintenance_fence_after_bootstrap
 fi

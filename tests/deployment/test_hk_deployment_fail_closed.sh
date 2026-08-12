@@ -57,6 +57,11 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" 'accepted_ack_statuses = {"acked", "completed"}'
   assert_contains "$generator" 'NAUTILUS_INITIAL_TRADING_STATE=HALTED'
   assert_contains "$text" 'did not reach ready+HALTED'
+  assert_contains "$text" \
+    'NODE_STARTUP_MIN_AVAILABLE_BYTES=$((3 * 1024 * 1024 * 1024))'
+  assert_contains "$text" 'verify_node_startup_memory_reserve'
+  assert_contains "$text" 'recreate_release_node'
+  assert_contains "$text" 'startup left MemAvailable below 3 GiB'
   assert_contains "$text" 'ACCOUNT_B_ROLLOUT_GATE'
   assert_contains "$text" 'ACCOUNT_B_RELEASE_MANIFEST'
   assert_contains "$text" 'ACCOUNT_B_EVIDENCE_FILE'
@@ -154,6 +159,14 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" 'redis_cgroup_limit_bytes'
   assert_contains "$text" 'memory_limit_bytes'
   assert_contains "$text" 'memory_swap_limit_bytes'
+  assert_contains "$text" \
+    'SYSTEMD_RESOURCE_CONTRACT="$STAGING/systemd-resource-contract.json"'
+  assert_contains "$text" \
+    'Redis capacity cgroup differs from release resource contract'
+  assert_contains "$text" \
+    'Redis capacity memory limit differs from release resource contract'
+  assert_contains "$text" \
+    'Redis capacity memory swap differs from release resource contract'
   assert_contains "$text" 'legacy Redis container identity differs from backup evidence'
   assert_contains "$text" 'running Redis active volume source differs from evidence'
   assert_contains "$text" 'running Redis must contain only the fencing epoch marker'
@@ -752,6 +765,146 @@ test_die_routes_failure_through_err_trap() {
   assert_contains "$output" "ERR_TRAP_FIRED"
 }
 
+test_node_recreate_is_sequential_and_memory_gated() {
+  local case_dir="$TMP_DIR/node-recreate-memory-gate"
+  local trader_root="$case_dir/trader-v3"
+  local meminfo="$case_dir/meminfo"
+  local log="$case_dir/actions.log"
+  local recreate_definition
+  local memory_definition
+  local output
+  local status
+  mkdir -p "$trader_root"
+  cat >"$trader_root/recreate-trader-v3-node-a.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'recreate\n' >>"$NODE_RECREATE_TEST_LOG"
+EOF
+  chmod +x "$trader_root/recreate-trader-v3-node-a.sh"
+  printf 'MemAvailable:    4194304 kB\n' >"$meminfo"
+  recreate_definition=$(extract_function recreate_release_node)
+  memory_definition=$(extract_function verify_node_startup_memory_reserve)
+
+  T="$trader_root" \
+  NODE_STARTUP_MEMINFO_PATH="$meminfo" \
+  NODE_STARTUP_MIN_AVAILABLE_BYTES=$((3 * 1024 * 1024 * 1024)) \
+  NODE_RELEASE_MEMORY_LIMIT_BYTES=469762048 \
+  NODE_RECREATE_TEST_LOG="$log" \
+  RECREATE_DEFINITION="$recreate_definition" \
+  MEMORY_DEFINITION="$memory_definition" \
+    bash -c '
+      set -Eeuo pipefail
+      die() {
+        printf "FATAL: %s\n" "$*" >&2
+        return 1
+      }
+      verify_maintenance_fence() {
+        printf "fence:%s\n" "$1" >>"$NODE_RECREATE_TEST_LOG"
+      }
+      verify_node_ready_halted() {
+        printf "ready:%s\n" "$1" >>"$NODE_RECREATE_TEST_LOG"
+      }
+      node_ready_port() {
+        printf "8081\n"
+      }
+      verify_version_endpoint() {
+        printf "version:%s\n" "$1" >>"$NODE_RECREATE_TEST_LOG"
+      }
+        write_node_startup_resource_evidence() {
+          printf "evidence:%s\n" "$1" >>"$NODE_RECREATE_TEST_LOG"
+        }
+      docker() {
+        if [ "$1" = "inspect" ]; then
+          printf "false 0 469762048\n"
+          return 0
+        fi
+        if [ "$1" = "exec" ]; then
+          case "$*" in
+            *memory.current*)
+              printf "196083712\n"
+              ;;
+            *memory.peak*)
+              printf "268435456\n"
+              ;;
+          esac
+          return 0
+        fi
+        return 1
+      }
+      eval "$MEMORY_DEFINITION"
+      eval "$RECREATE_DEFINITION"
+      recreate_release_node trader-v3-node-a
+    '
+  assert_contains "$(cat "$log")" \
+    $'fence:node-recreate-trader-v3-node-a\nrecreate\nready:trader-v3-node-a\nversion:8081\nevidence:trader-v3-node-a'
+
+  printf 'MemAvailable:    3145727 kB\n' >"$meminfo"
+  set +e
+  output=$(
+    T="$trader_root" \
+    NODE_STARTUP_MEMINFO_PATH="$meminfo" \
+    NODE_STARTUP_MIN_AVAILABLE_BYTES=$((3 * 1024 * 1024 * 1024)) \
+    NODE_RELEASE_MEMORY_LIMIT_BYTES=469762048 \
+    NODE_RECREATE_TEST_LOG="$log" \
+    RECREATE_DEFINITION="$recreate_definition" \
+    MEMORY_DEFINITION="$memory_definition" \
+      bash -c '
+        set -Eeuo pipefail
+        die() {
+          printf "FATAL: %s\n" "$*" >&2
+          return 1
+        }
+        verify_maintenance_fence() {
+          return 0
+        }
+        verify_node_ready_halted() {
+          return 0
+        }
+        node_ready_port() {
+          printf "8081\n"
+        }
+        verify_version_endpoint() {
+          return 0
+        }
+      write_node_startup_resource_evidence() {
+        printf "evidence:%s\n" "$1" >>"$NODE_RECREATE_TEST_LOG"
+      }
+        docker() {
+          if [ "$1" = "inspect" ]; then
+            printf "false 0 469762048\n"
+            return 0
+          fi
+          if [ "$1" = "exec" ]; then
+            case "$*" in
+              *memory.current*)
+                printf "196083712\n"
+                ;;
+              *memory.peak*)
+                printf "268435456\n"
+                ;;
+            esac
+            return 0
+          fi
+          return 1
+        }
+        trap "printf rollback-path-entered >&2" ERR
+        eval "$MEMORY_DEFINITION"
+        eval "$RECREATE_DEFINITION"
+        recreate_release_node trader-v3-node-a
+      ' 2>&1
+  )
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    fail "node recreate accepted startup memory below 3 GiB"
+  fi
+  assert_contains "$output" \
+    "trader-v3-node-a startup left MemAvailable below 3 GiB"
+  assert_contains "$output" "rollback-path-entered"
+  if [ "$(grep -c '^evidence:' "$log")" -ne 1 ]; then
+    fail "failed startup wrote final resource evidence"
+  fi
+}
+
 test_on_err_restores_files_topology_and_old_image() {
   local case_dir="$TMP_DIR/on-err"
   local fake_bin="$case_dir/bin"
@@ -927,7 +1080,7 @@ recreate_section = text.index(
 )
 recreate_loop = text.index(
     'for node in "${RECREATE_NODES[@]}"; do\n'
-    '    bash "$T/recreate-$node.sh"',
+    '  recreate_release_node "$node"',
     recreate_section,
 )
 verify_nodes = text.index(
@@ -1038,12 +1191,97 @@ test_on_err_uses_compatible_recovery_after_migration() {
     'post-migration recovery nodes remain HALTED'
   assert_contains "$recovery_definition" \
     'PATH="$POST_MIGRATION_RECOVERY_BIN:$PATH"'
+  assert_contains "$recovery_definition" \
+    'verify_node_ready_halted "$node"'
+  assert_contains "$recovery_definition" \
+    'verify_version_endpoint "$recovery_port"'
+  assert_contains "$recovery_definition" \
+    'verify_node_startup_memory_reserve "$node"'
   assert_not_contains "$recovery_definition" \
     'generate_release_recreate'
   assert_not_contains "$definition" \
     'bash "$BACKUP_ROOT/recreate-$ROLLOUT_NODE.sh"'
   assert_not_contains "$recovery_definition" \
     'docker stop --time 30 "$ROLLOUT_NODE" >/dev/null 2>&1 || true'
+}
+
+test_post_migration_recovery_resource_failure_blocks_promotion() {
+  local case_dir="$TMP_DIR/post-migration-resource-gate"
+  local recovery_root="$case_dir/recovery"
+  local recovery_bin="$case_dir/bin"
+  local trader_root="$case_dir/trader-v3"
+  local node="trader-v3-node-a"
+  local log="$case_dir/actions.log"
+  local recovery_definition
+  local status
+  mkdir -p "$recovery_root/$node" "$recovery_bin" "$trader_root"
+  : >"$recovery_root/$node/expectation.json"
+  : >"$recovery_root/$node/container.env"
+  cat >"$recovery_root/$node/recreate.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'recreate\n' >>"$RECOVERY_RESOURCE_TEST_LOG"
+EOF
+  chmod 0700 "$recovery_root/$node/recreate.sh"
+  : >"$case_dir/recovery-manifest.json"
+  cat >"$recovery_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0700 "$recovery_bin/docker"
+  recovery_definition=$(extract_function recover_post_migration_node)
+
+  set +e
+  RECOVERY_RESOURCE_TEST_LOG="$log" \
+  RECOVERY_DEFINITION="$recovery_definition" \
+  POST_MIGRATION_RECOVERY_ROOT="$recovery_root" \
+  POST_MIGRATION_RECOVERY_BIN="$recovery_bin" \
+  POST_MIGRATION_RECOVERY_DOCKER="$recovery_bin/docker" \
+  POST_MIGRATION_RECOVERY_MANIFEST="$case_dir/recovery-manifest.json" \
+  T="$trader_root" \
+  RECOVERY_NODE="$node" \
+    bash -c '
+      set -Eeuo pipefail
+      RECREATE_NODES=("$RECOVERY_NODE")
+      verify_maintenance_fence() {
+        return 0
+      }
+      python3() {
+        return 0
+      }
+      docker() {
+        return 0
+      }
+      verify_node_ready_halted() {
+        printf "ready:%s\n" "$1" >>"$RECOVERY_RESOURCE_TEST_LOG"
+      }
+      node_ready_port() {
+        printf "8081\n"
+      }
+      verify_version_endpoint() {
+        printf "version:%s\n" "$1" >>"$RECOVERY_RESOURCE_TEST_LOG"
+      }
+      verify_node_startup_memory_reserve() {
+        printf "resource:%s\n" "$1" >>"$RECOVERY_RESOURCE_TEST_LOG"
+        return 1
+      }
+      verify_post_migration_recovery() {
+        printf "post:%s\n" "$1" >>"$RECOVERY_RESOURCE_TEST_LOG"
+      }
+      eval "$RECOVERY_DEFINITION"
+      recover_post_migration_node
+    ' >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [ "$status" -eq 0 ]; then
+    fail "post-migration recovery accepted failed resource gate"
+  fi
+  assert_contains "$(cat "$log")" \
+    $'recreate\nready:trader-v3-node-a\nversion:8081\nresource:trader-v3-node-a'
+  assert_not_contains "$(cat "$log")" "post:"
+  if [ -e "$trader_root/recreate-$node.sh" ]; then
+    fail "failed post-migration recovery promoted recreate script"
+  fi
 }
 
 test_on_err_selects_post_migration_recovery_branch() {
@@ -1810,10 +2048,12 @@ test_account_stall_operation_lock_is_exclusive_and_configurable
 test_pre_migration_database_backup_is_bounded_and_validated
 test_pre_migration_database_backup_rejects_invalid_restore_listing
 test_die_routes_failure_through_err_trap
+test_node_recreate_is_sequential_and_memory_gated
 test_on_err_restores_files_topology_and_old_image
 test_immutable_config_and_rollout_ordering
 test_migration_expectations_have_separate_schema_contracts
 test_on_err_uses_compatible_recovery_after_migration
+test_post_migration_recovery_resource_failure_blocks_promotion
 test_on_err_selects_post_migration_recovery_branch
 test_watcher_restart_and_rollback_use_compose_health_and_hash_gate
 test_strict_watcher_mapping_failure_restores_prior_runtime

@@ -80,7 +80,9 @@ def test_account_stall_drop_ins_have_complete_resource_budgets() -> None:
         _validate_resource_budget(directives)
         parsed[role] = directives
 
-    assert _memory_bytes(parsed["redis"]["MemoryMax"]) == 2560 * 1024**2
+    assert _memory_bytes(parsed["account-node"]["MemoryMax"]) == 448 * 1024**2
+    assert parsed["account-node"]["CPUQuota"] == "100%"
+    assert _memory_bytes(parsed["redis"]["MemoryMax"]) == 640 * 1024**2
     assert _memory_bytes(
         parsed["control-plane-writer"]["MemoryMax"]
     ) > _memory_bytes(parsed["control-plane-reader"]["MemoryMax"])

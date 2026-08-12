@@ -73,6 +73,15 @@ def _application_paths(app) -> set[str]:
     }
 
 
+def _route_methods(app, path: str) -> set[str]:
+    methods: set[str] = set()
+    for route in app.routes:
+        if route.path != path:
+            continue
+        methods.update(route.methods or set())
+    return methods
+
+
 def test_role_apps_expose_only_their_owned_routes() -> None:
     node_control = _application_paths(read_api.create_app(AppRole.NODE_CONTROL))
     event_ingest = _application_paths(read_api.create_app(AppRole.EVENT_INGEST))
@@ -99,6 +108,28 @@ def test_role_apps_expose_only_their_owned_routes() -> None:
     assert "/v1/operator/orders" in operator_query
     assert "/v1/nodes/{node_id}/heartbeat" not in operator_query
     assert "/v1/nodes/{node_id}/execution-events" not in operator_query
+
+
+def test_settings_admin_routes_belong_only_to_operator_query() -> None:
+    node_control = read_api.create_app(AppRole.NODE_CONTROL)
+    event_ingest = read_api.create_app(AppRole.EVENT_INGEST)
+    operator_query = read_api.create_app(AppRole.OPERATOR_QUERY)
+    settings_path = "/v1/order-management/settings"
+
+    assert _route_methods(node_control, settings_path) == set()
+    assert _route_methods(event_ingest, settings_path) == set()
+    assert _route_methods(operator_query, settings_path) == {
+        "GET",
+        "PATCH",
+    }
+    assert _route_methods(
+        operator_query,
+        f"{settings_path}/rollback",
+    ) == {"POST"}
+    assert _route_methods(
+        operator_query,
+        f"{settings_path}/import",
+    ) == {"POST"}
 
 
 def test_default_all_role_preserves_the_existing_route_surface() -> None:

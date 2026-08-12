@@ -28,9 +28,15 @@ from psycopg2.extras import RealDictCursor
 
 _PSYCOPG2_DRIVER = psycopg2
 _HERE = Path(__file__).resolve().parent
+_CONTROL_PLANE = _HERE.parent
 _DB = _HERE.parent / "db"
 _EXECUTION_DOMAIN = _HERE.parents[2] / "packages" / "execution-domain"
-for _module_path in (_HERE, _DB, _EXECUTION_DOMAIN):
+for _module_path in (
+    _HERE,
+    _CONTROL_PLANE,
+    _DB,
+    _EXECUTION_DOMAIN,
+):
     if str(_module_path) not in sys.path:
         sys.path.insert(0, str(_module_path))
 
@@ -68,6 +74,13 @@ READER_TOKEN_ENV = {
 }
 
 app = FastAPI(title="Hermes control-plane read API", version="contracts-v1")
+
+from settings.router import (  # noqa: E402
+    router as order_management_settings_router,
+)
+
+app.router.routes.extend(order_management_settings_router.routes)
+
 NODE_COMMAND_POLL_LIMIT = 64
 _TRADING_STATE_COMMANDS = frozenset({"HALT", "REDUCE", "RESUME"})
 _COMMAND_TARGET_MAX_AGE_SECONDS = 5.0

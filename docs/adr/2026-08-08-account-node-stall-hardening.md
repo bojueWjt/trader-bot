@@ -15,6 +15,11 @@ persistence 使用 runtime instance identity 扩展 key space，message streams 
 系统需要一个深模块收敛控制面复杂性：actor 只提交本地工作，网络、重试、队列、时限、
 progress clock 和降级策略全部隐藏在模块实现内。调用者只依赖小而稳定的 interface。
 
+控制面角色名称保留现有 `operator-query`，其职责范围是完整操作员 API 平面：
+查询接口以及受 `RISK_ADMIN_TOKEN` 和 settings RBAC 保护的订单管理配置写接口。
+`node-control` 和 `event-ingest` 不暴露 settings 路由；数据库角色
+`trader_v3_operator_query` 持有对应 settings、outbox 和 audit 写权限。
+
 ## Decision
 
 引入 `NodeControlPlaneSession` 模块作为 node 与 control plane 的唯一 seam。模块 interface
@@ -205,8 +210,15 @@ message_bus_namespace = trader-{trader_id}:{persistence_instance}:{streams_prefi
 - Postgres execution events 和 durable local spool 承担审计与恢复，Redis streams 只承担
   有界实时传输。新 generation 从 exchange-first reconciliation 重建状态，旧 generation
   不承担恢复真相源职责。
-- Redis 配置显式 `maxmemory`，初始目标 2 GiB，保留 `noeviction` 以维持 fail-closed；
-  container memory limit 高于 Redis maxmemory，并给 OS 与其他服务保留至少 3 GiB。
+- Redis 配置显式 `maxmemory`，HK 8 GiB 主机目标为 512 MiB，保留
+  `noeviction` 以维持 fail-closed；container memory limit 为 640 MiB。
+- A-D 节点各使用 448 MiB、1 CPU 的有限配额。Redis capacity plan 为四节点
+  和其他常驻服务保留 2304 MiB，并为 OS 保留至少 3 GiB。
+- bootstrap 串行启动节点；每个节点达到 ready+HALTED 后，宿主机
+  `MemAvailable` 必须仍不少于 3 GiB。
+- migration 后的自动恢复复用相同的 `/version`、cgroup peak、OOM/restart 和
+  3 GiB `MemAvailable` 门禁；启动资源证据仅记录通过项，并在成功或失败收尾时
+  以 `0400` 权限纳入备份校验和。
 - 告警阈值采用 60%/75%/85%；写失败或 85% 持续超窗触发 HALTED 和容量 incident。
 - janitor 默认 dry-run。apply safety manifest 对每个执行账户同时携带稳定
   `lease_namespace` 和精确 `persistence_namespace`；前者验证当前 lease owner，后者保护

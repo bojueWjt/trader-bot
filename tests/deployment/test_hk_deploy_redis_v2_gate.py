@@ -12,6 +12,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts" / "hk-deploy-20260803.sh"
+RELEASE_TOOL = REPO_ROOT / "scripts" / "release_manifest.py"
 REDIS_SCHEMA_EPOCH = "fenced-generation-namespace/v2"
 REDIS_FENCING_EPOCH = "123e4567-e89b-42d3-a456-426614174000"
 REDIS_FENCING_EPOCH_KEY = "trader-bot:redis-fencing-epoch"
@@ -179,6 +180,9 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
         self.backup_path = self.evidence_root / "cold-backup-manifest.json"
         self.capacity_path = self.evidence_root / "capacity-evidence.json"
         self.risk_policy_path = self.evidence_root / "live-risk-policy.json"
+        self.resource_contract_path = (
+            self.evidence_root / "systemd-resource-contract.json"
+        )
         self.risk_policy_path.write_text(
             json.dumps(
                 {
@@ -214,11 +218,11 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
         )
         self._write_backup()
 
-        maxmemory = 2 * 1024**3
+        maxmemory = 512 * 1024**2
         used_memory = 256 * 1024**2
         dataset_memory = 128 * 1024**2
         headroom_percent = 20
-        cgroup_limit = int(2.5 * 1024**3)
+        cgroup_limit = 640 * 1024**2
         container_headroom_percent = 20
         required_maxmemory = _ceiling_percent(
             used_memory,
@@ -230,7 +234,7 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
         )
         host_total = 8 * 1024**3
         host_available = 7 * 1024**3
-        other_services_reserve = 1024**3
+        other_services_reserve = 2304 * 1024**2
         system_reserve = 3 * 1024**3
         growth_to_maxmemory = maxmemory - used_memory
         container_overhead = required_container - maxmemory
@@ -322,6 +326,116 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
             "runtime_checks": dict(RUNTIME_CHECKS),
         }
         self._write_capacity()
+        node_resource = {
+            "memory_bytes": 448 * 1024**2,
+            "memory_swap_bytes": 448 * 1024**2,
+            "nano_cpus": 1_000_000_000,
+            "nofile_hard": 65_536,
+            "nofile_soft": 65_536,
+            "pids_limit": 512,
+            "restart_policy": "always",
+        }
+        redis_resource = {
+            "memory_bytes": cgroup_limit,
+            "memory_swap_bytes": cgroup_limit,
+            "nano_cpus": 1_500_000_000,
+            "nofile_hard": 65_536,
+            "nofile_soft": 65_536,
+            "pids_limit": 256,
+            "restart_policy": "always",
+        }
+        bindings = [
+            (
+                "infra/systemd/account-stall-account-node.conf",
+                "hk-gen-recreate-patched.py",
+                "docker_host_config",
+                [
+                    "trader-v3-node-a",
+                    "trader-v3-node-b",
+                    "trader-v3-node-c",
+                    "trader-v3-node-d",
+                ],
+                [
+                    "docker://trader-v3-node-a/HostConfig",
+                    "docker://trader-v3-node-b/HostConfig",
+                    "docker://trader-v3-node-c/HostConfig",
+                    "docker://trader-v3-node-d/HostConfig",
+                ],
+                node_resource,
+            ),
+            (
+                "infra/systemd/account-stall-control-plane-reader.conf",
+                "hk-control-plane-isolation.sh",
+                "inline_service_unit",
+                ["trader-v3-controlplane-operator-query.service"],
+                [
+                    (
+                        "/etc/systemd/system/"
+                        "trader-v3-controlplane-operator-query.service"
+                    )
+                ],
+                False,
+            ),
+            (
+                "infra/systemd/account-stall-control-plane-writer.conf",
+                "hk-control-plane-isolation.sh",
+                "inline_service_unit",
+                [
+                    "trader-v3-controlplane-node-control.service",
+                    "trader-v3-controlplane-event-ingest.service",
+                ],
+                [
+                    (
+                        "/etc/systemd/system/"
+                        "trader-v3-controlplane-node-control.service"
+                    ),
+                    (
+                        "/etc/systemd/system/"
+                        "trader-v3-controlplane-event-ingest.service"
+                    ),
+                ],
+                False,
+            ),
+            (
+                "infra/systemd/account-stall-redis.conf",
+                "hk-redis-rebaseline.sh",
+                "docker_host_config",
+                ["trader-v3-redis"],
+                ["docker://trader-v3-redis/HostConfig"],
+                redis_resource,
+            ),
+        ]
+        resources = []
+        for (
+            artifact,
+            consumer,
+            application,
+            owners,
+            destinations,
+            host_config,
+        ) in bindings:
+            artifact_path = self.evidence_root / artifact
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(
+                f"# fixture {artifact}\n",
+                encoding="utf-8",
+            )
+            resource = {
+                "application": application,
+                "artifact": artifact,
+                "consumer_entrypoint": consumer,
+                "destinations": destinations,
+                "owner_units": owners,
+                "sha256": _sha256(artifact_path),
+            }
+            if host_config is not False:
+                resource["effective_docker_host_config"] = host_config
+            resources.append(resource)
+        self.resource_contract = {
+            "schema_version": "trader-v3-systemd-resource-contract/v1",
+            "resources": resources,
+        }
+        self._write_resource_contract()
 
     def _write_backup(self) -> None:
         self.backup_path.write_text(
@@ -339,6 +453,17 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _write_resource_contract(self) -> None:
+        self.resource_contract_path.write_text(
+            json.dumps(
+                self.resource_contract,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def _run_validator(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -350,6 +475,8 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
                 str(self.trusted_root),
                 REDIS_SCHEMA_EPOCH,
                 str(self.risk_policy_path),
+                str(RELEASE_TOOL),
+                str(self.resource_contract_path),
             ],
             cwd=REPO_ROOT,
             text=True,
@@ -391,6 +518,8 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
             str(self.capacity["host_total_memory_bytes"]),
             str(self.capacity["host_available_memory_bytes"]),
             json.dumps(inspected),
+            str(RELEASE_TOOL),
+            str(self.resource_contract_path),
         ]
 
     def _run_live_validator(
@@ -413,6 +542,43 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_capacity_evidence_must_match_release_redis_host_config(
+        self,
+    ) -> None:
+        mutations = {
+            "cgroup": (
+                "redis_cgroup_limit_bytes",
+                "Redis capacity cgroup differs from release resource contract",
+            ),
+            "memory": (
+                "memory_limit_bytes",
+                (
+                    "Redis capacity memory limit differs from release "
+                    "resource contract"
+                ),
+            ),
+            "memory swap": (
+                "memory_swap_limit_bytes",
+                (
+                    "Redis capacity memory swap differs from release "
+                    "resource contract"
+                ),
+            ),
+        }
+        original = json.loads(json.dumps(self.capacity))
+        for name, (field, message) in mutations.items():
+            with self.subTest(name=name):
+                self.capacity = json.loads(json.dumps(original))
+                self.capacity[field] += 1024
+                self._write_capacity()
+
+                result = self._run_validator()
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+        self.capacity = original
+        self._write_capacity()
+
     def test_legacy_application_schema_epoch_is_rejected(self) -> None:
         result = subprocess.run(
             [
@@ -424,6 +590,8 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
                 str(self.trusted_root),
                 "stable-account-namespace/v1",
                 str(self.risk_policy_path),
+                str(RELEASE_TOOL),
+                str(self.resource_contract_path),
             ],
             cwd=REPO_ROOT,
             text=True,
@@ -660,6 +828,8 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
             "$HOST_TOTAL_BYTES",
             "$HOST_AVAILABLE_BYTES",
             "$CURRENT_REDIS_INSPECT",
+            "$RELEASE_TOOL",
+            "$SYSTEMD_RESOURCE_CONTRACT",
         ]
         self.assertEqual(_live_validator_command(), expected_command)
 
@@ -676,6 +846,26 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
             "running Redis fencing epoch differs from evidence",
+            result.stderr,
+        )
+
+    def test_live_validator_rejects_release_resource_drift(self) -> None:
+        redis_resource = next(
+            item
+            for item in self.resource_contract["resources"]
+            if item["artifact"]
+            == "infra/systemd/account-stall-redis.conf"
+        )
+        host_config = redis_resource["effective_docker_host_config"]
+        host_config["memory_bytes"] += 1024
+        host_config["memory_swap_bytes"] += 1024
+        self._write_resource_contract()
+
+        result = self._run_live_validator()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "running Redis memory differs from release resource contract",
             result.stderr,
         )
 

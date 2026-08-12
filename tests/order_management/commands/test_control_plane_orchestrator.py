@@ -79,8 +79,16 @@ def test_command_run_cannot_skip_venue_verification(db_conn):
         )
 
 
-def test_node_ack_mapping_keeps_running_out_of_legacy_completed_rollup():
-    assert read_api._legacy_ack_status_for_node_status("accepted") is None
-    assert read_api._legacy_ack_status_for_node_status("running") is None
-    assert read_api._legacy_ack_status_for_node_status("completed") == "acked"
-    assert read_api._legacy_ack_status_for_node_status("failed") == "failed"
+def test_node_ack_state_machine_keeps_running_non_terminal():
+    assert read_api._command_ack_transition_allowed("pending", "accepted")
+    assert read_api._command_ack_transition_allowed("accepted", "running")
+    assert read_api._command_ack_transition_allowed("running", "completed")
+    assert read_api._command_ack_transition_allowed("running", "failed")
+    assert not read_api._command_ack_transition_allowed(
+        "completed",
+        "running",
+    )
+    assert not read_api._command_ack_transition_allowed(
+        "failed",
+        "running",
+    )
