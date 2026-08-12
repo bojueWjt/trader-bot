@@ -38,7 +38,7 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
         intent = _intent(
             action="partial_close",
             target_position_id=POSITION_ID,
-            order_plan={"type": "market", "quantity": "0.1244"},
+            order_plan={"type": "market", "quantity": "0.1246"},
         )
 
         result = plan_intent_execution(intent, _context())
@@ -49,7 +49,7 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
         order = result.orders[0]
         self.assertEqual(order.order_type, "MARKET")
         self.assertEqual(order.side, "SELL")
-        self.assertEqual(order.quantity, "0.124")
+        self.assertEqual(order.quantity, "0.125")
         self.assertTrue(order.reduce_only)
         self.assertIn("lifecycle_role=exit", order.tags)
         self.assertIn(f"position_id={POSITION_ID}", order.tags)

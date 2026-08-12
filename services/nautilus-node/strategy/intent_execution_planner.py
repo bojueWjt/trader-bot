@@ -195,7 +195,11 @@ def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | M
     if position_denial is not None:
         return position_denial
 
-    order_spec = _build_order_spec(entry_order_plan, context.instrument)
+    order_spec = _build_order_spec(
+        entry_order_plan,
+        context.instrument,
+        round_quantity_down=True,
+    )
     if isinstance(order_spec, OrderDenied):
         return order_spec
     approved_max_notional = _approved_max_notional(intent)
@@ -431,13 +435,25 @@ def _entry_order_plan(intent: Any, context: PlannerContext) -> dict[str, Any] | 
     return order_plan
 
 
-def _build_order_spec(order_plan: dict[str, Any], instrument: InstrumentSpec) -> _OrderSpec | OrderDenied:
+def _build_order_spec(
+    order_plan: dict[str, Any],
+    instrument: InstrumentSpec,
+    *,
+    round_quantity_down: bool = False,
+) -> _OrderSpec | OrderDenied:
     order_type = str(order_plan.get("type", "")).lower()
-    quantity = _rounded_down_positive(
-        order_plan.get("quantity"),
-        instrument.quantity_increment,
-        "quantity",
-    )
+    if round_quantity_down:
+        quantity = _rounded_down_positive(
+            order_plan.get("quantity"),
+            instrument.quantity_increment,
+            "quantity",
+        )
+    else:
+        quantity = _rounded_positive(
+            order_plan.get("quantity"),
+            instrument.quantity_increment,
+            "quantity",
+        )
     if isinstance(quantity, OrderDenied):
         return quantity
 
