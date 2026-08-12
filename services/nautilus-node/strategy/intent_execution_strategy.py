@@ -49,6 +49,8 @@ from strategy.intent_execution_planner import (
     encode_client_order_id,
     plan_intent_execution,
     _authorization_source,
+    _approved_max_notional,
+    _rounded_down_positive,
     _rounded_positive,
 )
 
@@ -2163,6 +2165,14 @@ class IntentExecutionStrategy(Strategy):
             self._report_denial(intent, plans)
             return
 
+        ladder_denial = self._zone_ladder_dynamic_budget_denial(
+            plans,
+        )
+        if ladder_denial is not None:
+            self._record_denial(ladder_denial)
+            self._report_denial(intent, ladder_denial)
+            return
+
         if durable_async:
             protection_preimage = copy.deepcopy(
                 self._entry_protection_stash
@@ -2340,6 +2350,9 @@ class IntentExecutionStrategy(Strategy):
         tranches = order_plan.get("tranches")
         if not isinstance(tranches, (list, tuple)) or len(tranches) != 3:
             return OrderDenied("unsupported_order_spec", "zone_ladder.tranches")
+        approved_max_notional = _approved_max_notional(intent)
+        if isinstance(approved_max_notional, OrderDenied):
+            return approved_max_notional
 
         tags = _entry_tags(intent, action)
         plans: list[OrderPlan] = []
@@ -2353,7 +2366,7 @@ class IntentExecutionStrategy(Strategy):
             if sequence != index + 1 or sequence < 1 or sequence > 9:
                 return OrderDenied("unsupported_order_spec", f"tranches[{index}].seq")
 
-            quantity = _rounded_positive(
+            quantity = _rounded_down_positive(
                 tranche.get("quantity"),
                 instrument.quantity_increment,
                 f"tranches[{index}].quantity",
@@ -2379,6 +2392,10 @@ class IntentExecutionStrategy(Strategy):
                     quantity=quantity,
                     price=price,
                     time_in_force="GTC",
+                    approved_max_notional=format(
+                        approved_max_notional,
+                        "f",
+                    ),
                 )
             )
         return tuple(plans)
@@ -3086,6 +3103,20 @@ class IntentExecutionStrategy(Strategy):
             self._report_denial(intent, denial)
             self._restore_prepare_submit_preimage(task)
             return
+
+        mode = ""
+        continuation = task.continuation
+        if isinstance(continuation, Mapping):
+            mode = str(continuation.get("mode") or "")
+        if mode == "zone_ladder":
+            ladder_denial = self._zone_ladder_dynamic_budget_denial(
+                task.plans,
+            )
+            if ladder_denial is not None:
+                self._record_denial(ladder_denial)
+                self._report_denial(intent, ladder_denial)
+                self._restore_prepare_submit_preimage(task)
+                return
 
         submitted_plans: list[OrderPlan] = []
         for plan in task.plans:
@@ -5493,7 +5524,10 @@ class IntentExecutionStrategy(Strategy):
                 OrderDenied("order_submit_failed", repr(exc))
             )
             return False
-        entry_denial = self._live_entry_notional_denial(plan, order)
+        entry_denial = self._live_entry_notional_denial(
+            plan,
+            order,
+        )
         if entry_denial is not None:
             self._record_denial(entry_denial)
             return False
@@ -5583,7 +5617,10 @@ class IntentExecutionStrategy(Strategy):
             self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
             return False
 
-        entry_denial = self._live_entry_notional_denial(plan, order)
+        entry_denial = self._live_entry_notional_denial(
+            plan,
+            order,
+        )
         if entry_denial is not None:
             self._record_denial(entry_denial)
             return False
@@ -5768,6 +5805,20 @@ class IntentExecutionStrategy(Strategy):
                 )
 
         actual_notional = quantity * price
+        approved_max_notional = _approved_max_notional_from_plan(
+            plan.approved_max_notional
+        )
+        if isinstance(approved_max_notional, OrderDenied):
+            return approved_max_notional
+        if actual_notional > approved_max_notional:
+            return OrderDenied(
+                "approved_max_notional_exceeded",
+                (
+                    f"instrument={plan.instrument_id}:"
+                    f"actual={format(actual_notional, 'f')}:"
+                    f"approved={format(approved_max_notional, 'f')}"
+                ),
+            )
         if actual_notional > cap:
             return OrderDenied(
                 "live_entry_notional_exceeded",
@@ -5778,6 +5829,48 @@ class IntentExecutionStrategy(Strategy):
                 ),
             )
         return None
+
+    def _zone_ladder_dynamic_budget_denial(
+        self,
+        plans: Iterable[OrderPlan],
+    ) -> OrderDenied | None:
+        total = Decimal("0")
+        instrument_id = ""
+        intent_id = ""
+        approved_max_notional: Decimal | bool = False
+        for plan in plans:
+            intent_id = str(plan.intent_id)
+            instrument_id = plan.instrument_id
+            if plan.reduce_only:
+                continue
+            plan_approved = _approved_max_notional_from_plan(
+                plan.approved_max_notional
+            )
+            if isinstance(plan_approved, OrderDenied):
+                return plan_approved
+            if approved_max_notional is False:
+                approved_max_notional = plan_approved
+            elif approved_max_notional != plan_approved:
+                return OrderDenied(
+                    "approved_max_notional_invalid",
+                    f"zone_ladder:{intent_id}",
+                )
+            quantity = _positive_canary_decimal(plan.quantity)
+            price = _positive_canary_decimal(plan.price)
+            if quantity is None or price is None:
+                return OrderDenied("unsupported_order_spec", "zone_ladder")
+            total += quantity * price
+        if approved_max_notional is False or total <= approved_max_notional:
+            return None
+        return OrderDenied(
+            "approved_max_notional_exceeded",
+            (
+                f"instrument={instrument_id}:"
+                f"actual={format(total, 'f')}:"
+                f"approved={format(approved_max_notional, 'f')}:"
+                f"intent={intent_id}"
+            ),
+        )
 
     def _fresh_live_mark_price(
         self,
@@ -8213,6 +8306,16 @@ def _parse_live_entry_notional_inventory(
             )
         caps[instrument_id] = cap
     return caps
+
+
+def _approved_max_notional_from_plan(value: Any) -> Decimal | OrderDenied:
+    budget = _positive_canary_decimal(value)
+    if budget is None:
+        return OrderDenied(
+            "approved_max_notional_invalid",
+            "order_plan.approved_max_notional",
+        )
+    return budget
 
 
 def _fsync_strategy_directory(path: Path) -> None:

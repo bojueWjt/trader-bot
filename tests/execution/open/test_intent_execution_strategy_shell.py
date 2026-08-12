@@ -598,6 +598,67 @@ class StrategyShellTest(unittest.TestCase):
             "instrument=BTCUSDT-PERP.BINANCE:actual=101.00:cap=100",
         )
 
+    def test_live_account_b_rejects_final_limit_notional_over_intent_budget(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "12000"),),
+                release_id="release-a",
+                final_quantity="1.01",
+                final_price="100",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_entry_intent(max_notional="100")
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = _normal_live_open_gate()
+
+            strategy._handle_intent_ready(
+                intent,
+                exchange_state_ready=False,
+            )
+
+            self.assertEqual(strategy.submitted_orders, [])
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "approved_max_notional_exceeded",
+            )
+            self.assertEqual(
+                strategy.denials[-1].detail,
+                "instrument=BTCUSDT-PERP.BINANCE:actual=101.00:approved=100",
+            )
+
+    def test_live_entry_requires_approved_max_notional_on_final_gate(
+        self,
+    ) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("BTCUSDT-PERP.BINANCE", "12000"),),
+            final_quantity="1",
+            final_price="100",
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            quantity="1",
+            price="100",
+            approved_max_notional="",
+        )
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertFalse(submitted)
+        self.assertEqual(strategy.submitted_orders, [])
+        self.assertEqual(
+            strategy.denials[-1].reason,
+            "approved_max_notional_invalid",
+        )
+        self.assertEqual(
+            strategy.denials[-1].detail,
+            "order_plan.approved_max_notional",
+        )
+
     def test_live_account_b_allows_final_limit_notional_at_cap(
         self,
     ) -> None:
@@ -620,6 +681,40 @@ class StrategyShellTest(unittest.TestCase):
             [plan.client_order_id],
         )
         self.assertEqual(strategy.denials, [])
+
+    def test_live_zone_ladder_rejects_three_rung_total_before_first_submit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _LiveEntrySubmitStrategy(
+                inventory=(("BTCUSDT-PERP.BINANCE", "12000"),),
+                release_id="release-a",
+                state_dir=Path(state_dir),
+            )
+            strategy.set_live_open_gate_getter(
+                lambda: _normal_live_open_gate()
+            )
+            intent = _live_zone_ladder_intent(max_notional="100")
+            intent.order_plan["rollout_phase"] = "fleet_complete"
+            intent.order_plan["live_open_gate"] = _normal_live_open_gate()
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(
+                identity,
+                _durable_payload(intent),
+            )
+
+            strategy._handle_intent_ready(
+                intent,
+                exchange_state_ready=False,
+            )
+
+            self.assertEqual(strategy.submitted_orders, [])
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "approved_max_notional_exceeded",
+            )
+            self.assertIn("actual=120", strategy.denials[-1].detail)
+            self.assertIn("approved=100", strategy.denials[-1].detail)
 
     def test_live_secondary_regular_submit_stays_compatible_with_release_id(
         self,
@@ -770,6 +865,7 @@ class StrategyShellTest(unittest.TestCase):
             quantity="1000",
             price=None,
             reduce_only=True,
+            approved_max_notional="",
         )
 
         submitted = strategy._submit_order_plan(plan)
@@ -2278,12 +2374,23 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         final_price: str | None = None,
         mark_price: str | None = None,
         mark_price_at: datetime | None = None,
+        state_dir: Path | None = None,
     ) -> None:
         self.submitted_orders: list[str] = []
         self._final_quantity = final_quantity
         self._final_price = final_price
         self._mark_price = mark_price
         self._mark_price_at = mark_price_at
+        self._state_dir = state_dir
+        live_canary_execution_path = ""
+        intent_execution_inbox_path = ""
+        if state_dir is not None:
+            live_canary_execution_path = str(
+                state_dir / "live-canary-execution.json"
+            )
+            intent_execution_inbox_path = str(
+                state_dir / "intent-execution-inbox.json"
+            )
         super().__init__(
             IntentExecutionStrategyConfig(
                 account_id=account_id,
@@ -2291,12 +2398,26 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
                 trading_state="ACTIVE",
                 environment="live",
                 release_id=release_id,
+                live_canary_execution_path=live_canary_execution_path,
+                intent_execution_inbox_path=intent_execution_inbox_path,
                 live_entry_notional_inventory=inventory,
             )
         )
 
     def _cache_instrument(self, instrument_id: str):
         return SimpleNamespace(id=instrument_id)
+
+    def _instrument_spec(self, instrument_id: str) -> InstrumentSpec:
+        return InstrumentSpec(
+            instrument_id=instrument_id,
+            price_increment="0.01",
+            quantity_increment="0.01",
+        )
+
+    def _protection_stash_path(self) -> str:
+        if self._state_dir is None:
+            return super()._protection_stash_path()
+        return str(self._state_dir / self._PROTECTION_STASH_FILENAME)
 
     def _cache_mark_price(self, instrument_id: str):
         del instrument_id
@@ -2306,6 +2427,14 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
             value=self._mark_price,
             ts_event=int(self._mark_price_at.timestamp() * 1_000_000_000),
         )
+
+    def _cache_orders(self, instrument_id):
+        del instrument_id
+        return ()
+
+    def _cache_positions(self, instrument_id):
+        del instrument_id
+        return ()
 
     def _build_nautilus_order(self, plan, instrument):
         del instrument
@@ -2439,6 +2568,61 @@ def _durable_entry_intent() -> SimpleNamespace:
     )
 
 
+def _live_entry_intent(
+    *,
+    max_notional: str = "100",
+) -> SimpleNamespace:
+    intent_id = uuid4()
+    return SimpleNamespace(
+        intent_id=intent_id,
+        decision_id=uuid4(),
+        risk_decision_id=uuid4(),
+        idempotency_key=f"idempotency-{intent_id}",
+        account_id="account-b",
+        instrument_id="BTCUSDT-PERP.BINANCE",
+        action="open_position",
+        valid_until=(
+            datetime(2026, 8, 8, 12, tzinfo=timezone.utc)
+            + timedelta(minutes=5)
+        ),
+        risk_budget=SimpleNamespace(max_notional=max_notional),
+        order_plan={
+            "type": "limit",
+            "side": "buy",
+            "quantity": "1",
+            "price": "100",
+            "time_in_force": "IOC",
+            "authorization": {
+                "authorized_by_type": "user",
+                "authorized_by_id": "dynamic-budget-test",
+                "source_message_id": str(uuid4()),
+            },
+        },
+    )
+
+
+def _live_zone_ladder_intent(
+    *,
+    max_notional: str,
+) -> SimpleNamespace:
+    intent = _live_entry_intent(max_notional=max_notional)
+    intent.order_plan = {
+        "type": "zone_ladder",
+        "side": "buy",
+        "authorization": {
+            "authorized_by_type": "user",
+            "authorized_by_id": "dynamic-budget-test",
+            "source_message_id": str(uuid4()),
+        },
+        "tranches": [
+            {"seq": 1, "quantity": "0.4", "price": "100"},
+            {"seq": 2, "quantity": "0.4", "price": "100"},
+            {"seq": 3, "quantity": "0.4", "price": "100"},
+        ],
+    }
+    return intent
+
+
 def _durable_identity(intent: SimpleNamespace) -> IntentExecutionIdentity:
     return IntentExecutionIdentity(
         account_id=intent.account_id,
@@ -2521,6 +2705,7 @@ def _canary_order_plan(
     *,
     quantity: str = "0.1",
     price: str = "100",
+    approved_max_notional: str = "12",
 ) -> OrderPlan:
     return OrderPlan(
         intent_id=UUID(identity.intent_id),
@@ -2532,6 +2717,7 @@ def _canary_order_plan(
         quantity=quantity,
         price=price,
         time_in_force="IOC",
+        approved_max_notional=approved_max_notional,
     )
 
 
@@ -2542,6 +2728,7 @@ def _live_entry_order_plan(
     price: str | None,
     order_type: str = "LIMIT",
     reduce_only: bool = False,
+    approved_max_notional: str = "100000",
 ) -> OrderPlan:
     intent_id = uuid4()
     return OrderPlan(
@@ -2555,6 +2742,7 @@ def _live_entry_order_plan(
         price=price,
         time_in_force="IOC",
         reduce_only=reduce_only,
+        approved_max_notional=approved_max_notional,
     )
 
 

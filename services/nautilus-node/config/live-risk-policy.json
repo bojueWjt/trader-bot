@@ -13,7 +13,8 @@
     ],
     "default_order_modify_rate": "1/00:00:01",
     "default_order_submit_rate": "50/00:00:01",
-    "max_notional_ceiling_usdt": "100"
+    "global_safety_max_notional_usdt": "100000",
+    "max_notional_ceiling_usdt": "100000"
   },
   "runtime_resource_contract": {
     "command_journal": {

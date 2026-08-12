@@ -138,7 +138,7 @@ def test_apply_policy_updates_caps_and_preserves_secret_references(
         assert config["binance"]["api_secret"]["file"]
         caps = config["risk"]["max_notional_per_order"]
         assert set(caps) == live_config.ALLOWED_INSTRUMENTS
-        assert set(caps.values()) == {"100"}
+        assert set(caps.values()) == {"100000"}
         assert config["risk"]["max_order_submit_rate"] == "50/00:00:01"
         assert config["risk"]["max_order_modify_rate"] == "1/00:00:01"
     manifest = json.loads(
@@ -273,12 +273,12 @@ def test_capture_rejects_legacy_cap_above_reviewed_ceiling(
     monkeypatch.setattr(
         live_config,
         "_docker_inspect_environment",
-        lambda _container: _legacy_environment("101"),
+        lambda _container: _legacy_environment("100001"),
     )
 
     with pytest.raises(
         live_config.LiveNodeConfigError,
-        match="at most 100",
+        match="at most 100000",
     ):
         live_config.capture_legacy_risk(
             policy_path=POLICY,
@@ -339,6 +339,9 @@ def test_prepare_target_creates_immutable_artifact_without_touching_peer(
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact["account_id"] == "account-a"
     assert artifact["risk"]["max_notional_per_order"]
+    assert set(
+        artifact["risk"]["max_notional_per_order"].values()
+    ) == {"100000"}
     for account_id, path in configs.items():
         assert path.read_bytes() == originals[account_id]["payload"]
         assert path.stat().st_ino == originals[account_id]["inode"]

@@ -133,6 +133,11 @@ def load_risk_policy(path: Path) -> dict[str, Any]:
         raise LiveNodeConfigError(
             "risk policy max_notional ceiling must be positive"
         )
+    target_cap = _positive_cap(
+        migration.get("global_safety_max_notional_usdt"),
+        "risk policy global_safety_max_notional_usdt",
+        ceiling=ceiling,
+    )
     default_rates = {
         "max_order_submit_rate": _required_rate(
             migration.get("default_order_submit_rate"),
@@ -155,6 +160,7 @@ def load_risk_policy(path: Path) -> dict[str, Any]:
     )
     return {
         "max_notional_ceiling_usdt": ceiling,
+        "global_safety_max_notional_usdt": target_cap,
         "default_rates": default_rates,
         "entry_contract": dict(entry),
     }
@@ -362,6 +368,21 @@ def load_captured_risk(
     )
 
 
+def _policy_target_risk(
+    captured_risk: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    target_cap = policy["global_safety_max_notional_usdt"]
+    return {
+        "max_notional_per_order": {
+            instrument: target_cap
+            for instrument in sorted(ALLOWED_INSTRUMENTS)
+        },
+        "max_order_submit_rate": captured_risk["max_order_submit_rate"],
+        "max_order_modify_rate": captured_risk["max_order_modify_rate"],
+    }
+
+
 def _read_secure_config(
     path: Path,
     *,
@@ -567,24 +588,25 @@ def _config_with_captured_risk(
         raise LiveNodeConfigError(
             f"node config account identity mismatch: {source_config_path}"
         )
-    risk = load_captured_risk(
+    policy = load_risk_policy(policy_path)
+    legacy_risk = load_captured_risk(
         legacy_risk_path,
         policy_path=policy_path,
     )
+    target_risk = _policy_target_risk(legacy_risk, policy)
     current_risk = config.get("risk")
     if current_risk is not None:
-        policy = load_risk_policy(policy_path)
         validated_current = _validate_migration_risk(
             current_risk,
             ceiling=policy["max_notional_ceiling_usdt"],
         )
-        if validated_current != risk:
+        if validated_current not in (legacy_risk, target_risk):
             raise LiveNodeConfigError(
-                "node config risk differs from captured legacy risk: "
+                "node config risk differs from captured or target risk: "
                 f"{source_config_path}"
             )
     updated = dict(config)
-    updated["risk"] = risk
+    updated["risk"] = target_risk
     payload = (
         json.dumps(updated, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
@@ -759,10 +781,12 @@ def apply_policy(
         )
     if backup_dir.exists():
         raise LiveNodeConfigError(f"config backup path exists: {backup_dir}")
-    risk = load_captured_risk(
+    policy = load_risk_policy(policy_path)
+    legacy_risk = load_captured_risk(
         legacy_risk_path,
         policy_path=policy_path,
     )
+    target_risk = _policy_target_risk(legacy_risk, policy)
     originals: dict[str, tuple[bytes, os.stat_result, dict[str, Any]]] = {}
     updated_payloads: dict[str, bytes] = {}
     normalized_hashes: dict[str, str] = {}
@@ -779,17 +803,16 @@ def apply_policy(
         if current_risk is not None:
             validated_current = _validate_migration_risk(
                 current_risk,
-                ceiling=load_risk_policy(policy_path)[
-                    "max_notional_ceiling_usdt"
-                ],
+                ceiling=policy["max_notional_ceiling_usdt"],
             )
-            if validated_current != risk:
+            if validated_current not in (legacy_risk, target_risk):
                 raise LiveNodeConfigError(
-                    f"node config risk differs from captured legacy risk: {path}"
+                    "node config risk differs from captured or target risk: "
+                    f"{path}"
                 )
         originals[account_id] = (payload, file_stat, config)
         updated = dict(config)
-        updated["risk"] = risk
+        updated["risk"] = target_risk
         updated_payloads[account_id] = (
             json.dumps(updated, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
