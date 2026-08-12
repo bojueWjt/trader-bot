@@ -10,6 +10,7 @@ Discover BINANCE_EXEC_DST from the running image before generation:
     "import nautilus_trader.adapters.binance.execution as m; print(m.__file__)"
 """
 
+import hashlib
 import json
 import os
 import re
@@ -97,26 +98,56 @@ PATCH_MOUNT_TARGETS = (
 )
 BINANCE_EXECUTION_FILE = "binance_execution.py"
 BINANCE_FUTURES_EXECUTION_FILE = "binance_futures_execution.py"
+SNAPSHOT_EVIDENCE_SCHEMA = "trader-v3-runtime-recreate-snapshot/v1"
+DEFAULT_DOCKER_SHM_SIZE = 64 * 1024 * 1024
+
+
+def _pop_flag(values, flag):
+    if flag not in values:
+        return False
+    values.remove(flag)
+    if flag in values:
+        raise DeploymentConfigError(f"{flag} cannot be repeated")
+    return True
+
+
+def _pop_option(values, option):
+    if option not in values:
+        return False
+    index = values.index(option)
+    if index + 1 >= len(values):
+        raise DeploymentConfigError(f"{option} requires a value")
+    value = values[index + 1]
+    del values[index : index + 2]
+    if option in values:
+        raise DeploymentConfigError(f"{option} cannot be repeated")
+    return value
 
 
 def parse_args(argv):
     values = list(argv[1:])
     release_manifest_path = False
     database_schema_epoch = False
-    if "--release-manifest" in values:
-        index = values.index("--release-manifest")
-        if index + 1 >= len(values):
-            raise DeploymentConfigError("--release-manifest requires a path")
-        release_manifest_path = Path(values[index + 1])
-        del values[index : index + 2]
-    if "--database-schema-epoch" in values:
-        index = values.index("--database-schema-epoch")
-        if index + 1 >= len(values):
-            raise DeploymentConfigError(
-                "--database-schema-epoch requires a value"
-            )
-        database_schema_epoch = values[index + 1].strip()
-        del values[index : index + 2]
+    snapshot_runtime = _pop_flag(values, "--snapshot-runtime")
+    output_raw = _pop_option(values, "--output")
+    environment_output_raw = _pop_option(
+        values,
+        "--environment-output",
+    )
+    evidence_output_raw = _pop_option(values, "--evidence-output")
+    verify_snapshot_raw = _pop_option(
+        values,
+        "--verify-snapshot-evidence",
+    )
+    release_manifest_raw = _pop_option(values, "--release-manifest")
+    database_schema_raw = _pop_option(
+        values,
+        "--database-schema-epoch",
+    )
+    if release_manifest_raw is not False:
+        release_manifest_path = Path(release_manifest_raw)
+    if database_schema_raw is not False:
+        database_schema_epoch = database_schema_raw.strip()
     if len(values) not in {1, 3}:
         raise DeploymentConfigError(
             "expected CONTAINER for immutable mode or CONTAINER plus "
@@ -124,7 +155,7 @@ def parse_args(argv):
             "hk-gen-recreate-patched.py CONTAINER "
             "[BINANCE_EXEC_DST BINANCE_FUTURES_EXEC_DST] "
             "[--release-manifest PATH] "
-            "[--database-schema-epoch EPOCH]"
+            "[--database-schema-epoch EPOCH] or snapshot runtime options"
         )
 
     name = values[0].strip()
@@ -135,6 +166,50 @@ def parse_args(argv):
         binance_futures_dst = values[2].strip()
     if not name:
         raise DeploymentConfigError("container name is empty")
+    snapshot_mode = snapshot_runtime or verify_snapshot_raw is not False
+    if snapshot_mode:
+        if len(values) != 3:
+            raise DeploymentConfigError(
+                "snapshot runtime mode requires both Binance "
+                "execution destinations"
+            )
+        if release_manifest_path is not False or database_schema_epoch is not False:
+            raise DeploymentConfigError(
+                "snapshot runtime mode cannot use a release manifest"
+            )
+        if snapshot_runtime and verify_snapshot_raw is not False:
+            raise DeploymentConfigError(
+                "snapshot generation and verification are separate operations"
+            )
+        output_values = (
+            output_raw,
+            environment_output_raw,
+            evidence_output_raw,
+        )
+        if snapshot_runtime and any(
+            value is False for value in output_values
+        ):
+            raise DeploymentConfigError(
+                "snapshot runtime requires --output, "
+                "--environment-output, and --evidence-output"
+            )
+        if verify_snapshot_raw is not False and any(
+            value is not False for value in output_values
+        ):
+            raise DeploymentConfigError(
+                "snapshot verification cannot use generation outputs"
+            )
+    elif any(
+        value is not False
+        for value in (
+            output_raw,
+            environment_output_raw,
+            evidence_output_raw,
+        )
+    ):
+        raise DeploymentConfigError(
+            "snapshot output options require --snapshot-runtime"
+        )
     if release_manifest_path is not False:
         if not database_schema_epoch:
             raise DeploymentConfigError(
@@ -174,12 +249,33 @@ def parse_args(argv):
                 "BINANCE_FUTURES_EXEC_DST contains invalid characters"
             )
 
+    def output_path(raw, option):
+        if raw is False:
+            return False
+        path = Path(raw)
+        if not path.is_absolute():
+            raise DeploymentConfigError(
+                f"{option} must be an absolute path"
+            )
+        return path
+
     return (
         name,
         binance_dst,
         binance_futures_dst,
         release_manifest_path,
         database_schema_epoch,
+        snapshot_runtime,
+        output_path(output_raw, "--output"),
+        output_path(
+            environment_output_raw,
+            "--environment-output",
+        ),
+        output_path(evidence_output_raw, "--evidence-output"),
+        output_path(
+            verify_snapshot_raw,
+            "--verify-snapshot-evidence",
+        ),
     )
 
 
@@ -491,6 +587,8 @@ def append_allowlisted_runtime_spec(
     name,
     *,
     reviewed_resources=False,
+    preserve_release_labels=False,
+    preserve_runtime_defaults=False,
 ):
     config = _require_dict(inspected.get("Config"), "Config")
     host_config = _require_dict(
@@ -587,6 +685,20 @@ def append_allowlisted_runtime_spec(
         run.append("--read-only")
     _append_nonempty_option(run, "--pid", host_config.get("PidMode"))
     _append_nonempty_option(run, "--ipc", host_config.get("IpcMode"))
+    if preserve_runtime_defaults:
+        _append_nonempty_option(
+            run,
+            "--cgroupns",
+            host_config.get("CgroupnsMode"),
+        )
+        _append_nonempty_option(
+            run,
+            "--runtime",
+            host_config.get("Runtime"),
+        )
+        shm_size = host_config.get("ShmSize")
+        if isinstance(shm_size, int) and shm_size > 0:
+            run.extend(["--shm-size", str(shm_size)])
 
     if reviewed_resources is False:
         memory = host_config.get("Memory")
@@ -595,7 +707,10 @@ def append_allowlisted_runtime_spec(
         cpu_shares = host_config.get("CpuShares")
         if isinstance(memory, int) and memory > 0:
             run.extend(["--memory", str(memory)])
-        if isinstance(memory_swap, int) and memory_swap > 0:
+        if (
+            isinstance(memory_swap, int)
+            and (memory_swap > 0 or memory_swap == -1)
+        ):
             run.extend(["--memory-swap", str(memory_swap)])
         if isinstance(nano_cpus, int) and nano_cpus > 0:
             run.extend(
@@ -603,6 +718,9 @@ def append_allowlisted_runtime_spec(
             )
         if isinstance(cpu_shares, int) and cpu_shares > 0:
             run.extend(["--cpu-shares", str(cpu_shares)])
+        pids_limit = host_config.get("PidsLimit")
+        if isinstance(pids_limit, int) and pids_limit > 0:
+            run.extend(["--pids-limit", str(pids_limit)])
     else:
         run.extend(
             [
@@ -644,8 +762,11 @@ def append_allowlisted_runtime_spec(
     for key, value in sorted(labels.items()):
         normalized_key = str(key)
         if (
-            normalized_key.startswith("io.trader.release.")
-            or normalized_key.startswith("com.trader.release.")
+            preserve_release_labels is False
+            and (
+                normalized_key.startswith("io.trader.release.")
+                or normalized_key.startswith("com.trader.release.")
+            )
         ):
             continue
         run.extend(["--label", f"{key}={value}"])
@@ -692,6 +813,777 @@ def append_allowlisted_runtime_spec(
             continue
         network_connects.append((network_name, tuple(aliases)))
     return primary_network, network_connects
+
+
+def _canonical_json_sha256(value):
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_private_file(path, payload, mode):
+    if not path.parent.is_dir():
+        raise DeploymentConfigError(
+            f"snapshot output directory is missing: {path.parent}"
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, mode)
+    except OSError as exc:
+        raise DeploymentConfigError(
+            f"snapshot output cannot be created: {path}"
+        ) from exc
+    try:
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def _snapshot_environment(inspected):
+    config = _require_dict(inspected.get("Config"), "Config")
+    environment = _require_list(config.get("Env") or [], "Config.Env")
+    normalized = []
+    names = set()
+    for raw in environment:
+        value = str(raw)
+        if re.search(r"[\x00\r\n]", value):
+            raise DeploymentConfigError(
+                "container environment contains an unsupported control byte"
+            )
+        name, separator, _ = value.partition("=")
+        if (
+            not separator
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
+        ):
+            raise DeploymentConfigError(
+                "container environment entry is invalid"
+            )
+        if name in names:
+            raise DeploymentConfigError(
+                f"container environment name is duplicated: {name}"
+            )
+        names.add(name)
+        normalized.append(value)
+    halted_values = [
+        value
+        for value in normalized
+        if value.startswith("NAUTILUS_INITIAL_TRADING_STATE=")
+    ]
+    if halted_values != ["NAUTILUS_INITIAL_TRADING_STATE=HALTED"]:
+        raise DeploymentConfigError(
+            "snapshot source container must already be HALTED"
+        )
+    return normalized
+
+
+def _snapshot_mounts(inspected):
+    raw_mounts = _require_list(inspected.get("Mounts") or [], "Mounts")
+    mounts = []
+    destinations = set()
+    for raw in raw_mounts:
+        mount = _require_dict(raw, "Mounts[]")
+        mount_type = str(mount.get("Type") or "").strip()
+        destination = str(mount.get("Destination") or "").strip()
+        if not destination.startswith("/") or ":" in destination:
+            raise DeploymentConfigError(
+                f"snapshot mount destination is invalid: {destination}"
+            )
+        if destination in destinations:
+            raise DeploymentConfigError(
+                f"snapshot mount destination is duplicated: {destination}"
+            )
+        destinations.add(destination)
+        source = str(mount.get("Source") or "").strip()
+        volume_name = str(mount.get("Name") or "").strip()
+        if mount_type == "bind":
+            if not source.startswith("/") or ":" in source:
+                raise DeploymentConfigError(
+                    f"snapshot bind source is invalid: {source}"
+                )
+            run_source = source
+        elif mount_type == "volume":
+            if not volume_name or re.search(r"[:\n]", volume_name):
+                raise DeploymentConfigError(
+                    f"snapshot volume name is invalid: {volume_name}"
+                )
+            run_source = volume_name
+        else:
+            raise DeploymentConfigError(
+                f"unsupported snapshot mount type: {mount_type}"
+            )
+        writable = mount.get("RW") is True
+        propagation = str(mount.get("Propagation") or "").strip()
+        if mount_type == "bind" and propagation not in {"", "rprivate"}:
+            raise DeploymentConfigError(
+                "snapshot mount propagation is unsupported: "
+                f"{source} -> {destination} ({propagation})"
+            )
+        mode = str(mount.get("Mode") or "").strip()
+        if not mode:
+            mode = "rw"
+            if not writable:
+                mode = "ro"
+        if re.fullmatch(r"[a-zA-Z0-9,._-]+", mode) is None:
+            raise DeploymentConfigError(
+                f"snapshot mount mode is invalid: {mode}"
+            )
+        mounts.append(
+            {
+                "destination": destination,
+                "mode": mode,
+                "name": volume_name,
+                "propagation": propagation,
+                "run_source": run_source,
+                "rw": writable,
+                "source": source,
+                "type": mount_type,
+            }
+        )
+    return sorted(
+        mounts,
+        key=lambda item: (
+            item["destination"],
+            item["run_source"],
+        ),
+    )
+
+
+def _is_inactive(value):
+    if value is None or value is False:
+        return True
+    if value == "" or value == 0:
+        return True
+    if value == [] or value == {}:
+        return True
+    return False
+
+
+def _validate_snapshot_config(inspected):
+    config = _require_dict(inspected.get("Config"), "Config")
+    inactive_fields = (
+        "AttachStderr",
+        "AttachStdin",
+        "AttachStdout",
+        "Domainname",
+        "ExposedPorts",
+        "Healthcheck",
+        "MacAddress",
+        "OnBuild",
+        "OpenStdin",
+        "StdinOnce",
+        "StopSignal",
+        "StopTimeout",
+        "Tty",
+        "Volumes",
+    )
+    for field_name in inactive_fields:
+        value = config.get(field_name)
+        if not _is_inactive(value):
+            raise DeploymentConfigError(
+                f"snapshot Config.{field_name} is unsupported"
+            )
+
+
+def _validate_snapshot_host_config(inspected):
+    host_config = _require_dict(
+        inspected.get("HostConfig"),
+        "HostConfig",
+    )
+    inactive_fields = (
+        "AutoRemove",
+        "BlkioDeviceReadBps",
+        "BlkioDeviceReadIOps",
+        "BlkioDeviceWriteBps",
+        "BlkioDeviceWriteIOps",
+        "BlkioWeight",
+        "BlkioWeightDevice",
+        "Cgroup",
+        "CgroupParent",
+        "ConsoleSize",
+        "CpuCount",
+        "CpuPercent",
+        "CpuPeriod",
+        "CpuQuota",
+        "CpuRealtimePeriod",
+        "CpuRealtimeRuntime",
+        "CpusetCpus",
+        "CpusetMems",
+        "DeviceCgroupRules",
+        "DeviceRequests",
+        "Dns",
+        "DnsOptions",
+        "DnsSearch",
+        "ExtraHosts",
+        "GroupAdd",
+        "Init",
+        "IOMaximumBandwidth",
+        "IOMaximumIOps",
+        "Isolation",
+        "Links",
+        "MemoryReservation",
+        "MemorySwappiness",
+        "OomKillDisable",
+        "OomScoreAdj",
+        "Privileged",
+        "PublishAllPorts",
+        "StorageOpt",
+        "Sysctls",
+        "Tmpfs",
+        "UTSMode",
+        "UsernsMode",
+        "VolumeDriver",
+        "VolumesFrom",
+    )
+    for field_name in inactive_fields:
+        value = host_config.get(field_name)
+        if field_name == "ConsoleSize" and value == [0, 0]:
+            continue
+        if not _is_inactive(value):
+            raise DeploymentConfigError(
+                f"snapshot HostConfig.{field_name} is unsupported"
+            )
+    shm_size = host_config.get("ShmSize")
+    if shm_size not in {None, 0, DEFAULT_DOCKER_SHM_SIZE}:
+        raise DeploymentConfigError(
+            "snapshot HostConfig.ShmSize is unsupported"
+        )
+
+
+def _validate_snapshot_networks(inspected):
+    host_config = _require_dict(
+        inspected.get("HostConfig"),
+        "HostConfig",
+    )
+    network_settings = _require_dict(
+        inspected.get("NetworkSettings"),
+        "NetworkSettings",
+    )
+    networks = _require_dict(
+        network_settings.get("Networks"),
+        "NetworkSettings.Networks",
+    )
+    if not networks:
+        raise DeploymentConfigError(
+            "container must be attached to at least one network"
+        )
+    primary_network = next(iter(networks))
+    network_mode = str(host_config.get("NetworkMode") or "").strip()
+    compatible_modes = {"", primary_network}
+    if primary_network == "bridge":
+        compatible_modes.add("default")
+    if network_mode not in compatible_modes:
+        raise DeploymentConfigError(
+            "snapshot HostConfig.NetworkMode differs from primary network"
+        )
+    unsupported_fields = (
+        "DriverOpts",
+        "IPAMConfig",
+        "Links",
+        "MacAddress",
+    )
+    for network_name, raw in sorted(networks.items()):
+        network = _require_dict(
+            raw,
+            f"NetworkSettings.Networks.{network_name}",
+        )
+        for field_name in unsupported_fields:
+            value = network.get(field_name)
+            if not _is_inactive(value):
+                raise DeploymentConfigError(
+                    "snapshot network endpoint option is unsupported: "
+                    f"{network_name}.{field_name}"
+                )
+
+
+def _validate_snapshot_replayability(inspected):
+    _validate_snapshot_config(inspected)
+    _validate_snapshot_host_config(inspected)
+    _validate_snapshot_networks(inspected)
+
+
+def _validate_snapshot_binance_targets(
+    mounts,
+    binance_dst,
+    binance_futures_dst,
+):
+    requirements = (
+        (BINANCE_EXECUTION_FILE, binance_dst),
+        (BINANCE_FUTURES_EXECUTION_FILE, binance_futures_dst),
+    )
+    for filename, destination in requirements:
+        matches = [
+            mount
+            for mount in mounts
+            if mount["destination"] == destination
+            and Path(mount["source"]).name == filename
+        ]
+        if len(matches) != 1:
+            raise DeploymentConfigError(
+                "snapshot source lacks one canonical Binance mount: "
+                f"{filename} -> {destination}"
+            )
+
+
+def _snapshot_runtime_contract(inspected, environment, mounts):
+    config = _require_dict(inspected.get("Config"), "Config")
+    host_config = _require_dict(
+        inspected.get("HostConfig"),
+        "HostConfig",
+    )
+    network_settings = _require_dict(
+        inspected.get("NetworkSettings"),
+        "NetworkSettings",
+    )
+    networks = _require_dict(
+        network_settings.get("Networks"),
+        "NetworkSettings.Networks",
+    )
+    normalized_networks = {}
+    for name, raw in sorted(networks.items()):
+        network = _require_dict(
+            raw,
+            f"NetworkSettings.Networks.{name}",
+        )
+        aliases = _require_list(
+            network.get("Aliases") or [],
+            f"NetworkSettings.Networks.{name}.Aliases",
+        )
+        normalized_networks[str(name)] = {
+            "aliases": [str(alias) for alias in aliases],
+        }
+    restart_policy = _require_dict(
+        host_config.get("RestartPolicy") or {},
+        "HostConfig.RestartPolicy",
+    )
+    replayed_host_fields = (
+        "CapAdd",
+        "CapDrop",
+        "CgroupnsMode",
+        "CpuShares",
+        "Devices",
+        "IpcMode",
+        "LogConfig",
+        "Memory",
+        "MemorySwap",
+        "NanoCpus",
+        "NetworkMode",
+        "PidMode",
+        "PidsLimit",
+        "PortBindings",
+        "ReadonlyRootfs",
+        "Runtime",
+        "SecurityOpt",
+        "ShmSize",
+        "Ulimits",
+    )
+    return {
+        "image_digest": str(inspected.get("Image") or ""),
+        "config_image": str(config.get("Image") or ""),
+        "environment_count": len(environment),
+        "environment_names": sorted(
+            value.partition("=")[0] for value in environment
+        ),
+        "environment_sha256": _canonical_json_sha256(environment),
+        "container_config": {
+            "Cmd": config.get("Cmd"),
+            "Entrypoint": config.get("Entrypoint"),
+            "Hostname": config.get("Hostname"),
+            "Labels": config.get("Labels") or {},
+            "User": config.get("User"),
+            "WorkingDir": config.get("WorkingDir"),
+        },
+        "host_config": {
+            field_name: host_config.get(field_name)
+            for field_name in replayed_host_fields
+        },
+        "mounts": mounts,
+        "networks": normalized_networks,
+        "restart_policy": {
+            "MaximumRetryCount": restart_policy.get(
+                "MaximumRetryCount"
+            ),
+            "Name": restart_policy.get("Name"),
+        },
+    }
+
+
+def _snapshot_restart_policy(inspected):
+    host_config = _require_dict(
+        inspected.get("HostConfig"),
+        "HostConfig",
+    )
+    policy = _require_dict(
+        host_config.get("RestartPolicy") or {},
+        "HostConfig.RestartPolicy",
+    )
+    name = str(policy.get("Name") or "").strip()
+    if not name:
+        name = "no"
+    retry_count = policy.get("MaximumRetryCount")
+    if name == "on-failure":
+        if isinstance(retry_count, int) and retry_count > 0:
+            return f"{name}:{retry_count}"
+    return name
+
+
+def _snapshot_script_lines(
+    name,
+    inspected,
+    environment_path,
+    environment_sha256,
+    mounts,
+):
+    config = _require_dict(inspected.get("Config"), "Config")
+    image = str(inspected.get("Image") or "").strip()
+    if not image:
+        raise DeploymentConfigError(
+            "snapshot source image digest is missing"
+        )
+    cmd = _require_list(config.get("Cmd") or [], "Config.Cmd")
+    entrypoint = _require_list(
+        config.get("Entrypoint") or [],
+        "Config.Entrypoint",
+    )
+    restart = _snapshot_restart_policy(inspected)
+    lines = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        f"snapshot_env={shlex.quote(str(environment_path))}",
+        f"snapshot_env_sha256={shlex.quote(environment_sha256)}",
+        'actual_env_sha256="$(sha256sum "$snapshot_env" | awk \'{print $1}\')"',
+        'if [ "$actual_env_sha256" != "$snapshot_env_sha256" ]; then',
+        '  echo "FATAL: rollback environment snapshot hash mismatch" >&2',
+        "  exit 1",
+        "fi",
+        (
+            "old_pid=$(docker inspect --format "
+            "'{{.State.Pid}}' "
+            f"{shlex.quote(name)} 2>/dev/null || true)"
+        ),
+        f"docker rm -f {shlex.quote(name)} 2>/dev/null || true",
+        'if [[ "$old_pid" =~ ^[1-9][0-9]*$ ]]; then',
+        "  for _ in $(seq 1 100); do",
+        '    if ! kill -0 "$old_pid" 2>/dev/null; then',
+        "      break",
+        "    fi",
+        "    sleep 0.1",
+        "  done",
+        '  if kill -0 "$old_pid" 2>/dev/null; then',
+        '    echo "FATAL: old node process is still alive: pid=$old_pid" >&2',
+        "    exit 1",
+        "  fi",
+        "fi",
+    ]
+    run = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        name,
+        f"--restart={restart}",
+        "--env-file",
+        str(environment_path),
+    ]
+    primary_network, network_connects = append_allowlisted_runtime_spec(
+        run,
+        inspected,
+        name,
+        preserve_release_labels=True,
+        preserve_runtime_defaults=True,
+    )
+    for mount in mounts:
+        run.extend(
+            [
+                "-v",
+                (
+                    f"{mount['run_source']}:"
+                    f"{mount['destination']}:{mount['mode']}"
+                ),
+            ]
+        )
+    if entrypoint:
+        run.extend(["--entrypoint", str(entrypoint[0])])
+    lines.append("run=(")
+    for value in run:
+        lines.append(f"  {shlex.quote(str(value))}")
+    lines.append(")")
+    suffix = [image]
+    if len(entrypoint) > 1:
+        suffix.extend(entrypoint[1:])
+    suffix.extend(cmd)
+    for value in suffix:
+        lines.append(f"run+=({shlex.quote(str(value))})")
+    lines.extend(
+        [
+            'container_id="$("${run[@]}")"',
+            '[ -n "$container_id" ] || {',
+            '  echo "FATAL: docker run returned an empty container id" >&2',
+            "  exit 1",
+            "}",
+        ]
+    )
+    for network_name, aliases in network_connects:
+        connect = ["docker", "network", "connect"]
+        for alias in aliases:
+            connect.extend(["--alias", alias])
+        connect.extend([network_name, name])
+        lines.append(" ".join(shlex.quote(value) for value in connect))
+    return lines, primary_network, restart
+
+
+def generate_snapshot_runtime(
+    name,
+    binance_dst,
+    binance_futures_dst,
+    output_path,
+    environment_output_path,
+    evidence_output_path,
+):
+    inspect_output = subprocess.check_output(["docker", "inspect", name])
+    inspected = json.loads(inspect_output)[0]
+    state = _require_dict(inspected.get("State"), "State")
+    if state.get("Running") is not False:
+        raise DeploymentConfigError(
+            "snapshot source container must be stopped"
+        )
+    _validate_snapshot_replayability(inspected)
+    environment = _snapshot_environment(inspected)
+    mounts = _snapshot_mounts(inspected)
+    _validate_snapshot_binance_targets(
+        mounts,
+        binance_dst,
+        binance_futures_dst,
+    )
+    runtime_contract = _snapshot_runtime_contract(
+        inspected,
+        environment,
+        mounts,
+    )
+    environment_bytes = ("\n".join(environment) + "\n").encode("utf-8")
+    _write_private_file(
+        environment_output_path,
+        environment_bytes,
+        0o400,
+    )
+    environment_file_sha256 = _file_sha256(environment_output_path)
+    lines, primary_network, restart = _snapshot_script_lines(
+        name,
+        inspected,
+        environment_output_path,
+        environment_file_sha256,
+        mounts,
+    )
+    script_bytes = ("\n".join(lines) + "\n").encode("utf-8")
+    _write_private_file(output_path, script_bytes, 0o700)
+    evidence = {
+        "schema_version": SNAPSHOT_EVIDENCE_SCHEMA,
+        "container": name,
+        "container_id": str(inspected.get("Id") or ""),
+        "environment_path": str(environment_output_path),
+        "environment_sha256": environment_file_sha256,
+        "recreate_path": str(output_path),
+        "recreate_sha256": _file_sha256(output_path),
+        "runtime_contract": runtime_contract,
+    }
+    evidence_bytes = (
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    _write_private_file(
+        evidence_output_path,
+        evidence_bytes,
+        0o400,
+    )
+    print(
+        f"WROTE snapshot recreate for {name}"
+        f" | primary_net: {primary_network} | restart: {restart}"
+    )
+
+
+def _read_private_snapshot_file(path, expected_mode, label):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise DeploymentConfigError(
+            f"{label} is missing: {path}"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise DeploymentConfigError(
+                f"{label} must be regular: {path}"
+            )
+        if stat.S_IMODE(before.st_mode) != expected_mode:
+            raise DeploymentConfigError(
+                f"{label} mode mismatch: {path}"
+            )
+        if before.st_nlink != 1:
+            raise DeploymentConfigError(
+                f"{label} link count is invalid: {path}"
+            )
+        if before.st_uid != os.geteuid():
+            raise DeploymentConfigError(
+                f"{label} owner mismatch: {path}"
+            )
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        path_metadata = os.lstat(path)
+        stable = (
+            before.st_dev == after.st_dev == path_metadata.st_dev,
+            before.st_ino == after.st_ino == path_metadata.st_ino,
+            before.st_size == after.st_size == path_metadata.st_size,
+            before.st_mtime_ns
+            == after.st_mtime_ns
+            == path_metadata.st_mtime_ns,
+            before.st_ctime_ns
+            == after.st_ctime_ns
+            == path_metadata.st_ctime_ns,
+        )
+        if not all(stable):
+            raise DeploymentConfigError(
+                f"{label} changed during read: {path}"
+            )
+        payload = b"".join(chunks)
+        digest = hashlib.sha256(payload).hexdigest()
+        return payload, digest
+    except OSError as exc:
+        raise DeploymentConfigError(
+            f"{label} is unreadable: {path}"
+        ) from exc
+    finally:
+        os.close(descriptor)
+
+
+def verify_snapshot_evidence(
+    name,
+    binance_dst,
+    binance_futures_dst,
+    evidence_path,
+):
+    evidence_bytes, _ = _read_private_snapshot_file(
+        evidence_path,
+        0o400,
+        "snapshot evidence",
+    )
+    try:
+        evidence = json.loads(evidence_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DeploymentConfigError(
+            f"snapshot evidence is invalid: {evidence_path}"
+        ) from exc
+    if evidence.get("schema_version") != SNAPSHOT_EVIDENCE_SCHEMA:
+        raise DeploymentConfigError(
+            "snapshot evidence schema is invalid"
+        )
+    if evidence.get("container") != name:
+        raise DeploymentConfigError(
+            "snapshot evidence container differs"
+        )
+    environment_path = Path(str(evidence.get("environment_path") or ""))
+    recreate_path = Path(str(evidence.get("recreate_path") or ""))
+    environment_bytes, environment_sha256 = _read_private_snapshot_file(
+        environment_path,
+        0o400,
+        "snapshot environment",
+    )
+    recreate_bytes, recreate_sha256 = _read_private_snapshot_file(
+        recreate_path,
+        0o700,
+        "snapshot recreate",
+    )
+    if environment_sha256 != evidence.get("environment_sha256"):
+        raise DeploymentConfigError(
+            "snapshot environment hash mismatch"
+        )
+    if recreate_sha256 != evidence.get("recreate_sha256"):
+        raise DeploymentConfigError(
+            "snapshot recreate hash mismatch"
+        )
+    try:
+        environment = environment_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise DeploymentConfigError(
+            "snapshot environment is invalid"
+        ) from exc
+    inspect_output = subprocess.check_output(["docker", "inspect", name])
+    inspected = json.loads(inspect_output)[0]
+    state = _require_dict(inspected.get("State"), "State")
+    if state.get("Running") is not False:
+        raise DeploymentConfigError(
+            "snapshot verification requires a stopped container"
+        )
+    _validate_snapshot_replayability(inspected)
+    live_environment = _snapshot_environment(inspected)
+    if live_environment != environment:
+        raise DeploymentConfigError(
+            "snapshot environment differs from live inspect"
+        )
+    mounts = _snapshot_mounts(inspected)
+    _validate_snapshot_binance_targets(
+        mounts,
+        binance_dst,
+        binance_futures_dst,
+    )
+    contract = _snapshot_runtime_contract(
+        inspected,
+        live_environment,
+        mounts,
+    )
+    if contract != evidence.get("runtime_contract"):
+        raise DeploymentConfigError(
+            "snapshot runtime contract differs from live inspect"
+        )
+    if str(inspected.get("Id") or "") != evidence.get("container_id"):
+        raise DeploymentConfigError(
+            "snapshot source container identity differs"
+        )
+    expected_lines, _, _ = _snapshot_script_lines(
+        name,
+        inspected,
+        environment_path,
+        str(evidence.get("environment_sha256") or ""),
+        mounts,
+    )
+    expected_script = "\n".join(expected_lines) + "\n"
+    try:
+        actual_script = recreate_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DeploymentConfigError(
+            "snapshot recreate is invalid"
+        ) from exc
+    if actual_script != expected_script:
+        raise DeploymentConfigError(
+            "snapshot recreate differs from live runtime contract"
+        )
+    print(f"VERIFIED snapshot recreate for {name}")
 
 
 def append_reviewed_resource_verification(
@@ -1031,17 +1923,43 @@ def main(argv=None):
             binance_futures_dst,
             release_manifest_path,
             database_schema_epoch,
+            snapshot_runtime,
+            output_path,
+            environment_output_path,
+            evidence_output_path,
+            verify_snapshot_path,
         ) = parse_args(argv)
         trader_root = Path(os.environ.get("TRADER_ROOT", "/srv/trader-v3"))
-        generate(
-            name,
-            binance_dst,
-            binance_futures_dst,
-            trader_root,
-            release_manifest_path,
-            database_schema_epoch,
-        )
-    except (DeploymentConfigError, subprocess.CalledProcessError) as exc:
+        if snapshot_runtime:
+            generate_snapshot_runtime(
+                name,
+                binance_dst,
+                binance_futures_dst,
+                output_path,
+                environment_output_path,
+                evidence_output_path,
+            )
+        elif verify_snapshot_path is not False:
+            verify_snapshot_evidence(
+                name,
+                binance_dst,
+                binance_futures_dst,
+                verify_snapshot_path,
+            )
+        else:
+            generate(
+                name,
+                binance_dst,
+                binance_futures_dst,
+                trader_root,
+                release_manifest_path,
+                database_schema_epoch,
+            )
+    except (
+        DeploymentConfigError,
+        json.JSONDecodeError,
+        subprocess.CalledProcessError,
+    ) as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         return 2
 

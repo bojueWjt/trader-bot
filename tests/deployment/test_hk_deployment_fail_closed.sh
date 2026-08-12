@@ -125,6 +125,15 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" 'capture_pre_migration_backup_expectation'
   assert_contains "$text" 'capture_post_migration_recovery_expectation'
   assert_contains "$text" 'prepare_post_migration_recovery_recreate'
+  assert_contains "$text" 'prepare_legacy_rollback_recreate_fleet'
+  assert_contains "$text" '--snapshot-runtime'
+  assert_contains "$text" '--verify-snapshot-evidence'
+  assert_contains "$text" 'legacy-recreate-bootstrap.json'
+  assert_contains "$text" 'legacy-recreate-generated.tsv'
+  assert_contains "$text" \
+    'existing rollback recreate script changed during bootstrap'
+  assert_contains "$text" \
+    'legacy snapshot recreate verification failed'
   assert_contains "$text" 'post-migration-recovery-manifest.json'
   assert_contains "$text" \
     'POST_MIGRATION_RECOVERY_ROOT="$BACKUP_ROOT/post-migration-recovery"'
@@ -905,6 +914,481 @@ EOF
   fi
 }
 
+test_bootstrap_generated_recreate_cleanup_preserves_existing_scripts() {
+  local case_dir="$TMP_DIR/bootstrap-recreate-cleanup"
+  local trader_root="$case_dir/trader-v3"
+  local backup_root="$case_dir/backup"
+  local generated_list="$backup_root/legacy-recreate-generated.tsv"
+  local existing_a="$trader_root/recreate-trader-v3-node-a.sh"
+  local generated_c="$trader_root/recreate-trader-v3-node-c.sh"
+  local generated_d="$trader_root/recreate-trader-v3-node-d.sh"
+  local backup_c="$backup_root/recreate-trader-v3-node-c.sh"
+  local backup_d="$backup_root/recreate-trader-v3-node-d.sh"
+  local cleanup_definition
+  local remove_definition
+  local existing_hash
+  mkdir -p "$trader_root" "$backup_root"
+  printf '#!/bin/bash\nprintf existing-a\\n\n' >"$existing_a"
+  printf '#!/bin/bash\nprintf generated-c\\n\n' >"$generated_c"
+  printf '#!/bin/bash\nprintf generated-d\\n\n' >"$generated_d"
+  cp "$generated_c" "$backup_c"
+  cp "$generated_d" "$backup_d"
+  chmod 0700 \
+    "$existing_a" \
+    "$generated_c" \
+    "$generated_d" \
+    "$backup_c" \
+    "$backup_d"
+  printf '%s\t%s\t%s\t%s\n' \
+    trader-v3-node-c \
+    "$backup_c" \
+    "$backup_root/c-env.json" \
+    "$backup_root/c-evidence.json" \
+    >"$generated_list"
+  printf '%s\t%s\t%s\t%s\n' \
+    trader-v3-node-d \
+    "$backup_d" \
+    "$backup_root/d-env.json" \
+    "$backup_root/d-evidence.json" \
+    >>"$generated_list"
+  existing_hash="$(sha256sum "$existing_a" | awk '{print $1}')"
+  remove_definition=$(
+    extract_function remove_generated_legacy_recreate_if_unchanged
+  )
+  cleanup_definition=$(extract_function remove_bootstrap_generated_live_recreate)
+
+  T="$trader_root" \
+  BACKUP_CAPTURED=0 \
+  LEGACY_RECREATE_BOOTSTRAP_PREPARED=1 \
+  LEGACY_RECREATE_GENERATED_LIST="$generated_list" \
+  REMOVE_DEFINITION="$remove_definition" \
+  CLEANUP_DEFINITION="$cleanup_definition" \
+    bash -c '
+      set -Eeuo pipefail
+      eval "$REMOVE_DEFINITION"
+      eval "$CLEANUP_DEFINITION"
+      remove_bootstrap_generated_live_recreate
+    '
+
+  [ -f "$existing_a" ] \
+    || fail "bootstrap recreate cleanup removed an existing script"
+  [ "$(sha256sum "$existing_a" | awk '{print $1}')" = "$existing_hash" ] \
+    || fail "bootstrap recreate cleanup changed an existing script"
+  [ ! -e "$generated_c" ] \
+    || fail "bootstrap recreate cleanup retained generated node-c script"
+  [ ! -e "$generated_d" ] \
+    || fail "bootstrap recreate cleanup retained generated node-d script"
+}
+
+test_existing_recreate_mode_remains_compatible() {
+  local case_dir="$TMP_DIR/existing-recreate-mode"
+  local existing="$case_dir/recreate-trader-v3-node-a.sh"
+  local verify_definition
+  mkdir -p "$case_dir"
+  printf '#!/bin/bash\nexit 0\n' >"$existing"
+  chmod 0755 "$existing"
+  verify_definition=$(extract_function verify_legacy_recreate_artifact)
+
+  VERIFY_DEFINITION="$verify_definition" \
+  EXISTING_RECREATE="$existing" \
+    bash -c '
+      set -Eeuo pipefail
+      eval "$VERIFY_DEFINITION"
+      verify_legacy_recreate_artifact \
+        "$EXISTING_RECREATE" \
+        "existing rollback recreate" \
+        existing \
+        >/dev/null
+    '
+}
+
+test_generated_recreate_promotion_rejects_link_attacks() {
+  local case_dir="$TMP_DIR/generated-recreate-promotion-links"
+  local source="$case_dir/generated.sh"
+  local linked_source="$case_dir/generated-linked.sh"
+  local destination="$case_dir/live.sh"
+  local attack_target="$case_dir/attack-target.sh"
+  local promote_definition
+  local output
+  local status
+  mkdir -p "$case_dir"
+  printf '#!/bin/bash\nexit 0\n' >"$source"
+  chmod 0700 "$source"
+  promote_definition=$(extract_function promote_generated_legacy_recreate)
+
+  ln "$source" "$linked_source"
+  set +e
+  output=$(
+    PROMOTE_DEFINITION="$promote_definition" \
+    SOURCE="$source" \
+    DESTINATION="$destination" \
+      bash -c '
+        set -Eeuo pipefail
+        eval "$PROMOTE_DEFINITION"
+        promote_generated_legacy_recreate "$SOURCE" "$DESTINATION"
+      ' 2>&1
+  )
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    fail "generated recreate promotion accepted a hard-linked source"
+  fi
+  assert_contains "$output" "generated recreate source is invalid"
+  [ ! -e "$destination" ] \
+    || fail "hard-linked source attack created the live destination"
+  rm "$linked_source"
+
+  printf '#!/bin/bash\nprintf protected\\n\n' >"$attack_target"
+  ln -s "$attack_target" "$destination"
+  set +e
+  output=$(
+    PROMOTE_DEFINITION="$promote_definition" \
+    SOURCE="$source" \
+    DESTINATION="$destination" \
+      bash -c '
+        set -Eeuo pipefail
+        eval "$PROMOTE_DEFINITION"
+        promote_generated_legacy_recreate "$SOURCE" "$DESTINATION"
+      ' 2>&1
+  )
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    fail "generated recreate promotion accepted a symlink destination"
+  fi
+  assert_contains "$output" "generated recreate destination exists"
+  [ "$(cat "$attack_target")" = $'#!/bin/bash\nprintf protected\\n' ] \
+    || fail "symlink destination attack changed its target"
+}
+
+test_bootstrap_recreate_fleet_preserves_a_b_and_materializes_c_d() {
+  local case_dir="$TMP_DIR/bootstrap-recreate-fleet"
+  local fake_bin="$case_dir/bin"
+  local inspect_dir="$case_dir/inspect"
+  local trader_root="$case_dir/trader-v3"
+  local backup_root="$case_dir/backup"
+  local docker_log="$case_dir/docker.log"
+  local definitions
+  local node
+  local existing_a="$trader_root/recreate-trader-v3-node-a.sh"
+  local existing_b="$trader_root/recreate-trader-v3-node-b.sh"
+  local existing_a_hash
+  local existing_b_hash
+  mkdir -p "$fake_bin" "$inspect_dir" "$trader_root" "$backup_root"
+  printf '#!/bin/bash\nexit 0\n' >"$existing_a"
+  printf '#!/bin/bash\nexit 0\n' >"$existing_b"
+  chmod 0755 "$existing_a" "$existing_b"
+  existing_a_hash="$(sha256sum "$existing_a" | awk '{print $1}')"
+  existing_b_hash="$(sha256sum "$existing_b" | awk '{print $1}')"
+
+  python3 - "$inspect_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+binance = "/app/nautilus/binance_execution.py"
+futures = "/app/nautilus/binance_futures_execution.py"
+for suffix in ("a", "b", "c", "d"):
+    name = f"trader-v3-node-{suffix}"
+    payload = [
+        {
+            "Id": suffix * 64,
+            "Image": "sha256:" + suffix * 64,
+            "State": {
+                "Running": False,
+            },
+            "Config": {
+                "Image": f"legacy:{suffix}",
+                "Hostname": name,
+                "User": "",
+                "WorkingDir": "/app",
+                "Labels": {},
+                "Env": [
+                    f"ACCOUNT_ID=account-{suffix}",
+                    "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+                ],
+                "Cmd": [],
+                "Entrypoint": None,
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "trader-v3": {
+                        "Aliases": [name],
+                    },
+                },
+            },
+            "HostConfig": {
+                "RestartPolicy": {
+                    "Name": "no",
+                    "MaximumRetryCount": 0,
+                },
+                "NetworkMode": "trader-v3",
+                "PortBindings": {},
+                "Ulimits": [],
+                "SecurityOpt": [],
+                "CapAdd": [],
+                "CapDrop": [],
+                "Devices": [],
+                "ReadonlyRootfs": False,
+                "PidMode": "",
+                "IpcMode": "",
+                "CgroupnsMode": "",
+                "Runtime": "",
+                "ShmSize": 67108864,
+                "Memory": 0,
+                "MemorySwap": 0,
+                "NanoCpus": 0,
+                "CpuShares": 0,
+                "PidsLimit": 0,
+                "LogConfig": {},
+            },
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": f"/legacy/{suffix}/binance_execution.py",
+                    "Destination": binance,
+                    "Mode": "ro",
+                    "RW": False,
+                    "Propagation": "rprivate",
+                },
+                {
+                    "Type": "bind",
+                    "Source": (
+                        f"/legacy/{suffix}/"
+                        "binance_futures_execution.py"
+                    ),
+                    "Destination": futures,
+                    "Mode": "ro",
+                    "RW": False,
+                    "Propagation": "rprivate",
+                },
+            ],
+        },
+    ]
+    (root / f"{name}.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+PY
+
+  cat >"$fake_bin/docker" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+command_name="$1"
+shift
+case "$command_name" in
+  inspect)
+    if [ "${1:-}" = "--format" ]; then
+      format="$2"
+      name="$3"
+      case "$format" in
+        '{{.State.Pid}}')
+          printf '0\n'
+          ;;
+        '{{.Image}}')
+          python3 - "$FAKE_INSPECT_DIR/$name.json" <<'PY'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8"))[0]["Image"])
+PY
+          ;;
+        *)
+          exit 1
+          ;;
+      esac
+      exit 0
+    fi
+    cat "$FAKE_INSPECT_DIR/$1.json"
+    ;;
+  rm)
+    exit 0
+    ;;
+  run)
+    printf '%q ' run "$@" >>"$FAKE_DOCKER_LOG"
+    printf '\n' >>"$FAKE_DOCKER_LOG"
+    env_file=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--env-file" ]; then
+        env_file="$2"
+        shift 2
+        continue
+      fi
+      shift
+    done
+    [ -r "$env_file" ]
+    grep -qx 'NAUTILUS_INITIAL_TRADING_STATE=HALTED' "$env_file"
+    printf 'snapshot-container-id\n'
+    ;;
+  network)
+    [ "$1" = "connect" ]
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  chmod 0755 "$fake_bin/docker"
+
+  definitions="$(
+    extract_function die
+    extract_function_until \
+      discover_legacy_binance_mount_targets \
+      verify_legacy_recreate_artifact
+    extract_function_until \
+      verify_legacy_recreate_artifact \
+      capture_existing_legacy_recreate
+    extract_function_until \
+      capture_existing_legacy_recreate \
+      promote_generated_legacy_recreate
+    extract_function_until \
+      promote_generated_legacy_recreate \
+      remove_generated_legacy_recreate_if_unchanged
+    extract_function_until \
+      remove_generated_legacy_recreate_if_unchanged \
+      write_legacy_recreate_bootstrap_evidence
+    extract_function_until \
+      write_legacy_recreate_bootstrap_evidence \
+      verify_legacy_rollback_recreate_fleet
+    extract_function_until \
+      verify_legacy_rollback_recreate_fleet \
+      prepare_legacy_rollback_recreate_fleet
+    extract_function_until \
+      prepare_legacy_rollback_recreate_fleet \
+      remove_bootstrap_generated_live_recreate
+  )"
+
+  PATH="$fake_bin:$PATH" \
+  FAKE_INSPECT_DIR="$inspect_dir" \
+  FAKE_DOCKER_LOG="$docker_log" \
+  T="$trader_root" \
+  BACKUP_ROOT="$backup_root" \
+  GEN_RECREATE="$GEN_RECREATE" \
+  DEPLOY_GATE_MODE=bootstrap_stopped \
+  LEGACY_RECREATE_BOOTSTRAP_EVIDENCE="$backup_root/legacy-recreate-bootstrap.json" \
+  LEGACY_RECREATE_GENERATED_LIST="$backup_root/legacy-recreate-generated.tsv" \
+  LEGACY_RECREATE_RECORDS="$backup_root/legacy-recreate-records.tsv" \
+  LEGACY_RECREATE_SNAPSHOT_ROOT="$backup_root/legacy-recreate-snapshots" \
+  DEFINITIONS="$definitions" \
+    bash -c '
+      set -Eeuo pipefail
+      eval "$DEFINITIONS"
+      RECREATE_NODES=(
+        trader-v3-node-a
+        trader-v3-node-b
+        trader-v3-node-c
+        trader-v3-node-d
+      )
+      prepare_legacy_rollback_recreate_fleet
+      verify_legacy_rollback_recreate_fleet
+    '
+
+  [ "$(sha256sum "$existing_a" | awk '{print $1}')" = "$existing_a_hash" ] \
+    || fail "bootstrap changed account-a recreate"
+  [ "$(sha256sum "$existing_b" | awk '{print $1}')" = "$existing_b_hash" ] \
+    || fail "bootstrap changed account-b recreate"
+  [ "$(stat -f '%Lp' "$backup_root/recreate-trader-v3-node-a.sh")" = "755" ] \
+    || fail "bootstrap changed account-a recreate mode"
+  [ "$(stat -f '%Lp' "$backup_root/recreate-trader-v3-node-b.sh")" = "755" ] \
+    || fail "bootstrap changed account-b recreate mode"
+  for node in trader-v3-node-c trader-v3-node-d; do
+    [ -x "$trader_root/recreate-$node.sh" ] \
+      || fail "bootstrap did not promote $node recreate"
+    [ -x "$backup_root/recreate-$node.sh" ] \
+      || fail "bootstrap did not back up $node recreate"
+    [ -r "$backup_root/legacy-recreate-snapshots/$node/container-env.json" ] \
+      || fail "bootstrap did not preserve $node environment"
+    [ -r "$backup_root/legacy-recreate-snapshots/$node/snapshot-evidence.json" ] \
+      || fail "bootstrap did not preserve $node evidence"
+  done
+  [ "$(wc -l <"$backup_root/legacy-recreate-records.tsv")" -eq 4 ] \
+    || fail "bootstrap recreate record set is incomplete"
+  [ "$(wc -l <"$backup_root/legacy-recreate-generated.tsv")" -eq 2 ] \
+    || fail "bootstrap generated recreate set is incomplete"
+
+  (
+    cd "$backup_root"
+    find . -type f ! -name SHA256SUMS -print0 \
+      | sort -z \
+      | xargs -0 sha256sum
+  ) >"$backup_root/SHA256SUMS"
+  (
+    cd "$backup_root"
+    sha256sum -c SHA256SUMS >/dev/null
+  )
+  for relative in \
+    legacy-recreate-bootstrap.json \
+    legacy-recreate-generated.tsv \
+    legacy-recreate-records.tsv \
+    recreate-trader-v3-node-c.sh \
+    recreate-trader-v3-node-d.sh \
+    legacy-recreate-snapshots/trader-v3-node-c/container-env.json \
+    legacy-recreate-snapshots/trader-v3-node-d/container-env.json; do
+    grep -Fq "  ./$relative" "$backup_root/SHA256SUMS" \
+      || fail "backup checksum omitted $relative"
+  done
+
+  : >"$docker_log"
+  PATH="$fake_bin:$PATH" \
+  FAKE_INSPECT_DIR="$inspect_dir" \
+  FAKE_DOCKER_LOG="$docker_log" \
+    bash "$backup_root/recreate-trader-v3-node-c.sh"
+  PATH="$fake_bin:$PATH" \
+  FAKE_INSPECT_DIR="$inspect_dir" \
+  FAKE_DOCKER_LOG="$docker_log" \
+    bash "$backup_root/recreate-trader-v3-node-d.sh"
+  grep -Fq -- \
+    "--env-file $backup_root/legacy-recreate-snapshots/trader-v3-node-c/container-env.json" \
+    "$docker_log" \
+    || fail "account-c rollback did not use its backup environment"
+  grep -Fq -- \
+    "--env-file $backup_root/legacy-recreate-snapshots/trader-v3-node-d/container-env.json" \
+    "$docker_log" \
+    || fail "account-d rollback did not use its backup environment"
+}
+
+test_bootstrap_recreate_fleet_rejects_missing_a_b() {
+  local case_dir="$TMP_DIR/bootstrap-recreate-missing-a"
+  local trader_root="$case_dir/trader-v3"
+  local backup_root="$case_dir/backup"
+  local definitions
+  local output
+  local status
+  mkdir -p "$trader_root" "$backup_root"
+  definitions="$(
+    extract_function die
+    extract_function_until \
+      prepare_legacy_rollback_recreate_fleet \
+      remove_bootstrap_generated_live_recreate
+  )"
+
+  set +e
+  output=$(
+    T="$trader_root" \
+    BACKUP_ROOT="$backup_root" \
+    DEPLOY_GATE_MODE=bootstrap_stopped \
+    LEGACY_RECREATE_BOOTSTRAP_EVIDENCE="$backup_root/legacy-recreate-bootstrap.json" \
+    LEGACY_RECREATE_GENERATED_LIST="$backup_root/legacy-recreate-generated.tsv" \
+    LEGACY_RECREATE_RECORDS="$backup_root/legacy-recreate-records.tsv" \
+    LEGACY_RECREATE_SNAPSHOT_ROOT="$backup_root/legacy-recreate-snapshots" \
+    DEFINITIONS="$definitions" \
+      bash -c '
+        set -Eeuo pipefail
+        eval "$DEFINITIONS"
+        RECREATE_NODES=(trader-v3-node-a)
+        prepare_legacy_rollback_recreate_fleet
+      ' 2>&1
+  )
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    fail "bootstrap generated a missing account-a recreate"
+  fi
+  assert_contains "$output" \
+    "existing rollback recreate script missing: trader-v3-node-a"
+}
+
 test_on_err_restores_files_topology_and_old_image() {
   local case_dir="$TMP_DIR/on-err"
   local fake_bin="$case_dir/bin"
@@ -1049,6 +1533,10 @@ database_backup = text.index(
     "capture_pre_migration_database_backup",
     phase_only,
 )
+legacy_recreate_bootstrap = text.index(
+    "prepare_legacy_rollback_recreate_fleet",
+    phase_only,
+)
 pre_migration_expectation = text.index(
     "capture_pre_migration_backup_expectation",
     database_backup,
@@ -1101,6 +1589,7 @@ if not (
     < prepare_d
     < capture_release
     < phase_only
+    < legacy_recreate_bootstrap
     < database_backup
     < pre_migration_expectation
     < recovery_prepare
@@ -2049,6 +2538,11 @@ test_pre_migration_database_backup_is_bounded_and_validated
 test_pre_migration_database_backup_rejects_invalid_restore_listing
 test_die_routes_failure_through_err_trap
 test_node_recreate_is_sequential_and_memory_gated
+test_bootstrap_generated_recreate_cleanup_preserves_existing_scripts
+test_existing_recreate_mode_remains_compatible
+test_generated_recreate_promotion_rejects_link_attacks
+test_bootstrap_recreate_fleet_preserves_a_b_and_materializes_c_d
+test_bootstrap_recreate_fleet_rejects_missing_a_b
 test_on_err_restores_files_topology_and_old_image
 test_immutable_config_and_rollout_ordering
 test_migration_expectations_have_separate_schema_contracts

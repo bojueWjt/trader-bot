@@ -162,11 +162,16 @@ BOOTSTRAP_STOPPED_GATE_LOG="$BACKUP_ROOT/bootstrap-stopped-gates.jsonl"
 BOOTSTRAP_REDIS_FENCING_EPOCH=""
 BOOTSTRAP_RECOVERY_BLOCKED_EVIDENCE="$BACKUP_ROOT/bootstrap-recovery-blocked.json"
 PARTIAL_INSTALL_RECOVERY_EVIDENCE="$BACKUP_ROOT/partial-install-recovery.json"
+LEGACY_RECREATE_BOOTSTRAP_EVIDENCE="$BACKUP_ROOT/legacy-recreate-bootstrap.json"
+LEGACY_RECREATE_GENERATED_LIST="$BACKUP_ROOT/legacy-recreate-generated.tsv"
+LEGACY_RECREATE_RECORDS="$BACKUP_ROOT/legacy-recreate-records.tsv"
+LEGACY_RECREATE_SNAPSHOT_ROOT="$BACKUP_ROOT/legacy-recreate-snapshots"
 MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0014-migration-committed.json"
 MAINTENANCE_FENCE_STATE="$BACKUP_ROOT/maintenance-fence.json"
 MAINTENANCE_FENCE_ID=""
 MAINTENANCE_FENCE_ACQUIRED=0
 ACCOUNT_B_REVIEWER_PUBLIC_KEY_SHA256="9c7b1df4bd215fe5370c73f363b60e30d66e92456731f6d79414314b1113a7a4"
+LEGACY_RECREATE_BOOTSTRAP_PREPARED=0
 
 verify_account_stall_operation_lock() {
   python3 - \
@@ -3931,6 +3936,782 @@ generate_release_recreate() {
       ;;
   esac
 }
+discover_legacy_binance_mount_targets() {
+  local node="$1"
+  python3 - "$node" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+container = sys.argv[1]
+inspected = json.loads(
+    subprocess.check_output(
+        ["docker", "inspect", container],
+        text=True,
+    )
+)[0]
+required = (
+    "binance_execution.py",
+    "binance_futures_execution.py",
+)
+by_filename = {}
+for mount in inspected.get("Mounts") or []:
+    source = str(mount.get("Source") or "")
+    destination = str(mount.get("Destination") or "")
+    filename = Path(source).name
+    if filename not in required:
+        continue
+    if not destination.startswith("/") or ":" in destination:
+        raise SystemExit(
+            f"legacy Binance mount destination is invalid: {destination}"
+        )
+    if filename in by_filename:
+        raise SystemExit(
+            f"legacy Binance mount is duplicated: {filename}"
+        )
+    by_filename[filename] = destination
+missing = [filename for filename in required if filename not in by_filename]
+if missing:
+    raise SystemExit(
+        "legacy Binance mount targets are missing: " + ",".join(missing)
+    )
+for filename in required:
+    print(by_filename[filename])
+PY
+}
+verify_legacy_recreate_artifact() {
+  local path="$1"
+  local label="$2"
+  local source_kind="${3:-generated}"
+  local emit_hash="${4:-0}"
+  python3 - "$path" "$label" "$source_kind" "$emit_hash" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+label = sys.argv[2]
+source_kind = sys.argv[3]
+emit_hash = sys.argv[4] == "1"
+if source_kind not in {"existing", "generated"}:
+    raise SystemExit(f"{label} source kind is invalid")
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    descriptor = os.open(path, flags)
+except OSError as exc:
+    raise SystemExit(f"{label} is unavailable: {path}") from exc
+try:
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit(f"{label} must be a regular file: {path}")
+    mode = stat.S_IMODE(before.st_mode)
+    if source_kind == "generated":
+        if mode != 0o700:
+            raise SystemExit(f"{label} mode must be 0700: {path}")
+        if before.st_nlink != 1:
+            raise SystemExit(f"{label} link count is invalid: {path}")
+        if before.st_uid != os.geteuid():
+            raise SystemExit(f"{label} owner mismatch: {path}")
+    elif mode & 0o111 == 0:
+        raise SystemExit(f"{label} must be executable: {path}")
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    after = os.fstat(descriptor)
+    path_metadata = os.lstat(path)
+    stable = (
+        before.st_dev == after.st_dev == path_metadata.st_dev,
+        before.st_ino == after.st_ino == path_metadata.st_ino,
+        before.st_size == after.st_size == path_metadata.st_size,
+        before.st_mtime_ns
+        == after.st_mtime_ns
+        == path_metadata.st_mtime_ns,
+        before.st_ctime_ns
+        == after.st_ctime_ns
+        == path_metadata.st_ctime_ns,
+    )
+    if not all(stable):
+        raise SystemExit(f"{label} changed during verification: {path}")
+    if emit_hash:
+        print(digest.hexdigest())
+finally:
+    os.close(descriptor)
+PY
+}
+capture_existing_legacy_recreate() {
+  local source="$1"
+  local destination="$2"
+  python3 - "$source" "$destination" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+source_flags = os.O_RDONLY
+destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    source_flags |= os.O_NOFOLLOW
+    destination_flags |= os.O_NOFOLLOW
+source_descriptor = os.open(source, source_flags)
+destination_descriptor = False
+try:
+    before = os.fstat(source_descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit(f"existing recreate must be regular: {source}")
+    mode = stat.S_IMODE(before.st_mode)
+    if mode & 0o111 == 0:
+        raise SystemExit(f"existing recreate must be executable: {source}")
+    destination_descriptor = os.open(
+        destination,
+        destination_flags,
+        mode,
+    )
+    os.fchmod(destination_descriptor, mode)
+    os.fchown(destination_descriptor, before.st_uid, before.st_gid)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(source_descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset = 0
+        while offset < len(chunk):
+            offset += os.write(destination_descriptor, chunk[offset:])
+    os.fsync(destination_descriptor)
+    after = os.fstat(source_descriptor)
+    path_metadata = os.lstat(source)
+    stable = (
+        before.st_dev == after.st_dev == path_metadata.st_dev,
+        before.st_ino == after.st_ino == path_metadata.st_ino,
+        before.st_size == after.st_size == path_metadata.st_size,
+        before.st_mtime_ns
+        == after.st_mtime_ns
+        == path_metadata.st_mtime_ns,
+        before.st_ctime_ns
+        == after.st_ctime_ns
+        == path_metadata.st_ctime_ns,
+    )
+    if not all(stable):
+        raise SystemExit(
+            f"existing recreate changed during capture: {source}"
+        )
+    captured = os.fstat(destination_descriptor)
+    if not stat.S_ISREG(captured.st_mode) or captured.st_nlink != 1:
+        raise SystemExit(
+            f"captured recreate identity is invalid: {destination}"
+        )
+    print(digest.hexdigest())
+except BaseException:
+    if destination_descriptor is not False:
+        os.close(destination_descriptor)
+        destination_descriptor = False
+    try:
+        destination.unlink()
+    except FileNotFoundError:
+        pass
+    raise
+finally:
+    os.close(source_descriptor)
+    if destination_descriptor is not False:
+        os.close(destination_descriptor)
+directory_descriptor = os.open(destination.parent, os.O_RDONLY)
+try:
+    os.fsync(directory_descriptor)
+finally:
+    os.close(directory_descriptor)
+PY
+}
+promote_generated_legacy_recreate() {
+  local source="$1"
+  local destination="$2"
+  python3 - "$source" "$destination" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+source_flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    source_flags |= os.O_NOFOLLOW
+source_descriptor = os.open(source, source_flags)
+temporary_descriptor = False
+temporary_path = False
+destination_created = False
+try:
+    before = os.fstat(source_descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_IMODE(before.st_mode) != 0o700
+        or before.st_nlink != 1
+        or before.st_uid != os.geteuid()
+    ):
+        raise SystemExit(
+            f"generated recreate source is invalid: {source}"
+        )
+    temporary_descriptor, temporary_raw = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    temporary_path = Path(temporary_raw)
+    os.fchmod(temporary_descriptor, 0o700)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(source_descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset = 0
+        while offset < len(chunk):
+            offset += os.write(temporary_descriptor, chunk[offset:])
+    os.fsync(temporary_descriptor)
+    after = os.fstat(source_descriptor)
+    path_metadata = os.lstat(source)
+    stable = (
+        before.st_dev == after.st_dev == path_metadata.st_dev,
+        before.st_ino == after.st_ino == path_metadata.st_ino,
+        before.st_size == after.st_size == path_metadata.st_size,
+        before.st_mtime_ns
+        == after.st_mtime_ns
+        == path_metadata.st_mtime_ns,
+        before.st_ctime_ns
+        == after.st_ctime_ns
+        == path_metadata.st_ctime_ns,
+    )
+    if not all(stable):
+        raise SystemExit(
+            f"generated recreate changed during promotion: {source}"
+        )
+    try:
+        os.lstat(destination)
+    except FileNotFoundError:
+        pass
+    else:
+        raise SystemExit(
+            f"generated recreate destination exists: {destination}"
+        )
+    os.link(temporary_path, destination, follow_symlinks=False)
+    destination_created = True
+    temporary_path.unlink()
+    temporary_path = False
+    destination_metadata = os.lstat(destination)
+    if (
+        not stat.S_ISREG(destination_metadata.st_mode)
+        or stat.S_IMODE(destination_metadata.st_mode) != 0o700
+        or destination_metadata.st_nlink != 1
+        or destination_metadata.st_uid != os.geteuid()
+    ):
+        raise SystemExit(
+            f"promoted recreate identity is invalid: {destination}"
+        )
+    directory_descriptor = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+    print(digest.hexdigest())
+except BaseException:
+    if destination_created:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+    if temporary_path is not False:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+    raise
+finally:
+    os.close(source_descriptor)
+    if temporary_descriptor is not False:
+        os.close(temporary_descriptor)
+PY
+}
+remove_generated_legacy_recreate_if_unchanged() {
+  local source="$1"
+  local destination="$2"
+  python3 - "$source" "$destination" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+if not destination.exists() and not destination.is_symlink():
+    raise SystemExit(0)
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+source_descriptor = os.open(source, flags)
+destination_descriptor = os.open(destination, flags)
+try:
+    source_metadata = os.fstat(source_descriptor)
+    destination_metadata = os.fstat(destination_descriptor)
+    for metadata, path in (
+        (source_metadata, source),
+        (destination_metadata, destination),
+    ):
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+        ):
+            raise SystemExit(
+                f"generated recreate cleanup identity is invalid: {path}"
+            )
+    def read_all(descriptor):
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        return digest.hexdigest()
+    if read_all(source_descriptor) != read_all(destination_descriptor):
+        raise SystemExit(
+            f"generated recreate cleanup hash changed: {destination}"
+        )
+    path_metadata = os.lstat(destination)
+    if (
+        path_metadata.st_dev != destination_metadata.st_dev
+        or path_metadata.st_ino != destination_metadata.st_ino
+    ):
+        raise SystemExit(
+            f"generated recreate cleanup identity changed: {destination}"
+        )
+    destination.unlink()
+finally:
+    os.close(source_descriptor)
+    os.close(destination_descriptor)
+directory_descriptor = os.open(destination.parent, os.O_RDONLY)
+try:
+    os.fsync(directory_descriptor)
+finally:
+    os.close(directory_descriptor)
+PY
+}
+write_legacy_recreate_bootstrap_evidence() {
+  python3 - \
+    "$LEGACY_RECREATE_RECORDS" \
+    "$LEGACY_RECREATE_GENERATED_LIST" \
+    "$LEGACY_RECREATE_BOOTSTRAP_EVIDENCE" \
+    "${RECREATE_NODES[@]}" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+def read_recreate(path, source):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise SystemExit(f"legacy backup recreate is invalid: {path}")
+        mode = stat.S_IMODE(before.st_mode)
+        if source == "generated":
+            if (
+                mode != 0o700
+                or before.st_nlink != 1
+                or before.st_uid != os.geteuid()
+            ):
+                raise SystemExit(
+                    f"legacy backup recreate is invalid: {path}"
+                )
+        elif mode & 0o111 == 0:
+            raise SystemExit(
+                f"legacy backup recreate is not executable: {path}"
+            )
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        path_metadata = os.lstat(path)
+        stable = (
+            before.st_dev == after.st_dev == path_metadata.st_dev,
+            before.st_ino == after.st_ino == path_metadata.st_ino,
+            before.st_size == after.st_size == path_metadata.st_size,
+            before.st_mtime_ns
+            == after.st_mtime_ns
+            == path_metadata.st_mtime_ns,
+            before.st_ctime_ns
+            == after.st_ctime_ns
+            == path_metadata.st_ctime_ns,
+        )
+        if not all(stable):
+            raise SystemExit(
+                f"legacy backup recreate changed during read: {path}"
+            )
+        return digest.hexdigest(), mode
+    finally:
+        os.close(descriptor)
+
+
+records_path = Path(sys.argv[1])
+generated_path = Path(sys.argv[2])
+output_path = Path(sys.argv[3])
+expected_nodes = sys.argv[4:]
+records = []
+seen = set()
+for raw in records_path.read_text(encoding="utf-8").splitlines():
+    fields = raw.split("\t")
+    if len(fields) != 5:
+        raise SystemExit("legacy recreate record is invalid")
+    node, source, live_raw, backup_raw, original_sha256 = fields
+    if node in seen:
+        raise SystemExit(f"legacy recreate record is duplicated: {node}")
+    seen.add(node)
+    live_path = Path(live_raw)
+    backup_path = Path(backup_raw)
+    if source not in {"existing", "generated"}:
+        raise SystemExit(f"legacy recreate source is invalid: {node}")
+    backup_sha256, backup_mode = read_recreate(backup_path, source)
+    if original_sha256 != backup_sha256:
+        raise SystemExit(f"legacy recreate capture hash differs: {node}")
+    records.append(
+        {
+            "node": node,
+            "source": source,
+            "live_path": str(live_path),
+            "backup_path": str(backup_path),
+            "mode": format(backup_mode, "04o"),
+            "recreate_sha256": backup_sha256,
+        }
+    )
+if seen != set(expected_nodes) or len(seen) != len(expected_nodes):
+    raise SystemExit("legacy recreate records differ from node exact-set")
+generated_nodes = []
+for raw in generated_path.read_text(encoding="utf-8").splitlines():
+    fields = raw.split("\t")
+    if len(fields) != 4:
+        raise SystemExit("legacy generated recreate record is invalid")
+    node, recreate_raw, environment_raw, evidence_raw = fields
+    generated_nodes.append(node)
+    matching = [item for item in records if item["node"] == node]
+    if len(matching) != 1 or matching[0]["source"] != "generated":
+        raise SystemExit(
+            f"legacy generated recreate source differs: {node}"
+        )
+    matching[0]["environment_path"] = environment_raw
+    matching[0]["snapshot_evidence_path"] = evidence_raw
+    if matching[0]["backup_path"] != recreate_raw:
+        raise SystemExit(
+            f"legacy generated recreate path differs: {node}"
+        )
+if len(generated_nodes) != len(set(generated_nodes)):
+    raise SystemExit("legacy generated recreate nodes are duplicated")
+payload = {
+    "schema_version": "trader-v3-legacy-recreate-bootstrap/v1",
+    "nodes": sorted(records, key=lambda item: item["node"]),
+    "generated_nodes": sorted(generated_nodes),
+}
+encoded = (
+    json.dumps(payload, indent=2, sort_keys=True) + "\n"
+).encode("utf-8")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(output_path, flags, 0o400)
+try:
+    offset = 0
+    while offset < len(encoded):
+        offset += os.write(descriptor, encoded[offset:])
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+directory_descriptor = os.open(output_path.parent, os.O_RDONLY)
+try:
+    os.fsync(directory_descriptor)
+finally:
+    os.close(directory_descriptor)
+PY
+}
+verify_legacy_rollback_recreate_fleet() {
+  local node
+  local source
+  local live_path
+  local backup_path
+  local expected_sha256
+  local actual_sha256
+  local snapshot_evidence
+  local legacy_targets_output
+  local -a legacy_binance_targets=()
+  [ -f "$LEGACY_RECREATE_BOOTSTRAP_EVIDENCE" ] \
+    || die "legacy recreate bootstrap evidence is missing"
+  while IFS=$'\t' read -r \
+    node source live_path backup_path expected_sha256; do
+    [ -n "$node" ] || continue
+    verify_legacy_recreate_artifact \
+      "$live_path" \
+      "live rollback recreate" \
+      "$source"
+    verify_legacy_recreate_artifact \
+      "$backup_path" \
+      "backup rollback recreate" \
+      "$source"
+    actual_sha256="$(
+      verify_legacy_recreate_artifact \
+        "$live_path" \
+        "live rollback recreate" \
+        "$source" \
+        1
+    )"
+    if [ "$actual_sha256" != "$expected_sha256" ]; then
+      if [ "$source" = "existing" ]; then
+        die "existing rollback recreate script changed during bootstrap: $node"
+      fi
+      die "generated rollback recreate script changed during bootstrap: $node"
+    fi
+    [ "$(
+      verify_legacy_recreate_artifact \
+        "$backup_path" \
+        "backup rollback recreate" \
+        "$source" \
+        1
+    )" = "$expected_sha256" ] \
+      || die "backup rollback recreate hash differs: $node"
+  done < "$LEGACY_RECREATE_RECORDS"
+  while IFS=$'\t' read -r \
+    node backup_path environment_path snapshot_evidence; do
+    [ -n "$node" ] || continue
+    if ! legacy_targets_output="$(
+      discover_legacy_binance_mount_targets "$node"
+    )"; then
+      die "legacy Binance mount target discovery failed: $node"
+    fi
+    legacy_binance_targets=()
+    while IFS= read -r target; do
+      [ -n "$target" ] || continue
+      legacy_binance_targets+=("$target")
+    done <<< "$legacy_targets_output"
+    [ "${#legacy_binance_targets[@]}" -eq 2 ] \
+      || die "legacy Binance mount target count is invalid: $node"
+    if ! python3 "$GEN_RECREATE" \
+      "$node" \
+      "${legacy_binance_targets[0]}" \
+      "${legacy_binance_targets[1]}" \
+      --verify-snapshot-evidence "$snapshot_evidence"; then
+      die "legacy snapshot recreate verification failed: $node"
+    fi
+  done < "$LEGACY_RECREATE_GENERATED_LIST"
+}
+prepare_legacy_rollback_recreate_fleet() {
+  local node
+  local live_path
+  local backup_path
+  local snapshot_dir
+  local environment_path
+  local snapshot_evidence
+  local before_sha256
+  local promoted_sha256
+  local legacy_targets_output
+  local target
+  local -a legacy_binance_targets=()
+  local -a promoted_paths=()
+  mkdir -p "$LEGACY_RECREATE_SNAPSHOT_ROOT"
+  chmod 0700 "$LEGACY_RECREATE_SNAPSHOT_ROOT"
+  : > "$LEGACY_RECREATE_RECORDS"
+  : > "$LEGACY_RECREATE_GENERATED_LIST"
+  chmod 0600 \
+    "$LEGACY_RECREATE_RECORDS" \
+    "$LEGACY_RECREATE_GENERATED_LIST"
+  for node in "${RECREATE_NODES[@]}"; do
+    live_path="$T/recreate-$node.sh"
+    backup_path="$BACKUP_ROOT/recreate-$node.sh"
+    if [ -e "$live_path" ] || [ -L "$live_path" ]; then
+      verify_legacy_recreate_artifact \
+        "$live_path" \
+        "existing rollback recreate" \
+        existing
+      before_sha256="$(
+        capture_existing_legacy_recreate \
+          "$live_path" \
+          "$backup_path"
+      )" || die "existing rollback recreate capture failed: $node"
+      [ "$(
+        verify_legacy_recreate_artifact \
+          "$live_path" \
+          "existing rollback recreate" \
+          existing \
+          1
+      )" = "$before_sha256" ] \
+        || die "existing rollback recreate script changed during bootstrap: $node"
+      [ "$(
+        verify_legacy_recreate_artifact \
+          "$backup_path" \
+          "captured rollback recreate" \
+          existing \
+          1
+      )" = "$before_sha256" ] \
+        || die "existing rollback recreate capture hash differs: $node"
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$node" \
+        existing \
+        "$live_path" \
+        "$backup_path" \
+        "$before_sha256" \
+        >> "$LEGACY_RECREATE_RECORDS"
+      continue
+    fi
+    case "$node" in
+      trader-v3-node-c|trader-v3-node-d)
+        ;;
+      *)
+        die "existing rollback recreate script missing: $node"
+        ;;
+    esac
+    if [[ ! "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+      die "existing rollback recreate script missing outside bootstrap: $node"
+    fi
+    snapshot_dir="$LEGACY_RECREATE_SNAPSHOT_ROOT/$node"
+    environment_path="$snapshot_dir/container-env.json"
+    snapshot_evidence="$snapshot_dir/snapshot-evidence.json"
+    mkdir -p "$snapshot_dir"
+    chmod 0700 "$snapshot_dir"
+    if ! legacy_targets_output="$(
+      discover_legacy_binance_mount_targets "$node"
+    )"; then
+      die "legacy Binance mount target discovery failed: $node"
+    fi
+    legacy_binance_targets=()
+    while IFS= read -r target; do
+      [ -n "$target" ] || continue
+      legacy_binance_targets+=("$target")
+    done <<< "$legacy_targets_output"
+    [ "${#legacy_binance_targets[@]}" -eq 2 ] \
+      || die "legacy Binance mount target count is invalid: $node"
+    python3 "$GEN_RECREATE" \
+      "$node" \
+      "${legacy_binance_targets[0]}" \
+      "${legacy_binance_targets[1]}" \
+      --snapshot-runtime \
+      --output "$backup_path" \
+      --environment-output "$environment_path" \
+      --evidence-output "$snapshot_evidence"
+    verify_legacy_recreate_artifact \
+      "$backup_path" \
+      "generated rollback recreate" \
+      generated
+    if ! python3 "$GEN_RECREATE" \
+      "$node" \
+      "${legacy_binance_targets[0]}" \
+      "${legacy_binance_targets[1]}" \
+      --verify-snapshot-evidence "$snapshot_evidence"; then
+      die "legacy snapshot recreate verification failed: $node"
+    fi
+    before_sha256="$(
+      verify_legacy_recreate_artifact \
+        "$backup_path" \
+        "generated rollback recreate" \
+        generated \
+        1
+    )"
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$node" \
+      generated \
+      "$live_path" \
+      "$backup_path" \
+      "$before_sha256" \
+      >> "$LEGACY_RECREATE_RECORDS"
+    printf '%s\t%s\t%s\t%s\n' \
+      "$node" \
+      "$backup_path" \
+      "$environment_path" \
+      "$snapshot_evidence" \
+      >> "$LEGACY_RECREATE_GENERATED_LIST"
+  done
+  write_legacy_recreate_bootstrap_evidence
+  LEGACY_RECREATE_BOOTSTRAP_PREPARED=1
+  while IFS=$'\t' read -r \
+    node backup_path environment_path snapshot_evidence; do
+    [ -n "$node" ] || continue
+    live_path="$T/recreate-$node.sh"
+    if [ -e "$live_path" ] || [ -L "$live_path" ]; then
+      for live_path in "${promoted_paths[@]}"; do
+        remove_generated_legacy_recreate_if_unchanged \
+          "$BACKUP_ROOT/$(basename "$live_path")" \
+          "$live_path" \
+          || true
+      done
+      die "generated rollback recreate live path appeared: $node"
+    fi
+    if ! promoted_sha256="$(
+      promote_generated_legacy_recreate \
+        "$backup_path" \
+        "$live_path"
+    )"; then
+      for live_path in "${promoted_paths[@]}"; do
+        remove_generated_legacy_recreate_if_unchanged \
+          "$BACKUP_ROOT/$(basename "$live_path")" \
+          "$live_path" \
+          || true
+      done
+      return 1
+    fi
+    [ "$promoted_sha256" = "$(
+      verify_legacy_recreate_artifact \
+        "$backup_path" \
+        "generated rollback recreate" \
+        generated \
+        1
+    )" ] || die "generated rollback recreate promotion hash differs: $node"
+    promoted_paths+=("$live_path")
+  done < "$LEGACY_RECREATE_GENERATED_LIST"
+  verify_legacy_rollback_recreate_fleet
+}
+remove_bootstrap_generated_live_recreate() {
+  local node
+  local backup_path
+  local environment_path
+  local snapshot_evidence
+  local live_path
+  if [ "$LEGACY_RECREATE_BOOTSTRAP_PREPARED" != "1" ]; then
+    return
+  fi
+  if [ "$BACKUP_CAPTURED" = "1" ]; then
+    return
+  fi
+  if [ ! -f "$LEGACY_RECREATE_GENERATED_LIST" ]; then
+    return
+  fi
+  while IFS=$'\t' read -r \
+    node backup_path environment_path snapshot_evidence; do
+    [ -n "$node" ] || continue
+    live_path="$T/recreate-$node.sh"
+    if ! remove_generated_legacy_recreate_if_unchanged \
+      "$backup_path" \
+      "$live_path"; then
+      echo "!! generated rollback recreate cleanup hash changed: $node" >&2
+    fi
+  done < "$LEGACY_RECREATE_GENERATED_LIST"
+}
 prepare_post_migration_recovery_recreate() {
   local node
   local recovery_dir
@@ -3970,7 +4751,6 @@ prepare_post_migration_recovery_recreate() {
     fi
     chmod 0700 "$recovery_script"
     cp -a "$previous_recreate" "$live_recreate"
-    chmod 0700 "$live_recreate"
     if ! cmp -s "$previous_recreate" "$live_recreate"; then
       echo "FATAL: live recreate script was not restored: $node" >&2
       return 1
@@ -4291,6 +5071,7 @@ on_err() {
   else
     restore_pre_migration_state
   fi
+  remove_bootstrap_generated_live_recreate
   if [ "$ROLLOUT_TRACKED" = "1" ] \
     && [ "$ROLLOUT_FINALIZED" != "1" ] \
     && [ "$PRESERVE_ROLLOUT_FOR_RETRY" != "1" ] \
@@ -5789,10 +6570,6 @@ docker inspect "$WATCHER_CONTAINER" >/dev/null \
 discover_control_plane_units
 verify_control_plane_isolation_artifact
 docker inspect "${ALL_NODES[@]}" >/dev/null || die "node containers missing"
-for node in "${RECREATE_NODES[@]}"; do
-  [ -x "$T/recreate-$node.sh" ] \
-    || die "existing rollback recreate script missing: $node"
-done
 
 apply_and_verify_database_migration() {
   verify_account_stall_operation_lock
@@ -7890,14 +8667,12 @@ fi
 mkdir -p "$BACKUP_ROOT/files"
 : > "$BACKUP_ROOT/index.tsv"
 : > "$BACKUP_ROOT/new-files.txt"
+prepare_legacy_rollback_recreate_fleet
+verify_legacy_rollback_recreate_fleet
 docker inspect "${ALL_NODES[@]}" > "$BACKUP_ROOT/containers-before.json"
 for node in "${RECREATE_NODES[@]}"; do
   printf '%s\t%s\n' "$node" "$(docker inspect --format '{{.Image}}' "$node")"
 done > "$BACKUP_ROOT/old-images.tsv"
-for node in "${RECREATE_NODES[@]}"; do
-  cp -a "$T/recreate-$node.sh" "$BACKUP_ROOT/recreate-$node.sh"
-  chmod 0700 "$BACKUP_ROOT/recreate-$node.sh"
-done
 bk() { # bk <src> <label>
   cp -a "$1" "$BACKUP_ROOT/files/$2"
   printf '%s\t%s\n' "$2" "$1" >> "$BACKUP_ROOT/index.tsv"

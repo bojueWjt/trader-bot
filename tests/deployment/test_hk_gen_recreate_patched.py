@@ -130,6 +130,9 @@ class GenRecreatePatchedTest(unittest.TestCase):
             {
                 "Id": "f" * 64,
                 "Image": "sha256:" + ("1" * 64),
+                "State": {
+                    "Running": False,
+                },
                 "Config": {
                     "Image": "trader-node:test",
                     "Hostname": "node-a-runtime",
@@ -273,12 +276,15 @@ class GenRecreatePatchedTest(unittest.TestCase):
     def generated_recreate_path(self, container_name="trader-v3-node-a"):
         return self.trader_root / f"recreate-{container_name}.sh"
 
-    def generated_run_tokens(self, container_name="trader-v3-node-a"):
-        recreate = self.generated_recreate_path(container_name)
+    def run_tokens_from_path(self, recreate):
         lines = recreate.read_text(encoding="utf-8").splitlines()
         start = lines.index("run=(") + 1
         end = lines.index(")", start)
         return shlex.split(" ".join(lines[start:end]))
+
+    def generated_run_tokens(self, container_name="trader-v3-node-a"):
+        recreate = self.generated_recreate_path(container_name)
+        return self.run_tokens_from_path(recreate)
 
     def generated_mounts(self, container_name="trader-v3-node-a"):
         tokens = self.generated_run_tokens(container_name)
@@ -975,6 +981,465 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             text,
         )
         self.assertIn('container_id="$("${run[@]}")"', text)
+
+    def test_snapshot_runtime_preserves_live_contract_without_secret_text(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspected = inspect_payload[0]
+        inspected["Config"]["Env"] = [
+            "ACCOUNT_ID=account-c",
+            "BINANCE_ACCOUNT_C_API_SECRET=snapshot-secret",
+            "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+            "PATH=/usr/bin",
+        ]
+        inspected["Mounts"] = [
+            {
+                "Type": "bind",
+                "Source": "/srv/trader-v3/legacy-release/node.py",
+                "Destination": "/app/app/node.py",
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+            {
+                "Type": "bind",
+                "Source": "/srv/trader-v3/secrets/subaccounts/api-key",
+                "Destination": "/run/secrets/binance_account_c_api_key",
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+            {
+                "Type": "bind",
+                "Source": (
+                    "/srv/trader-v3/legacy-release/"
+                    "binance_execution.py"
+                ),
+                "Destination": BINANCE_DST,
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+            {
+                "Type": "bind",
+                "Source": (
+                    "/srv/trader-v3/legacy-release/"
+                    "binance_futures_execution.py"
+                ),
+                "Destination": BINANCE_FUTURES_DST,
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+        ]
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        snapshot_root = self.temp_path / "snapshot"
+        snapshot_root.mkdir()
+        recreate = snapshot_root / "recreate.sh"
+        environment = snapshot_root / "container-env.json"
+        evidence = snapshot_root / "evidence.json"
+
+        result = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(recreate),
+            "--environment-output",
+            str(environment),
+            "--evidence-output",
+            str(evidence),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(recreate.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(environment.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(evidence.stat().st_mode & 0o777, 0o400)
+        text = recreate.read_text(encoding="utf-8")
+        self.assertNotIn("snapshot-secret", text)
+        self.assertNotIn("snapshot-secret", result.stdout)
+        self.assertIn(str(environment), text)
+        self.assertIn(
+            "BINANCE_ACCOUNT_C_API_SECRET=snapshot-secret",
+            environment.read_text(encoding="utf-8").splitlines(),
+        )
+        self.assertIn("--env-file", self.run_tokens_from_path(recreate))
+        self.assertNotIn('run+=("-e" "$env_value")', text)
+        tokens = self.run_tokens_from_path(recreate)
+        self.assertIn(f"run+=({inspected['Image']})", text)
+        mounts = [
+            tokens[index + 1]
+            for index, token in enumerate(tokens)
+            if token == "-v"
+        ]
+        self.assertEqual(
+            set(mounts),
+            {
+                (
+                    f"{mount['Source']}:{mount['Destination']}:"
+                    f"{mount['Mode']}"
+                )
+                for mount in inspected["Mounts"]
+            },
+        )
+        self.assertNotIn(str(self.patch_dir), text)
+        evidence_payload = json.loads(evidence.read_text(encoding="utf-8"))
+        self.assertEqual(
+            evidence_payload["runtime_contract"]["image_digest"],
+            inspected["Image"],
+        )
+        self.assertEqual(
+            evidence_payload["runtime_contract"]["restart_policy"],
+            inspected["HostConfig"]["RestartPolicy"],
+        )
+
+        verify = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--verify-snapshot-evidence",
+            str(evidence),
+        )
+        self.assertEqual(verify.returncode, 0, verify.stderr)
+
+    def test_snapshot_runtime_verification_rejects_live_mount_drift(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspected = inspect_payload[0]
+        inspected["Config"]["Env"] = [
+            "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+        ]
+        inspected["Mounts"] = [
+            {
+                "Type": "bind",
+                "Source": "/legacy/binance_execution.py",
+                "Destination": BINANCE_DST,
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+            {
+                "Type": "bind",
+                "Source": "/legacy/binance_futures_execution.py",
+                "Destination": BINANCE_FUTURES_DST,
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+            {
+                "Type": "bind",
+                "Source": "/legacy/node.py",
+                "Destination": "/app/app/node.py",
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+        ]
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        snapshot_root = self.temp_path / "snapshot-drift"
+        snapshot_root.mkdir()
+        recreate = snapshot_root / "recreate.sh"
+        environment = snapshot_root / "container-env.json"
+        evidence = snapshot_root / "evidence.json"
+        generated = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(recreate),
+            "--environment-output",
+            str(environment),
+            "--evidence-output",
+            str(evidence),
+        )
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+
+        inspect_payload[0]["Mounts"][2]["Source"] = "/drifted/node.py"
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        verify = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--verify-snapshot-evidence",
+            str(evidence),
+        )
+
+        self.assertEqual(verify.returncode, 2)
+        self.assertIn("runtime contract differs", verify.stderr)
+
+    def test_snapshot_runtime_rejects_non_private_mount_propagation(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspected = inspect_payload[0]
+        inspected["Config"]["Env"] = [
+            "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+        ]
+        inspected["Mounts"] = [
+            {
+                "Type": "bind",
+                "Source": "/legacy/binance_execution.py",
+                "Destination": BINANCE_DST,
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rshared",
+            },
+            {
+                "Type": "bind",
+                "Source": "/legacy/binance_futures_execution.py",
+                "Destination": BINANCE_FUTURES_DST,
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+        ]
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        snapshot_root = self.temp_path / "snapshot-propagation"
+        snapshot_root.mkdir()
+
+        result = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(snapshot_root / "recreate.sh"),
+            "--environment-output",
+            str(snapshot_root / "container.env"),
+            "--evidence-output",
+            str(snapshot_root / "evidence.json"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("mount propagation is unsupported", result.stderr)
+
+    def test_snapshot_runtime_rejects_static_network_endpoint(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspect_payload[0]["Config"]["Env"] = [
+            "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+        ]
+        inspect_payload[0]["NetworkSettings"]["Networks"]["trader-v3"][
+            "IPAMConfig"
+        ] = {
+            "IPv4Address": "172.20.0.9",
+        }
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        snapshot_root = self.temp_path / "snapshot-static-ip"
+        snapshot_root.mkdir()
+
+        result = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(snapshot_root / "recreate.sh"),
+            "--environment-output",
+            str(snapshot_root / "container.env"),
+            "--evidence-output",
+            str(snapshot_root / "evidence.json"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("network endpoint option is unsupported", result.stderr)
+
+    def test_snapshot_runtime_rejects_endpoint_mac_address(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspect_payload[0]["Config"]["Env"] = [
+            "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+        ]
+        inspect_payload[0]["NetworkSettings"]["Networks"]["trader-v3"][
+            "MacAddress"
+        ] = "02:42:ac:14:00:09"
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        snapshot_root = self.temp_path / "snapshot-endpoint-mac"
+        snapshot_root.mkdir()
+
+        result = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(snapshot_root / "recreate.sh"),
+            "--environment-output",
+            str(snapshot_root / "container.env"),
+            "--evidence-output",
+            str(snapshot_root / "evidence.json"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "trader-v3.MacAddress",
+            result.stderr,
+        )
+
+    def test_snapshot_runtime_rejects_unreplayed_host_config(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspect_payload[0]["Config"]["Env"] = [
+            "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+        ]
+        inspect_payload[0]["HostConfig"]["MemoryReservation"] = 268435456
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        snapshot_root = self.temp_path / "snapshot-host-config"
+        snapshot_root.mkdir()
+
+        result = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(snapshot_root / "recreate.sh"),
+            "--environment-output",
+            str(snapshot_root / "container.env"),
+            "--evidence-output",
+            str(snapshot_root / "evidence.json"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "HostConfig.MemoryReservation is unsupported",
+            result.stderr,
+        )
+
+    def test_snapshot_runtime_rejects_explicit_mac_address(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspect_payload[0]["Config"]["Env"] = [
+            "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+        ]
+        inspect_payload[0]["Config"]["MacAddress"] = "02:42:ac:14:00:09"
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        snapshot_root = self.temp_path / "snapshot-mac-address"
+        snapshot_root.mkdir()
+
+        result = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(snapshot_root / "recreate.sh"),
+            "--environment-output",
+            str(snapshot_root / "container.env"),
+            "--evidence-output",
+            str(snapshot_root / "evidence.json"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "snapshot Config.MacAddress is unsupported",
+            result.stderr,
+        )
+
+    def test_snapshot_runtime_replays_unlimited_memory_swap(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspected = inspect_payload[0]
+        inspected["Config"]["Env"] = [
+            "NAUTILUS_INITIAL_TRADING_STATE=HALTED",
+        ]
+        inspected["HostConfig"]["MemorySwap"] = -1
+        inspected["Mounts"] = [
+            {
+                "Type": "bind",
+                "Source": "/legacy/binance_execution.py",
+                "Destination": BINANCE_DST,
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+            {
+                "Type": "bind",
+                "Source": "/legacy/binance_futures_execution.py",
+                "Destination": BINANCE_FUTURES_DST,
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+        ]
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        snapshot_root = self.temp_path / "snapshot-unlimited-swap"
+        snapshot_root.mkdir()
+        recreate = snapshot_root / "recreate.sh"
+
+        result = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(recreate),
+            "--environment-output",
+            str(snapshot_root / "container.env"),
+            "--evidence-output",
+            str(snapshot_root / "evidence.json"),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tokens = self.run_tokens_from_path(recreate)
+        index = tokens.index("--memory-swap")
+        self.assertEqual(tokens[index + 1], "-1")
+
+    def test_snapshot_runtime_requires_halted_live_container(self):
+        snapshot_root = self.temp_path / "snapshot-active"
+        snapshot_root.mkdir()
+
+        result = self.run_script(
+            "trader-v3-node-c",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            "--snapshot-runtime",
+            "--output",
+            str(snapshot_root / "recreate.sh"),
+            "--environment-output",
+            str(snapshot_root / "container-env.json"),
+            "--evidence-output",
+            str(snapshot_root / "evidence.json"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must already be HALTED", result.stderr)
 
     def test_dynamic_published_port_is_rejected(self):
         inspect_payload = json.loads(
