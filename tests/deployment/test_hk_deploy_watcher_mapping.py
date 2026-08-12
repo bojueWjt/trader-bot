@@ -52,39 +52,49 @@ def _create_database(
     path: Path,
     *,
     routes: tuple[tuple[str, str, str, float], ...] = ROUTES,
+    include_enabled: bool = True,
 ) -> None:
     connection = sqlite3.connect(path)
     try:
-        connection.executescript(
-            """
+        account_schema = """
             CREATE TABLE account_configs (
                 account_id TEXT PRIMARY KEY,
                 api_key TEXT NOT NULL,
                 api_secret TEXT NOT NULL,
                 is_testnet INTEGER NOT NULL,
                 execution_account_id TEXT NOT NULL,
-                risk_capital_multiplier REAL NOT NULL,
-                is_enabled INTEGER NOT NULL
+                risk_capital_multiplier REAL NOT NULL
+        """
+        if include_enabled:
+            account_schema += ",\n                is_enabled INTEGER NOT NULL"
+        account_schema += """
             );
             CREATE TABLE channel_routing (
                 channel_id TEXT PRIMARY KEY,
                 target_account_id TEXT NOT NULL
             );
-            """
-        )
+        """
+        connection.executescript(account_schema)
         for channel_id, credential_id, execution_id, multiplier in routes:
-            connection.execute(
-                "INSERT OR IGNORE INTO account_configs ("
+            columns = (
                 "account_id, api_key, api_secret, is_testnet, "
-                "execution_account_id, risk_capital_multiplier, is_enabled"
-                ") VALUES (?, ?, ?, 0, ?, ?, 1)",
-                (
-                    credential_id,
-                    f"private-key-{execution_id}",
-                    f"private-secret-{execution_id}",
-                    execution_id,
-                    multiplier,
-                ),
+                "execution_account_id, risk_capital_multiplier"
+            )
+            values = "?, ?, ?, 0, ?, ?"
+            parameters: tuple[object, ...] = (
+                credential_id,
+                f"private-key-{execution_id}",
+                f"private-secret-{execution_id}",
+                execution_id,
+                multiplier,
+            )
+            if include_enabled:
+                columns += ", is_enabled"
+                values += ", 1"
+            connection.execute(
+                f"INSERT OR IGNORE INTO account_configs ({columns}) "
+                f"VALUES ({values})",
+                parameters,
             )
             connection.execute(
                 "INSERT INTO channel_routing (channel_id, target_account_id) "
@@ -100,6 +110,7 @@ def _run_gate(
     database_path: Path,
     *,
     evidence_path: Path | None = None,
+    schema_mode: str = "strict",
 ) -> subprocess.CompletedProcess[str]:
     evidence_value = ""
     if evidence_path is not None:
@@ -111,6 +122,8 @@ def _run_gate(
         + f"WATCHER_TRADING_DB={shlex.quote(str(database_path))}\n"
         + "verify_four_channel_account_mapping "
         + shlex.quote(evidence_value)
+        + " "
+        + shlex.quote(schema_mode)
         + "\n"
     )
     return subprocess.run(
@@ -194,8 +207,10 @@ def test_valid_mapping_writes_durable_redacted_evidence(
     assert stat.S_IMODE(evidence_path.stat().st_mode) == 0o400
     payload = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == (
-        "trader-v3-four-channel-account-mapping/v1"
+        "trader-v3-four-channel-account-mapping/v2"
     )
+    assert payload["schema_mode"] == "strict"
+    assert payload["enabled_column_mode"] == "explicit"
     assert payload["database"]["quick_check"] == "ok"
     assert payload["database"]["journal_mode"] == "delete"
     database_before = payload["database"]["files_before_read"]
@@ -279,7 +294,96 @@ def test_positive_runtime_multiplier_is_preserved_without_fixed_value(
     )
 
 
-def test_extra_enabled_live_route_fails_closed(tmp_path: Path) -> None:
+def test_pre_restart_schema_uses_verified_implicit_enabled_mode(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "watcher-trading.db"
+    evidence_path = tmp_path / "evidence" / "mapping.json"
+    evidence_path.parent.mkdir(mode=0o700)
+    _create_database(database_path, include_enabled=False)
+
+    result = _run_gate(
+        database_path,
+        evidence_path=evidence_path,
+        schema_mode="pre_restart",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert payload["schema_mode"] == "pre_restart"
+    assert payload["pre_restart_contract"] == (
+        "dynamic-routing-columns-present/enabled-column-optional-v1"
+    )
+    assert payload["enabled_column_mode"] == "legacy_implicit_enabled"
+    assert all(item["is_enabled"] == 1 for item in payload["mapping"])
+
+
+def test_strict_gate_rejects_pre_restart_schema_without_enabled_column(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "watcher-trading.db"
+    _create_database(database_path, include_enabled=False)
+
+    result = _run_gate(database_path, schema_mode="strict")
+
+    assert result.returncode != 0
+    assert "account_configs lacks required columns: is_enabled" in (
+        result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_column",
+    (
+        "execution_account_id",
+        "risk_capital_multiplier",
+    ),
+)
+def test_pre_restart_gate_requires_dynamic_routing_columns(
+    tmp_path: Path,
+    missing_column: str,
+) -> None:
+    database_path = tmp_path / "watcher-trading.db"
+    account_columns = {
+        "account_id": "TEXT PRIMARY KEY",
+        "api_key": "TEXT NOT NULL",
+        "api_secret": "TEXT NOT NULL",
+        "is_testnet": "INTEGER NOT NULL",
+        "execution_account_id": "TEXT NOT NULL",
+        "risk_capital_multiplier": "REAL NOT NULL",
+    }
+    account_columns.pop(missing_column)
+    schema = ",\n".join(
+        f"{name} {definition}"
+        for name, definition in account_columns.items()
+    )
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.executescript(
+            f"""
+            CREATE TABLE account_configs (
+                {schema}
+            );
+            CREATE TABLE channel_routing (
+                channel_id TEXT PRIMARY KEY,
+                target_account_id TEXT NOT NULL
+            );
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = _run_gate(database_path, schema_mode="pre_restart")
+
+    assert result.returncode != 0
+    assert (
+        f"account_configs lacks required columns: {missing_column}"
+        in result.stderr
+    )
+
+
+def test_extra_enabled_live_route_remains_compatible(tmp_path: Path) -> None:
     database_path = tmp_path / "watcher-trading.db"
     _create_database(database_path)
     _insert_route(
@@ -293,8 +397,7 @@ def test_extra_enabled_live_route_fails_closed(tmp_path: Path) -> None:
 
     result = _run_gate(database_path)
 
-    assert result.returncode != 0
-    assert "enabled live channel routes must be exactly:" in result.stderr
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -466,7 +569,7 @@ def test_deploy_orders_preflight_evidence_before_schema_and_install() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     preflight = text.index("# ---------- preflight ----------")
     preflight_gate = text.index(
-        "\nverify_four_channel_account_mapping\n",
+        'verify_four_channel_account_mapping "" pre_restart',
         preflight,
     )
     halt = text.index("# ---------- HALT ----------", preflight_gate)
@@ -476,7 +579,8 @@ def test_deploy_orders_preflight_evidence_before_schema_and_install() -> None:
     )
     evidence_gate = text.index(
         'verify_four_channel_account_mapping '
-        '"$FOUR_CHANNEL_MAPPING_EVIDENCE"',
+        '\\\n  "$FOUR_CHANNEL_MAPPING_EVIDENCE" '
+        '\\\n  pre_restart',
         backup_creation,
     )
     database_schema = text.index(
@@ -484,7 +588,30 @@ def test_deploy_orders_preflight_evidence_before_schema_and_install() -> None:
         evidence_gate,
     )
     install = text.index("# ---------- install ----------", database_schema)
+    watcher_restart = text.index(
+        "restart_watcher_runtime",
+        install,
+    )
+    forced_schema_restart = text.index(
+        'if [ "$WATCHER_SCHEMA_RESTART_REQUIRED" = "1" ]; then',
+        install,
+    )
+    transition_change_gate = text.index(
+        '|| [ "$WATCHER_SCHEMA_RESTART_REQUIRED" = "1" ]',
+        preflight_gate,
+    )
+    strict_gate = text.index(
+        "verify_post_restart_four_channel_account_mapping",
+        watcher_restart,
+    )
+    recreate = text.index(
+        "# ---------- recreate & verify ----------",
+        strict_gate,
+    )
 
     assert preflight_gate < halt
     assert halt < backup_creation < evidence_gate
     assert evidence_gate < database_schema < install
+    assert preflight_gate < transition_change_gate < halt
+    assert install < forced_schema_restart < watcher_restart
+    assert watcher_restart < strict_gate < recreate

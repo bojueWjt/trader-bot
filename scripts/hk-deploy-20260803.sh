@@ -13,7 +13,9 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 TAG="deploy-${STAMP}-account-stall-hardening"
 BACKUP_ROOT="$T/backups/$TAG"
 WATCHER_TRADING_DB="${WATCHER_TRADING_DB:-/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db}"
-FOUR_CHANNEL_MAPPING_EVIDENCE="$BACKUP_ROOT/four-channel-account-mapping.json"
+FOUR_CHANNEL_MAPPING_EVIDENCE="$BACKUP_ROOT/four-channel-account-mapping-pre-watcher.json"
+FOUR_CHANNEL_MAPPING_POST_WATCHER_EVIDENCE="$BACKUP_ROOT/four-channel-account-mapping-post-watcher.json"
+FOUR_CHANNEL_MAPPING_ROLLBACK_EVIDENCE="$BACKUP_ROOT/four-channel-account-mapping-rollback.json"
 ACCOUNT_STALL_OPERATION_LOCK="${ACCOUNT_STALL_OPERATION_LOCK:-/var/lock/trader-v3-account-stall-operation.lock}"
 ACCOUNT_STALL_OPERATION_LOCK_UID="${ACCOUNT_STALL_OPERATION_LOCK_UID:-$(id -u)}"
 ACCOUNT_STALL_OPERATION_LOCK_GID="${ACCOUNT_STALL_OPERATION_LOCK_GID:-$(id -g)}"
@@ -122,6 +124,7 @@ HERMES_RESTART_REQUIRED=0
 HERMES_RESTARTED=0
 WATCHER_RESTART_REQUIRED=0
 WATCHER_RESTARTED=0
+WATCHER_SCHEMA_RESTART_REQUIRED=0
 EXCHANGE_STATE_RESTART_REQUIRED=0
 EXCHANGE_STATE_RESTARTED=0
 CONTROL_PLANE_ISOLATION_REQUIRED=0
@@ -347,7 +350,8 @@ die() {
 }
 verify_four_channel_account_mapping() {
   local evidence_path="${1:-}"
-  python3 - "$WATCHER_TRADING_DB" "$evidence_path" <<'PY'
+  local schema_mode="${2:-strict}"
+  python3 - "$WATCHER_TRADING_DB" "$evidence_path" "$schema_mode" <<'PY'
 from __future__ import annotations
 
 from collections import Counter
@@ -385,12 +389,11 @@ EXPECTED_EXECUTION_ACCOUNTS = {
     "account-c",
     "account-d",
 }
-REQUIRED_COLUMNS = {
+PRE_RESTART_REQUIRED_COLUMNS = {
     "account_configs": {
         "account_id",
         "execution_account_id",
         "risk_capital_multiplier",
-        "is_enabled",
         "is_testnet",
     },
     "channel_routing": {
@@ -458,13 +461,18 @@ def validate_database_identity(
         fail("SQLite database identity changed during mapping gate")
 
 
-def validate_schema(connection: sqlite3.Connection) -> None:
+def validate_schema(
+    connection: sqlite3.Connection,
+    *,
+    require_explicit_enabled: bool,
+) -> dict[str, set[str]]:
     rows = connection.execute(
         "SELECT name, type FROM sqlite_schema "
         "WHERE name IN ('account_configs', 'channel_routing')"
     ).fetchall()
     objects = {str(row["name"]): str(row["type"]) for row in rows}
-    for table_name, required_columns in REQUIRED_COLUMNS.items():
+    table_columns: dict[str, set[str]] = {}
+    for table_name, required_columns in PRE_RESTART_REQUIRED_COLUMNS.items():
         if objects.get(table_name) != "table":
             fail(f"required table is missing: {table_name}")
         columns = {
@@ -473,23 +481,35 @@ def validate_schema(connection: sqlite3.Connection) -> None:
                 f"PRAGMA table_info({table_name})"
             ).fetchall()
         }
+        table_columns[table_name] = columns
         missing = sorted(required_columns - columns)
         if missing:
             fail(
                 f"{table_name} lacks required columns: {','.join(missing)}"
             )
+    account_columns = table_columns["account_configs"]
+    if require_explicit_enabled and "is_enabled" not in account_columns:
+        fail("account_configs lacks required columns: is_enabled")
+    return table_columns
 
 
-def load_mapping(connection: sqlite3.Connection) -> list[dict[str, object]]:
+def load_mapping(
+    connection: sqlite3.Connection,
+    *,
+    account_columns: set[str],
+) -> list[dict[str, object]]:
     channel_ids = sorted(EXPECTED_ROUTES)
     placeholders = ",".join("?" for _ in channel_ids)
+    enabled_field = "1 AS is_enabled"
+    if "is_enabled" in account_columns:
+        enabled_field = "account.is_enabled AS is_enabled"
     rows = connection.execute(
         "SELECT "
         "route.channel_id AS channel_id, "
         "route.target_account_id AS credential_account_id, "
         "account.execution_account_id AS execution_account_id, "
         "account.risk_capital_multiplier AS risk_capital_multiplier, "
-        "account.is_enabled AS is_enabled, "
+        f"{enabled_field}, "
         "account.is_testnet AS is_testnet "
         "FROM channel_routing AS route "
         "LEFT JOIN account_configs AS account "
@@ -526,27 +546,6 @@ def load_mapping(connection: sqlite3.Connection) -> list[dict[str, object]]:
             }
         )
     return mappings
-
-
-def validate_live_channel_exact_set(
-    connection: sqlite3.Connection,
-) -> None:
-    rows = connection.execute(
-        "SELECT route.channel_id AS channel_id "
-        "FROM channel_routing AS route "
-        "JOIN account_configs AS account "
-        "ON account.account_id = route.target_account_id "
-        "WHERE account.is_enabled = 1 "
-        "AND account.is_testnet = 0 "
-        "ORDER BY route.channel_id"
-    ).fetchall()
-    live_channel_ids = [str(row["channel_id"]) for row in rows]
-    expected_channel_ids = sorted(EXPECTED_ROUTES)
-    if live_channel_ids != expected_channel_ids:
-        fail(
-            "enabled live channel routes must be exactly: "
-            + ",".join(expected_channel_ids)
-        )
 
 
 def validate_mapping(mappings: list[dict[str, object]]) -> None:
@@ -630,6 +629,10 @@ def write_evidence(
 
 database_path = Path(sys.argv[1])
 evidence_argument = sys.argv[2]
+schema_mode = sys.argv[3]
+if schema_mode not in {"pre_restart", "strict"}:
+    fail(f"schema mode is invalid: {schema_mode}")
+require_explicit_enabled = schema_mode == "strict"
 sqlite_files_before = capture_sqlite_files(database_path)
 database_uri = database_path.resolve(strict=True).as_uri() + "?mode=ro"
 try:
@@ -658,10 +661,16 @@ try:
     ]
     if quick_check != ["ok"]:
         fail("SQLite PRAGMA quick_check failed")
-    validate_schema(connection)
-    mappings = load_mapping(connection)
+    table_columns = validate_schema(
+        connection,
+        require_explicit_enabled=require_explicit_enabled,
+    )
+    account_columns = table_columns["account_configs"]
+    mappings = load_mapping(
+        connection,
+        account_columns=account_columns,
+    )
     validate_mapping(mappings)
-    validate_live_channel_exact_set(connection)
     data_version_after = int(
         connection.execute("PRAGMA data_version").fetchone()[0]
     )
@@ -672,9 +681,17 @@ validate_database_identity(sqlite_files_before, sqlite_files_after)
 
 if evidence_argument:
     evidence_path = Path(evidence_argument)
+    enabled_column_mode = "explicit"
+    if "is_enabled" not in account_columns:
+        enabled_column_mode = "legacy_implicit_enabled"
     evidence = {
-        "schema_version": "trader-v3-four-channel-account-mapping/v1",
+        "schema_version": "trader-v3-four-channel-account-mapping/v2",
         "captured_at": datetime.now(timezone.utc).isoformat(),
+        "schema_mode": schema_mode,
+        "pre_restart_contract": (
+            "dynamic-routing-columns-present/enabled-column-optional-v1"
+        ),
+        "enabled_column_mode": enabled_column_mode,
         "database": {
             "path": str(database_path),
             "quick_check": "ok",
@@ -690,6 +707,41 @@ if evidence_argument:
 PY
 }
 # FOUR_CHANNEL_MAPPING_GATE_END
+
+detect_watcher_schema_restart_requirement() {
+  python3 - "$WATCHER_TRADING_DB" <<'PY'
+from pathlib import Path
+import sqlite3
+import sys
+
+database_path = Path(sys.argv[1])
+database_uri = database_path.resolve(strict=True).as_uri() + "?mode=ro"
+connection = sqlite3.connect(database_uri, uri=True, timeout=5)
+try:
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(account_configs)"
+        ).fetchall()
+    }
+finally:
+    connection.close()
+print("0" if "is_enabled" in columns else "1")
+PY
+}
+
+refresh_backup_checksums() {
+  (
+    cd "$BACKUP_ROOT"
+    find . -type f \
+      ! -name SHA256SUMS \
+      ! -name SHA256SUMS.new \
+      -print0 \
+      | sort -z \
+      | xargs -0 sha256sum
+  ) > "$BACKUP_ROOT/SHA256SUMS.new"
+  mv "$BACKUP_ROOT/SHA256SUMS.new" "$BACKUP_ROOT/SHA256SUMS"
+}
 
 require_staging_artifact() {
   local path="$1"
@@ -1880,6 +1932,177 @@ rollback_restart_watcher_runtime() {
     echo "!! telegram-watcher rollback hash verification FAILED: $WATCHER_CONTAINER" >&2
     return 1
   }
+}
+write_watcher_mapping_rollback_evidence() {
+  local gate_status="$1"
+  local gate_error="$2"
+  local file_restore_status="$3"
+  local runtime_restore_status="$4"
+  local runtime_rollback_required="$5"
+  local runtime_rollback_attempted="$6"
+  python3 - \
+    "$FOUR_CHANNEL_MAPPING_ROLLBACK_EVIDENCE" \
+    "$FOUR_CHANNEL_MAPPING_EVIDENCE" \
+    "$WATCHER_RUNTIME_CHANGED_LIST" \
+    "$gate_status" \
+    "$gate_error" \
+    "$file_restore_status" \
+    "$runtime_restore_status" \
+    "$WATCHER_SCHEMA_RESTART_REQUIRED" \
+    "$runtime_rollback_required" \
+    "$runtime_rollback_attempted" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+output_path = Path(sys.argv[1])
+pre_restart_evidence = Path(sys.argv[2])
+changed_list = Path(sys.argv[3])
+gate_error = str(sys.argv[5])[:2048]
+runtime_rollback_required = sys.argv[9] == "1"
+runtime_rollback_attempted = sys.argv[10] == "1"
+payload = {
+    "schema_version": "trader-v3-four-channel-mapping-rollback/v2",
+    "captured_at": datetime.now(timezone.utc).isoformat(),
+    "strict_gate_status": int(sys.argv[4]),
+    "strict_gate_error": gate_error,
+    "pre_restart_evidence_sha256": sha256_file(pre_restart_evidence),
+    "changed_list_sha256": sha256_file(changed_list),
+    "watcher_schema_restart_required": sys.argv[8] == "1",
+    "file_restore_passed": int(sys.argv[6]) == 0,
+    "runtime_rollback_required": runtime_rollback_required,
+    "runtime_rollback_attempted": runtime_rollback_attempted,
+    "runtime_rollback_not_required": not runtime_rollback_required,
+    "runtime_rebuild_health_hash_passed": (
+        runtime_rollback_attempted and int(sys.argv[7]) == 0
+    ),
+}
+serialized = (
+    json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+).encode("utf-8")
+temporary = output_path.with_name(
+    f".{output_path.name}.{os.getpid()}.tmp"
+)
+descriptor = os.open(
+    temporary,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+    0o400,
+)
+try:
+    offset = 0
+    while offset < len(serialized):
+        offset += os.write(descriptor, serialized[offset:])
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+os.replace(temporary, output_path)
+os.chmod(output_path, 0o400)
+directory_descriptor = os.open(output_path.parent, os.O_RDONLY)
+try:
+    os.fsync(directory_descriptor)
+finally:
+    os.close(directory_descriptor)
+PY
+}
+restore_watcher_runtime_files() {
+  local release_path
+  local destination
+  local label
+  local indexed_destination
+  local restored
+  if [ "$BACKUP_CAPTURED" != "1" ] || [ "$FILES_INSTALLED" != "1" ]; then
+    return
+  fi
+  [ -f "$WATCHER_RUNTIME_CHANGED_LIST" ] \
+    || die "watcher rollback changed-list is missing"
+  while IFS=$'\t' read -r release_path destination; do
+    if [ -z "$release_path" ] || [ -z "$destination" ]; then
+      continue
+    fi
+    restored=0
+    while IFS=$'\t' read -r label indexed_destination; do
+      if [ "$indexed_destination" != "$destination" ]; then
+        continue
+      fi
+      cp -a -- "$BACKUP_ROOT/files/$label" "$destination" \
+        || die "watcher file rollback failed: $destination"
+      restored=1
+      break
+    done < "$BACKUP_ROOT/index.tsv"
+    if [ "$restored" = "1" ]; then
+      continue
+    fi
+    grep -Fxq "$destination" "$BACKUP_ROOT/new-files.txt" \
+      || die "watcher rollback source is missing: $destination"
+    rm -f -- "$destination" \
+      || die "watcher new file rollback failed: $destination"
+  done < "$WATCHER_RUNTIME_CHANGED_LIST"
+}
+verify_post_restart_four_channel_account_mapping() {
+  local gate_status=0
+  local gate_error=""
+  local file_restore_status=0
+  local runtime_restore_status=0
+  local runtime_rollback_required="$WATCHER_RESTARTED"
+  local runtime_rollback_attempted=0
+  if gate_error="$(
+    verify_four_channel_account_mapping \
+      "$FOUR_CHANNEL_MAPPING_POST_WATCHER_EVIDENCE" \
+      strict 2>&1
+  )"; then
+    return
+  else
+    gate_status=$?
+  fi
+  printf '%s\n' "$gate_error" >&2
+  echo "!! watcher strict mapping gate failed; restoring prior watcher runtime" >&2
+  if restore_watcher_runtime_files; then
+    file_restore_status=0
+  else
+    file_restore_status=$?
+  fi
+  if [ "$file_restore_status" = "0" ] \
+    && [ "$runtime_rollback_required" = "1" ]; then
+    runtime_rollback_attempted=1
+    if rollback_restart_watcher_runtime; then
+      runtime_restore_status=0
+    else
+      runtime_restore_status=$?
+    fi
+  elif [ "$file_restore_status" = "0" ]; then
+    runtime_restore_status=0
+  else
+    runtime_restore_status=1
+  fi
+  write_watcher_mapping_rollback_evidence \
+    "$gate_status" \
+    "$gate_error" \
+    "$file_restore_status" \
+    "$runtime_restore_status" \
+    "$runtime_rollback_required" \
+    "$runtime_rollback_attempted"
+  refresh_backup_checksums
+  if [ "$file_restore_status" != "0" ] \
+    || [ "$runtime_restore_status" != "0" ]; then
+    docker stop --time 30 "$WATCHER_CONTAINER" >/dev/null 2>&1 || true
+    return 1
+  fi
+  WATCHER_RESTARTED=0
+  return "$gate_status"
 }
 restore_installed_runtime_files() {
   local label
@@ -3823,7 +4046,17 @@ if [ "$DELIVERY_MODE" = "immutable_image" ]; then
   [ -f "$IMMUTABLE_BUILDER" ] || die "immutable image builder missing"
 fi
 command -v python3 >/dev/null || die "python3 missing"
-verify_four_channel_account_mapping
+verify_four_channel_account_mapping "" pre_restart
+WATCHER_SCHEMA_RESTART_REQUIRED="$(
+  detect_watcher_schema_restart_requirement
+)"
+case "$WATCHER_SCHEMA_RESTART_REQUIRED" in
+  0|1)
+    ;;
+  *)
+    die "watcher schema restart requirement is invalid"
+    ;;
+esac
 validate_watcher_runtime_payload
 command -v timeout >/dev/null || die "timeout missing"
 command -v docker >/dev/null || die "docker missing"
@@ -6232,6 +6465,7 @@ if [ "$DELIVERY_MODE" = "transition_bind_mount" ]; then
   [ "${#CHANGED_CONTAINER[@]}" -gt 0 ] \
     || [ "${#CHANGED_HOST[@]}" -gt 0 ] \
     || [ "$CHANGED_WATCHER_COUNT" -gt 0 ] \
+    || [ "$WATCHER_SCHEMA_RESTART_REQUIRED" = "1" ] \
     || [ "$CONTROL_PLANE_ISOLATION_REQUIRED" = "1" ] \
     || { echo "nothing to deploy"; exit 0; }
 fi
@@ -6343,7 +6577,9 @@ fi
 [ ! -e "$BACKUP_ROOT" ] || die "backup path exists: $BACKUP_ROOT"
 mkdir -p "$BACKUP_ROOT"
 chmod 0700 "$BACKUP_ROOT"
-verify_four_channel_account_mapping "$FOUR_CHANNEL_MAPPING_EVIDENCE"
+verify_four_channel_account_mapping \
+  "$FOUR_CHANNEL_MAPPING_EVIDENCE" \
+  pre_restart
 CONFIG_ARTIFACT_A=""
 CONFIG_ARTIFACT_B=""
 CONFIG_ARTIFACT_C=""
@@ -7306,7 +7542,10 @@ for node in "${RECREATE_NODES[@]}"; do
 done
 (
   cd "$BACKUP_ROOT"
-  find . -type f ! -name SHA256SUMS -print0 \
+  find . -type f \
+    ! -name SHA256SUMS \
+    ! -name SHA256SUMS.new \
+    -print0 \
     | sort -z \
     | xargs -0 sha256sum
 ) > "$BACKUP_ROOT/SHA256SUMS.new"
@@ -7419,6 +7658,9 @@ for h in "${CHANGED_HOST[@]:-}"; do
     install_watcher_runtime_atomically "$WATCHER_RUNTIME_CHANGED_LIST"
     WATCHER_RESTART_REQUIRED=1
   fi
+  if [ "$WATCHER_SCHEMA_RESTART_REQUIRED" = "1" ]; then
+    WATCHER_RESTART_REQUIRED=1
+  fi
 	cmp -s host/exchange_state_recorder.py "$EXCHANGE_STATE_RECORDER_TGT" \
 	  || die "post-install mismatch: host/exchange_state_recorder.py"
 	cmp -s host/hermes_signal_feeder.py "$HERMES_FEEDER_TGT" \
@@ -7431,8 +7673,10 @@ for h in "${CHANGED_HOST[@]:-}"; do
 	printf '%s release_id=%s deployed_at=%s\n' \
 	  "$RELEASE_COMMIT" "$RELEASE_ID" "$STAMP" > "$T/DEPLOYED_COMMIT.txt"
 	echo "== files installed"
-  restart_watcher_runtime
-  restart_exchange_state_recorder
+	restart_watcher_runtime
+  verify_post_restart_four_channel_account_mapping
+  refresh_backup_checksums
+	restart_exchange_state_recorder
 	restart_hermes_units
 
 # ---------- recreate & verify ----------
@@ -7477,7 +7721,10 @@ if [ "$ROLLOUT_NODE" = "trader-v3-node-b" ]; then
     "$BACKUP_ROOT/account-b-gate/account-a-safety-post.json"
   (
     cd "$BACKUP_ROOT"
-    find . -type f ! -name SHA256SUMS -print0 \
+    find . -type f \
+      ! -name SHA256SUMS \
+      ! -name SHA256SUMS.new \
+      -print0 \
       | sort -z \
       | xargs -0 sha256sum
   ) > "$BACKUP_ROOT/SHA256SUMS.new"

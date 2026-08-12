@@ -189,16 +189,40 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" \
     'WATCHER_TRADING_DB="${WATCHER_TRADING_DB:-/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db}"'
   assert_contains "$text" \
-    'FOUR_CHANNEL_MAPPING_EVIDENCE="$BACKUP_ROOT/four-channel-account-mapping.json"'
+    'FOUR_CHANNEL_MAPPING_EVIDENCE="$BACKUP_ROOT/four-channel-account-mapping-pre-watcher.json"'
+  assert_contains "$text" \
+    'FOUR_CHANNEL_MAPPING_POST_WATCHER_EVIDENCE="$BACKUP_ROOT/four-channel-account-mapping-post-watcher.json"'
+  assert_contains "$text" \
+    'FOUR_CHANNEL_MAPPING_ROLLBACK_EVIDENCE="$BACKUP_ROOT/four-channel-account-mapping-rollback.json"'
   assert_contains "$text" 'verify_four_channel_account_mapping'
   assert_contains "$text" \
-    '"schema_version": "trader-v3-four-channel-account-mapping/v1"'
+    '"schema_version": "trader-v3-four-channel-account-mapping/v2"'
+  assert_contains "$text" \
+    'verify_four_channel_account_mapping "" pre_restart'
+  assert_contains "$text" \
+    'dynamic-routing-columns-present/enabled-column-optional-v1'
+  assert_contains "$text" \
+    'detect_watcher_schema_restart_requirement'
+  assert_contains "$text" \
+    'if [ "$WATCHER_SCHEMA_RESTART_REQUIRED" = "1" ]; then'
   assert_contains "$text" 'connection.execute("PRAGMA query_only = ON")'
   assert_contains "$text" 'connection.execute("BEGIN")'
   assert_contains "$text" 'connection.execute("PRAGMA quick_check")'
   assert_contains "$text" 'os.fchmod(file_descriptor, 0o400)'
   assert_contains "$text" \
-    'verify_four_channel_account_mapping "$FOUR_CHANNEL_MAPPING_EVIDENCE"'
+    '"$FOUR_CHANNEL_MAPPING_EVIDENCE" \'
+  assert_contains "$text" \
+    '"$FOUR_CHANNEL_MAPPING_POST_WATCHER_EVIDENCE" \'
+  assert_contains "$text" \
+    'verify_post_restart_four_channel_account_mapping'
+  assert_contains "$text" \
+    'restore_watcher_runtime_files'
+  assert_contains "$text" \
+    'watcher strict mapping gate failed; restoring prior watcher runtime'
+  assert_contains "$text" \
+    'write_watcher_mapping_rollback_evidence'
+  assert_contains "$text" \
+    'runtime_rebuild_health_hash_passed'
   assert_contains "$text" \
     'WATCHER_COMPOSE_SERVICE="${WATCHER_COMPOSE_SERVICE:-watcher}"'
   assert_contains "$text" \
@@ -1201,6 +1225,272 @@ EOF
     "docker exec -i trader-watcher-1 python3 -"
 }
 
+test_strict_watcher_mapping_failure_restores_prior_runtime() {
+  local case_dir="$TMP_DIR/watcher-strict-mapping-rollback"
+  local fake_bin="$case_dir/bin"
+  local backup_root="$case_dir/backup"
+  local files_root="$backup_root/files"
+  local watcher_project_root="$case_dir/srv-trader"
+  local watcher_root="$watcher_project_root/services/telegram-watcher"
+  local destination="$watcher_root/server.js"
+  local changed_list="$backup_root/watcher-runtime-changed.tsv"
+  local manifest="$case_dir/watcher-runtime-manifest.json"
+  local log="$case_dir/actions.log"
+  local compose_definition
+  local health_definition
+  local rollback_container_definition
+  local rollback_definition
+  local restore_definition
+  local evidence_definition
+  local checksum_definition
+  local verify_definition
+  mkdir -p "$fake_bin" "$files_root" "$watcher_root"
+  printf 'old-watcher-runtime\n' >"$files_root/watcher__fixture__server.js"
+  printf 'new-watcher-runtime\n' >"$destination"
+  printf 'watcher__fixture__server.js\t%s\n' "$destination" \
+    >"$backup_root/index.tsv"
+  : >"$backup_root/new-files.txt"
+  printf 'watcher/server.js\t%s\n' "$destination" >"$changed_list"
+  printf '{"schema_version":"pre-restart"}\n' \
+    >"$backup_root/four-channel-account-mapping-pre-watcher.json"
+  : >"$watcher_project_root/docker-compose.yml"
+  python3 - "$manifest" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+runtime = b"old-watcher-runtime\n"
+payload = {
+    "schema_version": "trader-v3-watcher-runtime-manifest/v1",
+    "files": [
+        {
+            "release_path": "watcher/server.js",
+            "target_path": "/app/server.js",
+            "sha256": hashlib.sha256(runtime).hexdigest(),
+            "size": len(runtime),
+        }
+    ],
+}
+Path(sys.argv[1]).write_text(json.dumps(payload), encoding="utf-8")
+PY
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >>"$WATCHER_MAPPING_TEST_LOG"
+printf '{"configured":true,"connected":true,"loggedIn":true,"watchGroups":[]}\n'
+EOF
+  cat >"$fake_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >>"$WATCHER_MAPPING_TEST_LOG"
+if [ "$1" = "inspect" ]; then
+  printf 'true\n'
+  exit 0
+fi
+if [ "$1" = "exec" ]; then
+  payload="$(cat)"
+  case "$payload" in
+    *'/app/server.js'*'watcher rollback container hash mismatch'*)
+      exit 0
+      ;;
+    *)
+      printf 'unexpected docker exec payload\n' >&2
+      exit 19
+      ;;
+  esac
+fi
+if [ "$1" = "compose" ]; then
+  exit 0
+fi
+exit 17
+EOF
+  chmod +x "$fake_bin/curl" "$fake_bin/docker"
+  compose_definition=$(extract_function docker_compose_watcher)
+  health_definition=$(extract_function verify_watcher_health)
+  rollback_container_definition=$(
+    extract_function verify_watcher_container_runtime_rollback
+  )
+  rollback_definition=$(extract_function rollback_restart_watcher_runtime)
+  restore_definition=$(extract_function restore_watcher_runtime_files)
+  evidence_definition=$(
+    extract_function_until \
+      write_watcher_mapping_rollback_evidence \
+      restore_watcher_runtime_files
+  )
+  checksum_definition=$(extract_function refresh_backup_checksums)
+  verify_definition=$(
+    extract_function verify_post_restart_four_channel_account_mapping
+  )
+
+  PATH="$fake_bin:$PATH" \
+  BACKUP_ROOT="$backup_root" \
+  WATCHER_RUNTIME_CHANGED_LIST="$changed_list" \
+  WATCHER_RUNTIME_MANIFEST="$manifest" \
+  WATCHER_ROOT="$watcher_project_root" \
+  WATCHER_SOURCE_ROOT="$watcher_root" \
+  WATCHER_COMPOSE_FILE="$watcher_project_root/docker-compose.yml" \
+  WATCHER_COMPOSE_PROJECT="trader" \
+  WATCHER_COMPOSE_SERVICE="watcher" \
+  WATCHER_CONTAINER="trader-watcher-1" \
+  WATCHER_HEALTH_URL="http://127.0.0.1:9090/api/status" \
+  FOUR_CHANNEL_MAPPING_EVIDENCE="$backup_root/four-channel-account-mapping-pre-watcher.json" \
+  FOUR_CHANNEL_MAPPING_POST_WATCHER_EVIDENCE="$case_dir/evidence.json" \
+  FOUR_CHANNEL_MAPPING_ROLLBACK_EVIDENCE="$backup_root/four-channel-account-mapping-rollback.json" \
+  DESTINATION="$destination" \
+  WATCHER_MAPPING_TEST_LOG="$log" \
+  COMPOSE_DEFINITION="$compose_definition" \
+  HEALTH_DEFINITION="$health_definition" \
+  ROLLBACK_CONTAINER_DEFINITION="$rollback_container_definition" \
+  ROLLBACK_DEFINITION="$rollback_definition" \
+  RESTORE_DEFINITION="$restore_definition" \
+  EVIDENCE_DEFINITION="$evidence_definition" \
+  CHECKSUM_DEFINITION="$checksum_definition" \
+  VERIFY_DEFINITION="$verify_definition" \
+  BACKUP_CAPTURED=1 \
+  FILES_INSTALLED=1 \
+  WATCHER_SCHEMA_RESTART_REQUIRED=1 \
+  WATCHER_RESTARTED=1 \
+    bash -c '
+      set -Eeuo pipefail
+      die() {
+        printf "die %s\n" "$*" >>"$WATCHER_MAPPING_TEST_LOG"
+        return 1
+      }
+      verify_four_channel_account_mapping() {
+        printf "strict-gate %s %s\n" "$1" "$2" \
+          >>"$WATCHER_MAPPING_TEST_LOG"
+        return 23
+      }
+      eval "$COMPOSE_DEFINITION"
+      eval "$HEALTH_DEFINITION"
+      eval "$ROLLBACK_CONTAINER_DEFINITION"
+      eval "$ROLLBACK_DEFINITION"
+      eval "$RESTORE_DEFINITION"
+      eval "$EVIDENCE_DEFINITION"
+      eval "$CHECKSUM_DEFINITION"
+      eval "$VERIFY_DEFINITION"
+      set +e
+      verify_post_restart_four_channel_account_mapping
+      status=$?
+      set -e
+      printf "status=%s restarted=%s\n" \
+        "$status" "$WATCHER_RESTARTED" >>"$WATCHER_MAPPING_TEST_LOG"
+      [ "$status" -eq 23 ]
+      [ "$WATCHER_RESTARTED" -eq 0 ]
+    '
+
+  if [ "$(cat "$destination")" != "old-watcher-runtime" ]; then
+    fail "strict watcher mapping failure did not restore prior runtime"
+  fi
+  assert_contains "$(cat "$log")" \
+    "strict-gate $case_dir/evidence.json strict"
+  assert_contains "$(cat "$log")" \
+    "docker compose --project-name trader --file $watcher_project_root/docker-compose.yml build watcher"
+  assert_contains "$(cat "$log")" \
+    "docker compose --project-name trader --file $watcher_project_root/docker-compose.yml up -d --no-deps --force-recreate watcher"
+  assert_contains "$(cat "$log")" \
+    "curl -sf http://127.0.0.1:9090/api/status"
+  assert_contains "$(cat "$log")" \
+    "docker exec -i trader-watcher-1 python3 -"
+  assert_contains "$(cat "$log")" "status=23 restarted=0"
+  python3 - "$backup_root/four-channel-account-mapping-rollback.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert payload["schema_version"] == (
+    "trader-v3-four-channel-mapping-rollback/v2"
+)
+assert payload["strict_gate_status"] == 23
+assert payload["file_restore_passed"] is True
+assert payload["runtime_rollback_required"] is True
+assert payload["runtime_rollback_attempted"] is True
+assert payload["runtime_rollback_not_required"] is False
+assert payload["runtime_rebuild_health_hash_passed"] is True
+assert payload["watcher_schema_restart_required"] is True
+PY
+  (
+    cd "$backup_root"
+    sha256sum -c SHA256SUMS >/dev/null
+  )
+
+  : >"$log"
+  PATH="$fake_bin:$PATH" \
+  BACKUP_ROOT="$backup_root" \
+  WATCHER_RUNTIME_CHANGED_LIST="$changed_list" \
+  WATCHER_RUNTIME_MANIFEST="$manifest" \
+  WATCHER_ROOT="$watcher_project_root" \
+  WATCHER_SOURCE_ROOT="$watcher_root" \
+  WATCHER_COMPOSE_FILE="$watcher_project_root/docker-compose.yml" \
+  WATCHER_COMPOSE_PROJECT="trader" \
+  WATCHER_COMPOSE_SERVICE="watcher" \
+  WATCHER_CONTAINER="trader-watcher-1" \
+  WATCHER_HEALTH_URL="http://127.0.0.1:9090/api/status" \
+  FOUR_CHANNEL_MAPPING_EVIDENCE="$backup_root/four-channel-account-mapping-pre-watcher.json" \
+  FOUR_CHANNEL_MAPPING_POST_WATCHER_EVIDENCE="$case_dir/evidence.json" \
+  FOUR_CHANNEL_MAPPING_ROLLBACK_EVIDENCE="$backup_root/four-channel-account-mapping-rollback.json" \
+  WATCHER_MAPPING_TEST_LOG="$log" \
+  COMPOSE_DEFINITION="$compose_definition" \
+  HEALTH_DEFINITION="$health_definition" \
+  ROLLBACK_CONTAINER_DEFINITION="$rollback_container_definition" \
+  ROLLBACK_DEFINITION="$rollback_definition" \
+  RESTORE_DEFINITION="$restore_definition" \
+  EVIDENCE_DEFINITION="$evidence_definition" \
+  CHECKSUM_DEFINITION="$checksum_definition" \
+  VERIFY_DEFINITION="$verify_definition" \
+  BACKUP_CAPTURED=1 \
+  FILES_INSTALLED=0 \
+  WATCHER_SCHEMA_RESTART_REQUIRED=0 \
+  WATCHER_RESTARTED=0 \
+    bash -c '
+      set -Eeuo pipefail
+      die() {
+        printf "die %s\n" "$*" >>"$WATCHER_MAPPING_TEST_LOG"
+        return 1
+      }
+      verify_four_channel_account_mapping() {
+        printf "strict-gate %s %s\n" "$1" "$2" \
+          >>"$WATCHER_MAPPING_TEST_LOG"
+        return 23
+      }
+      eval "$COMPOSE_DEFINITION"
+      eval "$HEALTH_DEFINITION"
+      eval "$ROLLBACK_CONTAINER_DEFINITION"
+      eval "$ROLLBACK_DEFINITION"
+      eval "$RESTORE_DEFINITION"
+      eval "$EVIDENCE_DEFINITION"
+      eval "$CHECKSUM_DEFINITION"
+      eval "$VERIFY_DEFINITION"
+      set +e
+      verify_post_restart_four_channel_account_mapping
+      status=$?
+      set -e
+      printf "status=%s restarted=%s\n" \
+        "$status" "$WATCHER_RESTARTED" >>"$WATCHER_MAPPING_TEST_LOG"
+      [ "$status" -eq 23 ]
+      [ "$WATCHER_RESTARTED" -eq 0 ]
+    '
+  assert_contains "$(cat "$log")" \
+    "strict-gate $case_dir/evidence.json strict"
+  assert_contains "$(cat "$log")" "status=23 restarted=0"
+  assert_not_contains "$(cat "$log")" "docker "
+  assert_not_contains "$(cat "$log")" "curl "
+  python3 - "$backup_root/four-channel-account-mapping-rollback.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert payload["runtime_rollback_required"] is False
+assert payload["runtime_rollback_attempted"] is False
+assert payload["runtime_rollback_not_required"] is True
+assert payload["runtime_rebuild_health_hash_passed"] is False
+assert payload["watcher_schema_restart_required"] is False
+PY
+  (
+    cd "$backup_root"
+    sha256sum -c SHA256SUMS >/dev/null
+  )
+}
+
 make_materials() {
   local deploy_dir="$1"
   local files=(
@@ -1526,6 +1816,7 @@ test_migration_expectations_have_separate_schema_contracts
 test_on_err_uses_compatible_recovery_after_migration
 test_on_err_selects_post_migration_recovery_branch
 test_watcher_restart_and_rollback_use_compose_health_and_hash_gate
+test_strict_watcher_mapping_failure_restores_prior_runtime
 test_root_window_preflight_covers_stage5_inputs
 test_root_window_fails_when_binance_destination_is_missing
 test_verify_requires_patch_destination
