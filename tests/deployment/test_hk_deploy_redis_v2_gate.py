@@ -22,12 +22,32 @@ RUNTIME_CHECKS = {
     "epoch_marker_persisted": True,
     "memory_limit_matches": True,
     "memory_swap_is_finite": True,
+    "maxmemory_is_explicit": True,
     "maxmemory_policy_noeviction": True,
+    "namespace_schema_epoch_bound": True,
     "nodes_stopped": True,
     "rdb_status_ok": True,
     "save_policy_configured": True,
     "source_container_preserved": True,
     "source_run_id_changed": True,
+    "stable_namespaces_bound": True,
+    "stream_retention_configured": True,
+    "swap_disabled": True,
+}
+RUNTIME_RESOURCE_POLICY = {
+    "schema_version": "trader-v3-runtime-resources/v1",
+    "namespace_schema_epoch": REDIS_SCHEMA_EPOCH,
+    "stable_namespaces": {
+        "account-a": "trader-TRADER-ACCOUNT-A",
+        "account-b": "trader-TRADER-ACCOUNT-B",
+        "account-c": "trader-TRADER-ACCOUNT-C",
+        "account-d": "trader-TRADER-ACCOUNT-D",
+    },
+    "stream_retention": {
+        "stream_max_entries": 100_000,
+        "stream_max_bytes": 64 * 1024**2,
+        "total_stream_max_bytes": 256 * 1024**2,
+    },
 }
 
 
@@ -158,6 +178,40 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
         }
         self.backup_path = self.evidence_root / "cold-backup-manifest.json"
         self.capacity_path = self.evidence_root / "capacity-evidence.json"
+        self.risk_policy_path = self.evidence_root / "live-risk-policy.json"
+        self.risk_policy_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "trader-v3-live-risk-policy/v2",
+                    "entry_contract": {},
+                    "legacy_migration_contract": {},
+                    "runtime_resource_contract": {
+                        "schema_version": (
+                            "trader-v3-runtime-resources/v1"
+                        ),
+                        "command_journal": {
+                            "max_bytes": 16 * 1024**2,
+                        },
+                        "redis": {
+                            "critical_window_seconds": 30,
+                            "memory_critical_ratio": 0.85,
+                            "memory_degraded_ratio": 0.75,
+                            "memory_warning_ratio": 0.6,
+                            "sample_interval_seconds": 5,
+                            "scan_count": 500,
+                            "stream_max_bytes": 64 * 1024**2,
+                            "stream_max_entries": 100_000,
+                            "thread_join_timeout_seconds": 5,
+                            "total_stream_max_bytes": 256 * 1024**2,
+                        },
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         self._write_backup()
 
         maxmemory = 2 * 1024**3
@@ -262,6 +316,9 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
                 "trader-v3-redis-legacy-20260808T000000Z"
             ),
             "nodes_stopped": True,
+            "runtime_resource_policy": json.loads(
+                json.dumps(RUNTIME_RESOURCE_POLICY)
+            ),
             "runtime_checks": dict(RUNTIME_CHECKS),
         }
         self._write_capacity()
@@ -292,6 +349,7 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
                 str(self.capacity_path),
                 str(self.trusted_root),
                 REDIS_SCHEMA_EPOCH,
+                str(self.risk_policy_path),
             ],
             cwd=REPO_ROOT,
             text=True,
@@ -365,6 +423,7 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
                 str(self.capacity_path),
                 str(self.trusted_root),
                 "stable-account-namespace/v1",
+                str(self.risk_policy_path),
             ],
             cwd=REPO_ROOT,
             text=True,
@@ -430,6 +489,11 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
             ),
             "control key reset": lambda: self.capacity.update(
                 {"control_keys_reinitialized": False}
+            ),
+            "runtime resource policy": lambda: self.capacity[
+                "runtime_resource_policy"
+            ]["stream_retention"].update(
+                {"stream_max_entries": 99_999}
             ),
         }
         original = json.loads(json.dumps(self.capacity))

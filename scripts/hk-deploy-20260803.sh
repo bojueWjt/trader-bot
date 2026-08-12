@@ -4296,7 +4296,8 @@ python3 - \
   "$REDIS_COLD_BACKUP_MANIFEST" \
   "$REDIS_CAPACITY_EVIDENCE" \
   "$T/redis-rebaseline" \
-  "$REDIS_SCHEMA_EPOCH" <<'PY'
+  "$REDIS_SCHEMA_EPOCH" \
+  "$LIVE_RISK_POLICY" <<'PY'
 # REDIS_EVIDENCE_V3_VALIDATOR_BEGIN
 from __future__ import annotations
 
@@ -4315,8 +4316,10 @@ backup_path = Path(sys.argv[1]).resolve()
 capacity_path = Path(sys.argv[2]).resolve()
 trusted_root = Path(sys.argv[3]).resolve()
 expected_redis_epoch = sys.argv[4]
+risk_policy_path = Path(sys.argv[5]).resolve()
 backup = json.loads(backup_path.read_text(encoding="utf-8"))
 capacity = json.loads(capacity_path.read_text(encoding="utf-8"))
+risk_policy = json.loads(risk_policy_path.read_text(encoding="utf-8"))
 if backup.get("schema_version") != "trader-v3-redis-cold-backup/v2":
     raise SystemExit("Redis cold backup schema mismatch")
 if capacity.get("schema_version") != "trader-v3-redis-capacity-evidence/v3":
@@ -4404,6 +4407,7 @@ capacity_fields = {
     "source_redis_run_id",
     "legacy_container",
     "nodes_stopped",
+    "runtime_resource_policy",
     "runtime_checks",
 }
 if set(backup) != backup_fields:
@@ -4435,6 +4439,60 @@ def require_text(document, key):
     if not isinstance(value, str) or not value.strip():
         raise SystemExit(f"Redis evidence text is invalid: {key}")
     return value.strip()
+
+
+if risk_policy.get("schema_version") != "trader-v3-live-risk-policy/v2":
+    raise SystemExit("live risk policy schema mismatch")
+runtime_resource_contract = risk_policy.get("runtime_resource_contract")
+if not isinstance(runtime_resource_contract, dict):
+    raise SystemExit("live risk runtime resource contract is missing")
+if runtime_resource_contract.get("schema_version") != (
+    "trader-v3-runtime-resources/v1"
+):
+    raise SystemExit("live risk runtime resource schema mismatch")
+redis_resource_contract = runtime_resource_contract.get("redis")
+if not isinstance(redis_resource_contract, dict):
+    raise SystemExit("live risk Redis resource contract is missing")
+expected_runtime_resource_policy = {
+    "schema_version": runtime_resource_contract["schema_version"],
+    "namespace_schema_epoch": expected_redis_epoch,
+    "stable_namespaces": {
+        "account-a": "trader-TRADER-ACCOUNT-A",
+        "account-b": "trader-TRADER-ACCOUNT-B",
+        "account-c": "trader-TRADER-ACCOUNT-C",
+        "account-d": "trader-TRADER-ACCOUNT-D",
+    },
+    "stream_retention": {
+        "stream_max_entries": require_int(
+            redis_resource_contract,
+            "stream_max_entries",
+            minimum=1,
+        ),
+        "stream_max_bytes": require_int(
+            redis_resource_contract,
+            "stream_max_bytes",
+            minimum=1,
+        ),
+        "total_stream_max_bytes": require_int(
+            redis_resource_contract,
+            "total_stream_max_bytes",
+            minimum=1,
+        ),
+    },
+}
+if (
+    expected_runtime_resource_policy["stream_retention"][
+        "total_stream_max_bytes"
+    ]
+    < expected_runtime_resource_policy["stream_retention"][
+        "stream_max_bytes"
+    ]
+):
+    raise SystemExit("live risk Redis stream retention is invalid")
+if capacity.get("runtime_resource_policy") != expected_runtime_resource_policy:
+    raise SystemExit(
+        "Redis capacity runtime resource policy differs from release"
+    )
 
 
 def parse_timestamp(document, key):
@@ -4887,12 +4945,17 @@ expected_runtime_checks = {
     "epoch_marker_persisted",
     "memory_limit_matches",
     "memory_swap_is_finite",
+    "maxmemory_is_explicit",
     "maxmemory_policy_noeviction",
+    "namespace_schema_epoch_bound",
     "nodes_stopped",
     "rdb_status_ok",
     "save_policy_configured",
     "source_container_preserved",
     "source_run_id_changed",
+    "stable_namespaces_bound",
+    "stream_retention_configured",
+    "swap_disabled",
 }
 if not isinstance(runtime_checks, dict):
     raise SystemExit("Redis capacity runtime checks are missing")
