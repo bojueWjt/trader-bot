@@ -3298,6 +3298,39 @@ def _active_reviewed_rollout(cur) -> dict | None:
     }
 
 
+def _peer_awaits_rollout_step(
+    *,
+    trading_state: str,
+    peer_account_id: str,
+    release_identity: tuple[
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ],
+    rollout_phase: str | None,
+) -> bool:
+    # During an active reviewed rollout the accounts are recreated in
+    # ladder order (a canary, then b, c, d).  A HALTED reporter must
+    # tolerate peers whose ladder step has not completed yet — the peer
+    # currently being recreated and every later one — otherwise the
+    # canary can never reach ready.  A LIVE reporter never tolerates a
+    # missing peer, and outside an active rollout phase (fleet_complete,
+    # aborted) no tolerance applies.
+    if trading_state != "HALTED" or not release_identity[0]:
+        return False
+    if rollout_phase not in _ACTIVE_ROLLOUT_PHASES:
+        return False
+    peer_phase = _CANARY_PHASE_BY_ACCOUNT.get(peer_account_id)
+    if peer_phase is None:
+        return False
+    return (
+        _ACTIVE_ROLLOUT_PHASES.index(peer_phase)
+        >= _ACTIVE_ROLLOUT_PHASES.index(rollout_phase)
+    )
+
+
 def _missing_peer_status(
     *,
     account_id: str,
@@ -3312,12 +3345,11 @@ def _missing_peer_status(
     ],
     rollout_phase: str | None,
 ) -> str:
-    if (
-        account_id == "account-a"
-        and trading_state == "HALTED"
-        and peer_account_id == "account-b"
-        and rollout_phase == _ROLLOUT_PHASE_ACCOUNT_A_CANARY
-        and release_identity[0]
+    if _peer_awaits_rollout_step(
+        trading_state=trading_state,
+        peer_account_id=peer_account_id,
+        release_identity=release_identity,
+        rollout_phase=rollout_phase,
     ):
         return "rollout_pending"
     return "missing"
@@ -3350,21 +3382,21 @@ def _peer_release_status(
 ) -> str:
     if fresh and identity_matches:
         return "consistent"
-    if (
-        account_id == "account-a"
-        and trading_state == "HALTED"
-        and peer_account_id == "account-b"
-        and rollout_phase == _ROLLOUT_PHASE_ACCOUNT_A_CANARY
-        and release_identity[0]
+    if _peer_awaits_rollout_step(
+        trading_state=trading_state,
+        peer_account_id=peer_account_id,
+        release_identity=release_identity,
+        rollout_phase=rollout_phase,
     ):
         return "rollout_pending"
+    # An old-release reporter must tolerate a fresh HALTED peer that is
+    # already on the actively rolling-out release: that peer is ahead of
+    # the reporter on the ladder, not drifted.
     if (
-        account_id == "account-b"
-        and peer_account_id == "account-a"
-        and fresh
+        fresh
         and peer_trading_state == "HALTED"
         and active_rollout is not None
-        and active_rollout["phase"] == _ROLLOUT_PHASE_ACCOUNT_A_CANARY
+        and active_rollout["phase"] in _ACTIVE_ROLLOUT_PHASES
         and peer_identity[0] == active_rollout["release_id"]
     ):
         return "rollout_pending"
