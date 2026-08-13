@@ -1665,6 +1665,7 @@ activate_control_plane_topology() {
   CONTROL_PLANE_RESTARTED=1
   if [[ "${DEPLOY_GATE_MODE:-maintenance_fence}" =~ ^bootstrap(_resume)?_stopped$ ]]; then
     TRADER_ROOT="$T" \
+    ACCOUNT_STALL_SYSTEMD_RESOURCE_ROOT="$STAGING/infra/systemd" \
     CONTROL_PLANE_ISOLATION_BACKUP_ROOT="$BACKUP_ROOT/control-plane-isolation" \
     LEGACY_CONTROL_PLANE_UNIT="$LEGACY_CONTROL_PLANE_UNIT" \
     ACCOUNT_STALL_MAINTENANCE_FENCE_OWNERSHIP="bootstrap_stopped" \
@@ -1674,6 +1675,7 @@ activate_control_plane_topology() {
       bash "$CONTROL_PLANE_ISOLATION_SCRIPT"
   else
     TRADER_ROOT="$T" \
+    ACCOUNT_STALL_SYSTEMD_RESOURCE_ROOT="$STAGING/infra/systemd" \
     CONTROL_PLANE_ISOLATION_BACKUP_ROOT="$BACKUP_ROOT/control-plane-isolation" \
     LEGACY_CONTROL_PLANE_UNIT="$LEGACY_CONTROL_PLANE_UNIT" \
       bash "$CONTROL_PLANE_ISOLATION_SCRIPT"

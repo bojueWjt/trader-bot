@@ -277,6 +277,7 @@ CONTROL_PLANE_RESTARTED=0
 CONTROL_PLANE_TOPOLOGY=
 LEGACY_CONTROL_PLANE_UNIT={legacy_unit}
 T={tmp_path / "trader-v3"}
+STAGING={tmp_path / "staging"}
 BACKUP_ROOT={tmp_path / "backup"}
 verify_maintenance_fence() {{ return 0; }}
 discover_control_plane_units
@@ -340,6 +341,7 @@ CONTROL_PLANE_RESTARTED=0
 CONTROL_PLANE_TOPOLOGY=
 LEGACY_CONTROL_PLANE_UNIT={legacy_unit}
 T={tmp_path / "trader-v3"}
+STAGING={tmp_path / "staging"}
 BACKUP_ROOT={tmp_path / "backup"}
 verify_maintenance_fence() {{ return 0; }}
 discover_control_plane_units
