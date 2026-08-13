@@ -82,6 +82,10 @@ class HealthService:
             status_code=200 if ready else 503,
             body={
                 "ready": ready,
+                # Identity fields let deploy-side quiesce checks assert
+                # they are talking to the intended account's node.
+                "account_id": self._lifecycle.config.account_id,
+                "node_id": self._lifecycle.config.node_id,
                 "missing": [dependency.value for dependency in readiness.missing],
                 "trading_state": self._lifecycle.trading_state.value,
                 "halt_reason": self._lifecycle.halt_reason,

@@ -1037,3 +1037,19 @@ def _wait_until(predicate, timeout: float) -> bool:
             return True
         time.sleep(0.001)
     return bool(predicate())
+
+
+def test_readiness_payload_carries_node_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Deploy-side quiesce checks assert the /ready endpoint they reached
+    # belongs to the intended account, so the readiness payload must
+    # carry the node's identity fields.
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    health = HealthService(lifecycle)
+
+    response = health.readiness()
+
+    assert response.body["account_id"] == config.account_id
+    assert response.body["node_id"] == config.node_id
