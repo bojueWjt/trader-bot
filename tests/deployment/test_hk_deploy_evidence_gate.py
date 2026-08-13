@@ -271,7 +271,7 @@ class AccountBEvidenceGateTest(unittest.TestCase):
             "image_digest": "sha256:" + ("1" * 64),
             "config_sha256": "2" * 64,
             "dependency_lock_sha256": "3" * 64,
-            "schema_epoch": DATABASE_SCHEMA_EPOCH,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
         }
         base_capacity = {
             "redis_fencing_epoch": "redis-epoch-a",
@@ -317,7 +317,7 @@ class AccountBEvidenceGateTest(unittest.TestCase):
                     state_manifest_payload["image_digest"],
                     state_manifest_payload["config_sha256"],
                     state_manifest_payload["dependency_lock_sha256"],
-                    state_manifest_payload["schema_epoch"],
+                    state_manifest_payload["schema_epochs"]["db"],
                     hashlib.sha256(state_manifest_bytes).hexdigest(),
                     bundle_sha256,
                     "bootstrap-register:"
@@ -949,7 +949,7 @@ def connect(_url):
             "image_digest": "sha256:" + ("4" * 64),
             "config_sha256": "2" * 64,
             "dependency_lock_sha256": "3" * 64,
-            "schema_epoch": DATABASE_SCHEMA_EPOCH,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
         }
 
         result = self._run_deploy_gate_mode_detector(

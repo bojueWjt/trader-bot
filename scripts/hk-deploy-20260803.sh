@@ -1310,7 +1310,10 @@ try:
                     manifest.get("image_digest"),
                     manifest.get("config_sha256"),
                     manifest.get("dependency_lock_sha256"),
-                    manifest.get("schema_epoch"),
+                    # Registration derives schema_epoch from the db entry
+                    # of the schema_epochs map; the release manifest has
+                    # no top-level schema_epoch key.
+                    (manifest.get("schema_epochs") or {}).get("db"),
                     hashlib.sha256(manifest_bytes).hexdigest(),
                     hashlib.sha256(bundle_bytes).hexdigest(),
                     f"bootstrap-register:{manifest.get('release_id')}",
