@@ -8083,6 +8083,11 @@ if [ "$ROLLOUT_NODE" = "trader-v3-node-a" ] \
       'import json,sys; print(json.load(open(sys.argv[1]))["host_path"])' \
       "$CONFIG_RECORD_D"
   )"
+  # The node container reads /cfg.json as the image's nautilus user
+  # (uid 999); the artifacts are written read-only for root under
+  # umask 077, so hand them to that uid without widening the mode.
+  chown 999:999 "$CONFIG_ARTIFACT_ROOT"/account-*/*.json \
+    || die "cannot assign config artifacts to the container user"
   echo "== immutable reviewed account-a through account-d config artifacts prepared"
 elif [ "$DEPLOY_GATE_MODE" = "bootstrap_resume_stopped" ]; then
   echo "== bootstrap resume will reuse the signed account-a release manifest"
