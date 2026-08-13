@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -432,6 +434,29 @@ def test_context_contains_numbered_python_payload_only(tmp_path: Path) -> None:
         for item in copied
     } == set(expected_payloads)
     assert len(copied) == len(EXPECTED_IMMUTABLE_ENTRIES)
+
+
+def test_context_payload_modes_survive_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    bundle_manifest = _write_bundle(tmp_path / "bundle")
+    dependency_lock = _write_reviewed_lock(bundle_manifest)
+    context = tmp_path / "context"
+
+    previous_umask = os.umask(0o077)
+    try:
+        builder.prepare_build_context(
+            bundle_manifest,
+            context,
+            dependency_lock,
+        )
+    finally:
+        os.umask(previous_umask)
+
+    payload_files = sorted((context / "payload").iterdir())
+    assert payload_files
+    for path in payload_files:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644, path.name
 
 
 def test_context_rejects_non_python_config_payload(tmp_path: Path) -> None:

@@ -81,6 +81,10 @@ def prepare_build_context(
         source = bundle_manifest.parent / item["bundle_path"]
         destination = payload_dir / context_name
         shutil.copyfile(source, destination)
+        # COPY preserves context file modes and the image runs as a
+        # non-root user; pin 0o644 so the caller's umask cannot produce
+        # unreadable in-image payloads.
+        os.chmod(destination, 0o644)
         if destination.stat().st_size != source.stat().st_size:
             raise ImmutableBuildError(
                 f"context copy size mismatch: {item['bundle_path']}"
@@ -125,6 +129,7 @@ def prepare_build_context(
     )
     inventory_payload = payload_dir / "dependency-inventory.json"
     shutil.copyfile(inventory_release_path, inventory_payload)
+    os.chmod(inventory_payload, 0o644)
     if sha256_file(inventory_payload) != sha256_file(
         inventory_release_path
     ):
@@ -133,6 +138,7 @@ def prepare_build_context(
         )
     lock_payload = payload_dir / "dependency.lock"
     shutil.copyfile(dependency_lock, lock_payload)
+    os.chmod(lock_payload, 0o644)
     if sha256_file(lock_payload) != sha256_file(dependency_lock):
         raise ImmutableBuildError("dependency lock context copy hash mismatch")
     dockerfile_lines.append(
@@ -174,6 +180,7 @@ def prepare_build_context(
     )
     migration_payload = payload_dir / MIGRATION_MANIFEST_NAME
     shutil.copyfile(selected_migration_manifest, migration_payload)
+    os.chmod(migration_payload, 0o644)
     if sha256_file(migration_payload) != sha256_file(
         selected_migration_manifest
     ):

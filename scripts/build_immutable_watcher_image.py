@@ -216,6 +216,10 @@ def prepare_build_context(
         source = manifest_path.parent / str(item["release_path"])
         destination = payload_dir / context_name
         shutil.copyfile(source, destination)
+        # COPY preserves context file modes and the image runs as a
+        # non-root user; pin 0o644 so the caller's umask cannot produce
+        # unreadable in-image payloads.
+        os.chmod(destination, 0o644)
         if sha256_file(destination) != item["sha256"]:
             raise ImmutableWatcherBuildError(
                 f"watcher context copy hash mismatch: {item['release_path']}"

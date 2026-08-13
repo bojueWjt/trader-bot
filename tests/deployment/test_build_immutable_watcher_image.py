@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from unittest import mock
@@ -193,6 +195,24 @@ def test_prepare_context_copies_exact_runtime_set_and_checks_base_lock(
         builder.WATCHER_RELEASE_FILES
     ):
         assert target_path in dockerfile_body
+
+
+def test_context_payload_modes_survive_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_release(tmp_path / "release")
+    context = tmp_path / "context"
+
+    previous_umask = os.umask(0o077)
+    try:
+        builder.prepare_build_context(manifest_path, context)
+    finally:
+        os.umask(previous_umask)
+
+    payload_files = sorted((context / "payload").iterdir())
+    assert payload_files
+    for path in payload_files:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644, path.name
 
 
 def test_manifest_rejects_missing_runtime_member(
