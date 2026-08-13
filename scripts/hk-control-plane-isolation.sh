@@ -1154,7 +1154,9 @@ PY
 run_timed rm -f "$router_block"
 router_block=""
 
-run_timed caddy validate --config "$caddy_temporary"
+# The temp file name does not match caddy format autodetection, which
+# would otherwise parse it as JSON and reject Caddyfile comments.
+run_timed caddy validate --adapter caddyfile --config "$caddy_temporary"
 run_timed mv -f "$caddy_temporary" "$CADDY_FILE"
 caddy_temporary=""
 run_timed systemctl reload caddy.service
