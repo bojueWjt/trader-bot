@@ -2601,7 +2601,16 @@ class CommandPollerActor(Actor):
                 reason = f"exchange evidence unavailable: {detail}"
                 self._exchange_evidence_available = False
                 self._exchange_evidence_failure_reason = reason
-                self._mark_dependency_failed("reconciliation", reason)
+                # Do NOT mark the reconciliation dependency failed here:
+                # that call destroys the completed reconciliation proof
+                # (mark_dependency_ready(RECONCILIATION) is a deliberate
+                # no-op, so only a fresh reconciliation could rebuild it)
+                # and a transient snapshot miss would collapse readiness
+                # permanently. Fail-closed halting still happens through
+                # the control-plane path: the evidence-less heartbeat is
+                # rejected with 409 for release nodes, which marks the
+                # control_plane dependency failed and halts — and that
+                # path recovers symmetrically once evidence returns.
                 print(
                     "[CommandPollerActor] exchange evidence unavailable; "
                     "sending heartbeat without exchange snapshot: "

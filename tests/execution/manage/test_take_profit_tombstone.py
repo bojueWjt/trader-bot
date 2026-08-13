@@ -1720,3 +1720,59 @@ def _intent(**overrides: Any) -> _Intent:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HaltedProtectionSyncTest(unittest.TestCase):
+    def test_halted_state_defers_protection_sync_without_order_flow(
+        self,
+    ) -> None:
+        # A HALTED bootstrap onto an account with live positions must not
+        # produce any venue order flow: no protection submissions, no
+        # cancels — the sync defers until the operator releases the halt.
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _Strategy(
+                Path(state_dir),
+                orders=_live_protection_orders(),
+            )
+            entry_intent_id = _seed_entry_stash(strategy)
+            strategy.set_trading_state_getter(lambda: "HALTED")
+            rescheduled: list[str] = []
+            strategy._reschedule_protection_sync = (  # type: ignore[method-assign]
+                lambda intent_key, stash, count_retry=False: rescheduled.append(
+                    intent_key
+                )
+            )
+
+            strategy._sync_protection(str(entry_intent_id))
+
+            self.assertEqual(strategy.submitted_plans, [])
+            self.assertEqual(strategy.cancelled_client_order_ids, [])
+            self.assertEqual(rescheduled, [str(entry_intent_id)])
+
+    def test_active_state_passes_the_halt_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _Strategy(Path(state_dir), orders=[])
+            entry_intent_id = _seed_entry_stash(strategy)
+            strategy.set_trading_state_getter(lambda: "ACTIVE")
+            deferred: list[str] = []
+            original = type(strategy)._reschedule_protection_sync
+
+            def spying_reschedule(
+                intent_key: str,
+                stash: dict[str, Any],
+                count_retry: bool = False,
+            ) -> None:
+                if not count_retry:
+                    deferred.append(intent_key)
+                original(strategy, intent_key, stash, count_retry=count_retry)
+
+            strategy._reschedule_protection_sync = (  # type: ignore[method-assign]
+                spying_reschedule
+            )
+
+            _sync_protection(strategy, str(entry_intent_id))
+
+            # ACTIVE must not trip the halt gate (which defers with
+            # count_retry=False); convergence may still retry for other
+            # reasons, but only with count_retry=True.
+            self.assertEqual(deferred, [])

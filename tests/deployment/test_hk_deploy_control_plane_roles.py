@@ -509,11 +509,14 @@ def test_shared_mutation_gate_rejects_active_peer(tmp_path: Path) -> None:
     source = (
         _definitions(
             "die",
+            "probe_execution_account_quiesced",
             "verify_execution_account_quiesced",
             "verify_all_execution_accounts_quiesced",
         )
         + """
 TEMP_FILES=()
+ACCOUNT_QUIESCE_PROBE_ATTEMPTS=2
+ACCOUNT_QUIESCE_PROBE_INTERVAL_SECONDS=0
 verify_all_execution_accounts_quiesced
 """
     )
@@ -532,11 +535,14 @@ def test_shared_mutation_gate_accepts_both_halted(tmp_path: Path) -> None:
     source = (
         _definitions(
             "die",
+            "probe_execution_account_quiesced",
             "verify_execution_account_quiesced",
             "verify_all_execution_accounts_quiesced",
         )
         + """
 TEMP_FILES=()
+ACCOUNT_QUIESCE_PROBE_ATTEMPTS=2
+ACCOUNT_QUIESCE_PROBE_INTERVAL_SECONDS=0
 verify_all_execution_accounts_quiesced
 """
     )
@@ -557,11 +563,14 @@ def test_shared_mutation_gate_accepts_unavailable_stopped_peer(
     source = (
         _definitions(
             "die",
+            "probe_execution_account_quiesced",
             "verify_execution_account_quiesced",
             "verify_all_execution_accounts_quiesced",
         )
         + """
 TEMP_FILES=()
+ACCOUNT_QUIESCE_PROBE_ATTEMPTS=2
+ACCOUNT_QUIESCE_PROBE_INTERVAL_SECONDS=0
 verify_all_execution_accounts_quiesced
 """
     )
@@ -582,11 +591,14 @@ def test_shared_mutation_gate_rejects_wrong_peer_identity(
     source = (
         _definitions(
             "die",
+            "probe_execution_account_quiesced",
             "verify_execution_account_quiesced",
             "verify_all_execution_accounts_quiesced",
         )
         + """
 TEMP_FILES=()
+ACCOUNT_QUIESCE_PROBE_ATTEMPTS=2
+ACCOUNT_QUIESCE_PROBE_INTERVAL_SECONDS=0
 verify_all_execution_accounts_quiesced
 """
     )

@@ -466,12 +466,11 @@ def test_exchange_evidence_failure_still_sends_fail_closed_heartbeat() -> None:
         assert control_plane.heartbeat_calls == 1
         assert len(control_plane.heartbeats) == 1
         assert actor._last_heartbeat_success_at is not None
-        assert lifecycle.failed_dependencies == [
-            (
-                DependencyName.RECONCILIATION,
-                "exchange evidence unavailable: Binance 429 backoff active",
-            )
-        ]
+        # A transient snapshot miss must NOT fail the reconciliation
+        # dependency: that destroys the completed reconciliation proof
+        # (irrecoverable without a fresh reconciliation). Fail-closed
+        # halting is owned by the control-plane 409 path instead.
+        assert lifecycle.failed_dependencies == []
         assert actor._exchange_evidence_available is False
         assert (
             actor._exchange_evidence_failure_reason

@@ -2509,7 +2509,7 @@ scan_control_plane_journals() {
     fi
   done
 }
-verify_execution_account_quiesced() {
+probe_execution_account_quiesced() {
   local account_id="$1"
   local container="$2"
   local port="$3"
@@ -2539,29 +2539,58 @@ if not isinstance(trading_state, str) or not trading_state.strip():
 print(trading_state.strip().upper())
 PY
     )"; then
-      die "$account_id readiness payload is invalid"
+      QUIESCE_PROBE_FAILURE="soft:$account_id readiness payload is invalid"
+      return 1
     fi
-    [ "$trading_state" = "HALTED" ] \
-      || die "$account_id trading state is $trading_state; shared mutation requires HALTED"
+    if [ "$trading_state" != "HALTED" ]; then
+      QUIESCE_PROBE_FAILURE="hard:$account_id trading state is $trading_state; shared mutation requires HALTED"
+      return 1
+    fi
     echo "== $account_id quiesced via /ready HALTED"
-    return
+    return 0
   fi
   if ! running="$(
     docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null
   )"; then
-    die "$account_id readiness is unavailable and $container cannot be inspected"
+    QUIESCE_PROBE_FAILURE="soft:$account_id readiness is unavailable and $container cannot be inspected"
+    return 1
   fi
   case "$running" in
     false)
       echo "== $account_id quiesced via stopped container $container"
+      return 0
       ;;
     true)
-      die "$account_id readiness is unavailable while $container is running"
+      QUIESCE_PROBE_FAILURE="soft:$account_id readiness is unavailable while $container is running"
+      return 1
       ;;
     *)
       die "$account_id container running state is invalid: $running"
       ;;
   esac
+}
+verify_execution_account_quiesced() {
+  local account_id="$1"
+  local container="$2"
+  local port="$3"
+  local attempt
+  # A RUNNING release node can be transiently unready (503) while its
+  # exchange-evidence heartbeats recover from venue backoff, so soft
+  # probe failures retry within a bounded window; hard failures (an
+  # ACTIVE peer during shared mutation) die immediately.
+  for attempt in $(seq 1 "${ACCOUNT_QUIESCE_PROBE_ATTEMPTS:-45}"); do
+    QUIESCE_PROBE_FAILURE=""
+    if probe_execution_account_quiesced "$account_id" "$container" "$port"; then
+      return
+    fi
+    case "$QUIESCE_PROBE_FAILURE" in
+      hard:*)
+        die "${QUIESCE_PROBE_FAILURE#hard:}"
+        ;;
+    esac
+    sleep "${ACCOUNT_QUIESCE_PROBE_INTERVAL_SECONDS:-2}"
+  done
+  die "${QUIESCE_PROBE_FAILURE#soft:} (after $attempt probes)"
 }
 verify_all_execution_accounts_quiesced() {
   verify_execution_account_quiesced \

@@ -4945,6 +4945,13 @@ class IntentExecutionStrategy(Strategy):
         if stash.get("protection_frozen"):
             self._queue_entry_protection_stash_persist()
             return
+        if self._trading_state().upper() != "ACTIVE":
+            # A non-ACTIVE node must stay order-silent: protection
+            # convergence submits and cancels live venue orders, so a
+            # HALTED bootstrap onto an account with live positions
+            # defers convergence until the operator releases the halt.
+            self._reschedule_protection_sync(intent_key, stash)
+            return
         if not self._has_authorized_protection_parent(intent_key, stash):
             self._queue_entry_protection_stash_persist()
             return
