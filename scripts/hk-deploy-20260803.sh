@@ -1658,7 +1658,10 @@ verify_control_plane_isolation_artifact() {
     || die "SHA256SUMS does not cover hk-control-plane-isolation.sh"
 }
 reconcile_control_plane_lock_privileges() {
-  if [ "$CONTROL_PLANE_ISOLATION_REQUIRED" != "1" ]; then
+  # Roles serve traffic in every non-rollback deploy, whether the role
+  # topology is freshly activated in this run or discovered already
+  # active, so the lock privileges must be reconciled on both paths.
+  if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
     return
   fi
   "$T/.venv-cp/bin/python" - "$T/.env.v3" <<'PY'
@@ -1730,7 +1733,6 @@ activate_control_plane_topology() {
     return
   fi
   verify_maintenance_fence "control-plane-isolation"
-  reconcile_control_plane_lock_privileges
   CONTROL_PLANE_RESTARTED=1
   if [[ "${DEPLOY_GATE_MODE:-maintenance_fence}" =~ ^bootstrap(_resume)?_stopped$ ]]; then
     TRADER_ROOT="$T" \
@@ -9327,6 +9329,7 @@ for h in "${CHANGED_HOST[@]:-}"; do
 # ---------- recreate & verify ----------
 verify_all_execution_accounts_quiesced
 verify_maintenance_fence "topology-replacement"
+reconcile_control_plane_lock_privileges
 activate_control_plane_topology
 restart_control_plane_units
 echo "== control-plane topology=$CONTROL_PLANE_TOPOLOGY units=${CONTROL_PLANE_UNITS[*]}"

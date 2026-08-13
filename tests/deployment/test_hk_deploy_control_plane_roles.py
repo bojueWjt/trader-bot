@@ -846,22 +846,28 @@ def test_lock_privilege_reconciliation_covers_row_locking_roles() -> None:
     assert "CONTROL_PLANE_ROLE_LOCK_PRIVILEGES_OK" in source
 
 
-def test_lock_privilege_reconciliation_precedes_topology_activation() -> None:
-    source = _function_source("activate_control_plane_topology")
+def test_lock_privilege_reconciliation_precedes_topology_replacement() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
 
-    reconcile_at = source.index("reconcile_control_plane_lock_privileges")
-    isolation_at = source.index('bash "$CONTROL_PLANE_ISOLATION_SCRIPT"')
-    assert reconcile_at < isolation_at
+    # The reconciliation must run on the main topology-replacement path,
+    # before both activation (fresh roles) and restart (roles already
+    # active) — gating it inside activate_control_plane_topology would
+    # silently skip it whenever the role topology is discovered active.
+    assert (
+        'verify_maintenance_fence "topology-replacement"\n'
+        "reconcile_control_plane_lock_privileges\n"
+        "activate_control_plane_topology\n"
+        "restart_control_plane_units\n"
+    ) in text
 
 
-def test_lock_privilege_reconciliation_requires_isolation_topology() -> None:
+def test_lock_privilege_reconciliation_skips_emergency_rollback() -> None:
     source = _function_source("reconcile_control_plane_lock_privileges")
 
-    tmp = Path(os.environ.get("TMPDIR", "/tmp"))
     probe = (
         source
         + """
-CONTROL_PLANE_ISOLATION_REQUIRED=0
+EMERGENCY_ROLLBACK=1
 T=/nonexistent-trader-root
 reconcile_control_plane_lock_privileges
 printf 'skipped\\n'
