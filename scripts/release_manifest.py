@@ -2536,11 +2536,26 @@ def release_review_subject_sha256(
         "review_subject_sha256",
         "reviewer_trust_proof",
     }
-    payload = {
-        key: value
-        for key, value in manifest.items()
-        if key not in excluded
-    }
+    payload = {}
+    for key, value in manifest.items():
+        if key in excluded:
+            continue
+        if key == "node_configs" and isinstance(value, list):
+            # host_path embeds the per-run backup directory, so a proof
+            # signed against one deploy run could never validate in the
+            # next; the review subject binds artifact content (sha256,
+            # normalized hash, runtime resources), not staging paths.
+            value = [
+                {
+                    field: field_value
+                    for field, field_value in entry.items()
+                    if field != "host_path"
+                }
+                if isinstance(entry, dict)
+                else entry
+                for entry in value
+            ]
+        payload[key] = value
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 

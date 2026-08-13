@@ -780,6 +780,36 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             manifest,
         )
 
+    def test_review_subject_ignores_node_config_host_path(self):
+        base = {
+            "schema_version": release_manifest.SCHEMA_VERSION,
+            "image_digest": IMAGE_DIGEST,
+            "node_configs": [
+                {
+                    "account_id": "account-a",
+                    "container": "trader-v3-node-a",
+                    "host_path": "/srv/backups/run-one/artifact.json",
+                    "sha256": "a" * 64,
+                }
+            ],
+        }
+        moved = json.loads(json.dumps(base))
+        moved["node_configs"][0]["host_path"] = (
+            "/srv/backups/run-two/artifact.json"
+        )
+        changed = json.loads(json.dumps(base))
+        changed["node_configs"][0]["sha256"] = "b" * 64
+
+        subject = release_manifest.release_review_subject_sha256(base)
+        self.assertEqual(
+            subject,
+            release_manifest.release_review_subject_sha256(moved),
+        )
+        self.assertNotEqual(
+            subject,
+            release_manifest.release_review_subject_sha256(changed),
+        )
+
     def test_capture_preview_matches_captured_review_subject(self):
         bundle_path = self.temp_path / "bundle-manifest.json"
         bundle_path.write_text(
