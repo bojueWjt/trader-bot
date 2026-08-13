@@ -1756,7 +1756,19 @@ docker_compose_watcher() {
 }
 verify_watcher_health() {
   local payload
-  payload="$(curl -sf "$WATCHER_HEALTH_URL")" \
+  local healthy=0
+  local attempt
+  # A recreated watcher needs time to restore its Telegram session
+  # before the status endpoint answers; probe with a bounded retry
+  # window instead of a single shot.
+  for attempt in $(seq 1 30); do
+    if payload="$(curl -sf "$WATCHER_HEALTH_URL")"; then
+      healthy=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$healthy" = "1" ] \
     || die "telegram-watcher health endpoint failed: $WATCHER_HEALTH_URL"
   python3 - "$payload" <<'PY'
 import json
