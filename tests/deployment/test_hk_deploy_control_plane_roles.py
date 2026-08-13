@@ -832,17 +832,22 @@ def test_lock_privilege_reconciliation_covers_row_locking_roles() -> None:
 
     # Every (role, table) pair whose handlers take FOR SHARE/FOR UPDATE
     # row locks without an UPDATE grant from migration 0012 must be
-    # reconciled, and the grants must be verified fail-closed.
+    # reconciled with a single-column grant (whole-table UPDATE would
+    # trip the role startup probes), and both directions must be
+    # verified fail-closed: the lock column granted, the probed column
+    # still forbidden.
     for pair in (
-        '("trader_v3_node_control", "redis_fencing_epochs")',
-        '("trader_v3_event_ingest", "redis_fencing_epochs")',
-        '("trader_v3_event_ingest", "node_heartbeats")',
-        '("trader_v3_operator_query", "node_heartbeats")',
-        '("trader_v3_operator_query", "control_plane_maintenance_fences")',
+        '("trader_v3_node_control", "redis_fencing_epochs", "created_at", None)',
+        '("trader_v3_event_ingest", "redis_fencing_epochs", "created_at", None)',
+        '("trader_v3_event_ingest", "node_heartbeats", "created_at", "status")',
+        '("trader_v3_operator_query", "node_heartbeats", "created_at", "status")',
+        '"control_plane_maintenance_fences",\n        "acquired_at",\n        None',
     ):
         assert pair in source
-    assert "has_table_privilege" in source
+    assert "GRANT UPDATE ({}) ON {} TO {}" in source
+    assert "has_column_privilege" in source
     assert "lock privilege verification failed" in source
+    assert "forbidden write column is grantable" in source
     assert "CONTROL_PLANE_ROLE_LOCK_PRIVILEGES_OK" in source
 
 

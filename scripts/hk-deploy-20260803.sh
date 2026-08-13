@@ -1671,16 +1671,24 @@ from pathlib import Path
 import psycopg2
 
 # PostgreSQL only permits FOR SHARE/FOR UPDATE row locks to roles that hold
-# UPDATE on the locked table.  The role handlers take these locks while
-# validating writer fencing, so the privilege must exist even where
-# migration 0012 revoked writes; write prevention for those roles remains
-# enforced by the handlers, not by the table ACL.
+# UPDATE on at least one column of the locked table.  The role handlers
+# take these locks while validating writer fencing, but the role startup
+# probes (app_roles._ROLLBACK_ONLY_PERMISSION_PROBES) require that the
+# probed write stays forbidden, so grant UPDATE on a single bookkeeping
+# column instead of the whole table: the lock works and the probe column
+# stays unwritable.  Each entry is (role, table, lock_column,
+# probe_column_that_must_stay_forbidden_or_None).
 LOCK_PRIVILEGES = (
-    ("trader_v3_node_control", "redis_fencing_epochs"),
-    ("trader_v3_event_ingest", "redis_fencing_epochs"),
-    ("trader_v3_event_ingest", "node_heartbeats"),
-    ("trader_v3_operator_query", "node_heartbeats"),
-    ("trader_v3_operator_query", "control_plane_maintenance_fences"),
+    ("trader_v3_node_control", "redis_fencing_epochs", "created_at", None),
+    ("trader_v3_event_ingest", "redis_fencing_epochs", "created_at", None),
+    ("trader_v3_event_ingest", "node_heartbeats", "created_at", "status"),
+    ("trader_v3_operator_query", "node_heartbeats", "created_at", "status"),
+    (
+        "trader_v3_operator_query",
+        "control_plane_maintenance_fences",
+        "acquired_at",
+        None,
+    ),
 )
 
 
@@ -1709,19 +1717,36 @@ if not database_url:
 conn = psycopg2.connect(database_url)
 try:
     with conn.cursor() as cur:
-        for role, table in LOCK_PRIVILEGES:
-            cur.execute('GRANT UPDATE ON {} TO {}'.format(table, role))
+        for role, table, lock_column, _forbidden in LOCK_PRIVILEGES:
+            cur.execute(
+                'GRANT UPDATE ({}) ON {} TO {}'.format(
+                    lock_column, table, role
+                )
+            )
     conn.commit()
     with conn.cursor() as cur:
-        for role, table in LOCK_PRIVILEGES:
+        for role, table, lock_column, forbidden in LOCK_PRIVILEGES:
             cur.execute(
-                "SELECT has_table_privilege(%s, %s, 'UPDATE')",
-                (role, table),
+                "SELECT has_column_privilege(%s, %s, %s, 'UPDATE')",
+                (role, table, lock_column),
             )
             row = cur.fetchone()
             if row is None or row[0] is not True:
                 raise SystemExit(
-                    f"lock privilege verification failed: {role} {table}"
+                    "lock privilege verification failed: "
+                    f"{role} {table}.{lock_column}"
+                )
+            if forbidden is None:
+                continue
+            cur.execute(
+                "SELECT has_column_privilege(%s, %s, %s, 'UPDATE')",
+                (role, table, forbidden),
+            )
+            row = cur.fetchone()
+            if row is None or row[0] is not False:
+                raise SystemExit(
+                    "forbidden write column is grantable: "
+                    f"{role} {table}.{forbidden}"
                 )
 finally:
     conn.close()
