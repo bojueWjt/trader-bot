@@ -2030,15 +2030,24 @@ def validate_release_source_manifest(
                 f"release source path is duplicated: {release_path}"
             )
         release_paths.add(release_path)
-        release_files.append(
-            {
-                "release_path": release_path,
-                "sha256": _require_sha256(
-                    str(raw.get("sha256") or ""),
-                    "release source file sha256",
-                ),
-            }
-        )
+        entry = {
+            "release_path": release_path,
+            "sha256": _require_sha256(
+                str(raw.get("sha256") or ""),
+                "release source file sha256",
+            ),
+        }
+        # Rollout registration verifies live-adapter provenance against
+        # these fields, so normalization must not strip them.
+        for provenance_field in (
+            "size",
+            "source_git_blob",
+            "source_git_mode",
+            "source_path",
+        ):
+            if provenance_field in raw:
+                entry[provenance_field] = raw[provenance_field]
+        release_files.append(entry)
     bundle_sha256 = _require_sha256(
         str(document.get("bundle_manifest_sha256") or ""),
         "release source bundle manifest sha256",

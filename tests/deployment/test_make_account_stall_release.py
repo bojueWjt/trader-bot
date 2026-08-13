@@ -591,6 +591,16 @@ def test_release_payload_envelope_validates_end_to_end(
     ] == hashlib.sha256(
         (output / release.WATCHER_RUNTIME_MANIFEST_NAME).read_bytes()
     ).hexdigest()
+    adapter_entries = [
+        item
+        for item in payload["source_manifest"]["files"]
+        if item["release_path"] == "account_a_live_trade_http_adapter.py"
+    ]
+    assert len(adapter_entries) == 1
+    assert adapter_entries[0]["source_path"] == (
+        "scripts/account_a_live_trade_http_adapter.py"
+    )
+    assert adapter_entries[0]["source_git_mode"] == "100755"
 
 
 def test_release_builder_rejects_incomplete_live_risk_policy(
