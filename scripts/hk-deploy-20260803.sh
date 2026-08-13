@@ -6590,6 +6590,7 @@ EXECUTION_DOMAIN_TGT="$T/packages/execution-domain/execution_domain"
 EXECUTION_DOMAIN_INIT_TGT="$EXECUTION_DOMAIN_TGT/__init__.py"
 EXECUTION_DOMAIN_CONTRACTS_TGT="$EXECUTION_DOMAIN_TGT/contracts.py"
 EXECUTION_DOMAIN_CONTROL_PLANE_TGT="$EXECUTION_DOMAIN_TGT/control_plane.py"
+EXECUTION_DOMAIN_IDEMPOTENCY_TGT="$EXECUTION_DOMAIN_TGT/idempotency.py"
 APP_ROLES_TGT="$T/services/control-plane/api/app_roles.py"
 DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
 [ -f host/read_api.py ] || die "staging missing host/read_api.py"
@@ -6611,6 +6612,8 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
   || die "staging missing host/execution_domain/contracts.py"
 [ -f host/execution_domain/control_plane.py ] \
   || die "staging missing host/execution_domain/control_plane.py"
+[ -f host/execution_domain/idempotency.py ] \
+  || die "staging missing host/execution_domain/idempotency.py"
 [ -f host/app_roles.py ] || die "staging missing host/app_roles.py"
 [ -f host/pools.py ] || die "staging missing host/pools.py"
 [ -f "$API_TGT" ] || die "live read_api not found at $API_TGT"
@@ -7788,6 +7791,9 @@ cmp -s host/execution_domain/__init__.py "$EXECUTION_DOMAIN_INIT_TGT" \
   || CHANGED_HOST+=("execution_domain_init")
 cmp -s host/execution_domain/contracts.py "$EXECUTION_DOMAIN_CONTRACTS_TGT" \
   || CHANGED_HOST+=("execution_domain_contracts")
+cmp -s host/execution_domain/idempotency.py \
+  "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" \
+  || CHANGED_HOST+=("execution_domain_idempotency")
 cmp -s host/execution_domain/control_plane.py \
   "$EXECUTION_DOMAIN_CONTROL_PLANE_TGT" \
   || CHANGED_HOST+=("execution_domain_control_plane")
@@ -8811,6 +8817,15 @@ for h in "${CHANGED_HOST[@]:-}"; do
           >> "$BACKUP_ROOT/new-files.txt"
       fi
       ;;
+    execution_domain_idempotency)
+      if [ -f "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" ]; then
+        bk "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" \
+          "host__execution_domain_idempotency.py"
+      else
+        printf '%s\n' "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
     app_roles)
       if [ -f "$APP_ROLES_TGT" ]; then
         bk "$APP_ROLES_TGT" "host__app_roles.py"
@@ -9005,6 +9020,16 @@ for h in "${CHANGED_HOST[@]:-}"; do
       else
         install -m 0644 host/execution_domain/control_plane.py \
           "$EXECUTION_DOMAIN_CONTROL_PLANE_TGT"
+      fi
+      ;;
+    execution_domain_idempotency)
+      mkdir -p "$EXECUTION_DOMAIN_TGT"
+      if [ -f "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" ]; then
+        cat host/execution_domain/idempotency.py \
+          > "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT"
+      else
+        install -m 0644 host/execution_domain/idempotency.py \
+          "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT"
       fi
       ;;
 	    app_roles)

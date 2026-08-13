@@ -99,6 +99,7 @@ REQUIRED_HOST_PATHS = {
     "host/execution_domain/__init__.py",
     "host/execution_domain/contracts.py",
     "host/execution_domain/control_plane.py",
+    "host/execution_domain/idempotency.py",
     "host/app_roles.py",
     "host/pools.py",
 }
@@ -151,6 +152,9 @@ EXPECTED_RELEASE_FILE_MAP = {
     (
         "packages/execution-domain/execution_domain/control_plane.py"
     ): "host/execution_domain/control_plane.py",
+    (
+        "packages/execution-domain/execution_domain/idempotency.py"
+    ): "host/execution_domain/idempotency.py",
     "services/control-plane/api/app_roles.py": "host/app_roles.py",
     "services/control-plane/db/pools.py": "host/pools.py",
     (

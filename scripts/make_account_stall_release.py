@@ -151,6 +151,10 @@ RELEASE_FILES = (
         "host/execution_domain/control_plane.py",
     ),
     (
+        "packages/execution-domain/execution_domain/idempotency.py",
+        "host/execution_domain/idempotency.py",
+    ),
+    (
         "services/control-plane/api/app_roles.py",
         "host/app_roles.py",
     ),
