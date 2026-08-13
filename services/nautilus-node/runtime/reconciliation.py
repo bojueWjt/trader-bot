@@ -263,7 +263,14 @@ def _normalize_record(record: Any) -> Any:
         return record
     to_dict = getattr(record, "to_dict", None)
     if callable(to_dict):
-        return _normalize_record(to_dict())
+        try:
+            payload = to_dict()
+        except TypeError:
+            # Cython event classes (e.g. nautilus OrderFilled) expose
+            # to_dict as a staticmethod that takes the instance as an
+            # explicit argument, so the attribute lookup does not bind.
+            payload = type(record).to_dict(record)
+        return _normalize_record(payload)
     raise TypeError(
         "reconciliation records must be mappings, dataclasses, or stable scalars"
     )

@@ -536,3 +536,28 @@ def mark_non_reconciliation_dependencies_ready(lifecycle: NodeLifecycle) -> None
         if dependency is DependencyName.RECONCILIATION:
             continue
         lifecycle.mark_dependency_ready(dependency)
+
+
+class CythonStyleOrderFilled:
+    """Mimics nautilus Cython events: to_dict is a staticmethod that
+    takes the instance explicitly, so attribute access on the instance
+    yields an unbound callable expecting one positional argument."""
+
+    def __init__(self, payload: dict[str, str]) -> None:
+        self._payload = payload
+
+    @staticmethod
+    def to_dict(obj: "CythonStyleOrderFilled") -> dict[str, str]:
+        return dict(obj._payload)
+
+
+def test_dataset_summary_normalizes_cython_staticmethod_to_dict() -> None:
+    record = CythonStyleOrderFilled({"client_order_id": "O-1"})
+
+    summary = ReconciliationDatasetSummary.from_records([record])
+
+    bound_equivalent = ReconciliationDatasetSummary.from_records(
+        [{"client_order_id": "O-1"}]
+    )
+    assert summary.count == 1
+    assert summary.digest == bound_equivalent.digest
