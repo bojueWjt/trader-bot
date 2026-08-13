@@ -6598,6 +6598,8 @@ AUDIT_PACKAGE_TGT="$T/services/control-plane/audit"
 AUDIT_PACKAGE_FILES=(__init__.py settings_audit.py)
 ORDER_MANAGEMENT_PACKAGE_TGT="$T/services/control-plane/order_management"
 ORDER_MANAGEMENT_PACKAGE_FILES=(__init__.py db_helpers.py identifiers.py metrics.py outbox.py)
+OBSERVABILITY_PACKAGE_TGT="$T/services/nautilus-node/observability"
+OBSERVABILITY_PACKAGE_FILES=(__init__.py _shared.py logs.py metrics.py tracing.py)
 APP_ROLES_TGT="$T/services/control-plane/api/app_roles.py"
 DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
 [ -f host/read_api.py ] || die "staging missing host/read_api.py"
@@ -6634,6 +6636,10 @@ done
 for om_file in "${ORDER_MANAGEMENT_PACKAGE_FILES[@]}"; do
   [ -f "host/order_management/$om_file" ] \
     || die "staging missing host/order_management/$om_file"
+done
+for obs_file in "${OBSERVABILITY_PACKAGE_FILES[@]}"; do
+  [ -f "host/observability/$obs_file" ] \
+    || die "staging missing host/observability/$obs_file"
 done
 [ -f host/app_roles.py ] || die "staging missing host/app_roles.py"
 [ -f host/pools.py ] || die "staging missing host/pools.py"
@@ -7839,6 +7845,13 @@ for om_file in "${ORDER_MANAGEMENT_PACKAGE_FILES[@]}"; do
     break
   fi
 done
+for obs_file in "${OBSERVABILITY_PACKAGE_FILES[@]}"; do
+  if ! cmp -s "host/observability/$obs_file" \
+    "$OBSERVABILITY_PACKAGE_TGT/$obs_file"; then
+    CHANGED_HOST+=("observability_package")
+    break
+  fi
+done
 cmp -s host/execution_domain/control_plane.py \
   "$EXECUTION_DOMAIN_CONTROL_PLANE_TGT" \
   || CHANGED_HOST+=("execution_domain_control_plane")
@@ -8913,6 +8926,17 @@ for h in "${CHANGED_HOST[@]:-}"; do
         fi
       done
       ;;
+    observability_package)
+      for obs_file in "${OBSERVABILITY_PACKAGE_FILES[@]}"; do
+        if [ -f "$OBSERVABILITY_PACKAGE_TGT/$obs_file" ]; then
+          bk "$OBSERVABILITY_PACKAGE_TGT/$obs_file" \
+            "host__observability_$obs_file"
+        else
+          printf '%s\n' "$OBSERVABILITY_PACKAGE_TGT/$obs_file" \
+            >> "$BACKUP_ROOT/new-files.txt"
+        fi
+      done
+      ;;
     app_roles)
       if [ -f "$APP_ROLES_TGT" ]; then
         bk "$APP_ROLES_TGT" "host__app_roles.py"
@@ -9167,6 +9191,19 @@ for h in "${CHANGED_HOST[@]:-}"; do
         else
           install -m 0644 "host/order_management/$om_file" \
             "$ORDER_MANAGEMENT_PACKAGE_TGT/$om_file"
+        fi
+      done
+      ;;
+    observability_package)
+      mkdir -p "$OBSERVABILITY_PACKAGE_TGT"
+      chmod 0755 "$OBSERVABILITY_PACKAGE_TGT"
+      for obs_file in "${OBSERVABILITY_PACKAGE_FILES[@]}"; do
+        if [ -f "$OBSERVABILITY_PACKAGE_TGT/$obs_file" ]; then
+          cat "host/observability/$obs_file" \
+            > "$OBSERVABILITY_PACKAGE_TGT/$obs_file"
+        else
+          install -m 0644 "host/observability/$obs_file" \
+            "$OBSERVABILITY_PACKAGE_TGT/$obs_file"
         fi
       done
       ;;

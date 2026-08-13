@@ -227,6 +227,26 @@ RELEASE_FILES = (
         "host/order_management/outbox.py",
     ),
     (
+        "services/nautilus-node/observability/__init__.py",
+        "host/observability/__init__.py",
+    ),
+    (
+        "services/nautilus-node/observability/_shared.py",
+        "host/observability/_shared.py",
+    ),
+    (
+        "services/nautilus-node/observability/logs.py",
+        "host/observability/logs.py",
+    ),
+    (
+        "services/nautilus-node/observability/metrics.py",
+        "host/observability/metrics.py",
+    ),
+    (
+        "services/nautilus-node/observability/tracing.py",
+        "host/observability/tracing.py",
+    ),
+    (
         "services/control-plane/api/app_roles.py",
         "host/app_roles.py",
     ),

@@ -118,6 +118,11 @@ REQUIRED_HOST_PATHS = {
     "host/order_management/identifiers.py",
     "host/order_management/metrics.py",
     "host/order_management/outbox.py",
+    "host/observability/__init__.py",
+    "host/observability/_shared.py",
+    "host/observability/logs.py",
+    "host/observability/metrics.py",
+    "host/observability/tracing.py",
     "host/app_roles.py",
     "host/pools.py",
 }
@@ -227,6 +232,21 @@ EXPECTED_RELEASE_FILE_MAP = {
     (
         "services/control-plane/order_management/outbox.py"
     ): "host/order_management/outbox.py",
+    (
+        "services/nautilus-node/observability/__init__.py"
+    ): "host/observability/__init__.py",
+    (
+        "services/nautilus-node/observability/_shared.py"
+    ): "host/observability/_shared.py",
+    (
+        "services/nautilus-node/observability/logs.py"
+    ): "host/observability/logs.py",
+    (
+        "services/nautilus-node/observability/metrics.py"
+    ): "host/observability/metrics.py",
+    (
+        "services/nautilus-node/observability/tracing.py"
+    ): "host/observability/tracing.py",
     "services/control-plane/api/app_roles.py": "host/app_roles.py",
     "services/control-plane/db/pools.py": "host/pools.py",
     (
