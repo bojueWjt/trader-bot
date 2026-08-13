@@ -195,6 +195,14 @@ RELEASE_FILES = (
         "host/settings/versioning.py",
     ),
     (
+        "services/control-plane/audit/__init__.py",
+        "host/audit/__init__.py",
+    ),
+    (
+        "services/control-plane/audit/settings_audit.py",
+        "host/audit/settings_audit.py",
+    ),
+    (
         "services/control-plane/api/app_roles.py",
         "host/app_roles.py",
     ),

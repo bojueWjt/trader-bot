@@ -6593,6 +6593,8 @@ EXECUTION_DOMAIN_CONTROL_PLANE_TGT="$EXECUTION_DOMAIN_TGT/control_plane.py"
 EXECUTION_DOMAIN_IDEMPOTENCY_TGT="$EXECUTION_DOMAIN_TGT/idempotency.py"
 SETTINGS_PACKAGE_TGT="$T/services/control-plane/settings"
 SETTINGS_PACKAGE_FILES=(__init__.py apply_plan.py import_export.py permissions.py publisher.py resolver.py router.py schema.py service.py versioning.py)
+AUDIT_PACKAGE_TGT="$T/services/control-plane/audit"
+AUDIT_PACKAGE_FILES=(__init__.py settings_audit.py)
 APP_ROLES_TGT="$T/services/control-plane/api/app_roles.py"
 DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
 [ -f host/read_api.py ] || die "staging missing host/read_api.py"
@@ -6619,6 +6621,10 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
 for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
   [ -f "host/settings/$settings_file" ] \
     || die "staging missing host/settings/$settings_file"
+done
+for audit_file in "${AUDIT_PACKAGE_FILES[@]}"; do
+  [ -f "host/audit/$audit_file" ] \
+    || die "staging missing host/audit/$audit_file"
 done
 [ -f host/app_roles.py ] || die "staging missing host/app_roles.py"
 [ -f host/pools.py ] || die "staging missing host/pools.py"
@@ -7807,6 +7813,13 @@ for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
     break
   fi
 done
+for audit_file in "${AUDIT_PACKAGE_FILES[@]}"; do
+  if ! cmp -s "host/audit/$audit_file" \
+    "$AUDIT_PACKAGE_TGT/$audit_file"; then
+    CHANGED_HOST+=("audit_package")
+    break
+  fi
+done
 cmp -s host/execution_domain/control_plane.py \
   "$EXECUTION_DOMAIN_CONTROL_PLANE_TGT" \
   || CHANGED_HOST+=("execution_domain_control_plane")
@@ -8850,6 +8863,17 @@ for h in "${CHANGED_HOST[@]:-}"; do
         fi
       done
       ;;
+    audit_package)
+      for audit_file in "${AUDIT_PACKAGE_FILES[@]}"; do
+        if [ -f "$AUDIT_PACKAGE_TGT/$audit_file" ]; then
+          bk "$AUDIT_PACKAGE_TGT/$audit_file" \
+            "host__audit_$audit_file"
+        else
+          printf '%s\n' "$AUDIT_PACKAGE_TGT/$audit_file" \
+            >> "$BACKUP_ROOT/new-files.txt"
+        fi
+      done
+      ;;
     app_roles)
       if [ -f "$APP_ROLES_TGT" ]; then
         bk "$APP_ROLES_TGT" "host__app_roles.py"
@@ -9058,6 +9082,9 @@ for h in "${CHANGED_HOST[@]:-}"; do
       ;;
     settings_package)
       mkdir -p "$SETTINGS_PACKAGE_TGT"
+      # The deploy runs under umask 077 and the role services run as
+      # non-root users; pin the package directory world-readable.
+      chmod 0755 "$SETTINGS_PACKAGE_TGT"
       for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
         if [ -f "$SETTINGS_PACKAGE_TGT/$settings_file" ]; then
           cat "host/settings/$settings_file" \
@@ -9065,6 +9092,19 @@ for h in "${CHANGED_HOST[@]:-}"; do
         else
           install -m 0644 "host/settings/$settings_file" \
             "$SETTINGS_PACKAGE_TGT/$settings_file"
+        fi
+      done
+      ;;
+    audit_package)
+      mkdir -p "$AUDIT_PACKAGE_TGT"
+      chmod 0755 "$AUDIT_PACKAGE_TGT"
+      for audit_file in "${AUDIT_PACKAGE_FILES[@]}"; do
+        if [ -f "$AUDIT_PACKAGE_TGT/$audit_file" ]; then
+          cat "host/audit/$audit_file" \
+            > "$AUDIT_PACKAGE_TGT/$audit_file"
+        else
+          install -m 0644 "host/audit/$audit_file" \
+            "$AUDIT_PACKAGE_TGT/$audit_file"
         fi
       done
       ;;

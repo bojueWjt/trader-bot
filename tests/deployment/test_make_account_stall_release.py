@@ -110,6 +110,8 @@ REQUIRED_HOST_PATHS = {
     "host/settings/schema.py",
     "host/settings/service.py",
     "host/settings/versioning.py",
+    "host/audit/__init__.py",
+    "host/audit/settings_audit.py",
     "host/app_roles.py",
     "host/pools.py",
 }
@@ -195,6 +197,12 @@ EXPECTED_RELEASE_FILE_MAP = {
     (
         "services/control-plane/settings/versioning.py"
     ): "host/settings/versioning.py",
+    (
+        "services/control-plane/audit/__init__.py"
+    ): "host/audit/__init__.py",
+    (
+        "services/control-plane/audit/settings_audit.py"
+    ): "host/audit/settings_audit.py",
     "services/control-plane/api/app_roles.py": "host/app_roles.py",
     "services/control-plane/db/pools.py": "host/pools.py",
     (
