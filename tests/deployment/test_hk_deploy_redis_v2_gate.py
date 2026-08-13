@@ -327,8 +327,8 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
         }
         self._write_capacity()
         node_resource = {
-            "memory_bytes": 448 * 1024**2,
-            "memory_swap_bytes": 448 * 1024**2,
+            "memory_bytes": 640 * 1024**2,
+            "memory_swap_bytes": 640 * 1024**2,
             "nano_cpus": 1_000_000_000,
             "nofile_hard": 65_536,
             "nofile_soft": 65_536,

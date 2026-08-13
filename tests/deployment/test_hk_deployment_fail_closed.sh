@@ -796,7 +796,7 @@ EOF
   T="$trader_root" \
   NODE_STARTUP_MEMINFO_PATH="$meminfo" \
   NODE_STARTUP_MIN_AVAILABLE_BYTES=$((3 * 1024 * 1024 * 1024)) \
-  NODE_RELEASE_MEMORY_LIMIT_BYTES=469762048 \
+  NODE_RELEASE_MEMORY_LIMIT_BYTES=671088640 \
   NODE_RECREATE_TEST_LOG="$log" \
   RECREATE_DEFINITION="$recreate_definition" \
   MEMORY_DEFINITION="$memory_definition" \
@@ -823,7 +823,7 @@ EOF
         }
       docker() {
         if [ "$1" = "inspect" ]; then
-          printf "false 0 469762048\n"
+          printf "false 0 671088640\n"
           return 0
         fi
         if [ "$1" = "exec" ]; then
@@ -852,7 +852,7 @@ EOF
     T="$trader_root" \
     NODE_STARTUP_MEMINFO_PATH="$meminfo" \
     NODE_STARTUP_MIN_AVAILABLE_BYTES=$((3 * 1024 * 1024 * 1024)) \
-    NODE_RELEASE_MEMORY_LIMIT_BYTES=469762048 \
+    NODE_RELEASE_MEMORY_LIMIT_BYTES=671088640 \
     NODE_RECREATE_TEST_LOG="$log" \
     RECREATE_DEFINITION="$recreate_definition" \
     MEMORY_DEFINITION="$memory_definition" \
@@ -879,7 +879,7 @@ EOF
       }
         docker() {
           if [ "$1" = "inspect" ]; then
-            printf "false 0 469762048\n"
+            printf "false 0 671088640\n"
             return 0
           fi
           if [ "$1" = "exec" ]; then
