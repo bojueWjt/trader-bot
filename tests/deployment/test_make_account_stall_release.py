@@ -112,6 +112,11 @@ REQUIRED_HOST_PATHS = {
     "host/settings/versioning.py",
     "host/audit/__init__.py",
     "host/audit/settings_audit.py",
+    "host/order_management/__init__.py",
+    "host/order_management/db_helpers.py",
+    "host/order_management/identifiers.py",
+    "host/order_management/metrics.py",
+    "host/order_management/outbox.py",
     "host/app_roles.py",
     "host/pools.py",
 }
@@ -203,6 +208,21 @@ EXPECTED_RELEASE_FILE_MAP = {
     (
         "services/control-plane/audit/settings_audit.py"
     ): "host/audit/settings_audit.py",
+    (
+        "services/control-plane/order_management/__init__.py"
+    ): "host/order_management/__init__.py",
+    (
+        "services/control-plane/order_management/db_helpers.py"
+    ): "host/order_management/db_helpers.py",
+    (
+        "services/control-plane/order_management/identifiers.py"
+    ): "host/order_management/identifiers.py",
+    (
+        "services/control-plane/order_management/metrics.py"
+    ): "host/order_management/metrics.py",
+    (
+        "services/control-plane/order_management/outbox.py"
+    ): "host/order_management/outbox.py",
     "services/control-plane/api/app_roles.py": "host/app_roles.py",
     "services/control-plane/db/pools.py": "host/pools.py",
     (
