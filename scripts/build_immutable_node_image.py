@@ -24,8 +24,13 @@ from release_manifest import (
     RELEASE_DEPENDENCY_LOCK_NAME,
     RELEASE_SOURCE_MANIFEST_NAME,
     ReleaseManifestError,
+    _docker_image_id,
     _docker_image_labels,
+    _docker_image_layers,
+    _pinned_local_base_reference,
+    _prepare_pinned_local_base,
     _require_image_digest,
+    _require_strict_image_layer_prefix,
     build_attestation_labels,
     build_attestation_subject_sha256,
     dependency_inventory_verifier_command,
@@ -38,32 +43,6 @@ from release_manifest import (
 
 class ImmutableBuildError(ValueError):
     pass
-
-
-def _docker_image_id(image: str) -> str:
-    try:
-        output = subprocess.check_output(
-            [
-                "docker",
-                "image",
-                "inspect",
-                "--format",
-                "{{.Id}}",
-                image,
-            ],
-            text=True,
-            stderr=subprocess.PIPE,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise ImmutableBuildError(
-            f"local base image is unavailable: {image}"
-        ) from exc
-    try:
-        return _require_image_digest(output.strip())
-    except ReleaseManifestError as exc:
-        raise ImmutableBuildError(
-            "docker returned an invalid base image ID"
-        ) from exc
 
 
 def prepare_build_context(
@@ -261,16 +240,27 @@ def build_immutable_image(
             if migration_manifest is not None
             else None,
         )
-        local_base = _docker_image_id(expected_base)
+        try:
+            local_base = _docker_image_id(expected_base)
+        except ReleaseManifestError as exc:
+            raise ImmutableBuildError(str(exc)) from exc
         if local_base != expected_base:
             raise ImmutableBuildError(
                 "local base image content ID differs from requested base"
             )
+        try:
+            base_layers = _docker_image_layers(expected_base)
+            local_base_reference = _prepare_pinned_local_base(
+                expected_base,
+                image_id_resolver=_docker_image_id,
+            )
+        except ReleaseManifestError as exc:
+            raise ImmutableBuildError(str(exc)) from exc
         body_path = context_dir / "Dockerfile.body"
         body = body_path.read_text(encoding="utf-8")
         dockerfile = context_dir / "Dockerfile"
         dockerfile.write_text(
-            f"FROM {expected_base}\n{body}",
+            f"FROM {local_base_reference}\n{body}",
             encoding="utf-8",
         )
         selected_migration_manifest = migration_manifest
@@ -332,15 +322,34 @@ def build_immutable_image(
             raise ImmutableBuildError(
                 "docker build did not write an image ID"
             )
-        image_id = _require_image_digest(
-            iid_file.read_text(encoding="utf-8").strip()
-        )
-        inspected_id = _docker_image_id(image_id)
+        try:
+            image_id = _require_image_digest(
+                iid_file.read_text(encoding="utf-8").strip()
+            )
+            inspected_id = _docker_image_id(image_id)
+        except ReleaseManifestError as exc:
+            raise ImmutableBuildError(str(exc)) from exc
         if inspected_id != image_id:
             raise ImmutableBuildError(
                 "built image content ID failed local verification"
             )
-        actual_labels = _docker_image_labels(image_id)
+        try:
+            built_layers = _docker_image_layers(image_id)
+            _require_strict_image_layer_prefix(
+                base_layers,
+                built_layers,
+            )
+            alias_id = _docker_image_id(local_base_reference)
+        except ReleaseManifestError as exc:
+            raise ImmutableBuildError(str(exc)) from exc
+        if alias_id != expected_base:
+            raise ImmutableBuildError(
+                "pinned local base image reference changed after build"
+            )
+        try:
+            actual_labels = _docker_image_labels(image_id)
+        except ReleaseManifestError as exc:
+            raise ImmutableBuildError(str(exc)) from exc
         for key, expected in build_labels.items():
             if actual_labels.get(key) != expected:
                 raise ImmutableBuildError(

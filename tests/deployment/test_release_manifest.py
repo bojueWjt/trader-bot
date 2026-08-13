@@ -147,6 +147,72 @@ class ReleaseManifestTest(unittest.TestCase):
             **strict_fields,
         )
 
+    def test_docker_image_layers_parses_valid_rootfs_layers(self):
+        layers = [
+            "sha256:" + ("e" * 64),
+            "sha256:" + ("f" * 64),
+        ]
+        with mock.patch.object(
+            release_manifest.subprocess,
+            "check_output",
+            return_value=json.dumps(layers),
+        ) as check_output:
+            actual = release_manifest._docker_image_layers(IMAGE_DIGEST)
+
+        self.assertEqual(actual, layers)
+        check_output.assert_called_once_with(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RootFS.Layers}}",
+                IMAGE_DIGEST,
+            ],
+            text=True,
+            stderr=release_manifest.subprocess.PIPE,
+        )
+
+    def test_docker_image_layers_rejects_unparseable_output(self):
+        with (
+            mock.patch.object(
+                release_manifest.subprocess,
+                "check_output",
+                return_value="{",
+            ),
+            self.assertRaisesRegex(
+                release_manifest.ReleaseManifestError,
+                "invalid image layers",
+            ),
+        ):
+            release_manifest._docker_image_layers(IMAGE_DIGEST)
+
+    def test_docker_image_layers_fails_closed_on_inspect_error(self):
+        with (
+            mock.patch.object(
+                release_manifest.subprocess,
+                "check_output",
+                side_effect=OSError("docker unavailable"),
+            ),
+            self.assertRaisesRegex(
+                release_manifest.ReleaseManifestError,
+                "cannot inspect Docker image layers",
+            ),
+        ):
+            release_manifest._docker_image_layers(IMAGE_DIGEST)
+
+    def test_image_layer_prefix_requires_an_added_layer(self):
+        layers = ["sha256:" + ("e" * 64)]
+
+        with self.assertRaisesRegex(
+            release_manifest.ReleaseManifestError,
+            "must add at least one layer",
+        ):
+            release_manifest._require_strict_image_layer_prefix(
+                layers,
+                list(layers),
+            )
+
     def strict_envelope_evidence(self):
         return {
             "build_attestation": {

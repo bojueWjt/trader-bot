@@ -16,8 +16,13 @@ from pathlib import Path
 
 from release_manifest import (
     ReleaseManifestError,
+    _docker_image_id,
     _docker_image_labels,
+    _docker_image_layers,
+    _pinned_local_base_reference,
+    _prepare_pinned_local_base,
     _require_image_digest,
+    _require_strict_image_layer_prefix,
     sha256_file,
 )
 
@@ -79,32 +84,6 @@ _EXPECTED_RELEASE_TARGETS = {
     release_path: target_path
     for _source_path, release_path, target_path in WATCHER_RELEASE_FILES
 }
-
-
-def _docker_image_id(image: str) -> str:
-    try:
-        output = subprocess.check_output(
-            [
-                "docker",
-                "image",
-                "inspect",
-                "--format",
-                "{{.Id}}",
-                image,
-            ],
-            text=True,
-            stderr=subprocess.PIPE,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise ImmutableWatcherBuildError(
-            f"local watcher base image is unavailable: {image}"
-        ) from exc
-    try:
-        return _require_image_digest(output.strip())
-    except ReleaseManifestError as exc:
-        raise ImmutableWatcherBuildError(
-            "docker returned an invalid watcher base image ID"
-        ) from exc
 
 
 def _payload_subject_sha256(files: list[dict[str, object]]) -> str:
@@ -303,15 +282,26 @@ def build_immutable_watcher_image(
     ) as raw_context:
         context_dir = Path(raw_context)
         files = prepare_build_context(reviewed_manifest, context_dir)
-        local_base = _docker_image_id(expected_base)
+        try:
+            local_base = _docker_image_id(expected_base)
+        except ReleaseManifestError as exc:
+            raise ImmutableWatcherBuildError(str(exc)) from exc
         if local_base != expected_base:
             raise ImmutableWatcherBuildError(
                 "local watcher base image differs from requested digest"
             )
+        try:
+            base_layers = _docker_image_layers(expected_base)
+            local_base_reference = _prepare_pinned_local_base(
+                expected_base,
+                image_id_resolver=_docker_image_id,
+            )
+        except ReleaseManifestError as exc:
+            raise ImmutableWatcherBuildError(str(exc)) from exc
         body_path = context_dir / "Dockerfile.body"
         dockerfile = context_dir / "Dockerfile"
         dockerfile.write_text(
-            f"FROM {expected_base}\n"
+            f"FROM {local_base_reference}\n"
             + body_path.read_text(encoding="utf-8"),
             encoding="utf-8",
         )
@@ -365,14 +355,34 @@ def build_immutable_watcher_image(
             raise ImmutableWatcherBuildError(
                 "docker watcher build did not write an image ID"
             )
-        image_id = _require_image_digest(
-            iid_file.read_text(encoding="utf-8").strip()
-        )
-        if _docker_image_id(image_id) != image_id:
+        try:
+            image_id = _require_image_digest(
+                iid_file.read_text(encoding="utf-8").strip()
+            )
+            inspected_id = _docker_image_id(image_id)
+        except ReleaseManifestError as exc:
+            raise ImmutableWatcherBuildError(str(exc)) from exc
+        if inspected_id != image_id:
             raise ImmutableWatcherBuildError(
                 "built watcher image failed local identity verification"
             )
-        actual_labels = _docker_image_labels(image_id)
+        try:
+            built_layers = _docker_image_layers(image_id)
+            _require_strict_image_layer_prefix(
+                base_layers,
+                built_layers,
+            )
+            alias_id = _docker_image_id(local_base_reference)
+        except ReleaseManifestError as exc:
+            raise ImmutableWatcherBuildError(str(exc)) from exc
+        if alias_id != expected_base:
+            raise ImmutableWatcherBuildError(
+                "pinned local watcher base image changed after build"
+            )
+        try:
+            actual_labels = _docker_image_labels(image_id)
+        except ReleaseManifestError as exc:
+            raise ImmutableWatcherBuildError(str(exc)) from exc
         for key, expected in labels.items():
             if actual_labels.get(key) != expected:
                 raise ImmutableWatcherBuildError(

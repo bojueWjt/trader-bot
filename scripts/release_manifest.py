@@ -22,7 +22,7 @@ import sys
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 SCHEMA_VERSION = "trader-v3-release/v3"
 LEGACY_SCHEMA_VERSION = "trader-v3-release/v2"
@@ -1676,6 +1676,130 @@ def _require_image_digest(value: str) -> str:
             "image_digest must be a sha256 content digest"
         )
     return normalized
+
+
+def _pinned_local_base_reference(image_digest: str) -> str:
+    normalized = _require_image_digest(image_digest)
+    digest_hex = normalized.split(":", 1)[1]
+    return f"trader-bot/immutable-base:{digest_hex}"
+
+
+def _docker_image_id(image: str) -> str:
+    try:
+        output = subprocess.check_output(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}",
+                image,
+            ],
+            text=True,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ReleaseManifestError(
+            f"local Docker image is unavailable: {image}"
+        ) from exc
+    try:
+        return _require_image_digest(output.strip())
+    except ReleaseManifestError as exc:
+        raise ReleaseManifestError(
+            "docker returned an invalid image ID"
+        ) from exc
+
+
+def _prepare_pinned_local_base(
+    image_digest: str,
+    *,
+    # image_id_resolver is a test seam; production callers must pass
+    # the real _docker_image_id (or omit it) so identity checks stay strict.
+    image_id_resolver: Callable[[str], str] | None = None,
+) -> str:
+    normalized = _require_image_digest(image_digest)
+    reference = _pinned_local_base_reference(normalized)
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "image",
+                "tag",
+                normalized,
+                reference,
+            ],
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ReleaseManifestError(
+            "cannot create pinned local base image reference"
+        ) from exc
+    resolver = image_id_resolver
+    if resolver is None:
+        resolver = _docker_image_id
+    if resolver(reference) != normalized:
+        raise ReleaseManifestError(
+            "pinned local base image reference identity mismatch"
+        )
+    return reference
+
+
+def _docker_image_layers(image: str) -> list[str]:
+    try:
+        output = subprocess.check_output(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RootFS.Layers}}",
+                image,
+            ],
+            text=True,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ReleaseManifestError(
+            f"cannot inspect Docker image layers: {image}"
+        ) from exc
+    try:
+        raw_layers = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ReleaseManifestError(
+            "docker returned invalid image layers"
+        ) from exc
+    if not isinstance(raw_layers, list):
+        raise ReleaseManifestError(
+            "docker returned invalid image layers"
+        )
+    layers = []
+    for raw_layer in raw_layers:
+        if not isinstance(raw_layer, str):
+            raise ReleaseManifestError(
+                "docker returned invalid image layers"
+            )
+        try:
+            layer = _require_image_digest(raw_layer)
+        except ReleaseManifestError as exc:
+            raise ReleaseManifestError(
+                "docker returned invalid image layers"
+            ) from exc
+        layers.append(layer)
+    return layers
+
+
+def _require_strict_image_layer_prefix(
+    base_layers: list[str],
+    built_layers: list[str],
+) -> None:
+    if len(built_layers) <= len(base_layers):
+        raise ReleaseManifestError(
+            "built image must add at least one layer to the base image"
+        )
+    if built_layers[: len(base_layers)] != base_layers:
+        raise ReleaseManifestError(
+            "built image base layer prefix mismatch"
+        )
 
 
 def _require_delivery_mode(value: str) -> str:

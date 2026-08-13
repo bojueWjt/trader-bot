@@ -15,7 +15,13 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import build_immutable_node_image as builder
 import release_manifest
 
-IMAGE_ID = "sha256:" + ("a" * 64)
+BASE_IMAGE = "sha256:" + ("a" * 64)
+BUILT_IMAGE = "sha256:" + ("b" * 64)
+BASE_LAYERS = [
+    "sha256:" + ("c" * 64),
+    "sha256:" + ("d" * 64),
+]
+BUILT_LAYER = "sha256:" + ("e" * 64)
 LOCK_CONTENT = """
 version = 1
 revision = 1
@@ -260,6 +266,90 @@ def _write_release_source_manifest(root: Path) -> Path:
     return path
 
 
+def _build_with_layer_results(
+    tmp_path: Path,
+    layer_results: list[object],
+    image_id_results: list[object] | None = None,
+) -> dict[str, object]:
+    bundle_manifest = _write_bundle(tmp_path / "bundle")
+    dependency_lock = _write_reviewed_lock(bundle_manifest)
+    iid_output = tmp_path / "derived.id"
+    captured: dict[str, object] = {}
+
+    def fake_run(command, check):
+        assert check is True
+        if command[:3] == ["docker", "image", "tag"]:
+            captured["tag_command"] = command
+            return mock.Mock(returncode=0)
+        captured["command"] = command
+        iid_index = command.index("--iidfile") + 1
+        Path(command[iid_index]).write_text(
+            f"{BUILT_IMAGE}\n",
+            encoding="utf-8",
+        )
+        context = Path(command[-1])
+        captured["dockerfile"] = (
+            context / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        return mock.Mock(returncode=0)
+
+    def fake_image_labels(_image_id):
+        command = captured["command"]
+        labels = {}
+        for index, token in enumerate(command):
+            if token != "--label":
+                continue
+            key, value = command[index + 1].split("=", 1)
+            labels[key] = value
+        return labels
+
+    selected_image_id_results = image_id_results
+    if selected_image_id_results is None:
+        selected_image_id_results = [
+            BASE_IMAGE,
+            BASE_IMAGE,
+            BUILT_IMAGE,
+            BASE_IMAGE,
+        ]
+
+    with (
+        mock.patch.object(
+            builder,
+            "_docker_image_id",
+            side_effect=selected_image_id_results,
+        ) as image_id,
+        mock.patch.object(
+            builder,
+            "_docker_image_layers",
+            side_effect=layer_results,
+        ) as image_layers,
+        mock.patch.object(
+            builder,
+            "_docker_image_labels",
+            side_effect=fake_image_labels,
+        ),
+        mock.patch.object(
+            builder.subprocess,
+            "run",
+            side_effect=fake_run,
+        ),
+    ):
+        built = builder.build_immutable_image(
+            bundle_manifest=bundle_manifest,
+            dependency_lock=dependency_lock,
+            base_image=BASE_IMAGE,
+            iid_output=iid_output,
+        )
+
+    return {
+        "built": built,
+        "captured": captured,
+        "iid_output": iid_output,
+        "image_id": image_id,
+        "image_layers": image_layers,
+    }
+
+
 def test_context_contains_numbered_python_payload_only(tmp_path: Path) -> None:
     actual_runtime_entries = {
         (bundle_name, mount_target)
@@ -496,61 +586,94 @@ def test_dependency_inventory_verifier_compares_exact_installed_set(
 
 
 def test_build_uses_local_digest_and_network_none(tmp_path: Path) -> None:
-    bundle_manifest = _write_bundle(tmp_path / "bundle")
-    dependency_lock = _write_reviewed_lock(bundle_manifest)
-    iid_output = tmp_path / "derived.id"
-    captured = {}
+    result = _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+    )
+    captured = result["captured"]
+    iid_output = result["iid_output"]
+    image_id = result["image_id"]
+    image_layers = result["image_layers"]
 
-    def fake_run(command, check):
-        assert check is True
-        captured["command"] = command
-        iid_index = command.index("--iidfile") + 1
-        Path(command[iid_index]).write_text(
-            f"{IMAGE_ID}\n",
-            encoding="utf-8",
-        )
-        context = Path(command[-1])
-        captured["dockerfile"] = (
-            context / "Dockerfile"
-        ).read_text(encoding="utf-8")
-        return mock.Mock(returncode=0)
-
-    def fake_image_labels(_image_id):
-        command = captured["command"]
-        labels = {}
-        for index, token in enumerate(command):
-            if token != "--label":
-                continue
-            key, value = command[index + 1].split("=", 1)
-            labels[key] = value
-        return labels
-
-    with (
-        mock.patch.object(
-            builder,
-            "_docker_image_id",
-            return_value=IMAGE_ID,
-        ),
-        mock.patch.object(
-            builder,
-            "_docker_image_labels",
-            side_effect=fake_image_labels,
-        ),
-        mock.patch.object(
-            builder.subprocess,
-            "run",
-            side_effect=fake_run,
-        ),
-    ):
-        built = builder.build_immutable_image(
-            bundle_manifest=bundle_manifest,
-            dependency_lock=dependency_lock,
-            base_image=IMAGE_ID,
-            iid_output=iid_output,
-        )
-
-    assert built == IMAGE_ID
-    assert iid_output.read_text(encoding="utf-8").strip() == IMAGE_ID
+    assert result["built"] == BUILT_IMAGE
+    assert iid_output.read_text(encoding="utf-8").strip() == BUILT_IMAGE
     assert "--network=none" in captured["command"]
     assert "--pull=false" in captured["command"]
-    assert captured["dockerfile"].startswith(f"FROM {IMAGE_ID}\n")
+    local_base = builder._pinned_local_base_reference(BASE_IMAGE)
+    assert captured["tag_command"] == [
+        "docker",
+        "image",
+        "tag",
+        BASE_IMAGE,
+        local_base,
+    ]
+    assert captured["dockerfile"].splitlines()[0] == (
+        f"FROM {local_base}"
+    )
+    assert image_id.call_args_list == [
+        mock.call(BASE_IMAGE),
+        mock.call(local_base),
+        mock.call(BUILT_IMAGE),
+        mock.call(local_base),
+    ]
+    assert image_layers.call_args_list == [
+        mock.call(BASE_IMAGE),
+        mock.call(BUILT_IMAGE),
+    ]
+
+
+def test_build_rejects_mismatched_base_layer_prefix(
+    tmp_path: Path,
+) -> None:
+    mismatched_layers = [
+        "sha256:" + ("f" * 64),
+        BASE_LAYERS[1],
+        BUILT_LAYER,
+    ]
+
+    with pytest.raises(
+        builder.ImmutableBuildError,
+        match="base layer prefix mismatch",
+    ):
+        _build_with_layer_results(
+            tmp_path,
+            [BASE_LAYERS, mismatched_layers],
+        )
+
+
+def test_build_fails_closed_when_built_layer_inspect_fails(
+    tmp_path: Path,
+) -> None:
+    inspect_error = release_manifest.ReleaseManifestError(
+        "cannot inspect Docker image layers"
+    )
+
+    with pytest.raises(
+        builder.ImmutableBuildError,
+        match="cannot inspect Docker image layers",
+    ):
+        _build_with_layer_results(
+            tmp_path,
+            [BASE_LAYERS, inspect_error],
+        )
+
+
+def test_build_rejects_alias_identity_change_after_build(
+    tmp_path: Path,
+) -> None:
+    changed_alias = "sha256:" + ("f" * 64)
+
+    with pytest.raises(
+        builder.ImmutableBuildError,
+        match="reference changed after build",
+    ):
+        _build_with_layer_results(
+            tmp_path,
+            [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+            [
+                BASE_IMAGE,
+                BASE_IMAGE,
+                BUILT_IMAGE,
+                changed_alias,
+            ],
+        )
