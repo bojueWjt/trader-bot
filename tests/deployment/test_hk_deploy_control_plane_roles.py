@@ -280,6 +280,7 @@ T={tmp_path / "trader-v3"}
 STAGING={tmp_path / "staging"}
 BACKUP_ROOT={tmp_path / "backup"}
 verify_maintenance_fence() {{ return 0; }}
+reconcile_control_plane_lock_privileges() {{ return 0; }}
 discover_control_plane_units
 activate_control_plane_topology
 printf 'topology=%s\\n' "$CONTROL_PLANE_TOPOLOGY"
@@ -344,6 +345,7 @@ T={tmp_path / "trader-v3"}
 STAGING={tmp_path / "staging"}
 BACKUP_ROOT={tmp_path / "backup"}
 verify_maintenance_fence() {{ return 0; }}
+reconcile_control_plane_lock_privileges() {{ return 0; }}
 discover_control_plane_units
 activate_control_plane_topology
 """
@@ -823,3 +825,54 @@ on_err 53
     assert evidence_log.read_text(encoding="utf-8") == (
         "partial-host-install-restore-failed:0\n"
     )
+
+
+def test_lock_privilege_reconciliation_covers_row_locking_roles() -> None:
+    source = _function_source("reconcile_control_plane_lock_privileges")
+
+    # Every (role, table) pair whose handlers take FOR SHARE/FOR UPDATE
+    # row locks without an UPDATE grant from migration 0012 must be
+    # reconciled, and the grants must be verified fail-closed.
+    for pair in (
+        '("trader_v3_node_control", "redis_fencing_epochs")',
+        '("trader_v3_event_ingest", "redis_fencing_epochs")',
+        '("trader_v3_event_ingest", "node_heartbeats")',
+        '("trader_v3_operator_query", "node_heartbeats")',
+        '("trader_v3_operator_query", "control_plane_maintenance_fences")',
+    ):
+        assert pair in source
+    assert "has_table_privilege" in source
+    assert "lock privilege verification failed" in source
+    assert "CONTROL_PLANE_ROLE_LOCK_PRIVILEGES_OK" in source
+
+
+def test_lock_privilege_reconciliation_precedes_topology_activation() -> None:
+    source = _function_source("activate_control_plane_topology")
+
+    reconcile_at = source.index("reconcile_control_plane_lock_privileges")
+    isolation_at = source.index('bash "$CONTROL_PLANE_ISOLATION_SCRIPT"')
+    assert reconcile_at < isolation_at
+
+
+def test_lock_privilege_reconciliation_requires_isolation_topology() -> None:
+    source = _function_source("reconcile_control_plane_lock_privileges")
+
+    tmp = Path(os.environ.get("TMPDIR", "/tmp"))
+    probe = (
+        source
+        + """
+CONTROL_PLANE_ISOLATION_REQUIRED=0
+T=/nonexistent-trader-root
+reconcile_control_plane_lock_privileges
+printf 'skipped\\n'
+"""
+    )
+    result = subprocess.run(
+        ["bash", "-c", f"set -Eeuo pipefail\n{probe}"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "skipped" in result.stdout

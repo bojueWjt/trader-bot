@@ -1657,11 +1657,80 @@ verify_control_plane_isolation_artifact() {
     | grep -Fxq "hk-control-plane-isolation.sh" \
     || die "SHA256SUMS does not cover hk-control-plane-isolation.sh"
 }
+reconcile_control_plane_lock_privileges() {
+  if [ "$CONTROL_PLANE_ISOLATION_REQUIRED" != "1" ]; then
+    return
+  fi
+  "$T/.venv-cp/bin/python" - "$T/.env.v3" <<'PY'
+import sys
+from pathlib import Path
+
+import psycopg2
+
+# PostgreSQL only permits FOR SHARE/FOR UPDATE row locks to roles that hold
+# UPDATE on the locked table.  The role handlers take these locks while
+# validating writer fencing, so the privilege must exist even where
+# migration 0012 revoked writes; write prevention for those roles remains
+# enforced by the handlers, not by the table ACL.
+LOCK_PRIVILEGES = (
+    ("trader_v3_node_control", "redis_fencing_epochs"),
+    ("trader_v3_event_ingest", "redis_fencing_epochs"),
+    ("trader_v3_event_ingest", "node_heartbeats"),
+    ("trader_v3_operator_query", "node_heartbeats"),
+    ("trader_v3_operator_query", "control_plane_maintenance_fences"),
+)
+
+
+def read_database_url(path):
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() != "DATABASE_URL":
+            continue
+        value = value.strip()
+        if (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in {"'", '"'}
+        ):
+            value = value[1:-1]
+        return value
+    return ""
+
+
+database_url = read_database_url(sys.argv[1])
+if not database_url:
+    raise SystemExit("DATABASE_URL is missing from control-plane environment")
+conn = psycopg2.connect(database_url)
+try:
+    with conn.cursor() as cur:
+        for role, table in LOCK_PRIVILEGES:
+            cur.execute('GRANT UPDATE ON {} TO {}'.format(table, role))
+    conn.commit()
+    with conn.cursor() as cur:
+        for role, table in LOCK_PRIVILEGES:
+            cur.execute(
+                "SELECT has_table_privilege(%s, %s, 'UPDATE')",
+                (role, table),
+            )
+            row = cur.fetchone()
+            if row is None or row[0] is not True:
+                raise SystemExit(
+                    f"lock privilege verification failed: {role} {table}"
+                )
+finally:
+    conn.close()
+print("CONTROL_PLANE_ROLE_LOCK_PRIVILEGES_OK")
+PY
+}
 activate_control_plane_topology() {
   if [ "$CONTROL_PLANE_ISOLATION_REQUIRED" != "1" ]; then
     return
   fi
   verify_maintenance_fence "control-plane-isolation"
+  reconcile_control_plane_lock_privileges
   CONTROL_PLANE_RESTARTED=1
   if [[ "${DEPLOY_GATE_MODE:-maintenance_fence}" =~ ^bootstrap(_resume)?_stopped$ ]]; then
     TRADER_ROOT="$T" \
