@@ -780,6 +780,122 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             manifest,
         )
 
+    def test_capture_preview_matches_captured_review_subject(self):
+        bundle_path = self.temp_path / "bundle-manifest.json"
+        bundle_path.write_text(
+            json.dumps(self.bundle),
+            encoding="utf-8",
+        )
+        lock_path = self.write_dependency_lock()
+        migration_manifest = self.write_migration_manifest()
+        output_path = self.temp_path / "release-manifest.json"
+        attestation_path = (
+            self.temp_path / release_manifest.BUILD_ATTESTATION_NAME
+        )
+        attestation_path.write_text("attested\n", encoding="utf-8")
+        reviewer_path = (
+            self.temp_path / release_manifest.REVIEWER_TRUST_PROOF_NAME
+        )
+        reviewer_path.write_text("approved\n", encoding="utf-8")
+        containers = list(release_manifest.DEFAULT_CONTAINERS)
+        inventory_sha256 = release_manifest.dependency_inventory_sha256(
+            release_manifest.build_dependency_inventory(lock_path)
+        )
+        envelope = {
+            "release_payload": [
+                {
+                    "path": "bundle-manifest.json",
+                    "sha256": RELEASE_PAYLOAD_SHA256,
+                }
+            ],
+            "sha256sums_sha256": SHA256SUMS_SHA256,
+            "release_source_manifest_sha256": (
+                RELEASE_SOURCE_MANIFEST_SHA256
+            ),
+            "systemd_resource_contract_sha256": (
+                SYSTEMD_RESOURCE_CONTRACT_SHA256
+            ),
+            "dependency_lock_sha256": (
+                release_manifest.sha256_file(lock_path)
+            ),
+            "dependency_inventory_sha256": inventory_sha256,
+            "migration_manifest_sha256": (
+                release_manifest.sha256_file(migration_manifest)
+            ),
+        }
+
+        def reviewer_proof(_path, **kwargs):
+            return {
+                "path": release_manifest.REVIEWER_TRUST_PROOF_NAME,
+                "sha256": REVIEWER_TRUST_PROOF_SHA256,
+                "reviewer": "release-reviewer",
+                "decision": "approved",
+                "review_subject_sha256": kwargs[
+                    "expected_subject_sha256"
+                ],
+            }
+
+        with (
+            mock.patch.object(
+                release_manifest,
+                "_runtime_image_identity",
+                return_value=([], IMAGE_DIGEST),
+            ),
+            mock.patch.object(
+                release_manifest,
+                "validate_build_attestation",
+                return_value={"image_digest": IMAGE_DIGEST},
+            ),
+            mock.patch.object(
+                release_manifest,
+                "validate_release_payload_envelope",
+                return_value=envelope,
+            ),
+            mock.patch.object(
+                release_manifest,
+                "validate_reviewer_trust_proof",
+                side_effect=reviewer_proof,
+            ),
+        ):
+            preview = release_manifest.capture_release_manifest(
+                bundle_path=bundle_path,
+                dependency_lock_path=lock_path,
+                output_path=None,
+                patch_root=self.patch_root,
+                containers=containers,
+                image_digest=IMAGE_DIGEST,
+                node_config_specs=self.node_config_specs,
+                migration_manifest_path=migration_manifest,
+                build_attestation_path=attestation_path,
+                preview_review_subject=True,
+            )
+            manifest = release_manifest.capture_release_manifest(
+                bundle_path=bundle_path,
+                dependency_lock_path=lock_path,
+                output_path=output_path,
+                patch_root=self.patch_root,
+                containers=containers,
+                image_digest=IMAGE_DIGEST,
+                node_config_specs=self.node_config_specs,
+                migration_manifest_path=migration_manifest,
+                build_attestation_path=attestation_path,
+                reviewer_trust_proof_path=reviewer_path,
+                reviewer_trust_sha256=REVIEWER_TRUST_PROOF_SHA256,
+            )
+
+        self.assertEqual(
+            preview["review_subject_sha256"],
+            manifest["review_subject_sha256"],
+        )
+        self.assertEqual(
+            preview["build_attestation_sha256"],
+            release_manifest.sha256_file(attestation_path),
+        )
+        self.assertEqual(
+            preview["source_commit"],
+            self.bundle["repo_commit"],
+        )
+
     def test_capture_fails_closed_without_config_artifacts(self):
         bundle_path = self.temp_path / "bundle-manifest.json"
         bundle_path.write_text(

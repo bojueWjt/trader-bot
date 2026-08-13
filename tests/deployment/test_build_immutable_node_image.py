@@ -702,3 +702,228 @@ def test_build_rejects_alias_identity_change_after_build(
                 changed_alias,
             ],
         )
+
+
+def test_build_reuses_matching_attested_image(tmp_path: Path) -> None:
+    _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+    )
+    attestation_path = (
+        tmp_path / "bundle" / release_manifest.BUILD_ATTESTATION_NAME
+    )
+    attested_bytes = attestation_path.read_bytes()
+    attestation = json.loads(attested_bytes.decode("utf-8"))
+    iid_output = tmp_path / "derived-second.id"
+    commands = []
+
+    def fake_run(command, check):
+        assert check is True
+        assert command[:3] == ["docker", "image", "tag"]
+        commands.append(command)
+        return mock.Mock(returncode=0)
+
+    with (
+        mock.patch.object(
+            builder,
+            "_docker_image_id",
+            side_effect=[
+                BASE_IMAGE,
+                BASE_IMAGE,
+                BUILT_IMAGE,
+                BASE_IMAGE,
+            ],
+        ),
+        mock.patch.object(
+            builder,
+            "_docker_image_layers",
+            side_effect=[BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+        ),
+        mock.patch.object(
+            builder,
+            "_docker_image_labels",
+            return_value=dict(attestation["image_labels"]),
+        ),
+        mock.patch.object(
+            builder.subprocess,
+            "run",
+            side_effect=fake_run,
+        ),
+    ):
+        built = builder.build_immutable_image(
+            bundle_manifest=tmp_path / "bundle" / "bundle-manifest.json",
+            dependency_lock=tmp_path / "bundle" / "uv.node.lock",
+            base_image=BASE_IMAGE,
+            iid_output=iid_output,
+        )
+
+    assert built == BUILT_IMAGE
+    assert iid_output.read_text(encoding="utf-8").strip() == BUILT_IMAGE
+    assert attestation_path.read_bytes() == attested_bytes
+    assert len(commands) == 1
+
+
+def test_build_rebuilds_when_attestation_inputs_drift(
+    tmp_path: Path,
+) -> None:
+    _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+    )
+    attestation_path = (
+        tmp_path / "bundle" / release_manifest.BUILD_ATTESTATION_NAME
+    )
+    document = json.loads(
+        attestation_path.read_text(encoding="utf-8")
+    )
+    document["build_subject_sha256"] = "0" * 64
+    attestation_path.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+    )
+
+    assert result["built"] == BUILT_IMAGE
+    assert "command" in result["captured"]
+    restored = json.loads(
+        attestation_path.read_text(encoding="utf-8")
+    )
+    assert restored["build_subject_sha256"] != "0" * 64
+
+
+def test_build_rebuilds_when_attestation_fields_mismatch(
+    tmp_path: Path,
+) -> None:
+    _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+    )
+    attestation_path = (
+        tmp_path / "bundle" / release_manifest.BUILD_ATTESTATION_NAME
+    )
+    document = json.loads(
+        attestation_path.read_text(encoding="utf-8")
+    )
+    document.pop("generated_at")
+    attestation_path.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+    )
+
+    assert result["built"] == BUILT_IMAGE
+    assert "command" in result["captured"]
+    restored = json.loads(
+        attestation_path.read_text(encoding="utf-8")
+    )
+    assert "generated_at" in restored
+
+
+def test_build_rebuilds_when_attested_labels_mismatch(
+    tmp_path: Path,
+) -> None:
+    _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+    )
+    attestation_path = (
+        tmp_path / "bundle" / release_manifest.BUILD_ATTESTATION_NAME
+    )
+    attested = json.loads(
+        attestation_path.read_text(encoding="utf-8")
+    )
+    correct_labels = dict(attested["image_labels"])
+    tampered_labels = dict(correct_labels)
+    tampered_labels[sorted(tampered_labels)[0]] = "0" * 64
+    labels_by_call = iter([tampered_labels, correct_labels])
+    iid_output = tmp_path / "derived-third.id"
+    captured: dict[str, object] = {}
+
+    def fake_run(command, check):
+        assert check is True
+        if command[:3] == ["docker", "image", "tag"]:
+            return mock.Mock(returncode=0)
+        captured["command"] = command
+        iid_index = command.index("--iidfile") + 1
+        Path(command[iid_index]).write_text(
+            f"{BUILT_IMAGE}\n",
+            encoding="utf-8",
+        )
+        return mock.Mock(returncode=0)
+
+    with (
+        mock.patch.object(
+            builder,
+            "_docker_image_id",
+            side_effect=[
+                BASE_IMAGE,
+                BASE_IMAGE,
+                BUILT_IMAGE,
+                BASE_IMAGE,
+                BUILT_IMAGE,
+                BASE_IMAGE,
+            ],
+        ),
+        mock.patch.object(
+            builder,
+            "_docker_image_layers",
+            side_effect=[
+                BASE_LAYERS,
+                [*BASE_LAYERS, BUILT_LAYER],
+                [*BASE_LAYERS, BUILT_LAYER],
+            ],
+        ),
+        mock.patch.object(
+            builder,
+            "_docker_image_labels",
+            side_effect=lambda _image: next(labels_by_call),
+        ),
+        mock.patch.object(
+            builder.subprocess,
+            "run",
+            side_effect=fake_run,
+        ),
+    ):
+        built = builder.build_immutable_image(
+            bundle_manifest=tmp_path / "bundle" / "bundle-manifest.json",
+            dependency_lock=tmp_path / "bundle" / "uv.node.lock",
+            base_image=BASE_IMAGE,
+            iid_output=iid_output,
+        )
+
+    assert built == BUILT_IMAGE
+    assert "command" in captured
+
+
+def test_build_rebuilds_when_attested_image_is_missing(
+    tmp_path: Path,
+) -> None:
+    _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+    )
+
+    result = _build_with_layer_results(
+        tmp_path,
+        [BASE_LAYERS, [*BASE_LAYERS, BUILT_LAYER]],
+        [
+            BASE_IMAGE,
+            BASE_IMAGE,
+            release_manifest.ReleaseManifestError(
+                "local Docker image is unavailable"
+            ),
+            BUILT_IMAGE,
+            BASE_IMAGE,
+        ],
+    )
+
+    assert result["built"] == BUILT_IMAGE
+    assert "command" in result["captured"]

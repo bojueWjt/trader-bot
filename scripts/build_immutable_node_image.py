@@ -15,6 +15,7 @@ from pathlib import Path
 
 from release_manifest import (
     BUILD_ATTESTATION_NAME,
+    BUILD_ATTESTATION_REQUIRED_FIELDS,
     BUILD_ATTESTATION_SCHEMA_VERSION,
     DEPENDENCY_INVENTORY_NAME,
     IMMUTABLE_DEPENDENCY_LOCK_TARGET,
@@ -43,6 +44,62 @@ from release_manifest import (
 
 class ImmutableBuildError(ValueError):
     pass
+
+
+def _reusable_attested_image(
+    attestation_path: Path,
+    *,
+    build_inputs: dict[str, str],
+    build_labels: dict[str, str],
+    base_layers: list[str],
+    local_base_reference: str,
+    expected_base: str,
+) -> str | None:
+    # A deploy re-run must not invalidate a reviewer trust proof that
+    # pins the attestation file hash, so a previous build is reused only
+    # when every attested input matches this run and the attested image
+    # still verifies locally; any doubt falls back to a fresh build.
+    if not attestation_path.is_file():
+        return None
+    try:
+        document = json.loads(
+            attestation_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    if set(document) != BUILD_ATTESTATION_REQUIRED_FIELDS:
+        return None
+    if document.get("schema_version") != (
+        BUILD_ATTESTATION_SCHEMA_VERSION
+    ):
+        return None
+    if document.get("build_subject_sha256") != (
+        build_attestation_subject_sha256(build_inputs)
+    ):
+        return None
+    if document.get("image_labels") != build_labels:
+        return None
+    try:
+        image_id = _require_image_digest(
+            str(document.get("image_digest") or "")
+        )
+        if _docker_image_id(image_id) != image_id:
+            return None
+        _require_strict_image_layer_prefix(
+            base_layers,
+            _docker_image_layers(image_id),
+        )
+        if _docker_image_id(local_base_reference) != expected_base:
+            return None
+        actual_labels = _docker_image_labels(image_id)
+    except ReleaseManifestError:
+        return None
+    for key, expected in build_labels.items():
+        if actual_labels.get(key) != expected:
+            return None
+    return image_id
 
 
 def prepare_build_context(
@@ -299,78 +356,96 @@ def build_immutable_image(
             ),
         }
         build_labels = build_attestation_labels(build_inputs)
-        body_path.unlink()
-        iid_file = context_dir / "image-id"
-        command = [
-            "docker",
-            "build",
-            "--network=none",
-            "--pull=false",
-            "--no-cache",
-            "--iidfile",
-            str(iid_file),
-        ]
-        for key, value in sorted(build_labels.items()):
-            command.extend(["--label", f"{key}={value}"])
-        command.extend(
-            [
-                "--file",
-                str(dockerfile),
-                str(context_dir),
-            ]
+        selected_attestation_output = attestation_output
+        if selected_attestation_output is None:
+            selected_attestation_output = (
+                reviewed_root / BUILD_ATTESTATION_NAME
+            )
+        reused_image_id = _reusable_attested_image(
+            selected_attestation_output,
+            build_inputs=build_inputs,
+            build_labels=build_labels,
+            base_layers=base_layers,
+            local_base_reference=local_base_reference,
+            expected_base=expected_base,
         )
-        try:
-            subprocess.run(command, check=True)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise ImmutableBuildError(
-                "docker immutable image build failed"
-            ) from exc
-        if not iid_file.is_file():
-            raise ImmutableBuildError(
-                "docker build did not write an image ID"
+        if reused_image_id is not None:
+            image_id = reused_image_id
+        else:
+            body_path.unlink()
+            iid_file = context_dir / "image-id"
+            command = [
+                "docker",
+                "build",
+                "--network=none",
+                "--pull=false",
+                "--no-cache",
+                "--iidfile",
+                str(iid_file),
+            ]
+            for key, value in sorted(build_labels.items()):
+                command.extend(["--label", f"{key}={value}"])
+            command.extend(
+                [
+                    "--file",
+                    str(dockerfile),
+                    str(context_dir),
+                ]
             )
-        try:
-            image_id = _require_image_digest(
-                iid_file.read_text(encoding="utf-8").strip()
-            )
-            inspected_id = _docker_image_id(image_id)
-        except ReleaseManifestError as exc:
-            raise ImmutableBuildError(str(exc)) from exc
-        if inspected_id != image_id:
-            raise ImmutableBuildError(
-                "built image content ID failed local verification"
-            )
-        try:
-            built_layers = _docker_image_layers(image_id)
-            _require_strict_image_layer_prefix(
-                base_layers,
-                built_layers,
-            )
-            alias_id = _docker_image_id(local_base_reference)
-        except ReleaseManifestError as exc:
-            raise ImmutableBuildError(str(exc)) from exc
-        if alias_id != expected_base:
-            raise ImmutableBuildError(
-                "pinned local base image reference changed after build"
-            )
-        try:
-            actual_labels = _docker_image_labels(image_id)
-        except ReleaseManifestError as exc:
-            raise ImmutableBuildError(str(exc)) from exc
-        for key, expected in build_labels.items():
-            if actual_labels.get(key) != expected:
+            try:
+                subprocess.run(command, check=True)
+            except (OSError, subprocess.CalledProcessError) as exc:
                 raise ImmutableBuildError(
-                    f"built image label verification failed: {key}"
+                    "docker immutable image build failed"
+                ) from exc
+            if not iid_file.is_file():
+                raise ImmutableBuildError(
+                    "docker build did not write an image ID"
                 )
+            try:
+                image_id = _require_image_digest(
+                    iid_file.read_text(encoding="utf-8").strip()
+                )
+                inspected_id = _docker_image_id(image_id)
+            except ReleaseManifestError as exc:
+                raise ImmutableBuildError(str(exc)) from exc
+            if inspected_id != image_id:
+                raise ImmutableBuildError(
+                    "built image content ID failed local verification"
+                )
+            try:
+                built_layers = _docker_image_layers(image_id)
+                _require_strict_image_layer_prefix(
+                    base_layers,
+                    built_layers,
+                )
+                alias_id = _docker_image_id(local_base_reference)
+            except ReleaseManifestError as exc:
+                raise ImmutableBuildError(str(exc)) from exc
+            if alias_id != expected_base:
+                raise ImmutableBuildError(
+                    "pinned local base image reference changed after build"
+                )
+            try:
+                actual_labels = _docker_image_labels(image_id)
+            except ReleaseManifestError as exc:
+                raise ImmutableBuildError(str(exc)) from exc
+            for key, expected in build_labels.items():
+                if actual_labels.get(key) != expected:
+                    raise ImmutableBuildError(
+                        f"built image label verification failed: {key}"
+                    )
 
     if iid_output is not None:
         iid_output.parent.mkdir(parents=True, exist_ok=True)
         iid_output.write_text(f"{image_id}\n", encoding="utf-8")
-    selected_attestation_output = attestation_output
-    if selected_attestation_output is None:
-        selected_attestation_output = (
-            reviewed_root / BUILD_ATTESTATION_NAME
+    if reused_image_id is not None:
+        print(
+            "REUSED immutable node image"
+            f" image={image_id} base={expected_base}"
+            f" files={len(copied_files)}"
         )
+        return image_id
     attestation = {
         "schema_version": BUILD_ATTESTATION_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),

@@ -113,6 +113,22 @@ REVIEWER_TRUST_PROOF_NAME = "reviewer-trust-proof.json"
 BUILD_ATTESTATION_SCHEMA_VERSION = (
     "trader-v3-immutable-build-attestation/v1"
 )
+BUILD_ATTESTATION_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "generated_at",
+        "base_image_digest",
+        "dockerfile_sha256",
+        "bundle_manifest",
+        "release_source_manifest",
+        "dependency_lock",
+        "dependency_inventory",
+        "migration_manifest",
+        "build_subject_sha256",
+        "image_digest",
+        "image_labels",
+    }
+)
 REVIEWER_TRUST_PROOF_SCHEMA_VERSION = (
     "trader-v3-reviewer-trust-proof/v1"
 )
@@ -2394,21 +2410,7 @@ def validate_build_attestation(
     verify_image_labels: bool = False,
 ) -> dict[str, Any]:
     document = _load_json(path)
-    required_fields = {
-        "schema_version",
-        "generated_at",
-        "base_image_digest",
-        "dockerfile_sha256",
-        "bundle_manifest",
-        "release_source_manifest",
-        "dependency_lock",
-        "dependency_inventory",
-        "migration_manifest",
-        "build_subject_sha256",
-        "image_digest",
-        "image_labels",
-    }
-    if set(document) != required_fields:
+    if set(document) != BUILD_ATTESTATION_REQUIRED_FIELDS:
         raise ReleaseManifestError(
             "immutable build attestation fields mismatch"
         )
@@ -3640,7 +3642,12 @@ def capture_release_manifest(
     build_attestation_path: Path | None = None,
     reviewer_trust_proof_path: Path | None = None,
     reviewer_trust_sha256: str | None = None,
+    preview_review_subject: bool = False,
 ) -> dict[str, Any]:
+    if preview_review_subject and delivery_mode != DELIVERY_IMMUTABLE:
+        raise ReleaseManifestError(
+            "review subject preview requires immutable delivery"
+        )
     bundle = _load_json(bundle_path)
     bundle_files = _validated_bundle_files(bundle, patch_root)
     if require_transition_runtime:
@@ -3768,6 +3775,16 @@ def capture_release_manifest(
             ),
             _allow_unreviewed_subject=True,
         )
+        if preview_review_subject:
+            return {
+                "review_subject_sha256": provisional[
+                    "review_subject_sha256"
+                ],
+                "build_attestation_sha256": sha256_file(
+                    selected_attestation
+                ),
+                "source_commit": str(bundle["repo_commit"]),
+            }
         reviewer_proof = validate_reviewer_trust_proof(
             selected_proof_path,
             pinned_sha256=pinned_proof_sha256,
@@ -4469,7 +4486,16 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser.add_argument("--build-attestation", type=Path)
     capture_parser.add_argument("--reviewer-trust-proof", type=Path)
     capture_parser.add_argument("--reviewer-trust-sha256")
-    capture_parser.add_argument("--output", type=Path, required=True)
+    capture_parser.add_argument("--output", type=Path)
+    capture_parser.add_argument(
+        "--preview-review-subject",
+        action="store_true",
+        help=(
+            "Print the provisional review subject, build attestation "
+            "hash and source commit for reviewer trust proof signing, "
+            "without validating a proof or writing a manifest."
+        ),
+    )
     capture_parser.add_argument(
         "--patch-root",
         type=Path,
@@ -4573,6 +4599,11 @@ def main(argv: list[str] | None = None) -> int:
                 args.containers,
                 exact_count=len(DEFAULT_CONTAINERS),
             )
+            if args.output is None and not args.preview_review_subject:
+                capture_parser.error(
+                    "--output is required unless previewing the "
+                    "review subject"
+                )
             manifest = capture_release_manifest(
                 bundle_path=args.bundle_manifest,
                 dependency_lock_path=args.dependency_lock,
@@ -4590,7 +4621,18 @@ def main(argv: list[str] | None = None) -> int:
                 build_attestation_path=args.build_attestation,
                 reviewer_trust_proof_path=args.reviewer_trust_proof,
                 reviewer_trust_sha256=args.reviewer_trust_sha256,
+                preview_review_subject=args.preview_review_subject,
             )
+            if args.preview_review_subject:
+                print(
+                    "PREVIEW"
+                    " review_subject_sha256="
+                    f"{manifest['review_subject_sha256']}"
+                    " build_attestation_sha256="
+                    f"{manifest['build_attestation_sha256']}"
+                    f" source_commit={manifest['source_commit']}"
+                )
+                return 0
             print(f"WROTE {args.output}")
             _print_identity(manifest, containers)
             return 0
