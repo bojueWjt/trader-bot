@@ -102,6 +102,7 @@ DEPENDENCY_INVENTORY_SCHEMA_VERSION = (
 )
 MIGRATION_MANIFEST_SCHEMA_VERSION = "trader-v3-migration-manifest/v1"
 MIGRATION_MANIFEST_NAME = "migration-manifest.json"
+WATCHER_RUNTIME_MANIFEST_NAME = "watcher-runtime-manifest.json"
 RELEASE_SOURCE_MANIFEST_NAME = "release-source-manifest.json"
 SYSTEMD_RESOURCE_CONTRACT_NAME = "systemd-resource-contract.json"
 SHA256SUMS_NAME = "SHA256SUMS"
@@ -2087,6 +2088,19 @@ def validate_release_source_manifest(
         str(systemd.get("sha256") or ""),
         "release source systemd resource sha256",
     )
+    watcher_runtime = document.get("watcher_runtime")
+    if not isinstance(watcher_runtime, dict):
+        raise ReleaseManifestError(
+            "release source watcher runtime metadata is invalid"
+        )
+    if watcher_runtime.get("manifest") != WATCHER_RUNTIME_MANIFEST_NAME:
+        raise ReleaseManifestError(
+            "release source watcher runtime manifest path mismatch"
+        )
+    watcher_runtime_manifest_sha256 = _require_sha256(
+        str(watcher_runtime.get("manifest_sha256") or ""),
+        "release source watcher runtime manifest sha256",
+    )
     root = payload_root.resolve()
     bundle_path = root / "bundle-manifest.json"
     if not bundle_path.is_file() or sha256_file(bundle_path) != bundle_sha256:
@@ -2109,12 +2123,24 @@ def validate_release_source_manifest(
         raise ReleaseManifestError(
             "release source systemd resource hash mismatch"
         )
+    watcher_manifest_path = root / WATCHER_RUNTIME_MANIFEST_NAME
+    if (
+        not watcher_manifest_path.is_file()
+        or sha256_file(watcher_manifest_path)
+        != watcher_runtime_manifest_sha256
+    ):
+        raise ReleaseManifestError(
+            "release source watcher runtime manifest hash mismatch"
+        )
     return {
         "source_commit": source_commit,
         "source_tree": source_tree,
         "bundle_manifest_sha256": bundle_sha256,
         "migration_manifest_sha256": migration_manifest_sha256,
         "systemd_resource_contract_sha256": systemd_sha256,
+        "watcher_runtime_manifest_sha256": (
+            watcher_runtime_manifest_sha256
+        ),
         "files": sorted(
             release_files,
             key=lambda item: item["release_path"],
@@ -2842,6 +2868,9 @@ def _expected_release_payload(
         ],
         SYSTEMD_RESOURCE_CONTRACT_NAME: source_manifest[
             "systemd_resource_contract_sha256"
+        ],
+        WATCHER_RUNTIME_MANIFEST_NAME: source_manifest[
+            "watcher_runtime_manifest_sha256"
         ],
     }
     for item in bundle_files:

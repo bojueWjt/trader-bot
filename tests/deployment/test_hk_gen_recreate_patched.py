@@ -597,6 +597,11 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             encoding="utf-8",
         )
 
+        watcher_manifest_path = (
+            self.temp_path
+            / release_manifest.WATCHER_RUNTIME_MANIFEST_NAME
+        )
+        watcher_manifest_path.write_text("{}\n", encoding="utf-8")
         source_path = (
             self.temp_path / release_manifest.RELEASE_SOURCE_MANIFEST_NAME
         )
@@ -644,6 +649,17 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
                         ),
                         "sha256": release_manifest.sha256_file(
                             systemd_path
+                        ),
+                    },
+                    "watcher_runtime": {
+                        "manifest": (
+                            release_manifest
+                            .WATCHER_RUNTIME_MANIFEST_NAME
+                        ),
+                        "manifest_sha256": (
+                            release_manifest.sha256_file(
+                                watcher_manifest_path
+                            )
                         ),
                     },
                     "files": [

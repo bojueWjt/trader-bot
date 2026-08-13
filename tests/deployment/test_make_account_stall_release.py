@@ -165,6 +165,27 @@ EXPECTED_RELEASE_FILE_MAP = {
 }
 
 
+_FIXTURE_LOCK_CONTENT = """
+version = 1
+revision = 1
+requires-python = "==3.12.*"
+
+[[package]]
+name = "nautilus-node-runtime"
+version = "0.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "runtime-demo" },
+]
+
+[[package]]
+name = "runtime-demo"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://example.invalid/runtime-demo-1.2.3.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size = 1 }
+""".strip() + "\n"
+
+
 def _seed_repo(root: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(
@@ -184,7 +205,9 @@ def _seed_repo(root: Path) -> None:
     for source_relative, _destination_relative in release.RELEASE_FILES:
         path = root / source_relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        if source_relative in {
+        if source_relative == "infra/docker/nautilus/uv.node.lock":
+            path.write_text(_FIXTURE_LOCK_CONTENT, encoding="utf-8")
+        elif source_relative in {
             *release.SYSTEMD_RESOURCE_FILES,
             "scripts/release_manifest.py",
             "services/nautilus-node/config/live-risk-policy.json",
@@ -542,6 +565,32 @@ def test_release_builder_writes_complete_checksummed_payload(
         check=False,
     )
     assert verified.returncode == 0
+
+
+def test_release_payload_envelope_validates_end_to_end(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    output = tmp_path / "release"
+    release.build_release(repo, output)
+
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    import release_manifest
+
+    release_manifest.write_dependency_inventory(
+        output / release_manifest.RELEASE_DEPENDENCY_LOCK_NAME,
+        output / release_manifest.DEPENDENCY_INVENTORY_NAME,
+    )
+    payload = release_manifest.validate_release_payload_envelope(
+        payload_root=output,
+    )
+    assert payload["source_manifest"][
+        "watcher_runtime_manifest_sha256"
+    ] == hashlib.sha256(
+        (output / release.WATCHER_RUNTIME_MANIFEST_NAME).read_bytes()
+    ).hexdigest()
 
 
 def test_release_builder_rejects_incomplete_live_risk_policy(
