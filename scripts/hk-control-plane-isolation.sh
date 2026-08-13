@@ -991,7 +991,24 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from urllib.error import URLError
 from urllib.request import urlopen
+
+
+def fetch(url: str, timeout: int, deadline: float):
+    # systemd reports a role unit started before uvicorn binds its
+    # port; retry within a bounded window and stay fail-closed after.
+    while True:
+        try:
+            return urlopen(url, timeout=timeout)
+        except URLError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1.0)
+
+
+startup_deadline = time.monotonic() + 30.0
 
 expected = {
     int(sys.argv[1]): {
@@ -1021,9 +1038,10 @@ database_roles = {
     int(sys.argv[3]): sys.argv[7],
 }
 for port, required_paths in expected.items():
-    with urlopen(
+    with fetch(
         f"http://127.0.0.1:{port}/openapi.json",
-        timeout=probe_timeout,
+        probe_timeout,
+        startup_deadline,
     ) as response:
         document = json.load(response)
     paths = set(document.get("paths") or {})
@@ -1032,9 +1050,10 @@ for port, required_paths in expected.items():
         raise SystemExit(
             f"role port {port} lacks routes: {missing}"
         )
-    with urlopen(
+    with fetch(
         f"http://127.0.0.1:{port}/health/role",
-        timeout=probe_timeout,
+        probe_timeout,
+        startup_deadline,
     ) as response:
         if response.status != 200:
             raise SystemExit(
@@ -1056,9 +1075,10 @@ for port, required_paths in expected.items():
 all_paths = {
     port: set(
         json.load(
-            urlopen(
+            fetch(
                 f"http://127.0.0.1:{port}/openapi.json",
-                timeout=probe_timeout,
+                probe_timeout,
+                startup_deadline,
             )
         ).get("paths")
         or {}
