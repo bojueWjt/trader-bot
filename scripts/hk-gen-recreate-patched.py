@@ -1720,6 +1720,9 @@ def generate(
         "set -euo pipefail",
         "inherited_env=()",
         "while IFS= read -r env_value; do",
+        # An empty inherited entry would become `docker run -e ""`,
+        # which docker rejects after the old container is already gone.
+        '  [ -n "$env_value" ] || continue',
         '  inherited_env+=("$env_value")',
         (
             "done < <(docker inspect --format "
