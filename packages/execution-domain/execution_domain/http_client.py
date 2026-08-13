@@ -549,6 +549,18 @@ class HttpControlPlaneClient(ControlPlaneClient):
             exc.headers,
             detail,
         ):
+            if detail == "node writer heartbeat is missing":
+                # The heartbeat row can only be absent before this node's
+                # first ACCEPTED heartbeat: a transient exchange-evidence
+                # gap on the opening heartbeat leaves the row uncreated,
+                # and fencing the process for that races bootstrap into a
+                # crash loop. The next accepted heartbeat creates the row,
+                # so surface a retryable error instead. Genuine
+                # supersession rejects with epoch/generation/token
+                # mismatch details and still fences fatally below.
+                return ControlPlaneHttpError(
+                    f"{method} {path} failed with HTTP {exc.code}: {detail}"
+                )
             reason = f"control-plane rejected stale writer: {detail}"
             self._trigger_fatal_fence(reason)
             return ControlPlaneFencingError(reason)

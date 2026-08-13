@@ -29,6 +29,7 @@ from execution_domain.control_plane import (  # noqa: E402
 from execution_domain.http_client import (  # noqa: E402
     ControlPlaneConnectTimeout,
     ControlPlaneFencingError,
+    ControlPlaneHttpError,
     ControlPlaneIdentityError,
     ControlPlaneReadTimeout,
     ControlPlaneTotalTimeout,
@@ -389,3 +390,43 @@ def _client(**overrides) -> HttpControlPlaneClient:
     return HttpControlPlaneClient(
         **values,
     )
+
+
+def test_missing_heartbeat_writer_rejection_is_retryable_not_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # "node writer heartbeat is missing" can only occur before this
+    # node's first accepted heartbeat (the row does not exist yet), so a
+    # transient evidence gap on the opening heartbeat must surface as a
+    # retryable HTTP error instead of fencing the process into a
+    # bootstrap crash loop.
+    fatal_reasons: list[str] = []
+    headers = Message()
+    headers["X-Writer-Fence-Rejected"] = "true"
+
+    def urlopen(request, timeout):
+        del request, timeout
+        raise HTTPError(
+            url="https://control-plane.invalid/v1/nodes/node-a/commands",
+            code=409,
+            msg="Conflict",
+            hdrs=headers,
+            fp=BytesIO(b'{"detail":"node writer heartbeat is missing"}'),
+        )
+
+    monkeypatch.setattr(http_client_module, "urlopen", urlopen)
+    client = _client(fatal_fence_hook=fatal_reasons.append)
+
+    with pytest.raises(
+        ControlPlaneHttpError,
+        match="node writer heartbeat is missing",
+    ):
+        client.poll_commands("node-a", None)
+
+    assert fatal_reasons == []
+    # The client is NOT latched: later calls still reach the server.
+    with pytest.raises(
+        ControlPlaneHttpError,
+        match="node writer heartbeat is missing",
+    ):
+        client.poll_commands("node-a", None)
