@@ -1101,6 +1101,10 @@ router_block="$(mktemp)"
 cat > "$router_block" <<EOF
 $MARKER_BEGIN
 http://127.0.0.1:$ROUTER_PORT {
+	# A caddyfile site host is a matcher, not a bind address; without an
+	# explicit bind the router would listen on every interface, exposing
+	# the control-plane API and failing the loopback listener check.
+	bind 127.0.0.1
 	@event_ingest path_regexp event_ingest ^/v1/nodes/[^/]+/(events|execution-events)$
 	handle @event_ingest {
 		reverse_proxy 127.0.0.1:$EVENT_PORT
