@@ -4542,7 +4542,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "capture":
             containers = _parse_containers(
                 args.containers,
-                exact_count=2,
+                exact_count=len(DEFAULT_CONTAINERS),
             )
             manifest = capture_release_manifest(
                 bundle_path=args.bundle_manifest,

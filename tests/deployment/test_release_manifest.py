@@ -213,6 +213,24 @@ class ReleaseManifestTest(unittest.TestCase):
                 list(layers),
             )
 
+    def test_capture_container_selection_requires_full_fleet(self):
+        containers = release_manifest._parse_containers(
+            None,
+            exact_count=len(release_manifest.DEFAULT_CONTAINERS),
+        )
+        self.assertEqual(
+            containers,
+            list(release_manifest.DEFAULT_CONTAINERS),
+        )
+        with self.assertRaisesRegex(
+            release_manifest.ReleaseManifestError,
+            "distinct containers are required",
+        ):
+            release_manifest._parse_containers(
+                ["trader-v3-node-a", "trader-v3-node-b"],
+                exact_count=len(release_manifest.DEFAULT_CONTAINERS),
+            )
+
     def strict_envelope_evidence(self):
         return {
             "build_attestation": {
