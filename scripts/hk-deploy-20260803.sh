@@ -153,7 +153,11 @@ POSTGRES_PRE_MIGRATION_DUMP="$BACKUP_ROOT/postgres-pre-migration.dump"
 POSTGRES_PRE_MIGRATION_RESTORE_LIST="$BACKUP_ROOT/postgres-pre-migration.dump.list"
 POSTGRES_PRE_MIGRATION_SHA256="$BACKUP_ROOT/postgres-pre-migration.dump.sha256"
 PRE_MIGRATION_BACKUP_EXPECTATION="$BACKUP_ROOT/pre-migration-backup-expectation.json"
-POST_MIGRATION_RECOVERY_MANIFEST="$BACKUP_ROOT/post-migration-recovery-manifest.json"
+# The recovery manifest is validated as a strict release envelope with
+# its own directory as the payload root, so the durable copy must live
+# inside a full copy of the reviewed release payload.
+POST_MIGRATION_RECOVERY_PAYLOAD_ROOT="$BACKUP_ROOT/release-payload"
+POST_MIGRATION_RECOVERY_MANIFEST="$POST_MIGRATION_RECOVERY_PAYLOAD_ROOT/release-manifest.json"
 POST_MIGRATION_RECOVERY_ROOT="$BACKUP_ROOT/post-migration-recovery"
 POST_MIGRATION_RECOVERY_BIN="$BACKUP_ROOT/post-migration-recovery-bin"
 POST_MIGRATION_RECOVERY_DOCKER="$POST_MIGRATION_RECOVERY_BIN/docker"
@@ -8820,7 +8824,11 @@ capture_pre_migration_database_backup \
   "$POSTGRES_PRE_MIGRATION_RESTORE_LIST" \
   "$POSTGRES_PRE_MIGRATION_SHA256"
 unset DATABASE_URL
-cp -- "$RELEASE_MANIFEST" "$POST_MIGRATION_RECOVERY_MANIFEST"
+mkdir -p "$POST_MIGRATION_RECOVERY_PAYLOAD_ROOT"
+chmod 0700 "$POST_MIGRATION_RECOVERY_PAYLOAD_ROOT"
+cp -a "$STAGING/." "$POST_MIGRATION_RECOVERY_PAYLOAD_ROOT/"
+[ -f "$POST_MIGRATION_RECOVERY_MANIFEST" ] \
+  || die "post-migration recovery payload lacks release-manifest.json"
 chmod 0400 "$POST_MIGRATION_RECOVERY_MANIFEST"
 capture_pre_migration_backup_expectation \
   "$PRE_MIGRATION_BACKUP_EXPECTATION" \
