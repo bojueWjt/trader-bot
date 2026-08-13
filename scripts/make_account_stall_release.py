@@ -155,6 +155,46 @@ RELEASE_FILES = (
         "host/execution_domain/idempotency.py",
     ),
     (
+        "services/control-plane/settings/__init__.py",
+        "host/settings/__init__.py",
+    ),
+    (
+        "services/control-plane/settings/apply_plan.py",
+        "host/settings/apply_plan.py",
+    ),
+    (
+        "services/control-plane/settings/import_export.py",
+        "host/settings/import_export.py",
+    ),
+    (
+        "services/control-plane/settings/permissions.py",
+        "host/settings/permissions.py",
+    ),
+    (
+        "services/control-plane/settings/publisher.py",
+        "host/settings/publisher.py",
+    ),
+    (
+        "services/control-plane/settings/resolver.py",
+        "host/settings/resolver.py",
+    ),
+    (
+        "services/control-plane/settings/router.py",
+        "host/settings/router.py",
+    ),
+    (
+        "services/control-plane/settings/schema.py",
+        "host/settings/schema.py",
+    ),
+    (
+        "services/control-plane/settings/service.py",
+        "host/settings/service.py",
+    ),
+    (
+        "services/control-plane/settings/versioning.py",
+        "host/settings/versioning.py",
+    ),
+    (
         "services/control-plane/api/app_roles.py",
         "host/app_roles.py",
     ),

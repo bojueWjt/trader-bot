@@ -6591,6 +6591,8 @@ EXECUTION_DOMAIN_INIT_TGT="$EXECUTION_DOMAIN_TGT/__init__.py"
 EXECUTION_DOMAIN_CONTRACTS_TGT="$EXECUTION_DOMAIN_TGT/contracts.py"
 EXECUTION_DOMAIN_CONTROL_PLANE_TGT="$EXECUTION_DOMAIN_TGT/control_plane.py"
 EXECUTION_DOMAIN_IDEMPOTENCY_TGT="$EXECUTION_DOMAIN_TGT/idempotency.py"
+SETTINGS_PACKAGE_TGT="$T/services/control-plane/settings"
+SETTINGS_PACKAGE_FILES=(__init__.py apply_plan.py import_export.py permissions.py publisher.py resolver.py router.py schema.py service.py versioning.py)
 APP_ROLES_TGT="$T/services/control-plane/api/app_roles.py"
 DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
 [ -f host/read_api.py ] || die "staging missing host/read_api.py"
@@ -6614,6 +6616,10 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
   || die "staging missing host/execution_domain/control_plane.py"
 [ -f host/execution_domain/idempotency.py ] \
   || die "staging missing host/execution_domain/idempotency.py"
+for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
+  [ -f "host/settings/$settings_file" ] \
+    || die "staging missing host/settings/$settings_file"
+done
 [ -f host/app_roles.py ] || die "staging missing host/app_roles.py"
 [ -f host/pools.py ] || die "staging missing host/pools.py"
 [ -f "$API_TGT" ] || die "live read_api not found at $API_TGT"
@@ -7794,6 +7800,13 @@ cmp -s host/execution_domain/contracts.py "$EXECUTION_DOMAIN_CONTRACTS_TGT" \
 cmp -s host/execution_domain/idempotency.py \
   "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" \
   || CHANGED_HOST+=("execution_domain_idempotency")
+for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
+  if ! cmp -s "host/settings/$settings_file" \
+    "$SETTINGS_PACKAGE_TGT/$settings_file"; then
+    CHANGED_HOST+=("settings_package")
+    break
+  fi
+done
 cmp -s host/execution_domain/control_plane.py \
   "$EXECUTION_DOMAIN_CONTROL_PLANE_TGT" \
   || CHANGED_HOST+=("execution_domain_control_plane")
@@ -8826,6 +8839,17 @@ for h in "${CHANGED_HOST[@]:-}"; do
           >> "$BACKUP_ROOT/new-files.txt"
       fi
       ;;
+    settings_package)
+      for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
+        if [ -f "$SETTINGS_PACKAGE_TGT/$settings_file" ]; then
+          bk "$SETTINGS_PACKAGE_TGT/$settings_file" \
+            "host__settings_$settings_file"
+        else
+          printf '%s\n' "$SETTINGS_PACKAGE_TGT/$settings_file" \
+            >> "$BACKUP_ROOT/new-files.txt"
+        fi
+      done
+      ;;
     app_roles)
       if [ -f "$APP_ROLES_TGT" ]; then
         bk "$APP_ROLES_TGT" "host__app_roles.py"
@@ -9031,6 +9055,18 @@ for h in "${CHANGED_HOST[@]:-}"; do
         install -m 0644 host/execution_domain/idempotency.py \
           "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT"
       fi
+      ;;
+    settings_package)
+      mkdir -p "$SETTINGS_PACKAGE_TGT"
+      for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
+        if [ -f "$SETTINGS_PACKAGE_TGT/$settings_file" ]; then
+          cat "host/settings/$settings_file" \
+            > "$SETTINGS_PACKAGE_TGT/$settings_file"
+        else
+          install -m 0644 "host/settings/$settings_file" \
+            "$SETTINGS_PACKAGE_TGT/$settings_file"
+        fi
+      done
       ;;
 	    app_roles)
 	      install_host_python_module host/app_roles.py "$APP_ROLES_TGT"

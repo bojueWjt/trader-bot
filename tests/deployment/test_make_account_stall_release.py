@@ -100,6 +100,16 @@ REQUIRED_HOST_PATHS = {
     "host/execution_domain/contracts.py",
     "host/execution_domain/control_plane.py",
     "host/execution_domain/idempotency.py",
+    "host/settings/__init__.py",
+    "host/settings/apply_plan.py",
+    "host/settings/import_export.py",
+    "host/settings/permissions.py",
+    "host/settings/publisher.py",
+    "host/settings/resolver.py",
+    "host/settings/router.py",
+    "host/settings/schema.py",
+    "host/settings/service.py",
+    "host/settings/versioning.py",
     "host/app_roles.py",
     "host/pools.py",
 }
@@ -155,6 +165,36 @@ EXPECTED_RELEASE_FILE_MAP = {
     (
         "packages/execution-domain/execution_domain/idempotency.py"
     ): "host/execution_domain/idempotency.py",
+    (
+        "services/control-plane/settings/__init__.py"
+    ): "host/settings/__init__.py",
+    (
+        "services/control-plane/settings/apply_plan.py"
+    ): "host/settings/apply_plan.py",
+    (
+        "services/control-plane/settings/import_export.py"
+    ): "host/settings/import_export.py",
+    (
+        "services/control-plane/settings/permissions.py"
+    ): "host/settings/permissions.py",
+    (
+        "services/control-plane/settings/publisher.py"
+    ): "host/settings/publisher.py",
+    (
+        "services/control-plane/settings/resolver.py"
+    ): "host/settings/resolver.py",
+    (
+        "services/control-plane/settings/router.py"
+    ): "host/settings/router.py",
+    (
+        "services/control-plane/settings/schema.py"
+    ): "host/settings/schema.py",
+    (
+        "services/control-plane/settings/service.py"
+    ): "host/settings/service.py",
+    (
+        "services/control-plane/settings/versioning.py"
+    ): "host/settings/versioning.py",
     "services/control-plane/api/app_roles.py": "host/app_roles.py",
     "services/control-plane/db/pools.py": "host/pools.py",
     (
