@@ -1145,7 +1145,8 @@ run_timed "$VENV_ROOT/bin/python" - \
 from __future__ import annotations
 
 import sys
-from urllib.error import HTTPError
+import time
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 port = int(sys.argv[1])
@@ -1162,12 +1163,23 @@ probes = (
     ),
     Request(f"http://127.0.0.1:{port}/v1/nodes"),
 )
+# systemctl reload applies the caddy config asynchronously, so the
+# router listener may need a moment; retry within a bounded window and
+# still fail closed once it expires.
+deadline = time.monotonic() + 30.0
 for request in probes:
-    try:
-        with urlopen(request, timeout=probe_timeout) as response:
-            status = response.status
-    except HTTPError as exc:
-        status = exc.code
+    while True:
+        try:
+            with urlopen(request, timeout=probe_timeout) as response:
+                status = response.status
+            break
+        except HTTPError as exc:
+            status = exc.code
+            break
+        except URLError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1.0)
     if status == 404:
         raise SystemExit(f"router returned 404 for {request.full_url}")
 PY
