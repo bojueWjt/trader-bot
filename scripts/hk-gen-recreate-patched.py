@@ -95,6 +95,11 @@ PATCH_MOUNT_TARGETS = (
         "/app/persistence/redis_namespace_lease.py",
     ),
     ("redis_resp_client.py", "/app/persistence/redis_resp_client.py"),
+    ("routing_init.py", "/app/routing/__init__.py"),
+    (
+        "routing_multi_account.py",
+        "/app/routing/multi_account.py",
+    ),
 )
 BINANCE_EXECUTION_FILE = "binance_execution.py"
 BINANCE_FUTURES_EXECUTION_FILE = "binance_futures_execution.py"

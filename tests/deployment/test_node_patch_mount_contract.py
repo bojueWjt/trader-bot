@@ -49,6 +49,8 @@ EXPECTED_PATCH_MOUNTS = {
     "node_config.py": "/app/config/node_config.py",
     "risk_config.py": "/app/risk/config.py",
     "risk_init.py": "/app/risk/__init__.py",
+    "routing_init.py": "/app/routing/__init__.py",
+    "routing_multi_account.py": "/app/routing/multi_account.py",
     "binance_execution.py": BINANCE_DST,
     "binance_futures_execution.py": BINANCE_FUTURES_DST,
 }
@@ -75,11 +77,26 @@ LEGACY_PATCH_MOUNTS = {
         "persistence_init.py",
         "redis_namespace_lease.py",
         "redis_resp_client.py",
+        "routing_init.py",
+        "routing_multi_account.py",
     }
 }
 
 
 class NodePatchMountContractTest(unittest.TestCase):
+    def test_generator_mounts_match_container_bundle_contract(self):
+        import make_container_bundle
+
+        self.assertEqual(
+            _generator_mounts(),
+            {
+                bundle_name: mount_target
+                for bundle_name, _source, mount_target in (
+                    make_container_bundle.BUNDLE_FILES
+                )
+            },
+        )
+
     def test_hardening_generator_contains_full_transition_mount_list(self):
         self.assertEqual(_generator_mounts(), EXPECTED_PATCH_MOUNTS)
         deploy = HARDENING_DEPLOY.read_text(encoding="utf-8")
