@@ -155,6 +155,10 @@ RELEASE_FILES = (
         "host/execution_domain/idempotency.py",
     ),
     (
+        "packages/execution-domain/execution_domain/identifiers.py",
+        "host/execution_domain/identifiers.py",
+    ),
+    (
         "services/control-plane/settings/__init__.py",
         "host/settings/__init__.py",
     ),

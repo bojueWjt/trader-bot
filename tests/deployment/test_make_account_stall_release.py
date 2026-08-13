@@ -100,6 +100,7 @@ REQUIRED_HOST_PATHS = {
     "host/execution_domain/contracts.py",
     "host/execution_domain/control_plane.py",
     "host/execution_domain/idempotency.py",
+    "host/execution_domain/identifiers.py",
     "host/settings/__init__.py",
     "host/settings/apply_plan.py",
     "host/settings/import_export.py",
@@ -172,6 +173,9 @@ EXPECTED_RELEASE_FILE_MAP = {
     (
         "packages/execution-domain/execution_domain/idempotency.py"
     ): "host/execution_domain/idempotency.py",
+    (
+        "packages/execution-domain/execution_domain/identifiers.py"
+    ): "host/execution_domain/identifiers.py",
     (
         "services/control-plane/settings/__init__.py"
     ): "host/settings/__init__.py",
