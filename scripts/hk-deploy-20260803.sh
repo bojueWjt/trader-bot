@@ -2787,7 +2787,12 @@ existing_proxy = binance.get("proxy_url")
 if existing_proxy is not None and existing_proxy != proxy_url:
     raise SystemExit("live node Binance proxy differs from deployment proxy")
 updated_binance = dict(binance)
-updated_binance["proxy_url"] = proxy_url
+if proxy_url:
+    updated_binance["proxy_url"] = proxy_url
+else:
+    # Route egress uses no proxy; a literal false would be rejected by
+    # the node's secret-reference validation, so omit the field.
+    updated_binance.pop("proxy_url", None)
 updated["binance"] = updated_binance
 updated["runtime_resources"] = resources
 payload = (

@@ -323,7 +323,7 @@ verify_binance_proxy_egress
 @pytest.mark.parametrize(
     ("mode", "proxy_url", "expected_proxy"),
     (
-        ("route", "", False),
+        ("route", "", None),
         ("proxy", "http://proxy.internal:3128", "http://proxy.internal:3128"),
     ),
 )
@@ -371,7 +371,9 @@ prepare_release_bound_config_source {source_config} {output_config}
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(output_config.read_text(encoding="utf-8"))
-    assert payload["binance"]["proxy_url"] == expected_proxy
+    # Route egress omits proxy_url entirely: the node rejects a literal
+    # false, and only a real proxy string may reach the artifact.
+    assert payload["binance"].get("proxy_url") == expected_proxy
 
 
 def test_deploy_preflight_uses_mode_aware_egress_gate() -> None:
@@ -379,4 +381,4 @@ def test_deploy_preflight_uses_mode_aware_egress_gate() -> None:
 
     assert 'BINANCE_ROUTE_INTERFACE="wg0"' in text
     assert "\nload_binance_egress_settings\nverify_binance_egress\n" in text
-    assert 'updated_binance["proxy_url"] = proxy_url' in text
+    assert 'if proxy_url:\n    updated_binance["proxy_url"] = proxy_url' in text
