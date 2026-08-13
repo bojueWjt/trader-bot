@@ -1552,8 +1552,10 @@ capture_pre_migration_database_backup() {
     fi
   done
   umask 077
+  # libpq only expands connection URLs passed as --dbname; PGDATABASE is
+  # taken literally as a database name and would fall back to the local
+  # Unix socket.
   PGCONNECT_TIMEOUT=10 \
-  PGDATABASE="$database_url" \
     timeout \
       --signal=TERM \
       --kill-after=10s \
@@ -1562,6 +1564,7 @@ capture_pre_migration_database_backup() {
       --format=custom \
       --no-owner \
       --no-privileges \
+      --dbname="$database_url" \
       --file="$dump_path"
   if [ ! -s "$dump_path" ]; then
     die "pre-migration PostgreSQL backup is empty"
@@ -3017,6 +3020,7 @@ capture_pre_migration_backup_expectation() {
     "$old_images" \
     "$T" \
     "$output" \
+    "$DEPLOY_GATE_MODE" \
     "${RECREATE_NODES[@]}" <<'PY'
 import hashlib
 import json
@@ -3066,6 +3070,7 @@ def write_durable_json(path, payload):
     old_images_raw,
     trader_root_raw,
     output_raw,
+    gate_mode_raw,
     *recreate_nodes,
 ) = sys.argv[1:]
 manifest_path = Path(manifest_raw)
@@ -3076,17 +3081,31 @@ postgres_restore_list_path = Path(postgres_restore_list_raw)
 old_images_path = Path(old_images_raw)
 trader_root = Path(trader_root_raw)
 output_path = Path(output_raw)
-required_files = (
-    manifest_path,
-    recreate_path,
+# Bootstrapping over the legacy topology has no previous release of this
+# lineage: no live release manifest, no release labels, and recreate
+# scripts only for nodes the legacy flow managed. Record what exists
+# instead of failing, but only in the audited bootstrap gate modes.
+bootstrap = gate_mode_raw in {
+    "bootstrap_stopped",
+    "bootstrap_resume_stopped",
+}
+required_files = [
     postgres_dump_path,
     postgres_dump_sha256_path,
     postgres_restore_list_path,
     old_images_path,
-)
+]
+if not bootstrap:
+    required_files = [manifest_path, recreate_path, *required_files]
 for path in required_files:
     if not path.is_file() or path.is_symlink():
         raise SystemExit(f"pre-migration backup artifact is invalid: {path}")
+if bootstrap:
+    for path in (manifest_path, recreate_path):
+        if path.exists() and (not path.is_file() or path.is_symlink()):
+            raise SystemExit(
+                f"pre-migration backup artifact is invalid: {path}"
+            )
 if not recreate_nodes:
     raise SystemExit("pre-migration backup expectation node set is empty")
 if len(recreate_nodes) != len(set(recreate_nodes)):
@@ -3101,19 +3120,25 @@ for raw_line in old_images_path.read_text(encoding="utf-8").splitlines():
     old_images[node] = image_digest
 if set(old_images) != set(recreate_nodes):
     raise SystemExit("old image record differs from recreate node exact-set")
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-identity_fields = (
-    "release_id",
-    "image_digest",
-    "config_sha256",
-    "dependency_lock_sha256",
-)
-identity = {}
-for field in identity_fields:
-    value = str(manifest.get(field) or "").strip()
-    if not value:
-        raise SystemExit(f"previous release manifest lacks {field}")
-    identity[field] = value
+identity = None
+if manifest_path.is_file():
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    identity_fields = (
+        "release_id",
+        "image_digest",
+        "config_sha256",
+        "dependency_lock_sha256",
+    )
+    identity = {}
+    for field in identity_fields:
+        value = str(manifest.get(field) or "").strip()
+        if not value:
+            raise SystemExit(f"previous release manifest lacks {field}")
+        identity[field] = value
+elif not bootstrap:
+    raise SystemExit(
+        f"pre-migration backup artifact is invalid: {manifest_path}"
+    )
 inspected = json.loads(
     subprocess.check_output(
         ["docker", "inspect", container],
@@ -3121,17 +3146,22 @@ inspected = json.loads(
     )
 )[0]
 previous_image_digest = str(inspected.get("Image") or "").strip()
-if previous_image_digest != identity["image_digest"]:
-    raise SystemExit("previous container image differs from release manifest")
-labels = inspected.get("Config", {}).get("Labels", {})
-expected_labels = {
-    "com.trader.release.id": identity["release_id"],
-    "com.trader.release.image-digest": identity["image_digest"],
-    "com.trader.release.config-sha256": identity["config_sha256"],
-}
-for key, expected in expected_labels.items():
-    if labels.get(key) != expected:
-        raise SystemExit(f"pre-migration container label mismatch: {key}")
+if identity is not None:
+    if previous_image_digest != identity["image_digest"]:
+        raise SystemExit(
+            "previous container image differs from release manifest"
+        )
+    labels = inspected.get("Config", {}).get("Labels", {})
+    expected_labels = {
+        "com.trader.release.id": identity["release_id"],
+        "com.trader.release.image-digest": identity["image_digest"],
+        "com.trader.release.config-sha256": identity["config_sha256"],
+    }
+    for key, expected in expected_labels.items():
+        if labels.get(key) != expected:
+            raise SystemExit(
+                f"pre-migration container label mismatch: {key}"
+            )
 previous_nodes = []
 for node in recreate_nodes:
     inspected_node = json.loads(
@@ -3144,14 +3174,26 @@ for node in recreate_nodes:
     if inspected_image != old_images[node]:
         raise SystemExit(f"old image record differs from container: {node}")
     node_recreate_path = trader_root / f"recreate-{node}.sh"
-    if not node_recreate_path.is_file() or node_recreate_path.is_symlink():
+    node_recreate_present = (
+        node_recreate_path.is_file()
+        and not node_recreate_path.is_symlink()
+    )
+    if not node_recreate_present and not bootstrap:
         raise SystemExit(f"pre-migration recreate artifact is invalid: {node}")
     previous_nodes.append(
         {
             "container": node,
             "previous_image_digest": inspected_image,
-            "previous_recreate_path": str(node_recreate_path),
-            "previous_recreate_sha256": sha256_file(node_recreate_path),
+            "previous_recreate_path": (
+                str(node_recreate_path)
+                if node_recreate_present
+                else None
+            ),
+            "previous_recreate_sha256": (
+                sha256_file(node_recreate_path)
+                if node_recreate_present
+                else None
+            ),
         }
     )
 hash_record = postgres_dump_sha256_path.read_text(
@@ -3174,10 +3216,19 @@ payload = {
     ),
     "account_id": account_id,
     "container": container,
+    "bootstrap_without_previous_release": identity is None,
     "previous_manifest_identity": identity,
-    "previous_manifest_sha256": sha256_file(manifest_path),
+    "previous_manifest_sha256": (
+        sha256_file(manifest_path)
+        if manifest_path.is_file()
+        else None
+    ),
     "previous_image_digest": previous_image_digest,
-    "previous_recreate_sha256": sha256_file(recreate_path),
+    "previous_recreate_sha256": (
+        sha256_file(recreate_path)
+        if recreate_path.is_file() and not recreate_path.is_symlink()
+        else None
+    ),
     "previous_nodes": previous_nodes,
     "old_images_sha256": sha256_file(old_images_path),
     "postgres_dump_path": str(postgres_dump_path),
