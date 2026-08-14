@@ -17,8 +17,8 @@ APP_SCHEMA_EPOCH = "account-stall-hardening-runtime/v1"
 DATABASE_SCHEMA_EPOCH = "0014_cancel_order_contract"
 REDIS_SCHEMA_EPOCH = "fenced-generation-namespace/v2"
 REVIEWER_KEY_SHA256 = (
-    "9c7b1df4bd215fe5370c73f363b60e30"
-    "d66e92456731f6d79414314b1113a7a4"
+    "2b149fe2d7357dfea74441a1f6d6f1dd"
+    "9ff6ea6a1a800fd5f2f7c2778339f928"
 )
 
 

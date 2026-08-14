@@ -90,8 +90,8 @@ LIVE_ADAPTER_SOURCE_PATH = "scripts/account_a_live_trade_http_adapter.py"
 LIVE_ADAPTER_RELEASE_PATH = "account_a_live_trade_http_adapter.py"
 RELEASE_GATE_VALIDITY = timedelta(minutes=15)
 PINNED_REVIEWER_PUBLIC_KEY_SHA256 = (
-    "9c7b1df4bd215fe5370c73f363b60e30"
-    "d66e92456731f6d79414314b1113a7a4"
+    "2b149fe2d7357dfea74441a1f6d6f1dd"
+    "9ff6ea6a1a800fd5f2f7c2778339f928"
 )
 PINNED_OPENSSL_PATH = Path("/usr/bin/openssl")
 CLOSURE_ACCOUNT_BY_TARGET_PHASE = {

@@ -123,8 +123,8 @@ class NodePatchMountContractTest(unittest.TestCase):
         self.assertIn("write_account_b_reviewer_public_key", deploy)
         self.assertIn("-----BEGIN PUBLIC KEY-----", deploy)
         self.assertIn(
-            "9c7b1df4bd215fe5370c73f363b60e30"
-            "d66e92456731f6d79414314b1113a7a4",
+            "2b149fe2d7357dfea74441a1f6d6f1dd"
+            "9ff6ea6a1a800fd5f2f7c2778339f928",
             deploy,
         )
         self.assertNotIn("ACCOUNT_B_EVIDENCE_PUBLIC_KEY", deploy)
