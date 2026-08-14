@@ -276,6 +276,9 @@ class CanaryAuthorization:
     node_id: str
     rollout_phase: str
     symbol: str
+    writer_id: str
+    lease_id: str
+    fencing_epoch: int
     release: ReleaseIdentity
     intent_id: str
     close_intent_id: str
@@ -4024,6 +4027,26 @@ def _validate_authorization_documents(
         )
     expires_at = _validate_document_window(permit, "permit", now)
 
+    # The external adapter requires the node writer identity on every
+    # request, so the signed permit must carry it explicitly.
+    writer_id = _required_text(
+        permit.get("writer_id"),
+        "permit writer_id",
+    )
+    lease_id = _required_text(
+        permit.get("lease_id"),
+        "permit lease_id",
+    )
+    fencing_epoch = permit.get("fencing_epoch")
+    if (
+        isinstance(fencing_epoch, bool)
+        or not isinstance(fencing_epoch, int)
+        or fencing_epoch < 1
+    ):
+        raise LiveTradeExecutionError(
+            "permit fencing_epoch must be a positive integer"
+        )
+
     normalized_hashes = {
         name: _required_sha256(value, f"{name} sha256")
         for name, value in document_sha256.items()
@@ -4034,6 +4057,9 @@ def _validate_authorization_documents(
         "node_id": target.node_id,
         "rollout_phase": target.rollout_phase,
         "symbol": SYMBOL,
+        "writer_id": writer_id,
+        "lease_id": lease_id,
+        "fencing_epoch": fencing_epoch,
         "release": asdict(release_identity),
         "intent_id": intent_id,
         "close_intent_id": close_intent_id,
@@ -4081,6 +4107,9 @@ def _validate_authorization_documents(
         node_id=target.node_id,
         rollout_phase=target.rollout_phase,
         symbol=SYMBOL,
+        writer_id=writer_id,
+        lease_id=lease_id,
+        fencing_epoch=fencing_epoch,
         release=release_identity,
         intent_id=intent_id,
         close_intent_id=close_intent_id,
@@ -4648,6 +4677,9 @@ def _identity_payload(
         "node_id": authorization.node_id,
         "rollout_phase": authorization.rollout_phase,
         "symbol": authorization.symbol,
+        "writer_id": authorization.writer_id,
+        "lease_id": authorization.lease_id,
+        "fencing_epoch": authorization.fencing_epoch,
         "release_id": authorization.release.release_id,
         "image_digest": authorization.release.image_digest,
         "config_sha256": authorization.release.config_sha256,
