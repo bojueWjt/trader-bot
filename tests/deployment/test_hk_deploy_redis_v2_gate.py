@@ -857,6 +857,26 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_live_validator_accepts_runtime_namespace_data(self) -> None:
+        arguments = self._live_validator_arguments()
+        arguments[3] = "2627"
+
+        result = self._run_live_validator(arguments)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_live_validator_rejects_empty_runtime_database(self) -> None:
+        arguments = self._live_validator_arguments()
+        arguments[3] = "0"
+
+        result = self._run_live_validator(arguments)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "running Redis is missing the fencing epoch marker",
+            result.stderr,
+        )
+
     def test_live_validator_rejects_release_resource_drift(self) -> None:
         redis_resource = next(
             item

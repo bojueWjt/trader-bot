@@ -189,7 +189,7 @@ test_hardening_deploy_contract_is_fail_closed() {
     'Redis capacity memory swap differs from release resource contract'
   assert_contains "$text" 'legacy Redis container identity differs from backup evidence'
   assert_contains "$text" 'running Redis active volume source differs from evidence'
-  assert_contains "$text" 'running Redis must contain only the fencing epoch marker'
+  assert_contains "$text" 'running Redis is missing the fencing epoch marker'
   assert_contains "$text" 'running Redis maxmemory policy must be noeviction'
   assert_contains "$text" 'running Redis MemorySwap differs from capacity evidence'
   assert_contains "$text" 'running Redis active volume differs from evidence'

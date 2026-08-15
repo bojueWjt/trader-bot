@@ -7027,8 +7027,11 @@ if run_id != expected_run_id:
     raise SystemExit("running Redis differs from capacity evidence")
 if inspected.get("Id") != capacity["active_container_id"]:
     raise SystemExit("running Redis container identity differs from evidence")
-if int(dbsize) != 1:
-    raise SystemExit("running Redis must contain only the fencing epoch marker")
+# Capacity evidence already proves this exact container/run_id/volume began
+# with only the epoch marker. Account namespace keys are expected after nodes
+# have run against that fresh volume.
+if int(dbsize) < 1:
+    raise SystemExit("running Redis is missing the fencing epoch marker")
 expected_fencing_epoch = str(capacity["redis_fencing_epoch"])
 if redis_fencing_epoch != expected_fencing_epoch:
     raise SystemExit("running Redis fencing epoch differs from evidence")
