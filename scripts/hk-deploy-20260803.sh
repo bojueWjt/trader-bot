@@ -62,6 +62,7 @@ LEGACY_CONTROL_PLANE_UNIT="${LEGACY_CONTROL_PLANE_UNIT:-trader-v3-controlplane.s
 REDIS_COLD_BACKUP_MANIFEST="${REDIS_COLD_BACKUP_MANIFEST:-$T/redis-rebaseline/current/cold-backup-manifest.json}"
 REDIS_CAPACITY_EVIDENCE="${REDIS_CAPACITY_EVIDENCE:-$T/redis-rebaseline/current/capacity-evidence.json}"
 REDIS_FENCING_EPOCH_KEY="trader-bot:redis-fencing-epoch"
+REDIS_AOF_VALIDATION_ROOT="$T/redis-aof-validation"
 REDIS_NAMESPACE_JANITOR="$STAGING/redis_namespace_janitor.py"
 REDIS_NAMESPACE_REGISTRY="$STAGING/redis_namespace_registry.py"
 HERMES_V3_TRADER_ROOT="${HERMES_V3_TRADER_ROOT:-/srv/hermes/profiles/trader/skills/trading/v3-trader}"
@@ -6471,6 +6472,39 @@ read -r \
 
 REDIS_IMAGE="$(docker inspect --format '{{.Image}}' trader-v3-redis)"
 [ -n "$REDIS_IMAGE" ] || die "running Redis image digest is missing"
+verify_redis_cold_backup_aof() {
+  local artifact_path="$1"
+  local canonical_after
+  local canonical_before
+  local checker_status=0
+  local validation_dir
+  local validation_path
+  canonical_before="$(
+    sha256sum "$artifact_path" | awk '{print $1}'
+  )"
+  install -d -m 0700 "$REDIS_AOF_VALIDATION_ROOT"
+  validation_dir="$(
+    mktemp -d "$REDIS_AOF_VALIDATION_ROOT/aof.XXXXXX"
+  )"
+  validation_path="$validation_dir/appendonly.aof"
+  cp -- "$artifact_path" "$validation_path"
+  chmod 0600 "$validation_path"
+  docker run --rm --network none \
+    --entrypoint redis-check-aof \
+    -v "$validation_dir:/evidence:rw" \
+    "$REDIS_IMAGE" /evidence/appendonly.aof >/dev/null \
+    || checker_status=$?
+  canonical_after="$(
+    sha256sum "$artifact_path" | awk '{print $1}'
+  )"
+  rm -f -- "$validation_path"
+  rmdir -- "$validation_dir"
+  rmdir -- "$REDIS_AOF_VALIDATION_ROOT" 2>/dev/null || true
+  [ "$canonical_after" = "$canonical_before" ] \
+    || die "Redis cold backup AOF checker changed canonical artifact"
+  [ "$checker_status" -eq 0 ] \
+    || die "Redis cold backup AOF checker failed: $artifact_path"
+}
 while IFS=$'\t' read -r artifact_kind artifact_path; do
   [ -n "$artifact_kind" ] || continue
   case "$artifact_kind" in
@@ -6482,11 +6516,7 @@ while IFS=$'\t' read -r artifact_kind artifact_path; do
         || die "Redis cold backup RDB checker failed: $artifact_path"
       ;;
     aof)
-      docker run --rm --network none \
-        --entrypoint redis-check-aof \
-        -v "$artifact_path:/evidence/appendonly.aof:ro" \
-        "$REDIS_IMAGE" /evidence/appendonly.aof >/dev/null \
-        || die "Redis cold backup AOF checker failed: $artifact_path"
+      verify_redis_cold_backup_aof "$artifact_path"
       ;;
     aof-manifest)
       python3 - "$artifact_path" <<'PY'

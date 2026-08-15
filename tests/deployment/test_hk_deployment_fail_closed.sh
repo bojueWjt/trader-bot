@@ -161,6 +161,14 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_not_contains "$text" 'trader-v3-redis-capacity-evidence/v2'
   assert_contains "$text" 'redis-check-rdb'
   assert_contains "$text" 'redis-check-aof'
+  assert_contains "$text" \
+    'REDIS_AOF_VALIDATION_ROOT="$T/redis-aof-validation"'
+  assert_contains "$text" \
+    '-v "$validation_dir:/evidence:rw"'
+  assert_contains "$text" \
+    'Redis cold backup AOF checker changed canonical artifact'
+  assert_not_contains "$text" \
+    '-v "$artifact_path:/evidence/appendonly.aof:ro"'
   assert_contains "$text" 'validator_output_sha256'
   assert_contains "$text" 'source_container_preserved'
   assert_contains "$text" 'active_volume_source'
