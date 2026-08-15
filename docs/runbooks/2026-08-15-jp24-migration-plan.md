@@ -9,7 +9,7 @@
 
 - 目标 1：jp-24 收编进机群（SSH 加固、Tailscale、balen-deloy inventory 同步、三台 Mac 的 codex/claude code 更新）。
 - 目标 2：四账户交易栈整体迁移到 jp-24，携带四项代码缺陷修复，全程 HALTED，HK 保留为回滚冷备。
-- 目标 3：四账户按出口 IP 分流（2+1+1），单 IP 权重回到 2400 限额内。
+- 目标 3：四账户按四个出口 IP 分流，单 IP 权重回到 2400 限额内。
 
 ## 硬性禁止事项（每个阶段都适用）
 
@@ -32,10 +32,10 @@
 |---|---|---|
 | account-a | 170.205.39.79 | 920 / 2400 |
 | account-b | 170.205.39.82 | 920 / 2400 |
-| account-c | 170.205.39.88 | 1840 / 2400（与 d 共享） |
-| account-d | 170.205.39.88 | 同上 |
+| account-c | 170.205.39.88 | 920 / 2400 |
+| account-d | 103.197.211.79（jp-max HTTPS CONNECT proxy） | 920 / 2400 |
 
-实现方式：每账户独立 docker network + iptables SNAT 按网段绑定源 IP（P1 落地，P4 从容器内 `curl api.ipify.org` 实证核对）。IPv6 作为未来第 4 出口的备选实验项，不作为本次依赖。
+实现方式：每账户独立 docker network；a/b/c 用 iptables SNAT 绑定 jp-24 三个本机 IPv4，d 的 `binance.proxy_url` 固定为 jp-max Tailscale 专用 HTTPS CONNECT proxy（出口 `103.197.211.79`）。P4 从各容器内实证核对实际 Binance 出口。IPv6 保留为未来实验项。
 
 ---
 
@@ -62,7 +62,7 @@
 2. 三个控制面角色（node-control / event-ingest / operator-query）systemd 单元与 DB 角色，沿用列级锁授权方案。
 3. 环境变量修正（事故修复项）：`CONTROL_PLANE_NODE_CONTROL_DB_POOL_SIZE=24`、`CONTROL_PLANE_NODE_CONTROL_DB_CHECKOUT_TIMEOUT_SECONDS=2`。
 4. 部署 staging 目录用真实磁盘 `/srv/trader-staging`，**禁用 /tmp（若为 tmpfs）作 staging**——HK 的 tmpfs 教训。
-5. 四账户出口分流落地（docker network + SNAT），按上表映射。
+5. 四账户出口分流落地：a/b/c 使用 docker network + SNAT；d 配置 jp-max 专用 proxy，按上表映射。
 6. systemd 资源合同沿用 `MemoryMax=640M`/节点。
 
 **P1 验收**：三角色启动自检（`_ROLLBACK_ONLY_PERMISSION_PROBES`）全过；Redis `maxmemory` 读数；每个账户网络的容器内出口 IP 实测与映射表一致；staging 目录挂载点非 tmpfs（`df -T` 证据）。
@@ -88,7 +88,7 @@
 
 1. 用 P2 attested bundle 走 `hk-deploy-20260803.sh` 全流程（fail-closed 门禁不减一条），`SKIP_RESUME=1` 保持 HALTED。
 2. 六项门禁读数汇报（四节点 ready+HALTED、startup 内存峰值 vs 640MiB、rollout phase 注册、心跳围栏等）。
-3. 逐容器实测出口 IP 与分配表一致。
+3. 逐容器实测 Binance 出口 IP 与分配表一致，d 必须通过受限 proxy 返回 `103.197.211.79`。
 4. 重装 per-account recorder（补 c/d 录制盲区）+ exchange-state recorder 重启。
 5. **24 小时 HALTED 浸泡**：全程无 -1003、无 503、无重启、Redis 内存平稳、`X-MBX-USED-WEIGHT-1M` 每 IP 峰值 <50%。这是对三层根因修复的直接回归验证。
 

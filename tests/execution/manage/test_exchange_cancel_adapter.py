@@ -537,6 +537,41 @@ class ExchangeStateMirrorTest(unittest.TestCase):
 
 
 class ExchangeEvidenceProviderTest(unittest.TestCase):
+    def test_default_refresh_interval_reuses_evidence_for_five_seconds(
+        self,
+    ) -> None:
+        clock = _VirtualClock(
+            datetime(2026, 8, 8, 8, 30, tzinfo=timezone.utc),
+            monotonic_value=10.0,
+        )
+        transport = _ScriptedTransport(
+            {
+                ("GET", "/fapi/v2/positionRisk"): [[], []],
+                ("GET", "/fapi/v1/openOrders"): [[], []],
+                ("GET", "/fapi/v1/openAlgoOrders"): [
+                    {"orders": []},
+                    {"orders": []},
+                ],
+            }
+        )
+        provider = BinanceExchangeEvidenceProvider(
+            transport=transport,
+            monotonic=clock.monotonic,
+            now=clock.now,
+        )
+
+        first = provider.snapshot()
+        clock.advance(4.99)
+        cached = provider.snapshot()
+
+        self.assertEqual(cached, first)
+        self.assertEqual(len(transport.calls), 3)
+
+        clock.advance(0.02)
+        provider.snapshot()
+
+        self.assertEqual(len(transport.calls), 6)
+
     def test_snapshot_reuses_fresh_cached_evidence(self) -> None:
         transport = _ScriptedTransport(
             {

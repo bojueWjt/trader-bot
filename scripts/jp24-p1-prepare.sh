@@ -196,11 +196,15 @@ lines = [
     "WATCHER_TRADING_DB=" + str(watcher_database_path),
     "BINANCE_EGRESS_MODE=account_networks",
     "BINANCE_PROXY_URL=",
+    "BINANCE_PROXY_URL_A=",
+    "BINANCE_PROXY_URL_B=",
+    "BINANCE_PROXY_URL_C=",
+    "BINANCE_PROXY_URL_D=http://100.107.72.78:13128",
     "BINANCE_EXPECTED_EGRESS_IP=170.205.39.79",
     "BINANCE_EXPECTED_EGRESS_IP_A=170.205.39.79",
     "BINANCE_EXPECTED_EGRESS_IP_B=170.205.39.82",
     "BINANCE_EXPECTED_EGRESS_IP_C=170.205.39.88",
-    "BINANCE_EXPECTED_EGRESS_IP_D=170.205.39.88",
+    "BINANCE_EXPECTED_EGRESS_IP_D=103.197.211.79",
 ]
 payload = ("\n".join(lines) + "\n").encode("utf-8")
 descriptor, temporary_name = tempfile.mkstemp(

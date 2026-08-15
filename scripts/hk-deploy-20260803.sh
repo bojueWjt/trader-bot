@@ -119,6 +119,10 @@ OPERATOR_ACCOUNT_REGISTRY_JSON='{"account-a":{},"account-b":{},"account-c":{},"a
 V3_OPERATOR_ACCOUNTS="account-a,account-b,account-c,account-d"
 BINANCE_EGRESS_MODE=""
 BINANCE_PROXY_URL=""
+BINANCE_PROXY_URL_A=""
+BINANCE_PROXY_URL_B=""
+BINANCE_PROXY_URL_C=""
+BINANCE_PROXY_URL_D=""
 BINANCE_EXPECTED_EGRESS_IP=""
 BINANCE_EXPECTED_EGRESS_IP_A=""
 BINANCE_EXPECTED_EGRESS_IP_B=""
@@ -3164,7 +3168,11 @@ prepare_release_bound_config_source() {
     "$source_config" \
     "$output_config" \
     "$BINANCE_EGRESS_MODE" \
-    "$BINANCE_PROXY_URL" <<'PY'
+    "$BINANCE_PROXY_URL" \
+    "$BINANCE_PROXY_URL_A" \
+    "$BINANCE_PROXY_URL_B" \
+    "$BINANCE_PROXY_URL_C" \
+    "$BINANCE_PROXY_URL_D" <<'PY'
 import json
 import os
 import sys
@@ -3176,21 +3184,12 @@ from pathlib import Path
     source_raw,
     output_raw,
     egress_mode,
-    proxy_url,
+    shared_proxy_url,
+    proxy_url_a,
+    proxy_url_b,
+    proxy_url_c,
+    proxy_url_d,
 ) = sys.argv[1:]
-if egress_mode in {"route", "account_networks"}:
-    if proxy_url:
-        raise SystemExit(
-            f"{egress_mode} egress mode cannot configure a Binance proxy"
-        )
-    proxy_url = False
-elif egress_mode == "proxy":
-    if not proxy_url:
-        raise SystemExit(
-            "proxy egress mode requires a Binance proxy"
-        )
-else:
-    raise SystemExit("Binance egress mode is invalid")
 sys.path.insert(0, str(Path(release_tool).resolve().parent))
 import release_manifest
 
@@ -3199,6 +3198,42 @@ source_path = Path(source_raw)
 output_path = Path(output_raw)
 policy = json.loads(policy_path.read_text(encoding="utf-8"))
 source = json.loads(source_path.read_text(encoding="utf-8"))
+account_id = source.get("account_id")
+account_proxy_urls = dict(
+    (
+        ("account-a", proxy_url_a),
+        ("account-b", proxy_url_b),
+        ("account-c", proxy_url_c),
+        ("account-d", proxy_url_d),
+    )
+)
+if account_id not in account_proxy_urls:
+    raise SystemExit("live node account_id is invalid")
+if egress_mode == "route":
+    if shared_proxy_url or any(account_proxy_urls.values()):
+        raise SystemExit(
+            "route egress mode cannot configure a Binance proxy"
+        )
+    proxy_url = False
+elif egress_mode == "proxy":
+    if not shared_proxy_url:
+        raise SystemExit(
+            "proxy egress mode requires a Binance proxy"
+        )
+    if any(account_proxy_urls.values()):
+        raise SystemExit(
+            "proxy egress mode cannot configure account Binance proxies"
+        )
+    proxy_url = shared_proxy_url
+elif egress_mode == "account_networks":
+    if shared_proxy_url:
+        raise SystemExit(
+            "account_networks egress mode cannot configure a shared proxy"
+        )
+    proxy_url = account_proxy_urls[account_id] or False
+else:
+    raise SystemExit("Binance egress mode is invalid")
+
 resources = release_manifest._validated_runtime_resources(
     policy.get("runtime_resource_contract"),
     label="live risk policy runtime_resource_contract",
@@ -3273,6 +3308,10 @@ def read_environment(path):
 values = read_environment(sys.argv[1])
 egress_mode = values.get("BINANCE_EGRESS_MODE", "").strip()
 proxy_url = values.get("BINANCE_PROXY_URL", "").strip()
+account_proxy_urls = [
+    values.get(f"BINANCE_PROXY_URL_{label}", "").strip()
+    for label in ("A", "B", "C", "D")
+]
 expected_egress = values.get(
     "BINANCE_EXPECTED_EGRESS_IP",
     "",
@@ -3285,25 +3324,75 @@ if egress_mode not in {"route", "proxy", "account_networks"}:
     raise SystemExit(
         "BINANCE_EGRESS_MODE must be route, proxy, or account_networks"
     )
-if egress_mode in {"route", "account_networks"} and proxy_url:
-    raise SystemExit(
-        f"BINANCE_PROXY_URL must be empty in {egress_mode} mode"
-    )
-if egress_mode == "proxy":
-    parsed_proxy = urlsplit(proxy_url)
+
+
+def validate_proxy_url(raw_value, label):
+    if not raw_value:
+        return ""
+    parsed_proxy = urlsplit(raw_value)
     if (
         parsed_proxy.scheme not in {"http", "https"}
         or not parsed_proxy.hostname
     ):
         raise SystemExit(
-            "BINANCE_PROXY_URL must be an http(s) URL"
+            f"{label} must be an http(s) URL"
         )
     if (
         parsed_proxy.username is not None
         or parsed_proxy.password is not None
     ):
+        if label == "BINANCE_PROXY_URL":
+            raise SystemExit(
+                "BINANCE_PROXY_URL must not contain credentials"
+            )
         raise SystemExit(
-            "BINANCE_PROXY_URL must not contain credentials"
+            f"{label} must not contain credentials"
+        )
+    try:
+        parsed_proxy.port
+    except ValueError as exc:
+        raise SystemExit(f"{label} contains an invalid port") from exc
+    return raw_value
+
+
+proxy_url = validate_proxy_url(proxy_url, "BINANCE_PROXY_URL")
+normalized_account_proxies = [
+    validate_proxy_url(raw_value, f"BINANCE_PROXY_URL_{label}")
+    for label, raw_value in zip(
+        ("A", "B", "C", "D"),
+        account_proxy_urls,
+    )
+]
+if egress_mode == "route":
+    if proxy_url:
+        raise SystemExit(
+            "BINANCE_PROXY_URL must be empty in route mode"
+        )
+    if any(normalized_account_proxies):
+        raise SystemExit(
+            "route mode must not configure Binance proxies"
+        )
+if egress_mode == "proxy":
+    if not proxy_url:
+        raise SystemExit(
+            "BINANCE_PROXY_URL must be an http(s) URL"
+        )
+    if any(normalized_account_proxies):
+        raise SystemExit(
+            "proxy mode must not configure account Binance proxies"
+        )
+if egress_mode == "account_networks":
+    if proxy_url:
+        raise SystemExit(
+            "BINANCE_PROXY_URL must be empty in account_networks mode"
+        )
+    if any(normalized_account_proxies[:3]):
+        raise SystemExit(
+            "account A, B, and C Binance proxies must be empty"
+        )
+    if not normalized_account_proxies[3]:
+        raise SystemExit(
+            "BINANCE_PROXY_URL_D must be an http(s) URL"
         )
 try:
     expected_ip = ipaddress.ip_address(expected_egress)
@@ -3343,12 +3432,17 @@ if egress_mode == "account_networks":
         raise SystemExit(
             "account A, B, and C egress IPs must be distinct"
         )
-    if account_c != account_d:
+    if len({account_a, account_b, account_c, account_d}) != 4:
         raise SystemExit(
-            "account C and D egress IPs must match"
+            "account A through D egress IPs must be distinct"
         )
 print(f"mode={egress_mode}")
 print(f"proxy={proxy_url}")
+for label, value in zip(
+    ("a", "b", "c", "d"),
+    normalized_account_proxies,
+):
+    print(f"proxy_{label}={value}")
 print(f"expected={expected_ip}")
 for label, value in zip(
     ("a", "b", "c", "d"),
@@ -3362,15 +3456,19 @@ PY
   while IFS= read -r setting; do
     settings+=("${setting#*=}")
   done <<<"$settings_output"
-  [ "${#settings[@]}" -eq 7 ] \
+  [ "${#settings[@]}" -eq 11 ] \
     || die "Binance JP egress settings are incomplete"
   BINANCE_EGRESS_MODE="${settings[0]}"
   BINANCE_PROXY_URL="${settings[1]}"
-  BINANCE_EXPECTED_EGRESS_IP="${settings[2]}"
-  BINANCE_EXPECTED_EGRESS_IP_A="${settings[3]}"
-  BINANCE_EXPECTED_EGRESS_IP_B="${settings[4]}"
-  BINANCE_EXPECTED_EGRESS_IP_C="${settings[5]}"
-  BINANCE_EXPECTED_EGRESS_IP_D="${settings[6]}"
+  BINANCE_PROXY_URL_A="${settings[2]}"
+  BINANCE_PROXY_URL_B="${settings[3]}"
+  BINANCE_PROXY_URL_C="${settings[4]}"
+  BINANCE_PROXY_URL_D="${settings[5]}"
+  BINANCE_EXPECTED_EGRESS_IP="${settings[6]}"
+  BINANCE_EXPECTED_EGRESS_IP_A="${settings[7]}"
+  BINANCE_EXPECTED_EGRESS_IP_B="${settings[8]}"
+  BINANCE_EXPECTED_EGRESS_IP_C="${settings[9]}"
+  BINANCE_EXPECTED_EGRESS_IP_D="${settings[10]}"
 }
 load_binance_proxy_settings() {
   load_binance_egress_settings
@@ -3483,12 +3581,19 @@ verify_binance_account_network_egress() {
   local network
   local network_names
   local node
+  local proxy_url
   local probe_image
   local expected_egress_ips=(
     "$BINANCE_EXPECTED_EGRESS_IP_A"
     "$BINANCE_EXPECTED_EGRESS_IP_B"
     "$BINANCE_EXPECTED_EGRESS_IP_C"
     "$BINANCE_EXPECTED_EGRESS_IP_D"
+  )
+  local proxy_urls=(
+    "$BINANCE_PROXY_URL_A"
+    "$BINANCE_PROXY_URL_B"
+    "$BINANCE_PROXY_URL_C"
+    "$BINANCE_PROXY_URL_D"
   )
   probe_image="$(
     docker image inspect \
@@ -3501,6 +3606,7 @@ verify_binance_account_network_egress() {
     network="${BINANCE_ACCOUNT_NETWORKS[$index]}"
     node="${ALL_NODES[$index]}"
     expected_egress="${expected_egress_ips[$index]}"
+    proxy_url="${proxy_urls[$index]}"
     docker network inspect "$network" >/dev/null \
       || die "Binance account network is unavailable: $network"
     network_names="$(
@@ -3510,35 +3616,65 @@ verify_binance_account_network_egress() {
     )" || die "Binance node network inspection failed: $node"
     [ "$network_names" = "$network" ] \
       || die "Binance node network differs from account allocation: $node"
-    actual_egress="$(
-      docker run --rm \
-        --network "$network" \
-        "$probe_image" \
-        --fail \
-        --silent \
-        --show-error \
-        --max-time 15 \
-        https://api.ipify.org
-    )" || die "Binance account-network ipify probe failed: $network"
+    if [ -n "$proxy_url" ]; then
+      actual_egress="$(
+        docker run --rm \
+          --network "$network" \
+          "$probe_image" \
+          --proxy "$proxy_url" \
+          --fail \
+          --silent \
+          --show-error \
+          --max-time 15 \
+          https://api.ipify.org
+      )" || die "Binance account-network ipify probe failed: $network"
+    else
+      actual_egress="$(
+        docker run --rm \
+          --network "$network" \
+          "$probe_image" \
+          --fail \
+          --silent \
+          --show-error \
+          --max-time 15 \
+          https://api.ipify.org
+      )" || die "Binance account-network ipify probe failed: $network"
+    fi
     [ "$actual_egress" = "$expected_egress" ] \
       || die "Binance account-network egress differs: $network"
-    fapi_http_code="$(
-      docker run --rm \
-        --network "$network" \
-        "$probe_image" \
-        --silent \
-        --show-error \
-        --max-time 15 \
-        --output /dev/null \
-        --write-out '%{http_code}' \
-        https://fapi.binance.com/fapi/v1/time
-    )" || die "Binance account-network FAPI probe failed: $network"
+    if [ -n "$proxy_url" ]; then
+      fapi_http_code="$(
+        docker run --rm \
+          --network "$network" \
+          "$probe_image" \
+          --proxy "$proxy_url" \
+          --silent \
+          --show-error \
+          --max-time 15 \
+          --output /dev/null \
+          --write-out '%{http_code}' \
+          https://fapi.binance.com/fapi/v1/time
+      )" || die "Binance account-network FAPI probe failed: $network"
+    else
+      fapi_http_code="$(
+        docker run --rm \
+          --network "$network" \
+          "$probe_image" \
+          --silent \
+          --show-error \
+          --max-time 15 \
+          --output /dev/null \
+          --write-out '%{http_code}' \
+          https://fapi.binance.com/fapi/v1/time
+      )" || die "Binance account-network FAPI probe failed: $network"
+    fi
     [ "$fapi_http_code" = "200" ] \
       || die "Binance account-network FAPI probe did not return HTTP 200: $network"
-    printf '== Binance account network verified: %s network=%s egress=%s\n' \
+    printf '== Binance account network verified: %s network=%s egress=%s proxy=%s\n' \
       "$node" \
       "$network" \
-      "$actual_egress"
+      "$actual_egress" \
+      "${proxy_url:-direct}"
   done
 }
 verify_binance_egress() {

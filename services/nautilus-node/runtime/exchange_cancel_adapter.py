@@ -1152,7 +1152,7 @@ class BinanceExchangeEvidenceProvider:
         self,
         *,
         transport: ExchangeTransport,
-        refresh_interval_seconds: float = 3.0,
+        refresh_interval_seconds: float = 5.0,
         total_deadline_seconds: float = DEFAULT_EVIDENCE_TOTAL_DEADLINE_SECONDS,
         backoff_base_seconds: float = DEFAULT_EVIDENCE_BACKOFF_BASE_SECONDS,
         backoff_max_seconds: float = DEFAULT_EVIDENCE_BACKOFF_MAX_SECONDS,

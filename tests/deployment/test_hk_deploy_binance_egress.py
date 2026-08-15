@@ -47,10 +47,21 @@ def _write_environment(
         "203.0.113.27",
         "203.0.113.28",
         "203.0.113.29",
-        "203.0.113.29",
+        "203.0.113.30",
     ),
+    account_proxy_urls: tuple[str, str, str, str] | None = None,
 ) -> None:
     account_a, account_b, account_c, account_d = account_expected_ips
+    if account_proxy_urls is None:
+        account_proxy_urls = ("", "", "", "")
+        if mode == "account_networks":
+            account_proxy_urls = (
+                "",
+                "",
+                "",
+                "http://proxy-d.internal:3128",
+            )
+    proxy_a, proxy_b, proxy_c, proxy_d = account_proxy_urls
     root.mkdir(parents=True, exist_ok=True)
     (root / ".env.v3").write_text(
         "\n".join(
@@ -58,6 +69,10 @@ def _write_environment(
                 f"BINANCE_EGRESS_MODE={mode}",
                 f"BINANCE_EXPECTED_EGRESS_IP={expected_ip}",
                 f"BINANCE_PROXY_URL={proxy_url}",
+                f"BINANCE_PROXY_URL_A={proxy_a}",
+                f"BINANCE_PROXY_URL_B={proxy_b}",
+                f"BINANCE_PROXY_URL_C={proxy_c}",
+                f"BINANCE_PROXY_URL_D={proxy_d}",
                 f"BINANCE_EXPECTED_EGRESS_IP_A={account_a}",
                 f"BINANCE_EXPECTED_EGRESS_IP_B={account_b}",
                 f"BINANCE_EXPECTED_EGRESS_IP_C={account_c}",
@@ -76,6 +91,10 @@ def _loader_source(root: Path) -> str:
 T={root}
 BINANCE_EGRESS_MODE=
 BINANCE_PROXY_URL=
+BINANCE_PROXY_URL_A=
+BINANCE_PROXY_URL_B=
+BINANCE_PROXY_URL_C=
+BINANCE_PROXY_URL_D=
 BINANCE_EXPECTED_EGRESS_IP=
 BINANCE_EXPECTED_EGRESS_IP_A=
 BINANCE_EXPECTED_EGRESS_IP_B=
@@ -84,6 +103,10 @@ BINANCE_EXPECTED_EGRESS_IP_D=
 load_binance_egress_settings
 printf 'mode=%s\\n' "$BINANCE_EGRESS_MODE"
 printf 'proxy=%s\\n' "$BINANCE_PROXY_URL"
+printf 'proxy_a=%s\\n' "$BINANCE_PROXY_URL_A"
+printf 'proxy_b=%s\\n' "$BINANCE_PROXY_URL_B"
+printf 'proxy_c=%s\\n' "$BINANCE_PROXY_URL_C"
+printf 'proxy_d=%s\\n' "$BINANCE_PROXY_URL_D"
 printf 'expected=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP"
 printf 'expected_a=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP_A"
 printf 'expected_b=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP_B"
@@ -119,7 +142,11 @@ def test_load_binance_egress_settings_accepts_explicit_modes(
         assert "expected_a=203.0.113.27\n" in result.stdout
         assert "expected_b=203.0.113.28\n" in result.stdout
         assert "expected_c=203.0.113.29\n" in result.stdout
-        assert "expected_d=203.0.113.29\n" in result.stdout
+        assert "expected_d=203.0.113.30\n" in result.stdout
+        assert "proxy_a=\n" in result.stdout
+        assert "proxy_b=\n" in result.stdout
+        assert "proxy_c=\n" in result.stdout
+        assert "proxy_d=http://proxy-d.internal:3128\n" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -161,6 +188,43 @@ def test_load_binance_egress_settings_fails_closed(
         mode=mode,
         expected_ip=expected_ip,
         proxy_url=proxy_url,
+    )
+
+    result = _run_bash(_loader_source(root))
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("account_proxy_urls", "message"),
+    (
+        (("", "", "", ""), "BINANCE_PROXY_URL_D"),
+        (
+            (
+                "http://proxy-a.internal:3128",
+                "",
+                "",
+                "http://proxy-d.internal:3128",
+            ),
+            "account A, B, and C Binance proxies must be empty",
+        ),
+        (
+            ("", "", "", "http://operator:secret@proxy-d.internal:3128"),
+            "must not contain credentials",
+        ),
+    ),
+)
+def test_account_network_settings_require_only_account_d_proxy(
+    tmp_path: Path,
+    account_proxy_urls: tuple[str, str, str, str],
+    message: str,
+) -> None:
+    root = tmp_path / "runtime"
+    _write_environment(
+        root,
+        mode="account_networks",
+        account_proxy_urls=account_proxy_urls,
     )
 
     result = _run_bash(_loader_source(root))
@@ -389,7 +453,17 @@ if [ "$1" = "run" ]; then
       case "$network" in
         trader-v3-account-a) value=203.0.113.27 ;;
         trader-v3-account-b) value=203.0.113.28 ;;
-        trader-v3-account-c|trader-v3-account-d) value=203.0.113.29 ;;
+        trader-v3-account-c) value=203.0.113.29 ;;
+        trader-v3-account-d)
+          case "$*" in
+            *"--proxy http://proxy-d.internal:3128"*)
+              value=203.0.113.30
+              ;;
+            *)
+              exit 64
+              ;;
+          esac
+          ;;
         *) exit 64 ;;
       esac
       if [ "${FAKE_BAD_EGRESS_NETWORK:-}" = "$network" ]; then
@@ -434,7 +508,11 @@ BINANCE_ACCOUNT_NETWORKS=(
 BINANCE_EXPECTED_EGRESS_IP_A=203.0.113.27
 BINANCE_EXPECTED_EGRESS_IP_B=203.0.113.28
 BINANCE_EXPECTED_EGRESS_IP_C=203.0.113.29
-BINANCE_EXPECTED_EGRESS_IP_D=203.0.113.29
+BINANCE_EXPECTED_EGRESS_IP_D=203.0.113.30
+BINANCE_PROXY_URL_A=
+BINANCE_PROXY_URL_B=
+BINANCE_PROXY_URL_C=
+BINANCE_PROXY_URL_D=http://proxy-d.internal:3128
 BINANCE_EGRESS_PROBE_IMAGE=curlimages/curl:8.12.1
 verify_binance_account_network_egress
 """
@@ -464,6 +542,7 @@ def test_account_network_mode_verifies_all_nodes_and_egress(
     assert result.returncode == 0, result.stderr
     log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
     assert log.count("docker run --rm --network trader-v3-account-") == 8
+    assert log.count("--proxy http://proxy-d.internal:3128") == 2
     assert result.stdout.count("== Binance account network verified:") == 4
 
 
@@ -499,17 +578,38 @@ def test_account_network_mode_fails_closed(
 
 
 @pytest.mark.parametrize(
-    ("mode", "proxy_url", "expected_proxy"),
+    ("mode", "account_id", "proxy_url", "proxy_url_d", "expected_proxy"),
     (
-        ("route", "", None),
-        ("proxy", "http://proxy.internal:3128", "http://proxy.internal:3128"),
-        ("account_networks", "", None),
+        ("route", "account-a", "", "", None),
+        (
+            "proxy",
+            "account-a",
+            "http://proxy.internal:3128",
+            "",
+            "http://proxy.internal:3128",
+        ),
+        (
+            "account_networks",
+            "account-a",
+            "",
+            "http://proxy-d.internal:3128",
+            None,
+        ),
+        (
+            "account_networks",
+            "account-d",
+            "",
+            "http://proxy-d.internal:3128",
+            "http://proxy-d.internal:3128",
+        ),
     ),
 )
 def test_release_bound_node_config_uses_mode_specific_proxy_value(
     tmp_path: Path,
     mode: str,
+    account_id: str,
     proxy_url: str,
+    proxy_url_d: str,
     expected_proxy: bool | str,
 ) -> None:
     release_tool = tmp_path / "release_manifest.py"
@@ -528,6 +628,7 @@ def test_release_bound_node_config_uses_mode_specific_proxy_value(
     source_config.write_text(
         json.dumps(
             {
+                "account_id": account_id,
                 "binance": {},
                 "runtime_resources": {"cpu": 1},
             }
@@ -542,6 +643,10 @@ RELEASE_TOOL={release_tool}
 LIVE_RISK_POLICY={policy}
 BINANCE_EGRESS_MODE={mode}
 BINANCE_PROXY_URL={proxy_url}
+BINANCE_PROXY_URL_A=
+BINANCE_PROXY_URL_B=
+BINANCE_PROXY_URL_C=
+BINANCE_PROXY_URL_D={proxy_url_d}
 prepare_release_bound_config_source {source_config} {output_config}
 """
     )
@@ -562,12 +667,15 @@ def test_deploy_preflight_uses_mode_aware_egress_gate() -> None:
     assert "\nload_binance_egress_settings\nverify_binance_egress\n" in text
     assert 'if proxy_url:\n    updated_binance["proxy_url"] = proxy_url' in text
     assert "verify_binance_account_network_egress" in text
+    assert 'proxy_url = account_proxy_urls[account_id] or False' in text
 
 
 def test_jp24_prepare_exposes_internal_services_on_account_networks() -> None:
     text = JP24_PREPARE.read_text(encoding="utf-8")
 
     assert '"BINANCE_EGRESS_MODE=account_networks"' in text
+    assert '"BINANCE_PROXY_URL_D=http://100.107.72.78:13128"' in text
+    assert '"BINANCE_EXPECTED_EGRESS_IP_D=103.197.211.79"' in text
     assert "connect_redis_networks() {" in text
     assert "--alias trader-v3-redis" in text
     assert "allow_account_network_control_plane() {" in text
