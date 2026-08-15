@@ -1351,6 +1351,368 @@ def test_bootstrap_registration_audit_marks_all_accounts_halted(
     assert audits[0]["payload"]["bootstrap_all_halted"] is True
 
 
+def _migration_rebaseline_document() -> reviewed_release_rollout.ReleaseDocument:
+    return reviewed_release_rollout.ReleaseDocument(
+        release_id="migration-release",
+        image_digest="sha256:" + ("1" * 64),
+        config_sha256="2" * 64,
+        dependency_lock_sha256="3" * 64,
+        schema_epoch="0014_cancel_order_contract",
+        manifest_sha256="4" * 64,
+        bundle_manifest_sha256="5" * 64,
+        delivery_mode=release_manifest.DELIVERY_IMMUTABLE,
+        release_root_path="/srv/trader-v3/releases/migration",
+        release_source_manifest_sha256="6" * 64,
+        live_adapter_sha256="7" * 64,
+        node_ids=dict(reviewed_release_rollout.EXPECTED_NODE_IDS),
+    )
+
+
+def _migration_rebaseline_capacity(
+) -> reviewed_release_rollout.RedisFencingEpochEvidence:
+    return reviewed_release_rollout.RedisFencingEpochEvidence(
+        redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        marker_sha256=sha256(
+            REDIS_FENCING_EPOCH.encode("ascii")
+        ).hexdigest(),
+        capacity_evidence_sha256="8" * 64,
+        initial_redis_run_id="a" * 40,
+        active_volume="trader-v3-redis-migration",
+    )
+
+
+def _migration_rebaseline_rollout(
+    document: reviewed_release_rollout.ReleaseDocument,
+    capacity: reviewed_release_rollout.RedisFencingEpochEvidence,
+) -> dict:
+    return {
+        "release_id": document.release_id,
+        "redis_fencing_epoch": capacity.redis_fencing_epoch,
+        "image_digest": document.image_digest,
+        "config_sha256": document.config_sha256,
+        "dependency_lock_sha256": document.dependency_lock_sha256,
+        "schema_epoch": document.schema_epoch,
+        "manifest_sha256": document.manifest_sha256,
+        "bundle_manifest_sha256": document.bundle_manifest_sha256,
+        "registration_idempotency_key": (
+            "migration-rebaseline-register:migration-release"
+        ),
+        "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+        "phase_version": 1,
+        "reviewed_by": "release-reviewer",
+        "reviewed_at": None,
+        "created_at": None,
+        "updated_at": None,
+    }
+
+
+def test_migration_rebaseline_registration_is_atomic_and_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _migration_rebaseline_document()
+    capacity = _migration_rebaseline_capacity()
+    rollout = _migration_rebaseline_rollout(document, capacity)
+    predecessor = {
+        "release_id": "migrated-hk-release",
+        "redis_fencing_epoch": "123e4567-e89b-42d3-a456-426614174001",
+        "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+        "phase_version": 1,
+    }
+    calls = []
+    events = []
+    audits = []
+
+    class OperationLock:
+        def require_held(self) -> None:
+            calls.append("lock")
+
+    class Cursor:
+        def __enter__(self):
+            calls.append("cursor-enter")
+            return self
+
+        def __exit__(self, *_args) -> None:
+            calls.append("cursor-exit")
+
+        def execute(self, statement, _params=None) -> None:
+            if "INSERT INTO reviewed_release_rollouts" in statement:
+                calls.append("insert-successor")
+
+        def fetchone(self):
+            return rollout
+
+    class Connection:
+        def __enter__(self):
+            calls.append("transaction-enter")
+            return self
+
+        def __exit__(self, *_args) -> None:
+            calls.append("transaction-exit")
+
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_rollout_by_registration_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_no_active_maintenance_fence_for_migration",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_bootstrap_registration_history",
+        lambda *_args, **_kwargs: {
+            "redis_fencing_epoch_count": 2,
+            "reviewed_release_rollout_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_lock_migration_rebaseline_predecessor",
+        lambda *_args, **_kwargs: predecessor,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_abort_migration_rebaseline_predecessor",
+        lambda *_args, **_kwargs: calls.append("abort-predecessor"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_activate_redis_fencing_epoch",
+        lambda *_args, **_kwargs: calls.append("activate-successor-epoch"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_register_account_manifests",
+        lambda *_args, **_kwargs: calls.append("register-manifests"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_registered_manifests",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_rollout_event",
+        lambda *_args, **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_global_audit",
+        lambda *_args, **kwargs: audits.append(kwargs),
+    )
+
+    result = (
+        reviewed_release_rollout.migration_rebaseline_register_reviewed_release(
+            Connection(),
+            document,
+            capacity,
+            reviewed_by="release-reviewer",
+            idempotency_key=(
+                "migration-rebaseline-register:migration-release"
+            ),
+            operation_lock=OperationLock(),
+        )
+    )
+
+    assert result["idempotent"] is False
+    assert calls.index("abort-predecessor") < calls.index(
+        "activate-successor-epoch"
+    )
+    assert calls.index("activate-successor-epoch") < calls.index(
+        "insert-successor"
+    )
+    registration = events[0]["evidence"]
+    assert registration["registration_mode"] == (
+        reviewed_release_rollout.MIGRATION_REBASELINE_REGISTRATION_MODE
+    )
+    assert registration["all_accounts_stopped"] is True
+    assert registration["predecessor_release_id"] == "migrated-hk-release"
+    assert audits[0]["payload"]["predecessor_release_id"] == (
+        "migrated-hk-release"
+    )
+
+
+def test_migration_rebaseline_registration_replay_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _migration_rebaseline_document()
+    capacity = _migration_rebaseline_capacity()
+    rollout = _migration_rebaseline_rollout(document, capacity)
+    replay_checks = []
+
+    class OperationLock:
+        def require_held(self) -> None:
+            return
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return
+
+        def execute(self, _statement, _params=None) -> None:
+            return
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return
+
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_rollout_by_registration_key",
+        lambda *_args, **_kwargs: rollout,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_no_active_maintenance_fence_for_migration",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_bootstrap_registration_history",
+        lambda *_args, **_kwargs: {
+            "redis_fencing_epoch_count": 3,
+            "reviewed_release_rollout_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_rollout_matches_document",
+        lambda *_args, **_kwargs: replay_checks.append("identity"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_migration_rebaseline_replay",
+        lambda *_args, **_kwargs: replay_checks.append("history"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_registered_manifests",
+        lambda *_args, **_kwargs: replay_checks.append("manifests"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_activate_redis_fencing_epoch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("replay attempted to rotate Redis epoch")
+        ),
+    )
+
+    result = (
+        reviewed_release_rollout.migration_rebaseline_register_reviewed_release(
+            Connection(),
+            document,
+            capacity,
+            reviewed_by="release-reviewer",
+            idempotency_key=(
+                "migration-rebaseline-register:migration-release"
+            ),
+            operation_lock=OperationLock(),
+        )
+    )
+
+    assert result["idempotent"] is True
+    assert replay_checks == ["identity", "history", "manifests"]
+
+
+def test_migration_rebaseline_abort_records_transition_and_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _migration_rebaseline_document()
+    capacity = _migration_rebaseline_capacity()
+    predecessor = {
+        "release_id": "migrated-hk-release",
+        "redis_fencing_epoch": "123e4567-e89b-42d3-a456-426614174001",
+        "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+        "phase_version": 1,
+    }
+    statements = []
+    events = []
+    audits = []
+
+    class Cursor:
+        def execute(self, statement, params=None) -> None:
+            statements.append((statement, params))
+
+        def fetchone(self):
+            return {"release_id": predecessor["release_id"]}
+
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_rollout_event",
+        lambda *_args, **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_global_audit",
+        lambda *_args, **kwargs: audits.append(kwargs),
+    )
+
+    reviewed_release_rollout._abort_migration_rebaseline_predecessor(
+        Cursor(),
+        predecessor=predecessor,
+        successor_document=document,
+        successor_capacity_evidence=capacity,
+        actor="release-reviewer",
+    )
+
+    assert "UPDATE reviewed_release_rollouts" in statements[0][0]
+    assert events[0]["from_phase"] == (
+        reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY
+    )
+    assert events[0]["to_phase"] == reviewed_release_rollout.PHASE_ABORTED
+    assert events[0]["idempotency_key"] == (
+        "migration-rebaseline-abort:migration-release"
+    )
+    assert events[0]["evidence"]["all_accounts_stopped"] is True
+    assert audits[0]["payload"]["successor_release_id"] == (
+        "migration-release"
+    )
+
+
+def test_migration_rebaseline_rejects_active_maintenance_fence() -> None:
+    class Cursor:
+        def execute(self, statement, params=None) -> None:
+            self.statements.append((statement, params))
+
+        def fetchall(self):
+            return [{"fence_id": "active-fence"}]
+
+    cursor = Cursor()
+    cursor.statements = []
+    with pytest.raises(
+        reviewed_release_rollout.ReleaseRolloutError,
+        match="requires no active maintenance fence",
+    ):
+        reviewed_release_rollout._require_no_active_maintenance_fence_for_migration(
+            cursor
+        )
+
+    assert "pg_advisory_xact_lock" in cursor.statements[0][0]
+    assert cursor.statements[0][1] == (
+        "trader-v3-control-plane-maintenance-fence",
+    )
+    assert "FROM control_plane_maintenance_fences" in (
+        cursor.statements[1][0]
+    )
+    assert "FOR UPDATE" in cursor.statements[1][0]
+    assert cursor.statements[1][1] == (
+        reviewed_release_rollout.REDIS_FENCING_DOMAIN,
+    )
+
+
 def _readiness_rollout() -> dict:
     return {
         "release_id": "bootstrap-release",

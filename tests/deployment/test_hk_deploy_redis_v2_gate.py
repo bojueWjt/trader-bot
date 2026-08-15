@@ -727,8 +727,16 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
         dispatch_end = text.index("\n# ---------- install ----------", dispatch_start)
         registration_dispatch = text[dispatch_start:dispatch_end]
         self.assertIn(
-            'if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then',
+            'if [[ "$DEPLOY_GATE_MODE" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then',
             registration_dispatch,
+        )
+        self.assertIn(
+            "run_reviewed_rollout migration-rebaseline-register",
+            registration_command,
+        )
+        self.assertIn(
+            '--idempotency-key "migration-rebaseline-register:$RELEASE_ID"',
+            registration_command,
         )
         self.assertIn(
             "ensure_bootstrap_rollout_registration",

@@ -46,6 +46,13 @@ PHASES = (
     PHASE_FLEET_COMPLETE,
     PHASE_ABORTED,
 )
+ACTIVE_ROLLOUT_PHASES = (
+    PHASE_ACCOUNT_A_CANARY,
+    PHASE_ACCOUNT_B_ROLLOUT,
+    PHASE_ACCOUNT_C_ROLLOUT,
+    PHASE_ACCOUNT_D_ROLLOUT,
+)
+MIGRATION_REBASELINE_REGISTRATION_MODE = "migration_rebaseline_stopped"
 ALLOWED_TRANSITIONS = {
     PHASE_ACCOUNT_A_CANARY: {
         PHASE_ACCOUNT_B_ROLLOUT,
@@ -1881,6 +1888,205 @@ def bootstrap_register_reviewed_release(
             )
 
 
+def migration_rebaseline_register_reviewed_release(
+    conn,
+    document: ReleaseDocument,
+    capacity_evidence: RedisFencingEpochEvidence,
+    *,
+    reviewed_by: str,
+    idempotency_key: str,
+    operation_lock: AccountStallOperationLock,
+) -> dict[str, Any]:
+    """Register a fresh-host release while preserving migrated rollout history."""
+    operation_lock.require_held()
+    reviewer = _required_text(reviewed_by, "reviewed_by")
+    if not isinstance(capacity_evidence, RedisFencingEpochEvidence):
+        raise ReleaseRolloutError("capacity_evidence is required")
+    operation_key = _required_text(
+        idempotency_key,
+        "idempotency_key",
+    )
+    if dict(document.node_ids) != EXPECTED_NODE_IDS:
+        raise ReleaseRolloutError(
+            "reviewed release node/account exact-set mismatch"
+        )
+
+    with conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            operation_lock.require_held()
+            _lock_redis_fencing_epoch_domain(cur)
+            _require_no_active_maintenance_fence_for_migration(cur)
+            existing_by_key = _rollout_by_registration_key(
+                cur,
+                operation_key,
+            )
+            history = _bootstrap_registration_history(cur)
+            if existing_by_key is not None:
+                _require_rollout_matches_document(
+                    existing_by_key,
+                    document,
+                    capacity_evidence,
+                    operation_key,
+                    reviewer,
+                )
+                _require_migration_rebaseline_replay(
+                    cur,
+                    document=document,
+                    capacity_evidence=capacity_evidence,
+                    reviewed_by=reviewer,
+                    idempotency_key=operation_key,
+                )
+                _require_registered_manifests(cur, document)
+                return _rollout_payload(
+                    existing_by_key,
+                    idempotent=True,
+                )
+
+            predecessor = _lock_migration_rebaseline_predecessor(
+                cur,
+                document=document,
+                capacity_evidence=capacity_evidence,
+                history=history,
+            )
+            operation_lock.require_held()
+            _abort_migration_rebaseline_predecessor(
+                cur,
+                predecessor=predecessor,
+                successor_document=document,
+                successor_capacity_evidence=capacity_evidence,
+                actor=reviewer,
+            )
+            operation_lock.require_held()
+            _activate_redis_fencing_epoch(
+                cur,
+                capacity_evidence,
+                activated_by=reviewer,
+            )
+            operation_lock.require_held()
+            cur.execute(
+                """
+                INSERT INTO reviewed_release_rollouts (
+                    release_id,
+                    redis_fencing_epoch,
+                    image_digest,
+                    config_sha256,
+                    dependency_lock_sha256,
+                    schema_epoch,
+                    manifest_sha256,
+                    bundle_manifest_sha256,
+                    registration_idempotency_key,
+                    reviewed_by
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    document.release_id,
+                    capacity_evidence.redis_fencing_epoch,
+                    document.image_digest,
+                    document.config_sha256,
+                    document.dependency_lock_sha256,
+                    document.schema_epoch,
+                    document.manifest_sha256,
+                    document.bundle_manifest_sha256,
+                    operation_key,
+                    reviewer,
+                ),
+            )
+            rollout = cur.fetchone()
+            if rollout is None:
+                raise ReleaseRolloutError(
+                    "migration rebaseline rollout registration conflicted"
+                )
+
+            _require_rollout_matches_document(
+                rollout,
+                document,
+                capacity_evidence,
+                operation_key,
+                reviewer,
+            )
+            _register_account_manifests(
+                cur,
+                document,
+                reviewed_by=reviewer,
+            )
+            _require_registered_manifests(cur, document)
+            evidence = {
+                "registration_mode": (
+                    MIGRATION_REBASELINE_REGISTRATION_MODE
+                ),
+                "bootstrap_all_halted": True,
+                "all_accounts_stopped": True,
+                "predecessor_release_id": predecessor["release_id"],
+                "predecessor_phase": predecessor["phase"],
+                "predecessor_phase_version": int(
+                    predecessor["phase_version"]
+                ),
+                "predecessor_redis_fencing_epoch": str(
+                    predecessor["redis_fencing_epoch"]
+                ),
+                "migration_history": {
+                    "redis_fencing_epoch_count": (
+                        history["redis_fencing_epoch_count"]
+                    ),
+                    "reviewed_release_rollout_count": (
+                        history["reviewed_release_rollout_count"]
+                    ),
+                },
+                "accounts": list(ACCOUNTS),
+                "delivery_mode": document.delivery_mode,
+                "manifest_sha256": document.manifest_sha256,
+                "bundle_manifest_sha256": document.bundle_manifest_sha256,
+                "redis_fencing_epoch": (
+                    capacity_evidence.redis_fencing_epoch
+                ),
+                "redis_fencing_epoch_marker_sha256": (
+                    capacity_evidence.marker_sha256
+                ),
+                "redis_capacity_evidence_sha256": (
+                    capacity_evidence.capacity_evidence_sha256
+                ),
+                "initial_redis_run_id": (
+                    capacity_evidence.initial_redis_run_id
+                ),
+                "active_volume": capacity_evidence.active_volume,
+            }
+            _record_rollout_event(
+                cur,
+                release_id=document.release_id,
+                event_type="registered",
+                from_phase=None,
+                to_phase=PHASE_ACCOUNT_A_CANARY,
+                phase_version=1,
+                idempotency_key=operation_key,
+                actor=reviewer,
+                reason=(
+                    "stopped migration rebaseline release registered for "
+                    "account-a through account-d"
+                ),
+                evidence=evidence,
+            )
+            _record_global_audit(
+                cur,
+                release_id=document.release_id,
+                event_type="reviewed_release_registered",
+                actor=reviewer,
+                payload={
+                    "phase": PHASE_ACCOUNT_A_CANARY,
+                    "phase_version": 1,
+                    "idempotency_key": operation_key,
+                    **evidence,
+                },
+            )
+            return _rollout_payload(
+                rollout,
+                idempotent=False,
+            )
+
+
 def advance_rollout(
     conn,
     release_id: str,
@@ -2359,12 +2565,379 @@ def _require_bootstrap_replay_history(history: dict[str, int]) -> None:
         )
 
 
+def _migration_rebaseline_abort_key(successor_release_id: str) -> str:
+    return f"migration-rebaseline-abort:{successor_release_id}"
+
+
+def _require_no_active_maintenance_fence_for_migration(cur) -> None:
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s))",
+        ("trader-v3-control-plane-maintenance-fence",),
+    )
+    cur.execute(
+        """
+        SELECT fence_id::text AS fence_id
+        FROM control_plane_maintenance_fences
+        WHERE domain=%s
+          AND status='active'
+        FOR UPDATE
+        """,
+        (REDIS_FENCING_DOMAIN,),
+    )
+    if cur.fetchall():
+        raise ReleaseRolloutError(
+            "migration rebaseline requires no active maintenance fence"
+        )
+
+
+def _lock_migration_rebaseline_predecessor(
+    cur,
+    *,
+    document: ReleaseDocument,
+    capacity_evidence: RedisFencingEpochEvidence,
+    history: dict[str, int],
+) -> dict[str, Any]:
+    if history["redis_fencing_epoch_count"] < 1:
+        raise ReleaseRolloutError(
+            "migration rebaseline requires Redis fencing epoch history"
+        )
+    if history["reviewed_release_rollout_count"] < 1:
+        raise ReleaseRolloutError(
+            "migration rebaseline requires reviewed rollout history"
+        )
+    cur.execute(
+        """
+        SELECT release_id,
+               redis_fencing_epoch::text AS redis_fencing_epoch,
+               phase,
+               phase_version
+        FROM reviewed_release_rollouts
+        WHERE phase = ANY(%s)
+        FOR UPDATE
+        """,
+        (list(ACTIVE_ROLLOUT_PHASES),),
+    )
+    active_rollouts = cur.fetchall()
+    if len(active_rollouts) != 1:
+        raise ReleaseRolloutError(
+            "migration rebaseline requires exactly one active predecessor rollout"
+        )
+    predecessor = active_rollouts[0]
+    if predecessor["release_id"] == document.release_id:
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor must differ from successor"
+        )
+    active_epoch = _active_redis_fencing_epoch(
+        cur,
+        for_update=True,
+    )
+    if str(predecessor["redis_fencing_epoch"]) != active_epoch:
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor Redis epoch is not active"
+        )
+    if active_epoch == capacity_evidence.redis_fencing_epoch:
+        raise ReleaseRolloutError(
+            "migration rebaseline requires a fresh Redis fencing epoch"
+        )
+    return predecessor
+
+
+def _abort_migration_rebaseline_predecessor(
+    cur,
+    *,
+    predecessor: dict[str, Any],
+    successor_document: ReleaseDocument,
+    successor_capacity_evidence: RedisFencingEpochEvidence,
+    actor: str,
+) -> None:
+    predecessor_release_id = str(predecessor["release_id"])
+    predecessor_phase = str(predecessor["phase"])
+    predecessor_version = int(predecessor["phase_version"])
+    next_version = predecessor_version + 1
+    abort_key = _migration_rebaseline_abort_key(
+        successor_document.release_id
+    )
+    reason = "superseded by stopped migration rebaseline"
+    evidence = {
+        "registration_mode": MIGRATION_REBASELINE_REGISTRATION_MODE,
+        "all_accounts_stopped": True,
+        "successor_release_id": successor_document.release_id,
+        "predecessor_redis_fencing_epoch": str(
+            predecessor["redis_fencing_epoch"]
+        ),
+        "successor_redis_fencing_epoch": (
+            successor_capacity_evidence.redis_fencing_epoch
+        ),
+    }
+    cur.execute(
+        """
+        UPDATE reviewed_release_rollouts
+        SET phase=%s,
+            phase_version=%s
+        WHERE release_id=%s
+          AND phase=%s
+          AND phase_version=%s
+        RETURNING release_id
+        """,
+        (
+            PHASE_ABORTED,
+            next_version,
+            predecessor_release_id,
+            predecessor_phase,
+            predecessor_version,
+        ),
+    )
+    if cur.fetchone() is None:
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor changed concurrently"
+        )
+    _record_rollout_event(
+        cur,
+        release_id=predecessor_release_id,
+        event_type="phase_transition",
+        from_phase=predecessor_phase,
+        to_phase=PHASE_ABORTED,
+        phase_version=next_version,
+        idempotency_key=abort_key,
+        actor=actor,
+        reason=reason,
+        evidence=evidence,
+    )
+    _record_global_audit(
+        cur,
+        release_id=predecessor_release_id,
+        event_type="reviewed_release_phase_transition",
+        actor=actor,
+        payload={
+            "from_phase": predecessor_phase,
+            "to_phase": PHASE_ABORTED,
+            "phase_version": next_version,
+            "idempotency_key": abort_key,
+            "reason": reason,
+            **evidence,
+        },
+    )
+
+
+def _require_migration_rebaseline_replay(
+    cur,
+    *,
+    document: ReleaseDocument,
+    capacity_evidence: RedisFencingEpochEvidence,
+    reviewed_by: str,
+    idempotency_key: str,
+) -> None:
+    _require_active_epoch_matches_rollout(
+        cur,
+        {
+            "redis_fencing_epoch": capacity_evidence.redis_fencing_epoch,
+        },
+    )
+    cur.execute(
+        """
+        SELECT release_id
+        FROM reviewed_release_rollouts
+        WHERE phase = ANY(%s)
+        FOR SHARE
+        """,
+        (list(ACTIVE_ROLLOUT_PHASES),),
+    )
+    active_release_ids = [
+        str(row["release_id"])
+        for row in cur.fetchall()
+    ]
+    if active_release_ids != [document.release_id]:
+        raise ReleaseRolloutError(
+            "migration rebaseline replay active rollout differs"
+        )
+    predecessor_release_id = _require_migration_rebaseline_abort_event(
+        cur,
+        successor_release_id=document.release_id,
+        successor_redis_fencing_epoch=(
+            capacity_evidence.redis_fencing_epoch
+        ),
+        reviewed_by=reviewed_by,
+    )
+    _require_migration_rebaseline_abort_audit(
+        cur,
+        predecessor_release_id=predecessor_release_id,
+        successor_release_id=document.release_id,
+        successor_redis_fencing_epoch=(
+            capacity_evidence.redis_fencing_epoch
+        ),
+        reviewed_by=reviewed_by,
+    )
+    _require_stopped_registration_event(
+        cur,
+        release_id=document.release_id,
+        idempotency_key=idempotency_key,
+        reviewed_by=reviewed_by,
+        registration_mode=MIGRATION_REBASELINE_REGISTRATION_MODE,
+        context="migration rebaseline replay",
+        predecessor_release_id=predecessor_release_id,
+    )
+    _require_stopped_registration_audit(
+        cur,
+        release_id=document.release_id,
+        idempotency_key=idempotency_key,
+        reviewed_by=reviewed_by,
+        registration_mode=MIGRATION_REBASELINE_REGISTRATION_MODE,
+        context="migration rebaseline replay",
+        predecessor_release_id=predecessor_release_id,
+    )
+
+
+def _require_migration_rebaseline_abort_event(
+    cur,
+    *,
+    successor_release_id: str,
+    successor_redis_fencing_epoch: str,
+    reviewed_by: str,
+) -> str:
+    abort_key = _migration_rebaseline_abort_key(successor_release_id)
+    cur.execute(
+        """
+        SELECT release_id,
+               event_type,
+               from_phase,
+               to_phase,
+               phase_version,
+               actor,
+               reason,
+               evidence
+        FROM reviewed_release_rollout_events
+        WHERE idempotency_key=%s
+        FOR SHARE
+        """,
+        (abort_key,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor abort event is missing"
+        )
+    if (
+        row["event_type"] != "phase_transition"
+        or row["from_phase"] not in ACTIVE_ROLLOUT_PHASES
+        or row["to_phase"] != PHASE_ABORTED
+        or int(row["phase_version"]) <= 1
+        or row["actor"] != reviewed_by
+        or row["reason"] != "superseded by stopped migration rebaseline"
+    ):
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor abort event conflicts"
+        )
+    evidence = row["evidence"]
+    if not isinstance(evidence, dict):
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor abort evidence is invalid"
+        )
+    expected = (
+        MIGRATION_REBASELINE_REGISTRATION_MODE,
+        True,
+        successor_release_id,
+        successor_redis_fencing_epoch,
+    )
+    actual = (
+        evidence.get("registration_mode"),
+        evidence.get("all_accounts_stopped"),
+        evidence.get("successor_release_id"),
+        evidence.get("successor_redis_fencing_epoch"),
+    )
+    if actual != expected:
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor abort evidence conflicts"
+        )
+    predecessor_release_id = str(row["release_id"] or "").strip()
+    if not predecessor_release_id:
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor release id is invalid"
+        )
+    return predecessor_release_id
+
+
+def _require_migration_rebaseline_abort_audit(
+    cur,
+    *,
+    predecessor_release_id: str,
+    successor_release_id: str,
+    successor_redis_fencing_epoch: str,
+    reviewed_by: str,
+) -> None:
+    abort_key = _migration_rebaseline_abort_key(successor_release_id)
+    cur.execute(
+        """
+        SELECT actor,
+               payload
+        FROM audit_events
+        WHERE event_type='reviewed_release_phase_transition'
+          AND aggregate_type='reviewed_release_rollout'
+          AND aggregate_id=%s
+        FOR SHARE
+        """,
+        (predecessor_release_id,),
+    )
+    matching = []
+    for row in cur.fetchall():
+        payload = row["payload"]
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("idempotency_key") != abort_key:
+            continue
+        matching.append((row["actor"], payload))
+    if len(matching) != 1:
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor abort audit is missing or ambiguous"
+        )
+    actor, payload = matching[0]
+    expected = (
+        reviewed_by,
+        PHASE_ABORTED,
+        MIGRATION_REBASELINE_REGISTRATION_MODE,
+        True,
+        successor_release_id,
+        successor_redis_fencing_epoch,
+    )
+    actual = (
+        actor,
+        payload.get("to_phase"),
+        payload.get("registration_mode"),
+        payload.get("all_accounts_stopped"),
+        payload.get("successor_release_id"),
+        payload.get("successor_redis_fencing_epoch"),
+    )
+    if actual != expected:
+        raise ReleaseRolloutError(
+            "migration rebaseline predecessor abort audit conflicts"
+        )
+
+
 def _require_bootstrap_registration_event(
     cur,
     *,
     release_id: str,
     idempotency_key: str,
     reviewed_by: str,
+) -> None:
+    _require_stopped_registration_event(
+        cur,
+        release_id=release_id,
+        idempotency_key=idempotency_key,
+        reviewed_by=reviewed_by,
+        registration_mode="bootstrap",
+        context="bootstrap replay",
+    )
+
+
+def _require_stopped_registration_event(
+    cur,
+    *,
+    release_id: str,
+    idempotency_key: str,
+    reviewed_by: str,
+    registration_mode: str,
+    context: str,
+    predecessor_release_id: str | None = None,
 ) -> None:
     cur.execute(
         """
@@ -2384,7 +2957,7 @@ def _require_bootstrap_registration_event(
     row = cur.fetchone()
     if row is None:
         raise ReleaseRolloutError(
-            "bootstrap replay registration event is missing"
+            f"{context} registration event is missing"
         )
     identity = (
         row["release_id"],
@@ -2404,20 +2977,30 @@ def _require_bootstrap_registration_event(
     )
     if identity != expected:
         raise ReleaseRolloutError(
-            "bootstrap replay registration event conflicts"
+            f"{context} registration event conflicts"
         )
     evidence = row["evidence"]
     if not isinstance(evidence, dict):
         raise ReleaseRolloutError(
-            "bootstrap replay registration evidence is invalid"
+            f"{context} registration evidence is invalid"
         )
-    if evidence.get("registration_mode") != "bootstrap":
+    if evidence.get("registration_mode") != registration_mode:
         raise ReleaseRolloutError(
-            "bootstrap replay registration mode conflicts"
+            f"{context} registration mode conflicts"
         )
     if evidence.get("bootstrap_all_halted") is not True:
         raise ReleaseRolloutError(
-            "bootstrap replay halted state conflicts"
+            f"{context} halted state conflicts"
+        )
+    if predecessor_release_id is None:
+        return
+    if evidence.get("all_accounts_stopped") is not True:
+        raise ReleaseRolloutError(
+            f"{context} stopped state conflicts"
+        )
+    if evidence.get("predecessor_release_id") != predecessor_release_id:
+        raise ReleaseRolloutError(
+            f"{context} predecessor release conflicts"
         )
 
 
@@ -2427,6 +3010,26 @@ def _require_bootstrap_registration_audit(
     release_id: str,
     idempotency_key: str,
     reviewed_by: str,
+) -> None:
+    _require_stopped_registration_audit(
+        cur,
+        release_id=release_id,
+        idempotency_key=idempotency_key,
+        reviewed_by=reviewed_by,
+        registration_mode="bootstrap",
+        context="bootstrap replay",
+    )
+
+
+def _require_stopped_registration_audit(
+    cur,
+    *,
+    release_id: str,
+    idempotency_key: str,
+    reviewed_by: str,
+    registration_mode: str,
+    context: str,
+    predecessor_release_id: str | None = None,
 ) -> None:
     cur.execute(
         """
@@ -2451,20 +3054,30 @@ def _require_bootstrap_registration_audit(
         matching.append((row["actor"], payload))
     if len(matching) != 1:
         raise ReleaseRolloutError(
-            "bootstrap replay registration audit is missing or ambiguous"
+            f"{context} registration audit is missing or ambiguous"
         )
     actor, payload = matching[0]
     if actor != reviewed_by:
         raise ReleaseRolloutError(
-            "bootstrap replay registration audit actor conflicts"
+            f"{context} registration audit actor conflicts"
         )
-    if payload.get("registration_mode") != "bootstrap":
+    if payload.get("registration_mode") != registration_mode:
         raise ReleaseRolloutError(
-            "bootstrap replay registration audit mode conflicts"
+            f"{context} registration audit mode conflicts"
         )
     if payload.get("bootstrap_all_halted") is not True:
         raise ReleaseRolloutError(
-            "bootstrap replay registration audit halted state conflicts"
+            f"{context} registration audit halted state conflicts"
+        )
+    if predecessor_release_id is None:
+        return
+    if payload.get("all_accounts_stopped") is not True:
+        raise ReleaseRolloutError(
+            f"{context} registration audit stopped state conflicts"
+        )
+    if payload.get("predecessor_release_id") != predecessor_release_id:
+        raise ReleaseRolloutError(
+            f"{context} registration audit predecessor release conflicts"
         )
 
 
@@ -2498,31 +3111,85 @@ def _has_bootstrap_all_halted_registration(
         return False
     registration_mode = evidence.get("registration_mode")
     all_halted = evidence.get("bootstrap_all_halted")
+    stopped_registration_modes = {
+        "bootstrap",
+        MIGRATION_REBASELINE_REGISTRATION_MODE,
+    }
     bootstrap_marked = (
-        registration_mode == "bootstrap"
+        registration_mode in stopped_registration_modes
         or all_halted is not None
     )
     if not bootstrap_marked:
         return False
     if (
-        registration_mode != "bootstrap"
+        registration_mode not in stopped_registration_modes
         or all_halted is not True
     ):
         raise ReleaseRolloutError(
             "bootstrap registration evidence is incomplete"
         )
-    _require_bootstrap_registration_event(
-        cur,
-        release_id=str(rollout["release_id"]),
-        idempotency_key=registration_key,
-        reviewed_by=reviewed_by,
-    )
-    _require_bootstrap_registration_audit(
-        cur,
-        release_id=str(rollout["release_id"]),
-        idempotency_key=registration_key,
-        reviewed_by=reviewed_by,
-    )
+    if registration_mode == "bootstrap":
+        _require_bootstrap_registration_event(
+            cur,
+            release_id=str(rollout["release_id"]),
+            idempotency_key=registration_key,
+            reviewed_by=reviewed_by,
+        )
+        _require_bootstrap_registration_audit(
+            cur,
+            release_id=str(rollout["release_id"]),
+            idempotency_key=registration_key,
+            reviewed_by=reviewed_by,
+        )
+    else:
+        predecessor_release_id = str(
+            evidence.get("predecessor_release_id") or ""
+        ).strip()
+        if not predecessor_release_id:
+            raise ReleaseRolloutError(
+                "migration rebaseline predecessor evidence is incomplete"
+            )
+        audited_predecessor_release_id = (
+            _require_migration_rebaseline_abort_event(
+                cur,
+                successor_release_id=str(rollout["release_id"]),
+                successor_redis_fencing_epoch=str(
+                    rollout["redis_fencing_epoch"]
+                ),
+                reviewed_by=reviewed_by,
+            )
+        )
+        if audited_predecessor_release_id != predecessor_release_id:
+            raise ReleaseRolloutError(
+                "migration rebaseline predecessor audit differs"
+            )
+        _require_migration_rebaseline_abort_audit(
+            cur,
+            predecessor_release_id=predecessor_release_id,
+            successor_release_id=str(rollout["release_id"]),
+            successor_redis_fencing_epoch=str(
+                rollout["redis_fencing_epoch"]
+            ),
+            reviewed_by=reviewed_by,
+        )
+        _require_stopped_registration_event(
+            cur,
+            release_id=str(rollout["release_id"]),
+            idempotency_key=registration_key,
+            reviewed_by=reviewed_by,
+            registration_mode=MIGRATION_REBASELINE_REGISTRATION_MODE,
+            context="migration rebaseline readiness",
+            predecessor_release_id=predecessor_release_id,
+        )
+        _require_stopped_registration_audit(
+            cur,
+            release_id=str(rollout["release_id"]),
+            idempotency_key=registration_key,
+            reviewed_by=reviewed_by,
+            registration_mode=MIGRATION_REBASELINE_REGISTRATION_MODE,
+            context="migration rebaseline readiness",
+            predecessor_release_id=predecessor_release_id,
+        )
     return True
 
 
@@ -3528,6 +4195,37 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
 
+    migration_rebaseline_parser = subparsers.add_parser(
+        "migration-rebaseline-register",
+        help=(
+            "atomically supersede migrated rollout history and register a "
+            "fresh-host release"
+        ),
+    )
+    migration_rebaseline_parser.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+    )
+    migration_rebaseline_parser.add_argument(
+        "--bundle-manifest",
+        type=Path,
+        required=True,
+    )
+    migration_rebaseline_parser.add_argument(
+        "--capacity-evidence",
+        type=Path,
+        required=True,
+    )
+    migration_rebaseline_parser.add_argument(
+        "--reviewed-by",
+        required=True,
+    )
+    migration_rebaseline_parser.add_argument(
+        "--idempotency-key",
+        required=True,
+    )
+
     sign_gate_parser = subparsers.add_parser(
         "sign-release-gate",
         help=(
@@ -3649,6 +4347,7 @@ def main(argv: list[str] | None = None) -> int:
             mutation = args.command in {
                 "register",
                 "bootstrap-register",
+                "migration-rebaseline-register",
                 "advance",
                 "finalize",
             }
@@ -3689,6 +4388,24 @@ def main(argv: list[str] | None = None) -> int:
                             reviewed_by=args.reviewed_by,
                             idempotency_key=args.idempotency_key,
                             operation_lock=operation_lock,
+                        )
+                    elif args.command == "migration-rebaseline-register":
+                        document = load_release_document(
+                            args.manifest,
+                            args.bundle_manifest,
+                        )
+                        capacity_evidence = load_capacity_evidence(
+                            args.capacity_evidence
+                        )
+                        result = (
+                            migration_rebaseline_register_reviewed_release(
+                                conn,
+                                document,
+                                capacity_evidence,
+                                reviewed_by=args.reviewed_by,
+                                idempotency_key=args.idempotency_key,
+                                operation_lock=operation_lock,
+                            )
                         )
                     elif args.command == "advance":
                         result = advance_rollout(

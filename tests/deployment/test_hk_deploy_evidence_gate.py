@@ -265,6 +265,9 @@ class AccountBEvidenceGateTest(unittest.TestCase):
         capacity_payload: dict | None = None,
         state_manifest_payload: dict | None = None,
         state_capacity_payload: dict | None = None,
+        resume_manifest: bool = True,
+        state_registration_key: str | None = None,
+        write_release_manifest: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         base_manifest = {
             "release_id": "release-reviewed-a",
@@ -295,6 +298,8 @@ class AccountBEvidenceGateTest(unittest.TestCase):
 
         env_path = self.root / "deploy-gate.env"
         manifest_path = self.root / "account-a-release-manifest.json"
+        live_manifest_path = self.root / "live-release-manifest.json"
+        release_manifest_path = self.root / "staging-release-manifest.json"
         capacity_path = self.root / "redis-capacity-evidence.json"
         bundle_path = self.root / "bundle-manifest.json"
         env_path.write_text(
@@ -302,11 +307,18 @@ class AccountBEvidenceGateTest(unittest.TestCase):
             encoding="utf-8",
         )
         manifest_path.write_bytes(encode(manifest_payload))
+        if write_release_manifest:
+            release_manifest_path.write_bytes(encode(manifest_payload))
         capacity_path.write_bytes(encode(capacity_payload))
         bundle_path.write_bytes(encode(bundle_payload))
         state_manifest_bytes = encode(state_manifest_payload)
         state_capacity_bytes = encode(state_capacity_payload)
         bundle_sha256 = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+        if state_registration_key is None:
+            state_registration_key = (
+                "bootstrap-register:"
+                + state_manifest_payload["release_id"]
+            )
         state = {
             "redis_count": 1,
             "rollout_count": 1,
@@ -320,8 +332,7 @@ class AccountBEvidenceGateTest(unittest.TestCase):
                     state_manifest_payload["schema_epochs"]["db"],
                     hashlib.sha256(state_manifest_bytes).hexdigest(),
                     bundle_sha256,
-                    "bootstrap-register:"
-                    + state_manifest_payload["release_id"],
+                    state_registration_key,
                     "account_a_canary",
                 ]
             ],
@@ -331,6 +342,8 @@ class AccountBEvidenceGateTest(unittest.TestCase):
                     hashlib.sha256(state_capacity_bytes).hexdigest(),
                 ]
             ],
+            "target_release_count": 0,
+            "target_epoch_count": 0,
         }
         fake_module = self.root / "psycopg2.py"
         fake_module.write_text(
@@ -360,6 +373,13 @@ class Cursor:
             return (True, True)
         if "count(*) FROM redis_fencing_epochs" in self.query:
             return (STATE["redis_count"],)
+        if "WHERE redis_fencing_epoch=%s" in self.query:
+            return (STATE["target_epoch_count"],)
+        if (
+            "count(*)" in self.query
+            and "WHERE release_id=%s" in self.query
+        ):
+            return (STATE["target_release_count"],)
         if "count(*) FROM reviewed_release_rollouts" in self.query:
             return (STATE["rollout_count"],)
         return False
@@ -397,9 +417,12 @@ def connect(_url):
                 str(env_path),
                 "trader-v3-node-a",
                 "0",
-                str(manifest_path),
+                str(manifest_path) if resume_manifest else "",
                 str(capacity_path),
                 str(bundle_path),
+                str(live_manifest_path),
+                str(release_manifest_path),
+                "1",
             ],
             cwd=REPO_ROOT,
             env=environment,
@@ -515,6 +538,9 @@ def connect(_url):
         configure_function = text[configure_start:configure_end]
         bootstrap_branch = configure_function.index("bootstrap_stopped)")
         resume_branch = configure_function.index("bootstrap_resume_stopped)")
+        migration_branch = configure_function.index(
+            "migration_rebaseline_stopped)"
+        )
         maintenance_branch = configure_function.index("maintenance_fence)")
 
         self.assertIn(
@@ -523,7 +549,11 @@ def connect(_url):
         )
         self.assertIn(
             'RECREATE_NODES=("${ALL_NODES[@]}")',
-            configure_function[resume_branch:maintenance_branch],
+            configure_function[resume_branch:migration_branch],
+        )
+        self.assertIn(
+            'RECREATE_NODES=("${ALL_NODES[@]}")',
+            configure_function[migration_branch:maintenance_branch],
         )
 
         recreate_start = text.index("# ---------- recreate & verify ----------")
@@ -550,6 +580,40 @@ def connect(_url):
         self.assertNotIn(
             'bash "$T/recreate-$ROLLOUT_NODE.sh"',
             recreate_section,
+        )
+
+    def test_migration_rebaseline_requires_stopped_restart_no_fleet(
+        self,
+    ) -> None:
+        text = DEPLOY.read_text(encoding="utf-8")
+        stopped_start = text.index(
+            "verify_all_execution_accounts_stopped()"
+        )
+        stopped_end = text.index("\nstop_recreate_nodes()", stopped_start)
+        stopped_gate = text[stopped_start:stopped_end]
+        configure_start = text.index("configure_deploy_gate_mode()")
+        configure_end = text.index(
+            "\nverify_bootstrap_stopped_gate()",
+            configure_start,
+        )
+        configure_gate = text[configure_start:configure_end]
+
+        self.assertIn('for node in "${ALL_NODES[@]}"; do', stopped_gate)
+        self.assertIn("{{.State.Running}}", stopped_gate)
+        self.assertIn("{{.HostConfig.RestartPolicy.Name}}", stopped_gate)
+        self.assertIn('[ "$running" = "false" ]', stopped_gate)
+        self.assertIn('[ "$restart_policy" = "no" ]', stopped_gate)
+        self.assertIn(
+            "migration_rebaseline_stopped)",
+            configure_gate,
+        )
+        self.assertIn(
+            "verify_all_execution_accounts_stopped",
+            configure_gate,
+        )
+        self.assertIn(
+            'die "migration rebaseline requires no live release manifest"',
+            configure_gate,
         )
 
     def test_new_control_plane_role_modules_support_first_install(self) -> None:
@@ -979,6 +1043,81 @@ def connect(_url):
         self.assertIn(
             "bootstrap resume Redis epoch evidence differs",
             result.stderr,
+        )
+
+    def test_migration_rebaseline_accepts_migrated_history_and_fresh_epoch(
+        self,
+    ) -> None:
+        old_manifest = {
+            "release_id": "release-hk-old",
+            "image_digest": "sha256:" + ("4" * 64),
+            "config_sha256": "5" * 64,
+            "dependency_lock_sha256": "6" * 64,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
+        }
+        old_capacity = {
+            "redis_fencing_epoch": "redis-epoch-hk-old",
+            "account_ids": ["account-a", "account-b", "account-c", "account-d"],
+        }
+        result = self._run_deploy_gate_mode_detector(
+            state_manifest_payload=old_manifest,
+            state_capacity_payload=old_capacity,
+            resume_manifest=False,
+            write_release_manifest=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "migration_rebaseline_stopped",
+        )
+
+    def test_migration_rebaseline_rejects_reused_redis_epoch(self) -> None:
+        old_manifest = {
+            "release_id": "release-hk-old",
+            "image_digest": "sha256:" + ("4" * 64),
+            "config_sha256": "5" * 64,
+            "dependency_lock_sha256": "6" * 64,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
+        }
+        shared_capacity = {
+            "redis_fencing_epoch": "redis-epoch-shared",
+            "account_ids": ["account-a", "account-b", "account-c", "account-d"],
+        }
+        result = self._run_deploy_gate_mode_detector(
+            capacity_payload=shared_capacity,
+            state_manifest_payload=old_manifest,
+            state_capacity_payload=shared_capacity,
+            resume_manifest=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "migration rebaseline active release differs from the fresh Redis epoch",
+            result.stderr,
+        )
+
+    def test_migration_rebaseline_replay_requires_exact_release(self) -> None:
+        manifest = {
+            "release_id": "release-reviewed-a",
+            "image_digest": "sha256:" + ("1" * 64),
+            "config_sha256": "2" * 64,
+            "dependency_lock_sha256": "3" * 64,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
+        }
+        result = self._run_deploy_gate_mode_detector(
+            manifest_payload=manifest,
+            state_manifest_payload=manifest,
+            resume_manifest=False,
+            state_registration_key=(
+                "migration-rebaseline-register:release-reviewed-a"
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "migration_rebaseline_stopped",
         )
 
     def test_report_symlink_is_rejected(self) -> None:

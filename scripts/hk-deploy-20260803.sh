@@ -1115,7 +1115,7 @@ PY
 
 verify_maintenance_fence() {
   local stage="$1"
-  if [[ "${DEPLOY_GATE_MODE:-maintenance_fence}" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+  if [[ "${DEPLOY_GATE_MODE:-maintenance_fence}" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then
     verify_bootstrap_stopped_gate "$stage"
     return
   fi
@@ -1207,7 +1207,10 @@ configure_deploy_gate_mode() {
       "$EMERGENCY_ROLLBACK" \
       "$ACCOUNT_A_RELEASE_MANIFEST" \
       "$REDIS_CAPACITY_EVIDENCE" \
-      "$STAGING/bundle-manifest.json" <<'PY'
+      "$STAGING/bundle-manifest.json" \
+      "$T/RELEASE_MANIFEST.json" \
+      "$RELEASE_MANIFEST" \
+      "$SKIP_RESUME" <<'PY'
 import hashlib
 import json
 import sys
@@ -1242,10 +1245,14 @@ emergency_rollback = sys.argv[3]
 resume_manifest_raw = sys.argv[4]
 capacity_evidence_path = Path(sys.argv[5])
 bundle_manifest_path = Path(sys.argv[6])
+live_manifest_path = Path(sys.argv[7])
+release_manifest_path = Path(sys.argv[8])
+skip_resume = sys.argv[9]
 if emergency_rollback == "1":
     print("maintenance_fence")
     raise SystemExit(0)
 resume_manifest_path = False
+migration_rebaseline = False
 if resume_manifest_raw:
     resume_manifest_path = Path(resume_manifest_raw)
     if rollout_node != "trader-v3-node-a":
@@ -1357,6 +1364,178 @@ try:
                     )
         else:
             raise SystemExit("partial rollout history tables detected")
+        if resume_manifest_path is False and live_manifest_path.is_symlink():
+            raise SystemExit("live release manifest cannot be a symlink")
+        if (
+            resume_manifest_path is False
+            and not live_manifest_path.exists()
+            and not live_manifest_path.is_symlink()
+        ):
+            if rollout_node != "trader-v3-node-a":
+                raise SystemExit(
+                    "migration rebaseline requires trader-v3-node-a"
+                )
+            if skip_resume != "1":
+                raise SystemExit(
+                    "migration rebaseline requires SKIP_RESUME=1"
+                )
+            for path, label in (
+                (capacity_evidence_path, "Redis capacity evidence"),
+                (bundle_manifest_path, "bundle manifest"),
+            ):
+                if not path.is_file() or path.is_symlink():
+                    raise SystemExit(f"{label} is invalid")
+            target_manifest = False
+            if release_manifest_path.is_symlink():
+                raise SystemExit("release manifest cannot be a symlink")
+            if release_manifest_path.exists():
+                if not release_manifest_path.is_file():
+                    raise SystemExit("release manifest is invalid")
+                target_manifest = json.loads(
+                    release_manifest_path.read_text(encoding="utf-8")
+                )
+                if not isinstance(target_manifest, dict):
+                    raise SystemExit("release manifest root is invalid")
+            capacity_evidence = json.loads(
+                capacity_evidence_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(capacity_evidence, dict):
+                raise SystemExit("Redis capacity evidence root is invalid")
+            cur.execute(
+                """
+                SELECT release_id,
+                       redis_fencing_epoch::text,
+                       image_digest,
+                       config_sha256,
+                       dependency_lock_sha256,
+                       schema_epoch,
+                       manifest_sha256,
+                       bundle_manifest_sha256,
+                       registration_idempotency_key,
+                       phase
+                FROM reviewed_release_rollouts
+                WHERE phase IN (
+                    'account_a_canary',
+                    'account_b_rollout',
+                    'account_c_rollout',
+                    'account_d_rollout'
+                )
+                """
+            )
+            active_rollouts = cur.fetchall()
+            if len(active_rollouts) != 1:
+                raise SystemExit(
+                    "migration rebaseline requires one active rollout"
+                )
+            cur.execute(
+                """
+                SELECT redis_fencing_epoch::text,
+                       capacity_evidence_sha256
+                FROM redis_fencing_epochs
+                WHERE domain='trader-v3'
+                  AND status='active'
+                """
+            )
+            active_epochs = cur.fetchall()
+            if len(active_epochs) != 1:
+                raise SystemExit(
+                    "migration rebaseline requires one active Redis epoch"
+                )
+            active_rollout = active_rollouts[0]
+            active_epoch = active_epochs[0]
+            if active_rollout[1] != active_epoch[0]:
+                raise SystemExit(
+                    "migration rebaseline active rollout epoch differs"
+                )
+            target_epoch = capacity_evidence.get("redis_fencing_epoch")
+            if not isinstance(target_epoch, str) or not target_epoch.strip():
+                raise SystemExit(
+                    "migration rebaseline capacity evidence lacks epoch"
+                )
+            target_evidence_sha256 = hashlib.sha256(
+                capacity_evidence_path.read_bytes()
+            ).hexdigest()
+            if active_epoch[0] == target_epoch:
+                if target_manifest is False:
+                    raise SystemExit(
+                        "migration rebaseline replay requires release manifest"
+                    )
+                target_release_id = target_manifest.get("release_id")
+                if (
+                    not isinstance(target_release_id, str)
+                    or not target_release_id.strip()
+                ):
+                    raise SystemExit(
+                        "migration rebaseline release manifest lacks release_id"
+                    )
+                if active_rollout[0] != target_release_id:
+                    raise SystemExit(
+                        "migration rebaseline active release differs from "
+                        "the fresh Redis epoch"
+                    )
+                expected = (
+                    target_release_id,
+                    target_epoch,
+                    target_manifest.get("image_digest"),
+                    target_manifest.get("config_sha256"),
+                    target_manifest.get("dependency_lock_sha256"),
+                    (target_manifest.get("schema_epochs") or {}).get("db"),
+                    hashlib.sha256(
+                        release_manifest_path.read_bytes()
+                    ).hexdigest(),
+                    hashlib.sha256(
+                        bundle_manifest_path.read_bytes()
+                    ).hexdigest(),
+                    f"migration-rebaseline-register:{target_release_id}",
+                    "account_a_canary",
+                )
+                if tuple(active_rollout) != expected:
+                    raise SystemExit(
+                        "migration rebaseline replay release differs"
+                    )
+                if active_epoch != (
+                    target_epoch,
+                    target_evidence_sha256,
+                ):
+                    raise SystemExit(
+                        "migration rebaseline replay Redis evidence differs"
+                    )
+            else:
+                cur.execute(
+                    """
+                    SELECT count(*)
+                    FROM redis_fencing_epochs
+                    WHERE redis_fencing_epoch=%s
+                    """,
+                    (target_epoch,),
+                )
+                if int(cur.fetchone()[0]) != 0:
+                    raise SystemExit(
+                        "migration rebaseline target Redis epoch already exists"
+                    )
+                if target_manifest is not False:
+                    target_release_id = target_manifest.get("release_id")
+                    if (
+                        not isinstance(target_release_id, str)
+                        or not target_release_id.strip()
+                    ):
+                        raise SystemExit(
+                            "migration rebaseline release manifest lacks "
+                            "release_id"
+                        )
+                    cur.execute(
+                        """
+                        SELECT count(*)
+                        FROM reviewed_release_rollouts
+                        WHERE release_id=%s
+                        """,
+                        (target_release_id,),
+                    )
+                    if int(cur.fetchone()[0]) != 0:
+                        raise SystemExit(
+                            "migration rebaseline target release already exists"
+                        )
+            migration_rebaseline = True
 finally:
     conn.close()
 if redis_count == 0 and rollout_count == 0:
@@ -1371,6 +1550,9 @@ if redis_count == 0 and rollout_count == 0:
 if redis_count > 0 and rollout_count > 0:
     if resume_manifest_path is not False:
         print("bootstrap_resume_stopped")
+        raise SystemExit(0)
+    if migration_rebaseline:
+        print("migration_rebaseline_stopped")
         raise SystemExit(0)
     print("maintenance_fence")
     raise SystemExit(0)
@@ -1400,6 +1582,29 @@ PY
         die "partial control-plane role environment detected during bootstrap resume"
       fi
       ;;
+    migration_rebaseline_stopped)
+      [ "$SKIP_RESUME" = "1" ] \
+        || die "migration rebaseline requires SKIP_RESUME=1"
+      verify_all_execution_accounts_stopped
+      [ ! -e "$T/RELEASE_MANIFEST.json" ] \
+        && [ ! -L "$T/RELEASE_MANIFEST.json" ] \
+        || die "migration rebaseline requires no live release manifest"
+      BOOTSTRAP_ALL_NODE_RELEASE=1
+      RECREATE_NODES=("${ALL_NODES[@]}")
+      role_env_count=0
+      for env_file in "${CONTROL_PLANE_ROLE_ENV_FILES[@]}"; do
+        if [ -f "$env_file" ]; then
+          role_env_count=$((role_env_count + 1))
+        fi
+      done
+      if [ "$role_env_count" -eq 0 ]; then
+        CONTROL_PLANE_ROLE_BOOTSTRAP_REQUIRED=1
+      elif [ "$role_env_count" -eq "${#CONTROL_PLANE_ROLE_ENV_FILES[@]}" ]; then
+        CONTROL_PLANE_ROLE_BOOTSTRAP_REQUIRED=0
+      else
+        die "partial control-plane role environment detected during migration rebaseline"
+      fi
+      ;;
     maintenance_fence)
       CONTROL_PLANE_ROLE_BOOTSTRAP_REQUIRED=0
       if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
@@ -1424,7 +1629,7 @@ verify_bootstrap_stopped_gate() {
   local live_epoch
   verify_account_stall_operation_lock
   case "${DEPLOY_GATE_MODE:-}" in
-    bootstrap_stopped|bootstrap_resume_stopped)
+    bootstrap_stopped|bootstrap_resume_stopped|migration_rebaseline_stopped)
       ;;
     *)
       die "bootstrap stopped gate used outside bootstrap mode"
@@ -1432,7 +1637,14 @@ verify_bootstrap_stopped_gate() {
   esac
   [ "$SKIP_RESUME" = "1" ] \
     || die "bootstrap stopped gate requires SKIP_RESUME=1"
-  verify_all_execution_accounts_quiesced
+  if [ "$DEPLOY_GATE_MODE" = "migration_rebaseline_stopped" ]; then
+    verify_all_execution_accounts_stopped
+    [ ! -e "$T/RELEASE_MANIFEST.json" ] \
+      && [ ! -L "$T/RELEASE_MANIFEST.json" ] \
+      || die "migration rebaseline requires no live release manifest"
+  else
+    verify_all_execution_accounts_quiesced
+  fi
   expected_epoch="$(
     python3 - "$REDIS_CAPACITY_EVIDENCE" <<'PY'
 import json
@@ -1457,7 +1669,8 @@ PY
     python3 - \
       "$BOOTSTRAP_STOPPED_GATE_LOG" \
       "$stage" \
-      "$expected_epoch" <<'PY'
+      "$expected_epoch" \
+      "$DEPLOY_GATE_MODE" <<'PY'
 import json
 import os
 import sys
@@ -1471,7 +1684,11 @@ entry = {
     "checked_at": datetime.now(timezone.utc).isoformat(),
     "redis_fencing_epoch": sys.argv[3],
     "accounts": ["account-a", "account-b", "account-c", "account-d"],
-    "quiesced_by": "ready-halted-or-stopped-container",
+    "quiesced_by": (
+        "stopped-container"
+        if sys.argv[4] == "migration_rebaseline_stopped"
+        else "ready-halted-or-stopped-container"
+    ),
     "skip_resume": True,
 }
 with path.open("a", encoding="utf-8") as handle:
@@ -1486,7 +1703,7 @@ acquire_maintenance_fence_after_bootstrap() {
   if ! verify_account_stall_operation_lock; then
     return 1
   fi
-  if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+  if [[ "$DEPLOY_GATE_MODE" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then
     [ "$ROLLOUT_TRACKED" = "1" ] \
       || die "bootstrap maintenance fence requires a tracked rollout"
   fi
@@ -1771,7 +1988,7 @@ activate_control_plane_topology() {
   fi
   verify_maintenance_fence "control-plane-isolation"
   CONTROL_PLANE_RESTARTED=1
-  if [[ "${DEPLOY_GATE_MODE:-maintenance_fence}" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+  if [[ "${DEPLOY_GATE_MODE:-maintenance_fence}" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then
     TRADER_ROOT="$T" \
     ACCOUNT_STALL_SYSTEMD_RESOURCE_ROOT="$STAGING/infra/systemd" \
     CONTROL_PLANE_ISOLATION_BACKUP_ROOT="$BACKUP_ROOT/control-plane-isolation" \
@@ -2622,6 +2839,23 @@ verify_all_execution_accounts_quiesced() {
     "trader-v3-node-d" \
     "8084"
 }
+verify_all_execution_accounts_stopped() {
+  local node
+  local restart_policy
+  local running
+  for node in "${ALL_NODES[@]}"; do
+    read -r running restart_policy < <(
+      docker inspect \
+        --format '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' \
+        "$node"
+    ) || die "migration rebaseline cannot inspect $node"
+    [ "$running" = "false" ] \
+      || die "migration rebaseline requires $node stopped"
+    [ "$restart_policy" = "no" ] \
+      || die "migration rebaseline requires $node restart=no"
+  done
+  echo "== migration rebaseline A-D stopped with restart=no"
+}
 stop_recreate_nodes() {
   local node
   if [ "${#RECREATE_NODES[@]}" -eq 0 ]; then
@@ -3365,6 +3599,7 @@ output_path = Path(output_raw)
 bootstrap = gate_mode_raw in {
     "bootstrap_stopped",
     "bootstrap_resume_stopped",
+    "migration_rebaseline_stopped",
 }
 required_files = [
     postgres_dump_path,
@@ -3957,7 +4192,7 @@ PY
 }
 ensure_bootstrap_rollout_registration() {
   case "$DEPLOY_GATE_MODE" in
-    bootstrap_stopped|bootstrap_resume_stopped)
+    bootstrap_stopped|bootstrap_resume_stopped|migration_rebaseline_stopped)
       ;;
     *)
       return
@@ -3966,27 +4201,42 @@ ensure_bootstrap_rollout_registration() {
   if [ "$BOOTSTRAP_REGISTRATION_COMPLETED" = "1" ]; then
     return
   fi
-  if ! run_reviewed_rollout bootstrap-register \
-    --manifest "$RELEASE_MANIFEST" \
-    --bundle-manifest "$STAGING/bundle-manifest.json" \
-    --capacity-evidence "$REDIS_CAPACITY_EVIDENCE" \
-    --reviewed-by "$ROLLOUT_REVIEWED_BY" \
-    --idempotency-key "bootstrap-register:$RELEASE_ID"; then
-    return 1
+  if [ "$DEPLOY_GATE_MODE" = "migration_rebaseline_stopped" ]; then
+    if ! run_reviewed_rollout migration-rebaseline-register \
+      --manifest "$RELEASE_MANIFEST" \
+      --bundle-manifest "$STAGING/bundle-manifest.json" \
+      --capacity-evidence "$REDIS_CAPACITY_EVIDENCE" \
+      --reviewed-by "$ROLLOUT_REVIEWED_BY" \
+      --idempotency-key "migration-rebaseline-register:$RELEASE_ID"; then
+      return 1
+    fi
+  else
+    if ! run_reviewed_rollout bootstrap-register \
+      --manifest "$RELEASE_MANIFEST" \
+      --bundle-manifest "$STAGING/bundle-manifest.json" \
+      --capacity-evidence "$REDIS_CAPACITY_EVIDENCE" \
+      --reviewed-by "$ROLLOUT_REVIEWED_BY" \
+      --idempotency-key "bootstrap-register:$RELEASE_ID"; then
+      return 1
+    fi
   fi
   BOOTSTRAP_REGISTRATION_COMPLETED=1
   ROLLOUT_TRACKED=1
-  echo "== bootstrap reviewed rollout registered in account_a_canary"
+  echo "== stopped-gate reviewed rollout registered in account_a_canary"
 }
 write_bootstrap_recovery_blocked_evidence() {
   local reason="$1"
+  local registration_key="bootstrap-register:${RELEASE_ID:-unknown}"
+  if [ "$DEPLOY_GATE_MODE" = "migration_rebaseline_stopped" ]; then
+    registration_key="migration-rebaseline-register:${RELEASE_ID:-unknown}"
+  fi
   if ! python3 - \
       "$BOOTSTRAP_RECOVERY_BLOCKED_EVIDENCE" \
       "$reason" \
       "${RELEASE_ID:-}" \
       "${BOOTSTRAP_REDIS_FENCING_EPOCH:-}" \
       "$MIGRATION_COMMIT_MARKER" \
-      "bootstrap-register:${RELEASE_ID:-unknown}" \
+      "$registration_key" \
       "${RECREATE_NODES[@]}" <<'PY'
 import json
 import os
@@ -4915,7 +5165,7 @@ prepare_legacy_rollback_recreate_fleet() {
         die "existing rollback recreate script missing: $node"
         ;;
     esac
-    if [[ ! "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+    if [[ ! "$DEPLOY_GATE_MODE" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then
       die "existing rollback recreate script missing outside bootstrap: $node"
     fi
     snapshot_dir="$LEGACY_RECREATE_SNAPSHOT_ROOT/$node"
@@ -5363,7 +5613,7 @@ on_err() {
           || true
       fi
     fi
-    if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]] \
+    if [[ "$DEPLOY_GATE_MODE" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]] \
       && ! ensure_bootstrap_rollout_registration; then
       recovery_allowed=0
       write_bootstrap_recovery_blocked_evidence \
@@ -5372,7 +5622,7 @@ on_err() {
     if [ "$recovery_allowed" = "1" ] \
       && recover_post_migration_node; then
       POST_MIGRATION_RECOVERY_VERIFIED=1
-      if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+      if [[ "$DEPLOY_GATE_MODE" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then
         if ! acquire_maintenance_fence_after_bootstrap; then
           POST_MIGRATION_RECOVERY_VERIFIED=0
           recovery_allowed=0
@@ -7030,6 +7280,7 @@ deploy_gate_mode = sys.argv[16]
 if deploy_gate_mode not in {
     "bootstrap_stopped",
     "bootstrap_resume_stopped",
+    "migration_rebaseline_stopped",
     "maintenance_fence",
 }:
     raise SystemExit("invalid database migration gate mode")
@@ -8158,7 +8409,7 @@ if [ "$DELIVERY_MODE" = "transition_bind_mount" ]; then
 fi
 
 # ---------- HALT ----------
-if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+if [[ "$DEPLOY_GATE_MODE" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then
   stop_recreate_nodes
   verify_maintenance_fence "bootstrap-pre-release"
 elif "$T/.venv-cp/bin/python" - \
@@ -9330,7 +9581,7 @@ echo "== database schema verified epoch=$DATABASE_SCHEMA_EPOCH"
 if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
   echo "== emergency rollback skips reviewed rollout registration and advancement"
 elif [ "$ROLLOUT_NODE" = "trader-v3-node-a" ]; then
-  if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+  if [[ "$DEPLOY_GATE_MODE" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then
     ensure_bootstrap_rollout_registration
   else
     run_reviewed_rollout register \
@@ -9550,7 +9801,7 @@ for node in "${RECREATE_NODES[@]}"; do
 done
 verify_release_nodes "${RECREATE_NODES[@]}"
 finalize_node_startup_resource_evidence
-if [[ "$DEPLOY_GATE_MODE" =~ ^bootstrap(_resume)?_stopped$ ]]; then
+if [[ "$DEPLOY_GATE_MODE" =~ ^(bootstrap(_resume)?|migration_rebaseline)_stopped$ ]]; then
   acquire_maintenance_fence_after_bootstrap
 fi
 if [ "$ROLLOUT_NODE" = "trader-v3-node-b" ]; then
