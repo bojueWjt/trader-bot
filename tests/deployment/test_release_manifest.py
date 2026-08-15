@@ -705,7 +705,7 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             ):
                 release_manifest.validate_release_manifest(manifest)
 
-    def test_capture_builds_v3_manifest_from_reviewed_config_artifacts(self):
+    def test_immutable_capture_ignores_differing_current_node_images(self):
         bundle_path = self.temp_path / "bundle-manifest.json"
         bundle_path.write_text(
             json.dumps(self.bundle),
@@ -749,6 +749,10 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             "dependency_inventory_sha256": inventory_sha256,
             "migration_manifest_sha256": migration_sha256,
         }
+        current_nodes = [
+            {"Image": f"sha256:{digit * 64}"}
+            for digit in ("1", "2", "3", "4")
+        ]
 
         def reviewer_proof(_path, **kwargs):
             return {
@@ -764,9 +768,9 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
         with (
             mock.patch.object(
                 release_manifest,
-                "_runtime_image_identity",
-                return_value=([], IMAGE_DIGEST),
-            ),
+                "_docker_inspect",
+                return_value=current_nodes,
+            ) as inspect_nodes,
             mock.patch.object(
                 release_manifest,
                 "validate_build_attestation",
@@ -817,6 +821,8 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             manifest["reviewer_trust_proof"]["sha256"],
             REVIEWER_TRUST_PROOF_SHA256,
         )
+        self.assertEqual(manifest["image_digest"], IMAGE_DIGEST)
+        inspect_nodes.assert_not_called()
         self.assertEqual(
             json.loads(output_path.read_text(encoding="utf-8")),
             manifest,

@@ -3737,8 +3737,6 @@ def capture_release_manifest(
     selected_migration_sha256 = sha256_file(
         selected_migration_manifest
     )
-    _, current_image_digest = _runtime_image_identity(containers)
-    selected_image_digest = current_image_digest
     envelope: dict[str, Any] = {}
     reviewer_proof: dict[str, str] | None = None
     if delivery_mode == DELIVERY_IMMUTABLE:
@@ -3840,6 +3838,8 @@ def capture_release_manifest(
                 selected_attestation
             ),
         )
+    else:
+        _, selected_image_digest = _runtime_image_identity(containers)
     manifest = build_release_manifest(
         bundle,
         image_digest=selected_image_digest,
