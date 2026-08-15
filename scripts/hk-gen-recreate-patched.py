@@ -105,6 +105,12 @@ BINANCE_EXECUTION_FILE = "binance_execution.py"
 BINANCE_FUTURES_EXECUTION_FILE = "binance_futures_execution.py"
 SNAPSHOT_EVIDENCE_SCHEMA = "trader-v3-runtime-recreate-snapshot/v1"
 DEFAULT_DOCKER_SHM_SIZE = 64 * 1024 * 1024
+REVIEWED_NODE_HEALTH_HOST_PORTS = {
+    "trader-v3-node-a": 8081,
+    "trader-v3-node-b": 8082,
+    "trader-v3-node-c": 8083,
+    "trader-v3-node-d": 8084,
+}
 
 
 def _pop_flag(values, flag):
@@ -586,6 +592,38 @@ def _append_nonempty_option(run, option, value):
         run.extend([option, normalized])
 
 
+def _reviewed_health_container_port(config, name):
+    expected_host_port = REVIEWED_NODE_HEALTH_HOST_PORTS.get(name)
+    if expected_host_port is None:
+        return False
+    environment = _require_list(
+        config.get("Env") or [],
+        "Config.Env",
+    )
+    values = []
+    for item in environment:
+        if not isinstance(item, str) or "=" not in item:
+            continue
+        env_name, value = item.split("=", 1)
+        if env_name == "NAUTILUS_HEALTH_PORT":
+            values.append(value.strip())
+    if len(values) != 1:
+        raise DeploymentConfigError(
+            f"{name} must define one NAUTILUS_HEALTH_PORT"
+        )
+    raw_port = values[0]
+    if re.fullmatch(r"[1-9][0-9]{0,4}", raw_port) is None:
+        raise DeploymentConfigError(
+            f"{name} NAUTILUS_HEALTH_PORT is invalid"
+        )
+    container_port = int(raw_port)
+    if container_port > 65535:
+        raise DeploymentConfigError(
+            f"{name} NAUTILUS_HEALTH_PORT is invalid"
+        )
+    return expected_host_port, container_port
+
+
 def append_allowlisted_runtime_spec(
     run,
     inspected,
@@ -610,6 +648,18 @@ def append_allowlisted_runtime_spec(
         port_bindings,
         "HostConfig.PortBindings",
     )
+    if reviewed_resources is not False and not port_bindings:
+        health_ports = _reviewed_health_container_port(config, name)
+        if health_ports is not False:
+            host_port, container_port = health_ports
+            port_bindings = {
+                f"{container_port}/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": str(host_port),
+                    }
+                ]
+            }
     for container_port, bindings in sorted(port_bindings.items()):
         bindings = _require_list(
             bindings or [],

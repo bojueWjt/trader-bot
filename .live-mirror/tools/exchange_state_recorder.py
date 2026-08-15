@@ -9,8 +9,8 @@ exchange_state_mirror plus accounts_projection for each account. It never
 touches the trading path; on any exchange error it logs and skips the cycle,
 letting the existing rows go stale.
 
-API keys are read from the running node containers' env (single source of
-truth; survives key rotation via the recreate scripts).
+API keys are read from the running node containers' env or reviewed read-only
+secret mounts (single source of truth; survives key rotation via recreate).
 """
 
 from __future__ import annotations
@@ -20,12 +20,14 @@ import hashlib
 import hmac
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.request
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from urllib.error import HTTPError
 
 import psycopg2
@@ -71,16 +73,95 @@ def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S", time.gmtime()) + f" {msg}", flush=True)
 
 
+def _secret_mount_value(inspected: dict, destination: str) -> str | None:
+    mounts = inspected.get("Mounts")
+    if not isinstance(mounts, list):
+        return None
+    matches = [
+        mount
+        for mount in mounts
+        if isinstance(mount, dict)
+        and str(mount.get("Destination") or "") == destination
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise RuntimeError(f"secret mount is not unique: {destination}")
+    mount = matches[0]
+    if mount.get("RW") is not False:
+        raise RuntimeError(f"secret mount must be read-only: {destination}")
+    source = Path(str(mount.get("Source") or ""))
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(source, flags)
+    try:
+        source_stat = os.fstat(descriptor)
+        source_mode = stat.S_IMODE(source_stat.st_mode)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise RuntimeError(
+                f"secret mount source must be a regular file: {destination}"
+            )
+        if (
+            source_stat.st_uid != 0
+            or source_stat.st_gid != 999
+            or source_mode != 0o440
+        ):
+            raise RuntimeError(
+                "secret mount source ownership or mode is invalid: "
+                f"{destination}"
+            )
+        raw = os.read(descriptor, 8193)
+    finally:
+        os.close(descriptor)
+    if len(raw) > 8192:
+        raise RuntimeError(f"secret mount value is too large: {destination}")
+    try:
+        value = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            f"secret mount value is not UTF-8: {destination}"
+        ) from exc
+    if not value:
+        raise RuntimeError(f"secret mount value is empty: {destination}")
+    return value
+
+
 def container_keys(container: str, prefix: str) -> tuple[str, str] | None:
     try:
         out = subprocess.run(
-            ["docker", "inspect", container, "--format", "{{json .Config.Env}}"],
-            capture_output=True, text=True, timeout=15, check=True,
+            ["docker", "inspect", container],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
         ).stdout
-        env = dict(item.split("=", 1) for item in json.loads(out) if "=" in item)
-        key, sec = env.get(f"{prefix}_API_KEY"), env.get(f"{prefix}_API_SECRET")
-        if key and sec:
-            return key, sec
+        inspected_rows = json.loads(out)
+        if not isinstance(inspected_rows, list) or len(inspected_rows) != 1:
+            raise RuntimeError("docker inspect must return one container")
+        inspected = inspected_rows[0]
+        env_rows = inspected.get("Config", {}).get("Env", [])
+        env = dict(
+            item.split("=", 1)
+            for item in env_rows
+            if isinstance(item, str) and "=" in item
+        )
+        key = env.get(f"{prefix}_API_KEY")
+        secret = env.get(f"{prefix}_API_SECRET")
+        if key and secret:
+            return key, secret
+
+        secret_stem = prefix.lower()
+        key = _secret_mount_value(
+            inspected,
+            f"/run/secrets/{secret_stem}_api_key",
+        )
+        secret = _secret_mount_value(
+            inspected,
+            f"/run/secrets/{secret_stem}_api_secret",
+        )
+        if key and secret:
+            return key, secret
     except Exception as exc:  # noqa: BLE001 - missing keys must not kill the loop
         log(f"key fetch failed for {container}: {exc}")
     return None

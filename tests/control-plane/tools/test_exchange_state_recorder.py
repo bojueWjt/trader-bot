@@ -4,10 +4,13 @@ import hashlib
 import hmac
 import importlib.util
 import io
+import json
+import os
 import sys
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
@@ -52,6 +55,133 @@ class ExchangeStateRecorderTest(unittest.TestCase):
                 ),
             },
         )
+
+    def test_container_keys_prefers_complete_environment(self) -> None:
+        module = _load_module()
+        inspected = [
+            {
+                "Config": {
+                    "Env": [
+                        "BINANCE_ACCOUNT_C_API_KEY=key-value",
+                        "BINANCE_ACCOUNT_C_API_SECRET=secret-value",
+                    ]
+                },
+                "Mounts": [],
+            }
+        ]
+
+        with patch.object(
+            module.subprocess,
+            "run",
+            return_value=SimpleNamespace(stdout=json.dumps(inspected)),
+        ):
+            result = module.container_keys(
+                "trader-v3-node-c",
+                "BINANCE_ACCOUNT_C",
+            )
+
+        self.assertEqual(result, ("key-value", "secret-value"))
+
+    def test_container_keys_reads_reviewed_secret_mounts(self) -> None:
+        module = _load_module()
+        with self.subTest("read-only root-owned secret files"):
+            from tempfile import TemporaryDirectory
+
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                key_path = root / "key"
+                secret_path = root / "secret"
+                key_path.write_text("key-value\n", encoding="utf-8")
+                secret_path.write_text(
+                    "secret-value\n",
+                    encoding="utf-8",
+                )
+                key_path.chmod(0o440)
+                secret_path.chmod(0o440)
+                inspected = [
+                    {
+                        "Config": {
+                            "Env": [
+                                "BINANCE_ACCOUNT_C_API_KEY=",
+                                "BINANCE_ACCOUNT_C_API_SECRET=",
+                            ]
+                        },
+                        "Mounts": [
+                            {
+                                "Source": str(key_path),
+                                "Destination": (
+                                    "/run/secrets/"
+                                    "binance_account_c_api_key"
+                                ),
+                                "RW": False,
+                            },
+                            {
+                                "Source": str(secret_path),
+                                "Destination": (
+                                    "/run/secrets/"
+                                    "binance_account_c_api_secret"
+                                ),
+                                "RW": False,
+                            },
+                        ],
+                    }
+                ]
+                real_fstat = os.fstat
+
+                def root_owned_fstat(descriptor):
+                    value = real_fstat(descriptor)
+                    return SimpleNamespace(
+                        st_mode=value.st_mode,
+                        st_uid=0,
+                        st_gid=999,
+                    )
+
+                with patch.object(
+                    module.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(
+                        stdout=json.dumps(inspected)
+                    ),
+                ), patch.object(
+                    module.os,
+                    "fstat",
+                    side_effect=root_owned_fstat,
+                ):
+                    result = module.container_keys(
+                        "trader-v3-node-c",
+                        "BINANCE_ACCOUNT_C",
+                    )
+
+                self.assertEqual(result, ("key-value", "secret-value"))
+
+    def test_container_keys_rejects_writable_secret_mount(self) -> None:
+        module = _load_module()
+        inspected = [
+            {
+                "Config": {"Env": []},
+                "Mounts": [
+                    {
+                        "Source": "/not-read",
+                        "Destination": (
+                            "/run/secrets/binance_account_c_api_key"
+                        ),
+                        "RW": True,
+                    }
+                ],
+            }
+        ]
+
+        with patch.object(
+            module.subprocess,
+            "run",
+            return_value=SimpleNamespace(stdout=json.dumps(inspected)),
+        ):
+            result = module.container_keys(
+                "trader-v3-node-c",
+                "BINANCE_ACCOUNT_C",
+            )
+
+        self.assertIsNone(result)
 
     def test_slim_order_preserves_hedge_position_side(self) -> None:
         module = _load_module()

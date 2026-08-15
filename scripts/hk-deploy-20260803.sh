@@ -2101,17 +2101,34 @@ rollback_restart_hermes_units() {
     || { echo "!! Hermes rollback restart FAILED: ${HERMES_REQUIRED_UNITS[*]}" >&2; return 1; }
 }
 restart_exchange_state_recorder() {
-  if [ "$EXCHANGE_STATE_RESTART_REQUIRED" != "1" ]; then
+  local action_required=0
+  if [ "$EXCHANGE_STATE_RESTART_REQUIRED" = "1" ]; then
+    action_required=1
+  fi
+  if ! systemctl is-active --quiet "$EXCHANGE_STATE_RECORDER_UNIT"; then
+    action_required=1
+  fi
+  if ! systemctl is-enabled --quiet "$EXCHANGE_STATE_RECORDER_UNIT"; then
+    action_required=1
+  fi
+  if [ "$action_required" != "1" ]; then
     return
   fi
   verify_maintenance_fence "exchange-state-restart"
   unit_exists "$EXCHANGE_STATE_RECORDER_UNIT" \
     || die "exchange-state unit not found: $EXCHANGE_STATE_RECORDER_UNIT"
   EXCHANGE_STATE_RESTARTED=1
-  systemctl restart "$EXCHANGE_STATE_RECORDER_UNIT"
+  systemctl enable "$EXCHANGE_STATE_RECORDER_UNIT"
+  if [ "$EXCHANGE_STATE_RESTART_REQUIRED" = "1" ]; then
+    systemctl restart "$EXCHANGE_STATE_RECORDER_UNIT"
+  else
+    systemctl start "$EXCHANGE_STATE_RECORDER_UNIT"
+  fi
   sleep 2
   systemctl is-active --quiet "$EXCHANGE_STATE_RECORDER_UNIT" \
     || die "$EXCHANGE_STATE_RECORDER_UNIT failed to restart"
+  systemctl is-enabled --quiet "$EXCHANGE_STATE_RECORDER_UNIT" \
+    || die "$EXCHANGE_STATE_RECORDER_UNIT failed to enable"
 }
 rollback_restart_exchange_state_recorder() {
   if [ "$EXCHANGE_STATE_RESTARTED" != "1" ]; then

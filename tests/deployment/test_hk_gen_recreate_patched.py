@@ -1481,6 +1481,54 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
         self.assertEqual(result.returncode, 2)
         self.assertIn("fixed HostPort", result.stderr)
 
+    def test_reviewed_release_restores_missing_account_health_binding(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspected = inspect_payload[0]
+        inspected["HostConfig"]["PortBindings"] = {}
+        inspected["Config"]["Env"].append("NAUTILUS_HEALTH_PORT=8081")
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        manifest_path, _, _ = self.write_v3_release_manifest()
+
+        result = self.run_script(
+            "trader-v3-node-a",
+            *self.release_identity_args(manifest_path),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tokens = self.generated_run_tokens()
+        publish_index = tokens.index("--publish")
+        self.assertEqual(
+            tokens[publish_index + 1],
+            "127.0.0.1:8081:8081/tcp",
+        )
+
+    def test_reviewed_release_rejects_missing_health_port_environment(self):
+        inspect_payload = json.loads(
+            self.inspect_path.read_text(encoding="utf-8")
+        )
+        inspect_payload[0]["HostConfig"]["PortBindings"] = {}
+        self.inspect_path.write_text(
+            json.dumps(inspect_payload),
+            encoding="utf-8",
+        )
+        manifest_path, _, _ = self.write_v3_release_manifest()
+
+        result = self.run_script(
+            "trader-v3-node-a",
+            *self.release_identity_args(manifest_path),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "must define one NAUTILUS_HEALTH_PORT",
+            result.stderr,
+        )
+
     def test_binance_destination_cannot_replace_another_patch(self):
         result = self.run_script(
             "trader-v3-node-a",
