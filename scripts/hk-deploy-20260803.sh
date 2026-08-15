@@ -5569,10 +5569,7 @@ for required in \
   require_checksum_artifact "$required"
 done
 if [ "$DELIVERY_MODE" = "immutable_image" ]; then
-  awk '{print $2}' SHA256SUMS \
-    | sed -e 's/^\*//' -e 's|^\./||' \
-    | grep -Fxq "build_immutable_node_image.py" \
-    || die "SHA256SUMS does not cover build_immutable_node_image.py"
+  require_checksum_artifact "build_immutable_node_image.py"
 fi
 
 # no-regression guards for the 08-03 live hotfix lineage

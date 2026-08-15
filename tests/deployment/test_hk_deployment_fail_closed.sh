@@ -134,7 +134,8 @@ test_hardening_deploy_contract_is_fail_closed() {
     'existing rollback recreate script changed during bootstrap'
   assert_contains "$text" \
     'legacy snapshot recreate verification failed'
-  assert_contains "$text" 'post-migration-recovery-manifest.json'
+  assert_contains "$text" \
+    'POST_MIGRATION_RECOVERY_MANIFEST="$POST_MIGRATION_RECOVERY_PAYLOAD_ROOT/release-manifest.json"'
   assert_contains "$text" \
     'POST_MIGRATION_RECOVERY_ROOT="$BACKUP_ROOT/post-migration-recovery"'
   assert_contains "$text" \
@@ -170,6 +171,8 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" 'memory_swap_limit_bytes'
   assert_contains "$text" \
     'SYSTEMD_RESOURCE_CONTRACT="$STAGING/systemd-resource-contract.json"'
+  assert_contains "$text" \
+    'require_checksum_artifact "build_immutable_node_image.py"'
   assert_contains "$text" \
     'Redis capacity cgroup differs from release resource contract'
   assert_contains "$text" \
