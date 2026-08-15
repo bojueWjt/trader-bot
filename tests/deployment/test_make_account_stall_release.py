@@ -348,6 +348,19 @@ def test_release_builder_includes_four_account_rollout_migration() -> None:
     }
 
 
+def test_applied_maintenance_fence_migration_is_immutable() -> None:
+    migration_path = (
+        REPO_ROOT
+        / "db"
+        / "migrations"
+        / "0012_control_plane_maintenance_fence.up.sql"
+    )
+
+    assert hashlib.sha256(migration_path.read_bytes()).hexdigest() == (
+        "72f076928b58e6ea8df6f809cce49fb69b8c34303a2728255c74aa0b63c9cb38"
+    )
+
+
 def test_reviewed_live_risk_policy_has_complete_runtime_resources() -> None:
     policy_path = (
         REPO_ROOT
