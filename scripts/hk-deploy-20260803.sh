@@ -1364,13 +1364,37 @@ try:
                     )
         else:
             raise SystemExit("partial rollout history tables detected")
-        if resume_manifest_path is False and live_manifest_path.is_symlink():
-            raise SystemExit("live release manifest cannot be a symlink")
-        if (
-            resume_manifest_path is False
-            and not live_manifest_path.exists()
-            and not live_manifest_path.is_symlink()
-        ):
+        migration_live_manifest = False
+        migration_candidate = False
+        if resume_manifest_path is False:
+            if live_manifest_path.is_symlink():
+                raise SystemExit("live release manifest cannot be a symlink")
+            if live_manifest_path.exists():
+                if not live_manifest_path.is_file():
+                    raise SystemExit("live release manifest is invalid")
+                if release_manifest_path.is_symlink():
+                    raise SystemExit("release manifest cannot be a symlink")
+                if release_manifest_path.exists():
+                    if not release_manifest_path.is_file():
+                        raise SystemExit("release manifest is invalid")
+                    if (
+                        live_manifest_path.read_bytes()
+                        != release_manifest_path.read_bytes()
+                    ):
+                        raise SystemExit(
+                            "migration rebaseline live release manifest differs"
+                        )
+                    migration_live_manifest = json.loads(
+                        live_manifest_path.read_text(encoding="utf-8")
+                    )
+                    if not isinstance(migration_live_manifest, dict):
+                        raise SystemExit(
+                            "live release manifest root is invalid"
+                        )
+                    migration_candidate = True
+            else:
+                migration_candidate = True
+        if migration_candidate:
             if rollout_node != "trader-v3-node-a":
                 raise SystemExit(
                     "migration rebaseline requires trader-v3-node-a"
@@ -1473,34 +1497,47 @@ try:
                         "migration rebaseline active release differs from "
                         "the fresh Redis epoch"
                     )
-                expected = (
-                    target_release_id,
-                    target_epoch,
-                    target_manifest.get("image_digest"),
-                    target_manifest.get("config_sha256"),
-                    target_manifest.get("dependency_lock_sha256"),
-                    (target_manifest.get("schema_epochs") or {}).get("db"),
-                    hashlib.sha256(
-                        release_manifest_path.read_bytes()
-                    ).hexdigest(),
-                    hashlib.sha256(
-                        bundle_manifest_path.read_bytes()
-                    ).hexdigest(),
-                    f"migration-rebaseline-register:{target_release_id}",
-                    "account_a_canary",
+                expected_registration_key = (
+                    f"migration-rebaseline-register:{target_release_id}"
                 )
-                if tuple(active_rollout) != expected:
-                    raise SystemExit(
-                        "migration rebaseline replay release differs"
-                    )
-                if active_epoch != (
-                    target_epoch,
-                    target_evidence_sha256,
+                if (
+                    migration_live_manifest is not False
+                    and active_rollout[8] != expected_registration_key
                 ):
-                    raise SystemExit(
-                        "migration rebaseline replay Redis evidence differs"
+                    migration_candidate = False
+                else:
+                    expected = (
+                        target_release_id,
+                        target_epoch,
+                        target_manifest.get("image_digest"),
+                        target_manifest.get("config_sha256"),
+                        target_manifest.get("dependency_lock_sha256"),
+                        (target_manifest.get("schema_epochs") or {}).get("db"),
+                        hashlib.sha256(
+                            release_manifest_path.read_bytes()
+                        ).hexdigest(),
+                        hashlib.sha256(
+                            bundle_manifest_path.read_bytes()
+                        ).hexdigest(),
+                        expected_registration_key,
+                        "account_a_canary",
                     )
+                    if tuple(active_rollout) != expected:
+                        raise SystemExit(
+                            "migration rebaseline replay release differs"
+                        )
+                    if active_epoch != (
+                        target_epoch,
+                        target_evidence_sha256,
+                    ):
+                        raise SystemExit(
+                            "migration rebaseline replay Redis evidence differs"
+                        )
             else:
+                if migration_live_manifest is not False:
+                    raise SystemExit(
+                        "new migration rebaseline requires no live release manifest"
+                    )
                 cur.execute(
                     """
                     SELECT count(*)
@@ -1535,7 +1572,7 @@ try:
                         raise SystemExit(
                             "migration rebaseline target release already exists"
                         )
-            migration_rebaseline = True
+            migration_rebaseline = migration_candidate
 finally:
     conn.close()
 if redis_count == 0 and rollout_count == 0:
@@ -1586,9 +1623,7 @@ PY
       [ "$SKIP_RESUME" = "1" ] \
         || die "migration rebaseline requires SKIP_RESUME=1"
       verify_all_execution_accounts_stopped
-      [ ! -e "$T/RELEASE_MANIFEST.json" ] \
-        && [ ! -L "$T/RELEASE_MANIFEST.json" ] \
-        || die "migration rebaseline requires no live release manifest"
+      verify_migration_rebaseline_live_manifest
       BOOTSTRAP_ALL_NODE_RELEASE=1
       RECREATE_NODES=("${ALL_NODES[@]}")
       role_env_count=0
@@ -1623,6 +1658,19 @@ PY
   esac
   echo "== deploy gate mode: $DEPLOY_GATE_MODE"
 }
+verify_migration_rebaseline_live_manifest() {
+  local live_manifest="$T/RELEASE_MANIFEST.json"
+  if [ ! -e "$live_manifest" ] && [ ! -L "$live_manifest" ]; then
+    return
+  fi
+  [ -f "$live_manifest" ] && [ ! -L "$live_manifest" ] \
+    || die "migration rebaseline live release manifest is invalid"
+  [ -f "$RELEASE_MANIFEST" ] && [ ! -L "$RELEASE_MANIFEST" ] \
+    || die "migration rebaseline replay requires staging release manifest"
+  cmp -s "$live_manifest" "$RELEASE_MANIFEST" \
+    || die "migration rebaseline live release manifest differs"
+  echo "== migration rebaseline live release manifest matches staging"
+}
 verify_bootstrap_stopped_gate() {
   local stage="$1"
   local expected_epoch
@@ -1639,9 +1687,7 @@ verify_bootstrap_stopped_gate() {
     || die "bootstrap stopped gate requires SKIP_RESUME=1"
   if [ "$DEPLOY_GATE_MODE" = "migration_rebaseline_stopped" ]; then
     verify_all_execution_accounts_stopped
-    [ ! -e "$T/RELEASE_MANIFEST.json" ] \
-      && [ ! -L "$T/RELEASE_MANIFEST.json" ] \
-      || die "migration rebaseline requires no live release manifest"
+    verify_migration_rebaseline_live_manifest
   else
     verify_all_execution_accounts_quiesced
   fi

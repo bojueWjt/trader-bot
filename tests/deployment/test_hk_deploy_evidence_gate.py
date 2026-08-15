@@ -268,6 +268,7 @@ class AccountBEvidenceGateTest(unittest.TestCase):
         resume_manifest: bool = True,
         state_registration_key: str | None = None,
         write_release_manifest: bool = True,
+        live_manifest_payload: dict | None = None,
     ) -> subprocess.CompletedProcess[str]:
         base_manifest = {
             "release_id": "release-reviewed-a",
@@ -309,6 +310,8 @@ class AccountBEvidenceGateTest(unittest.TestCase):
         manifest_path.write_bytes(encode(manifest_payload))
         if write_release_manifest:
             release_manifest_path.write_bytes(encode(manifest_payload))
+        if live_manifest_payload is not None:
+            live_manifest_path.write_bytes(encode(live_manifest_payload))
         capacity_path.write_bytes(encode(capacity_payload))
         bundle_path.write_bytes(encode(bundle_payload))
         state_manifest_bytes = encode(state_manifest_payload)
@@ -612,8 +615,24 @@ def connect(_url):
             configure_gate,
         )
         self.assertIn(
-            'die "migration rebaseline requires no live release manifest"',
+            "verify_migration_rebaseline_live_manifest",
             configure_gate,
+        )
+        helper_start = text.index(
+            "verify_migration_rebaseline_live_manifest()"
+        )
+        helper_end = text.index(
+            "\nverify_bootstrap_stopped_gate()",
+            helper_start,
+        )
+        helper = text[helper_start:helper_end]
+        self.assertIn(
+            'cmp -s "$live_manifest" "$RELEASE_MANIFEST"',
+            helper,
+        )
+        self.assertIn(
+            'die "migration rebaseline live release manifest differs"',
+            helper,
         )
 
     def test_new_control_plane_role_modules_support_first_install(self) -> None:
@@ -1112,6 +1131,7 @@ def connect(_url):
             state_registration_key=(
                 "migration-rebaseline-register:release-reviewed-a"
             ),
+            live_manifest_payload=manifest,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1119,6 +1139,54 @@ def connect(_url):
             result.stdout.strip(),
             "migration_rebaseline_stopped",
         )
+
+    def test_migration_rebaseline_replay_rejects_live_manifest_mismatch(
+        self,
+    ) -> None:
+        manifest = {
+            "release_id": "release-reviewed-a",
+            "image_digest": "sha256:" + ("1" * 64),
+            "config_sha256": "2" * 64,
+            "dependency_lock_sha256": "3" * 64,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
+        }
+        live_manifest = dict(manifest)
+        live_manifest["config_sha256"] = "9" * 64
+
+        result = self._run_deploy_gate_mode_detector(
+            manifest_payload=manifest,
+            state_manifest_payload=manifest,
+            resume_manifest=False,
+            state_registration_key=(
+                "migration-rebaseline-register:release-reviewed-a"
+            ),
+            live_manifest_payload=live_manifest,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "migration rebaseline live release manifest differs",
+            result.stderr,
+        )
+
+    def test_live_bootstrap_rollout_remains_maintenance_fence(self) -> None:
+        manifest = {
+            "release_id": "release-reviewed-a",
+            "image_digest": "sha256:" + ("1" * 64),
+            "config_sha256": "2" * 64,
+            "dependency_lock_sha256": "3" * 64,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
+        }
+
+        result = self._run_deploy_gate_mode_detector(
+            manifest_payload=manifest,
+            state_manifest_payload=manifest,
+            resume_manifest=False,
+            live_manifest_payload=manifest,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "maintenance_fence")
 
     def test_report_symlink_is_rejected(self) -> None:
         report_path = self.root / "fault_report.json"
