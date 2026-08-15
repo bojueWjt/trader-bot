@@ -1764,6 +1764,22 @@ def generate(
     if reviewed_resources is not False:
         restart = reviewed_resources["restart_policy"]
 
+    excluded_environment_pattern = (
+        "PATH|PYTHON*|LANG|GPG_KEY|HOME|"
+        "NAUTILUS_INITIAL_TRADING_STATE|"
+        "NAUTILUS_MAX_NOTIONAL_PER_ORDER_JSON|"
+        "NAUTILUS_MAX_ORDER_SUBMIT_RATE|"
+        "NAUTILUS_MAX_ORDER_MODIFY_RATE|"
+        "TRADER_RELEASE_COMMIT|TRADER_RELEASE_ID|"
+        "TRADER_RELEASE_IMAGE_DIGEST|TRADER_RELEASE_CONFIG_SHA256|"
+        "TRADER_RELEASE_DEPENDENCY_LOCK_SHA256|"
+        "TRADER_RELEASE_SCHEMA_EPOCH|"
+        "TRADER_RELEASE_MANIFEST_SCHEMA_VERSION|"
+        "TRADER_RELEASE_PURPOSE"
+    )
+    if release_identity is not False:
+        excluded_environment_pattern += "|NAUTILUS_HEALTH_HOST"
+
     state_dir = trader_root / "node-state" / suffix
     lines = [
         "#!/bin/bash",
@@ -1856,19 +1872,7 @@ def generate(
             'for env_value in "${inherited_env[@]}"; do',
             '  env_name="${env_value%%=*}"',
             '  case "$env_name" in',
-            (
-                "    PATH|PYTHON*|LANG|GPG_KEY|HOME|"
-                "NAUTILUS_INITIAL_TRADING_STATE|"
-                "NAUTILUS_MAX_NOTIONAL_PER_ORDER_JSON|"
-                "NAUTILUS_MAX_ORDER_SUBMIT_RATE|"
-                "NAUTILUS_MAX_ORDER_MODIFY_RATE|"
-                "TRADER_RELEASE_COMMIT|TRADER_RELEASE_ID|"
-                "TRADER_RELEASE_IMAGE_DIGEST|TRADER_RELEASE_CONFIG_SHA256|"
-                "TRADER_RELEASE_DEPENDENCY_LOCK_SHA256|"
-                "TRADER_RELEASE_SCHEMA_EPOCH|"
-                "TRADER_RELEASE_MANIFEST_SCHEMA_VERSION|"
-                "TRADER_RELEASE_PURPOSE)"
-            ),
+            f"    {excluded_environment_pattern})",
             "      continue",
             "      ;;",
             "  esac",
@@ -1879,6 +1883,9 @@ def generate(
         ]
     )
     if release_identity is not False:
+        lines.append(
+            'run+=("-e" "NAUTILUS_HEALTH_HOST=0.0.0.0")'
+        )
         lines.append(
             'run+=("-e" '
             f"{shlex.quote('TRADER_RELEASE_COMMIT=' + release_identity['commit'])}"

@@ -1488,6 +1488,9 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
         inspected = inspect_payload[0]
         inspected["HostConfig"]["PortBindings"] = {}
         inspected["Config"]["Env"].append("NAUTILUS_HEALTH_PORT=8081")
+        inspected["Config"]["Env"].append(
+            "NAUTILUS_HEALTH_HOST=127.0.0.1"
+        )
         self.inspect_path.write_text(
             json.dumps(inspect_payload),
             encoding="utf-8",
@@ -1505,6 +1508,19 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
         self.assertEqual(
             tokens[publish_index + 1],
             "127.0.0.1:8081:8081/tcp",
+        )
+        text = self.generated_environment()
+        self.assertIn(
+            "TRADER_RELEASE_PURPOSE|NAUTILUS_HEALTH_HOST)",
+            text,
+        )
+        self.assertEqual(
+            text.count('run+=("-e" "NAUTILUS_HEALTH_HOST=0.0.0.0")'),
+            1,
+        )
+        self.assertNotIn(
+            "NAUTILUS_HEALTH_HOST=127.0.0.1",
+            text,
         )
 
     def test_reviewed_release_rejects_missing_health_port_environment(self):
