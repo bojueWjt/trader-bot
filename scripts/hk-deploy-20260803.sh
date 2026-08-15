@@ -1385,17 +1385,16 @@ try:
                         live_manifest_path.read_bytes()
                         != release_manifest_path.read_bytes()
                     ):
-                        raise SystemExit(
-                            "migration rebaseline live release manifest differs"
+                        migration_candidate = False
+                    else:
+                        migration_live_manifest = json.loads(
+                            live_manifest_path.read_text(encoding="utf-8")
                         )
-                    migration_live_manifest = json.loads(
-                        live_manifest_path.read_text(encoding="utf-8")
-                    )
-                    if not isinstance(migration_live_manifest, dict):
-                        raise SystemExit(
-                            "live release manifest root is invalid"
-                        )
-                    migration_candidate = True
+                        if not isinstance(migration_live_manifest, dict):
+                            raise SystemExit(
+                                "live release manifest root is invalid"
+                            )
+                        migration_candidate = True
             else:
                 migration_candidate = True
         if migration_candidate:

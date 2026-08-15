@@ -1162,7 +1162,7 @@ def connect(_url):
             "migration_rebaseline_stopped",
         )
 
-    def test_migration_rebaseline_replay_rejects_live_manifest_mismatch(
+    def test_migration_rebaseline_live_manifest_mismatch_is_normal_deploy(
         self,
     ) -> None:
         manifest = {
@@ -1185,10 +1185,10 @@ def connect(_url):
             live_manifest_payload=live_manifest,
         )
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "migration rebaseline live release manifest differs",
-            result.stderr,
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "maintenance_fence",
         )
 
     def test_live_bootstrap_rollout_remains_maintenance_fence(self) -> None:
