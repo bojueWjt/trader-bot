@@ -210,6 +210,7 @@ class Scenario:
             assert headers["authorization"] == f"Bearer {NODE_TOKEN}"
             assert headers["x-node-id"] == NODE_ID
             assert headers["x-account-id"] == ACCOUNT_ID
+            _assert_node_writer_headers(headers)
             assert isinstance(body, dict)
             return 200, {"ok": True}
         if method == "GET" and path.startswith("/v1/operator/orders/"):
@@ -226,6 +227,7 @@ class Scenario:
             assert headers["authorization"] == f"Bearer {NODE_TOKEN}"
             assert headers["x-node-id"] == NODE_ID
             assert headers["x-account-id"] == ACCOUNT_ID
+            _assert_node_writer_headers(headers)
             requested_client_ids = ",".join(
                 query.get("client_order_ids", [])
             )
@@ -3152,6 +3154,12 @@ def _identity() -> dict[str, Any]:
         "permit_id": "permit-account-a-test",
         "intent_id": OPEN_INTENT_ID,
     }
+
+
+def _assert_node_writer_headers(headers: Mapping[str, str]) -> None:
+    assert headers["x-redis-fencing-epoch"] == LEASE_ID
+    assert headers["x-runtime-generation"] == WRITER_ID
+    assert headers["x-lease-fencing-token"] == str(FENCING_EPOCH)
 
 
 def _canonical_sha256_without_evidence(payload: dict[str, Any]) -> str:

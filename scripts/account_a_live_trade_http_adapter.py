@@ -303,6 +303,7 @@ class ControlPlaneClient:
         path: str,
         *,
         query: Mapping[str, Any] | None = None,
+        node_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._request(
             "GET",
@@ -310,12 +311,15 @@ class ControlPlaneClient:
             token=self._config.node_token,
             query=query,
             node_headers=True,
+            node_identity=node_identity,
         )
 
     def node_post(
         self,
         path: str,
         body: Mapping[str, Any],
+        *,
+        node_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -323,6 +327,7 @@ class ControlPlaneClient:
             token=self._config.node_token,
             body=body,
             node_headers=True,
+            node_identity=node_identity,
         )
 
     def _request(
@@ -335,6 +340,7 @@ class ControlPlaneClient:
         body: Mapping[str, Any] | None = None,
         request_id: str = "",
         node_headers: bool = False,
+        node_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = f"{self._config.base_url}{path}"
         if query:
@@ -355,6 +361,8 @@ class ControlPlaneClient:
         if node_headers:
             headers["X-Node-ID"] = self._config.node_id
             headers["X-Account-ID"] = self._config.account_id
+            if node_identity is not None:
+                headers.update(_node_writer_headers(node_identity))
         data = None
         if body is not None:
             data = _canonical_json_bytes(dict(body))
@@ -647,6 +655,7 @@ class AccountALiveTradeHttpAdapter:
         status = self._operator_status(str(request["intent_id"]))
         mirror = self._exchange_state_after(
             (open_client_order_id,),
+            request=request,
             not_before=exchange_not_before,
             deadline=deadline,
         )
@@ -685,7 +694,8 @@ class AccountALiveTradeHttpAdapter:
         )
         health_warnings.extend(loss_monitor["warnings"])
         publication_warning = self._publish_loss_monitor_evidence(
-            loss_monitor
+            loss_monitor,
+            request=request,
         )
         if publication_warning:
             health_warnings.append(publication_warning)
@@ -785,6 +795,7 @@ class AccountALiveTradeHttpAdapter:
     ) -> dict[str, Any]:
         mirror = self._exchange_state_after(
             (),
+            request=request,
             not_before=_exchange_not_before(request),
             deadline=self._deadline(request),
         )
@@ -916,6 +927,7 @@ class AccountALiveTradeHttpAdapter:
             retry_deadline = self._deadline(request)
             existing_close_mirror = self._exchange_state_after(
                 (client_order_id,),
+                request=request,
                 not_before=requested_not_before,
                 deadline=retry_deadline,
             )
@@ -951,6 +963,7 @@ class AccountALiveTradeHttpAdapter:
                     )
                 opening_mirror = self._exchange_state_after(
                     (open_client_order_id,),
+                    request=request,
                     not_before=open_exchange_not_before,
                     deadline=retry_deadline,
                 )
@@ -982,6 +995,7 @@ class AccountALiveTradeHttpAdapter:
                 )
         opening_mirror = self._exchange_state_after(
             (open_client_order_id,),
+            request=request,
             not_before=open_exchange_not_before,
             deadline=self._deadline(request),
         )
@@ -1071,6 +1085,7 @@ class AccountALiveTradeHttpAdapter:
                 summary = _empty_execution_summary()
             mirror = self._exchange_state_after(
                 (client_order_id,),
+                request=request,
                 not_before=exchange_not_before,
                 deadline=deadline,
             )
@@ -1176,6 +1191,7 @@ class AccountALiveTradeHttpAdapter:
     ) -> dict[str, Any]:
         mirror = self._exchange_state_after(
             (),
+            request=request,
             not_before=_exchange_not_before(request),
             deadline=self._deadline(request),
         )
@@ -1332,6 +1348,7 @@ class AccountALiveTradeHttpAdapter:
     ) -> dict[str, Any]:
         mirror = self._exchange_state_after(
             (),
+            request=request,
             not_before=_exchange_not_before(request),
             deadline=self._deadline(request),
         )
@@ -1396,6 +1413,8 @@ class AccountALiveTradeHttpAdapter:
     def _exchange_state(
         self,
         client_order_ids: tuple[str, ...],
+        *,
+        request: Mapping[str, Any],
     ) -> dict[str, Any]:
         query: dict[str, Any] = {
             "account_id": self._config.account_id
@@ -1405,6 +1424,7 @@ class AccountALiveTradeHttpAdapter:
         response = self._client.node_get(
             f"/v1/nodes/{self._config.node_id}/exchange-state",
             query=query,
+            node_identity=request,
         )
         if response.get("account_id") != self._config.account_id:
             raise AdapterError(
@@ -1417,6 +1437,7 @@ class AccountALiveTradeHttpAdapter:
         self,
         client_order_ids: tuple[str, ...],
         *,
+        request: Mapping[str, Any],
         not_before: datetime | bool,
         deadline: float,
     ) -> dict[str, Any]:
@@ -1425,7 +1446,10 @@ class AccountALiveTradeHttpAdapter:
             "exchange mirror did not advance past the required action boundary"
         )
         while True:
-            mirror = self._exchange_state(client_order_ids)
+            mirror = self._exchange_state(
+                client_order_ids,
+                request=request,
+            )
             fetched_at = _mirror_fetched_datetime(mirror)
             mirror_stale = mirror.get("stale") is True
             mirror_future = _timestamp_is_far_future(fetched_at)
@@ -1485,6 +1509,8 @@ class AccountALiveTradeHttpAdapter:
     def _publish_loss_monitor_evidence(
         self,
         loss_monitor: Mapping[str, Any],
+        *,
+        request: Mapping[str, Any],
     ) -> str:
         body = {
             "account_id": self._config.account_id,
@@ -1495,6 +1521,7 @@ class AccountALiveTradeHttpAdapter:
             self._client.node_post(
                 f"/v1/nodes/{self._config.node_id}/loss-monitor",
                 body,
+                node_identity=request,
             )
         except AdapterError as exc:
             if _is_hard_control_plane_error(exc):
@@ -1548,6 +1575,24 @@ def _identity(
     if intent_id:
         payload["intent_id"] = intent_id
     return payload
+
+
+def _node_writer_headers(request: Mapping[str, Any]) -> dict[str, str]:
+    lease_fencing_token = _positive_int(
+        request.get("fencing_epoch"),
+        "fencing_epoch",
+    )
+    return {
+        "X-Redis-Fencing-Epoch": _required_text(
+            request.get("lease_id"),
+            "lease_id",
+        ),
+        "X-Runtime-Generation": _required_text(
+            request.get("writer_id"),
+            "writer_id",
+        ),
+        "X-Lease-Fencing-Token": str(lease_fencing_token),
+    }
 
 
 def _exchange_payload(mirror: Mapping[str, Any]) -> dict[str, Any]:
