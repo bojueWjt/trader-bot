@@ -64,9 +64,6 @@ def resolve_common_base_image(images: list[str]) -> str:
         current_images.append(image)
 
     unique_images = set(current_images)
-    if len(unique_images) == 1:
-        return current_images[0]
-
     layers_by_image = {}
     candidate_sets = []
     for image in current_images:
@@ -85,7 +82,16 @@ def resolve_common_base_image(images: list[str]) -> str:
                 labeled_base = _require_image_digest(raw_base)
             except ReleaseManifestError as exc:
                 raise ImmutableBuildError(str(exc)) from exc
-            if labeled_base in unique_images:
+            try:
+                local_labeled_base = _docker_image_id(labeled_base)
+            except ReleaseManifestError:
+                local_labeled_base = ""
+            if local_labeled_base:
+                if local_labeled_base != labeled_base:
+                    raise ImmutableBuildError(
+                        "labeled base image content ID failed local "
+                        "verification"
+                    )
                 try:
                     base_layers = layers_by_image.setdefault(
                         labeled_base,
@@ -108,7 +114,6 @@ def resolve_common_base_image(images: list[str]) -> str:
     ranked = sorted(
         common,
         key=lambda image: len(layers_by_image[image]),
-        reverse=True,
     )
     if (
         len(ranked) > 1

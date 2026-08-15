@@ -180,6 +180,54 @@ def test_resolve_common_base_accepts_mixed_base_and_derived_images(
             release_manifest.LABEL_BUILD_BASE_IMAGE: BASE_IMAGE
         },
     }
+    def fake_image_id(image: str) -> str:
+        if image not in layers:
+            raise release_manifest.ReleaseManifestError(
+                f"local Docker image is unavailable: {image}"
+            )
+        return image
+
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_id",
+        fake_image_id,
+    )
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_layers",
+        lambda image: list(layers[image]),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_labels",
+        lambda image: dict(labels[image]),
+    )
+
+    resolved = builder.resolve_common_base_image(
+        [
+            PREVIOUS_IMAGE,
+            BASE_IMAGE,
+            BASE_IMAGE,
+            BASE_IMAGE,
+        ]
+    )
+
+    assert resolved == BASE_IMAGE
+
+
+def test_resolve_common_base_prefers_labeled_base_for_identical_derived_images(
+    monkeypatch,
+) -> None:
+    layers = {
+        BASE_IMAGE: list(BASE_LAYERS),
+        PREVIOUS_IMAGE: [*BASE_LAYERS, BUILT_LAYER],
+    }
+    labels = {
+        BASE_IMAGE: {},
+        PREVIOUS_IMAGE: {
+            release_manifest.LABEL_BUILD_BASE_IMAGE: BASE_IMAGE
+        },
+    }
     monkeypatch.setattr(
         builder,
         "_docker_image_id",
@@ -199,9 +247,9 @@ def test_resolve_common_base_accepts_mixed_base_and_derived_images(
     resolved = builder.resolve_common_base_image(
         [
             PREVIOUS_IMAGE,
-            BASE_IMAGE,
-            BASE_IMAGE,
-            BASE_IMAGE,
+            PREVIOUS_IMAGE,
+            PREVIOUS_IMAGE,
+            PREVIOUS_IMAGE,
         ]
     )
 
