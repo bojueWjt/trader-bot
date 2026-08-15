@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import http.client
+import ipaddress
 import json
 import os
 import stat
@@ -40,6 +42,8 @@ ACCOUNTS = {
 }
 BINANCE_RECV_WINDOW_MS = 30_000
 BINANCE_PROXY_ENV = "BINANCE_PROXY_URL"
+BINANCE_SOURCE_IP_ENV = "BINANCE_SOURCE_IP"
+BINANCE_EXPECTED_EGRESS_IP_ENV = "BINANCE_EXPECTED_EGRESS_IP"
 
 UPSERT_SQL = """
 INSERT INTO exchange_state_mirror (account_id, payload, updated_at)
@@ -167,11 +171,52 @@ def container_keys(container: str, prefix: str) -> tuple[str, str] | None:
     return None
 
 
-def build_binance_opener(proxy_url: str | None = None):
+class SourceAddressHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, source_ip: str) -> None:
+        super().__init__()
+        self.source_address = (source_ip, 0)
+
+    def https_open(self, req):
+        return self.do_open(self._connection_factory, req)
+
+    def _connection_factory(self, host: str, **kwargs):
+        return http.client.HTTPSConnection(
+            host,
+            source_address=self.source_address,
+            **kwargs,
+        )
+
+
+def _account_env_value(stem: str, account_id: str) -> str:
+    suffix = account_id.rsplit("-", 1)[-1].upper()
+    key = f"{stem}_{suffix}"
+    return os.environ.get(key, "").strip()
+
+
+def _account_source_ip(account_id: str) -> str:
+    source_ip = _account_env_value(BINANCE_SOURCE_IP_ENV, account_id)
+    if source_ip:
+        return source_ip
+    return _account_env_value(BINANCE_EXPECTED_EGRESS_IP_ENV, account_id)
+
+
+def account_binance_opener(account_id: str):
+    proxy_url = _account_env_value(BINANCE_PROXY_ENV, account_id)
+    if not proxy_url:
+        proxy_url = os.environ.get(BINANCE_PROXY_ENV, "").strip()
+    source_ip = _account_source_ip(account_id)
+    return build_binance_opener(proxy_url=proxy_url, source_ip=source_ip)
+
+
+def build_binance_opener(
+    proxy_url: str | None = None,
+    source_ip: str | None = None,
+):
     configured_proxy = proxy_url
     if configured_proxy is None:
         configured_proxy = os.environ.get(BINANCE_PROXY_ENV, "")
     configured_proxy = configured_proxy.strip()
+    configured_source_ip = str(source_ip or "").strip()
 
     proxies: dict[str, str] = {}
     if configured_proxy:
@@ -194,10 +239,19 @@ def build_binance_opener(proxy_url: str | None = None):
             "http": configured_proxy,
             "https": configured_proxy,
         }
+        configured_source_ip = ""
 
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler(proxies)
-    )
+    handlers = [urllib.request.ProxyHandler(proxies)]
+    if configured_source_ip:
+        try:
+            ipaddress.ip_address(configured_source_ip)
+        except ValueError as exc:
+            raise ValueError(
+                f"{BINANCE_SOURCE_IP_ENV} must be an IP address"
+            ) from exc
+        handlers.append(SourceAddressHTTPSHandler(configured_source_ip))
+
+    return urllib.request.build_opener(*handlers)
 
 
 def signed_get(
@@ -371,10 +425,10 @@ def snapshot_account(base: str, key: str, sec: str, opener=None) -> dict:
 
 
 def run_once(conn, base: str, opener=None) -> None:
-    request_opener = opener
-    if request_opener is None:
-        request_opener = build_binance_opener()
     for account_id, (container, prefix) in ACCOUNTS.items():
+        request_opener = opener
+        if request_opener is None:
+            request_opener = account_binance_opener(account_id)
         creds = container_keys(container, prefix)
         if not creds:
             continue
@@ -423,12 +477,11 @@ def main() -> None:
     if not args.db_url:
         print("DATABASE_URL not set and --db-url missing", file=sys.stderr)
         sys.exit(2)
-    opener = build_binance_opener()
     conn = psycopg2.connect(args.db_url)
     log(f"exchange state recorder start interval={args.interval}s base={args.base_url}")
     while True:
         try:
-            run_once(conn, args.base_url, opener=opener)
+            run_once(conn, args.base_url)
         except psycopg2.Error as exc:
             log(f"db error, reconnecting: {exc}")
             try:

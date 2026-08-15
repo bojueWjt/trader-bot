@@ -11,7 +11,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -241,6 +241,77 @@ class ExchangeStateRecorderTest(unittest.TestCase):
             },
         )
 
+    def test_build_binance_opener_binds_source_ip_without_proxy(self) -> None:
+        module = _load_module()
+
+        with patch.object(module.urllib.request, "build_opener") as build_opener:
+            module.build_binance_opener(source_ip="170.205.39.82")
+
+        handlers = build_opener.call_args.args
+        self.assertIsInstance(
+            handlers[0],
+            module.urllib.request.ProxyHandler,
+        )
+        self.assertEqual(handlers[0].proxies, {})
+        self.assertIsInstance(handlers[1], module.SourceAddressHTTPSHandler)
+        self.assertEqual(handlers[1].source_address, ("170.205.39.82", 0))
+
+    def test_account_binance_opener_uses_account_proxy_or_source_ip(
+        self,
+    ) -> None:
+        module = _load_module()
+        captured = []
+
+        def fake_build_binance_opener(proxy_url=None, source_ip=None):
+            captured.append((proxy_url, source_ip))
+            return object()
+
+        env = {
+            "BINANCE_EXPECTED_EGRESS_IP_A": "170.205.39.79",
+            "BINANCE_EXPECTED_EGRESS_IP_B": "170.205.39.82",
+            "BINANCE_PROXY_URL_D": "http://100.107.72.78:13128",
+            "BINANCE_EXPECTED_EGRESS_IP_D": "103.197.211.79",
+        }
+        with patch.dict(module.os.environ, env, clear=True), patch.object(
+            module,
+            "build_binance_opener",
+            side_effect=fake_build_binance_opener,
+        ):
+            module.account_binance_opener("account-a")
+            module.account_binance_opener("account-d")
+
+        self.assertEqual(
+            captured,
+            [
+                ("", "170.205.39.79"),
+                ("http://100.107.72.78:13128", "103.197.211.79"),
+            ],
+        )
+
+    def test_account_binance_opener_falls_back_to_global_proxy(self) -> None:
+        module = _load_module()
+        captured = []
+
+        def fake_build_binance_opener(proxy_url=None, source_ip=None):
+            captured.append((proxy_url, source_ip))
+            return object()
+
+        env = {
+            "BINANCE_PROXY_URL": "http://proxy.internal:3128",
+            "BINANCE_EXPECTED_EGRESS_IP_A": "170.205.39.79",
+        }
+        with patch.dict(module.os.environ, env, clear=True), patch.object(
+            module,
+            "build_binance_opener",
+            side_effect=fake_build_binance_opener,
+        ):
+            module.account_binance_opener("account-a")
+
+        self.assertEqual(
+            captured,
+            [("http://proxy.internal:3128", "170.205.39.79")],
+        )
+
     def test_build_binance_opener_disables_implicit_proxy_without_config(
         self,
     ) -> None:
@@ -397,6 +468,80 @@ class ExchangeStateRecorderTest(unittest.TestCase):
                 "api-secret",
                 opener=opener,
             )
+
+    def test_run_once_builds_account_specific_openers(self) -> None:
+        module = _load_module()
+        openers = {
+            account_id: object()
+            for account_id in module.ACCOUNTS
+        }
+        seen_openers = []
+
+        class FakeCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, *_args):
+                return None
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def rollback(self):
+                return None
+
+        def fake_snapshot_account(base, key, secret, opener=None):
+            seen_openers.append(opener)
+            return {
+                "fetched_at": "2026-08-15T00:00:00Z",
+                "account": {
+                    "currency": "USDT",
+                    "equity": "0",
+                    "margin": "0",
+                    "free": "0",
+                },
+            }
+
+        with patch.object(
+            module,
+            "container_keys",
+            return_value=("api-key", "api-secret"),
+        ), patch.object(
+            module,
+            "account_binance_opener",
+            side_effect=lambda account_id: openers[account_id],
+        ) as account_opener, patch.object(
+            module,
+            "snapshot_account",
+            side_effect=fake_snapshot_account,
+        ):
+            module.run_once(FakeConnection(), "https://fapi.binance.com")
+
+        self.assertEqual(
+            account_opener.call_args_list,
+            [
+                call("account-a"),
+                call("account-b"),
+                call("account-c"),
+                call("account-d"),
+            ],
+        )
+        self.assertEqual(
+            seen_openers,
+            [
+                openers["account-a"],
+                openers["account-b"],
+                openers["account-c"],
+                openers["account-d"],
+            ],
+        )
 
     def test_canonical_account_summary_accepts_empty_account(self) -> None:
         module = _load_module()
