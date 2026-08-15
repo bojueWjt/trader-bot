@@ -384,6 +384,12 @@ IDENTITY_PATTERNS = (
     re.compile(r"account[-_]?[abcd]", re.IGNORECASE),
     re.compile(r"node[-_]?[abcd]", re.IGNORECASE),
 )
+ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS = {
+    "account-a": "http://172.30.1.1:8080",
+    "account-b": "http://172.30.2.1:8080",
+    "account-c": "http://172.30.3.1:8080",
+    "account-d": "http://172.30.4.1:8080",
+}
 TRANSITION_RUNTIME_FILES = (
     (
         "health_server.py",
@@ -1108,6 +1114,20 @@ def node_config_sha256(path: Path) -> str:
 
 def node_config_value_sha256(config: dict[str, Any]) -> str:
     normalized = normalize_node_config(config)
+    account_id = config.get("account_id")
+    expected_base_url = ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS.get(
+        account_id
+    )
+    control_plane = config.get("control_plane")
+    normalized_control_plane = normalized.get("control_plane")
+    if (
+        isinstance(control_plane, dict)
+        and isinstance(normalized_control_plane, dict)
+        and control_plane.get("base_url") == expected_base_url
+    ):
+        normalized_control_plane["base_url"] = (
+            "<account-network-control-plane>"
+        )
     return hashlib.sha256(canonical_json_bytes(normalized)).hexdigest()
 
 

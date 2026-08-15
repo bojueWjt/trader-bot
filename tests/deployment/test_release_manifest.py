@@ -370,6 +370,14 @@ class ReleaseManifestTest(unittest.TestCase):
                 "redis": {
                     "key_prefix": f"nautilus:{account_id}:node-{suffix}"
                 },
+                "control_plane": {
+                    "base_url": (
+                        release_manifest
+                        .ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS[
+                            account_id
+                        ]
+                    )
+                },
                 "runtime_resources": {
                     "schema_version": (
                         release_manifest.RUNTIME_RESOURCES_SCHEMA_VERSION
@@ -414,6 +422,40 @@ class ReleaseManifestTest(unittest.TestCase):
             path.chmod(0o440)
             specs[account_id] = (container, path)
         return specs
+
+    def test_node_config_hash_rejects_account_network_gateway_mismatch(
+        self,
+    ):
+        configs = []
+        for suffix in ("a", "b", "c", "d"):
+            account_id = f"account-{suffix}"
+            configs.append(
+                {
+                    "account_id": account_id,
+                    "node_id": f"node-{suffix}",
+                    "control_plane": {
+                        "base_url": (
+                            release_manifest
+                            .ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS[
+                                account_id
+                            ]
+                        )
+                    },
+                }
+            )
+        expected_hashes = {
+            release_manifest.node_config_value_sha256(config)
+            for config in configs
+        }
+        self.assertEqual(len(expected_hashes), 1)
+
+        configs[2]["control_plane"]["base_url"] = (
+            "http://172.30.9.1:8080"
+        )
+        self.assertNotIn(
+            release_manifest.node_config_value_sha256(configs[2]),
+            expected_hashes,
+        )
 
     def write_dependency_lock(self):
         path = (

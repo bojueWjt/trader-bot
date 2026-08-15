@@ -44,6 +44,12 @@ def _write_configs(tmp_path: Path) -> dict[str, Path]:
                         },
                     },
                     "control_plane": {
+                        "base_url": (
+                            live_config
+                            .ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS[
+                                account_id
+                            ]
+                        ),
                         "token": {
                             "env": (
                                 f"CONTROL_PLANE_ACCOUNT_{suffix.upper()}_TOKEN"
@@ -59,6 +65,36 @@ def _write_configs(tmp_path: Path) -> dict[str, Path]:
         path.chmod(0o640)
         configs[account_id] = path
     return configs
+
+
+def test_normalized_hash_rejects_account_network_gateway_mismatch() -> None:
+    configs = []
+    for suffix in ("a", "b", "c", "d"):
+        account_id = f"account-{suffix}"
+        configs.append(
+            {
+                "account_id": account_id,
+                "node_id": f"node-{suffix}",
+                "control_plane": {
+                    "base_url": (
+                        live_config
+                        .ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS[
+                            account_id
+                        ]
+                    )
+                },
+            }
+        )
+    expected_hashes = {
+        live_config.normalized_config_sha256(config)
+        for config in configs
+    }
+    assert len(expected_hashes) == 1
+
+    configs[1]["control_plane"]["base_url"] = "http://172.30.9.1:8080"
+    assert live_config.normalized_config_sha256(configs[1]) not in (
+        expected_hashes
+    )
 
 
 def _legacy_environment(
