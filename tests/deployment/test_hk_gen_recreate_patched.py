@@ -130,6 +130,7 @@ class GenRecreatePatchedTest(unittest.TestCase):
         fake_docker.chmod(0o755)
 
         self.inspect_path = self.temp_path / "inspect.json"
+        self.stale_build_subject = "0" * 64
         inspect_payload = [
             {
                 "Id": "f" * 64,
@@ -144,6 +145,9 @@ class GenRecreatePatchedTest(unittest.TestCase):
                     "WorkingDir": "/app",
                     "Labels": {
                         "com.example.owner": "trading",
+                        release_manifest.LABEL_BUILD_ATTESTATION_SUBJECT: (
+                            self.stale_build_subject
+                        ),
                         release_manifest.LABEL_RELEASE_ID: "stale-release",
                     },
                     "Env": [
@@ -297,6 +301,18 @@ class GenRecreatePatchedTest(unittest.TestCase):
             if token == "-v":
                 mounts.append(tokens[index + 1])
         return mounts
+
+    def generated_labels(self, container_name="trader-v3-node-a"):
+        tokens = self.generated_run_tokens(container_name)
+        labels = {}
+        for index, token in enumerate(tokens):
+            if token != "--label":
+                continue
+            raw_label = tokens[index + 1]
+            name, separator, value = raw_label.partition("=")
+            self.assertEqual(separator, "=")
+            labels[name] = value
+        return labels
 
     def generated_environment(self, container_name="trader-v3-node-a"):
         recreate = self.generated_recreate_path(container_name)
@@ -1685,6 +1701,25 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
         self.assertIn(f"run+=({manifest['image_digest']})", text)
         self.assertNotIn(str(self.patch_dir), text)
         self.assertNotIn("/legacy/helpers:/app/common:ro", mounts)
+
+    def test_immutable_mode_replaces_inherited_build_labels(self):
+        manifest_path, _manifest, _paths = self.write_v3_release_manifest(
+            delivery_mode=release_manifest.DELIVERY_IMMUTABLE,
+        )
+        expected_labels = json.loads(
+            self.image_labels_path.read_text(encoding="utf-8")
+        )
+
+        result = self.run_script(
+            "trader-v3-node-a",
+            *self.release_identity_args(manifest_path),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        labels = self.generated_labels()
+        for key, value in expected_labels.items():
+            self.assertEqual(labels.get(key), value)
+        self.assertNotIn(self.stale_build_subject, labels.values())
 
     def test_v3_account_a_replaces_legacy_config_with_target_artifact(self):
         manifest_path, manifest, paths = self.write_v3_release_manifest()

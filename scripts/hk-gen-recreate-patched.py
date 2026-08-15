@@ -302,6 +302,7 @@ def load_release_identity(path):
         ) from exc
     strict_envelope = False
     node_resources = False
+    build_labels = {}
     if manifest["release_purpose"] == "account_stall_hardening":
         pinned_reviewer = os.environ.get(
             "TRADER_RELEASE_REVIEWER_TRUST_SHA256",
@@ -318,11 +319,19 @@ def load_release_identity(path):
                 strict_envelope["systemd_resource_contract"],
                 NODE_DOCKER_RESOURCE_ARTIFACT,
             )
+            raw_build_labels = strict_envelope["build_attestation"][
+                "image_labels"
+            ]
+            build_labels = {
+                str(key): str(value)
+                for key, value in raw_build_labels.items()
+            }
         except ReleaseManifestError as exc:
             raise DeploymentConfigError(
                 f"strict release envelope is invalid: {path}"
             ) from exc
     return {
+        "build_labels": build_labels,
         "commit": manifest["release_commit"],
         "config_sha256": manifest["config_sha256"],
         "dependency_lock_sha256": manifest["dependency_lock_sha256"],
@@ -632,6 +641,7 @@ def append_allowlisted_runtime_spec(
     inspected,
     name,
     *,
+    preserve_build_labels=True,
     reviewed_resources=False,
     preserve_release_labels=False,
     preserve_runtime_defaults=False,
@@ -825,6 +835,11 @@ def append_allowlisted_runtime_spec(
                 normalized_key.startswith("io.trader.release.")
                 or normalized_key.startswith("com.trader.release.")
             )
+        ):
+            continue
+        if (
+            preserve_build_labels is False
+            and normalized_key.startswith("com.trader.build.")
         ):
             continue
         run.extend(["--label", f"{key}={value}"])
@@ -1830,6 +1845,7 @@ def generate(
         run,
         inspected,
         name,
+        preserve_build_labels=release_identity is False,
         reviewed_resources=reviewed_resources,
     )
 
@@ -1862,6 +1878,7 @@ def generate(
             LABEL_RELEASE_IMAGE: release_identity["image_digest"],
             LABEL_RELEASE_DATABASE_SCHEMA: database_schema_epoch,
         }
+        labels.update(release_identity["build_labels"])
         for key, value in sorted(labels.items()):
             run.extend(["--label", f"{key}={value}"])
     if entrypoint:
