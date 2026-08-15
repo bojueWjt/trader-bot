@@ -341,6 +341,40 @@ ensure_networks() {
   done
 }
 
+allow_account_network_control_plane() {
+  local bridge
+  local gateway
+  local index
+  local network
+  local network_id
+  ufw status | grep -Fxq 'Status: active' \
+    || die "UFW must be active before account-network ingress is allowed"
+  for index in "${!ACCOUNT_NETWORKS[@]}"; do
+    network="${ACCOUNT_NETWORKS[$index]}"
+    gateway="${ACCOUNT_GATEWAYS[$index]}"
+    network_id="$(
+      docker network inspect "$network" --format '{{.Id}}'
+    )"
+    [[ "$network_id" =~ ^[0-9a-f]{64}$ ]] \
+      || die "Docker network ID is invalid: $network"
+    bridge="$(
+      docker network inspect "$network" \
+        --format '{{with index .Options "com.docker.network.bridge.name"}}{{.}}{{end}}'
+    )"
+    if [ -z "$bridge" ]; then
+      bridge="br-${network_id:0:12}"
+    fi
+    ip link show dev "$bridge" >/dev/null \
+      || die "Docker network bridge is unavailable: $network"
+    ufw allow in \
+      on "$bridge" \
+      to "$gateway" \
+      port 8080 \
+      proto tcp \
+      comment "Trader v3 account-${ACCOUNT_LABELS[$index]} control"
+  done
+}
+
 connect_redis_networks() {
   local attached
   local network
@@ -582,14 +616,8 @@ verify_caddy() {
   systemctl is-active --quiet caddy.service \
     || die "Caddy must be active"
   caddy validate --adapter caddyfile --config "$CADDY_FILE"
-  ss -lnt | awk '
-    $4 == "127.0.0.1:8080"
-    || $4 == "100.89.58.40:8080"
-    || $4 == "172.30.1.1:8080"
-    || $4 == "172.30.2.1:8080"
-    || $4 == "172.30.3.1:8080"
-    || $4 == "172.30.4.1:8080"
-  '
+  ss -lnt | awk \
+    '$4 ~ /^(127\.0\.0\.1|100\.89\.58\.40|172\.30\.[1-4]\.1):8080$/'
 }
 
 verify_node_memory_contract() {
@@ -627,6 +655,7 @@ main() {
       ensure_postgres
       ensure_redis
       ensure_networks
+      allow_account_network_control_plane
       connect_redis_networks
       write_egress_rules
       write_caddy_config

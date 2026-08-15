@@ -570,6 +570,13 @@ def test_jp24_prepare_exposes_internal_services_on_account_networks() -> None:
     assert '"BINANCE_EGRESS_MODE=account_networks"' in text
     assert "connect_redis_networks() {" in text
     assert "--alias trader-v3-redis" in text
+    assert "allow_account_network_control_plane() {" in text
+    assert 'ufw status | grep -Fxq \'Status: active\'' in text
+    assert 'ufw allow in \\\n      on "$bridge"' in text
+    assert (
+        "'$4 ~ /^(127\\.0\\.0\\.1|100\\.89\\.58\\.40|"
+        "172\\.30\\.[1-4]\\.1):8080$/'"
+    ) in text
     for gateway in (
         "172.30.1.1",
         "172.30.2.1",
