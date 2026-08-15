@@ -118,9 +118,11 @@ class _CanaryReadinessCursor:
         rows: list[tuple],
         *,
         approved_old_release: bool = True,
+        registration_event: tuple | None = None,
     ) -> None:
         self._rows = rows
         self._approved_old_release = approved_old_release
+        self._registration_event = registration_event
         self._query = ""
 
     def execute(self, query: str, _params=None) -> None:
@@ -130,6 +132,8 @@ class _CanaryReadinessCursor:
         return self._rows
 
     def fetchone(self):
+        if "FROM reviewed_release_rollout_events" in self._query:
+            return self._registration_event
         if "FROM reviewed_release_manifests" in self._query:
             if self._approved_old_release:
                 return (1,)
@@ -172,19 +176,26 @@ def _stub_canary_readiness_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     *,
     rollout_phase: str,
+    registration_mode: str | None = None,
 ) -> None:
+    rollout = {
+        "release_id": RELEASE_ID,
+        "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+        "image_digest": IMAGE_DIGEST,
+        "config_sha256": CONFIG_SHA256,
+        "dependency_lock_sha256": LOCK_SHA256,
+        "schema_epoch": SCHEMA_EPOCH,
+        "phase": rollout_phase,
+    }
+    if registration_mode:
+        rollout["registration_idempotency_key"] = (
+            "register-live-safety-release"
+        )
+        rollout["reviewed_by"] = "reviewer"
     monkeypatch.setattr(
         read_api,
         "_reviewed_rollout_state",
-        lambda _cur, _release_id: {
-            "release_id": RELEASE_ID,
-            "redis_fencing_epoch": REDIS_FENCING_EPOCH,
-            "image_digest": IMAGE_DIGEST,
-            "config_sha256": CONFIG_SHA256,
-            "dependency_lock_sha256": LOCK_SHA256,
-            "schema_epoch": SCHEMA_EPOCH,
-            "phase": rollout_phase,
-        },
+        lambda _cur, _release_id: rollout,
     )
     monkeypatch.setattr(
         read_api,
@@ -230,6 +241,65 @@ def test_canary_readiness_allows_one_active_target_with_halted_peers(
 
     read_api._validate_canary_release_ready(
         _CanaryReadinessCursor(rows),
+        account_id=ACCOUNT_B,
+        required_rollout_phase="account_b_rollout",
+        expected_trading_state="ACTIVE",
+        release_identity=(
+            RELEASE_ID,
+            IMAGE_DIGEST,
+            CONFIG_SHA256,
+            LOCK_SHA256,
+            SCHEMA_EPOCH,
+        ),
+    )
+
+
+def test_canary_readiness_accepts_migration_all_halted_new_release_peers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_canary_readiness_dependencies(
+        monkeypatch,
+        rollout_phase="account_b_rollout",
+        registration_mode="migration_rebaseline_stopped",
+    )
+    rows = [
+        _canary_readiness_row(
+            ACCOUNT_A,
+            status="HALTED",
+            upgraded=True,
+        ),
+        _canary_readiness_row(
+            ACCOUNT_B,
+            status="ACTIVE",
+            upgraded=True,
+        ),
+        _canary_readiness_row(
+            ACCOUNT_C,
+            status="HALTED",
+            upgraded=True,
+        ),
+        _canary_readiness_row(
+            ACCOUNT_D,
+            status="HALTED",
+            upgraded=True,
+        ),
+    ]
+    registration_event = (
+        "registered",
+        "account_a_canary",
+        1,
+        "reviewer",
+        {
+            "registration_mode": "migration_rebaseline_stopped",
+            "bootstrap_all_halted": True,
+        },
+    )
+
+    read_api._validate_canary_release_ready(
+        _CanaryReadinessCursor(
+            rows,
+            registration_event=registration_event,
+        ),
         account_id=ACCOUNT_B,
         required_rollout_phase="account_b_rollout",
         expected_trading_state="ACTIVE",
@@ -540,6 +610,7 @@ def _seed_reviewed_release_and_permit(
     evidence_age_seconds: int = 0,
     rollout_phase: str = "account_a_canary",
     seed_fleet_peers: bool = True,
+    registration_mode: str | None = None,
 ) -> str:
     permit_id = permit_id or str(uuid4())
     portfolio_baseline_sha256 = None
@@ -654,6 +725,40 @@ def _seed_reviewed_release_and_permit(
                 WHERE release_id=%s
                 """,
                 (int(phase_version) + 1, RELEASE_ID),
+            )
+        if registration_mode:
+            cur.execute(
+                """
+                INSERT INTO reviewed_release_rollout_events (
+                    rollout_event_id,
+                    release_id,
+                    event_type,
+                    from_phase,
+                    to_phase,
+                    phase_version,
+                    idempotency_key,
+                    actor,
+                    reason,
+                    evidence
+                )
+                VALUES (
+                    %s, %s, 'registered', NULL, 'account_a_canary',
+                    1, 'register-live-safety-release', 'reviewer',
+                    'test stopped all-halted registration', %s
+                )
+                ON CONFLICT (idempotency_key) DO UPDATE SET
+                    evidence=EXCLUDED.evidence
+                """,
+                (
+                    str(uuid4()),
+                    RELEASE_ID,
+                    Json(
+                        {
+                            "registration_mode": registration_mode,
+                            "bootstrap_all_halted": True,
+                        }
+                    ),
+                ),
             )
         cur.execute(
             """
@@ -1897,6 +2002,60 @@ def test_resume_allows_existing_non_target_risk_and_binds_portfolio_baseline(
         )
         status, baseline = cur.fetchone()
     assert status == "armed"
+    assert len(baseline) == 64
+
+
+def test_migration_rebaseline_all_halted_allows_later_account_canary_resume(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    for index, (account_id, node_id) in enumerate(
+        (
+            (ACCOUNT_A, NODE_A),
+            (ACCOUNT_B, NODE_B),
+            (ACCOUNT_C, NODE_C),
+            (ACCOUNT_D, NODE_D),
+        ),
+        start=1,
+    ):
+        _seed_heartbeat(
+            migrated_db,
+            node_id=node_id,
+            account_id=account_id,
+            runtime_generation=f"runtime-generation-{account_id}",
+            lease_fencing_token=40 + index,
+        )
+    permit_id = _seed_reviewed_release_and_permit(
+        migrated_db,
+        permit_account_id=ACCOUNT_B,
+        rollout_phase="account_b_rollout",
+        seed_fleet_peers=False,
+        registration_mode="migration_rebaseline_stopped",
+    )
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(
+            permit_id,
+            account_id=ACCOUNT_B,
+            node_id=NODE_B,
+        ),
+    )
+
+    assert response.status_code == 200
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, armed_node_id, portfolio_baseline_sha256
+            FROM live_canary_permits
+            WHERE permit_id=%s
+            """,
+            (permit_id,),
+        )
+        status, armed_node_id, baseline = cur.fetchone()
+    assert status == "armed"
+    assert armed_node_id == NODE_B
     assert len(baseline) == 64
 
 

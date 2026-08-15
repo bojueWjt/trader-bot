@@ -122,6 +122,10 @@ _CANARY_PHASE_BY_ACCOUNT = {
     "account-c": _ROLLOUT_PHASE_ACCOUNT_C,
     "account-d": _ROLLOUT_PHASE_ACCOUNT_D,
 }
+_MIGRATION_REBASELINE_REGISTRATION_MODE = "migration_rebaseline_stopped"
+_STOPPED_REGISTRATION_MODES = frozenset(
+    {"bootstrap", _MIGRATION_REBASELINE_REGISTRATION_MODE}
+)
 
 
 def _role_aware_database_connect(database_url: str):
@@ -2938,6 +2942,65 @@ def _validate_fleet_release_ready(
         )
 
 
+def _rollout_has_stopped_all_halted_registration(cur, rollout: dict) -> bool:
+    registration_key = str(
+        rollout.get("registration_idempotency_key") or ""
+    ).strip()
+    reviewed_by = str(rollout.get("reviewed_by") or "").strip()
+    if not registration_key or not reviewed_by:
+        return False
+    cur.execute(
+        """
+        SELECT event_type,
+               to_phase,
+               phase_version,
+               actor,
+               evidence
+        FROM reviewed_release_rollout_events
+        WHERE release_id=%s
+          AND idempotency_key=%s
+        FOR SHARE
+        """,
+        (rollout["release_id"], registration_key),
+    )
+    event = cur.fetchone()
+    if event is None:
+        return False
+    event_type, to_phase, phase_version, actor, evidence = event
+    if (
+        str(event_type) != "registered"
+        or str(to_phase) != _ROLLOUT_PHASE_ACCOUNT_A_CANARY
+        or int(phase_version) != 1
+        or str(actor) != reviewed_by
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release rollout registration evidence is invalid",
+        )
+    if not isinstance(evidence, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release rollout registration evidence is invalid",
+        )
+    registration_mode = evidence.get("registration_mode")
+    all_halted = evidence.get("bootstrap_all_halted")
+    marked_stopped = (
+        registration_mode in _STOPPED_REGISTRATION_MODES
+        or all_halted is not None
+    )
+    if not marked_stopped:
+        return False
+    if (
+        registration_mode not in _STOPPED_REGISTRATION_MODES
+        or all_halted is not True
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="reviewed release stopped registration evidence is incomplete",
+        )
+    return True
+
+
 def _validate_canary_release_ready(
     cur,
     *,
@@ -3001,6 +3064,10 @@ def _validate_canary_release_ready(
     upgraded_accounts = set(
         _ROLLOUT_ACCOUNTS[: account_index + 1]
     )
+    all_halted_registration = _rollout_has_stopped_all_halted_registration(
+        cur,
+        rollout,
+    )
     expected_accounts = _ROLLOUT_ACCOUNTS
     cur.execute(
         """
@@ -3057,6 +3124,37 @@ def _validate_canary_release_ready(
                     ),
                 )
         else:
+            if all_halted_registration:
+                if heartbeat_identity != release_identity:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"{heartbeat_account_id} must run the "
+                            "stopped reviewed release during canary rollout"
+                        ),
+                    )
+                if str(row[7]) != active_redis_fencing_epoch:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "canary rollout heartbeat Redis fencing epoch drift"
+                        ),
+                    )
+                expected_state = "HALTED"
+                if str(row[8] or "").upper() != expected_state:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"{heartbeat_account_id} must be "
+                            f"{expected_state} during canary rollout"
+                        ),
+                    )
+                if float(row[9]) > max_age:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="canary rollout heartbeat is stale",
+                    )
+                continue
             if heartbeat_identity == release_identity:
                 raise HTTPException(
                     status_code=409,
@@ -3138,7 +3236,9 @@ def _reviewed_rollout_state(
                dependency_lock_sha256,
                schema_epoch,
                phase,
-               phase_version
+               phase_version,
+               registration_idempotency_key,
+               reviewed_by
         FROM reviewed_release_rollouts
         WHERE release_id=%s
         """
@@ -3157,6 +3257,8 @@ def _reviewed_rollout_state(
         "schema_epoch": str(row[5]),
         "phase": str(row[6]),
         "phase_version": row[7],
+        "registration_idempotency_key": str(row[8] or ""),
+        "reviewed_by": str(row[9] or ""),
     }
 
 
@@ -3177,7 +3279,9 @@ def _current_reviewed_rollout_state(
                dependency_lock_sha256,
                schema_epoch,
                phase,
-               phase_version
+               phase_version,
+               registration_idempotency_key,
+               reviewed_by
         FROM reviewed_release_rollouts
         ORDER BY created_at DESC, release_id DESC
         LIMIT 1
@@ -3196,6 +3300,8 @@ def _current_reviewed_rollout_state(
         "schema_epoch": str(row[5]),
         "phase": str(row[6]),
         "phase_version": row[7],
+        "registration_idempotency_key": str(row[8] or ""),
+        "reviewed_by": str(row[9] or ""),
     }
 
 
