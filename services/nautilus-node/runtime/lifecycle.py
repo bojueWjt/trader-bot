@@ -542,6 +542,27 @@ class NodeLifecycle:
                 open_orders=normalized_open_orders,
             )
 
+    def build_writer_bootstrap_heartbeat(self) -> Heartbeat:
+        with self._state_lock:
+            self._heartbeat_sequence += 1
+            return Heartbeat(
+                account_id=self.config.account_id,
+                ts=self._clock.now(),
+                trading_state=self._trading_state,
+                readiness=self.readiness.ready,
+                projection_lag_ms=self._projection_lag_ms,
+                reconciliation_state=self._reconciliation_state,
+                redis_fencing_epoch=(
+                    str(self._redis_fencing_epoch)
+                    if self._redis_fencing_epoch is not False
+                    else None
+                ),
+                runtime_generation=self._runtime_generation,
+                lease_fencing_token=int(self._lease_generation or 0),
+                heartbeat_sequence=self._heartbeat_sequence,
+                last_event_id=self._last_event_id,
+            )
+
     def set_open_orders_provider(
         self,
         provider: Callable[[], Iterable[dict[str, Any]]],

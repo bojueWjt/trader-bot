@@ -296,6 +296,7 @@ class NodeControlPlaneSession:
     def __init__(
         self,
         *,
+        writer_bootstrap: Callable[[], Any] | None = None,
         heartbeat: Callable[[], Any] | None = None,
         command_poll: Callable[[int], Iterable[Any]] | None = None,
         command_apply: Callable[[Any], Any] | None = None,
@@ -389,6 +390,7 @@ class NodeControlPlaneSession:
             and not callable(fatal_termination_hook)
         ):
             raise TypeError("fatal termination hook must be callable")
+        self._writer_bootstrap = writer_bootstrap
         self._heartbeat = heartbeat
         self._command_poll = command_poll
         self._command_apply = command_apply
@@ -637,8 +639,14 @@ class NodeControlPlaneSession:
             self._offer_token(self._lanes["intent_fetch"])
 
     def _run_startup_barriers(self) -> None:
+        writer_bootstrap = self._writer_bootstrap
+        if writer_bootstrap is not None:
+            self._require_startup_action(
+                self._lanes["heartbeat"],
+                writer_bootstrap,
+            )
         heartbeat = self._heartbeat
-        if heartbeat is not None:
+        if writer_bootstrap is None and heartbeat is not None:
             self._require_startup_action(
                 self._lanes["heartbeat"],
                 heartbeat,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib.util
+import json
 import sys
 import time
 import unittest
@@ -11,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -631,6 +632,46 @@ class ExchangeEvidenceProviderTest(unittest.TestCase):
             ],
         )
 
+    def test_concurrent_force_refresh_calls_share_one_in_flight_round(
+        self,
+    ) -> None:
+        transport = _BlockingEvidenceTransport()
+        provider = BinanceExchangeEvidenceProvider(
+            transport=transport,
+        )
+        snapshots: list[dict[str, Any]] = []
+        failures: list[BaseException] = []
+
+        def snapshot() -> None:
+            try:
+                snapshots.append(provider.snapshot(force_refresh=True))
+            except BaseException as exc:
+                failures.append(exc)
+
+        first = Thread(target=snapshot)
+        second = Thread(target=snapshot)
+        first.start()
+        self.assertTrue(transport.first_request_started.wait(timeout=1.0))
+        second.start()
+        time.sleep(0.05)
+        transport.release_first_request.set()
+        first.join(timeout=1.0)
+        second.join(timeout=1.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(snapshots[0], snapshots[1])
+        self.assertEqual(
+            [path for _, path, _ in transport.calls],
+            [
+                "/fapi/v2/positionRisk",
+                "/fapi/v1/openOrders",
+                "/fapi/v1/openAlgoOrders",
+            ],
+        )
+
     def test_force_refresh_fails_closed_during_backoff_and_circuit(self) -> None:
         for threshold, expected_error in (
             (2, "backoff active"),
@@ -990,21 +1031,98 @@ class ExchangeEvidenceProviderTest(unittest.TestCase):
 
 
 class SignedBinanceTransportTest(unittest.TestCase):
+    def test_reuses_one_connection_across_signed_requests(self) -> None:
+        connection = _RecordingHttpConnection(
+            [
+                _HttpResponse({"status": "CANCELED"}),
+                _HttpResponse([]),
+            ]
+        )
+        factory_timeouts: list[float] = []
+
+        def connection_factory(timeout: float) -> Any:
+            factory_timeouts.append(timeout)
+            return connection
+
+        transport = SignedBinanceTransport(
+            base_url="https://fapi.binance.com",
+            api_key="api-key",
+            api_secret="api-secret",
+            timestamp_ms=lambda: 1_700_000_000_000,
+            connection_factory=connection_factory,
+        )
+
+        transport.request(
+            "DELETE",
+            "/fapi/v1/order",
+            {"symbol": "BTCUSDT", "orderId": "42"},
+        )
+        transport.request(
+            "GET",
+            "/fapi/v2/positionRisk",
+            {},
+        )
+
+        self.assertEqual(factory_timeouts, [10.0])
+        self.assertEqual(
+            [request[0] for request in connection.requests],
+            ["DELETE", "GET"],
+        )
+
+    def test_connection_failure_rebuilds_on_next_request(self) -> None:
+        failed = _RecordingHttpConnection(
+            [OSError("connection reset")]
+        )
+        recovered = _RecordingHttpConnection(
+            [_HttpResponse([])]
+        )
+        connections = [failed, recovered]
+        factory_calls = 0
+
+        def connection_factory(timeout: float) -> Any:
+            nonlocal factory_calls
+            del timeout
+            factory_calls += 1
+            return connections.pop(0)
+
+        transport = SignedBinanceTransport(
+            base_url="https://fapi.binance.com",
+            api_key="api-key",
+            api_secret="api-secret",
+            connection_factory=connection_factory,
+        )
+
+        with self.assertRaisesRegex(ExchangeCancelError, "connection reset"):
+            transport.request(
+                "GET",
+                "/fapi/v2/positionRisk",
+                {},
+            )
+        result = transport.request(
+            "GET",
+            "/fapi/v2/positionRisk",
+            {},
+        )
+
+        self.assertEqual(result, [])
+        self.assertEqual(factory_calls, 2)
+        self.assertTrue(failed.closed)
+
     def test_proxy_opener_handles_signed_cancel_and_evidence_requests(
         self,
     ) -> None:
         proxy_url = "http://100.107.72.78:13128"
-        opener = _RecordingUrlOpener(
+        connection = _RecordingHttpConnection(
             [
-                _JsonResponse({"status": "CANCELED"}),
-                _JsonResponse([]),
+                _HttpResponse({"status": "CANCELED"}),
+                _HttpResponse([]),
             ]
         )
         with patch.object(
-            EXCHANGE_CANCEL_ADAPTER.urllib.request,
-            "build_opener",
-            return_value=opener,
-        ) as build_opener:
+            EXCHANGE_CANCEL_ADAPTER.http.client,
+            "HTTPSConnection",
+            return_value=connection,
+        ) as connection_type:
             transport = SignedBinanceTransport(
                 base_url="https://fapi.binance.com",
                 api_key="api-key",
@@ -1023,24 +1141,30 @@ class SignedBinanceTransportTest(unittest.TestCase):
                 {},
             )
 
-        handler = build_opener.call_args.args[0]
+        connection_type.assert_called_once_with(
+            "100.107.72.78",
+            13128,
+            timeout=10.0,
+        )
         self.assertEqual(
-            handler.proxies,
-            {"http": proxy_url, "https": proxy_url},
+            connection.tunnels,
+            [("fapi.binance.com", 443)],
         )
         self.assertEqual(
             [
-                request.get_method()
-                for request, _timeout in opener.calls
+                method
+                for method, _target, _body, _headers
+                in connection.requests
             ],
             ["DELETE", "GET"],
         )
         self.assertEqual(
             [
                 EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(
-                    request.full_url
+                    target
                 ).path
-                for request, _timeout in opener.calls
+                for _method, target, _body, _headers
+                in connection.requests
             ],
             ["/fapi/v1/order", "/fapi/v2/positionRisk"],
         )
@@ -1067,31 +1191,28 @@ class SignedBinanceTransportTest(unittest.TestCase):
                     )
 
     def test_signed_request_includes_extended_recv_window_in_signature(self) -> None:
-        response = _JsonResponse({"status": "CANCELED"})
-        opener = _RecordingUrlOpener([response])
-        with patch.object(
-            EXCHANGE_CANCEL_ADAPTER.urllib.request,
-            "build_opener",
-            return_value=opener,
-        ):
-            transport = SignedBinanceTransport(
-                base_url="https://fapi.binance.com",
-                api_key="api-key",
-                api_secret="api-secret",
-                timestamp_ms=lambda: 1_700_000_000_000,
-            )
-            transport.request(
-                "DELETE",
-                "/fapi/v1/order",
-                {"symbol": "BTCUSDT", "orderId": "42"},
-            )
+        connection = _RecordingHttpConnection(
+            [_HttpResponse({"status": "CANCELED"})]
+        )
+        transport = SignedBinanceTransport(
+            base_url="https://fapi.binance.com",
+            api_key="api-key",
+            api_secret="api-secret",
+            timestamp_ms=lambda: 1_700_000_000_000,
+            connection_factory=lambda _timeout: connection,
+        )
+        transport.request(
+            "DELETE",
+            "/fapi/v1/order",
+            {"symbol": "BTCUSDT", "orderId": "42"},
+        )
 
-        request, _timeout = opener.calls[0]
+        _method, target, _body, _headers = connection.requests[0]
         query = EXCHANGE_CANCEL_ADAPTER.urllib.parse.parse_qs(
-            EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(request.full_url).query
+            EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(target).query
         )
         unsigned_query, signature = (
-            EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(request.full_url)
+            EXCHANGE_CANCEL_ADAPTER.urllib.parse.urlsplit(target)
             .query.rsplit("&signature=", 1)
         )
         expected_signature = hmac.new(
@@ -1104,35 +1225,29 @@ class SignedBinanceTransportTest(unittest.TestCase):
         self.assertEqual(signature, expected_signature)
 
     def test_http_error_preserves_status_headers_and_retry_after(self) -> None:
-        error = HTTPError(
-            "https://fapi.binance.com/fapi/v2/positionRisk",
-            429,
-            "Too Many Requests",
-            {"Retry-After": "2"},
-            BytesIO(b'{"code":-1003,"msg":"Too many requests"}'),
+        response = _HttpResponse(
+            {"code": -1003, "msg": "Too many requests"},
+            status=429,
+            headers={"Retry-After": "2"},
         )
-        opener = _RecordingUrlOpener([error])
-        with patch.object(
-            EXCHANGE_CANCEL_ADAPTER.urllib.request,
-            "build_opener",
-            return_value=opener,
-        ):
-            transport = SignedBinanceTransport(
-                base_url="https://fapi.binance.com",
-                api_key="api-key",
-                api_secret="api-secret",
-                timeout_seconds=10.0,
-                timestamp_ms=lambda: 1_700_000_000_000,
+        connection = _RecordingHttpConnection([response])
+        transport = SignedBinanceTransport(
+            base_url="https://fapi.binance.com",
+            api_key="api-key",
+            api_secret="api-secret",
+            timeout_seconds=10.0,
+            timestamp_ms=lambda: 1_700_000_000_000,
+            connection_factory=lambda _timeout: connection,
+        )
+        with self.assertRaises(BinanceApiError) as raised:
+            transport.request(
+                "GET",
+                "/fapi/v2/positionRisk",
+                {},
+                timeout_seconds=1.5,
             )
-            with self.assertRaises(BinanceApiError) as raised:
-                transport.request(
-                    "GET",
-                    "/fapi/v2/positionRisk",
-                    {},
-                    timeout_seconds=1.5,
-                )
 
-        self.assertEqual(opener.calls[0][1], 1.5)
+        self.assertEqual(connection.timeout, 1.5)
         self.assertEqual(raised.exception.http_status, 429)
         self.assertEqual(raised.exception.headers["retry-after"], "2")
 
@@ -1156,6 +1271,96 @@ class _ScriptedTransport:
         if isinstance(value, Exception):
             raise value
         return value
+
+
+class _BlockingEvidenceTransport:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.first_request_started = Event()
+        self.release_first_request = Event()
+        self._lock = Lock()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> Any:
+        del timeout_seconds
+        with self._lock:
+            self.calls.append((method, path, dict(params)))
+            call_number = len(self.calls)
+        if call_number == 1:
+            self.first_request_started.set()
+            self.release_first_request.wait(timeout=1.0)
+        if path == "/fapi/v1/openAlgoOrders":
+            return {"orders": []}
+        return []
+
+
+class _HttpResponse:
+    def __init__(
+        self,
+        payload: Any,
+        *,
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+        will_close: bool = False,
+    ) -> None:
+        self.status = status
+        self._payload = json.dumps(payload).encode("utf-8")
+        self.headers = Message()
+        for key, value in (headers or {}).items():
+            self.headers[key] = value
+        self.will_close = will_close
+        self.closed = False
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RecordingHttpConnection:
+    def __init__(self, responses: list[Any]) -> None:
+        self._responses = list(responses)
+        self.requests: list[
+            tuple[str, str, bytes | None, dict[str, str]]
+        ] = []
+        self.timeout = 0.0
+        self.sock = None
+        self.closed = False
+        self.tunnels: list[tuple[str, int]] = []
+
+    def set_tunnel(self, host: str, port: int) -> None:
+        self.tunnels.append((host, port))
+
+    def request(
+        self,
+        method: str,
+        target: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        response = self._responses[0]
+        if isinstance(response, Exception):
+            self._responses.pop(0)
+            raise response
+        self.requests.append(
+            (method, target, body, dict(headers or {}))
+        )
+
+    def getresponse(self) -> Any:
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _RecordingUrlOpener:

@@ -1130,6 +1130,14 @@ class ExecutionProjectionActor(Actor):
                 "with durable ingress pending"
             )
         self._stop_deadline_worker(deadline)
+        flushed = self._flush_durable_spool_for_shutdown(deadline)
+        if flushed is False:
+            reason = (
+                "execution projection shutdown deadline exceeded "
+                "with durable spool pending"
+            )
+            self._record_unflushed_position(reason)
+            self._halt_egress(reason)
         session = self._control_plane_session
         if session is not None:
             if self._manage_control_plane_session and self._session_started:
@@ -1141,6 +1149,57 @@ class ExecutionProjectionActor(Actor):
                         "deadline exceeded"
                     )
             return
+        self._stop_egress_worker(deadline)
+
+    def _flush_durable_spool_for_shutdown(
+        self,
+        deadline: float,
+    ) -> bool:
+        pending_count = self._durable_pending_count()
+        if pending_count is None or pending_count <= 0:
+            return True
+        session = self._control_plane_session
+        if session is not None:
+            result = session.submit_execution_event(False)
+            if _submission_was_accepted(result) is False:
+                return False
+        else:
+            self._egress_stop_deadline = deadline
+            self._egress_stop.set()
+            self._egress_wake.set()
+        while time.monotonic() < deadline:
+            pending_count = self._durable_pending_count()
+            if pending_count is None or pending_count <= 0:
+                return True
+            remaining = max(deadline - time.monotonic(), 0.0)
+            time.sleep(min(0.005, remaining))
+        pending_count = self._durable_pending_count()
+        return pending_count is None or pending_count <= 0
+
+    def _record_unflushed_position(self, reason: str) -> None:
+        recorder = getattr(
+            self._projection_actor,
+            "record_unflushed_position",
+            None,
+        )
+        if callable(recorder):
+            try:
+                recorder(reason)
+                return
+            except Exception as exc:
+                print(
+                    "[ExecutionProjectionActor] failed to record "
+                    f"unflushed position: {exc!r}",
+                    flush=True,
+                )
+        pending_count = self._durable_pending_count()
+        print(
+            "[ExecutionProjectionActor] shutdown left durable events "
+            f"pending_count={pending_count!r} reason={reason}",
+            flush=True,
+        )
+
+    def _stop_egress_worker(self, deadline: float) -> None:
         egress_thread = self._egress_thread
         if egress_thread is None:
             return
@@ -2647,6 +2706,15 @@ class CommandPollerActor(Actor):
 
     def session_send_heartbeat(self) -> None:
         self._run_heartbeat_lane()
+
+    def session_bootstrap_writer(self) -> None:
+        heartbeat = self._lifecycle.build_writer_bootstrap_heartbeat()
+        self._control_plane.heartbeat(
+            self._node_id,
+            heartbeat,
+        )
+        self._last_heartbeat_success_at = time.monotonic()
+        self._mark_dependency_ready("control_plane")
 
     def session_poll_commands(
         self,

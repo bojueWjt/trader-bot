@@ -278,6 +278,63 @@ def test_startup_heartbeat_failure_blocks_replay_and_fetch() -> None:
     assert fatal_reasons == ["writer takeover rejected"]
 
 
+def test_writer_bootstrap_blocks_network_lanes_until_registration() -> None:
+    calls: list[str] = []
+    bootstrap_started = Event()
+    release_bootstrap = Event()
+    heartbeat_sent = Event()
+    replayed = Event()
+    fetched = Event()
+
+    def writer_bootstrap() -> None:
+        calls.append("bootstrap_started")
+        bootstrap_started.set()
+        release_bootstrap.wait(timeout=1.0)
+        calls.append("bootstrap_completed")
+
+    def heartbeat() -> None:
+        calls.append("heartbeat")
+        heartbeat_sent.set()
+
+    def replay() -> int:
+        calls.append("replay")
+        replayed.set()
+        return 0
+
+    def fetch(capacity: int) -> tuple[Any, ...]:
+        del capacity
+        calls.append("fetch")
+        fetched.set()
+        return ()
+
+    session = NodeControlPlaneSession(
+        writer_bootstrap=writer_bootstrap,
+        heartbeat=heartbeat,
+        intent_replay=replay,
+        intent_fetch=fetch,
+        heartbeat_interval_seconds=0.01,
+        intent_fetch_interval_seconds=0.01,
+    )
+    session.start()
+
+    assert bootstrap_started.wait(timeout=1.0)
+    time.sleep(0.05)
+    assert heartbeat_sent.is_set() is False
+    assert replayed.is_set() is False
+    assert fetched.is_set() is False
+
+    release_bootstrap.set()
+
+    assert heartbeat_sent.wait(timeout=1.0)
+    assert replayed.wait(timeout=1.0)
+    assert fetched.wait(timeout=1.0)
+    bootstrap_completed = calls.index("bootstrap_completed")
+    assert bootstrap_completed < calls.index("heartbeat")
+    assert bootstrap_completed < calls.index("replay")
+    assert bootstrap_completed < calls.index("fetch")
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
 def test_startup_heartbeat_hard_deadline_triggers_fatal_fence() -> None:
     heartbeat_started = Event()
     release_heartbeat = Event()

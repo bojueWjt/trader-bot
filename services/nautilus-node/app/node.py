@@ -783,6 +783,9 @@ def _build_node_control_plane_session(
 
     session_config = runtime.config.control_plane.session
     session = NodeControlPlaneSession(
+        writer_bootstrap=lambda: actor_refs[
+            "command"
+        ].session_bootstrap_writer(),
         heartbeat=lambda: actor_refs["command"].session_send_heartbeat(),
         command_poll=lambda capacity: actor_refs[
             "command"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from threading import Lock
 from typing import Any, Callable, Protocol, Sequence
 
 from .contracts import ExecutionEventEnvelopeV1
@@ -66,6 +67,8 @@ class ProjectionActor:
         self._health = health
         self._egress_degraded_reason = ""
         self._egress_halted_reason = ""
+        self._shutdown_position_lock = Lock()
+        self._shutdown_unflushed_position: dict[str, Any] | bool = False
         self._sync_spool_pressure()
 
     @property
@@ -75,6 +78,14 @@ class ProjectionActor:
     @property
     def egress_halted_reason(self) -> str:
         return self._egress_halted_reason
+
+    @property
+    def shutdown_unflushed_position(self) -> dict[str, Any] | bool:
+        with self._shutdown_position_lock:
+            position = self._shutdown_unflushed_position
+            if position is False:
+                return False
+            return dict(position)
 
     def on_event(self, event: Any) -> str | None:
         result = self.ingest_event(event)
@@ -123,6 +134,38 @@ class ProjectionActor:
         if self.spool.pending_count == 0:
             self._mark_projection_ready()
         return acked
+
+    def pending_position(self) -> dict[str, Any]:
+        pending = self.spool.pending_events()
+        first_event_id: str | bool = False
+        last_event_id: str | bool = False
+        if pending:
+            first_event_id = pending[0].event_id
+            last_event_id = pending[-1].event_id
+        return {
+            "pending_count": len(pending),
+            "first_event_id": first_event_id,
+            "last_event_id": last_event_id,
+        }
+
+    def record_unflushed_position(
+        self,
+        reason: str,
+    ) -> dict[str, Any]:
+        position = self.pending_position()
+        record = {
+            **position,
+            "reason": str(reason),
+            "recorded_at": self._now().astimezone(timezone.utc).isoformat(),
+        }
+        with self._shutdown_position_lock:
+            self._shutdown_unflushed_position = record
+        print(
+            "[ProjectionActor] shutdown left durable events pending: "
+            f"{record}",
+            flush=True,
+        )
+        return dict(record)
 
     def mark_egress_degraded(self, reason: str) -> None:
         if self._egress_halted_reason:

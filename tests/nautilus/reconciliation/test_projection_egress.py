@@ -155,6 +155,15 @@ class _RecordingDurableProjection:
         self.halted_reasons.append(reason)
 
 
+class _NonDrainingSession:
+    def __init__(self) -> None:
+        self.submissions: list[Any] = []
+
+    def submit_execution_event(self, event: Any) -> str:
+        self.submissions.append(event)
+        return "accepted"
+
+
 class _ReplayBus:
     def __init__(self, event: Any) -> None:
         self.event = event
@@ -359,6 +368,44 @@ def test_projection_worker_stop_obeys_deadline_and_marks_sticky_halt() -> None:
     assert "shutdown deadline" in actor.halted_reason
     assert fatal_reasons == [actor.halted_reason]
     projection.release.set()
+
+
+def test_projection_shutdown_records_unflushed_position_with_shared_session(
+    tmp_path: Path,
+) -> None:
+    spool = JsonExecutionSpool(tmp_path / "shutdown-events.wal")
+    projection = ProjectionActor(
+        ProjectionConfig(node_id="node-a", account_id="account-a"),
+        _BlockingSink(),
+        spool,
+    )
+    session = _NonDrainingSession()
+    fatal_reasons: list[str] = []
+    actor = ExecutionProjectionActor(
+        projection,
+        worker_shutdown_wait_seconds=0.05,
+        fatal_callback=fatal_reasons.append,
+        control_plane_session=session,
+        manage_control_plane_session=False,
+    )
+    actor.on_start()
+    assert actor.on_event(_raw_order_event(1)) is True
+    assert _wait_until(lambda: spool.pending_count == 1)
+
+    started_at = time.monotonic()
+    actor.on_stop()
+    elapsed = time.monotonic() - started_at
+
+    position = projection.shutdown_unflushed_position
+    pending = spool.pending_events()
+    assert elapsed < 0.15
+    assert position is not False
+    assert position["pending_count"] == 1
+    assert position["first_event_id"] == pending[0].event_id
+    assert position["last_event_id"] == pending[-1].event_id
+    assert "shutdown deadline" in position["reason"]
+    assert fatal_reasons == [actor.halted_reason]
+    assert len(session.submissions) >= 2
 
 
 def test_projection_ignored_subscribed_event_is_fatal_fail_closed(

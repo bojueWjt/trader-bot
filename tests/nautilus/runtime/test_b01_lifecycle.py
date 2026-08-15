@@ -659,6 +659,44 @@ def test_heartbeat_build_monotonically_fences_runtime_writer(
     assert second.heartbeat_sequence == 2
 
 
+def test_writer_bootstrap_heartbeat_omits_release_and_exchange_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(
+        config=config,
+        clock=_FixedClock(),
+        release_id="release-a",
+    )
+    lifecycle._release_identity = {
+        "image_digest": "sha256:" + ("1" * 64),
+        "config_sha256": "2" * 64,
+        "dependency_lock_sha256": "3" * 64,
+        "schema_epoch": "0014_cancel_order_contract",
+    }
+    lifecycle.configure_lease(
+        redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        generation=41,
+        freshness_seconds=10,
+    )
+
+    heartbeat = lifecycle.build_writer_bootstrap_heartbeat()
+
+    assert heartbeat.account_id == config.account_id
+    assert heartbeat.runtime_generation == lifecycle.runtime_generation
+    assert heartbeat.redis_fencing_epoch == REDIS_FENCING_EPOCH
+    assert heartbeat.lease_fencing_token == 41
+    assert heartbeat.heartbeat_sequence == 1
+    assert heartbeat.release_id is None
+    assert heartbeat.image_digest is None
+    assert heartbeat.config_sha256 is None
+    assert heartbeat.dependency_lock_sha256 is None
+    assert heartbeat.schema_epoch is None
+    assert heartbeat.positions is None
+    assert heartbeat.regular_orders is None
+    assert heartbeat.algo_orders is None
+
+
 def test_heartbeat_carries_release_identity_exchange_evidence_and_proof_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

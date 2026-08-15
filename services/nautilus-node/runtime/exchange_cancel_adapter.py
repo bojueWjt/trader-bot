@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import json
 import math
 import random
@@ -912,18 +913,44 @@ class SignedBinanceTransport:
         timeout_seconds: float = 10.0,
         recv_window_ms: int = DEFAULT_RECV_WINDOW_MS,
         timestamp_ms: Callable[[], int] | None = None,
+        connection_factory: Callable[[float], Any] | None = None,
     ) -> None:
         if recv_window_ms <= 0 or recv_window_ms > MAX_RECV_WINDOW_MS:
             raise ValueError(
                 f"recv_window_ms must be between 1 and {MAX_RECV_WINDOW_MS}"
             )
         self._base_url = base_url.rstrip("/")
+        parsed_base_url = urllib.parse.urlsplit(self._base_url)
+        if (
+            parsed_base_url.scheme not in {"http", "https"}
+            or not parsed_base_url.hostname
+        ):
+            raise ValueError("base_url must be an http(s) URL")
+        if parsed_base_url.username is not None:
+            raise ValueError("base_url must not contain user information")
+        if parsed_base_url.password is not None:
+            raise ValueError("base_url must not contain user information")
+        try:
+            parsed_base_url.port
+        except ValueError as exc:
+            raise ValueError("base_url contains an invalid port") from exc
+        self._base_scheme = parsed_base_url.scheme
+        self._base_host = parsed_base_url.hostname
+        self._base_port = parsed_base_url.port
+        if self._base_port is None:
+            self._base_port = 443
+            if self._base_scheme == "http":
+                self._base_port = 80
+        self._base_path = parsed_base_url.path.rstrip("/")
         self._api_key = api_key
         self._api_secret = api_secret
         self._timeout_seconds = timeout_seconds
         self._recv_window_ms = recv_window_ms
         self._timestamp_ms = timestamp_ms
-        self._opener = _build_binance_url_opener(proxy_url)
+        self._proxy = _validated_binance_proxy(proxy_url)
+        self._connection_factory = connection_factory
+        self._connection_lock = threading.Lock()
+        self._connection: Any = False
 
     def request(
         self,
@@ -952,43 +979,151 @@ class SignedBinanceTransport:
             query.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        request = urllib.request.Request(
-            f"{self._base_url}{path}?{query}&signature={signature}",
-            headers={"X-MBX-APIKEY": self._api_key, "Accept": "application/json"},
-            method=method,
+        target = (
+            f"{self._base_path}{path}?{query}&signature={signature}"
         )
-        try:
-            with self._opener.open(
-                request,
-                timeout=selected_timeout,
-            ) as response:
-                raw = response.read()
-        except HTTPError as exc:
-            raw_error = exc.read()
+        proxy = self._proxy
+        if proxy is not False and self._base_scheme == "http":
+            target = f"{self._base_url}{path}?{query}&signature={signature}"
+        headers = {
+            "X-MBX-APIKEY": self._api_key,
+            "Accept": "application/json",
+            "Connection": "keep-alive",
+        }
+        with self._connection_lock:
             try:
-                error = json.loads(raw_error.decode("utf-8"))
+                connection = self._ensure_connection(selected_timeout)
+                self._set_connection_timeout(
+                    connection,
+                    selected_timeout,
+                )
+                connection.request(
+                    method,
+                    target,
+                    body=None,
+                    headers=headers,
+                )
+                response = connection.getresponse()
+                try:
+                    raw = response.read()
+                    status = int(response.status)
+                    response_headers = response.headers
+                    will_close = bool(
+                        getattr(response, "will_close", False)
+                    )
+                finally:
+                    response.close()
+                if will_close:
+                    self._close_connection_unlocked()
+            except (OSError, http.client.HTTPException) as exc:
+                self._close_connection_unlocked()
+                detail = str(exc).strip()
+                if not detail:
+                    detail = type(exc).__name__
+                raise ExchangeCancelError(
+                    f"{method} {path} failed: {detail}"
+                ) from exc
+        if status >= 400:
+            try:
+                error = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 error = {}
-            code = error.get("code", exc.code)
-            message = error.get("msg", raw_error.decode("utf-8", errors="replace"))
+            code = error.get("code", status)
+            message = error.get(
+                "msg",
+                raw.decode("utf-8", errors="replace"),
+            )
             raise BinanceApiError(
                 int(code),
                 str(message),
-                http_status=exc.code,
-                headers=exc.headers,
-            ) from exc
-        except URLError as exc:
-            raise ExchangeCancelError(f"{method} {path} failed: {exc.reason}") from exc
+                http_status=status,
+                headers=response_headers,
+            )
         if not raw:
             return {}
         return json.loads(raw.decode("utf-8"))
 
+    def close(self) -> None:
+        with self._connection_lock:
+            self._close_connection_unlocked()
 
-def _build_binance_url_opener(
+    def _ensure_connection(self, timeout_seconds: float) -> Any:
+        connection = self._connection
+        if connection is not False:
+            return connection
+        factory = self._connection_factory
+        if factory is None:
+            connection = self._build_connection(timeout_seconds)
+        else:
+            connection = factory(timeout_seconds)
+        self._connection = connection
+        return connection
+
+    def _build_connection(self, timeout_seconds: float) -> Any:
+        proxy = self._proxy
+        if proxy is False:
+            if self._base_scheme == "https":
+                return http.client.HTTPSConnection(
+                    self._base_host,
+                    self._base_port,
+                    timeout=timeout_seconds,
+                )
+            return http.client.HTTPConnection(
+                self._base_host,
+                self._base_port,
+                timeout=timeout_seconds,
+            )
+        proxy_port = proxy.port
+        if proxy_port is None:
+            proxy_port = 443
+            if proxy.scheme == "http":
+                proxy_port = 80
+        if self._base_scheme == "https":
+            connection = http.client.HTTPSConnection(
+                proxy.hostname,
+                proxy_port,
+                timeout=timeout_seconds,
+            )
+            connection.set_tunnel(
+                self._base_host,
+                self._base_port,
+            )
+            return connection
+        connection_type = http.client.HTTPConnection
+        if proxy.scheme == "https":
+            connection_type = http.client.HTTPSConnection
+        return connection_type(
+            proxy.hostname,
+            proxy_port,
+            timeout=timeout_seconds,
+        )
+
+    @staticmethod
+    def _set_connection_timeout(
+        connection: Any,
+        timeout_seconds: float,
+    ) -> None:
+        connection.timeout = timeout_seconds
+        connection_socket = getattr(connection, "sock", None)
+        if connection_socket is not None:
+            connection_socket.settimeout(timeout_seconds)
+
+    def _close_connection_unlocked(self) -> None:
+        connection = self._connection
+        self._connection = False
+        if connection is False:
+            return
+        try:
+            connection.close()
+        except OSError:
+            return
+
+
+def _validated_binance_proxy(
     proxy_url: str | bool | None,
 ) -> Any:
     if proxy_url is None or proxy_url is False:
-        return urllib.request.build_opener()
+        return False
     if not isinstance(proxy_url, str):
         raise ValueError("proxy_url must be an http(s) URL")
     normalized_proxy_url = proxy_url.strip()
@@ -1007,13 +1142,7 @@ def _build_binance_url_opener(
         parsed_proxy.port
     except ValueError as exc:
         raise ValueError("proxy_url contains an invalid port") from exc
-    proxy_handler = urllib.request.ProxyHandler(
-        {
-            "http": normalized_proxy_url,
-            "https": normalized_proxy_url,
-        }
-    )
-    return urllib.request.build_opener(proxy_handler)
+    return parsed_proxy
 
 
 class BinanceExchangeEvidenceProvider:
@@ -1063,14 +1192,20 @@ class BinanceExchangeEvidenceProvider:
             lambda delay: random.uniform(0.0, delay * 0.25)
         )
         self._lock = threading.Lock()
+        self._refresh_condition = threading.Condition(self._lock)
         self._cached: dict[str, Any] | None = None
         self._cached_at: float | None = None
         self._consecutive_failures = 0
         self._next_attempt_at = 0.0
         self._circuit_open_until = 0.0
+        self._refresh_in_flight = False
+        self._refresh_generation = 0
+        self._refresh_error: ExchangeCancelError | bool = False
+        self._refresh_error_generation = 0
 
     def snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
-        with self._lock:
+        deadline = self._monotonic() + self._total_deadline_seconds
+        with self._refresh_condition:
             current_monotonic = self._monotonic()
             cached = self._cached
             cached_at = self._cached_at
@@ -1082,54 +1217,99 @@ class BinanceExchangeEvidenceProvider:
                 < self._refresh_interval_seconds
             ):
                 return _copy_exchange_evidence(cached)
-
+            if self._refresh_in_flight:
+                refresh_generation = self._refresh_generation + 1
+                return self._await_refresh(
+                    refresh_generation,
+                    deadline=deadline,
+                )
             self._raise_if_backoff_active(current_monotonic)
-            deadline = current_monotonic + self._total_deadline_seconds
-            try:
-                positions_payload, positions_fetched_at = self._fetch_endpoint(
-                    "/fapi/v2/positionRisk",
-                    deadline=deadline,
-                )
-                positions = _position_evidence_rows(positions_payload)
-                regular_payload, regular_orders_fetched_at = self._fetch_endpoint(
-                    "/fapi/v1/openOrders",
-                    deadline=deadline,
-                )
-                regular_orders = _order_evidence_rows(
-                    regular_payload,
-                    order_kind=REGULAR_ORDER,
-                )
-                algo_payload, algo_orders_fetched_at = self._fetch_endpoint(
-                    "/fapi/v1/openAlgoOrders",
-                    deadline=deadline,
-                )
-                algo_orders = _order_evidence_rows(
-                    algo_payload,
-                    order_kind=ALGO_ORDER,
-                )
-            except Exception as exc:
-                raise self._record_failure(exc) from exc
-
-            fetched_at = min(
-                positions_fetched_at,
-                regular_orders_fetched_at,
-                algo_orders_fetched_at,
-            )
-            evidence = {
-                "positions": positions,
-                "regular_orders": regular_orders,
-                "algo_orders": algo_orders,
-                "positions_fetched_at": positions_fetched_at,
-                "regular_orders_fetched_at": regular_orders_fetched_at,
-                "algo_orders_fetched_at": algo_orders_fetched_at,
-                "fetched_at": fetched_at,
-            }
+            self._refresh_in_flight = True
+            refresh_generation = self._refresh_generation + 1
+        try:
+            evidence = self._refresh_evidence(deadline)
+        except Exception as exc:
+            with self._refresh_condition:
+                failure = self._record_failure(exc)
+                self._refresh_generation = refresh_generation
+                self._refresh_error = failure
+                self._refresh_error_generation = refresh_generation
+                self._refresh_in_flight = False
+                self._refresh_condition.notify_all()
+            raise failure from exc
+        with self._refresh_condition:
             self._cached = evidence
             self._cached_at = self._monotonic()
             self._consecutive_failures = 0
             self._next_attempt_at = 0.0
             self._circuit_open_until = 0.0
+            self._refresh_generation = refresh_generation
+            self._refresh_error = False
+            self._refresh_error_generation = 0
+            self._refresh_in_flight = False
+            self._refresh_condition.notify_all()
             return _copy_exchange_evidence(evidence)
+
+    def _await_refresh(
+        self,
+        refresh_generation: int,
+        *,
+        deadline: float,
+    ) -> dict[str, Any]:
+        while self._refresh_generation < refresh_generation:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise ExchangeCancelError(
+                    "exchange evidence singleflight deadline exceeded"
+                )
+            self._refresh_condition.wait(timeout=remaining)
+        if self._refresh_error_generation == refresh_generation:
+            error = self._refresh_error
+            if error is not False:
+                raise ExchangeCancelError(str(error))
+        cached = self._cached
+        if cached is None:
+            raise ExchangeCancelError(
+                "exchange evidence singleflight completed without a snapshot"
+            )
+        return _copy_exchange_evidence(cached)
+
+    def _refresh_evidence(self, deadline: float) -> dict[str, Any]:
+        positions_payload, positions_fetched_at = self._fetch_endpoint(
+            "/fapi/v2/positionRisk",
+            deadline=deadline,
+        )
+        positions = _position_evidence_rows(positions_payload)
+        regular_payload, regular_orders_fetched_at = self._fetch_endpoint(
+            "/fapi/v1/openOrders",
+            deadline=deadline,
+        )
+        regular_orders = _order_evidence_rows(
+            regular_payload,
+            order_kind=REGULAR_ORDER,
+        )
+        algo_payload, algo_orders_fetched_at = self._fetch_endpoint(
+            "/fapi/v1/openAlgoOrders",
+            deadline=deadline,
+        )
+        algo_orders = _order_evidence_rows(
+            algo_payload,
+            order_kind=ALGO_ORDER,
+        )
+        fetched_at = min(
+            positions_fetched_at,
+            regular_orders_fetched_at,
+            algo_orders_fetched_at,
+        )
+        return {
+            "positions": positions,
+            "regular_orders": regular_orders,
+            "algo_orders": algo_orders,
+            "positions_fetched_at": positions_fetched_at,
+            "regular_orders_fetched_at": regular_orders_fetched_at,
+            "algo_orders_fetched_at": algo_orders_fetched_at,
+            "fetched_at": fetched_at,
+        }
 
     def cached_snapshot(
         self,
