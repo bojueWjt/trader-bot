@@ -21,6 +21,7 @@ from release_manifest import (
     IMMUTABLE_DEPENDENCY_LOCK_TARGET,
     IMMUTABLE_DEPENDENCY_INVENTORY_TARGET,
     IMMUTABLE_MIGRATION_MANIFEST_TARGET,
+    LABEL_BUILD_BASE_IMAGE,
     MIGRATION_MANIFEST_NAME,
     RELEASE_DEPENDENCY_LOCK_NAME,
     RELEASE_SOURCE_MANIFEST_NAME,
@@ -44,6 +45,80 @@ from release_manifest import (
 
 class ImmutableBuildError(ValueError):
     pass
+
+
+def resolve_common_base_image(images: list[str]) -> str:
+    if not images:
+        raise ImmutableBuildError("at least one source image is required")
+    current_images = []
+    for raw_image in images:
+        try:
+            image = _require_image_digest(raw_image)
+            inspected = _docker_image_id(image)
+        except ReleaseManifestError as exc:
+            raise ImmutableBuildError(str(exc)) from exc
+        if inspected != image:
+            raise ImmutableBuildError(
+                "source image content ID failed local verification"
+            )
+        current_images.append(image)
+
+    unique_images = set(current_images)
+    if len(unique_images) == 1:
+        return current_images[0]
+
+    layers_by_image = {}
+    candidate_sets = []
+    for image in current_images:
+        try:
+            image_layers = layers_by_image.setdefault(
+                image,
+                _docker_image_layers(image),
+            )
+            labels = _docker_image_labels(image)
+        except ReleaseManifestError as exc:
+            raise ImmutableBuildError(str(exc)) from exc
+        candidates = {image}
+        raw_base = str(labels.get(LABEL_BUILD_BASE_IMAGE) or "").strip()
+        if raw_base:
+            try:
+                labeled_base = _require_image_digest(raw_base)
+            except ReleaseManifestError as exc:
+                raise ImmutableBuildError(str(exc)) from exc
+            if labeled_base in unique_images:
+                try:
+                    base_layers = layers_by_image.setdefault(
+                        labeled_base,
+                        _docker_image_layers(labeled_base),
+                    )
+                    _require_strict_image_layer_prefix(
+                        base_layers,
+                        image_layers,
+                    )
+                except ReleaseManifestError as exc:
+                    raise ImmutableBuildError(str(exc)) from exc
+                candidates.add(labeled_base)
+        candidate_sets.append(candidates)
+
+    common = set.intersection(*candidate_sets)
+    if not common:
+        raise ImmutableBuildError(
+            "source images do not share one available immutable base"
+        )
+    ranked = sorted(
+        common,
+        key=lambda image: len(layers_by_image[image]),
+        reverse=True,
+    )
+    if (
+        len(ranked) > 1
+        and len(layers_by_image[ranked[0]])
+        == len(layers_by_image[ranked[1]])
+    ):
+        raise ImmutableBuildError(
+            "source images have ambiguous common immutable bases"
+        )
+    return ranked[0]
 
 
 def _reusable_attested_image(
@@ -498,6 +573,30 @@ def build_immutable_image(
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_args = list(argv if argv is not None else sys.argv[1:])
+    if raw_args and raw_args[0] == "resolve-common-base":
+        resolver = argparse.ArgumentParser(
+            description="Resolve one verified base for current node images."
+        )
+        resolver.add_argument("resolve-common-base")
+        resolver.add_argument(
+            "--image",
+            action="append",
+            required=True,
+            dest="images",
+        )
+        args = resolver.parse_args(raw_args)
+        try:
+            print(resolve_common_base_image(args.images))
+        except (
+            ImmutableBuildError,
+            OSError,
+            ReleaseManifestError,
+        ) as exc:
+            print(f"FATAL: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
     parser = argparse.ArgumentParser(
         description="Build a derived immutable node image with no network."
     )
@@ -507,7 +606,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-image", required=True)
     parser.add_argument("--iid-output", type=Path)
     parser.add_argument("--attestation-output", type=Path)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_args)
 
     try:
         build_immutable_image(

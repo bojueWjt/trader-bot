@@ -213,6 +213,8 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" 'live-risk-policy.json'
   assert_contains "$text" \
     'IMMUTABLE_WATCHER_BUILDER="$STAGING/build_immutable_watcher_image.py"'
+  assert_contains "$text" 'resolve-common-base'
+  assert_contains "$text" 'common immutable base resolution failed'
   assert_contains "$text" \
     'WATCHER_RUNTIME_MANIFEST="$STAGING/watcher-runtime-manifest.json"'
   assert_contains "$text" \

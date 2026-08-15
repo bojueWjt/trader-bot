@@ -24,6 +24,7 @@ BASE_LAYERS = [
     "sha256:" + ("d" * 64),
 ]
 BUILT_LAYER = "sha256:" + ("e" * 64)
+PREVIOUS_IMAGE = "sha256:" + ("f" * 64)
 LOCK_CONTENT = """
 version = 1
 revision = 1
@@ -160,6 +161,118 @@ EXPECTED_IMMUTABLE_ENTRIES = (
         ),
     ),
 )
+
+
+def test_resolve_common_base_accepts_mixed_base_and_derived_images(
+    monkeypatch,
+) -> None:
+    layers = {
+        BASE_IMAGE: list(BASE_LAYERS),
+        PREVIOUS_IMAGE: [*BASE_LAYERS, BUILT_LAYER],
+    }
+    labels = {
+        BASE_IMAGE: {
+            release_manifest.LABEL_BUILD_BASE_IMAGE: (
+                "sha256:" + ("9" * 64)
+            )
+        },
+        PREVIOUS_IMAGE: {
+            release_manifest.LABEL_BUILD_BASE_IMAGE: BASE_IMAGE
+        },
+    }
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_id",
+        lambda image: image,
+    )
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_layers",
+        lambda image: list(layers[image]),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_labels",
+        lambda image: dict(labels[image]),
+    )
+
+    resolved = builder.resolve_common_base_image(
+        [
+            PREVIOUS_IMAGE,
+            BASE_IMAGE,
+            BASE_IMAGE,
+            BASE_IMAGE,
+        ]
+    )
+
+    assert resolved == BASE_IMAGE
+
+
+def test_resolve_common_base_rejects_unrelated_images(
+    monkeypatch,
+) -> None:
+    other_image = "sha256:" + ("8" * 64)
+    layers = {
+        BASE_IMAGE: list(BASE_LAYERS),
+        other_image: ["sha256:" + ("7" * 64)],
+    }
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_id",
+        lambda image: image,
+    )
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_layers",
+        lambda image: list(layers[image]),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_labels",
+        lambda image: {},
+    )
+
+    with pytest.raises(
+        builder.ImmutableBuildError,
+        match="do not share one available immutable base",
+    ):
+        builder.resolve_common_base_image(
+            [BASE_IMAGE, other_image]
+        )
+
+
+def test_resolve_common_base_rejects_forged_ancestry(
+    monkeypatch,
+) -> None:
+    layers = {
+        BASE_IMAGE: list(BASE_LAYERS),
+        PREVIOUS_IMAGE: ["sha256:" + ("7" * 64), BUILT_LAYER],
+    }
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_id",
+        lambda image: image,
+    )
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_layers",
+        lambda image: list(layers[image]),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_docker_image_labels",
+        lambda image: {
+            release_manifest.LABEL_BUILD_BASE_IMAGE: BASE_IMAGE
+        },
+    )
+
+    with pytest.raises(
+        builder.ImmutableBuildError,
+        match="must add at least one layer",
+    ):
+        builder.resolve_common_base_image(
+            [PREVIOUS_IMAGE, BASE_IMAGE]
+        )
 
 
 def _write_bundle(root: Path) -> Path:

@@ -8760,12 +8760,20 @@ elif [ "$ROLLOUT_NODE" = "trader-v3-node-c" ] \
     || die "$ROLLOUT_ACCOUNT target image is unavailable locally"
 else
   if [ "$DELIVERY_MODE" = "immutable_image" ]; then
-    BASE_IMAGE_A="$(docker inspect --format '{{.Image}}' "${ALL_NODES[0]}")"
-    for node in "${ALL_NODES[@]:1}"; do
+    BASE_IMAGE_ARGS=()
+    for node in "${ALL_NODES[@]}"; do
       base_image="$(docker inspect --format '{{.Image}}' "$node")"
-      [ "$BASE_IMAGE_A" = "$base_image" ] \
-        || die "base image digest differs before account-a canary: $node"
+      [ -n "$base_image" ] \
+        || die "source image digest is missing before account-a canary: $node"
+      BASE_IMAGE_ARGS+=(--image "$base_image")
     done
+    BASE_IMAGE_A="$(
+      python3 "$IMMUTABLE_BUILDER" \
+        resolve-common-base \
+        "${BASE_IMAGE_ARGS[@]}"
+    )" || die "common immutable base resolution failed"
+    [ -n "$BASE_IMAGE_A" ] \
+      || die "common immutable base image digest is missing"
     DERIVED_IID="$STAGING/derived-image.id"
     rm -f "$DERIVED_IID"
     python3 "$IMMUTABLE_BUILDER" \
