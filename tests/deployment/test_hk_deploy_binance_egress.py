@@ -9,6 +9,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts" / "hk-deploy-20260803.sh"
+JP24_PREPARE = REPO_ROOT / "scripts" / "jp24-p1-prepare.sh"
 
 
 def _function_source(name: str) -> str:
@@ -42,7 +43,14 @@ def _write_environment(
     mode: str,
     expected_ip: str = "203.0.113.27",
     proxy_url: str = "",
+    account_expected_ips: tuple[str, str, str, str] = (
+        "203.0.113.27",
+        "203.0.113.28",
+        "203.0.113.29",
+        "203.0.113.29",
+    ),
 ) -> None:
+    account_a, account_b, account_c, account_d = account_expected_ips
     root.mkdir(parents=True, exist_ok=True)
     (root / ".env.v3").write_text(
         "\n".join(
@@ -50,6 +58,10 @@ def _write_environment(
                 f"BINANCE_EGRESS_MODE={mode}",
                 f"BINANCE_EXPECTED_EGRESS_IP={expected_ip}",
                 f"BINANCE_PROXY_URL={proxy_url}",
+                f"BINANCE_EXPECTED_EGRESS_IP_A={account_a}",
+                f"BINANCE_EXPECTED_EGRESS_IP_B={account_b}",
+                f"BINANCE_EXPECTED_EGRESS_IP_C={account_c}",
+                f"BINANCE_EXPECTED_EGRESS_IP_D={account_d}",
                 "",
             )
         ),
@@ -65,10 +77,18 @@ T={root}
 BINANCE_EGRESS_MODE=
 BINANCE_PROXY_URL=
 BINANCE_EXPECTED_EGRESS_IP=
+BINANCE_EXPECTED_EGRESS_IP_A=
+BINANCE_EXPECTED_EGRESS_IP_B=
+BINANCE_EXPECTED_EGRESS_IP_C=
+BINANCE_EXPECTED_EGRESS_IP_D=
 load_binance_egress_settings
 printf 'mode=%s\\n' "$BINANCE_EGRESS_MODE"
 printf 'proxy=%s\\n' "$BINANCE_PROXY_URL"
 printf 'expected=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP"
+printf 'expected_a=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP_A"
+printf 'expected_b=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP_B"
+printf 'expected_c=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP_C"
+printf 'expected_d=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP_D"
 """
     )
 
@@ -78,6 +98,7 @@ printf 'expected=%s\\n' "$BINANCE_EXPECTED_EGRESS_IP"
     (
         ("route", ""),
         ("proxy", "http://proxy.internal:3128"),
+        ("account_networks", ""),
     ),
 )
 def test_load_binance_egress_settings_accepts_explicit_modes(
@@ -94,6 +115,11 @@ def test_load_binance_egress_settings_accepts_explicit_modes(
     assert f"mode={mode}\n" in result.stdout
     assert f"proxy={proxy_url}\n" in result.stdout
     assert "expected=203.0.113.27\n" in result.stdout
+    if mode == "account_networks":
+        assert "expected_a=203.0.113.27\n" in result.stdout
+        assert "expected_b=203.0.113.28\n" in result.stdout
+        assert "expected_c=203.0.113.29\n" in result.stdout
+        assert "expected_d=203.0.113.29\n" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -113,6 +139,12 @@ def test_load_binance_egress_settings_accepts_explicit_modes(
             "203.0.113.27",
             "http://operator:secret@proxy.internal:3128",
             "must not contain credentials",
+        ),
+        (
+            "account_networks",
+            "203.0.113.27",
+            "http://proxy.internal:3128",
+            "must be empty in account_networks mode",
         ),
     ),
 )
@@ -320,11 +352,158 @@ verify_binance_proxy_egress
     assert "https://api.ipify.org" in log
 
 
+def _write_account_network_docker_fake(bin_dir: Path) -> None:
+    docker_command = bin_dir / "docker"
+    docker_command.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker %s\\n' "$*" >>"$FAKE_COMMAND_LOG"
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  printf 'sha256:%064d\\n' 0
+  exit 0
+fi
+if [ "$1" = "network" ] && [ "$2" = "inspect" ]; then
+  exit 0
+fi
+if [ "$1" = "inspect" ]; then
+  node="$2"
+  suffix="${node##*-}"
+  network="trader-v3-account-$suffix"
+  if [ "${FAKE_BAD_NETWORK_NODE:-}" = "$node" ]; then
+    network=bridge
+  fi
+  printf '[{"NetworkSettings":{"Networks":{"%s":{}}}}]\\n' "$network"
+  exit 0
+fi
+if [ "$1" = "run" ]; then
+  network=
+  for value in "$@"; do
+    case "$value" in
+      trader-v3-account-*)
+        network="$value"
+        ;;
+    esac
+  done
+  case "$*" in
+    *api.ipify.org)
+      case "$network" in
+        trader-v3-account-a) value=203.0.113.27 ;;
+        trader-v3-account-b) value=203.0.113.28 ;;
+        trader-v3-account-c|trader-v3-account-d) value=203.0.113.29 ;;
+        *) exit 64 ;;
+      esac
+      if [ "${FAKE_BAD_EGRESS_NETWORK:-}" = "$network" ]; then
+        value=198.51.100.200
+      fi
+      printf '%s' "$value"
+      exit 0
+      ;;
+    *fapi.binance.com/fapi/v1/time)
+      if [ "${FAKE_BAD_FAPI_NETWORK:-}" = "$network" ]; then
+        printf '503'
+      else
+        printf '200'
+      fi
+      exit 0
+      ;;
+  esac
+fi
+exit 64
+""",
+        encoding="utf-8",
+    )
+    docker_command.chmod(0o755)
+
+
+def _account_network_source() -> str:
+    return (
+        _definitions("die", "verify_binance_account_network_egress")
+        + """
+ALL_NODES=(
+  trader-v3-node-a
+  trader-v3-node-b
+  trader-v3-node-c
+  trader-v3-node-d
+)
+BINANCE_ACCOUNT_NETWORKS=(
+  trader-v3-account-a
+  trader-v3-account-b
+  trader-v3-account-c
+  trader-v3-account-d
+)
+BINANCE_EXPECTED_EGRESS_IP_A=203.0.113.27
+BINANCE_EXPECTED_EGRESS_IP_B=203.0.113.28
+BINANCE_EXPECTED_EGRESS_IP_C=203.0.113.29
+BINANCE_EXPECTED_EGRESS_IP_D=203.0.113.29
+BINANCE_EGRESS_PROBE_IMAGE=curlimages/curl:8.12.1
+verify_binance_account_network_egress
+"""
+    )
+
+
+def _account_network_environment(tmp_path: Path) -> dict[str, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_account_network_docker_fake(bin_dir)
+    command_log = tmp_path / "commands.log"
+    command_log.write_text("", encoding="utf-8")
+    return {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_COMMAND_LOG": str(command_log),
+    }
+
+
+def test_account_network_mode_verifies_all_nodes_and_egress(
+    tmp_path: Path,
+) -> None:
+    env = _account_network_environment(tmp_path)
+
+    result = _run_bash(_account_network_source(), env)
+
+    assert result.returncode == 0, result.stderr
+    log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+    assert log.count("docker run --rm --network trader-v3-account-") == 8
+    assert result.stdout.count("== Binance account network verified:") == 4
+
+
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    (
+        (
+            {"FAKE_BAD_NETWORK_NODE": "trader-v3-node-b"},
+            "node network differs",
+        ),
+        (
+            {"FAKE_BAD_EGRESS_NETWORK": "trader-v3-account-c"},
+            "account-network egress differs",
+        ),
+        (
+            {"FAKE_BAD_FAPI_NETWORK": "trader-v3-account-d"},
+            "did not return HTTP 200",
+        ),
+    ),
+)
+def test_account_network_mode_fails_closed(
+    tmp_path: Path,
+    environment: dict[str, str],
+    message: str,
+) -> None:
+    env = _account_network_environment(tmp_path)
+    env.update(environment)
+
+    result = _run_bash(_account_network_source(), env)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
 @pytest.mark.parametrize(
     ("mode", "proxy_url", "expected_proxy"),
     (
         ("route", "", None),
         ("proxy", "http://proxy.internal:3128", "http://proxy.internal:3128"),
+        ("account_networks", "", None),
     ),
 )
 def test_release_bound_node_config_uses_mode_specific_proxy_value(
@@ -382,3 +561,19 @@ def test_deploy_preflight_uses_mode_aware_egress_gate() -> None:
     assert 'BINANCE_ROUTE_INTERFACE="wg0"' in text
     assert "\nload_binance_egress_settings\nverify_binance_egress\n" in text
     assert 'if proxy_url:\n    updated_binance["proxy_url"] = proxy_url' in text
+    assert "verify_binance_account_network_egress" in text
+
+
+def test_jp24_prepare_exposes_internal_services_on_account_networks() -> None:
+    text = JP24_PREPARE.read_text(encoding="utf-8")
+
+    assert '"BINANCE_EGRESS_MODE=account_networks"' in text
+    assert "connect_redis_networks() {" in text
+    assert "--alias trader-v3-redis" in text
+    for gateway in (
+        "172.30.1.1",
+        "172.30.2.1",
+        "172.30.3.1",
+        "172.30.4.1",
+    ):
+        assert f"http://{gateway}:8080" in text

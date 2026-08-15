@@ -194,7 +194,7 @@ lines = [
     "NAUTILUS_NODE_TOKEN=" + node_token,
     "RISK_ADMIN_TOKEN=" + risk_admin_token,
     "WATCHER_TRADING_DB=" + str(watcher_database_path),
-    "BINANCE_EGRESS_MODE=route",
+    "BINANCE_EGRESS_MODE=account_networks",
     "BINANCE_PROXY_URL=",
     "BINANCE_EXPECTED_EGRESS_IP=170.205.39.79",
     "BINANCE_EXPECTED_EGRESS_IP_A=170.205.39.79",
@@ -341,6 +341,29 @@ ensure_networks() {
   done
 }
 
+connect_redis_networks() {
+  local attached
+  local network
+  for network in "${ACCOUNT_NETWORKS[@]}"; do
+    attached="$(
+      docker inspect "$REDIS_CONTAINER" \
+        --format "{{if index .NetworkSettings.Networks \"$network\"}}yes{{end}}"
+    )"
+    if [ "$attached" != "yes" ]; then
+      docker network connect \
+        --alias trader-v3-redis \
+        "$network" \
+        "$REDIS_CONTAINER"
+    fi
+    attached="$(
+      docker inspect "$REDIS_CONTAINER" \
+        --format "{{if index .NetworkSettings.Networks \"$network\"}}yes{{end}}"
+    )"
+    [ "$attached" = "yes" ] \
+      || die "Redis is not attached to account network: $network"
+  done
+}
+
 write_egress_rules() {
   local temporary
   temporary="$(mktemp)"
@@ -397,8 +420,8 @@ write_caddy_config() {
 	auto_https off
 }
 
-http://127.0.0.1:8080, http://$TAILSCALE_IP:8080 {
-	bind 127.0.0.1 $TAILSCALE_IP
+http://127.0.0.1:8080, http://$TAILSCALE_IP:8080, http://172.30.1.1:8080, http://172.30.2.1:8080, http://172.30.3.1:8080, http://172.30.4.1:8080 {
+	bind 127.0.0.1 $TAILSCALE_IP 172.30.1.1 172.30.2.1 172.30.3.1 172.30.4.1
 
 	@event_ingest path_regexp event_ingest ^/v1/nodes/[^/]+/(events|execution-events)$
 	handle @event_ingest {
@@ -515,6 +538,25 @@ verify_networks() {
     printf 'account-%s_egress=%s\n' \
       "${ACCOUNT_LABELS[$index]}" \
       "$actual_ip"
+    docker run --rm \
+      --network "$network" \
+      curlimages/curl:8.12.1 \
+      --fail \
+      --silent \
+      --show-error \
+      --max-time 20 \
+      http://"${ACCOUNT_GATEWAYS[$index]}":8080/health/role \
+      >/dev/null
+    docker run --rm \
+      --network "$network" \
+      "$REDIS_IMAGE" \
+      redis-cli \
+      -h trader-v3-redis \
+      PING \
+      | grep -Fxq PONG \
+      || die "Redis is unavailable from account-${ACCOUNT_LABELS[$index]}"
+    printf 'account-%s_internal_services=OK\n' \
+      "${ACCOUNT_LABELS[$index]}"
   done
 }
 
@@ -540,7 +582,14 @@ verify_caddy() {
   systemctl is-active --quiet caddy.service \
     || die "Caddy must be active"
   caddy validate --adapter caddyfile --config "$CADDY_FILE"
-  ss -lnt | awk '$4 == "127.0.0.1:8080" || $4 == "100.89.58.40:8080"'
+  ss -lnt | awk '
+    $4 == "127.0.0.1:8080"
+    || $4 == "100.89.58.40:8080"
+    || $4 == "172.30.1.1:8080"
+    || $4 == "172.30.2.1:8080"
+    || $4 == "172.30.3.1:8080"
+    || $4 == "172.30.4.1:8080"
+  '
 }
 
 verify_node_memory_contract() {
@@ -578,6 +627,7 @@ main() {
       ensure_postgres
       ensure_redis
       ensure_networks
+      connect_redis_networks
       write_egress_rules
       write_caddy_config
       install_resource_contract
