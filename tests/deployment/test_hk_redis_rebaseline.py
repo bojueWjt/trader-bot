@@ -103,6 +103,8 @@ def inspect_value(container, format_string):
         return str(container.get("nofile", ""))
     if format_string == "{{.HostConfig.RestartPolicy.Name}}":
         return str(container.get("restart_policy", ""))
+    if format_string == "{{json .NetworkSettings.Networks}}":
+        return json.dumps(container.get("networks", {}), sort_keys=True)
     if "Config.Labels" in format_string:
         labels = container.get("labels", {})
         return labels.get("trader-v3.redis-rebaseline", "")
@@ -248,6 +250,27 @@ if command == "volume":
         raise SystemExit(0)
     raise SystemExit(2)
 
+if command == "network":
+    subcommand = args.pop(0)
+    if subcommand != "connect":
+        raise SystemExit(2)
+    fail("network_connect")
+    aliases = []
+    while args and args[0] == "--alias":
+        args.pop(0)
+        aliases.append(args.pop(0))
+    network_name, container_name = args
+    container = require_container(state, container_name)
+    container.setdefault("networks", {})[network_name] = {
+        "Aliases": aliases,
+    }
+    save_state(state)
+    log(
+        f"network-connect:{network_name}:{container_name}:"
+        f"{','.join(aliases)}"
+    )
+    raise SystemExit(0)
+
 if command == "exec":
     name = args.pop(0)
     container = require_container(state, name)
@@ -379,6 +402,7 @@ if command == "run":
         "nofile": nofile,
         "restart_policy": restart_policy,
         "labels": {"trader-v3.redis-rebaseline": label},
+        "networks": {"bridge": {"Aliases": None}},
         "mounts": [
             {
                 "Type": "volume",
@@ -539,6 +563,21 @@ class RebaselineHarness:
                 "memory": 0,
                 "memory_swap": 0,
                 "labels": {},
+                "networks": {
+                    "bridge": {"Aliases": None},
+                    "trader-v3-account-a": {
+                        "Aliases": ["trader-v3-redis"],
+                    },
+                    "trader-v3-account-b": {
+                        "Aliases": ["trader-v3-redis"],
+                    },
+                    "trader-v3-account-c": {
+                        "Aliases": ["trader-v3-redis"],
+                    },
+                    "trader-v3-account-d": {
+                        "Aliases": ["trader-v3-redis"],
+                    },
+                },
                 "mounts": [
                     {
                         "Type": "volume",
@@ -586,6 +625,7 @@ class RebaselineHarness:
             "memory": 0,
             "memory_swap": 0,
             "labels": {},
+            "networks": {"bridge": {"Aliases": None}},
             "mounts": [],
             "redis": {},
         }
@@ -713,6 +753,9 @@ def test_redis_rebaseline_contract_is_fail_closed() -> None:
     assert 'write_rollback_script' in text
     assert 'assert_node_stopped "$node"' in text
     assert "source Redis identity is not recoverable" in text
+    assert "capture_source_network_attachments" in text
+    assert "restore_source_network_attachments" in text
+    assert "verify_source_network_attachments" in text
 
 
 @pytest.mark.parametrize(
@@ -725,6 +768,7 @@ def test_redis_rebaseline_contract_is_fail_closed() -> None:
         "rename",
         "volume_create",
         "new_run",
+        "network_connect",
         "new_ping",
         "epoch_set",
         "epoch_save",
@@ -794,6 +838,37 @@ def test_success_generates_verified_evidence_and_executable_rollback(
     assert state["containers"][REDIS_CONTAINER]["id"] == "new-id"
     assert state["containers"][LEGACY_CONTAINER]["id"] == "source-id"
     assert state["containers"][LEGACY_CONTAINER]["running"] is False
+    expected_networks = {
+        "bridge": {"Aliases": None},
+        "trader-v3-account-a": {"Aliases": ["trader-v3-redis"]},
+        "trader-v3-account-b": {"Aliases": ["trader-v3-redis"]},
+        "trader-v3-account-c": {"Aliases": ["trader-v3-redis"]},
+        "trader-v3-account-d": {"Aliases": ["trader-v3-redis"]},
+    }
+    assert state["containers"][REDIS_CONTAINER]["networks"] == expected_networks
+    attachments = json.loads(
+        (
+            harness.evidence_root / "source-network-attachments.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert attachments == [
+        {
+            "aliases": ["trader-v3-redis"],
+            "network": "trader-v3-account-a",
+        },
+        {
+            "aliases": ["trader-v3-redis"],
+            "network": "trader-v3-account-b",
+        },
+        {
+            "aliases": ["trader-v3-redis"],
+            "network": "trader-v3-account-c",
+        },
+        {
+            "aliases": ["trader-v3-redis"],
+            "network": "trader-v3-account-d",
+        },
+    ]
     backup_manifest = json.loads(
         (harness.evidence_root / "cold-backup-manifest.json").read_text(
             encoding="utf-8"

@@ -47,6 +47,7 @@ VALIDATOR_ROOT="$EVIDENCE_ROOT/validators"
 BACKUP_MANIFEST="$EVIDENCE_ROOT/cold-backup-manifest.json"
 CAPACITY_PLAN="$EVIDENCE_ROOT/capacity-plan.json"
 CAPACITY_EVIDENCE="$EVIDENCE_ROOT/capacity-evidence.json"
+SOURCE_NETWORK_ATTACHMENTS="$EVIDENCE_ROOT/source-network-attachments.json"
 ROLLBACK_SCRIPT="$EVIDENCE_ROOT/rollback-redis.sh"
 LEGACY_CONTAINER="${REDIS_CONTAINER}-legacy-${STAMP}"
 NEW_VOLUME="${REDIS_CONTAINER}-hardening-${STAMP}"
@@ -84,6 +85,124 @@ inspect_value() {
   local format="$1"
   local container="$2"
   docker inspect --format "$format" "$container"
+}
+
+capture_source_network_attachments() {
+  local source_networks
+  source_networks="$(
+    inspect_value '{{json .NetworkSettings.Networks}}' "$REDIS_CONTAINER"
+  )"
+  python3 - "$SOURCE_NETWORK_ATTACHMENTS" "$source_networks" <<'PY'
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1])
+networks = json.loads(sys.argv[2])
+if not isinstance(networks, dict):
+    raise SystemExit("source Redis networks must be an object")
+
+safe_name = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+attachments = []
+for network_name, network in sorted(networks.items()):
+    if network_name == "bridge":
+        continue
+    if not isinstance(network_name, str) or safe_name.fullmatch(network_name) is None:
+        raise SystemExit("source Redis network name is unsafe")
+    if not isinstance(network, dict):
+        raise SystemExit(f"source Redis network is invalid: {network_name}")
+    raw_aliases = network.get("Aliases") or []
+    if not isinstance(raw_aliases, list):
+        raise SystemExit(f"source Redis aliases are invalid: {network_name}")
+    aliases = []
+    for alias in raw_aliases:
+        if not isinstance(alias, str) or safe_name.fullmatch(alias) is None:
+            raise SystemExit(f"source Redis alias is unsafe: {network_name}")
+        if alias not in aliases:
+            aliases.append(alias)
+    attachments.append(
+        {
+            "network": network_name,
+            "aliases": aliases,
+        }
+    )
+
+output.write_text(
+    json.dumps(attachments, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+  chmod 0600 "$SOURCE_NETWORK_ATTACHMENTS"
+}
+
+restore_source_network_attachments() {
+  local alias
+  local aliases
+  local network
+  local -a network_args
+  local -a source_aliases
+  while IFS=$'\t' read -r network aliases; do
+    [ -n "$network" ] || continue
+    network_args=(docker network connect)
+    if [ -n "$aliases" ]; then
+      IFS=',' read -r -a source_aliases <<< "$aliases"
+      for alias in "${source_aliases[@]}"; do
+        network_args+=(--alias "$alias")
+      done
+    fi
+    network_args+=("$network" "$REDIS_CONTAINER")
+    "${network_args[@]}"
+  done < <(
+    python3 - "$SOURCE_NETWORK_ATTACHMENTS" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+
+attachments = json.load(open(sys.argv[1], encoding="utf-8"))
+for attachment in attachments:
+    print(
+        f"{attachment['network']}\t"
+        f"{','.join(attachment['aliases'])}"
+    )
+PY
+  )
+}
+
+verify_source_network_attachments() {
+  local active_networks
+  active_networks="$(
+    inspect_value '{{json .NetworkSettings.Networks}}' "$REDIS_CONTAINER"
+  )"
+  python3 - "$SOURCE_NETWORK_ATTACHMENTS" "$active_networks" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+
+expected = json.load(open(sys.argv[1], encoding="utf-8"))
+active = json.loads(sys.argv[2])
+if not isinstance(active, dict):
+    raise SystemExit("active Redis networks must be an object")
+
+for attachment in expected:
+    network_name = attachment["network"]
+    network = active.get(network_name)
+    if not isinstance(network, dict):
+        raise SystemExit(f"active Redis network is missing: {network_name}")
+    aliases = network.get("Aliases") or []
+    if not isinstance(aliases, list):
+        raise SystemExit(f"active Redis aliases are invalid: {network_name}")
+    missing = sorted(set(attachment["aliases"]) - set(aliases))
+    if missing:
+        raise SystemExit(
+            f"active Redis aliases are missing for {network_name}: "
+            f"{','.join(missing)}"
+        )
+PY
 }
 
 container_id_or_empty() {
@@ -1184,6 +1303,7 @@ main() {
 
   SOURCE_CONTAINER_ID="$(inspect_value '{{.Id}}' "$REDIS_CONTAINER")"
   [ -n "$SOURCE_CONTAINER_ID" ] || die "source Redis identity is missing"
+  capture_source_network_attachments
   if [ "$(inspect_value '{{.State.Running}}' "$REDIS_CONTAINER")" = "true" ]; then
     SOURCE_WAS_RUNNING=1
   else
@@ -1350,6 +1470,8 @@ PY
   [ -n "$NEW_CONTAINER_ID" ] || die "new Redis container identity is missing"
   [ "$(container_label_or_empty "$REDIS_CONTAINER")" = "$STAMP" ] \
     || die "new Redis container lacks rebaseline ownership label"
+  restore_source_network_attachments
+  verify_source_network_attachments
   set_phase "new_container_created"
 
   for _ in $(seq 1 60); do
@@ -1535,6 +1657,7 @@ PY
     "$BACKUP_MANIFEST" \
     "$CAPACITY_PLAN" \
     "$CAPACITY_EVIDENCE" \
+    "$SOURCE_NETWORK_ATTACHMENTS" \
     "$EVIDENCE_ROOT/ROLLBACK.txt"
   ln -sfn "$EVIDENCE_ROOT" "$TRADER_ROOT/redis-rebaseline/current"
   set_phase "complete"
