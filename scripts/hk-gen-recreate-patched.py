@@ -30,8 +30,8 @@ from release_manifest import (
     LABEL_RELEASE_ID,
     LABEL_RELEASE_IMAGE,
     NODE_DOCKER_RESOURCE_ARTIFACT,
+    NODE_CONFIG_SCHEMA_VERSIONS,
     ReleaseManifestError,
-    SCHEMA_VERSION,
     docker_resource_contract,
     sha256_file,
     validate_strict_release_envelope,
@@ -433,7 +433,10 @@ def explicit_mounts(
 def release_node_config(release_identity, container_name):
     if release_identity is False:
         return False
-    if release_identity["manifest_schema_version"] != SCHEMA_VERSION:
+    if (
+        release_identity["manifest_schema_version"]
+        not in NODE_CONFIG_SCHEMA_VERSIONS
+    ):
         return False
     matches = [
         item

@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any
 
 POLICY_SCHEMA_VERSION = "trader-v3-live-risk-policy/v2"
-BACKUP_SCHEMA_VERSION = "trader-v3-live-node-config-backup/v1"
+BACKUP_SCHEMA_VERSION = "trader-v3-live-node-config-backup/v2"
+LEGACY_BACKUP_SCHEMA_VERSION = "trader-v3-live-node-config-backup/v1"
+NODE_CONFIG_CONTRACT_SCHEMA_VERSION = (
+    "trader-v3-node-config-contract/v1"
+)
 CAPTURE_SCHEMA_VERSION = "trader-v3-live-risk-capture/v1"
 ARTIFACT_RECORD_SCHEMA_VERSION = (
     "trader-v3-live-node-config-artifact-record/v1"
@@ -101,6 +105,36 @@ def normalized_config_sha256(config: dict[str, Any]) -> str:
             "<account-network-control-plane>"
         )
     return _sha256_bytes(_canonical_json_bytes(normalized))
+
+
+def normalized_config_contract_sha256(
+    normalized_hashes: dict[str, str],
+) -> str:
+    if (
+        not normalized_hashes
+        or not set(normalized_hashes).issubset(SUPPORTED_ACCOUNTS)
+    ):
+        raise LiveNodeConfigError(
+            "normalized config hashes must be a non-empty supported "
+            "account collection"
+        )
+    accounts = []
+    for account_id, digest in sorted(normalized_hashes.items()):
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise LiveNodeConfigError(
+                f"normalized config hash is invalid: {account_id}"
+            )
+        accounts.append(
+            {
+                "account_id": account_id,
+                "normalized_sha256": digest,
+            }
+        )
+    contract = {
+        "schema_version": NODE_CONFIG_CONTRACT_SCHEMA_VERSION,
+        "accounts": accounts,
+    }
+    return _sha256_bytes(_canonical_json_bytes(contract))
 
 
 def _load_object(path: Path, label: str) -> dict[str, Any]:
@@ -838,10 +872,9 @@ def apply_policy(
             json.dumps(updated, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
         normalized_hashes[account_id] = normalized_config_sha256(updated)
-    if len(set(normalized_hashes.values())) != 1:
-        raise LiveNodeConfigError(
-            "node normalized config hashes differ after risk update"
-        )
+    normalized_contract_sha256 = normalized_config_contract_sha256(
+        normalized_hashes
+    )
 
     backup_dir.mkdir(parents=True, mode=0o700)
     if os.geteuid() == 0:
@@ -866,7 +899,8 @@ def apply_policy(
     manifest = {
         "schema_version": BACKUP_SCHEMA_VERSION,
         "status": "prepared",
-        "normalized_config_sha256": next(iter(normalized_hashes.values())),
+        "normalized_config_sha256": normalized_contract_sha256,
+        "normalized_config_sha256_by_account": normalized_hashes,
         "entries": entries,
     }
     _write_private(
@@ -909,7 +943,10 @@ def apply_policy(
 def rollback(*, backup_dir: Path, expected_owner_uid: int) -> None:
     manifest_path = backup_dir / "manifest.json"
     manifest = _load_object(manifest_path, "config backup manifest")
-    if manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
+    if manifest.get("schema_version") not in {
+        LEGACY_BACKUP_SCHEMA_VERSION,
+        BACKUP_SCHEMA_VERSION,
+    }:
         raise LiveNodeConfigError("config backup manifest schema mismatch")
     entries = manifest.get("entries")
     if (

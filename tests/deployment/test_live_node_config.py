@@ -28,35 +28,40 @@ def _write_configs(tmp_path: Path) -> dict[str, Path]:
     for suffix in ("a", "b", "c", "d"):
         account_id = f"account-{suffix}"
         path = tmp_path / f"node-{suffix}.hk.json"
+        config = {
+            "account_id": account_id,
+            "node_id": f"nautilus-node-{account_id}",
+            "trader_id": f"trader-{account_id}",
+            "instance_id": f"instance-{account_id}",
+            "binance": {
+                "api_key": {
+                    "env": f"BINANCE_ACCOUNT_{suffix.upper()}_KEY"
+                },
+                "api_secret": {
+                    "file": f"/run/secrets/binance-account-{suffix}"
+                },
+            },
+            "control_plane": {
+                "base_url": (
+                    live_config
+                    .ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS[
+                        account_id
+                    ]
+                ),
+                "token": {
+                    "env": (
+                        f"CONTROL_PLANE_ACCOUNT_{suffix.upper()}_TOKEN"
+                    )
+                }
+            },
+        }
+        if account_id == "account-d":
+            config["binance"]["proxy_url"] = (
+                "http://100.107.72.78:13128"
+            )
         path.write_text(
             json.dumps(
-                {
-                    "account_id": account_id,
-                    "node_id": f"nautilus-node-{account_id}",
-                    "trader_id": f"trader-{account_id}",
-                    "instance_id": f"instance-{account_id}",
-                    "binance": {
-                        "api_key": {
-                            "env": f"BINANCE_ACCOUNT_{suffix.upper()}_KEY"
-                        },
-                        "api_secret": {
-                            "file": f"/run/secrets/binance-account-{suffix}"
-                        },
-                    },
-                    "control_plane": {
-                        "base_url": (
-                            live_config
-                            .ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS[
-                                account_id
-                            ]
-                        ),
-                        "token": {
-                            "env": (
-                                f"CONTROL_PLANE_ACCOUNT_{suffix.upper()}_TOKEN"
-                            )
-                        }
-                    },
-                },
+                config,
                 indent=2,
             )
             + "\n",
@@ -182,6 +187,27 @@ def test_apply_policy_updates_caps_and_preserves_secret_references(
     )
     assert manifest["status"] == "applied"
     assert manifest["normalized_config_sha256"] == digest
+    normalized_by_account = {
+        account_id: live_config.normalized_config_sha256(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+        for account_id, path in configs.items()
+    }
+    assert manifest["normalized_config_sha256_by_account"] == (
+        normalized_by_account
+    )
+    assert digest == live_config.normalized_config_contract_sha256(
+        normalized_by_account
+    )
+    assert len(
+        {
+            normalized_by_account[account_id]
+            for account_id in ("account-a", "account-b", "account-c")
+        }
+    ) == 1
+    assert normalized_by_account["account-d"] != normalized_by_account[
+        "account-a"
+    ]
 
 
 def test_capture_uses_reviewed_defaults_for_production_shaped_legacy_env(
@@ -383,7 +409,7 @@ def test_prepare_target_creates_immutable_artifact_without_touching_peer(
         assert path.stat().st_ino == originals[account_id]["inode"]
 
 
-def test_serial_target_artifacts_have_distinct_bytes_and_shared_identity(
+def test_serial_target_artifacts_bind_per_account_normalized_hashes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -405,8 +431,14 @@ def test_serial_target_artifacts_have_distinct_bytes_and_shared_identity(
 
     assert len({record["sha256"] for record in records.values()}) == 4
     assert len(
-        {record["normalized_sha256"] for record in records.values()}
+        {
+            records[account_id]["normalized_sha256"]
+            for account_id in ("account-a", "account-b", "account-c")
+        }
     ) == 1
+    assert records["account-d"]["normalized_sha256"] != records[
+        "account-a"
+    ]["normalized_sha256"]
     for account_id, record in records.items():
         assert Path(record["host_path"]).parent.name == account_id
 

@@ -100,7 +100,9 @@
 2. inventory 更新：jp-24 服务表补全，HK trader 条目标注状态。
 3. 用户决策点（不在本计划内执行）：币安白名单收敛（移除旧 IP）、HK 缩配或退租、canary 放行（RESUME → A 账户 SOLUSDT ≤12U 往返）。
 
-## 遗留债务（不阻塞迁移，迁移后处理）
+## 后续优化与遗留债务（不阻塞迁移，迁移后处理）
+
+Binance user-data WebSocket 接管订单与持仓变化的主动推送，现有轮询降为低频兜底校验，目标将每账户约 1,250 weight/min 降到两位数；排在当前四项代码缺陷修复与 P4 浸泡完成之后。
 
 F1–F3 回滚守卫；旧 immutable 镜像 GC；容量证据 rebaseline 的 24h 窗口机制改良；三套测试的 CI；本地 brew postgresql@16 修复；canary 适配器 `lease_fencing_token` 固定化设计缺陷（需要契约层决策，不许在部署中顺手改围栏语义）。
 

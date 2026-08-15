@@ -411,6 +411,10 @@ class ReleaseManifestTest(unittest.TestCase):
                     ),
                 },
             }
+            if account_id == "account-d":
+                config["binance"] = {
+                    "proxy_url": "http://100.107.72.78:13128",
+                }
             payload = (
                 json.dumps(config, indent=2, sort_keys=True) + "\n"
             ).encode("utf-8")
@@ -630,7 +634,7 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
 
         self.assertEqual(len(hashes), 1)
 
-    def test_v3_manifest_binds_each_immutable_node_config_artifact(self):
+    def test_v4_manifest_binds_per_account_node_config_contract(self):
         self.assertEqual(
             self.artifact_manifest["schema_version"],
             release_manifest.SCHEMA_VERSION,
@@ -647,13 +651,32 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             for item in self.artifact_manifest["node_configs"]
         }
         normalized_hashes = {
-            item["normalized_sha256"]
+            item["account_id"]: item["normalized_sha256"]
             for item in self.artifact_manifest["node_configs"]
         }
         self.assertEqual(len(raw_hashes), 4)
         self.assertEqual(
-            normalized_hashes,
-            {self.artifact_manifest["config_sha256"]},
+            len(
+                {
+                    normalized_hashes[account_id]
+                    for account_id in (
+                        "account-a",
+                        "account-b",
+                        "account-c",
+                    )
+                }
+            ),
+            1,
+        )
+        self.assertNotEqual(
+            normalized_hashes["account-d"],
+            normalized_hashes["account-a"],
+        )
+        self.assertEqual(
+            self.artifact_manifest["config_sha256"],
+            release_manifest.node_config_contract_sha256(
+                self.artifact_manifest["node_configs"]
+            ),
         )
         self.assertTrue(
             release_manifest.STRICT_V3_REQUIRED_FIELDS.issubset(
@@ -691,7 +714,7 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
                 release_manifest.REPORTER_WORKER_RESOURCE_DEFAULTS,
             )
 
-    def test_strict_v3_manifest_fails_closed_when_any_field_is_missing(self):
+    def test_strict_manifest_fails_closed_when_any_field_is_missing(self):
         for field in sorted(release_manifest.STRICT_V3_REQUIRED_FIELDS):
             manifest = json.loads(json.dumps(self.artifact_manifest))
             manifest.pop(field)
@@ -701,9 +724,27 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
 
             with self.subTest(field=field), self.assertRaisesRegex(
                 release_manifest.ReleaseManifestError,
-                "strict release v3 fields are required",
+                "strict release fields are required",
             ):
                 release_manifest.validate_release_manifest(manifest)
+
+    def test_v3_manifest_rejects_per_account_normalized_hashes(self):
+        manifest = json.loads(json.dumps(self.artifact_manifest))
+        manifest["schema_version"] = (
+            release_manifest.PREVIOUS_SCHEMA_VERSION
+        )
+        manifest["config_sha256"] = manifest["node_configs"][0][
+            "normalized_sha256"
+        ]
+        manifest["release_id"] = release_manifest.calculate_release_id(
+            manifest
+        )
+
+        with self.assertRaisesRegex(
+            release_manifest.ReleaseManifestError,
+            "schema v3 requires one shared",
+        ):
+            release_manifest.validate_release_manifest(manifest)
 
     def test_immutable_capture_ignores_differing_current_node_images(self):
         bundle_path = self.temp_path / "bundle-manifest.json"

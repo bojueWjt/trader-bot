@@ -24,10 +24,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-SCHEMA_VERSION = "trader-v3-release/v3"
+SCHEMA_VERSION = "trader-v3-release/v4"
+PREVIOUS_SCHEMA_VERSION = "trader-v3-release/v3"
 LEGACY_SCHEMA_VERSION = "trader-v3-release/v2"
 SUPPORTED_SCHEMA_VERSIONS = {
     LEGACY_SCHEMA_VERSION,
+    PREVIOUS_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+}
+NODE_CONFIG_SCHEMA_VERSIONS = {
+    PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
 }
 SCHEMA_EPOCHS = {
@@ -65,6 +71,9 @@ RELEASE_PURPOSES = (
     RELEASE_PURPOSE_EMERGENCY_ROLLBACK,
 )
 RUNTIME_RESOURCES_SCHEMA_VERSION = "trader-v3-runtime-resources/v1"
+NODE_CONFIG_CONTRACT_SCHEMA_VERSION = (
+    "trader-v3-node-config-contract/v1"
+)
 LABEL_RELEASE_COMMIT = "com.trader.release.commit"
 LABEL_RELEASE_CONFIG = "com.trader.release.config-sha256"
 LABEL_RELEASE_DELIVERY = "com.trader.release.delivery-mode"
@@ -1131,6 +1140,52 @@ def node_config_value_sha256(config: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json_bytes(normalized)).hexdigest()
 
 
+def node_config_contract_sha256(
+    node_configs: list[dict[str, Any]],
+) -> str:
+    accounts = [
+        {
+            "account_id": str(entry["account_id"]),
+            "normalized_sha256": _require_sha256(
+                str(entry["normalized_sha256"]),
+                "node config normalized_sha256",
+            ),
+        }
+        for entry in sorted(
+            node_configs,
+            key=lambda item: str(item["account_id"]),
+        )
+    ]
+    contract = {
+        "schema_version": NODE_CONFIG_CONTRACT_SCHEMA_VERSION,
+        "accounts": accounts,
+    }
+    return hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
+
+
+def _release_config_sha256(
+    node_configs: list[dict[str, Any]],
+    *,
+    schema_version: str,
+) -> str:
+    normalized_hashes = {
+        item["normalized_sha256"]
+        for item in node_configs
+    }
+    if schema_version == PREVIOUS_SCHEMA_VERSION:
+        if len(normalized_hashes) != 1:
+            raise ReleaseManifestError(
+                "release schema v3 requires one shared node normalized "
+                "config hash"
+            )
+        return next(iter(normalized_hashes))
+    if schema_version == SCHEMA_VERSION:
+        return node_config_contract_sha256(node_configs)
+    raise ReleaseManifestError(
+        "node config contract requires a supported release schema"
+    )
+
+
 def _validated_runtime_resources(
     raw: Any,
     *,
@@ -1581,7 +1636,6 @@ def _validated_node_configs(raw_entries: Any) -> list[dict[str, Any]]:
     containers = set()
     node_ids = set()
     host_paths = set()
-    normalized_hashes = set()
     runtime_resource_hashes = set()
     for raw in raw_entries:
         if not isinstance(raw, dict):
@@ -1670,7 +1724,6 @@ def _validated_node_configs(raw_entries: Any) -> list[dict[str, Any]]:
         containers.add(container)
         node_ids.add(node_id)
         host_paths.add(host_path)
-        normalized_hashes.add(normalized_digest)
         runtime_resource_hashes.add(resources_digest)
         entries.append(
             {
@@ -1688,10 +1741,6 @@ def _validated_node_configs(raw_entries: Any) -> list[dict[str, Any]]:
         )
     if not account_ids.issubset(REQUIRED_ACCOUNTS):
         raise ReleaseManifestError("release node config accounts are invalid")
-    if len(normalized_hashes) != 1:
-        raise ReleaseManifestError(
-            "node normalized config artifact hashes differ"
-        )
     if len(runtime_resource_hashes) != 1:
         raise ReleaseManifestError(
             "node runtime resource config hashes differ"
@@ -3026,9 +3075,9 @@ def validate_strict_release_envelope(
     reviewer_trust_sha256: str,
     verify_image_labels: bool,
 ) -> dict[str, Any]:
-    if manifest.get("schema_version") != SCHEMA_VERSION:
+    if manifest.get("schema_version") not in NODE_CONFIG_SCHEMA_VERSIONS:
         raise ReleaseManifestError(
-            "hardening live requires strict release schema v3"
+            "hardening live requires a strict node-config release schema"
         )
     if manifest.get("release_purpose") != RELEASE_PURPOSE_HARDENING:
         raise ReleaseManifestError(
@@ -3172,9 +3221,10 @@ def build_release_manifest(
     else:
         schema_version = SCHEMA_VERSION
         validated_node_configs = _validated_node_configs(node_configs)
-        validated_config_sha256 = validated_node_configs[0][
-            "normalized_sha256"
-        ]
+        validated_config_sha256 = _release_config_sha256(
+            validated_node_configs,
+            schema_version=schema_version,
+        )
         if config_sha256 is not None:
             requested_config_sha256 = _require_sha256(
                 config_sha256,
@@ -3230,7 +3280,8 @@ def build_release_manifest(
     if release_purpose == RELEASE_PURPOSE_HARDENING:
         if schema_version != SCHEMA_VERSION:
             raise ReleaseManifestError(
-                "account-stall hardening requires strict release schema v3"
+                "account-stall hardening build requires strict release "
+                "schema v4"
             )
         missing_values = []
         for field, value in (
@@ -3259,7 +3310,7 @@ def build_release_manifest(
             missing_values.append("migration_manifest_sha256")
         if missing_values:
             raise ReleaseManifestError(
-                "strict release v3 fields are required: "
+                "strict release fields are required: "
                 f"{sorted(missing_values)}"
             )
         manifest["release_payload"] = _validated_release_payload(
@@ -3378,14 +3429,15 @@ def validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         str(manifest.get("config_sha256", "")),
         "config_sha256",
     )
-    if schema_version == SCHEMA_VERSION:
+    if schema_version in NODE_CONFIG_SCHEMA_VERSIONS:
         manifest["node_configs"] = _validated_node_configs(
             manifest.get("node_configs")
         )
-        normalized_sha256 = manifest["node_configs"][0][
-            "normalized_sha256"
-        ]
-        if manifest["config_sha256"] != normalized_sha256:
+        expected_config_sha256 = _release_config_sha256(
+            manifest["node_configs"],
+            schema_version=schema_version,
+        )
+        if manifest["config_sha256"] != expected_config_sha256:
             raise ReleaseManifestError(
                 "config_sha256 differs from node config artifacts"
             )
@@ -3404,14 +3456,15 @@ def validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             "migration_manifest_sha256",
         )
     if manifest["release_purpose"] == RELEASE_PURPOSE_HARDENING:
-        if schema_version != SCHEMA_VERSION:
+        if schema_version not in NODE_CONFIG_SCHEMA_VERSIONS:
             raise ReleaseManifestError(
-                "account-stall hardening requires strict release schema v3"
+                "account-stall hardening requires a strict node-config "
+                "release schema"
             )
         missing = STRICT_V3_REQUIRED_FIELDS - set(manifest)
         if missing:
             raise ReleaseManifestError(
-                "strict release v3 fields are required: "
+                "strict release fields are required: "
                 f"{sorted(missing)}"
             )
         manifest["release_payload"] = _validated_release_payload(
@@ -4243,7 +4296,7 @@ def verify_live_release(
             NODE_DOCKER_RESOURCE_ARTIFACT,
         )
     node_config_by_container = {}
-    if manifest["schema_version"] == SCHEMA_VERSION:
+    if manifest["schema_version"] in NODE_CONFIG_SCHEMA_VERSIONS:
         inspected_nodes, image_digest = _runtime_image_identity(containers)
         node_config_by_container = {
             item["container"]: item
