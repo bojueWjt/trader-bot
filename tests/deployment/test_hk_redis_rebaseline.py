@@ -653,6 +653,11 @@ def test_redis_rebaseline_contract_is_fail_closed() -> None:
     assert 'set_phase "source_renamed"' in text
     assert 'container_label_or_empty "$REDIS_CONTAINER"' in text
     assert 'run_redis_checker redis-check-rdb "$RDB_RELATIVE"' in text
+    assert 'if [ "$checker" = "redis-check-aof" ]; then' in text
+    assert '-v "$validation_dir:/backup:rw"' in text
+    assert "redis-check-aof changed the canonical cold backup" in text
+    assert "canonical_sha256_before=" in text
+    assert "canonical_sha256_after=" in text
     assert 'python3 "$CAPACITY_PLANNER" verify-backup' in text
     assert 'python3 "$CAPACITY_PLANNER" generate' in text
     assert f'REDIS_FENCING_EPOCH_KEY="{REDIS_FENCING_EPOCH_KEY}"' in text

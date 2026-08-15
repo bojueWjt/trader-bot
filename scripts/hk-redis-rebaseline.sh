@@ -378,8 +378,41 @@ on_signal() {
 run_redis_checker() {
   local checker="$1"
   local relative_path="$2"
+  local canonical_after
+  local canonical_before
+  local canonical_path
   local safe_name="${relative_path//\//_}"
   local report="$VALIDATOR_ROOT/${checker}-${safe_name}.txt"
+  local validation_dir
+  local validation_name
+  if [ "$checker" = "redis-check-aof" ]; then
+    canonical_path="$BACKUP_ROOT/$relative_path"
+    canonical_before="$(
+      sha256sum "$canonical_path" | awk '{print $1}'
+    )"
+    validation_dir="$VALIDATOR_ROOT/aof-work-$safe_name"
+    validation_name="$(basename "$relative_path")"
+    mkdir -m 0700 "$validation_dir"
+    cp -- "$canonical_path" "$validation_dir/$validation_name"
+    chmod 0600 "$validation_dir/$validation_name"
+    docker run --rm \
+      --network none \
+      --entrypoint "$checker" \
+      -v "$validation_dir:/backup:rw" \
+      "$OLD_IMAGE" \
+      "/backup/$validation_name" > "$report" 2>&1
+    canonical_after="$(
+      sha256sum "$canonical_path" | awk '{print $1}'
+    )"
+    [ "$canonical_after" = "$canonical_before" ] \
+      || die "redis-check-aof changed the canonical cold backup"
+    printf 'canonical_sha256_before=%s\n' "$canonical_before" >> "$report"
+    printf 'canonical_sha256_after=%s\n' "$canonical_after" >> "$report"
+    rm -f "$validation_dir/$validation_name"
+    rmdir "$validation_dir"
+    [ -s "$report" ] || die "$checker returned no validation evidence"
+    return
+  fi
   docker run --rm \
     --network none \
     --entrypoint "$checker" \
