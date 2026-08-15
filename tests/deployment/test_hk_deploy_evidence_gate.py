@@ -596,10 +596,16 @@ def connect(_url):
         stopped_gate = text[stopped_start:stopped_end]
         configure_start = text.index("configure_deploy_gate_mode()")
         configure_end = text.index(
-            "\nverify_bootstrap_stopped_gate()",
+            "\nBOOTSTRAP_GATE_QUIESCED_BY=",
             configure_start,
         )
         configure_gate = text[configure_start:configure_end]
+        quiescence_start = text.index("verify_bootstrap_gate_quiescence()")
+        quiescence_end = text.index(
+            "\nverify_bootstrap_stopped_gate()",
+            quiescence_start,
+        )
+        quiescence_gate = text[quiescence_start:quiescence_end]
 
         self.assertIn('for node in "${ALL_NODES[@]}"; do', stopped_gate)
         self.assertIn("{{.State.Running}}", stopped_gate)
@@ -611,12 +617,28 @@ def connect(_url):
             configure_gate,
         )
         self.assertIn(
-            "verify_all_execution_accounts_stopped",
+            "verify_bootstrap_gate_quiescence",
             configure_gate,
         )
         self.assertIn(
+            "migration_rebaseline_live_manifest_exists",
+            quiescence_gate,
+        )
+        self.assertIn(
+            "verify_all_execution_accounts_quiesced",
+            quiescence_gate,
+        )
+        self.assertIn(
+            "verify_all_execution_accounts_stopped",
+            quiescence_gate,
+        )
+        self.assertIn(
+            'BOOTSTRAP_GATE_QUIESCED_BY="stopped-container"',
+            quiescence_gate,
+        )
+        self.assertIn(
             "verify_migration_rebaseline_live_manifest",
-            configure_gate,
+            quiescence_gate,
         )
         helper_start = text.index(
             "verify_migration_rebaseline_live_manifest()"

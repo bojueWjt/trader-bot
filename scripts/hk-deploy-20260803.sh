@@ -1626,8 +1626,7 @@ PY
     migration_rebaseline_stopped)
       [ "$SKIP_RESUME" = "1" ] \
         || die "migration rebaseline requires SKIP_RESUME=1"
-      verify_all_execution_accounts_stopped
-      verify_migration_rebaseline_live_manifest
+      verify_bootstrap_gate_quiescence
       BOOTSTRAP_ALL_NODE_RELEASE=1
       RECREATE_NODES=("${ALL_NODES[@]}")
       role_env_count=0
@@ -1662,6 +1661,11 @@ PY
   esac
   echo "== deploy gate mode: $DEPLOY_GATE_MODE"
 }
+BOOTSTRAP_GATE_QUIESCED_BY="ready-halted-or-stopped-container"
+migration_rebaseline_live_manifest_exists() {
+  local live_manifest="$T/RELEASE_MANIFEST.json"
+  [ -e "$live_manifest" ] || [ -L "$live_manifest" ]
+}
 verify_migration_rebaseline_live_manifest() {
   local live_manifest="$T/RELEASE_MANIFEST.json"
   if [ ! -e "$live_manifest" ] && [ ! -L "$live_manifest" ]; then
@@ -1674,6 +1678,21 @@ verify_migration_rebaseline_live_manifest() {
   cmp -s "$live_manifest" "$RELEASE_MANIFEST" \
     || die "migration rebaseline live release manifest differs"
   echo "== migration rebaseline live release manifest matches staging"
+}
+verify_bootstrap_gate_quiescence() {
+  BOOTSTRAP_GATE_QUIESCED_BY="ready-halted-or-stopped-container"
+  if [ "$DEPLOY_GATE_MODE" != "migration_rebaseline_stopped" ]; then
+    verify_all_execution_accounts_quiesced
+    return
+  fi
+  if migration_rebaseline_live_manifest_exists; then
+    verify_migration_rebaseline_live_manifest
+    verify_all_execution_accounts_quiesced
+    return
+  fi
+  verify_all_execution_accounts_stopped
+  verify_migration_rebaseline_live_manifest
+  BOOTSTRAP_GATE_QUIESCED_BY="stopped-container"
 }
 verify_bootstrap_stopped_gate() {
   local stage="$1"
@@ -1689,12 +1708,7 @@ verify_bootstrap_stopped_gate() {
   esac
   [ "$SKIP_RESUME" = "1" ] \
     || die "bootstrap stopped gate requires SKIP_RESUME=1"
-  if [ "$DEPLOY_GATE_MODE" = "migration_rebaseline_stopped" ]; then
-    verify_all_execution_accounts_stopped
-    verify_migration_rebaseline_live_manifest
-  else
-    verify_all_execution_accounts_quiesced
-  fi
+  verify_bootstrap_gate_quiescence
   expected_epoch="$(
     python3 - "$REDIS_CAPACITY_EVIDENCE" <<'PY'
 import json
@@ -1720,7 +1734,7 @@ PY
       "$BOOTSTRAP_STOPPED_GATE_LOG" \
       "$stage" \
       "$expected_epoch" \
-      "$DEPLOY_GATE_MODE" <<'PY'
+      "$BOOTSTRAP_GATE_QUIESCED_BY" <<'PY'
 import json
 import os
 import sys
@@ -1734,11 +1748,7 @@ entry = {
     "checked_at": datetime.now(timezone.utc).isoformat(),
     "redis_fencing_epoch": sys.argv[3],
     "accounts": ["account-a", "account-b", "account-c", "account-d"],
-    "quiesced_by": (
-        "stopped-container"
-        if sys.argv[4] == "migration_rebaseline_stopped"
-        else "ready-halted-or-stopped-container"
-    ),
+    "quiesced_by": sys.argv[4],
     "skip_resume": True,
 }
 with path.open("a", encoding="utf-8") as handle:
