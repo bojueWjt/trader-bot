@@ -313,7 +313,7 @@ def test_canary_readiness_accepts_migration_all_halted_new_release_peers(
     )
 
 
-def test_canary_readiness_rejects_missing_fleet_heartbeat(
+def test_canary_readiness_allows_missing_non_target_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_canary_readiness_dependencies(
@@ -338,26 +338,22 @@ def test_canary_readiness_rejects_missing_fleet_heartbeat(
         ),
     ]
 
-    with pytest.raises(
-        read_api.HTTPException,
-        match="canary rollout heartbeat set is incomplete",
-    ):
-        read_api._validate_canary_release_ready(
-            _CanaryReadinessCursor(rows),
-            account_id=ACCOUNT_A,
-            required_rollout_phase="account_a_canary",
-            expected_trading_state="HALTED",
-            release_identity=(
-                RELEASE_ID,
-                IMAGE_DIGEST,
-                CONFIG_SHA256,
-                LOCK_SHA256,
-                SCHEMA_EPOCH,
-            ),
-        )
+    read_api._validate_canary_release_ready(
+        _CanaryReadinessCursor(rows),
+        account_id=ACCOUNT_A,
+        required_rollout_phase="account_a_canary",
+        expected_trading_state="HALTED",
+        release_identity=(
+            RELEASE_ID,
+            IMAGE_DIGEST,
+            CONFIG_SHA256,
+            LOCK_SHA256,
+            SCHEMA_EPOCH,
+        ),
+    )
 
 
-def test_canary_readiness_rejects_active_non_target_account(
+def test_canary_readiness_allows_active_non_target_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_canary_readiness_dependencies(
@@ -387,23 +383,19 @@ def test_canary_readiness_rejects_active_non_target_account(
         ),
     ]
 
-    with pytest.raises(
-        read_api.HTTPException,
-        match="account-c must be HALTED during canary rollout",
-    ):
-        read_api._validate_canary_release_ready(
-            _CanaryReadinessCursor(rows),
-            account_id=ACCOUNT_A,
-            required_rollout_phase="account_a_canary",
-            expected_trading_state="HALTED",
-            release_identity=(
-                RELEASE_ID,
-                IMAGE_DIGEST,
-                CONFIG_SHA256,
-                LOCK_SHA256,
-                SCHEMA_EPOCH,
-            ),
-        )
+    read_api._validate_canary_release_ready(
+        _CanaryReadinessCursor(rows),
+        account_id=ACCOUNT_A,
+        required_rollout_phase="account_a_canary",
+        expected_trading_state="HALTED",
+        release_identity=(
+            RELEASE_ID,
+            IMAGE_DIGEST,
+            CONFIG_SHA256,
+            LOCK_SHA256,
+            SCHEMA_EPOCH,
+        ),
+    )
 
 
 def _activate_redis_epoch(
@@ -1000,6 +992,91 @@ def test_command_targets_must_match_fresh_node_account(
 
     assert response.status_code == 409
     assert response.json()["detail"] == "target_nodes do not match fresh account binding"
+
+
+def test_refresh_evidence_command_allows_stale_account_binding(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db, age_seconds=120)
+    request_id = str(uuid4())
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(request_id),
+        json={
+            "type": "REFRESH_EVIDENCE",
+            "reason": "refresh stale live evidence",
+            "confirm": True,
+            "request_id": request_id,
+            "target_nodes": [NODE_A],
+            "scope": {
+                "account_id": ACCOUNT_A,
+                "release_id": RELEASE_ID,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    command_id = response.json()["command_id"]
+    commands = client.get(
+        f"/v1/nodes/{NODE_A}/commands",
+        params={"account_id": ACCOUNT_A},
+        headers=_node_headers(NODE_A, ACCOUNT_A, NODE_A_TOKEN),
+    )
+    assert commands.status_code == 200
+    command = next(
+        item
+        for item in commands.json()["commands"]
+        if item["command_id"] == command_id
+    )
+    assert command["type"] == "refresh_evidence"
+    assert command["args"]["account_id"] == ACCOUNT_A
+
+    status = client.get(
+        f"/v1/commands/{command_id}",
+        headers=_risk_headers(str(uuid4())),
+    )
+    assert status.status_code == 200
+    assert status.json()["status"] == "pending"
+
+    ack = client.post(
+        f"/v1/nodes/{NODE_A}/commands/{command_id}/ack",
+        headers=_node_headers(NODE_A, ACCOUNT_A, NODE_A_TOKEN),
+        json={
+            "account_id": ACCOUNT_A,
+            "status": "completed",
+        },
+    )
+    assert ack.status_code == 200
+
+    completed = client.get(
+        f"/v1/commands/{command_id}",
+        headers=_risk_headers(str(uuid4())),
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completed"
+    assert completed.json()["acks"] == [
+        {
+            "node_id": NODE_A,
+            "status": "completed",
+        }
+    ]
+
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT mode
+            FROM risk_state
+            WHERE account_id=%s
+            """,
+            (ACCOUNT_A,),
+        )
+        assert cur.fetchall() == []
+        cur.execute(
+            "DELETE FROM operator_commands WHERE command_id=%s",
+            (command_id,),
+        )
 
 
 def test_account_a_state_command_requires_single_target(
@@ -1829,7 +1906,7 @@ def test_each_account_can_arm_its_own_rollout_canary(
         assert cur.fetchone() == (account_id, "armed", node_id)
 
 
-def test_canary_resume_requires_all_four_account_heartbeats(
+def test_account_a_canary_resume_allows_missing_non_target_heartbeat(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -1847,13 +1924,20 @@ def test_canary_resume_requires_all_four_account_heartbeats(
         json=_resume_body(permit_id),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == (
-        "canary rollout heartbeat set is incomplete"
-    )
+    assert response.status_code == 200
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, armed_node_id
+            FROM live_canary_permits
+            WHERE permit_id=%s
+            """,
+            (permit_id,),
+        )
+        assert cur.fetchone() == ("armed", NODE_A)
 
 
-def test_canary_resume_requires_every_non_target_account_halted(
+def test_account_a_canary_resume_allows_active_non_target_account(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -1876,10 +1960,17 @@ def test_canary_resume_requires_every_non_target_account_halted(
         json=_resume_body(permit_id),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == (
-        "account-c must be HALTED during canary rollout"
-    )
+    assert response.status_code == 200
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, armed_node_id
+            FROM live_canary_permits
+            WHERE permit_id=%s
+            """,
+            (permit_id,),
+        )
+        assert cur.fetchone() == ("armed", NODE_A)
 
 
 @pytest.mark.parametrize(

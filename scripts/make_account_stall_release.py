@@ -63,6 +63,8 @@ MIGRATION_FILES = (
     "db/migrations/0013_four_account_rollout.down.sql",
     "db/migrations/0014_cancel_order_contract.up.sql",
     "db/migrations/0014_cancel_order_contract.down.sql",
+    "db/migrations/0015_refresh_evidence_command.up.sql",
+    "db/migrations/0015_refresh_evidence_command.down.sql",
 )
 SYSTEMD_RESOURCE_FILES = (
     "infra/systemd/account-stall-account-node.conf",
@@ -360,6 +362,12 @@ MIGRATION_CANCEL_ORDER_CONTRACT_UP = (
 MIGRATION_CANCEL_ORDER_CONTRACT_DOWN = (
     "db/migrations/0014_cancel_order_contract.down.sql"
 )
+MIGRATION_REFRESH_EVIDENCE_COMMAND_UP = (
+    "db/migrations/0015_refresh_evidence_command.up.sql"
+)
+MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN = (
+    "db/migrations/0015_refresh_evidence_command.down.sql"
+)
 MIGRATION_PREREQUISITES = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -401,6 +409,13 @@ MIGRATION_STEPS = (
         "up": MIGRATION_CANCEL_ORDER_CONTRACT_UP,
         "down": MIGRATION_CANCEL_ORDER_CONTRACT_DOWN,
         "prerequisites": [MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP],
+    },
+    {
+        "version": "0015",
+        "name": "refresh_evidence_command",
+        "up": MIGRATION_REFRESH_EVIDENCE_COMMAND_UP,
+        "down": MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN,
+        "prerequisites": [MIGRATION_CANCEL_ORDER_CONTRACT_UP],
     },
 )
 MIGRATION_PYTHON_DEPENDENCIES = ("psycopg2",)

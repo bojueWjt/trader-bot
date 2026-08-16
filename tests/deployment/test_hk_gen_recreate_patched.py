@@ -93,7 +93,7 @@ PATCH_TARGETS = {
     "binance_execution.py": BINANCE_DST,
     "binance_futures_execution.py": BINANCE_FUTURES_DST,
 }
-DATABASE_SCHEMA_EPOCH = "0014_cancel_order_contract"
+DATABASE_SCHEMA_EPOCH = "0015_refresh_evidence_command"
 
 
 class GenRecreatePatchedTest(unittest.TestCase):

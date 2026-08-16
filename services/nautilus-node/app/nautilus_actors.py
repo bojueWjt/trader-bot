@@ -2646,13 +2646,18 @@ class CommandPollerActor(Actor):
             self._run_heartbeat_lane,
         )
 
-    def _run_heartbeat_lane(self) -> None:
+    def _run_heartbeat_lane(self, *, force_refresh: bool = False) -> None:
         evidence_provider = self._exchange_evidence_provider
         if evidence_provider is None:
             heartbeat = self._lifecycle.build_heartbeat()
         else:
             try:
-                snapshot = evidence_provider.snapshot()
+                if force_refresh:
+                    snapshot = evidence_provider.snapshot(
+                        force_refresh=True,
+                    )
+                else:
+                    snapshot = evidence_provider.snapshot()
             except Exception as exc:
                 detail = str(exc).strip()
                 if not detail:
@@ -2706,6 +2711,9 @@ class CommandPollerActor(Actor):
 
     def session_send_heartbeat(self) -> None:
         self._run_heartbeat_lane()
+
+    def session_refresh_evidence(self) -> None:
+        self._run_heartbeat_lane(force_refresh=True)
 
     def session_bootstrap_writer(self) -> None:
         heartbeat = self._lifecycle.build_writer_bootstrap_heartbeat()
@@ -4088,6 +4096,9 @@ class CommandPollerActor(Actor):
                 self._lifecycle.apply_operator_state(
                     TradingState.HALTED, "operator_command"
                 )
+            elif cmd.type == CommandType.REFRESH_EVIDENCE:
+                self.session_refresh_evidence()
+                return CommandAckStatus.COMPLETED, None
             elif cmd.type == CommandType.RESUME:
                 if _lifecycle_is_live(self._lifecycle):
                     from runtime.live_canary_execution import (

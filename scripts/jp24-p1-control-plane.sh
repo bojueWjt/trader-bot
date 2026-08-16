@@ -70,6 +70,7 @@ require_source() {
     "$SOURCE_ROOT/services/nautilus-node/observability/__init__.py" \
     "$SOURCE_ROOT/packages/execution-domain/execution_domain/__init__.py" \
     "$SOURCE_ROOT/db/migrations/0014_cancel_order_contract.up.sql" \
+    "$SOURCE_ROOT/db/migrations/0015_refresh_evidence_command.up.sql" \
     "$SOURCE_ROOT/infra/systemd/account-stall-control-plane-writer.conf" \
     "$SOURCE_ROOT/infra/systemd/account-stall-control-plane-reader.conf" \
     "$SOURCE_ROOT/scripts/bootstrap_control_plane_roles.py"; do

@@ -76,6 +76,7 @@ class CommandType(str, Enum):
     SET_REDUCING = "set_reducing"
     CANCEL_ALL = "cancel_all"
     CLOSE_ALL = "close_all"
+    REFRESH_EVIDENCE = "refresh_evidence"
 
 
 class CommandAckStatus(str, Enum):

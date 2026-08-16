@@ -118,6 +118,8 @@ def test_config_selects_restricted_account_environment(
 class Scenario:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.command_counter = 0
+        self.command_statuses: dict[str, dict[str, Any]] = {}
         self.node_state = "HALTED"
         self.forced_responses: dict[
             tuple[str, str],
@@ -161,12 +163,37 @@ class Scenario:
         if method == "POST" and path == "/v1/commands":
             assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
             assert isinstance(body, dict)
-            self.node_state = str(body["type"])
-            if self.node_state == "RESUME":
+            self.command_counter += 1
+            command_id = f"command-{self.command_counter}"
+            command_type = str(body["type"])
+            command_status = "pending"
+            if command_type == "REFRESH_EVIDENCE":
+                command_status = "completed"
+            self.command_statuses[command_id] = {
+                "command_id": command_id,
+                "status": command_status,
+                "command_type": command_type,
+                "completed": command_status == "completed",
+                "acks": [
+                    {
+                        "node_id": NODE_ID,
+                        "status": command_status,
+                    }
+                ],
+            }
+            self.node_state = command_type
+            if command_type == "RESUME":
                 self.node_state = "ACTIVE"
-            if self.node_state == "HALT":
+            if command_type == "HALT":
                 self.node_state = "HALTED"
-            return 200, {"command_id": "command-1", "status": "pending"}
+            return 200, {"command_id": command_id, "status": command_status}
+        if method == "GET" and path.startswith("/v1/commands/"):
+            assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
+            command_id = path.rsplit("/", 1)[-1]
+            status = self.command_statuses.get(command_id)
+            if status is None:
+                return 404, {"detail": "command not found"}
+            return 200, status
         if method == "POST" and path == "/v1/operator/orders":
             assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
             assert isinstance(body, dict)
@@ -355,13 +382,49 @@ def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
     assert _canonical_sha256_without_evidence(payload) == payload[
         "evidence_sha256"
     ]
-    command = scenario.requests[0]
+    refresh_command = scenario.requests[0]
+    assert refresh_command["method"] == "POST"
+    assert refresh_command["path"] == "/v1/commands"
+    assert refresh_command["body"]["type"] == "REFRESH_EVIDENCE"
+    assert refresh_command["body"]["scope"]["account_id"] == ACCOUNT_ID
+    refresh_status = scenario.requests[1]
+    assert refresh_status["method"] == "GET"
+    assert refresh_status["path"] == "/v1/commands/command-1"
+    command = scenario.requests[2]
     assert command["method"] == "POST"
     assert command["path"] == "/v1/commands"
     assert command["headers"]["x-request-id"] == "resume-request-id"
+    assert command["body"]["type"] == "RESUME"
     assert command["body"]["scope"]["executor_identity"] == _identity()
     assert command["body"]["scope"]["release_id"] == _request()["release_id"]
     assert command["body"]["scope"]["canary_permit_id"] == _request()["permit_id"]
+
+
+def test_refresh_evidence_action_posts_command_and_waits_completed(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "refresh-evidence",
+            _request(side_effect_id="manual-refresh-request-id"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["accepted"] is True
+    assert payload["action"] == "refresh-evidence"
+    assert payload["command_status"] == "completed"
+    assert payload["side_effect_id"] == (
+        "manual-refresh-request-id:refresh-evidence:refresh-evidence"
+    )
+    command = scenario.requests[0]
+    assert command["method"] == "POST"
+    assert command["path"] == "/v1/commands"
+    assert command["body"]["type"] == "REFRESH_EVIDENCE"
+    assert command["body"]["idempotency_key"] == payload["side_effect_id"]
+    assert scenario.requests[1]["path"] == "/v1/commands/command-1"
 
 
 @pytest.mark.parametrize("action", ["resume", "halt"])
@@ -464,6 +527,13 @@ def test_open_posts_limit_ioc_operator_intent(
     assert payload["accepted"] is True
     assert payload["action"] == "open"
     assert payload["client_order_id"] == OPEN_CLIENT_ORDER_ID
+    refresh_command = scenario.requests[0]
+    assert refresh_command["method"] == "POST"
+    assert refresh_command["path"] == "/v1/commands"
+    assert refresh_command["body"]["type"] == "REFRESH_EVIDENCE"
+    refresh_status = scenario.requests[1]
+    assert refresh_status["method"] == "GET"
+    assert refresh_status["path"] == "/v1/commands/command-1"
     operator_request = next(
         request
         for request in scenario.requests

@@ -14,7 +14,14 @@ CREATE TABLE operator_commands (
     completed_at timestamptz,
     CONSTRAINT uq_operator_commands_idempotency UNIQUE (idempotency_key),
     CONSTRAINT ck_operator_commands_type CHECK (
-        command_type IN ('HALT', 'REDUCE', 'RESUME', 'CANCEL_ALL', 'CLOSE_ALL')
+        command_type IN (
+            'HALT',
+            'REDUCE',
+            'RESUME',
+            'CANCEL_ALL',
+            'CLOSE_ALL',
+            'REFRESH_EVIDENCE'
+        )
     ),
     CONSTRAINT ck_operator_commands_status CHECK (
         status IN ('pending', 'acknowledged', 'partial', 'failed', 'completed')

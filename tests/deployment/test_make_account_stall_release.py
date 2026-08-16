@@ -333,18 +333,20 @@ def _commit_path(root: Path, path: Path, message: str) -> None:
     )
 
 
-def test_release_builder_includes_four_account_rollout_migration() -> None:
-    assert release.SCHEMA_EPOCHS["db"] == "0014_cancel_order_contract"
-    assert release.MIGRATION_FILES[-2:] == (
+def test_release_builder_includes_refresh_evidence_command_migration() -> None:
+    assert release.SCHEMA_EPOCHS["db"] == "0015_refresh_evidence_command"
+    assert release.MIGRATION_FILES[-4:] == (
         release.MIGRATION_CANCEL_ORDER_CONTRACT_UP,
         release.MIGRATION_CANCEL_ORDER_CONTRACT_DOWN,
+        release.MIGRATION_REFRESH_EVIDENCE_COMMAND_UP,
+        release.MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN,
     )
     assert release.MIGRATION_STEPS[-1] == {
-        "version": "0014",
-        "name": "cancel_order_contract",
-        "up": release.MIGRATION_CANCEL_ORDER_CONTRACT_UP,
-        "down": release.MIGRATION_CANCEL_ORDER_CONTRACT_DOWN,
-        "prerequisites": [release.MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP],
+        "version": "0015",
+        "name": "refresh_evidence_command",
+        "up": release.MIGRATION_REFRESH_EVIDENCE_COMMAND_UP,
+        "down": release.MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN,
+        "prerequisites": [release.MIGRATION_CANCEL_ORDER_CONTRACT_UP],
     }
 
 
@@ -429,7 +431,7 @@ def test_release_builder_writes_complete_checksummed_payload(
         "python_dependencies": ["psycopg2"],
         "migration_files": list(release.MIGRATION_FILES),
         "steps": [dict(item) for item in release.MIGRATION_STEPS],
-        "db_schema_epoch": "0014_cancel_order_contract",
+        "db_schema_epoch": "0015_refresh_evidence_command",
         "manifest": release.MIGRATION_MANIFEST_NAME,
         "manifest_sha256": hashlib.sha256(
             (output / release.MIGRATION_MANIFEST_NAME).read_bytes()
@@ -503,7 +505,7 @@ def test_release_builder_writes_complete_checksummed_payload(
     assert migration_manifest["schema_version"] == (
         release.MIGRATION_MANIFEST_SCHEMA_VERSION
     )
-    assert migration_manifest["schema_epoch"] == "0014_cancel_order_contract"
+    assert migration_manifest["schema_epoch"] == "0015_refresh_evidence_command"
     assert {
         item["path"]
         for item in migration_manifest["migrations"]

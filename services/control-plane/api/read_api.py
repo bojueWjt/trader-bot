@@ -83,6 +83,9 @@ app.router.routes.extend(order_management_settings_router.routes)
 
 NODE_COMMAND_POLL_LIMIT = 64
 _TRADING_STATE_COMMANDS = frozenset({"HALT", "REDUCE", "RESUME"})
+_ACCOUNT_SCOPED_NODE_COMMANDS = _TRADING_STATE_COMMANDS | frozenset(
+    {"REFRESH_EVIDENCE"}
+)
 _COMMAND_TARGET_MAX_AGE_SECONDS = 5.0
 _LIVE_EVIDENCE_MAX_AGE_SECONDS = 5.0
 _TESTNET_EMERGENCY_CLOSE_EVIDENCE_MAX_AGE_SECONDS = 86_400.0
@@ -840,14 +843,21 @@ def issue_operator_command(
     authorization: str | None = Header(default=None),
     x_request_id: str | None = Header(default=None),
 ):
-    """Operator dangerous-op command (HALT/REDUCE/RESUME/CANCEL_ALL/CLOSE_ALL).
+    """Operator audited command (HALT/REDUCE/RESUME/CANCEL_ALL/CLOSE_ALL/REFRESH_EVIDENCE).
     risk_admin only; requires request_id + reason + confirm=true; writes a durable
-    audit_events row; issue_command sets risk_state so the gateway fails closed."""
+    audit_events row; issue_command sets risk_state for state commands."""
     role = require_reader(authorization)
     if role != "risk_admin":
         raise HTTPException(status_code=403, detail="risk_admin required")
     command_type = (body.get("type") or body.get("command_type") or "").upper()
-    if command_type not in ("HALT", "REDUCE", "RESUME", "CANCEL_ALL", "CLOSE_ALL"):
+    if command_type not in (
+        "HALT",
+        "REDUCE",
+        "RESUME",
+        "CANCEL_ALL",
+        "CLOSE_ALL",
+        "REFRESH_EVIDENCE",
+    ):
         raise HTTPException(status_code=400, detail="invalid command_type")
     reason = (body.get("reason") or "").strip()
     request_id = (x_request_id or body.get("request_id") or "").strip()
@@ -866,15 +876,15 @@ def issue_operator_command(
     scope = _operator_command_scope(body, request_id, reason)
     target_nodes = _operator_command_targets(body.get("target_nodes"))
     account_id = str(scope.get("account_id") or "").strip()
-    if command_type in _TRADING_STATE_COMMANDS and not account_id:
+    if command_type in _ACCOUNT_SCOPED_NODE_COMMANDS and not account_id:
         raise HTTPException(status_code=400, detail="scope.account_id is required")
-    if command_type in _TRADING_STATE_COMMANDS and not target_nodes:
+    if command_type in _ACCOUNT_SCOPED_NODE_COMMANDS and not target_nodes:
         raise HTTPException(
             status_code=400,
-            detail="state commands require target_nodes",
+            detail="account-scoped commands require target_nodes",
         )
     if (
-        command_type in _TRADING_STATE_COMMANDS
+        command_type in _ACCOUNT_SCOPED_NODE_COMMANDS
         and account_id in _ROLLOUT_ACCOUNTS
         and len(target_nodes) != 1
     ):
@@ -885,7 +895,7 @@ def issue_operator_command(
     idempotency_key = body.get("idempotency_key") or request_id
     conn = _database_connection(database_url)
     try:
-        if command_type in _TRADING_STATE_COMMANDS:
+        if command_type in _ACCOUNT_SCOPED_NODE_COMMANDS:
             with conn.cursor() as cur:
                 existing_scope = _operator_command_existing_scope(
                     cur,
@@ -898,7 +908,8 @@ def issue_operator_command(
                         cur,
                         account_id=account_id,
                         target_nodes=target_nodes,
-                        require_fresh=command_type != "RESUME",
+                        require_fresh=command_type
+                        not in {"RESUME", "REFRESH_EVIDENCE"},
                     )
                     if command_type == "RESUME":
                         _validate_and_arm_resume(
@@ -923,6 +934,30 @@ def issue_operator_command(
         )
         conn.commit()
         return result
+    finally:
+        conn.close()
+
+
+@app.get("/v1/commands/{command_id}")
+def operator_command_status(
+    command_id: str,
+    authorization: str | None = Header(default=None),
+):
+    role = require_reader(authorization)
+    if role != "risk_admin":
+        raise HTTPException(status_code=403, detail="risk_admin required")
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="command store unavailable")
+    _cp_paths()
+    from commands import CommandError, get_status
+
+    conn = _database_connection(database_url)
+    try:
+        try:
+            return get_status(conn, command_id)
+        except CommandError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
     finally:
         conn.close()
 
@@ -1802,6 +1837,7 @@ def _cp_paths() -> None:
 _NODE_COMMAND_TYPE_MAP = {
     "HALT": "halt", "RESUME": "resume", "REDUCE": "set_reducing",
     "CANCEL_ALL": "cancel_all", "CLOSE_ALL": "close_all",
+    "REFRESH_EVIDENCE": "refresh_evidence",
 }
 @app.post("/v1/nodes/{node_id}/intents/{intent_id}/ack")
 def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
@@ -3059,161 +3095,6 @@ def _validate_canary_release_ready(
         cur,
         release_identity=release_identity,
     )
-
-    account_index = _ROLLOUT_ACCOUNTS.index(account_id)
-    upgraded_accounts = set(
-        _ROLLOUT_ACCOUNTS[: account_index + 1]
-    )
-    all_halted_registration = _rollout_has_stopped_all_halted_registration(
-        cur,
-        rollout,
-    )
-    expected_accounts = _ROLLOUT_ACCOUNTS
-    cur.execute(
-        """
-        SELECT account_id,
-               node_id,
-               release_id,
-               image_digest,
-               config_sha256,
-               dependency_lock_sha256,
-               schema_epoch,
-               redis_fencing_epoch,
-               status,
-               GREATEST(
-                   0,
-                   EXTRACT(EPOCH FROM (now() - last_seen_at))
-               )
-        FROM node_heartbeats
-        WHERE account_id = ANY(%s)
-        ORDER BY account_id, node_id
-        FOR SHARE
-        """,
-        (list(expected_accounts),),
-    )
-    rows = cur.fetchall()
-    if len(rows) != len(expected_accounts):
-        raise HTTPException(
-            status_code=409,
-            detail="canary rollout heartbeat set is incomplete",
-        )
-    seen_accounts: set[str] = set()
-    max_age = _live_evidence_max_age_seconds()
-    for row in rows:
-        heartbeat_account_id = str(row[0])
-        heartbeat_node_id = str(row[1])
-        if heartbeat_account_id in seen_accounts:
-            raise HTTPException(
-                status_code=409,
-                detail="canary rollout requires one node per account",
-            )
-        seen_accounts.add(heartbeat_account_id)
-        expected_node_id = f"nautilus-node-{heartbeat_account_id}"
-        if heartbeat_node_id != expected_node_id:
-            raise HTTPException(
-                status_code=409,
-                detail="canary rollout node identity is invalid",
-            )
-        heartbeat_identity = tuple(row[2:7])
-        if heartbeat_account_id in upgraded_accounts:
-            if heartbeat_identity != release_identity:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "canary rollout heartbeat release identity drift"
-                    ),
-                )
-        else:
-            if all_halted_registration:
-                if heartbeat_identity != release_identity:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            f"{heartbeat_account_id} must run the "
-                            "stopped reviewed release during canary rollout"
-                        ),
-                    )
-                if str(row[7]) != active_redis_fencing_epoch:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "canary rollout heartbeat Redis fencing epoch drift"
-                        ),
-                    )
-                expected_state = "HALTED"
-                if str(row[8] or "").upper() != expected_state:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            f"{heartbeat_account_id} must be "
-                            f"{expected_state} during canary rollout"
-                        ),
-                    )
-                if float(row[9]) > max_age:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="canary rollout heartbeat is stale",
-                    )
-                continue
-            if heartbeat_identity == release_identity:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"{heartbeat_account_id} must remain on an "
-                        "approved old release during canary rollout"
-                    ),
-                )
-            cur.execute(
-                """
-                SELECT 1
-                FROM reviewed_release_manifests
-                WHERE account_id=%s
-                  AND release_id=%s
-                  AND image_digest=%s
-                  AND config_sha256=%s
-                  AND dependency_lock_sha256=%s
-                  AND schema_epoch=%s
-                  AND review_status='reviewed'
-                """,
-                (
-                    heartbeat_account_id,
-                    *heartbeat_identity,
-                ),
-            )
-            if cur.fetchone() is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"{heartbeat_account_id} old release is not "
-                        "approved"
-                    ),
-                )
-        if str(row[7]) != active_redis_fencing_epoch:
-            raise HTTPException(
-                status_code=409,
-                detail="canary rollout heartbeat Redis fencing epoch drift",
-            )
-        expected_state = "HALTED"
-        if heartbeat_account_id == account_id:
-            expected_state = expected_trading_state
-        if str(row[8] or "").upper() != expected_state:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"{heartbeat_account_id} must be {expected_state} "
-                    "during canary rollout"
-                ),
-            )
-        if float(row[9]) > max_age:
-            raise HTTPException(
-                status_code=409,
-                detail="canary rollout heartbeat is stale",
-            )
-    if seen_accounts != set(expected_accounts):
-        raise HTTPException(
-            status_code=409,
-            detail="canary rollout heartbeat set is incomplete",
-        )
 
 
 def _reviewed_rollout_state(

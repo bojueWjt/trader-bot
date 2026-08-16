@@ -14,7 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts" / "hk-deploy-20260803.sh"
 APP_SCHEMA_EPOCH = "account-stall-hardening-runtime/v1"
-DATABASE_SCHEMA_EPOCH = "0014_cancel_order_contract"
+DATABASE_SCHEMA_EPOCH = "0015_refresh_evidence_command"
 REDIS_SCHEMA_EPOCH = "fenced-generation-namespace/v2"
 REVIEWER_KEY_SHA256 = (
     "2b149fe2d7357dfea74441a1f6d6f1dd"
@@ -481,6 +481,9 @@ def connect(_url):
         cancel_order_spec = migration_function.index(
             '"0014",\n        "cancel_order_contract",',
         )
+        refresh_evidence_spec = migration_function.index(
+            '"0015",\n        "refresh_evidence_command",',
+        )
         migration_sql = migration_function.index("cur.execute(sql)")
         migration_record = migration_function.index(
             "INSERT INTO schema_migrations",
@@ -491,6 +494,8 @@ def connect(_url):
         self.assertLess(order_management_spec, evidence_indexes_spec)
         self.assertLess(evidence_indexes_spec, live_safety_spec)
         self.assertLess(live_safety_spec, cancel_order_spec)
+        self.assertLess(cancel_order_spec, refresh_evidence_spec)
+        self.assertLess(refresh_evidence_spec, migration_sql)
         self.assertLess(migration_sql, migration_record)
         self.assertLess(migration_record, durable_check)
 
@@ -833,7 +838,7 @@ def connect(_url):
         source = _migration_validator_source()
 
         self.assertIn('"$DEPLOY_GATE_MODE"', invocation)
-        self.assertIn("deploy_gate_mode = sys.argv[16]", source)
+        self.assertIn("deploy_gate_mode = sys.argv[17]", source)
         self.assertIn('"bootstrap_stopped"', source)
         self.assertIn('"bootstrap_resume_stopped"', source)
         self.assertIn('"maintenance_fence"', source)
@@ -924,6 +929,13 @@ def connect(_url):
             migration_payload,
             encoding="utf-8",
         )
+        refresh_evidence_path = (
+            self.root / "0015_refresh_evidence_command.up.sql"
+        )
+        refresh_evidence_path.write_text(
+            migration_payload,
+            encoding="utf-8",
+        )
         marker_path = self.root / "migration-marker.json"
         fence_state_path = self.root / "maintenance-fence.json"
         environment = dict(os.environ)
@@ -941,6 +953,7 @@ def connect(_url):
                 str(maintenance_fence_path),
                 str(four_account_path),
                 str(cancel_order_path),
+                str(refresh_evidence_path),
                 DATABASE_SCHEMA_EPOCH,
                 str(marker_path),
                 "58deee06-3a70-47d3-b056-92854fc6c322",

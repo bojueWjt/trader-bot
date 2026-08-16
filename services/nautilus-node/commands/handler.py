@@ -31,6 +31,7 @@ except ModuleNotFoundError as exc:
         SET_REDUCING = "set_reducing"
         CANCEL_ALL = "cancel_all"
         CLOSE_ALL = "close_all"
+        REFRESH_EVIDENCE = "refresh_evidence"
 
     class CommandAckStatus(str, Enum):
         ACCEPTED = "accepted"
@@ -217,6 +218,9 @@ class CommandProcessor:
 
         if command.type == CommandType.CLOSE_ALL:
             return self._close_all(command)
+
+        if command.type == CommandType.REFRESH_EVIDENCE:
+            return {"evidence_refreshed": True}
 
         raise ValueError(f"unsupported command type {command.type!r}")
 

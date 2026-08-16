@@ -25,7 +25,7 @@ BUILD_ATTESTATION_SHA256 = "c" * 64
 REVIEWER_TRUST_PROOF_SHA256 = "d" * 64
 EXPECTED_SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0014_cancel_order_contract",
+    "db": "0015_refresh_evidence_command",
     "redis": "fenced-generation-namespace/v2",
 }
 EXPECTED_TRANSITION_RUNTIME_FILES = {

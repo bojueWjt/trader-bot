@@ -23,7 +23,7 @@ RELEASE_ID = "release-maintenance-test"
 IMAGE_DIGEST = "sha256:" + ("1" * 64)
 CONFIG_SHA256 = "2" * 64
 DEPENDENCY_LOCK_SHA256 = "3" * 64
-SCHEMA_EPOCH = "0014_cancel_order_contract"
+SCHEMA_EPOCH = "0015_refresh_evidence_command"
 
 
 def _seed_fleet(

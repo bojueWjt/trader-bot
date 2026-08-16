@@ -279,7 +279,7 @@ def test_live_startup_ignores_active_environment_override(
     )
     monkeypatch.setenv(
         "TRADER_RELEASE_SCHEMA_EPOCH",
-        "0014_cancel_order_contract",
+        "0015_refresh_evidence_command",
     )
 
     lifecycle = NodeLifecycle(config=live_config, clock=_FixedClock())
@@ -545,7 +545,7 @@ def test_live_heartbeat_release_drift_is_sticky_halted(
     )
     monkeypatch.setenv(
         "TRADER_RELEASE_SCHEMA_EPOCH",
-        "0014_cancel_order_contract",
+        "0015_refresh_evidence_command",
     )
 
     class ControlPlane:
@@ -672,7 +672,7 @@ def test_writer_bootstrap_heartbeat_omits_release_and_exchange_evidence(
         "image_digest": "sha256:" + ("1" * 64),
         "config_sha256": "2" * 64,
         "dependency_lock_sha256": "3" * 64,
-        "schema_epoch": "0014_cancel_order_contract",
+        "schema_epoch": "0015_refresh_evidence_command",
     }
     lifecycle.configure_lease(
         redis_fencing_epoch=REDIS_FENCING_EPOCH,
@@ -711,7 +711,7 @@ def test_heartbeat_carries_release_identity_exchange_evidence_and_proof_time(
     )
     monkeypatch.setenv(
         "TRADER_RELEASE_SCHEMA_EPOCH",
-        "0014_cancel_order_contract",
+        "0015_refresh_evidence_command",
     )
     config = _load_account_a(monkeypatch)
     clock = _FixedClock()
@@ -742,7 +742,7 @@ def test_heartbeat_carries_release_identity_exchange_evidence_and_proof_time(
     assert heartbeat.image_digest == "sha256:" + ("1" * 64)
     assert heartbeat.config_sha256 == "2" * 64
     assert heartbeat.dependency_lock_sha256 == "3" * 64
-    assert heartbeat.schema_epoch == "0014_cancel_order_contract"
+    assert heartbeat.schema_epoch == "0015_refresh_evidence_command"
     assert heartbeat.positions == (
         {"symbol": "ETHUSDT", "quantity": "-0.01"},
     )

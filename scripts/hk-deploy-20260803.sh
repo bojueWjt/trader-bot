@@ -56,6 +56,8 @@ MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP="$STAGING/db/migrations/0013_four_account_roll
 MIGRATION_FOUR_ACCOUNT_ROLLOUT_DOWN="$STAGING/db/migrations/0013_four_account_rollout.down.sql"
 MIGRATION_CANCEL_ORDER_CONTRACT_UP="$STAGING/db/migrations/0014_cancel_order_contract.up.sql"
 MIGRATION_CANCEL_ORDER_CONTRACT_DOWN="$STAGING/db/migrations/0014_cancel_order_contract.down.sql"
+MIGRATION_REFRESH_EVIDENCE_COMMAND_UP="$STAGING/db/migrations/0015_refresh_evidence_command.up.sql"
+MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN="$STAGING/db/migrations/0015_refresh_evidence_command.down.sql"
 CONTROL_PLANE_ISOLATION_SCRIPT="$STAGING/hk-control-plane-isolation.sh"
 CONTROL_PLANE_ISOLATION_MODE="${CONTROL_PLANE_ISOLATION_MODE:-require}"
 LEGACY_CONTROL_PLANE_UNIT="${LEGACY_CONTROL_PLANE_UNIT:-trader-v3-controlplane.service}"
@@ -186,7 +188,7 @@ LEGACY_RECREATE_BOOTSTRAP_EVIDENCE="$BACKUP_ROOT/legacy-recreate-bootstrap.json"
 LEGACY_RECREATE_GENERATED_LIST="$BACKUP_ROOT/legacy-recreate-generated.tsv"
 LEGACY_RECREATE_RECORDS="$BACKUP_ROOT/legacy-recreate-records.tsv"
 LEGACY_RECREATE_SNAPSHOT_ROOT="$BACKUP_ROOT/legacy-recreate-snapshots"
-MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0014-migration-committed.json"
+MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0015-migration-committed.json"
 MAINTENANCE_FENCE_STATE="$BACKUP_ROOT/maintenance-fence.json"
 MAINTENANCE_FENCE_ID=""
 MAINTENANCE_FENCE_ACQUIRED=0
@@ -4116,7 +4118,7 @@ try:
     UUID(redis_fencing_epoch)
 except ValueError as exc:
     raise SystemExit("post-migration Redis fencing epoch is invalid") from exc
-if database_schema_epoch != "0014_cancel_order_contract":
+if database_schema_epoch != "0015_refresh_evidence_command":
     raise SystemExit("post-migration database schema epoch is invalid")
 if redis_schema_epoch != "fenced-generation-namespace/v2":
     raise SystemExit("post-migration Redis schema epoch is invalid")
@@ -4304,7 +4306,7 @@ with psycopg2.connect(database_url) as conn, conn.cursor() as cur:
         FROM schema_migrations
         WHERE version = ANY(%s)
         """,
-        (["0010", "0011", "0012", "0013", "0014"],),
+        (["0010", "0011", "0012", "0013", "0014", "0015"],),
     )
     applied_migrations = dict(cur.fetchall())
 if len(rows) != 1:
@@ -4317,6 +4319,7 @@ if applied_migrations != {
     "0012": "control_plane_maintenance_fence",
     "0013": "four_account_rollout",
     "0014": "cancel_order_contract",
+    "0015": "refresh_evidence_command",
 }:
     raise SystemExit(
         "post-migration recovery lacks required migrations"
@@ -5930,6 +5933,10 @@ require_staging_artifact \
   || die "0014 up migration missing"
 [ -f "$MIGRATION_CANCEL_ORDER_CONTRACT_DOWN" ] \
   || die "0014 down migration missing"
+[ -f "$MIGRATION_REFRESH_EVIDENCE_COMMAND_UP" ] \
+  || die "0015 up migration missing"
+[ -f "$MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN" ] \
+  || die "0015 down migration missing"
 case "$DELIVERY_MODE" in
   immutable_image|transition_bind_mount) ;;
   *) die "invalid DELIVERY_MODE: $DELIVERY_MODE" ;;
@@ -6024,6 +6031,8 @@ for required in \
   db/migrations/0013_four_account_rollout.down.sql \
   db/migrations/0014_cancel_order_contract.up.sql \
   db/migrations/0014_cancel_order_contract.down.sql \
+  db/migrations/0015_refresh_evidence_command.up.sql \
+  db/migrations/0015_refresh_evidence_command.down.sql \
   "$(basename "$DEPENDENCY_LOCK")"; do
   require_checksum_artifact "$required"
 done
@@ -6162,6 +6171,15 @@ expected_steps = [
             "db/migrations/0013_four_account_rollout.up.sql",
         ],
     },
+    {
+        "version": "0015",
+        "name": "refresh_evidence_command",
+        "up": "db/migrations/0015_refresh_evidence_command.up.sql",
+        "down": "db/migrations/0015_refresh_evidence_command.down.sql",
+        "prerequisites": [
+            "db/migrations/0014_cancel_order_contract.up.sql",
+        ],
+    },
 ]
 if migration.get("steps") != expected_steps:
     raise SystemExit("release migration metadata mismatch: steps")
@@ -6176,6 +6194,8 @@ required_migration_files = {
     "db/migrations/0013_four_account_rollout.down.sql",
     "db/migrations/0014_cancel_order_contract.up.sql",
     "db/migrations/0014_cancel_order_contract.down.sql",
+    "db/migrations/0015_refresh_evidence_command.up.sql",
+    "db/migrations/0015_refresh_evidence_command.down.sql",
 }
 migration_files = migration.get("migration_files")
 if not isinstance(migration_files, list):
@@ -6185,8 +6205,8 @@ if not required_migration_files.issubset(set(migration_files)):
 print(epochs["app"], epochs["db"], epochs["redis"])
 PY
 )
-[ "$DATABASE_SCHEMA_EPOCH" = "0014_cancel_order_contract" ] \
-  || die "reviewed database schema epoch must be 0014_cancel_order_contract"
+[ "$DATABASE_SCHEMA_EPOCH" = "0015_refresh_evidence_command" ] \
+  || die "reviewed database schema epoch must be 0015_refresh_evidence_command"
 [ "$REDIS_SCHEMA_EPOCH" = "fenced-generation-namespace/v2" ] \
   || die "reviewed Redis schema epoch mismatch"
 
@@ -7433,6 +7453,7 @@ apply_and_verify_database_migration() {
     "$MIGRATION_MAINTENANCE_FENCE_UP" \
     "$MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP" \
     "$MIGRATION_CANCEL_ORDER_CONTRACT_UP" \
+    "$MIGRATION_REFRESH_EVIDENCE_COMMAND_UP" \
     "$DATABASE_SCHEMA_EPOCH" \
     "$MIGRATION_COMMIT_MARKER" \
     "$MAINTENANCE_FENCE_ID" \
@@ -7479,15 +7500,16 @@ migration_path = Path(sys.argv[4])
 maintenance_fence_path = Path(sys.argv[5])
 four_account_rollout_path = Path(sys.argv[6])
 cancel_order_contract_path = Path(sys.argv[7])
-expected_epoch = sys.argv[8]
-migration_commit_marker = Path(sys.argv[9])
-maintenance_fence_id_raw = sys.argv[10]
-maintenance_owner_token = sys.argv[11]
-maintenance_actor = sys.argv[12]
-maintenance_fence_state = Path(sys.argv[13])
-maintenance_lease_seconds = int(sys.argv[14])
-heartbeat_max_age_seconds = int(sys.argv[15])
-deploy_gate_mode = sys.argv[16]
+refresh_evidence_command_path = Path(sys.argv[8])
+expected_epoch = sys.argv[9]
+migration_commit_marker = Path(sys.argv[10])
+maintenance_fence_id_raw = sys.argv[11]
+maintenance_owner_token = sys.argv[12]
+maintenance_actor = sys.argv[13]
+maintenance_fence_state = Path(sys.argv[14])
+maintenance_lease_seconds = int(sys.argv[15])
+heartbeat_max_age_seconds = int(sys.argv[16])
+deploy_gate_mode = sys.argv[17]
 if deploy_gate_mode not in {
     "bootstrap_stopped",
     "bootstrap_resume_stopped",
@@ -7503,7 +7525,7 @@ elif maintenance_fence_id_raw:
 database_url = env.get("DATABASE_URL", "")
 if not database_url:
     raise SystemExit("DATABASE_URL is required for migration")
-if expected_epoch != "0014_cancel_order_contract":
+if expected_epoch != "0015_refresh_evidence_command":
     raise SystemExit("unexpected database schema epoch")
 migration_specs = (
     ("0005", "order_management", order_management_path),
@@ -7527,6 +7549,11 @@ migration_specs = (
         "0014",
         "cancel_order_contract",
         cancel_order_contract_path,
+    ),
+    (
+        "0015",
+        "refresh_evidence_command",
+        refresh_evidence_command_path,
     ),
 )
 migrations = []
@@ -8048,7 +8075,7 @@ try:
                 )
 finally:
     conn.close()
-print("database_schema_epoch=0014_cancel_order_contract")
+print("database_schema_epoch=0015_refresh_evidence_command")
 PY
   if [ "$DEPLOY_GATE_MODE" = "maintenance_fence" ]; then
     load_maintenance_fence_state
@@ -8337,12 +8364,12 @@ try:
             open_incidents = int(cur.fetchone()[0])
             cur.execute(
                 """
-                SELECT version, name
-                FROM schema_migrations
-                WHERE version = ANY(%s)
-                """,
-                (["0010", "0011", "0012", "0013", "0014"],),
-            )
+        SELECT version, name
+        FROM schema_migrations
+        WHERE version = ANY(%s)
+        """,
+        (["0010", "0011", "0012", "0013", "0014", "0015"],),
+    )
             applied_migrations = dict(cur.fetchall())
 finally:
     conn.close()
@@ -8384,6 +8411,7 @@ if applied_migrations != {
     "0012": "control_plane_maintenance_fence",
     "0013": "four_account_rollout",
     "0014": "cancel_order_contract",
+    "0015": "refresh_evidence_command",
 }:
     raise SystemExit("account-a database schema epoch mismatch")
 if not isinstance(positions, list):

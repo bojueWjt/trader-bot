@@ -74,6 +74,7 @@ IDENTITY_FIELDS = (
 ACTION_NAMES = {
     "resume",
     "open",
+    "refresh-evidence",
     "observe",
     "cancel-open",
     "position",
@@ -330,6 +331,9 @@ class ControlPlaneClient:
             node_identity=node_identity,
         )
 
+    def command_status(self, command_id: str) -> dict[str, Any]:
+        return self.risk_get(f"/v1/commands/{command_id}")
+
     def _request(
         self,
         method: str,
@@ -450,6 +454,8 @@ class AccountALiveTradeHttpAdapter:
             )
         if action == "open":
             return self._submit_open(request)
+        if action == "refresh-evidence":
+            return self._refresh_evidence(request, operation=action)
         if action == "observe":
             return self._observe(request)
         if action == "cancel-open":
@@ -496,6 +502,8 @@ class AccountALiveTradeHttpAdapter:
                 "max_round_trips": request.get("max_round_trips", 1),
             },
         }
+        if command == "RESUME":
+            self._refresh_evidence(request, operation="before-resume")
         self._client.risk_post(
             "/v1/commands",
             command_body,
@@ -625,6 +633,7 @@ class AccountALiveTradeHttpAdapter:
             "source": "control-plane",
             "valid_seconds": 300,
         }
+        self._refresh_evidence(request, operation="before-open")
         response = self._client.risk_post(
             "/v1/operator/orders",
             body,
@@ -1478,6 +1487,87 @@ class AccountALiveTradeHttpAdapter:
     ) -> dict[str, Any]:
         return self._client.risk_get(
             f"/v1/operator/orders/{intent_id}"
+        )
+
+    def _refresh_evidence(
+        self,
+        request: Mapping[str, Any],
+        *,
+        operation: str,
+    ) -> dict[str, Any]:
+        side_effect_id = _required_text(
+            request.get("side_effect_id"),
+            "side_effect_id",
+        )
+        refresh_id = _refresh_side_effect_id(side_effect_id, operation)
+        body = {
+            "type": "REFRESH_EVIDENCE",
+            "reason": (
+                f"{self._config.account_id} SOLUSDT evidence refresh "
+                f"{operation} permit={request['permit_id']}"
+            ),
+            "confirm": True,
+            "request_id": refresh_id,
+            "idempotency_key": refresh_id,
+            "target_nodes": [self._config.node_id],
+            "scope": {
+                "account_id": self._config.account_id,
+                "symbol": SYMBOL,
+                "release_id": request["release_id"],
+                "permit_id": request["permit_id"],
+                "operation": operation,
+                "executor_identity": _identity(request),
+            },
+        }
+        issued = self._client.risk_post(
+            "/v1/commands",
+            body,
+            request_id=refresh_id,
+        )
+        command_id = _required_text(
+            issued.get("command_id"),
+            "refresh command_id",
+        )
+        status = self._wait_for_command_status(
+            command_id,
+            request=request,
+        )
+        payload = {
+            **_identity(request),
+            "accepted": True,
+            "action": "refresh-evidence",
+            "operation": operation,
+            "command_id": command_id,
+            "command_status": status.get("status"),
+            "side_effect_id": refresh_id,
+            "source": "control-plane",
+            "observed_at": _now(),
+        }
+        return _with_evidence(payload)
+
+    def _wait_for_command_status(
+        self,
+        command_id: str,
+        *,
+        request: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        deadline = self._deadline(request)
+        last_status = ""
+        while time.monotonic() < deadline:
+            status = self._client.command_status(command_id)
+            last_status = str(status.get("status") or "").lower()
+            if last_status == "completed":
+                return status
+            if last_status in {"failed", "partial"}:
+                raise AdapterError(
+                    "refresh evidence command failed: "
+                    f"{command_id} status={last_status}"
+                )
+            time.sleep(self._config.poll_interval_seconds)
+        raise SoftAdapterError(
+            "refresh evidence command poll timeout; "
+            f"last_status={last_status or 'missing'}",
+            code="HTTP_TIMEOUT",
         )
 
     def _optional_node_snapshot(
@@ -2431,6 +2521,13 @@ def _open_client_ref(
     if account_id not in SUPPORTED_ADAPTER_TARGETS:
         raise AdapterError("open client ref account target is unsupported")
     return f"{account_id}-canary-open-{intent_id}"
+
+
+def _refresh_side_effect_id(side_effect_id: str, operation: str) -> str:
+    suffix = re.sub(r"[^A-Za-z0-9_.:-]+", "-", operation).strip("-")
+    if not suffix:
+        suffix = "refresh-evidence"
+    return f"{side_effect_id}:refresh-evidence:{suffix}"
 
 
 def _compact_operator_response(

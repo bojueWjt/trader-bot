@@ -38,7 +38,7 @@ NODE_CONFIG_SCHEMA_VERSIONS = {
 }
 SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0014_cancel_order_contract",
+    "db": "0015_refresh_evidence_command",
     "redis": "fenced-generation-namespace/v2",
 }
 DEFAULT_CONTAINERS = (
@@ -171,6 +171,12 @@ MIGRATION_CANCEL_ORDER_CONTRACT_UP_PATH = (
 MIGRATION_CANCEL_ORDER_CONTRACT_DOWN_PATH = (
     "db/migrations/0014_cancel_order_contract.down.sql"
 )
+MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH = (
+    "db/migrations/0015_refresh_evidence_command.up.sql"
+)
+MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN_PATH = (
+    "db/migrations/0015_refresh_evidence_command.down.sql"
+)
 MIGRATION_PREREQUISITE_PATHS = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -203,6 +209,8 @@ CANONICAL_MIGRATION_PATHS = (
     MIGRATION_FOUR_ACCOUNT_ROLLOUT_DOWN_PATH,
     MIGRATION_CANCEL_ORDER_CONTRACT_UP_PATH,
     MIGRATION_CANCEL_ORDER_CONTRACT_DOWN_PATH,
+    MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH,
+    MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN_PATH,
 )
 CANONICAL_MIGRATION_STEPS = (
     {
@@ -242,6 +250,13 @@ CANONICAL_MIGRATION_STEPS = (
         "up": MIGRATION_CANCEL_ORDER_CONTRACT_UP_PATH,
         "down": MIGRATION_CANCEL_ORDER_CONTRACT_DOWN_PATH,
         "prerequisites": [MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP_PATH],
+    },
+    {
+        "version": "0015",
+        "name": "refresh_evidence_command",
+        "up": MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH,
+        "down": MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN_PATH,
+        "prerequisites": [MIGRATION_CANCEL_ORDER_CONTRACT_UP_PATH],
     },
 )
 STRICT_V3_REQUIRED_FIELDS = {
@@ -1016,6 +1031,8 @@ def validate_migration_manifest(
         MIGRATION_FOUR_ACCOUNT_ROLLOUT_DOWN_PATH,
         MIGRATION_CANCEL_ORDER_CONTRACT_UP_PATH,
         MIGRATION_CANCEL_ORDER_CONTRACT_DOWN_PATH,
+        MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH,
+        MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN_PATH,
         *prerequisite_paths,
     }
     if not required_paths.issubset(migration_paths):

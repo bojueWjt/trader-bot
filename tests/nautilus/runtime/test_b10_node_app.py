@@ -38,7 +38,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
         os.environ["TRADER_RELEASE_DEPENDENCY_LOCK_SHA256"] = "3" * 64
         os.environ[
             "TRADER_RELEASE_SCHEMA_EPOCH"
-        ] = "0014_cancel_order_contract"
+        ] = "0015_refresh_evidence_command"
 
     def tearDown(self) -> None:
         os.environ.clear()
@@ -1522,6 +1522,42 @@ class NautilusActorAdapterTest(unittest.TestCase):
                 heartbeat.algo_orders,
                 ({"symbol": "ETHUSDT", "client_order_id": "algo-1"},),
             )
+            self.assertEqual(provider.force_refresh_values, [False])
+        finally:
+            actor.on_stop()
+
+    def test_refresh_evidence_command_forces_exchange_snapshot_heartbeat(self) -> None:
+        from app.nautilus_actors import CommandPollerActor
+        from execution_domain.control_plane import (
+            CommandAckStatus,
+            CommandType,
+            NodeCommand,
+        )
+
+        control_plane = _HeartbeatCaptureControlPlane()
+        lifecycle = _RecordingLifecycle()
+        provider = _ExchangeEvidenceProvider()
+        actor = CommandPollerActor(
+            control_plane=control_plane,
+            lifecycle=lifecycle,
+            node_id="node-a",
+            account_id="account-a",
+            exchange_evidence_provider=provider,
+        )
+
+        status, error = actor._apply(
+            NodeCommand(
+                command_id="cmd-refresh",
+                type=CommandType.REFRESH_EVIDENCE,
+            )
+        )
+
+        try:
+            self.assertEqual(status, CommandAckStatus.COMPLETED)
+            self.assertIsNone(error)
+            self.assertEqual(provider.force_refresh_values, [True])
+            self.assertEqual(len(control_plane.heartbeats), 1)
+            self.assertEqual(lifecycle.applied_states, [])
         finally:
             actor.on_stop()
 
@@ -2007,9 +2043,11 @@ class _OpenOrdersCache:
 class _ExchangeEvidenceProvider:
     def __init__(self) -> None:
         self.thread_id: int | None = None
+        self.force_refresh_values: list[bool] = []
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
         self.thread_id = threading.get_ident()
+        self.force_refresh_values.append(force_refresh)
         return {
             "positions": [{"symbol": "ETHUSDT", "quantity": "-0.01"}],
             "regular_orders": [

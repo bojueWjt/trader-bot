@@ -164,6 +164,30 @@ class CommandProcessorTests(unittest.TestCase):
             ],
         )
 
+    def test_refresh_evidence_command_is_non_stateful_noop(self) -> None:
+        control_plane = _RecordingControlPlane()
+        lifecycle = _RecordingLifecycle(TradingState.HALTED)
+        engine = _RecordingEngine()
+        processor = CommandProcessor(
+            node_id="node-a",
+            control_plane=control_plane,
+            lifecycle=lifecycle,
+            engine=engine,
+            state_store=InMemoryCommandStateStore(),
+        )
+
+        result = processor.handle(
+            NodeCommand(
+                command_id="cmd-refresh",
+                type=CommandType.REFRESH_EVIDENCE,
+            )
+        )
+
+        self.assertEqual(result.status, CommandAckStatus.COMPLETED)
+        self.assertEqual(result.result, {"evidence_refreshed": True})
+        self.assertEqual(lifecycle.states, [])
+        self.assertEqual(engine.calls, [])
+
     def test_failed_command_id_is_idempotent_and_does_not_reexecute_engine_calls(self) -> None:
         control_plane = _RecordingControlPlane()
         engine = _RecordingEngine(fail_cancel=True)
