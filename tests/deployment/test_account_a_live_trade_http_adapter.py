@@ -1339,6 +1339,44 @@ def test_observe_rejects_non_authoritative_or_pre_dispatch_absence(
     assert payload["exchange_evidence_state"] == "unknown"
 
 
+def test_observe_maps_operator_rejection_to_terminal_zero_fill(
+    tmp_path: Path,
+) -> None:
+    fetched_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+    scenario = Scenario()
+    scenario.operator_statuses[OPEN_INTENT_ID] = {
+        "intent": {
+            "order_plan": {
+                "side": "long",
+            },
+        },
+        "status": "REJECTED",
+        "detail": "canary_permit_already_claimed",
+        "orders": [],
+        "execution_events": [],
+    }
+    scenario.exchange_state = _exchange_state(
+        fetched_at=fetched_at,
+        mark_price="0",
+        evidence_authoritative=False,
+    )
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "observe",
+            _request(open_client_order_id=OPEN_CLIENT_ORDER_ID),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["open_status"] == "REJECTED"
+    assert payload["filled_quantity"] == "0"
+    assert payload["average_fill_price_usdt"] == "0"
+    assert payload["mark_fresh"] is False
+    assert payload["exchange_evidence_state"] == "unknown"
+
+
 def test_observe_treats_frozen_node_loss_monitor_as_advisory(
     tmp_path: Path,
 ) -> None:

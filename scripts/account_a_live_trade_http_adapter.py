@@ -43,6 +43,12 @@ TERMINAL_ORDER_STATUSES = {
     "FILLED",
     "REJECTED",
 }
+TERMINAL_OPERATOR_NO_FILL_STATUSES = {
+    "DENIED",
+    "DUPLICATE",
+    "EXPIRED",
+    "REJECTED",
+}
 SOFT_HTTP_STATUSES = {408, 425, 429}
 DURABLE_HTTP_FAILURE_RE = re.compile(
     r"(?:"
@@ -2308,6 +2314,10 @@ def _execution_summary(
         filled_quantity = weighted_quantity
     if average_fill_price == 0 and weighted_quantity > 0:
         average_fill_price = weighted_quote / weighted_quantity
+    if not matched_order and filled_quantity == 0:
+        operator_status = _operator_terminal_no_fill_status(status)
+        if operator_status:
+            order_status = operator_status
     event_average_fill_price = Decimal(0)
     if weighted_quantity > 0:
         event_average_fill_price = weighted_quote / weighted_quantity
@@ -2342,6 +2352,15 @@ def _execution_summary(
         ),
         "trade_ids": trade_ids,
     }
+
+
+def _operator_terminal_no_fill_status(status: Mapping[str, Any]) -> str:
+    raw_status = str(status.get("status") or "").strip().upper()
+    if raw_status not in TERMINAL_OPERATOR_NO_FILL_STATUSES:
+        return ""
+    if raw_status == "EXPIRED":
+        return "EXPIRED"
+    return "REJECTED"
 
 
 def _empty_execution_summary() -> dict[str, Decimal | str | bool]:
