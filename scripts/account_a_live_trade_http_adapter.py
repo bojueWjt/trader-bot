@@ -698,6 +698,7 @@ class AccountALiveTradeHttpAdapter:
             request.get("open_client_order_id"),
             "open_client_order_id",
         )
+        self._refresh_evidence(request, operation="before-observe")
         deadline = self._deadline(request)
         exchange_not_before = _exchange_not_before(request)
         status = self._operator_status(str(request["intent_id"]))
@@ -841,6 +842,7 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
+        self._refresh_evidence(request, operation="before-position")
         mirror = self._exchange_state_after(
             (),
             request=request,
@@ -1237,6 +1239,7 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
+        self._refresh_evidence(request, operation="before-final-snapshot")
         mirror = self._exchange_state_after(
             (),
             request=request,
@@ -1540,10 +1543,7 @@ class AccountALiveTradeHttpAdapter:
             operation=operation,
             target=target,
             refresh_id=_refresh_side_effect_id(
-                _required_text(
-                    request.get("side_effect_id"),
-                    "side_effect_id",
-                ),
+                _refresh_side_effect_seed(request, operation),
                 operation,
             ),
         )
@@ -2713,6 +2713,23 @@ def _refresh_side_effect_id(
             raise AdapterError("refresh account id is invalid")
         refresh_id = f"{refresh_id}:{account_suffix}"
     return refresh_id
+
+
+def _refresh_side_effect_seed(
+    request: Mapping[str, Any],
+    operation: str,
+) -> str:
+    raw = request.get("side_effect_id")
+    if raw is not None and str(raw).strip():
+        return _required_text(raw, "side_effect_id")
+    authorization_hash = _required_text(
+        request.get("authorization_sha256"),
+        "authorization_sha256",
+    )
+    account_id = _required_text(request.get("account_id"), "account_id")
+    intent_id = _canonical_uuid(request.get("intent_id"), "intent_id")
+    identity = f"{authorization_hash}:{account_id}:{intent_id}:{operation}"
+    return hashlib.sha256(identity.encode("ascii")).hexdigest()
 
 
 def _compact_operator_response(

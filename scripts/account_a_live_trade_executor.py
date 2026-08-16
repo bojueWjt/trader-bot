@@ -2129,6 +2129,10 @@ class AccountALiveTradeExecutor:
                         authorization.open_client_order_id
                     ),
                     "observation_index": observation_index,
+                    "side_effect_id": deterministic_side_effect_id(
+                        authorization,
+                        f"OBSERVE_{observation_index}",
+                    ),
                     "max_cumulative_net_loss_usdt": _decimal_text(
                         authorization.max_cumulative_net_loss_usdt
                     ),
@@ -2333,6 +2337,10 @@ class AccountALiveTradeExecutor:
                     "attempt": attempt,
                     "open_client_order_id": (
                         authorization.open_client_order_id
+                    ),
+                    "side_effect_id": deterministic_side_effect_id(
+                        authorization,
+                        f"POSITION_{attempt}",
                     ),
                     "hard_timeout_seconds": (
                         self._recovery_seconds_remaining(
@@ -2751,6 +2759,10 @@ class AccountALiveTradeExecutor:
                         ),
                         "protected_baseline_side": (
                             protected_baseline_side
+                        ),
+                        "side_effect_id": deterministic_side_effect_id(
+                            authorization,
+                            f"FINAL_SNAPSHOT_{attempt}",
                         ),
                         "hard_timeout_seconds": (
                             self._recovery_seconds_remaining(
@@ -4266,14 +4278,6 @@ def _parse_observation(
         raise LiveTradeExecutionError(
             "observation open client order ID mismatch"
         )
-    if payload.get("mark_fresh") is not True:
-        raise LiveTradeExecutionError(
-            "observation mark price is stale"
-        )
-    if payload.get("loss_monitor_healthy") is not True:
-        raise LiveTradeExecutionError(
-            "loss monitor is unhealthy"
-        )
     open_status = _required_text(
         payload.get("open_status"),
         "open_status",
@@ -4300,6 +4304,19 @@ def _parse_observation(
         raise LiveTradeExecutionError(
             "filled quantity exceeds authorized quantity"
         )
+    terminal_no_fill = (
+        open_status in TERMINAL_OPEN_STATUSES
+        and filled_quantity == 0
+    )
+    if not terminal_no_fill:
+        if payload.get("mark_fresh") is not True:
+            raise LiveTradeExecutionError(
+                "observation mark price is stale"
+            )
+        if payload.get("loss_monitor_healthy") is not True:
+            raise LiveTradeExecutionError(
+                "loss monitor is unhealthy"
+            )
     cumulative_loss = _decimal(
         payload.get("cumulative_net_loss_usdt"),
         "cumulative_net_loss_usdt",
@@ -4322,6 +4339,8 @@ def _parse_observation(
         "mark_at": mark_at,
         "loss_monitor_at": loss_monitor_at,
     }.items():
+        if terminal_no_fill and field_name != "observed_at":
+            continue
         _require_fresh_timestamp(
             timestamp,
             now=now,

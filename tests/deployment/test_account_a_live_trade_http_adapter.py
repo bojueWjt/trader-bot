@@ -453,6 +453,37 @@ def _assert_refresh_burst(
         assert scenario.requests.index(request) < before_index
 
 
+def _assert_single_refresh_before(
+    scenario: Scenario,
+    *,
+    operation: str,
+    before_request: dict[str, Any],
+) -> None:
+    refresh_posts = _refresh_command_posts(scenario)
+    matching = [
+        request
+        for request in refresh_posts
+        if request["body"]["scope"]["operation"] == operation
+    ]
+    assert len(matching) == 1
+    refresh_request = matching[0]
+    before_index = scenario.requests.index(before_request)
+    assert scenario.requests.index(refresh_request) < before_index
+    assert refresh_request["body"]["scope"]["account_id"] == ACCOUNT_ID
+    assert refresh_request["body"]["target_nodes"] == [NODE_ID]
+    assert refresh_request["body"]["idempotency_key"].endswith(
+        f":{operation}"
+    )
+    status_polls = [
+        request
+        for request in scenario.requests
+        if request["method"] == "GET"
+        and request["path"].startswith("/v1/commands/")
+    ]
+    assert status_polls
+    assert scenario.requests.index(status_polls[0]) < before_index
+
+
 def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
     tmp_path: Path,
 ) -> None:
@@ -1201,6 +1232,16 @@ def test_observe_uses_real_mirror_and_node_progress_evidence(
     }
     assert payload["node_snapshot"]["node_id"] == NODE_ID
     assert payload["node_snapshot"]["loss_monitor_healthy"] is True
+    exchange_request = next(
+        request
+        for request in scenario.requests
+        if request["path"] == f"/v1/nodes/{NODE_ID}/exchange-state"
+    )
+    _assert_single_refresh_before(
+        scenario,
+        operation="before-observe",
+        before_request=exchange_request,
+    )
     publication = next(
         request
         for request in scenario.requests
@@ -1693,6 +1734,11 @@ def test_position_waits_for_exchange_sample_after_dispatch(
         )
     ]
     assert len(exchange_requests) == 2
+    _assert_single_refresh_before(
+        scenario,
+        operation="before-position",
+        before_request=exchange_requests[0],
+    )
 
 
 def test_close_posts_exact_reduce_only_and_waits_for_exchange_flat(
@@ -2503,6 +2549,16 @@ def test_final_snapshot_keeps_exchange_proof_when_enrichment_is_unavailable(
     )
     assert payload["source"] == "exchange"
     assert payload["fetched_at"] == fetched_at.isoformat()
+    exchange_request = next(
+        request
+        for request in scenario.requests
+        if request["path"] == f"/v1/nodes/{NODE_ID}/exchange-state"
+    )
+    _assert_single_refresh_before(
+        scenario,
+        operation="before-final-snapshot",
+        before_request=exchange_request,
+    )
     assert payload["enrichment_degraded"] is True
     assert payload["financial_proof_complete"] is False
     assert len(payload["warnings"]) == 2

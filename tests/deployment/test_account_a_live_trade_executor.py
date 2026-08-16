@@ -174,9 +174,12 @@ class FakeAdapter:
         authorization: executor.CanaryAuthorization,
         *,
         fail_observe: bool = False,
+        open_fill_quantity: str | None = None,
         observation_loss: str = "0.10",
         observation_price: str = "100",
         observation_status: str = "FILLED",
+        observation_mark_fresh: bool = True,
+        observation_loss_monitor_healthy: bool = True,
         observation_times: Mapping[str, datetime] | None = None,
         signal_number: int | None = None,
         position_failures: int = 0,
@@ -196,9 +199,16 @@ class FakeAdapter:
     ) -> None:
         self.authorization = authorization
         self.fail_observe = fail_observe
+        self.open_fill_quantity = authorization.quantity
+        if open_fill_quantity is not None:
+            self.open_fill_quantity = Decimal(open_fill_quantity)
         self.observation_loss = observation_loss
         self.observation_price = observation_price
         self.observation_status = observation_status
+        self.observation_mark_fresh = observation_mark_fresh
+        self.observation_loss_monitor_healthy = (
+            observation_loss_monitor_healthy
+        )
         self.observation_times = dict(observation_times or {})
         self.signal_number = signal_number
         self.position_failures = position_failures
@@ -238,13 +248,14 @@ class FakeAdapter:
     ) -> Mapping[str, Any]:
         self._require_operation_lock()
         self._record_call("open", request)
-        self.position_quantity = self.authorization.quantity
-        self.exchange_confirmed_open_fill_quantity = (
-            self.authorization.quantity
-        )
-        self.position_side = "LONG"
-        if self.authorization.open_side == "SELL":
-            self.position_side = "SHORT"
+        self.position_quantity = self.open_fill_quantity
+        self.exchange_confirmed_open_fill_quantity = self.open_fill_quantity
+        if self.open_fill_quantity == 0:
+            self.position_side = "FLAT"
+        else:
+            self.position_side = "LONG"
+            if self.authorization.open_side == "SELL":
+                self.position_side = "SHORT"
         error = self.open_error_after_effect
         if error is not None:
             self.open_error_after_effect = None
@@ -279,13 +290,13 @@ class FakeAdapter:
                     self.authorization.open_client_order_id
                 ),
                 "open_status": self.observation_status,
-                "filled_quantity": str(
-                    self.authorization.quantity
-                ),
+                "filled_quantity": str(self.open_fill_quantity),
                 "average_fill_price_usdt": self.observation_price,
                 "cumulative_net_loss_usdt": self.observation_loss,
-                "mark_fresh": True,
-                "loss_monitor_healthy": True,
+                "mark_fresh": self.observation_mark_fresh,
+                "loss_monitor_healthy": (
+                    self.observation_loss_monitor_healthy
+                ),
                 "observed_at": observed_at.isoformat(),
                 "mark_at": mark_at.isoformat(),
                 "loss_monitor_at": loss_monitor_at.isoformat(),
@@ -1946,6 +1957,46 @@ def test_stale_trade_observation_closes_and_halts(
     assert f"observation {field_name} is stale" in result.failure_reason
     assert result.close_submitted is True
     assert adapter.calls.index("close") < adapter.calls.index("halt")
+
+
+def test_terminal_zero_fill_observation_proves_flat_without_mark_price(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(
+        authorization,
+        open_fill_quantity="0",
+        observation_loss="0",
+        observation_price="0",
+        observation_status="EXPIRED",
+        observation_mark_fresh=False,
+        observation_loss_monitor_healthy=False,
+        observation_times={
+            "mark_at": NOW - timedelta(seconds=60),
+            "loss_monitor_at": NOW - timedelta(seconds=60),
+        },
+    )
+    evidence_path = tmp_path / "terminal-zero-fill.json"
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=evidence_path,
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.passed is False
+    assert result.finished_halted is True
+    assert result.close_submitted is False
+    assert "open order produced no fill" in result.failure_reason
+    assert "observation mark price is stale" not in result.failure_reason
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert evidence["target_symbol_flat"] is True
+    assert evidence["target_symbol_regular_orders_zero"] is True
+    assert evidence["target_symbol_algo_orders_zero"] is True
+    assert evidence["mainnet_round_trip"]["open_filled_quantity"] == "0"
+    assert evidence["mainnet_round_trip"]["close_filled_quantity"] == "0"
 
 
 @pytest.mark.parametrize(
