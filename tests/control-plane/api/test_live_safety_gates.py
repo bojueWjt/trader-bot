@@ -528,6 +528,7 @@ def _seed_heartbeat(
                         "readiness": True,
                         "projection_lag_ms": 0,
                         "reconciliation_state": "healthy",
+                        "ts": now.isoformat(),
                     }
                 ),
                 release_id,
@@ -2094,6 +2095,43 @@ def test_resume_allows_existing_non_target_risk_and_binds_portfolio_baseline(
         status, baseline = cur.fetchone()
     assert status == "armed"
     assert len(baseline) == 64
+
+
+def test_resume_uses_payload_timestamp_for_reconciliation_health(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db)
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE node_heartbeats
+            SET reconciliation_completed_at=clock_timestamp() - interval '5 minutes'
+            WHERE node_id=%s
+            """,
+            (NODE_A,),
+        )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 200
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, armed_node_id
+            FROM live_canary_permits
+            WHERE permit_id=%s
+            """,
+            (permit_id,),
+        )
+        status, armed_node_id = cur.fetchone()
+    assert status == "armed"
+    assert armed_node_id == NODE_A
 
 
 def test_migration_rebaseline_all_halted_allows_later_account_canary_resume(

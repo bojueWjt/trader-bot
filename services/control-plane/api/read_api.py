@@ -1472,7 +1472,7 @@ def _load_live_heartbeat(
                lease_fencing_token,
                heartbeat_sequence,
                last_seen_at,
-               now()
+               clock_timestamp()
         FROM node_heartbeats
         WHERE node_id=%s
           AND account_id=%s
@@ -1590,12 +1590,16 @@ def _validate_live_heartbeat_evidence(
         "positions_snapshot_at",
         "regular_orders_snapshot_at",
         "algo_orders_snapshot_at",
-        "reconciliation_completed_at",
     )
     if any(
         not _timestamp_is_fresh(heartbeat.get(field_name), now)
         for field_name in freshness_fields
     ):
+        raise HTTPException(
+            status_code=409,
+            detail="node heartbeat evidence is stale",
+        )
+    if not _reconciliation_health_is_fresh(payload, now):
         raise HTTPException(
             status_code=409,
             detail="node heartbeat evidence is stale",
@@ -1707,6 +1711,19 @@ def _timestamp_is_fresh(value, now: datetime) -> bool:
         now,
         _live_evidence_max_age_seconds(),
     )
+
+
+def _reconciliation_health_is_fresh(payload: dict, now: datetime) -> bool:
+    if str(payload.get("reconciliation_state") or "").lower() != "healthy":
+        return False
+    raw_ts = payload.get("ts")
+    if not raw_ts:
+        return False
+    try:
+        observed = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return _timestamp_is_fresh(observed, now)
 
 
 def _timestamp_is_fresh_with_max_age(
