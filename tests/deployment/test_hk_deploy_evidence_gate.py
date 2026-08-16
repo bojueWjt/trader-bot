@@ -269,6 +269,7 @@ class AccountBEvidenceGateTest(unittest.TestCase):
         state_registration_key: str | None = None,
         write_release_manifest: bool = True,
         live_manifest_payload: dict | None = None,
+        fleet_state: str = "live_or_restartable",
     ) -> subprocess.CompletedProcess[str]:
         base_manifest = {
             "release_id": "release-reviewed-a",
@@ -426,6 +427,7 @@ def connect(_url):
                 str(live_manifest_path),
                 str(release_manifest_path),
                 "1",
+                fleet_state,
             ],
             cwd=REPO_ROOT,
             env=environment,
@@ -1181,6 +1183,38 @@ def connect(_url):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "maintenance_fence")
+
+    def test_same_epoch_stopped_recovery_uses_bootstrap_stopped(self) -> None:
+        old_manifest = {
+            "release_id": "release-hk-old",
+            "image_digest": "sha256:" + ("4" * 64),
+            "config_sha256": "5" * 64,
+            "dependency_lock_sha256": "6" * 64,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
+        }
+        successor_manifest = {
+            "release_id": "release-bootstrap-successor",
+            "image_digest": "sha256:" + ("7" * 64),
+            "config_sha256": "8" * 64,
+            "dependency_lock_sha256": "6" * 64,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
+        }
+        shared_capacity = {
+            "redis_fencing_epoch": "redis-epoch-shared",
+            "account_ids": ["account-a", "account-b", "account-c", "account-d"],
+        }
+        result = self._run_deploy_gate_mode_detector(
+            manifest_payload=successor_manifest,
+            capacity_payload=shared_capacity,
+            state_manifest_payload=old_manifest,
+            state_capacity_payload=shared_capacity,
+            resume_manifest=False,
+            live_manifest_payload=old_manifest,
+            fleet_state="all_stopped",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "bootstrap_stopped")
 
     def test_same_epoch_live_hotfix_capture_uses_maintenance_fence(
         self,

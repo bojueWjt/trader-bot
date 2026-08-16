@@ -1206,6 +1206,11 @@ print(database_url)
 PY
 }
 configure_deploy_gate_mode() {
+  local fleet_state="live_or_restartable"
+  local role_env_count
+  if all_execution_accounts_stopped; then
+    fleet_state="all_stopped"
+  fi
   DEPLOY_GATE_MODE="$(
     "$T/.venv-cp/bin/python" - \
       "$T/.env.v3" \
@@ -1216,7 +1221,8 @@ configure_deploy_gate_mode() {
       "$STAGING/bundle-manifest.json" \
       "$T/RELEASE_MANIFEST.json" \
       "$RELEASE_MANIFEST" \
-      "$SKIP_RESUME" <<'PY'
+      "$SKIP_RESUME" \
+      "$fleet_state" <<'PY'
 import hashlib
 import json
 import sys
@@ -1254,11 +1260,16 @@ bundle_manifest_path = Path(sys.argv[6])
 live_manifest_path = Path(sys.argv[7])
 release_manifest_path = Path(sys.argv[8])
 skip_resume = sys.argv[9]
+fleet_state = sys.argv[10]
+if fleet_state not in {"all_stopped", "live_or_restartable"}:
+    raise SystemExit("execution fleet state is invalid")
 if emergency_rollback == "1":
     print("maintenance_fence")
     raise SystemExit(0)
 resume_manifest_path = False
 migration_rebaseline = False
+bootstrap_stopped_recovery = False
+bootstrap_stopped_replay = False
 if resume_manifest_raw:
     resume_manifest_path = Path(resume_manifest_raw)
     if rollout_node != "trader-v3-node-a":
@@ -1506,21 +1517,94 @@ try:
                     raise SystemExit(
                         "migration rebaseline release manifest lacks release_id"
                     )
-                if active_rollout[0] != target_release_id:
-                    if live_manifest_present:
+                target_manifest_sha256 = hashlib.sha256(
+                    release_manifest_path.read_bytes()
+                ).hexdigest()
+                target_bundle_sha256 = hashlib.sha256(
+                    bundle_manifest_path.read_bytes()
+                ).hexdigest()
+                bootstrap_registration_key = (
+                    f"bootstrap-register:{target_release_id}"
+                )
+                expected_bootstrap_replay = (
+                    target_release_id,
+                    target_epoch,
+                    target_manifest.get("image_digest"),
+                    target_manifest.get("config_sha256"),
+                    target_manifest.get("dependency_lock_sha256"),
+                    (target_manifest.get("schema_epochs") or {}).get("db"),
+                    target_manifest_sha256,
+                    target_bundle_sha256,
+                    bootstrap_registration_key,
+                    "account_a_canary",
+                )
+                if (
+                    fleet_state == "all_stopped"
+                    and tuple(active_rollout) == expected_bootstrap_replay
+                ):
+                    if active_epoch != (
+                        target_epoch,
+                        target_evidence_sha256,
+                    ):
+                        raise SystemExit(
+                            "bootstrap stopped replay Redis evidence differs"
+                        )
+                    bootstrap_stopped_replay = True
+                    migration_candidate = False
+                elif active_rollout[0] != target_release_id:
+                    if fleet_state == "all_stopped":
+                        if rollout_node != "trader-v3-node-a":
+                            raise SystemExit(
+                                "bootstrap stopped recovery requires "
+                                "trader-v3-node-a"
+                            )
+                        if skip_resume != "1":
+                            raise SystemExit(
+                                "bootstrap stopped recovery requires "
+                                "SKIP_RESUME=1"
+                            )
+                        if active_epoch != (
+                            target_epoch,
+                            target_evidence_sha256,
+                        ):
+                            raise SystemExit(
+                                "bootstrap stopped recovery Redis evidence "
+                                "differs from the active epoch"
+                            )
+                        cur.execute(
+                            """
+                            SELECT count(*)
+                            FROM reviewed_release_rollouts
+                            WHERE release_id=%s
+                            """,
+                            (target_release_id,),
+                        )
+                        if int(cur.fetchone()[0]) != 0:
+                            raise SystemExit(
+                                "bootstrap stopped recovery target release "
+                                "already exists"
+                            )
+                        bootstrap_stopped_recovery = True
+                        migration_candidate = False
+                    elif live_manifest_present:
                         migration_candidate = False
                         migration_rebaseline = False
                         print("maintenance_fence")
                         raise SystemExit(0)
-                    raise SystemExit(
-                        "migration rebaseline active release differs from "
-                        "the fresh Redis epoch"
-                    )
+                    else:
+                        raise SystemExit(
+                            "migration rebaseline active release differs "
+                            "from the fresh Redis epoch"
+                        )
                 expected_registration_key = (
                     f"migration-rebaseline-register:{target_release_id}"
                 )
                 same_epoch_hotfix_key = f"register:{target_release_id}"
-                if (
+                if bootstrap_stopped_replay:
+                    pass
+                elif bootstrap_stopped_recovery:
+                    pass
+                elif (
                     live_manifest_present
                     and active_rollout[8] == same_epoch_hotfix_key
                 ):
@@ -1528,7 +1612,7 @@ try:
                     migration_rebaseline = False
                     print("maintenance_fence")
                     raise SystemExit(0)
-                if (
+                elif (
                     migration_live_manifest is not False
                     and active_rollout[8] != expected_registration_key
                 ):
@@ -1541,12 +1625,8 @@ try:
                         target_manifest.get("config_sha256"),
                         target_manifest.get("dependency_lock_sha256"),
                         (target_manifest.get("schema_epochs") or {}).get("db"),
-                        hashlib.sha256(
-                            release_manifest_path.read_bytes()
-                        ).hexdigest(),
-                        hashlib.sha256(
-                            bundle_manifest_path.read_bytes()
-                        ).hexdigest(),
+                        target_manifest_sha256,
+                        target_bundle_sha256,
                         expected_registration_key,
                         "account_a_canary",
                     )
@@ -1613,6 +1693,12 @@ if redis_count == 0 and rollout_count == 0:
     print("bootstrap_stopped")
     raise SystemExit(0)
 if redis_count > 0 and rollout_count > 0:
+    if bootstrap_stopped_replay:
+        print("bootstrap_resume_stopped")
+        raise SystemExit(0)
+    if bootstrap_stopped_recovery:
+        print("bootstrap_stopped")
+        raise SystemExit(0)
     if resume_manifest_path is not False:
         print("bootstrap_resume_stopped")
         raise SystemExit(0)
@@ -1626,9 +1712,21 @@ PY
   )" || die "deploy gate mode detection failed"
   case "$DEPLOY_GATE_MODE" in
     bootstrap_stopped)
-      CONTROL_PLANE_ROLE_BOOTSTRAP_REQUIRED=1
       BOOTSTRAP_ALL_NODE_RELEASE=1
       RECREATE_NODES=("${ALL_NODES[@]}")
+      role_env_count=0
+      for env_file in "${CONTROL_PLANE_ROLE_ENV_FILES[@]}"; do
+        if [ -f "$env_file" ]; then
+          role_env_count=$((role_env_count + 1))
+        fi
+      done
+      if [ "$role_env_count" -eq 0 ]; then
+        CONTROL_PLANE_ROLE_BOOTSTRAP_REQUIRED=1
+      elif [ "$role_env_count" -eq "${#CONTROL_PLANE_ROLE_ENV_FILES[@]}" ]; then
+        CONTROL_PLANE_ROLE_BOOTSTRAP_REQUIRED=0
+      else
+        die "partial control-plane role environment detected during bootstrap"
+      fi
       ;;
     bootstrap_resume_stopped)
       BOOTSTRAP_ALL_NODE_RELEASE=1
@@ -2941,6 +3039,26 @@ verify_all_execution_accounts_quiesced() {
     "account-d" \
     "trader-v3-node-d" \
     "8084"
+}
+all_execution_accounts_stopped() {
+  local node
+  local restart_policy
+  local running
+  for node in "${ALL_NODES[@]}"; do
+    if ! read -r running restart_policy < <(
+      docker inspect \
+        --format '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' \
+        "$node" 2>/dev/null
+    ); then
+      return 1
+    fi
+    if [ "$running" != "false" ]; then
+      return 1
+    fi
+    if [ "$restart_policy" != "no" ]; then
+      return 1
+    fi
+  done
 }
 verify_all_execution_accounts_stopped() {
   local node

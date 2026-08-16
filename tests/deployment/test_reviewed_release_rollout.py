@@ -1303,6 +1303,11 @@ def test_bootstrap_registration_audit_marks_all_accounts_halted(
     )
     monkeypatch.setattr(
         reviewed_release_rollout,
+        "_require_no_active_maintenance_fence_for_bootstrap_stopped",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
         "_bootstrap_registration_history",
         lambda *_args, **_kwargs: {
             "redis_fencing_epoch_count": 0,
@@ -1349,6 +1354,170 @@ def test_bootstrap_registration_audit_marks_all_accounts_halted(
     assert events[0]["evidence"]["bootstrap_all_halted"] is True
     assert audits[0]["payload"]["registration_mode"] == "bootstrap"
     assert audits[0]["payload"]["bootstrap_all_halted"] is True
+
+
+def test_bootstrap_stopped_registration_supersedes_active_predecessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = reviewed_release_rollout.ReleaseDocument(
+        release_id="bootstrap-successor",
+        image_digest="sha256:" + ("1" * 64),
+        config_sha256="2" * 64,
+        dependency_lock_sha256="3" * 64,
+        schema_epoch="0015_refresh_evidence_command",
+        manifest_sha256="4" * 64,
+        bundle_manifest_sha256="5" * 64,
+        delivery_mode=release_manifest.DELIVERY_IMMUTABLE,
+        release_root_path="/srv/trader-v3/releases/bootstrap-successor",
+        release_source_manifest_sha256="6" * 64,
+        live_adapter_sha256="7" * 64,
+        node_ids=dict(reviewed_release_rollout.EXPECTED_NODE_IDS),
+    )
+    capacity = reviewed_release_rollout.RedisFencingEpochEvidence(
+        redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        marker_sha256=sha256(
+            REDIS_FENCING_EPOCH.encode("ascii")
+        ).hexdigest(),
+        capacity_evidence_sha256="8" * 64,
+        initial_redis_run_id="a" * 40,
+        active_volume="trader-v3-redis-bootstrap",
+    )
+    rollout = {
+        "release_id": document.release_id,
+        "redis_fencing_epoch": capacity.redis_fencing_epoch,
+        "image_digest": document.image_digest,
+        "config_sha256": document.config_sha256,
+        "dependency_lock_sha256": document.dependency_lock_sha256,
+        "schema_epoch": document.schema_epoch,
+        "manifest_sha256": document.manifest_sha256,
+        "bundle_manifest_sha256": document.bundle_manifest_sha256,
+        "registration_idempotency_key": (
+            "bootstrap-register:bootstrap-successor"
+        ),
+        "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+        "phase_version": 1,
+        "reviewed_by": "release-reviewer",
+        "reviewed_at": None,
+        "created_at": None,
+        "updated_at": None,
+    }
+    predecessor = {
+        "release_id": "failed-predecessor",
+        "redis_fencing_epoch": capacity.redis_fencing_epoch,
+        "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+        "phase_version": 1,
+    }
+    calls = []
+    events = []
+    audits = []
+
+    class OperationLock:
+        def require_held(self) -> None:
+            calls.append("lock")
+
+    class Cursor:
+        def __enter__(self):
+            calls.append("cursor-enter")
+            return self
+
+        def __exit__(self, *_args) -> None:
+            calls.append("cursor-exit")
+
+        def execute(self, statement, _params=None) -> None:
+            if "INSERT INTO reviewed_release_rollouts" in statement:
+                calls.append("insert-successor")
+
+        def fetchone(self):
+            return rollout
+
+    class Connection:
+        def __enter__(self):
+            calls.append("transaction-enter")
+            return self
+
+        def __exit__(self, *_args) -> None:
+            calls.append("transaction-exit")
+
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_no_active_maintenance_fence_for_bootstrap_stopped",
+        lambda *_args, **_kwargs: calls.append("no-maintenance-fence"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_rollout_by_registration_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_bootstrap_registration_history",
+        lambda *_args, **_kwargs: {
+            "redis_fencing_epoch_count": 1,
+            "reviewed_release_rollout_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_lock_bootstrap_stopped_predecessor",
+        lambda *_args, **_kwargs: predecessor,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_abort_bootstrap_stopped_predecessor",
+        lambda *_args, **_kwargs: calls.append("abort-predecessor"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_activate_redis_fencing_epoch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stopped recovery attempted to rotate Redis epoch")
+        ),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_register_account_manifests",
+        lambda *_args, **_kwargs: calls.append("register-manifests"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_registered_manifests",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_rollout_event",
+        lambda *_args, **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_global_audit",
+        lambda *_args, **kwargs: audits.append(kwargs),
+    )
+
+    result = reviewed_release_rollout.bootstrap_register_reviewed_release(
+        Connection(),
+        document,
+        capacity,
+        reviewed_by="release-reviewer",
+        idempotency_key="bootstrap-register:bootstrap-successor",
+        operation_lock=OperationLock(),
+    )
+
+    assert result["idempotent"] is False
+    assert calls.index("abort-predecessor") < calls.index("insert-successor")
+    registration = events[0]["evidence"]
+    assert registration["registration_mode"] == (
+        reviewed_release_rollout.BOOTSTRAP_STOPPED_REGISTRATION_MODE
+    )
+    assert registration["all_accounts_stopped"] is True
+    assert registration["redis_epoch_reused"] is True
+    assert registration["predecessor_release_id"] == "failed-predecessor"
+    assert audits[0]["payload"]["predecessor_release_id"] == (
+        "failed-predecessor"
+    )
 
 
 def _migration_rebaseline_document() -> reviewed_release_rollout.ReleaseDocument:

@@ -110,11 +110,13 @@ class GenRecreatePatchedTest(unittest.TestCase):
         self.fake_bin = self.temp_path / "bin"
         self.fake_bin.mkdir()
         self.docker_called = self.temp_path / "docker-called"
+        self.docker_log = self.temp_path / "docker.log"
         self.image_labels_path = self.temp_path / "image-labels.json"
         self.image_labels_path.write_text("{}\n", encoding="utf-8")
         fake_docker = self.fake_bin / "docker"
         fake_docker.write_text(
             "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >> "$FAKE_DOCKER_LOG"\n'
             'if [ "$1" = "inspect" ]; then\n'
             '  touch "$FAKE_DOCKER_CALLED"\n'
             '  cat "$FAKE_DOCKER_INSPECT"\n'
@@ -266,6 +268,7 @@ class GenRecreatePatchedTest(unittest.TestCase):
         self.env["PATH"] = f"{self.fake_bin}:{self.env['PATH']}"
         self.env["TRADER_ROOT"] = str(self.trader_root)
         self.env["FAKE_DOCKER_CALLED"] = str(self.docker_called)
+        self.env["FAKE_DOCKER_LOG"] = str(self.docker_log)
         self.env["FAKE_DOCKER_INSPECT"] = str(self.inspect_path)
         self.env["FAKE_DOCKER_IMAGE_LABELS"] = str(
             self.image_labels_path
@@ -324,6 +327,20 @@ class GenRecreatePatchedTest(unittest.TestCase):
             str(manifest_path),
             "--database-schema-epoch",
             DATABASE_SCHEMA_EPOCH,
+        )
+
+    def install_fake_active_release_query(self, image_digest):
+        python_path = self.trader_root / ".venv-cp" / "bin" / "python"
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        python_path.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' {shlex.quote(image_digest)}\n",
+            encoding="utf-8",
+        )
+        python_path.chmod(0o755)
+        (self.trader_root / ".env.v3").write_text(
+            "DATABASE_URL=postgresql://fixture.invalid/test\n",
+            encoding="utf-8",
         )
 
     def write_release_manifest(
@@ -1618,6 +1635,63 @@ sdist = { url = "https://example.invalid/runtime-demo.tar.gz", hash = "sha256:aa
             check=False,
         )
         self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        guard_source = text.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        compile(guard_source, str(recreate), "exec")
+
+    def test_stale_release_recreate_refuses_before_docker_rm(self):
+        manifest_path, manifest = self.write_release_manifest()
+        result = self.run_script(
+            "trader-v3-node-a",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            *self.release_identity_args(manifest_path),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.install_fake_active_release_query(
+            "sha256:" + ("9" * 64)
+        )
+        self.docker_log.unlink(missing_ok=True)
+
+        executed = subprocess.run(
+            [str(self.generated_recreate_path())],
+            cwd=REPO_ROOT,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(executed.returncode, 0)
+        self.assertIn("use bootstrap_stopped", executed.stderr)
+        self.assertIn(manifest["image_digest"], executed.stderr)
+        docker_commands = ""
+        if self.docker_log.exists():
+            docker_commands = self.docker_log.read_text(encoding="utf-8")
+        self.assertNotIn("rm -f trader-v3-node-a", docker_commands)
+
+    def test_matching_active_release_recreate_reaches_docker_rm(self):
+        manifest_path, manifest = self.write_release_manifest()
+        result = self.run_script(
+            "trader-v3-node-a",
+            BINANCE_DST,
+            BINANCE_FUTURES_DST,
+            *self.release_identity_args(manifest_path),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.install_fake_active_release_query(manifest["image_digest"])
+        self.docker_log.unlink(missing_ok=True)
+
+        subprocess.run(
+            [str(self.generated_recreate_path())],
+            cwd=REPO_ROOT,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        docker_commands = self.docker_log.read_text(encoding="utf-8")
+        self.assertIn("rm -f trader-v3-node-a", docker_commands)
 
     def test_release_manifest_requires_database_schema_epoch(self):
         manifest_path, _ = self.write_release_manifest()

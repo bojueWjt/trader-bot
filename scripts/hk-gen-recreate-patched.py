@@ -1725,6 +1725,107 @@ def append_reviewed_resource_verification(
         )
 
 
+def append_active_release_image_guard(
+    lines,
+    *,
+    trader_root,
+    expected_image,
+):
+    database_environment = trader_root / ".env.v3"
+    database_python = trader_root / ".venv-cp" / "bin" / "python"
+    lines.extend(
+        [
+            'active_release_image="$(',
+            (
+                f"  {shlex.quote(str(database_python))} - "
+                f"{shlex.quote(str(database_environment))} <<'PY'"
+            ),
+            "import sys",
+            "from pathlib import Path",
+            "",
+            "import psycopg2",
+            "",
+            "",
+            "def read_database_url(path):",
+            (
+                "    for raw in Path(path).read_text("
+                "encoding=\"utf-8\").splitlines():"
+            ),
+            "        line = raw.strip()",
+            (
+                "        if not line or line.startswith(\"#\") "
+                "or \"=\" not in line:"
+            ),
+            "            continue",
+            "        key, value = line.split(\"=\", 1)",
+            "        if key.strip() != \"DATABASE_URL\":",
+            "            continue",
+            "        value = value.strip()",
+            "        if (",
+            "            len(value) >= 2",
+            "            and value[0] == value[-1]",
+            "            and value[0] in {\"'\", '\"'}",
+            "        ):",
+            "            value = value[1:-1]",
+            "        return value",
+            "    raise SystemExit(\"DATABASE_URL is missing\")",
+            "",
+            "",
+            "database_url = read_database_url(sys.argv[1])",
+            "with psycopg2.connect(database_url) as conn:",
+            "    with conn.cursor() as cur:",
+            "        cur.execute(",
+            "            \"\"\"",
+            "            SELECT image_digest",
+            "            FROM reviewed_release_rollouts",
+            "            WHERE phase IN (",
+            "                'account_a_canary',",
+            "                'account_b_rollout',",
+            "                'account_c_rollout',",
+            "                'account_d_rollout'",
+            "            )",
+            "            \"\"\"",
+            "        )",
+            "        active_rows = cur.fetchall()",
+            "        if len(active_rows) == 1:",
+            "            selected = active_rows[0]",
+            "        elif active_rows:",
+            "            raise SystemExit(",
+            "                \"multiple DB active releases; use bootstrap_stopped\"",
+            "            )",
+            "        else:",
+            "            cur.execute(",
+            "                \"\"\"",
+            "                SELECT image_digest",
+            "                FROM reviewed_release_rollouts",
+            "                WHERE phase='fleet_complete'",
+            "                ORDER BY reviewed_at DESC, release_id DESC",
+            "                LIMIT 1",
+            "                \"\"\"",
+            "            )",
+            "            selected = cur.fetchone()",
+            "if selected is None:",
+            "    raise SystemExit(",
+            "        \"DB active release is missing; use bootstrap_stopped\"",
+            "    )",
+            "print(str(selected[0]))",
+            "PY",
+            ')"',
+            (
+                "if [ \"$active_release_image\" != "
+                f"{shlex.quote(expected_image)} ]; then"
+            ),
+            (
+                f'  echo "FATAL: recreate image {expected_image} differs '
+                'from DB active release image $active_release_image; '
+                'use bootstrap_stopped" >&2'
+            ),
+            "  exit 1",
+            "fi",
+        ]
+    )
+
+
 def generate(
     name,
     binance_dst,
@@ -1802,6 +1903,15 @@ def generate(
     lines = [
         "#!/bin/bash",
         "set -euo pipefail",
+    ]
+    if release_identity is not False:
+        append_active_release_image_guard(
+            lines,
+            trader_root=trader_root,
+            expected_image=release_identity["image_digest"],
+        )
+    lines.extend(
+        [
         "inherited_env=()",
         "while IFS= read -r env_value; do",
         # An empty inherited entry would become `docker run -e ""`,
@@ -1832,7 +1942,8 @@ def generate(
         "  fi",
         "fi",
         f"mkdir -p {shlex.quote(str(state_dir))}",
-    ]
+        ]
+    )
     run = [
         "docker",
         "run",

@@ -54,6 +54,7 @@ ACTIVE_ROLLOUT_PHASES = (
 )
 MIGRATION_REBASELINE_REGISTRATION_MODE = "migration_rebaseline_stopped"
 SAME_EPOCH_HOTFIX_REGISTRATION_MODE = "same_epoch_hotfix"
+BOOTSTRAP_STOPPED_REGISTRATION_MODE = "bootstrap_stopped"
 ALLOWED_TRANSITIONS = {
     PHASE_ACCOUNT_A_CANARY: {
         PHASE_ACCOUNT_B_ROLLOUT,
@@ -1739,7 +1740,7 @@ def bootstrap_register_reviewed_release(
     idempotency_key: str,
     operation_lock: AccountStallOperationLock,
 ) -> dict[str, Any]:
-    """Create the first fenced rollout before heartbeat-based gates exist."""
+    """Register a fenced rollout while the four-account fleet is stopped."""
     operation_lock.require_held()
     reviewer = _required_text(reviewed_by, "reviewed_by")
     if not isinstance(capacity_evidence, RedisFencingEpochEvidence):
@@ -1757,6 +1758,7 @@ def bootstrap_register_reviewed_release(
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             operation_lock.require_held()
             _lock_redis_fencing_epoch_domain(cur)
+            _require_no_active_maintenance_fence_for_bootstrap_stopped(cur)
             existing_by_key = _rollout_by_registration_key(
                 cur,
                 operation_key,
@@ -1770,21 +1772,16 @@ def bootstrap_register_reviewed_release(
                     operation_key,
                     reviewer,
                 )
-                _require_bootstrap_replay_history(history)
                 _require_active_epoch_matches_rollout(
                     cur,
                     existing_by_key,
                 )
                 _require_registered_manifests(cur, document)
-                _require_bootstrap_registration_event(
+                _require_bootstrap_registration_replay(
                     cur,
-                    release_id=document.release_id,
-                    idempotency_key=operation_key,
-                    reviewed_by=reviewer,
-                )
-                _require_bootstrap_registration_audit(
-                    cur,
-                    release_id=document.release_id,
+                    document=document,
+                    capacity_evidence=capacity_evidence,
+                    history=history,
                     idempotency_key=operation_key,
                     reviewed_by=reviewer,
                 )
@@ -1793,13 +1790,31 @@ def bootstrap_register_reviewed_release(
                     idempotent=True,
                 )
 
-            _require_empty_bootstrap_history(history)
-            operation_lock.require_held()
-            _activate_redis_fencing_epoch(
-                cur,
-                capacity_evidence,
-                activated_by=reviewer,
-            )
+            predecessor = None
+            registration_mode = "bootstrap"
+            if _bootstrap_history_is_empty(history):
+                operation_lock.require_held()
+                _activate_redis_fencing_epoch(
+                    cur,
+                    capacity_evidence,
+                    activated_by=reviewer,
+                )
+            else:
+                registration_mode = BOOTSTRAP_STOPPED_REGISTRATION_MODE
+                predecessor = _lock_bootstrap_stopped_predecessor(
+                    cur,
+                    document=document,
+                    capacity_evidence=capacity_evidence,
+                    history=history,
+                )
+                operation_lock.require_held()
+                _abort_bootstrap_stopped_predecessor(
+                    cur,
+                    predecessor=predecessor,
+                    successor_document=document,
+                    successor_capacity_evidence=capacity_evidence,
+                    actor=reviewer,
+                )
             operation_lock.require_held()
             cur.execute(
                 """
@@ -1853,8 +1868,9 @@ def bootstrap_register_reviewed_release(
             )
             _require_registered_manifests(cur, document)
             evidence = {
-                "registration_mode": "bootstrap",
+                "registration_mode": registration_mode,
                 "bootstrap_all_halted": True,
+                "all_accounts_stopped": True,
                 "bootstrap_history": {
                     "redis_fencing_epoch_count": (
                         history["redis_fencing_epoch_count"]
@@ -1881,6 +1897,22 @@ def bootstrap_register_reviewed_release(
                 ),
                 "active_volume": capacity_evidence.active_volume,
             }
+            if predecessor is not None:
+                evidence.update(
+                    {
+                        "predecessor_release_id": str(
+                            predecessor["release_id"]
+                        ),
+                        "predecessor_phase": str(predecessor["phase"]),
+                        "predecessor_phase_version": int(
+                            predecessor["phase_version"]
+                        ),
+                        "predecessor_redis_fencing_epoch": str(
+                            predecessor["redis_fencing_epoch"]
+                        ),
+                        "redis_epoch_reused": True,
+                    }
+                )
             _record_rollout_event(
                 cur,
                 release_id=document.release_id,
@@ -1891,8 +1923,8 @@ def bootstrap_register_reviewed_release(
                 idempotency_key=operation_key,
                 actor=reviewer,
                 reason=(
-                    "bootstrap release registered for account-a through "
-                    "account-d"
+                    "stopped bootstrap release registered for account-a "
+                    "through account-d"
                 ),
                 evidence=evidence,
             )
@@ -2695,6 +2727,18 @@ def _require_empty_bootstrap_history(history: dict[str, int]) -> None:
         )
 
 
+def _bootstrap_history_is_empty(history: dict[str, int]) -> bool:
+    redis_count = history["redis_fencing_epoch_count"]
+    rollout_count = history["reviewed_release_rollout_count"]
+    if redis_count == 0 and rollout_count == 0:
+        return True
+    if redis_count < 1 or rollout_count < 1:
+        raise ReleaseRolloutError(
+            "bootstrap stopped recovery detected partial rollout history"
+        )
+    return False
+
+
 def _require_bootstrap_replay_history(history: dict[str, int]) -> None:
     if history["redis_fencing_epoch_count"] != 1:
         raise ReleaseRolloutError(
@@ -2703,6 +2747,365 @@ def _require_bootstrap_replay_history(history: dict[str, int]) -> None:
     if history["reviewed_release_rollout_count"] != 1:
         raise ReleaseRolloutError(
             "bootstrap replay requires exactly one reviewed release rollout"
+        )
+
+
+def _bootstrap_stopped_abort_key(successor_release_id: str) -> str:
+    return f"bootstrap-stopped-abort:{successor_release_id}"
+
+
+def _require_no_active_maintenance_fence_for_bootstrap_stopped(cur) -> None:
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s))",
+        ("trader-v3-control-plane-maintenance-fence",),
+    )
+    cur.execute(
+        """
+        SELECT fence_id::text AS fence_id
+        FROM control_plane_maintenance_fences
+        WHERE domain=%s
+          AND status='active'
+        FOR UPDATE
+        """,
+        (REDIS_FENCING_DOMAIN,),
+    )
+    if cur.fetchall():
+        raise ReleaseRolloutError(
+            "bootstrap stopped recovery requires no active maintenance fence"
+        )
+
+
+def _lock_bootstrap_stopped_predecessor(
+    cur,
+    *,
+    document: ReleaseDocument,
+    capacity_evidence: RedisFencingEpochEvidence,
+    history: dict[str, int],
+) -> dict[str, Any]:
+    _bootstrap_history_is_empty(history)
+    active_epoch = _active_redis_fencing_epoch(
+        cur,
+        for_update=True,
+    )
+    if active_epoch != capacity_evidence.redis_fencing_epoch:
+        raise ReleaseRolloutError(
+            "bootstrap stopped recovery requires the active Redis fencing epoch"
+        )
+    cur.execute(
+        """
+        SELECT release_id,
+               redis_fencing_epoch::text AS redis_fencing_epoch,
+               phase,
+               phase_version
+        FROM reviewed_release_rollouts
+        WHERE phase = ANY(%s)
+        FOR UPDATE
+        """,
+        (list(ACTIVE_ROLLOUT_PHASES),),
+    )
+    active_rollouts = cur.fetchall()
+    if len(active_rollouts) != 1:
+        raise ReleaseRolloutError(
+            "bootstrap stopped recovery requires exactly one active "
+            "predecessor rollout"
+        )
+    predecessor = active_rollouts[0]
+    if predecessor["release_id"] == document.release_id:
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor must differ from successor"
+        )
+    if str(predecessor["redis_fencing_epoch"]) != active_epoch:
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor Redis epoch is not active"
+        )
+    return predecessor
+
+
+def _abort_bootstrap_stopped_predecessor(
+    cur,
+    *,
+    predecessor: dict[str, Any],
+    successor_document: ReleaseDocument,
+    successor_capacity_evidence: RedisFencingEpochEvidence,
+    actor: str,
+) -> None:
+    predecessor_release_id = str(predecessor["release_id"])
+    predecessor_phase = str(predecessor["phase"])
+    predecessor_version = int(predecessor["phase_version"])
+    next_version = predecessor_version + 1
+    abort_key = _bootstrap_stopped_abort_key(
+        successor_document.release_id
+    )
+    reason = "superseded by stopped bootstrap recovery"
+    evidence = {
+        "registration_mode": BOOTSTRAP_STOPPED_REGISTRATION_MODE,
+        "all_accounts_stopped": True,
+        "redis_epoch_reused": True,
+        "successor_release_id": successor_document.release_id,
+        "predecessor_redis_fencing_epoch": str(
+            predecessor["redis_fencing_epoch"]
+        ),
+        "successor_redis_fencing_epoch": (
+            successor_capacity_evidence.redis_fencing_epoch
+        ),
+    }
+    cur.execute(
+        """
+        UPDATE reviewed_release_rollouts
+        SET phase=%s,
+            phase_version=%s
+        WHERE release_id=%s
+          AND phase=%s
+          AND phase_version=%s
+        RETURNING release_id
+        """,
+        (
+            PHASE_ABORTED,
+            next_version,
+            predecessor_release_id,
+            predecessor_phase,
+            predecessor_version,
+        ),
+    )
+    if cur.fetchone() is None:
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor changed concurrently"
+        )
+    _record_rollout_event(
+        cur,
+        release_id=predecessor_release_id,
+        event_type="phase_transition",
+        from_phase=predecessor_phase,
+        to_phase=PHASE_ABORTED,
+        phase_version=next_version,
+        idempotency_key=abort_key,
+        actor=actor,
+        reason=reason,
+        evidence=evidence,
+    )
+    _record_global_audit(
+        cur,
+        release_id=predecessor_release_id,
+        event_type="reviewed_release_phase_transition",
+        actor=actor,
+        payload={
+            "from_phase": predecessor_phase,
+            "to_phase": PHASE_ABORTED,
+            "phase_version": next_version,
+            "idempotency_key": abort_key,
+            "reason": reason,
+            **evidence,
+        },
+    )
+
+
+def _require_bootstrap_registration_replay(
+    cur,
+    *,
+    document: ReleaseDocument,
+    capacity_evidence: RedisFencingEpochEvidence,
+    history: dict[str, int],
+    idempotency_key: str,
+    reviewed_by: str,
+) -> None:
+    cur.execute(
+        """
+        SELECT evidence
+        FROM reviewed_release_rollout_events
+        WHERE idempotency_key=%s
+        FOR SHARE
+        """,
+        (idempotency_key,),
+    )
+    event = cur.fetchone()
+    if event is None or not isinstance(event["evidence"], dict):
+        raise ReleaseRolloutError(
+            "bootstrap replay registration evidence is missing"
+        )
+    registration_mode = event["evidence"].get("registration_mode")
+    if registration_mode == "bootstrap":
+        _require_bootstrap_replay_history(history)
+        _require_bootstrap_registration_event(
+            cur,
+            release_id=document.release_id,
+            idempotency_key=idempotency_key,
+            reviewed_by=reviewed_by,
+        )
+        _require_bootstrap_registration_audit(
+            cur,
+            release_id=document.release_id,
+            idempotency_key=idempotency_key,
+            reviewed_by=reviewed_by,
+        )
+        return
+    if registration_mode != BOOTSTRAP_STOPPED_REGISTRATION_MODE:
+        raise ReleaseRolloutError(
+            "bootstrap replay registration mode conflicts"
+        )
+    predecessor_release_id = _require_bootstrap_stopped_abort_event(
+        cur,
+        successor_release_id=document.release_id,
+        successor_redis_fencing_epoch=(
+            capacity_evidence.redis_fencing_epoch
+        ),
+        reviewed_by=reviewed_by,
+    )
+    _require_bootstrap_stopped_abort_audit(
+        cur,
+        predecessor_release_id=predecessor_release_id,
+        successor_release_id=document.release_id,
+        successor_redis_fencing_epoch=(
+            capacity_evidence.redis_fencing_epoch
+        ),
+        reviewed_by=reviewed_by,
+    )
+    _require_stopped_registration_event(
+        cur,
+        release_id=document.release_id,
+        idempotency_key=idempotency_key,
+        reviewed_by=reviewed_by,
+        registration_mode=BOOTSTRAP_STOPPED_REGISTRATION_MODE,
+        context="bootstrap stopped replay",
+        predecessor_release_id=predecessor_release_id,
+    )
+    _require_stopped_registration_audit(
+        cur,
+        release_id=document.release_id,
+        idempotency_key=idempotency_key,
+        reviewed_by=reviewed_by,
+        registration_mode=BOOTSTRAP_STOPPED_REGISTRATION_MODE,
+        context="bootstrap stopped replay",
+        predecessor_release_id=predecessor_release_id,
+    )
+
+
+def _require_bootstrap_stopped_abort_event(
+    cur,
+    *,
+    successor_release_id: str,
+    successor_redis_fencing_epoch: str,
+    reviewed_by: str,
+) -> str:
+    abort_key = _bootstrap_stopped_abort_key(successor_release_id)
+    cur.execute(
+        """
+        SELECT release_id,
+               event_type,
+               from_phase,
+               to_phase,
+               phase_version,
+               actor,
+               reason,
+               evidence
+        FROM reviewed_release_rollout_events
+        WHERE idempotency_key=%s
+        FOR SHARE
+        """,
+        (abort_key,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor abort event is missing"
+        )
+    evidence = row["evidence"]
+    if not isinstance(evidence, dict):
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor abort evidence is invalid"
+        )
+    expected = (
+        "phase_transition",
+        PHASE_ABORTED,
+        reviewed_by,
+        "superseded by stopped bootstrap recovery",
+        BOOTSTRAP_STOPPED_REGISTRATION_MODE,
+        True,
+        True,
+        successor_release_id,
+        successor_redis_fencing_epoch,
+    )
+    actual = (
+        row["event_type"],
+        row["to_phase"],
+        row["actor"],
+        row["reason"],
+        evidence.get("registration_mode"),
+        evidence.get("all_accounts_stopped"),
+        evidence.get("redis_epoch_reused"),
+        evidence.get("successor_release_id"),
+        evidence.get("successor_redis_fencing_epoch"),
+    )
+    if (
+        row["from_phase"] not in ACTIVE_ROLLOUT_PHASES
+        or int(row["phase_version"]) <= 1
+        or actual != expected
+    ):
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor abort event conflicts"
+        )
+    predecessor_release_id = str(row["release_id"] or "").strip()
+    if not predecessor_release_id:
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor release id is invalid"
+        )
+    return predecessor_release_id
+
+
+def _require_bootstrap_stopped_abort_audit(
+    cur,
+    *,
+    predecessor_release_id: str,
+    successor_release_id: str,
+    successor_redis_fencing_epoch: str,
+    reviewed_by: str,
+) -> None:
+    abort_key = _bootstrap_stopped_abort_key(successor_release_id)
+    cur.execute(
+        """
+        SELECT actor,
+               payload
+        FROM audit_events
+        WHERE event_type='reviewed_release_phase_transition'
+          AND aggregate_type='reviewed_release_rollout'
+          AND aggregate_id=%s
+        FOR SHARE
+        """,
+        (predecessor_release_id,),
+    )
+    matching = []
+    for row in cur.fetchall():
+        payload = row["payload"]
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("idempotency_key") != abort_key:
+            continue
+        matching.append((row["actor"], payload))
+    if len(matching) != 1:
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor abort audit is missing or ambiguous"
+        )
+    actor, payload = matching[0]
+    expected = (
+        reviewed_by,
+        PHASE_ABORTED,
+        BOOTSTRAP_STOPPED_REGISTRATION_MODE,
+        True,
+        True,
+        successor_release_id,
+        successor_redis_fencing_epoch,
+    )
+    actual = (
+        actor,
+        payload.get("to_phase"),
+        payload.get("registration_mode"),
+        payload.get("all_accounts_stopped"),
+        payload.get("redis_epoch_reused"),
+        payload.get("successor_release_id"),
+        payload.get("successor_redis_fencing_epoch"),
+    )
+    if actual != expected:
+        raise ReleaseRolloutError(
+            "bootstrap stopped predecessor abort audit conflicts"
         )
 
 
@@ -3254,6 +3657,7 @@ def _has_bootstrap_all_halted_registration(
     all_halted = evidence.get("bootstrap_all_halted")
     stopped_registration_modes = {
         "bootstrap",
+        BOOTSTRAP_STOPPED_REGISTRATION_MODE,
         MIGRATION_REBASELINE_REGISTRATION_MODE,
     }
     bootstrap_marked = (
