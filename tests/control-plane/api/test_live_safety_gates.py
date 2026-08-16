@@ -2291,8 +2291,10 @@ def test_account_a_canary_permit_is_atomic_single_use_and_capped(
         migrated_db,
         permit_status="armed",
     )
+    supplied_intent_id = str(uuid4())
     base = {
         "action": "open_position",
+        "intent_id": supplied_intent_id,
         "account_id": ACCOUNT_A,
         "symbol": SYMBOL,
         "side": "long",
@@ -2320,6 +2322,7 @@ def test_account_a_canary_permit_is_atomic_single_use_and_capped(
     )
 
     assert first.status_code == 200
+    assert first.json()["intent_id"] == supplied_intent_id
     assert replay.status_code == 200
     assert replay.json()["replay"] is True
     assert replay.json()["intent_id"] == first.json()["intent_id"]
@@ -2390,6 +2393,56 @@ def test_account_a_canary_permit_is_atomic_single_use_and_capped(
     assert datetime.fromisoformat(
         canary["testnet_emergency_close_verified_at"]
     ).tzinfo is not None
+
+
+def test_account_a_canary_rejects_invalid_supplied_intent_id(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db, trading_state="ACTIVE")
+    permit_id = _seed_reviewed_release_and_permit(
+        migrated_db,
+        permit_status="armed",
+    )
+
+    response = client.post(
+        "/v1/operator/orders",
+        headers=_risk_headers("canary-invalid-intent-id"),
+        json={
+            "action": "open_position",
+            "intent_id": "not-a-uuid",
+            "account_id": ACCOUNT_A,
+            "symbol": SYMBOL,
+            "side": "long",
+            "entry": {
+                "type": "limit",
+                "price": 100,
+                "time_in_force": "IOC",
+            },
+            "quantity": 0.12,
+            "notional_usdt": 12,
+            "reason": "account-a invalid canary intent",
+            "client_ref": "canary-invalid-intent-id",
+            "canary_permit_id": permit_id,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "intent_id must be a uuid for canary open"
+    )
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, consumed_open_count
+            FROM live_canary_permits
+            WHERE permit_id=%s
+            """,
+            (permit_id,),
+        )
+        status, consumed_open_count = cur.fetchone()
+    assert status == "armed"
+    assert consumed_open_count == 0
 
 
 def test_canary_open_replay_preserves_first_gate_and_budget(

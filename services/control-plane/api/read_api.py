@@ -6416,6 +6416,21 @@ def _lock_canary_permit(
     )
 
 
+def _supplied_canary_intent_id(body: dict, *, canary_open: bool) -> str | bool:
+    if not canary_open:
+        return False
+    raw_intent_id = str(body.get("intent_id") or "").strip()
+    if not raw_intent_id:
+        return False
+    try:
+        return str(UUID(raw_intent_id))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="intent_id must be a uuid for canary open",
+        )
+
+
 @app.post("/v1/operator/orders")
 def operator_order(
     body: dict = Body(default={}),
@@ -7107,8 +7122,17 @@ def operator_order(
             "target_position_id": target_position_id,
         }
 
+    supplied_canary_intent_id = _supplied_canary_intent_id(
+        body,
+        canary_open=canary_open,
+    )
     now = datetime.now(timezone.utc)
-    raw_id, run_id, ctx_id, dec_id, risk_id, intent_id = (str(uuid4()) for _ in range(6))
+    raw_id, run_id, ctx_id, dec_id, risk_id = (
+        str(uuid4()) for _ in range(5)
+    )
+    intent_id = str(uuid4())
+    if supplied_canary_intent_id:
+        intent_id = supplied_canary_intent_id
     if action == "open_position":
         idem = hashlib.sha256(
             f"operator|{account_id}|{client_ref}".encode()
