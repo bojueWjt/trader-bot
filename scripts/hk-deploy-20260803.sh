@@ -1672,15 +1672,18 @@ migration_rebaseline_live_manifest_exists() {
 verify_migration_rebaseline_live_manifest() {
   local live_manifest="$T/RELEASE_MANIFEST.json"
   if [ ! -e "$live_manifest" ] && [ ! -L "$live_manifest" ]; then
-    return
+    return 1
   fi
   [ -f "$live_manifest" ] && [ ! -L "$live_manifest" ] \
     || die "migration rebaseline live release manifest is invalid"
-  [ -f "$RELEASE_MANIFEST" ] && [ ! -L "$RELEASE_MANIFEST" ] \
-    || die "migration rebaseline replay requires staging release manifest"
-  cmp -s "$live_manifest" "$RELEASE_MANIFEST" \
-    || die "migration rebaseline live release manifest differs"
-  echo "== migration rebaseline live release manifest matches staging"
+  if [ ! -f "$RELEASE_MANIFEST" ] || [ -L "$RELEASE_MANIFEST" ]; then
+    return 1
+  fi
+  if cmp -s "$live_manifest" "$RELEASE_MANIFEST"; then
+    echo "== migration rebaseline live release manifest matches staging"
+    return 0
+  fi
+  return 1
 }
 verify_bootstrap_gate_quiescence() {
   BOOTSTRAP_GATE_QUIESCED_BY="ready-halted-or-stopped-container"
@@ -1688,13 +1691,12 @@ verify_bootstrap_gate_quiescence() {
     verify_all_execution_accounts_quiesced
     return
   fi
-  if migration_rebaseline_live_manifest_exists; then
-    verify_migration_rebaseline_live_manifest
+  if migration_rebaseline_live_manifest_exists \
+    && verify_migration_rebaseline_live_manifest; then
     verify_all_execution_accounts_quiesced
     return
   fi
   verify_all_execution_accounts_stopped
-  verify_migration_rebaseline_live_manifest
   BOOTSTRAP_GATE_QUIESCED_BY="stopped-container"
 }
 verify_bootstrap_stopped_gate() {

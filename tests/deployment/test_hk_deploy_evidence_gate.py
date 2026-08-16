@@ -658,7 +658,7 @@ def connect(_url):
             helper,
         )
         self.assertIn(
-            'die "migration rebaseline live release manifest differs"',
+            "return 1",
             helper,
         )
 
