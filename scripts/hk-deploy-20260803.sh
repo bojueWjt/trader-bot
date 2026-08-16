@@ -1490,6 +1490,11 @@ try:
             ).hexdigest()
             if active_epoch[0] == target_epoch:
                 if target_manifest is False:
+                    if live_manifest_present:
+                        migration_candidate = False
+                        migration_rebaseline = False
+                        print("maintenance_fence")
+                        raise SystemExit(0)
                     raise SystemExit(
                         "migration rebaseline replay requires release manifest"
                     )

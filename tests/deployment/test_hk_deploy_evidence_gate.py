@@ -1182,6 +1182,32 @@ def connect(_url):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "maintenance_fence")
 
+    def test_same_epoch_live_hotfix_capture_uses_maintenance_fence(
+        self,
+    ) -> None:
+        old_manifest = {
+            "release_id": "release-hk-old",
+            "image_digest": "sha256:" + ("4" * 64),
+            "config_sha256": "5" * 64,
+            "dependency_lock_sha256": "6" * 64,
+            "schema_epochs": {"db": DATABASE_SCHEMA_EPOCH},
+        }
+        shared_capacity = {
+            "redis_fencing_epoch": "redis-epoch-shared",
+            "account_ids": ["account-a", "account-b", "account-c", "account-d"],
+        }
+        result = self._run_deploy_gate_mode_detector(
+            capacity_payload=shared_capacity,
+            state_manifest_payload=old_manifest,
+            state_capacity_payload=shared_capacity,
+            resume_manifest=False,
+            write_release_manifest=False,
+            live_manifest_payload=old_manifest,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "maintenance_fence")
+
     def test_migration_rebaseline_replay_requires_exact_release(self) -> None:
         manifest = {
             "release_id": "release-reviewed-a",
