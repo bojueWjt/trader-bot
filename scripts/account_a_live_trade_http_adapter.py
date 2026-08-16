@@ -1635,6 +1635,10 @@ class AccountALiveTradeHttpAdapter:
             "accepted": True,
             "action": "refresh-evidence-burst",
             "operation": operation,
+            "refresh_accounts": [
+                target.account_id
+                for target in targets
+            ],
             "commands": records,
             "source": "control-plane",
             "observed_at": _now(),

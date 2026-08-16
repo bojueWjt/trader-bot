@@ -121,6 +121,41 @@ def test_config_selects_restricted_account_environment(
         adapter.dispatch("preflight", conflicting_request)
 
 
+def test_config_accepts_explicit_abc_refresh_accounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = runpy.run_path(str(ADAPTER))
+    config_type = namespace["Config"]
+    risk_path = tmp_path / "risk.token"
+    node_path = tmp_path / "node.token"
+    risk_path.write_text(RISK_TOKEN + "\n", encoding="ascii")
+    node_path.write_text(NODE_TOKEN + "\n", encoding="ascii")
+    risk_path.chmod(0o600)
+    node_path.chmod(0o400)
+    monkeypatch.setenv("HARDENED_CANARY_ACCOUNT_ID", ACCOUNT_ID)
+    monkeypatch.setenv(
+        "HARDENED_CANARY_REFRESH_ACCOUNTS",
+        "account-a,account-b,account-c",
+    )
+    monkeypatch.setenv(
+        "ACCOUNT_A_LIVE_TRADE_RISK_ADMIN_TOKEN_FILE",
+        str(risk_path),
+    )
+    monkeypatch.setenv(
+        "ACCOUNT_A_LIVE_TRADE_NODE_TOKEN_FILE",
+        str(node_path),
+    )
+
+    config = config_type.from_environment()
+
+    assert [target.account_id for target in config.refresh_targets] == [
+        "account-a",
+        "account-b",
+        "account-c",
+    ]
+
+
 class Scenario:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -381,18 +416,21 @@ def _assert_refresh_burst(
     *,
     operation: str,
     before_request: dict[str, Any],
+    expected_accounts: list[str] | None = None,
 ) -> None:
     refresh_posts = _refresh_command_posts(scenario)
-    assert len(refresh_posts) == 4
+    if expected_accounts is None:
+        expected_accounts = [
+            "account-a",
+            "account-b",
+            "account-c",
+            "account-d",
+        ]
+    assert len(refresh_posts) == len(expected_accounts)
     assert sorted(
         request["body"]["scope"]["account_id"]
         for request in refresh_posts
-    ) == [
-        "account-a",
-        "account-b",
-        "account-c",
-        "account-d",
-    ]
+    ) == expected_accounts
     before_index = scenario.requests.index(before_request)
     for request in refresh_posts:
         assert scenario.requests.index(request) < before_index
@@ -410,8 +448,8 @@ def _assert_refresh_burst(
         if request["method"] == "GET"
         and request["path"].startswith("/v1/commands/")
     ]
-    assert len(status_polls) >= 4
-    for request in status_polls[:4]:
+    assert len(status_polls) >= len(expected_accounts)
+    for request in status_polls[:len(expected_accounts)]:
         assert scenario.requests.index(request) < before_index
 
 
@@ -611,6 +649,52 @@ def test_open_posts_limit_ioc_operator_intent(
     assert operator_request["body"]["quantity"] == "0.07"
     assert operator_request["body"]["notional_usdt"] == "7"
     assert operator_request["body"]["canary_permit_id"] == _request()["permit_id"]
+
+
+def test_open_uses_explicit_abc_refresh_burst(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "open",
+            _request(
+                client_order_id=OPEN_CLIENT_ORDER_ID,
+                side="BUY",
+                order_type="LIMIT",
+                time_in_force="IOC",
+                quantity="0.07",
+                limit_price_usdt="100",
+                max_actual_open_notional_usdt="12",
+                side_effect_id="open-request-id",
+            ),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "HARDENED_CANARY_REFRESH_ACCOUNTS": (
+                    "account-a,account-b,account-c"
+                ),
+            },
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["accepted"] is True
+    operator_request = next(
+        request
+        for request in scenario.requests
+        if request["method"] == "POST"
+        and request["path"] == "/v1/operator/orders"
+    )
+    _assert_refresh_burst(
+        scenario,
+        operation="before-open",
+        before_request=operator_request,
+        expected_accounts=[
+            "account-a",
+            "account-b",
+            "account-c",
+        ],
+    )
 
 
 def test_open_rejects_quantity_other_than_live_canary_quantity(
