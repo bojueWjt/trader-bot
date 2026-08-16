@@ -19,6 +19,7 @@ sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 from app.node import (  # noqa: E402
     _cancel_reconciliation_proof_refresh_task,
+    _refresh_nautilus_reconciliation_proof,
     _register_nautilus_reconciliation_callback,
     _run_reconciliation_proof_refresh_loop,
 )
@@ -284,6 +285,37 @@ def test_refresh_reuses_required_nautilus_timeout_argument(
             ReconciliationState.HEALTHY,
         ],
     )
+
+
+def test_command_thread_can_request_immediate_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADER_RELEASE_ID", "release-a")
+    engine = FakeExecEngine([True, True])
+    node = FakeNode(engine)
+    recorder = ProofRecorder()
+    runtime = make_runtime(recorder)
+
+    async def exercise() -> None:
+        _register_nautilus_reconciliation_callback(
+            node,
+            runtime,
+            schedule_refresh=False,
+        )
+        assert await engine.reconcile_execution_state(7.0) is True
+        await asyncio.to_thread(
+            _refresh_nautilus_reconciliation_proof,
+            node,
+            runtime,
+        )
+
+    asyncio.run(exercise())
+
+    assert engine.calls == [7.0, 7.0]
+    assert recorder.states == [
+        ReconciliationState.HEALTHY,
+        ReconciliationState.HEALTHY,
+    ]
 
 
 def test_refresh_loop_supports_boolean_is_running_property(

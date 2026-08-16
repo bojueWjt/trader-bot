@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -347,6 +348,12 @@ def build_nautilus_trading_node(
             restart_required_callback=callback,
             namespace_lease=namespace_lease_guard,
             exchange_evidence_provider=runtime.exchange_evidence_provider,
+            reconciliation_refresh=lambda: (
+                _refresh_nautilus_reconciliation_proof(
+                    node,
+                    runtime,
+                )
+            ),
             namespace_lease_lost_callback=fatal_callback,
             command_journal_path=runtime.route.spool_path.with_suffix(
                 ".commands.json"
@@ -950,26 +957,34 @@ def _register_nautilus_reconciliation_callback(
         raise RuntimeError("Nautilus reconciliation proof hook is already registered")
 
     async def reconcile_with_proof(*args: Any, **kwargs: Any) -> bool:
-        generation = _begin_reconciliation(runtime)
-        try:
-            healthy = await _reconcile_with_total_deadline(
-                original,
-                args,
-                kwargs,
+        loop = asyncio.get_running_loop()
+        previous_loop = getattr(
+            engine,
+            "_trader_reconciliation_event_loop",
+            None,
+        )
+        if previous_loop is not loop:
+            task = getattr(
+                engine,
+                "_trader_reconciliation_proof_task",
+                None,
             )
-        except Exception:
-            _record_nautilus_reconciliation_proof(
-                node,
-                runtime,
-                healthy=False,
-                generation=generation,
-            )
-            raise
-        _record_nautilus_reconciliation_proof(
+            if task is not None and not task.done():
+                raise RuntimeError(
+                    "Nautilus reconciliation event loop changed while "
+                    "the proof refresh task is running"
+                )
+            engine._trader_reconciliation_lock = asyncio.Lock()
+        engine._trader_reconciliation_event_loop = loop
+        engine._trader_reconciliation_args = tuple(args)
+        engine._trader_reconciliation_kwargs = dict(kwargs)
+        healthy = await _execute_nautilus_reconciliation(
             node,
             runtime,
-            healthy=healthy,
-            generation=generation,
+            original,
+            args,
+            kwargs,
+            _nautilus_reconciliation_lock(engine),
         )
         if healthy and schedule_refresh:
             _ensure_reconciliation_proof_refresh_task(
@@ -983,6 +998,76 @@ def _register_nautilus_reconciliation_callback(
 
     engine.reconcile_execution_state = reconcile_with_proof
     engine._trader_reconciliation_proof_registered = True
+
+
+def _refresh_nautilus_reconciliation_proof(
+    node: Any,
+    runtime: AccountRuntime,
+) -> None:
+    del runtime
+    kernel = getattr(node, "kernel", None)
+    engine = getattr(kernel, "exec_engine", None)
+    if engine is None:
+        raise RuntimeError(
+            "Nautilus execution engine reconciliation API is unavailable"
+        )
+    loop = getattr(
+        engine,
+        "_trader_reconciliation_event_loop",
+        None,
+    )
+    if loop is None or loop.is_closed() or not loop.is_running():
+        raise RuntimeError(
+            "Nautilus reconciliation event loop is unavailable"
+        )
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if current_loop is loop:
+        raise RuntimeError(
+            "immediate reconciliation must run from a non-event-loop thread"
+        )
+    args = tuple(
+        getattr(
+            engine,
+            "_trader_reconciliation_args",
+            (),
+        )
+    )
+    kwargs = dict(
+        getattr(
+            engine,
+            "_trader_reconciliation_kwargs",
+            {},
+        )
+    )
+    reconcile = getattr(engine, "reconcile_execution_state", None)
+    if not callable(reconcile):
+        raise RuntimeError(
+            "Nautilus execution engine reconciliation API is unavailable"
+        )
+    timeout_seconds = _reconciliation_timeout_seconds(args, kwargs)
+    future = asyncio.run_coroutine_threadsafe(
+        reconcile(*args, **kwargs),
+        loop,
+    )
+    try:
+        healthy = bool(
+            future.result(
+                timeout=timeout_seconds + 1.0,
+            )
+        )
+    except FutureTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(
+            "immediate Nautilus reconciliation exceeded "
+            f"{timeout_seconds + 1.0:.3f}s command deadline"
+        ) from exc
+    if not healthy:
+        raise RuntimeError(
+            "immediate Nautilus reconciliation reported unhealthy state"
+        )
 
 
 def _ensure_reconciliation_proof_refresh_task(
@@ -1033,29 +1118,64 @@ async def _run_reconciliation_proof_refresh_loop(
                 running = bool(is_running)
             if not running:
                 return
-            generation = _begin_reconciliation(runtime)
             try:
-                healthy = await _reconcile_with_total_deadline(
+                await _execute_nautilus_reconciliation(
+                    node,
+                    runtime,
                     original_reconcile,
                     reconcile_args,
                     reconcile_kwargs,
+                    _nautilus_reconciliation_lock(engine),
                 )
             except Exception:
-                _record_nautilus_reconciliation_proof(
-                    node,
-                    runtime,
-                    healthy=False,
-                    generation=generation,
-                )
                 continue
+    except asyncio.CancelledError:
+        return
+
+
+def _nautilus_reconciliation_lock(engine: Any) -> asyncio.Lock:
+    lock = getattr(
+        engine,
+        "_trader_reconciliation_lock",
+        None,
+    )
+    if lock is None:
+        lock = asyncio.Lock()
+        engine._trader_reconciliation_lock = lock
+    return lock
+
+
+async def _execute_nautilus_reconciliation(
+    node: Any,
+    runtime: AccountRuntime,
+    reconcile: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    lock: asyncio.Lock,
+) -> bool:
+    async with lock:
+        generation = _begin_reconciliation(runtime)
+        try:
+            healthy = await _reconcile_with_total_deadline(
+                reconcile,
+                args,
+                kwargs,
+            )
+        except Exception:
             _record_nautilus_reconciliation_proof(
                 node,
                 runtime,
-                healthy=healthy,
+                healthy=False,
                 generation=generation,
             )
-    except asyncio.CancelledError:
-        return
+            raise
+        _record_nautilus_reconciliation_proof(
+            node,
+            runtime,
+            healthy=healthy,
+            generation=generation,
+        )
+        return healthy
 
 
 async def _reconcile_with_total_deadline(

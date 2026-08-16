@@ -1962,6 +1962,7 @@ class CommandPollerActor(Actor):
         fatal_callback: Callable[[str], None] | None = None,
         shutdown_callback: Callable[[], None] | None = None,
         exchange_evidence_provider: Any = None,
+        reconciliation_refresh: Callable[[], Any] | None = None,
         terminal_result_queue_capacity: int = (
             DEFAULT_TERMINAL_RESULT_QUEUE_CAPACITY
         ),
@@ -2091,6 +2092,7 @@ class CommandPollerActor(Actor):
         self._fatal_callback = fatal_callback
         self._shutdown_callback = shutdown_callback
         self._exchange_evidence_provider = exchange_evidence_provider
+        self._reconciliation_refresh = reconciliation_refresh
         self._terminal_verify_attempts = int(terminal_verify_attempts)
         self._terminal_verify_delay_seconds = float(
             terminal_verify_delay_seconds
@@ -2120,6 +2122,11 @@ class CommandPollerActor(Actor):
         self._session_commands: Queue[_SessionCommandPublication] = Queue(
             maxsize=self._max_pending_commands
         )
+        self._prepared_reconciliation_refreshes: dict[
+            str,
+            Exception | bool,
+        ] = {}
+        self._prepared_reconciliation_refreshes_lock = RLock()
         self._fatal_reason = ""
         self._last_namespace_lease_refresh_at: float | None = None
         self._last_namespace_lease_refreshed_at_epoch: int | None = None
@@ -2744,6 +2751,16 @@ class CommandPollerActor(Actor):
     ) -> _PendingCommandAck:
         if self._stopped.is_set():
             raise RuntimeError("command poller actor is stopped")
+        self._prepare_reconciliation_refresh(command)
+        if self._stopped.is_set():
+            self._discard_prepared_reconciliation_refresh(command)
+            raise RuntimeError("command poller actor is stopped")
+        return self._publish_session_command(command)
+
+    def _publish_session_command(
+        self,
+        command: Any,
+    ) -> _PendingCommandAck:
         publication = _SessionCommandPublication(command=command)
         try:
             self._session_commands.put(
@@ -2751,6 +2768,7 @@ class CommandPollerActor(Actor):
                 timeout=self._session_enqueue_timeout_seconds,
             )
         except Full as exc:
+            self._discard_prepared_reconciliation_refresh(command)
             self._fail_command_stream(
                 "operator command actor mailbox capacity exceeded"
             )
@@ -2771,13 +2789,68 @@ class CommandPollerActor(Actor):
                     "operator command apply timed out waiting for actor thread"
                 )
         if publication.error is not None:
+            self._discard_prepared_reconciliation_refresh(command)
             raise publication.error
         acknowledgement = publication.acknowledgement
         if acknowledgement is None:
+            self._discard_prepared_reconciliation_refresh(command)
             raise RuntimeError(
                 "operator command apply produced no acknowledgement"
             )
+        self._discard_prepared_reconciliation_refresh(command)
         return acknowledgement
+
+    def _prepare_reconciliation_refresh(self, command: Any) -> None:
+        from execution_domain.control_plane import CommandType  # type: ignore
+
+        if command.type != CommandType.REFRESH_EVIDENCE:
+            return
+        command_id = str(command.command_id)
+        with self._prepared_reconciliation_refreshes_lock:
+            if command_id in self._prepared_reconciliation_refreshes:
+                return
+        outcome = self._run_reconciliation_refresh()
+        with self._prepared_reconciliation_refreshes_lock:
+            self._prepared_reconciliation_refreshes[command_id] = outcome
+
+    def _run_reconciliation_refresh(self) -> Exception | bool:
+        callback = self._reconciliation_refresh
+        if callback is None:
+            return RuntimeError(
+                "Nautilus reconciliation refresh is unavailable"
+            )
+        try:
+            callback()
+        except Exception as exc:
+            return exc
+        return False
+
+    def _take_reconciliation_refresh(
+        self,
+        command: Any,
+    ) -> Exception | bool:
+        command_id = str(command.command_id)
+        with self._prepared_reconciliation_refreshes_lock:
+            if command_id in self._prepared_reconciliation_refreshes:
+                return self._prepared_reconciliation_refreshes.pop(
+                    command_id
+                )
+        if self._control_plane_session is not None:
+            return RuntimeError(
+                "prepared Nautilus reconciliation refresh is unavailable"
+            )
+        return self._run_reconciliation_refresh()
+
+    def _discard_prepared_reconciliation_refresh(
+        self,
+        command: Any,
+    ) -> None:
+        command_id = str(command.command_id)
+        with self._prepared_reconciliation_refreshes_lock:
+            self._prepared_reconciliation_refreshes.pop(
+                command_id,
+                False,
+            )
 
     def session_ack_command(
         self,
@@ -4097,6 +4170,13 @@ class CommandPollerActor(Actor):
                     TradingState.HALTED, "operator_command"
                 )
             elif cmd.type == CommandType.REFRESH_EVIDENCE:
+                reconciliation_error = self._take_reconciliation_refresh(
+                    cmd
+                )
+                if reconciliation_error is not False:
+                    return self._failed_command_result(
+                        reconciliation_error
+                    )
                 self.session_refresh_evidence()
                 return CommandAckStatus.COMPLETED, None
             elif cmd.type == CommandType.RESUME:

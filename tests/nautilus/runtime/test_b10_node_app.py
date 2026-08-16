@@ -1526,7 +1526,9 @@ class NautilusActorAdapterTest(unittest.TestCase):
         finally:
             actor.on_stop()
 
-    def test_refresh_evidence_command_forces_exchange_snapshot_heartbeat(self) -> None:
+    def test_refresh_evidence_command_reconciles_before_exchange_snapshot_heartbeat(
+        self,
+    ) -> None:
         from app.nautilus_actors import CommandPollerActor
         from execution_domain.control_plane import (
             CommandAckStatus,
@@ -1537,12 +1539,19 @@ class NautilusActorAdapterTest(unittest.TestCase):
         control_plane = _HeartbeatCaptureControlPlane()
         lifecycle = _RecordingLifecycle()
         provider = _ExchangeEvidenceProvider()
+        reconciliation_calls: list[str] = []
+
+        def refresh_reconciliation() -> None:
+            self.assertEqual(provider.force_refresh_values, [])
+            reconciliation_calls.append("completed")
+
         actor = CommandPollerActor(
             control_plane=control_plane,
             lifecycle=lifecycle,
             node_id="node-a",
             account_id="account-a",
             exchange_evidence_provider=provider,
+            reconciliation_refresh=refresh_reconciliation,
         )
 
         status, error = actor._apply(
@@ -1555,9 +1564,89 @@ class NautilusActorAdapterTest(unittest.TestCase):
         try:
             self.assertEqual(status, CommandAckStatus.COMPLETED)
             self.assertIsNone(error)
+            self.assertEqual(reconciliation_calls, ["completed"])
             self.assertEqual(provider.force_refresh_values, [True])
             self.assertEqual(len(control_plane.heartbeats), 1)
             self.assertEqual(lifecycle.applied_states, [])
+        finally:
+            actor.on_stop()
+
+    def test_refresh_evidence_command_fails_before_heartbeat_when_reconciliation_fails(
+        self,
+    ) -> None:
+        from app.nautilus_actors import CommandPollerActor
+        from execution_domain.control_plane import (
+            CommandAckStatus,
+            CommandType,
+            NodeCommand,
+        )
+
+        control_plane = _HeartbeatCaptureControlPlane()
+        lifecycle = _RecordingLifecycle()
+        provider = _ExchangeEvidenceProvider()
+
+        def fail_reconciliation() -> None:
+            raise RuntimeError("venue reconciliation failed")
+
+        actor = CommandPollerActor(
+            control_plane=control_plane,
+            lifecycle=lifecycle,
+            node_id="node-a",
+            account_id="account-a",
+            exchange_evidence_provider=provider,
+            reconciliation_refresh=fail_reconciliation,
+        )
+
+        status, error = actor._apply(
+            NodeCommand(
+                command_id="cmd-refresh-failed",
+                type=CommandType.REFRESH_EVIDENCE,
+            )
+        )
+
+        try:
+            self.assertEqual(status, CommandAckStatus.FAILED)
+            self.assertIn("venue reconciliation failed", str(error))
+            self.assertEqual(provider.force_refresh_values, [])
+            self.assertEqual(control_plane.heartbeats, [])
+            self.assertEqual(lifecycle.applied_states, [])
+        finally:
+            actor.on_stop()
+
+    def test_session_refresh_fails_closed_without_prepared_reconciliation(
+        self,
+    ) -> None:
+        from app.nautilus_actors import CommandPollerActor
+        from execution_domain.control_plane import (
+            CommandAckStatus,
+            CommandType,
+            NodeCommand,
+        )
+
+        reconciliation_calls: list[str] = []
+        actor = CommandPollerActor(
+            control_plane=_HeartbeatCaptureControlPlane(),
+            lifecycle=_RecordingLifecycle(),
+            node_id="node-a",
+            account_id="account-a",
+            reconciliation_refresh=lambda: reconciliation_calls.append(
+                "called"
+            ),
+            control_plane_session=object(),
+            manage_control_plane_session=False,
+        )
+
+        status, error = actor._apply(
+            NodeCommand(
+                command_id="cmd-refresh-unprepared",
+                type=CommandType.REFRESH_EVIDENCE,
+            )
+        )
+
+        try:
+            self.assertEqual(status, CommandAckStatus.FAILED)
+            self.assertIn("prepared Nautilus reconciliation", str(error))
+            self.assertEqual(reconciliation_calls, [])
         finally:
             actor.on_stop()
 

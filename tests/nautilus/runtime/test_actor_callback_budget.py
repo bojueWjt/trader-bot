@@ -455,6 +455,91 @@ def test_session_command_apply_returns_to_actor_thread() -> None:
     actor.on_stop()
 
 
+def test_session_refresh_reconciles_on_command_delivery_thread() -> None:
+    class RefreshControlPlane(_ControlPlane):
+        def __init__(self) -> None:
+            self.polled = False
+            self.acked = Event()
+
+        def poll_commands(
+            self,
+            node_id: str,
+            after_sequence: int | None,
+        ) -> tuple[NodeCommand, ...]:
+            del node_id, after_sequence
+            if self.polled:
+                return ()
+            self.polled = True
+            return (
+                NodeCommand(
+                    command_id="refresh-1",
+                    type=CommandType.REFRESH_EVIDENCE,
+                ),
+            )
+
+        def ack_command(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            self.acked.set()
+
+    class EvidenceProvider:
+        def __init__(self) -> None:
+            self.thread_id: int | None = None
+
+        def snapshot(
+            self,
+            *,
+            force_refresh: bool = False,
+        ) -> dict[str, Any]:
+            assert force_refresh is True
+            self.thread_id = get_ident()
+            return {
+                "positions": (),
+                "regular_orders": (),
+                "algo_orders": (),
+            }
+
+    control_plane = RefreshControlPlane()
+    provider = EvidenceProvider()
+    reconciliation_thread_ids: list[int] = []
+    actor_holder: dict[str, CommandPollerActor] = {}
+    session = NodeControlPlaneSession(
+        command_poll=lambda capacity: actor_holder[
+            "actor"
+        ].session_poll_commands(capacity),
+        command_apply=lambda command: actor_holder[
+            "actor"
+        ].session_apply_command(command),
+        command_ack=lambda acknowledgement: actor_holder[
+            "actor"
+        ].session_ack_command(acknowledgement),
+        command_poll_interval_seconds=0.01,
+    )
+    actor = CommandPollerActor(
+        control_plane,
+        _Lifecycle(),
+        "node-a",
+        account_id="account-a",
+        exchange_evidence_provider=provider,
+        reconciliation_refresh=lambda: reconciliation_thread_ids.append(
+            get_ident()
+        ),
+        control_plane_session=session,
+    )
+    actor_holder["actor"] = actor
+    actor.on_start()
+
+    deadline = time.monotonic() + 1.0
+    while not control_plane.acked.is_set() and time.monotonic() < deadline:
+        actor._on_poll_timer()
+        time.sleep(0.001)
+
+    assert control_plane.acked.is_set()
+    assert len(reconciliation_thread_ids) == 1
+    assert reconciliation_thread_ids[0] != get_ident()
+    assert provider.thread_id == get_ident()
+    actor.on_stop()
+
+
 def test_exchange_evidence_wait_keeps_actor_timer_callback_bounded() -> None:
     provider = _BlockingEvidenceProvider()
     session = _RecordingSession()
