@@ -1519,6 +1519,15 @@ try:
                 expected_registration_key = (
                     f"migration-rebaseline-register:{target_release_id}"
                 )
+                same_epoch_hotfix_key = f"register:{target_release_id}"
+                if (
+                    live_manifest_present
+                    and active_rollout[8] == same_epoch_hotfix_key
+                ):
+                    migration_candidate = False
+                    migration_rebaseline = False
+                    print("maintenance_fence")
+                    raise SystemExit(0)
                 if (
                     migration_live_manifest is not False
                     and active_rollout[8] != expected_registration_key
@@ -9855,6 +9864,9 @@ elif [ "$ROLLOUT_NODE" = "trader-v3-node-a" ]; then
       --idempotency-key "register:$RELEASE_ID"
     ROLLOUT_TRACKED=1
     echo "== reviewed rollout registered in account_a_canary"
+    if [ "$BOOTSTRAP_ALL_NODE_RELEASE" = "1" ]; then
+      stop_recreate_nodes
+    fi
   fi
 fi
 

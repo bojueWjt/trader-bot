@@ -642,6 +642,21 @@ def test_shared_mutation_gate_precedes_migration_and_topology_replacement() -> N
     assert topology_section < topology_gate < topology
 
 
+def test_account_a_all_node_hotfix_stops_old_nodes_after_registration() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    registration = text.index(
+        'echo "== reviewed rollout registered in account_a_canary"'
+    )
+    stop_nodes = text.index("stop_recreate_nodes", registration)
+    install_section = text.index("# ---------- install ----------", registration)
+    install_gate = text.index(
+        "verify_all_execution_accounts_quiesced",
+        install_section,
+    )
+
+    assert registration < stop_nodes < install_section < install_gate
+
+
 def test_optional_host_module_rejects_same_content_symlink_before_migration(
     tmp_path: Path,
 ) -> None:
