@@ -774,6 +774,55 @@ def test_preflight_returns_explicit_exchange_authority(
     assert payload["source"] == "exchange"
     assert payload["mirror_stale"] is False
     assert payload["available_usdt_balance"] == "100"
+    exchange_request = next(
+        request
+        for request in scenario.requests
+        if request["method"] == "GET"
+        and request["path"] == f"/v1/nodes/{NODE_ID}/exchange-state"
+    )
+    _assert_refresh_burst(
+        scenario,
+        operation="before-preflight",
+        before_request=exchange_request,
+    )
+
+
+def test_preflight_uses_explicit_abc_refresh_burst(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+            environment_overrides={
+                "HARDENED_CANARY_REFRESH_ACCOUNTS": (
+                    "account-a,account-b,account-c"
+                ),
+            },
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["action"] == "preflight"
+    exchange_request = next(
+        request
+        for request in scenario.requests
+        if request["method"] == "GET"
+        and request["path"] == f"/v1/nodes/{NODE_ID}/exchange-state"
+    )
+    _assert_refresh_burst(
+        scenario,
+        operation="before-preflight",
+        before_request=exchange_request,
+        expected_accounts=[
+            "account-a",
+            "account-b",
+            "account-c",
+        ],
+    )
 
 
 def test_portfolio_baseline_ignores_non_target_position_market_refresh(

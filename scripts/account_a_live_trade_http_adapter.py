@@ -1403,6 +1403,7 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
+        self._refresh_evidence_burst(request, operation="before-preflight")
         mirror = self._exchange_state_after(
             (),
             request=request,
@@ -1560,10 +1561,7 @@ class AccountALiveTradeHttpAdapter:
         *,
         operation: str,
     ) -> dict[str, Any]:
-        side_effect_id = _required_text(
-            request.get("side_effect_id"),
-            "side_effect_id",
-        )
+        side_effect_id = _refresh_side_effect_seed(request, operation)
         targets = self._config.refresh_targets
         if not targets:
             raise AdapterError("refresh evidence targets are empty")
