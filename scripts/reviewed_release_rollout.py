@@ -53,6 +53,7 @@ ACTIVE_ROLLOUT_PHASES = (
     PHASE_ACCOUNT_D_ROLLOUT,
 )
 MIGRATION_REBASELINE_REGISTRATION_MODE = "migration_rebaseline_stopped"
+SAME_EPOCH_HOTFIX_REGISTRATION_MODE = "same_epoch_hotfix"
 ALLOWED_TRANSITIONS = {
     PHASE_ACCOUNT_A_CANARY: {
         PHASE_ACCOUNT_B_ROLLOUT,
@@ -1560,24 +1561,37 @@ def register_reviewed_release(
                 cur,
                 for_update=True,
             )
+            same_epoch_predecessor: dict[str, Any] | None = None
             if active_epoch == capacity_evidence.redis_fencing_epoch:
-                raise ReleaseRolloutError(
-                    "registration requires a new Redis fencing epoch"
-                )
-            registration_heartbeats = (
-                _lock_registration_heartbeats(
+                same_epoch_predecessor = _lock_same_epoch_hotfix_predecessor(
                     cur,
                     document=document,
+                    capacity_evidence=capacity_evidence,
                     active_redis_fencing_epoch=active_epoch,
-                    max_age_seconds=DEFAULT_HEARTBEAT_MAX_AGE_SECONDS,
                 )
-            )
-            operation_lock.require_held()
-            _activate_redis_fencing_epoch(
-                cur,
-                capacity_evidence,
-                activated_by=reviewer,
-            )
+                _abort_same_epoch_hotfix_predecessor(
+                    cur,
+                    predecessor=same_epoch_predecessor,
+                    successor_document=document,
+                    successor_capacity_evidence=capacity_evidence,
+                    actor=reviewer,
+                )
+                registration_heartbeats: list[dict[str, Any]] = []
+            else:
+                registration_heartbeats = (
+                    _lock_registration_heartbeats(
+                        cur,
+                        document=document,
+                        active_redis_fencing_epoch=active_epoch,
+                        max_age_seconds=DEFAULT_HEARTBEAT_MAX_AGE_SECONDS,
+                    )
+                )
+                operation_lock.require_held()
+                _activate_redis_fencing_epoch(
+                    cur,
+                    capacity_evidence,
+                    activated_by=reviewer,
+                )
             operation_lock.require_held()
             cur.execute(
                 """
@@ -1671,6 +1685,18 @@ def register_reviewed_release(
                     ),
                     "maintenance_fence": maintenance_fence,
                 }
+                if same_epoch_predecessor is not None:
+                    evidence.update(
+                        {
+                            "registration_mode": (
+                                SAME_EPOCH_HOTFIX_REGISTRATION_MODE
+                            ),
+                            "predecessor_release_id": str(
+                                same_epoch_predecessor["release_id"]
+                            ),
+                            "redis_epoch_reused": True,
+                        }
+                    )
                 _record_rollout_event(
                     cur,
                     release_id=document.release_id,
@@ -2475,6 +2501,121 @@ def _require_idempotent_closure_report(
         raise ReleaseRolloutError(
             "transition idempotency closure report mismatch"
         )
+
+
+def _lock_same_epoch_hotfix_predecessor(
+    cur,
+    *,
+    document: ReleaseDocument,
+    capacity_evidence: RedisFencingEpochEvidence,
+    active_redis_fencing_epoch: str,
+) -> dict[str, Any]:
+    if active_redis_fencing_epoch != capacity_evidence.redis_fencing_epoch:
+        raise ReleaseRolloutError(
+            "same-epoch hotfix requires the active Redis fencing epoch"
+        )
+    cur.execute(
+        """
+        SELECT release_id,
+               redis_fencing_epoch::text AS redis_fencing_epoch,
+               phase,
+               phase_version
+        FROM reviewed_release_rollouts
+        WHERE phase = ANY(%s)
+        FOR UPDATE
+        """,
+        (list(ACTIVE_ROLLOUT_PHASES),),
+    )
+    active_rollouts = cur.fetchall()
+    if len(active_rollouts) != 1:
+        raise ReleaseRolloutError(
+            "same-epoch hotfix requires exactly one active predecessor rollout"
+        )
+    predecessor = active_rollouts[0]
+    if predecessor["release_id"] == document.release_id:
+        raise ReleaseRolloutError(
+            "same-epoch hotfix predecessor must differ from successor"
+        )
+    if str(predecessor["redis_fencing_epoch"]) != active_redis_fencing_epoch:
+        raise ReleaseRolloutError(
+            "same-epoch hotfix predecessor Redis epoch is not active"
+        )
+    return predecessor
+
+
+def _abort_same_epoch_hotfix_predecessor(
+    cur,
+    *,
+    predecessor: dict[str, Any],
+    successor_document: ReleaseDocument,
+    successor_capacity_evidence: RedisFencingEpochEvidence,
+    actor: str,
+) -> None:
+    predecessor_release_id = str(predecessor["release_id"])
+    predecessor_phase = str(predecessor["phase"])
+    predecessor_version = int(predecessor["phase_version"])
+    next_version = predecessor_version + 1
+    abort_key = f"same-epoch-hotfix-abort:{successor_document.release_id}"
+    reason = "superseded by same-epoch reviewed hotfix"
+    evidence = {
+        "registration_mode": SAME_EPOCH_HOTFIX_REGISTRATION_MODE,
+        "redis_epoch_reused": True,
+        "successor_release_id": successor_document.release_id,
+        "predecessor_redis_fencing_epoch": str(
+            predecessor["redis_fencing_epoch"]
+        ),
+        "successor_redis_fencing_epoch": (
+            successor_capacity_evidence.redis_fencing_epoch
+        ),
+    }
+    cur.execute(
+        """
+        UPDATE reviewed_release_rollouts
+        SET phase=%s,
+            phase_version=%s
+        WHERE release_id=%s
+          AND phase=%s
+          AND phase_version=%s
+        RETURNING release_id
+        """,
+        (
+            PHASE_ABORTED,
+            next_version,
+            predecessor_release_id,
+            predecessor_phase,
+            predecessor_version,
+        ),
+    )
+    if cur.fetchone() is None:
+        raise ReleaseRolloutError(
+            "same-epoch hotfix predecessor changed concurrently"
+        )
+    _record_rollout_event(
+        cur,
+        release_id=predecessor_release_id,
+        event_type="phase_transition",
+        from_phase=predecessor_phase,
+        to_phase=PHASE_ABORTED,
+        phase_version=next_version,
+        idempotency_key=abort_key,
+        actor=actor,
+        reason=reason,
+        evidence=evidence,
+    )
+    _record_global_audit(
+        cur,
+        release_id=predecessor_release_id,
+        event_type="reviewed_release_phase_transition",
+        actor=actor,
+        payload={
+            "from_phase": predecessor_phase,
+            "to_phase": PHASE_ABORTED,
+            "phase_version": next_version,
+            "idempotency_key": abort_key,
+            "reason": reason,
+            **evidence,
+        },
+    )
 
 
 def get_rollout(conn, release_id: str) -> dict[str, Any]:

@@ -1627,6 +1627,168 @@ def test_migration_rebaseline_registration_replay_is_idempotent(
     assert replay_checks == ["identity", "history", "manifests"]
 
 
+def test_register_same_epoch_hotfix_supersedes_active_rollout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = reviewed_release_rollout.ReleaseDocument(
+        release_id="hotfix-release",
+        image_digest="sha256:" + ("1" * 64),
+        config_sha256="2" * 64,
+        dependency_lock_sha256="3" * 64,
+        schema_epoch="0015_refresh_evidence_command",
+        manifest_sha256="4" * 64,
+        bundle_manifest_sha256="5" * 64,
+        delivery_mode=release_manifest.DELIVERY_IMMUTABLE,
+        release_root_path="/srv/trader-v3/releases/hotfix",
+        release_source_manifest_sha256="6" * 64,
+        live_adapter_sha256="7" * 64,
+        node_ids=dict(reviewed_release_rollout.EXPECTED_NODE_IDS),
+    )
+    capacity = reviewed_release_rollout.RedisFencingEpochEvidence(
+        redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        marker_sha256=sha256(
+            REDIS_FENCING_EPOCH.encode("ascii")
+        ).hexdigest(),
+        capacity_evidence_sha256="8" * 64,
+        initial_redis_run_id="a" * 40,
+        active_volume="trader-v3-redis-hotfix",
+    )
+    rollout = {
+        "release_id": document.release_id,
+        "redis_fencing_epoch": capacity.redis_fencing_epoch,
+        "image_digest": document.image_digest,
+        "config_sha256": document.config_sha256,
+        "dependency_lock_sha256": document.dependency_lock_sha256,
+        "schema_epoch": document.schema_epoch,
+        "manifest_sha256": document.manifest_sha256,
+        "bundle_manifest_sha256": document.bundle_manifest_sha256,
+        "registration_idempotency_key": "register:hotfix-release",
+        "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+        "phase_version": 1,
+        "reviewed_by": "release-reviewer",
+        "reviewed_at": None,
+        "created_at": None,
+        "updated_at": None,
+    }
+    predecessor = {
+        "release_id": "previous-release",
+        "redis_fencing_epoch": capacity.redis_fencing_epoch,
+        "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+        "phase_version": 1,
+    }
+    calls = []
+    events = []
+    audits = []
+
+    class OperationLock:
+        def require_held(self) -> None:
+            calls.append("lock")
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return
+
+        def execute(self, statement, _params=None) -> None:
+            if "INSERT INTO reviewed_release_rollouts" in statement:
+                calls.append("insert-successor")
+
+        def fetchone(self):
+            return rollout
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return
+
+        def cursor(self, **_kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_maintenance_fence",
+        lambda *_args, **_kwargs: {"fence_id": "fence-hotfix"},
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_rollout_by_registration_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_active_redis_fencing_epoch",
+        lambda *_args, **_kwargs: capacity.redis_fencing_epoch,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_lock_same_epoch_hotfix_predecessor",
+        lambda *_args, **_kwargs: predecessor,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_abort_same_epoch_hotfix_predecessor",
+        lambda *_args, **_kwargs: calls.append("abort-predecessor"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_lock_registration_heartbeats",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("same-epoch hotfix attempted heartbeat gate")
+        ),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_activate_redis_fencing_epoch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("same-epoch hotfix attempted Redis epoch activation")
+        ),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_register_account_manifests",
+        lambda *_args, **_kwargs: calls.append("register-manifests"),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_require_registered_manifests",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_rollout_event",
+        lambda *_args, **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_global_audit",
+        lambda *_args, **kwargs: audits.append(kwargs),
+    )
+
+    result = reviewed_release_rollout.register_reviewed_release(
+        Connection(),
+        document,
+        capacity,
+        reviewed_by="release-reviewer",
+        idempotency_key="register:hotfix-release",
+        operation_lock=OperationLock(),
+    )
+
+    assert result["idempotent"] is False
+    assert calls.index("abort-predecessor") < calls.index("insert-successor")
+    assert calls.index("insert-successor") < calls.index("register-manifests")
+    registration = events[0]["evidence"]
+    assert registration["registration_mode"] == (
+        reviewed_release_rollout.SAME_EPOCH_HOTFIX_REGISTRATION_MODE
+    )
+    assert registration["redis_epoch_reused"] is True
+    assert registration["predecessor_release_id"] == "previous-release"
+    assert audits[0]["payload"]["redis_epoch_reused"] is True
+
+
 def test_migration_rebaseline_abort_records_transition_and_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

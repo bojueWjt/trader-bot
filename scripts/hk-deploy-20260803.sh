@@ -1371,11 +1371,13 @@ try:
         else:
             raise SystemExit("partial rollout history tables detected")
         migration_live_manifest = False
+        live_manifest_present = False
         migration_candidate = False
         if resume_manifest_path is False:
             if live_manifest_path.is_symlink():
                 raise SystemExit("live release manifest cannot be a symlink")
             if live_manifest_path.exists():
+                live_manifest_present = True
                 if not live_manifest_path.is_file():
                     raise SystemExit("live release manifest is invalid")
                 if release_manifest_path.is_symlink():
@@ -1500,6 +1502,11 @@ try:
                         "migration rebaseline release manifest lacks release_id"
                     )
                 if active_rollout[0] != target_release_id:
+                    if live_manifest_present:
+                        migration_candidate = False
+                        migration_rebaseline = False
+                        print("maintenance_fence")
+                        raise SystemExit(0)
                     raise SystemExit(
                         "migration rebaseline active release differs from "
                         "the fresh Redis epoch"
