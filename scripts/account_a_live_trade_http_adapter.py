@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -170,6 +171,39 @@ def _selected_adapter_target() -> AdapterTarget:
     return target
 
 
+def _refresh_targets_from_environment(
+    selected_target: AdapterTarget,
+) -> tuple[AdapterTarget, ...]:
+    default_accounts = tuple(SUPPORTED_ADAPTER_TARGETS)
+    prefix = selected_target.environment_prefix
+    raw = os.environ.get(f"{prefix}_REFRESH_ACCOUNTS", "").strip()
+    if not raw:
+        raw = os.environ.get("HARDENED_CANARY_REFRESH_ACCOUNTS", "").strip()
+    if raw:
+        accounts = tuple(
+            item.strip().lower()
+            for item in re.split(r"[\s,]+", raw)
+            if item.strip()
+        )
+    else:
+        accounts = default_accounts
+    if not accounts:
+        raise AdapterError("refresh account list is empty")
+    if len(set(accounts)) != len(accounts):
+        raise AdapterError("refresh account list contains duplicates")
+    if selected_target.account_id not in accounts:
+        raise AdapterError("refresh account list must include canary account")
+    targets = []
+    for account_id in accounts:
+        target = SUPPORTED_ADAPTER_TARGETS.get(account_id)
+        if target is None:
+            raise AdapterError(
+                "refresh account list must contain supported accounts"
+            )
+        targets.append(target)
+    return tuple(targets)
+
+
 @dataclass(frozen=True)
 class Config:
     account_id: str
@@ -184,6 +218,7 @@ class Config:
     action_timeout_seconds: float
     exchange_freshness_seconds: float
     node_freshness_seconds: float
+    refresh_targets: tuple[AdapterTarget, ...]
 
     @classmethod
     def from_environment(cls) -> Config:
@@ -264,6 +299,7 @@ class Config:
                 ),
                 "node freshness threshold",
             ),
+            refresh_targets=_refresh_targets_from_environment(target),
         )
 
 
@@ -503,7 +539,10 @@ class AccountALiveTradeHttpAdapter:
             },
         }
         if command == "RESUME":
-            self._refresh_evidence(request, operation="before-resume")
+            self._refresh_evidence_burst(
+                request,
+                operation="before-resume",
+            )
         self._client.risk_post(
             "/v1/commands",
             command_body,
@@ -633,7 +672,7 @@ class AccountALiveTradeHttpAdapter:
             "source": "control-plane",
             "valid_seconds": 300,
         }
-        self._refresh_evidence(request, operation="before-open")
+        self._refresh_evidence_burst(request, operation="before-open")
         response = self._client.risk_post(
             "/v1/operator/orders",
             body,
@@ -1495,34 +1534,126 @@ class AccountALiveTradeHttpAdapter:
         *,
         operation: str,
     ) -> dict[str, Any]:
+        target = SUPPORTED_ADAPTER_TARGETS[self._config.account_id]
+        return self._refresh_evidence_for_target(
+            request,
+            operation=operation,
+            target=target,
+            refresh_id=_refresh_side_effect_id(
+                _required_text(
+                    request.get("side_effect_id"),
+                    "side_effect_id",
+                ),
+                operation,
+            ),
+        )
+
+    def _refresh_evidence_burst(
+        self,
+        request: Mapping[str, Any],
+        *,
+        operation: str,
+    ) -> dict[str, Any]:
         side_effect_id = _required_text(
             request.get("side_effect_id"),
             "side_effect_id",
         )
-        refresh_id = _refresh_side_effect_id(side_effect_id, operation)
-        body = {
-            "type": "REFRESH_EVIDENCE",
-            "reason": (
-                f"{self._config.account_id} SOLUSDT evidence refresh "
-                f"{operation} permit={request['permit_id']}"
-            ),
-            "confirm": True,
-            "request_id": refresh_id,
-            "idempotency_key": refresh_id,
-            "target_nodes": [self._config.node_id],
-            "scope": {
-                "account_id": self._config.account_id,
-                "symbol": SYMBOL,
-                "release_id": request["release_id"],
-                "permit_id": request["permit_id"],
-                "operation": operation,
-                "executor_identity": _identity(request),
-            },
+        targets = self._config.refresh_targets
+        if not targets:
+            raise AdapterError("refresh evidence targets are empty")
+
+        issued_by_account: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+            issue_futures = {}
+            for target in targets:
+                refresh_id = _refresh_side_effect_id(
+                    side_effect_id,
+                    operation,
+                    account_id=target.account_id,
+                )
+                future = executor.submit(
+                    self._issue_refresh_evidence,
+                    request,
+                    operation=operation,
+                    target=target,
+                    refresh_id=refresh_id,
+                )
+                issue_futures[future] = target
+            for future in as_completed(issue_futures):
+                target = issue_futures[future]
+                try:
+                    issued_by_account[target.account_id] = future.result()
+                except AdapterError as exc:
+                    raise AdapterError(
+                        "refresh evidence burst issue failed for "
+                        f"{target.account_id}: {exc}"
+                    ) from exc
+
+        records: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+            status_futures = {}
+            for target in targets:
+                issued = issued_by_account[target.account_id]
+                command_id = _required_text(
+                    issued.get("command_id"),
+                    "refresh command_id",
+                )
+                future = executor.submit(
+                    self._wait_for_command_status,
+                    command_id,
+                    request=request,
+                )
+                status_futures[future] = (target, command_id)
+            for future in as_completed(status_futures):
+                target, command_id = status_futures[future]
+                try:
+                    status = future.result()
+                except SoftAdapterError as exc:
+                    raise SoftAdapterError(
+                        "refresh evidence burst poll failed for "
+                        f"{target.account_id}: {exc}",
+                        code=exc.code,
+                        status_code=exc.status_code,
+                    ) from exc
+                except AdapterError as exc:
+                    raise AdapterError(
+                        "refresh evidence burst poll failed for "
+                        f"{target.account_id}: {exc}"
+                    ) from exc
+                records.append(
+                    {
+                        "account_id": target.account_id,
+                        "node_id": target.node_id,
+                        "command_id": command_id,
+                        "command_status": status.get("status"),
+                    }
+                )
+
+        records.sort(key=lambda item: str(item["account_id"]))
+        payload = {
+            **_identity(request),
+            "accepted": True,
+            "action": "refresh-evidence-burst",
+            "operation": operation,
+            "commands": records,
+            "source": "control-plane",
+            "observed_at": _now(),
         }
-        issued = self._client.risk_post(
-            "/v1/commands",
-            body,
-            request_id=refresh_id,
+        return _with_evidence(payload)
+
+    def _refresh_evidence_for_target(
+        self,
+        request: Mapping[str, Any],
+        *,
+        operation: str,
+        target: AdapterTarget,
+        refresh_id: str,
+    ) -> dict[str, Any]:
+        issued = self._issue_refresh_evidence(
+            request,
+            operation=operation,
+            target=target,
+            refresh_id=refresh_id,
         )
         command_id = _required_text(
             issued.get("command_id"),
@@ -1544,6 +1675,41 @@ class AccountALiveTradeHttpAdapter:
             "observed_at": _now(),
         }
         return _with_evidence(payload)
+
+    def _issue_refresh_evidence(
+        self,
+        request: Mapping[str, Any],
+        *,
+        operation: str,
+        target: AdapterTarget,
+        refresh_id: str,
+    ) -> dict[str, Any]:
+        body = {
+            "type": "REFRESH_EVIDENCE",
+            "reason": (
+                f"{target.account_id} SOLUSDT evidence refresh "
+                f"{operation} permit={request['permit_id']}"
+            ),
+            "confirm": True,
+            "request_id": refresh_id,
+            "idempotency_key": refresh_id,
+            "target_nodes": [target.node_id],
+            "scope": {
+                "account_id": target.account_id,
+                "symbol": SYMBOL,
+                "release_id": request["release_id"],
+                "permit_id": request["permit_id"],
+                "operation": operation,
+                "trigger_account_id": self._config.account_id,
+                "trigger_node_id": self._config.node_id,
+                "executor_identity": _identity(request),
+            },
+        }
+        return self._client.risk_post(
+            "/v1/commands",
+            body,
+            request_id=refresh_id,
+        )
 
     def _wait_for_command_status(
         self,
@@ -2523,11 +2689,26 @@ def _open_client_ref(
     return f"{account_id}-canary-open-{intent_id}"
 
 
-def _refresh_side_effect_id(side_effect_id: str, operation: str) -> str:
+def _refresh_side_effect_id(
+    side_effect_id: str,
+    operation: str,
+    *,
+    account_id: str = "",
+) -> str:
     suffix = re.sub(r"[^A-Za-z0-9_.:-]+", "-", operation).strip("-")
     if not suffix:
         suffix = "refresh-evidence"
-    return f"{side_effect_id}:refresh-evidence:{suffix}"
+    refresh_id = f"{side_effect_id}:refresh-evidence:{suffix}"
+    if account_id:
+        account_suffix = re.sub(
+            r"[^A-Za-z0-9_.:-]+",
+            "-",
+            account_id,
+        ).strip("-")
+        if not account_suffix:
+            raise AdapterError("refresh account id is invalid")
+        refresh_id = f"{refresh_id}:{account_suffix}"
+    return refresh_id
 
 
 def _compact_operator_response(

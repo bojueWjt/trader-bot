@@ -101,6 +101,12 @@ def test_config_selects_restricted_account_environment(
     assert config.node_id == node_id
     assert config.risk_token == risk_token
     assert config.node_token == node_token
+    assert [target.account_id for target in config.refresh_targets] == [
+        "account-a",
+        "account-b",
+        "account-c",
+        "account-d",
+    ]
     adapter = adapter_type(config)
     conflicting_request = _request()
     conflicting_request["account_id"] = "account-a"
@@ -117,6 +123,7 @@ def test_config_selects_restricted_account_environment(
 
 class Scenario:
     def __init__(self) -> None:
+        self.lock = threading.Lock()
         self.requests: list[dict[str, Any]] = []
         self.command_counter = 0
         self.command_statuses: dict[str, dict[str, Any]] = {}
@@ -163,12 +170,16 @@ class Scenario:
         if method == "POST" and path == "/v1/commands":
             assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
             assert isinstance(body, dict)
-            self.command_counter += 1
-            command_id = f"command-{self.command_counter}"
+            with self.lock:
+                self.command_counter += 1
+                command_id = f"command-{self.command_counter}"
             command_type = str(body["type"])
             command_status = "pending"
             if command_type == "REFRESH_EVIDENCE":
                 command_status = "completed"
+            target_nodes = body.get("target_nodes")
+            if not isinstance(target_nodes, list) or not target_nodes:
+                raise AssertionError("command target_nodes missing")
             self.command_statuses[command_id] = {
                 "command_id": command_id,
                 "status": command_status,
@@ -176,7 +187,7 @@ class Scenario:
                 "completed": command_status == "completed",
                 "acks": [
                     {
-                        "node_id": NODE_ID,
+                        "node_id": str(target_nodes[0]),
                         "status": command_status,
                     }
                 ],
@@ -355,6 +366,55 @@ class FakeControlPlane:
         self._thread.join(timeout=2)
 
 
+def _refresh_command_posts(scenario: Scenario) -> list[dict[str, Any]]:
+    return [
+        request
+        for request in scenario.requests
+        if request["method"] == "POST"
+        and request["path"] == "/v1/commands"
+        and request["body"]["type"] == "REFRESH_EVIDENCE"
+    ]
+
+
+def _assert_refresh_burst(
+    scenario: Scenario,
+    *,
+    operation: str,
+    before_request: dict[str, Any],
+) -> None:
+    refresh_posts = _refresh_command_posts(scenario)
+    assert len(refresh_posts) == 4
+    assert sorted(
+        request["body"]["scope"]["account_id"]
+        for request in refresh_posts
+    ) == [
+        "account-a",
+        "account-b",
+        "account-c",
+        "account-d",
+    ]
+    before_index = scenario.requests.index(before_request)
+    for request in refresh_posts:
+        assert scenario.requests.index(request) < before_index
+        account_id = request["body"]["scope"]["account_id"]
+        assert request["body"]["target_nodes"] == [
+            f"nautilus-node-{account_id}"
+        ]
+        assert request["body"]["scope"]["operation"] == operation
+        assert request["body"]["idempotency_key"].endswith(
+            f":{account_id}"
+        )
+    status_polls = [
+        request
+        for request in scenario.requests
+        if request["method"] == "GET"
+        and request["path"].startswith("/v1/commands/")
+    ]
+    assert len(status_polls) >= 4
+    for request in status_polls[:4]:
+        assert scenario.requests.index(request) < before_index
+
+
 def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
     tmp_path: Path,
 ) -> None:
@@ -382,15 +442,18 @@ def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
     assert _canonical_sha256_without_evidence(payload) == payload[
         "evidence_sha256"
     ]
-    refresh_command = scenario.requests[0]
-    assert refresh_command["method"] == "POST"
-    assert refresh_command["path"] == "/v1/commands"
-    assert refresh_command["body"]["type"] == "REFRESH_EVIDENCE"
-    assert refresh_command["body"]["scope"]["account_id"] == ACCOUNT_ID
-    refresh_status = scenario.requests[1]
-    assert refresh_status["method"] == "GET"
-    assert refresh_status["path"] == "/v1/commands/command-1"
-    command = scenario.requests[2]
+    command = next(
+        request
+        for request in scenario.requests
+        if request["method"] == "POST"
+        and request["path"] == "/v1/commands"
+        and request["body"]["type"] == "RESUME"
+    )
+    _assert_refresh_burst(
+        scenario,
+        operation="before-resume",
+        before_request=command,
+    )
     assert command["method"] == "POST"
     assert command["path"] == "/v1/commands"
     assert command["headers"]["x-request-id"] == "resume-request-id"
@@ -527,18 +590,16 @@ def test_open_posts_limit_ioc_operator_intent(
     assert payload["accepted"] is True
     assert payload["action"] == "open"
     assert payload["client_order_id"] == OPEN_CLIENT_ORDER_ID
-    refresh_command = scenario.requests[0]
-    assert refresh_command["method"] == "POST"
-    assert refresh_command["path"] == "/v1/commands"
-    assert refresh_command["body"]["type"] == "REFRESH_EVIDENCE"
-    refresh_status = scenario.requests[1]
-    assert refresh_status["method"] == "GET"
-    assert refresh_status["path"] == "/v1/commands/command-1"
     operator_request = next(
         request
         for request in scenario.requests
         if request["method"] == "POST"
         and request["path"] == "/v1/operator/orders"
+    )
+    _assert_refresh_burst(
+        scenario,
+        operation="before-open",
+        before_request=operator_request,
     )
     assert operator_request["path"] == "/v1/operator/orders"
     assert operator_request["headers"]["x-request-id"] == "open-request-id"
