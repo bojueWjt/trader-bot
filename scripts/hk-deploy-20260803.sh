@@ -1387,7 +1387,7 @@ try:
                         live_manifest_path.read_bytes()
                         != release_manifest_path.read_bytes()
                     ):
-                        migration_candidate = False
+                        migration_candidate = True
                     else:
                         migration_live_manifest = json.loads(
                             live_manifest_path.read_text(encoding="utf-8")
@@ -1397,6 +1397,8 @@ try:
                                 "live release manifest root is invalid"
                             )
                         migration_candidate = True
+                else:
+                    migration_candidate = True
             else:
                 migration_candidate = True
         if migration_candidate:

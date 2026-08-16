@@ -1175,7 +1175,7 @@ def connect(_url):
             "migration_rebaseline_stopped",
         )
 
-    def test_migration_rebaseline_live_manifest_mismatch_is_normal_deploy(
+    def test_migration_rebaseline_accepts_prior_live_manifest_mismatch(
         self,
     ) -> None:
         manifest = {
@@ -1201,7 +1201,7 @@ def connect(_url):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.strip(),
-            "maintenance_fence",
+            "migration_rebaseline_stopped",
         )
 
     def test_live_bootstrap_rollout_remains_maintenance_fence(self) -> None:
