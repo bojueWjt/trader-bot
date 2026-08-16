@@ -445,7 +445,7 @@ raise SystemExit(2)
 
 
 class RebaselineHarness:
-    def __init__(self, tmp_path: Path, *, host_available_kb: int = 7 * 1024**2):
+    def __init__(self, tmp_path: Path, *, host_available_kb: int = 22 * 1024**2):
         self.root = tmp_path
         self.trader_root = tmp_path / "trader-v3"
         self.trader_root.mkdir()
@@ -461,7 +461,7 @@ class RebaselineHarness:
         self.log_path.write_text("", encoding="utf-8")
         self.meminfo_path = tmp_path / "meminfo"
         self.meminfo_path.write_text(
-            "MemTotal:       8388608 kB\n"
+            f"MemTotal:       {24 * 1024**2} kB\n"
             f"MemAvailable:   {host_available_kb} kB\n",
             encoding="utf-8",
         )
@@ -897,7 +897,7 @@ def test_success_generates_verified_evidence_and_executable_rollback(
     assert capacity["initial_redis_run_id"] == capacity["active_redis_run_id"]
     assert capacity["control_keys_reinitialized"] is True
     assert capacity["maxmemory_policy"] == "noeviction"
-    assert capacity["maxmemory_bytes"] == 512 * 1024**2
+    assert capacity["maxmemory_bytes"] == 1536 * 1024**2
     assert capacity["other_services_reserve_bytes"] == 2304 * 1024**2
     assert capacity["memory_limit_bytes"] == 2 * 1024**3
     assert capacity["memory_swap_limit_bytes"] == 2 * 1024**3
@@ -912,8 +912,8 @@ def test_success_generates_verified_evidence_and_executable_rollback(
         },
         "stream_retention": {
             "stream_max_entries": 100_000,
-            "stream_max_bytes": 64 * 1024**2,
-            "total_stream_max_bytes": 256 * 1024**2,
+            "stream_max_bytes": 256 * 1024**2,
+            "total_stream_max_bytes": 1024 * 1024**2,
         },
     }
     assert all(capacity["runtime_checks"].values())

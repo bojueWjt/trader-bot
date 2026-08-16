@@ -41,10 +41,10 @@
       "memory_warning_ratio": 0.6,
       "sample_interval_seconds": 5,
       "scan_count": 500,
-      "stream_max_bytes": 67108864,
+      "stream_max_bytes": 268435456,
       "stream_max_entries": 100000,
       "thread_join_timeout_seconds": 5,
-      "total_stream_max_bytes": 268435456
+      "total_stream_max_bytes": 1073741824
     },
     "reporter_workers": {
       "denial_queue_capacity": 256,

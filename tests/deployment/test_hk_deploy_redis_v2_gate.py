@@ -46,8 +46,8 @@ RUNTIME_RESOURCE_POLICY = {
     },
     "stream_retention": {
         "stream_max_entries": 100_000,
-        "stream_max_bytes": 64 * 1024**2,
-        "total_stream_max_bytes": 256 * 1024**2,
+        "stream_max_bytes": 256 * 1024**2,
+        "total_stream_max_bytes": 1024 * 1024**2,
     },
 }
 
@@ -203,10 +203,10 @@ class RedisEvidenceV3GateTest(unittest.TestCase):
                             "memory_warning_ratio": 0.6,
                             "sample_interval_seconds": 5,
                             "scan_count": 500,
-                            "stream_max_bytes": 64 * 1024**2,
+                            "stream_max_bytes": 256 * 1024**2,
                             "stream_max_entries": 100_000,
                             "thread_join_timeout_seconds": 5,
-                            "total_stream_max_bytes": 256 * 1024**2,
+                            "total_stream_max_bytes": 1024 * 1024**2,
                         },
                     },
                 },

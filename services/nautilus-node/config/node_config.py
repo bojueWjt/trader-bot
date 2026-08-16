@@ -550,8 +550,8 @@ def _load_runtime_resources_config(
             "schema_version": RUNTIME_RESOURCES_SCHEMA_VERSION,
             "redis": {
                 "stream_max_entries": 100_000,
-                "stream_max_bytes": 64 * 1024 * 1024,
-                "total_stream_max_bytes": 256 * 1024 * 1024,
+                "stream_max_bytes": 256 * 1024 * 1024,
+                "total_stream_max_bytes": 1024 * 1024 * 1024,
                 "scan_count": 500,
                 "sample_interval_seconds": 5.0,
                 "critical_window_seconds": 30.0,

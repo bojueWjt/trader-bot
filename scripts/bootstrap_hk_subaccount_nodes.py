@@ -61,8 +61,8 @@ RUNTIME_RESOURCES = {
     "schema_version": "trader-v3-runtime-resources/v1",
     "redis": {
         "stream_max_entries": 100000,
-        "stream_max_bytes": 67108864,
-        "total_stream_max_bytes": 268435456,
+        "stream_max_bytes": 268435456,
+        "total_stream_max_bytes": 1073741824,
         "scan_count": 500,
         "sample_interval_seconds": 5,
         "critical_window_seconds": 30,
