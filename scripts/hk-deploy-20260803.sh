@@ -1501,45 +1501,76 @@ try:
             ).hexdigest()
             if active_epoch[0] == target_epoch:
                 if target_manifest is False:
-                    if live_manifest_present:
+                    if fleet_state == "all_stopped":
+                        if rollout_node != "trader-v3-node-a":
+                            raise SystemExit(
+                                "bootstrap stopped recovery requires "
+                                "trader-v3-node-a"
+                            )
+                        if skip_resume != "1":
+                            raise SystemExit(
+                                "bootstrap stopped recovery requires "
+                                "SKIP_RESUME=1"
+                            )
+                        if active_epoch != (
+                            target_epoch,
+                            target_evidence_sha256,
+                        ):
+                            raise SystemExit(
+                                "bootstrap stopped recovery Redis evidence "
+                                "differs from the active epoch"
+                            )
+                        bootstrap_stopped_recovery = True
+                        migration_candidate = False
+                    elif live_manifest_present:
                         migration_candidate = False
                         migration_rebaseline = False
                         print("maintenance_fence")
                         raise SystemExit(0)
-                    raise SystemExit(
-                        "migration rebaseline replay requires release manifest"
+                    else:
+                        raise SystemExit(
+                            "migration rebaseline replay requires "
+                            "release manifest"
+                        )
+                if target_manifest is not False:
+                    target_release_id = target_manifest.get("release_id")
+                    if (
+                        not isinstance(target_release_id, str)
+                        or not target_release_id.strip()
+                    ):
+                        raise SystemExit(
+                            "migration rebaseline release manifest lacks "
+                            "release_id"
+                        )
+                else:
+                    target_release_id = False
+                if target_release_id is not False:
+                    target_manifest_sha256 = hashlib.sha256(
+                        release_manifest_path.read_bytes()
+                    ).hexdigest()
+                    target_bundle_sha256 = hashlib.sha256(
+                        bundle_manifest_path.read_bytes()
+                    ).hexdigest()
+                    bootstrap_registration_key = (
+                        f"bootstrap-register:{target_release_id}"
                     )
-                target_release_id = target_manifest.get("release_id")
-                if (
-                    not isinstance(target_release_id, str)
-                    or not target_release_id.strip()
-                ):
-                    raise SystemExit(
-                        "migration rebaseline release manifest lacks release_id"
+                    expected_bootstrap_replay = (
+                        target_release_id,
+                        target_epoch,
+                        target_manifest.get("image_digest"),
+                        target_manifest.get("config_sha256"),
+                        target_manifest.get("dependency_lock_sha256"),
+                        (target_manifest.get("schema_epochs") or {}).get("db"),
+                        target_manifest_sha256,
+                        target_bundle_sha256,
+                        bootstrap_registration_key,
+                        "account_a_canary",
                     )
-                target_manifest_sha256 = hashlib.sha256(
-                    release_manifest_path.read_bytes()
-                ).hexdigest()
-                target_bundle_sha256 = hashlib.sha256(
-                    bundle_manifest_path.read_bytes()
-                ).hexdigest()
-                bootstrap_registration_key = (
-                    f"bootstrap-register:{target_release_id}"
-                )
-                expected_bootstrap_replay = (
-                    target_release_id,
-                    target_epoch,
-                    target_manifest.get("image_digest"),
-                    target_manifest.get("config_sha256"),
-                    target_manifest.get("dependency_lock_sha256"),
-                    (target_manifest.get("schema_epochs") or {}).get("db"),
-                    target_manifest_sha256,
-                    target_bundle_sha256,
-                    bootstrap_registration_key,
-                    "account_a_canary",
-                )
+                else:
+                    expected_bootstrap_replay = False
                 if (
                     fleet_state == "all_stopped"
+                    and expected_bootstrap_replay is not False
                     and tuple(active_rollout) == expected_bootstrap_replay
                 ):
                     if active_epoch != (
@@ -1551,7 +1582,10 @@ try:
                         )
                     bootstrap_stopped_replay = True
                     migration_candidate = False
-                elif active_rollout[0] != target_release_id:
+                elif (
+                    target_release_id is not False
+                    and active_rollout[0] != target_release_id
+                ):
                     if fleet_state == "all_stopped":
                         if rollout_node != "trader-v3-node-a":
                             raise SystemExit(
@@ -1596,10 +1630,14 @@ try:
                             "migration rebaseline active release differs "
                             "from the fresh Redis epoch"
                         )
-                expected_registration_key = (
-                    f"migration-rebaseline-register:{target_release_id}"
-                )
-                same_epoch_hotfix_key = f"register:{target_release_id}"
+                expected_registration_key = False
+                same_epoch_hotfix_key = False
+                if target_release_id is not False:
+                    expected_registration_key = (
+                        "migration-rebaseline-register:"
+                        f"{target_release_id}"
+                    )
+                    same_epoch_hotfix_key = f"register:{target_release_id}"
                 if bootstrap_stopped_replay:
                     pass
                 elif bootstrap_stopped_recovery:
@@ -1618,6 +1656,11 @@ try:
                 ):
                     migration_candidate = False
                 else:
+                    if target_manifest is False:
+                        raise SystemExit(
+                            "migration rebaseline replay requires "
+                            "release manifest"
+                        )
                     expected = (
                         target_release_id,
                         target_epoch,
