@@ -280,6 +280,17 @@ test_hardening_deploy_contract_is_fail_closed() {
     '"$LIVE_TRADE_EXECUTOR" \'
   assert_contains "$text" \
     '"$LIVE_TRADE_HTTP_ADAPTER" \'
+  assert_contains "$text" 'normalize_live_trade_release_metadata'
+  assert_contains "$text" \
+    '(Path(sys.argv[1]), 0o500, "live trade HTTP adapter")'
+  assert_contains "$text" \
+    '(Path(sys.argv[2]), 0o400, "release source manifest")'
+  assert_contains "$text" \
+    'flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW'
+  assert_contains "$text" \
+    'os.fchown(descriptor, 0, 0)'
+  assert_contains "$text" \
+    'os.fchmod(descriptor, mode)'
   assert_contains "$text" 'account_a_live_trade_executor.py \'
   assert_contains "$text" 'account_a_live_trade_http_adapter.py \'
   assert_contains "$text" 'build_immutable_watcher_image.py \'

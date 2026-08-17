@@ -799,6 +799,44 @@ require_checksum_artifact() {
   ' "$STAGING/SHA256SUMS" \
     || die "SHA256SUMS does not cover required artifact: $relative"
 }
+normalize_live_trade_release_metadata() {
+  python3 - \
+    "$LIVE_TRADE_HTTP_ADAPTER" \
+    "$RELEASE_SOURCE_MANIFEST" <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import stat
+import sys
+
+
+artifacts = (
+    (Path(sys.argv[1]), 0o500, "live trade HTTP adapter"),
+    (Path(sys.argv[2]), 0o400, "release source manifest"),
+)
+if os.geteuid() != 0:
+    raise SystemExit("live trade release metadata normalization requires root")
+for path, mode, label in artifacts:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SystemExit(f"{label} must be a regular file")
+        if metadata.st_nlink != 1:
+            raise SystemExit(f"{label} link count must equal one")
+        os.fchown(descriptor, 0, 0)
+        os.fchmod(descriptor, mode)
+        normalized = os.fstat(descriptor)
+        if normalized.st_uid != 0 or normalized.st_gid != 0:
+            raise SystemExit(f"{label} owner normalization failed")
+        if stat.S_IMODE(normalized.st_mode) != mode:
+            raise SystemExit(f"{label} mode normalization failed")
+    finally:
+        os.close(descriptor)
+PY
+}
 validate_watcher_runtime_payload() {
   require_staging_artifact \
     "$IMMUTABLE_WATCHER_BUILDER" \
@@ -6090,6 +6128,7 @@ require_staging_artifact \
 require_staging_artifact \
   "$LIVE_TRADE_HTTP_ADAPTER" \
   "account_a_live_trade_http_adapter.py"
+normalize_live_trade_release_metadata
 require_staging_artifact \
   "$BOOTSTRAP_CONTROL_PLANE_ROLES" \
   "bootstrap_control_plane_roles.py"

@@ -90,6 +90,14 @@ ACTION_NAMES = {
     "halt",
     "preflight",
 }
+CANARY_GATE_REFRESH_OPERATIONS = frozenset(
+    {
+        "before-preflight",
+        "before-resume",
+        "before-open",
+    }
+)
+CANARY_GATE_REFRESH_IDEMPOTENCY_OPERATION = "canary-gate"
 NON_TARGET_POSITION_BASELINE_FIELDS = (
     "symbol",
     "position_side",
@@ -1545,13 +1553,14 @@ class AccountALiveTradeHttpAdapter:
         operation: str,
     ) -> dict[str, Any]:
         target = SUPPORTED_ADAPTER_TARGETS[self._config.account_id]
+        idempotency_operation = _refresh_idempotency_operation(operation)
         return self._refresh_evidence_for_target(
             request,
             operation=operation,
             target=target,
             refresh_id=_refresh_side_effect_id(
                 _refresh_side_effect_seed(request, operation),
-                operation,
+                idempotency_operation,
             ),
         )
 
@@ -1562,6 +1571,7 @@ class AccountALiveTradeHttpAdapter:
         operation: str,
     ) -> dict[str, Any]:
         side_effect_id = _refresh_side_effect_seed(request, operation)
+        idempotency_operation = _refresh_idempotency_operation(operation)
         targets = self._config.refresh_targets
         if not targets:
             raise AdapterError("refresh evidence targets are empty")
@@ -1572,7 +1582,7 @@ class AccountALiveTradeHttpAdapter:
             for target in targets:
                 refresh_id = _refresh_side_effect_id(
                     side_effect_id,
-                    operation,
+                    idempotency_operation,
                     account_id=target.account_id,
                 )
                 future = executor.submit(
@@ -2736,6 +2746,15 @@ def _refresh_side_effect_seed(
     request: Mapping[str, Any],
     operation: str,
 ) -> str:
+    if operation in CANARY_GATE_REFRESH_OPERATIONS:
+        release_id = _required_text(request.get("release_id"), "release_id")
+        permit_id = _required_text(request.get("permit_id"), "permit_id")
+        intent_id = _canonical_uuid(request.get("intent_id"), "intent_id")
+        identity = (
+            f"{release_id}:{permit_id}:{intent_id}:"
+            f"{CANARY_GATE_REFRESH_IDEMPOTENCY_OPERATION}"
+        )
+        return hashlib.sha256(identity.encode("ascii")).hexdigest()
     raw = request.get("side_effect_id")
     if raw is not None and str(raw).strip():
         return _required_text(raw, "side_effect_id")
@@ -2747,6 +2766,12 @@ def _refresh_side_effect_seed(
     intent_id = _canonical_uuid(request.get("intent_id"), "intent_id")
     identity = f"{authorization_hash}:{account_id}:{intent_id}:{operation}"
     return hashlib.sha256(identity.encode("ascii")).hexdigest()
+
+
+def _refresh_idempotency_operation(operation: str) -> str:
+    if operation in CANARY_GATE_REFRESH_OPERATIONS:
+        return CANARY_GATE_REFRESH_IDEMPOTENCY_OPERATION
+    return operation
 
 
 def _compact_operator_response(

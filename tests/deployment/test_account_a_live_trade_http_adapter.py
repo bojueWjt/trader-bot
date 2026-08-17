@@ -825,6 +825,87 @@ def test_preflight_uses_explicit_abc_refresh_burst(
     )
 
 
+def test_canary_gate_actions_share_one_fleet_refresh_idempotency_set(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+
+    with FakeControlPlane(scenario) as server:
+        invocations = (
+            (
+                "preflight",
+                _request(
+                    phase="before-open",
+                    side_effect_id="preflight-request-id",
+                ),
+            ),
+            (
+                "resume",
+                _request(
+                    command="RESUME",
+                    scope="single-canary-round-trip",
+                    max_round_trips=1,
+                    side_effect_id="resume-request-id",
+                ),
+            ),
+            (
+                "open",
+                _request(
+                    client_order_id=OPEN_CLIENT_ORDER_ID,
+                    side="BUY",
+                    order_type="LIMIT",
+                    time_in_force="IOC",
+                    quantity="0.07",
+                    limit_price_usdt="100",
+                    max_actual_open_notional_usdt="12",
+                    side_effect_id="open-request-id",
+                ),
+            ),
+        )
+        for action, request in invocations:
+            invocation_path = tmp_path / action
+            invocation_path.mkdir()
+            completed, _payload = _invoke(
+                action,
+                request,
+                invocation_path,
+                server.url,
+            )
+            assert completed.returncode == 0, completed.stderr
+
+    refresh_posts = _refresh_command_posts(scenario)
+    assert len(refresh_posts) == 12
+    assert {
+        request["body"]["scope"]["operation"]
+        for request in refresh_posts
+    } == {
+        "before-preflight",
+        "before-resume",
+        "before-open",
+    }
+    keys_by_account: dict[str, set[str]] = {}
+    for request in refresh_posts:
+        body = request["body"]
+        account_id = body["scope"]["account_id"]
+        keys_by_account.setdefault(account_id, set()).add(
+            body["idempotency_key"]
+        )
+    assert keys_by_account == {
+        "account-a": {
+            next(iter(keys_by_account["account-a"])),
+        },
+        "account-b": {
+            next(iter(keys_by_account["account-b"])),
+        },
+        "account-c": {
+            next(iter(keys_by_account["account-c"])),
+        },
+        "account-d": {
+            next(iter(keys_by_account["account-d"])),
+        },
+    }
+
+
 def test_portfolio_baseline_ignores_non_target_position_market_refresh(
     tmp_path: Path,
 ) -> None:
