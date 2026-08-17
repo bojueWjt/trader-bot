@@ -825,7 +825,7 @@ def test_preflight_uses_explicit_abc_refresh_burst(
     )
 
 
-def test_canary_gate_actions_share_one_fleet_refresh_idempotency_set(
+def test_canary_gate_actions_use_distinct_fleet_refresh_idempotency_sets(
     tmp_path: Path,
 ) -> None:
     scenario = Scenario()
@@ -890,20 +890,18 @@ def test_canary_gate_actions_share_one_fleet_refresh_idempotency_set(
         keys_by_account.setdefault(account_id, set()).add(
             body["idempotency_key"]
         )
-    assert keys_by_account == {
-        "account-a": {
-            next(iter(keys_by_account["account-a"])),
-        },
-        "account-b": {
-            next(iter(keys_by_account["account-b"])),
-        },
-        "account-c": {
-            next(iter(keys_by_account["account-c"])),
-        },
-        "account-d": {
-            next(iter(keys_by_account["account-d"])),
-        },
+    assert set(keys_by_account) == {
+        "account-a",
+        "account-b",
+        "account-c",
+        "account-d",
     }
+    assert all(len(keys) == 3 for keys in keys_by_account.values())
+    assert len({
+        key
+        for keys in keys_by_account.values()
+        for key in keys
+    }) == 12
 
 
 def test_portfolio_baseline_ignores_non_target_position_market_refresh(

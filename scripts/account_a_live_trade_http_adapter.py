@@ -97,7 +97,6 @@ CANARY_GATE_REFRESH_OPERATIONS = frozenset(
         "before-open",
     }
 )
-CANARY_GATE_REFRESH_IDEMPOTENCY_OPERATION = "canary-gate"
 NON_TARGET_POSITION_BASELINE_FIELDS = (
     "symbol",
     "position_side",
@@ -2752,7 +2751,7 @@ def _refresh_side_effect_seed(
         intent_id = _canonical_uuid(request.get("intent_id"), "intent_id")
         identity = (
             f"{release_id}:{permit_id}:{intent_id}:"
-            f"{CANARY_GATE_REFRESH_IDEMPOTENCY_OPERATION}"
+            f"{operation}"
         )
         return hashlib.sha256(identity.encode("ascii")).hexdigest()
     raw = request.get("side_effect_id")
@@ -2769,8 +2768,6 @@ def _refresh_side_effect_seed(
 
 
 def _refresh_idempotency_operation(operation: str) -> str:
-    if operation in CANARY_GATE_REFRESH_OPERATIONS:
-        return CANARY_GATE_REFRESH_IDEMPOTENCY_OPERATION
     return operation
 
 
