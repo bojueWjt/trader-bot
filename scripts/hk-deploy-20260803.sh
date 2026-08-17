@@ -162,6 +162,7 @@ BOOTSTRAP_ALL_NODE_RELEASE=0
 BOOTSTRAP_REGISTRATION_COMPLETED=0
 PRESERVE_ROLLOUT_FOR_RETRY=0
 DEPLOY_GATE_MODE="maintenance_fence"
+REQUIRED_DEPLOY_GATE_MODE="${REQUIRED_DEPLOY_GATE_MODE:-}"
 RECREATE_NODES=()
 PHASE_ONLY_ROLLOUT=0
 ROLLBACK_IN_PROGRESS=0
@@ -1791,8 +1792,13 @@ if redis_count > 0 and rollout_count > 0:
 raise SystemExit("partial rollout history detected")
 PY
   )" || die "deploy gate mode detection failed"
+  if [ -n "$REQUIRED_DEPLOY_GATE_MODE" ] \
+    && [ "$DEPLOY_GATE_MODE" != "$REQUIRED_DEPLOY_GATE_MODE" ]; then
+    die "deploy gate mode $DEPLOY_GATE_MODE differs from required $REQUIRED_DEPLOY_GATE_MODE"
+  fi
   case "$DEPLOY_GATE_MODE" in
     bootstrap_stopped)
+      seal_all_execution_accounts_stopped
       BOOTSTRAP_ALL_NODE_RELEASE=1
       RECREATE_NODES=("${ALL_NODES[@]}")
       role_env_count=0
@@ -1810,6 +1816,7 @@ PY
       fi
       ;;
     bootstrap_resume_stopped)
+      seal_all_execution_accounts_stopped
       BOOTSTRAP_ALL_NODE_RELEASE=1
       RECREATE_NODES=("${ALL_NODES[@]}")
       role_env_count=0
@@ -1829,6 +1836,7 @@ PY
     migration_rebaseline_stopped)
       [ "$SKIP_RESUME" = "1" ] \
         || die "migration rebaseline requires SKIP_RESUME=1"
+      seal_all_execution_accounts_stopped
       verify_bootstrap_gate_quiescence
       BOOTSTRAP_ALL_NODE_RELEASE=1
       RECREATE_NODES=("${ALL_NODES[@]}")
@@ -3160,23 +3168,30 @@ verify_all_execution_accounts_quiesced() {
 }
 all_execution_accounts_stopped() {
   local node
-  local restart_policy
   local running
   for node in "${ALL_NODES[@]}"; do
-    if ! read -r running restart_policy < <(
+    if ! running="$(
       docker inspect \
-        --format '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' \
+        --format '{{.State.Running}}' \
         "$node" 2>/dev/null
-    ); then
+    )"; then
       return 1
     fi
     if [ "$running" != "false" ]; then
       return 1
     fi
-    if [ "$restart_policy" != "no" ]; then
-      return 1
-    fi
   done
+}
+seal_all_execution_accounts_stopped() {
+  local node
+  all_execution_accounts_stopped \
+    || die "bootstrap stopped sealing requires all execution accounts stopped"
+  for node in "${ALL_NODES[@]}"; do
+    docker update --restart=no "$node" >/dev/null \
+      || die "bootstrap stopped sealing failed for $node"
+  done
+  verify_all_execution_accounts_stopped
+  echo "== bootstrap stopped A-D sealed with restart=no"
 }
 verify_all_execution_accounts_stopped() {
   local node

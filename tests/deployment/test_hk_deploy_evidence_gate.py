@@ -624,6 +624,14 @@ def connect(_url):
             configure_gate,
         )
         self.assertIn(
+            "seal_all_execution_accounts_stopped",
+            configure_gate,
+        )
+        self.assertIn(
+            'DEPLOY_GATE_MODE" != "$REQUIRED_DEPLOY_GATE_MODE',
+            configure_gate,
+        )
+        self.assertIn(
             "verify_bootstrap_gate_quiescence",
             configure_gate,
         )
@@ -663,6 +671,57 @@ def connect(_url):
             "return 1",
             helper,
         )
+
+    def test_stopped_fleet_detection_accepts_mixed_restart_policies(
+        self,
+    ) -> None:
+        text = DEPLOY.read_text(encoding="utf-8")
+        function_start = text.index("all_execution_accounts_stopped()")
+        function_end = text.index(
+            "\nverify_all_execution_accounts_stopped()",
+            function_start,
+        )
+        function_source = text[function_start:function_end]
+        script = f"""
+set -eu
+ALL_NODES=(
+  trader-v3-node-a
+  trader-v3-node-b
+  trader-v3-node-c
+  trader-v3-node-d
+)
+docker() {{
+  format="$3"
+  node="${{@: -1}}"
+  if [[ "$format" != *RestartPolicy* ]]; then
+    printf '%s\\n' 'false'
+    return
+  fi
+  case "$node" in
+    trader-v3-node-a|trader-v3-node-b)
+      printf '%s\\n' 'false always'
+      ;;
+    trader-v3-node-c|trader-v3-node-d)
+      printf '%s\\n' 'false no'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}}
+{function_source}
+all_execution_accounts_stopped
+"""
+
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_new_control_plane_role_modules_support_first_install(self) -> None:
         text = DEPLOY.read_text(encoding="utf-8")
