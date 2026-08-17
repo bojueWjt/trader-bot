@@ -453,37 +453,6 @@ def _assert_refresh_burst(
         assert scenario.requests.index(request) < before_index
 
 
-def _assert_single_refresh_before(
-    scenario: Scenario,
-    *,
-    operation: str,
-    before_request: dict[str, Any],
-) -> None:
-    refresh_posts = _refresh_command_posts(scenario)
-    matching = [
-        request
-        for request in refresh_posts
-        if request["body"]["scope"]["operation"] == operation
-    ]
-    assert len(matching) == 1
-    refresh_request = matching[0]
-    before_index = scenario.requests.index(before_request)
-    assert scenario.requests.index(refresh_request) < before_index
-    assert refresh_request["body"]["scope"]["account_id"] == ACCOUNT_ID
-    assert refresh_request["body"]["target_nodes"] == [NODE_ID]
-    assert refresh_request["body"]["idempotency_key"].endswith(
-        f":{operation}"
-    )
-    status_polls = [
-        request
-        for request in scenario.requests
-        if request["method"] == "GET"
-        and request["path"].startswith("/v1/commands/")
-    ]
-    assert status_polls
-    assert scenario.requests.index(status_polls[0]) < before_index
-
-
 def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
     tmp_path: Path,
 ) -> None:
@@ -661,11 +630,7 @@ def test_open_posts_limit_ioc_operator_intent(
         if request["method"] == "POST"
         and request["path"] == "/v1/operator/orders"
     )
-    _assert_refresh_burst(
-        scenario,
-        operation="before-open",
-        before_request=operator_request,
-    )
+    assert _refresh_command_posts(scenario) == []
     assert operator_request["path"] == "/v1/operator/orders"
     assert operator_request["headers"]["x-request-id"] == "open-request-id"
     assert operator_request["body"]["entry"] == {
@@ -678,7 +643,7 @@ def test_open_posts_limit_ioc_operator_intent(
     assert operator_request["body"]["canary_permit_id"] == _request()["permit_id"]
 
 
-def test_open_uses_explicit_abc_refresh_burst(
+def test_open_does_not_issue_refresh_burst(
     tmp_path: Path,
 ) -> None:
     scenario = Scenario()
@@ -706,22 +671,7 @@ def test_open_uses_explicit_abc_refresh_burst(
 
     assert completed.returncode == 0, completed.stderr
     assert payload["accepted"] is True
-    operator_request = next(
-        request
-        for request in scenario.requests
-        if request["method"] == "POST"
-        and request["path"] == "/v1/operator/orders"
-    )
-    _assert_refresh_burst(
-        scenario,
-        operation="before-open",
-        before_request=operator_request,
-        expected_accounts=[
-            "account-a",
-            "account-b",
-            "account-c",
-        ],
-    )
+    assert _refresh_command_posts(scenario) == []
 
 
 def test_open_rejects_quantity_other_than_live_canary_quantity(
@@ -821,7 +771,7 @@ def test_preflight_uses_explicit_abc_refresh_burst(
     )
 
 
-def test_canary_gate_actions_use_distinct_fleet_refresh_idempotency_sets(
+def test_preflight_is_only_canary_gate_action_that_refreshes_fleet(
     tmp_path: Path,
 ) -> None:
     scenario = Scenario()
@@ -870,14 +820,11 @@ def test_canary_gate_actions_use_distinct_fleet_refresh_idempotency_sets(
             assert completed.returncode == 0, completed.stderr
 
     refresh_posts = _refresh_command_posts(scenario)
-    assert len(refresh_posts) == 8
+    assert len(refresh_posts) == 4
     assert {
         request["body"]["scope"]["operation"]
         for request in refresh_posts
-    } == {
-        "before-preflight",
-        "before-open",
-    }
+    } == {"before-preflight"}
     keys_by_account: dict[str, set[str]] = {}
     for request in refresh_posts:
         body = request["body"]
@@ -891,12 +838,12 @@ def test_canary_gate_actions_use_distinct_fleet_refresh_idempotency_sets(
         "account-c",
         "account-d",
     }
-    assert all(len(keys) == 2 for keys in keys_by_account.values())
+    assert all(len(keys) == 1 for keys in keys_by_account.values())
     assert len({
         key
         for keys in keys_by_account.values()
         for key in keys
-    }) == 8
+    }) == 4
 
 
 def test_portfolio_baseline_ignores_non_target_position_market_refresh(
@@ -1355,16 +1302,7 @@ def test_observe_uses_real_mirror_and_node_progress_evidence(
     }
     assert payload["node_snapshot"]["node_id"] == NODE_ID
     assert payload["node_snapshot"]["loss_monitor_healthy"] is True
-    exchange_request = next(
-        request
-        for request in scenario.requests
-        if request["path"] == f"/v1/nodes/{NODE_ID}/exchange-state"
-    )
-    _assert_single_refresh_before(
-        scenario,
-        operation="before-observe",
-        before_request=exchange_request,
-    )
+    assert _refresh_command_posts(scenario) == []
     publication = next(
         request
         for request in scenario.requests
@@ -1469,12 +1407,11 @@ def test_observe_maps_operator_rejection_to_terminal_zero_fill(
     scenario = Scenario()
     scenario.operator_statuses[OPEN_INTENT_ID] = {
         "intent": {
+            "status": "REJECTED",
             "order_plan": {
                 "side": "long",
             },
         },
-        "status": "REJECTED",
-        "detail": "canary_permit_already_claimed",
         "orders": [],
         "execution_events": [],
     }
@@ -1895,11 +1832,7 @@ def test_position_waits_for_exchange_sample_after_dispatch(
         )
     ]
     assert len(exchange_requests) == 2
-    _assert_single_refresh_before(
-        scenario,
-        operation="before-position",
-        before_request=exchange_requests[0],
-    )
+    assert _refresh_command_posts(scenario) == []
 
 
 def test_close_posts_exact_reduce_only_and_waits_for_exchange_flat(
@@ -2710,16 +2643,7 @@ def test_final_snapshot_keeps_exchange_proof_when_enrichment_is_unavailable(
     )
     assert payload["source"] == "exchange"
     assert payload["fetched_at"] == fetched_at.isoformat()
-    exchange_request = next(
-        request
-        for request in scenario.requests
-        if request["path"] == f"/v1/nodes/{NODE_ID}/exchange-state"
-    )
-    _assert_single_refresh_before(
-        scenario,
-        operation="before-final-snapshot",
-        before_request=exchange_request,
-    )
+    assert _refresh_command_posts(scenario) == []
     assert payload["enrichment_degraded"] is True
     assert payload["financial_proof_complete"] is False
     assert len(payload["warnings"]) == 2

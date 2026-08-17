@@ -225,14 +225,12 @@ class LiveCanaryExecutionIdentity:
             account_id=account_id,
             node_id=node_id,
             symbol=symbol,
-            max_notional_usdt=format(max_notional, "f"),
-            max_cumulative_loss_usdt=format(
-                max_cumulative_loss,
-                "f",
+            max_notional_usdt=_canonical_decimal_text(max_notional),
+            max_cumulative_loss_usdt=_canonical_decimal_text(
+                max_cumulative_loss
             ),
-            authorized_limit_price_usdt=format(
-                authorized_limit_price,
-                "f",
+            authorized_limit_price_usdt=_canonical_decimal_text(
+                authorized_limit_price
             ),
             expires_at=expires_at.isoformat(),
             portfolio_baseline_sha256=portfolio_baseline_sha256,
@@ -1335,7 +1333,11 @@ def _same_identity(
     left: LiveCanaryExecutionIdentity,
     right: LiveCanaryExecutionIdentity,
 ) -> bool:
-    return left == right
+    return left.normalized() == right.normalized()
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    return format(value.normalize(), "f")
 
 
 def _positive_decimal(value: Any, label: str) -> Decimal:

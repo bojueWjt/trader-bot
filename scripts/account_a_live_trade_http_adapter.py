@@ -93,7 +93,6 @@ ACTION_NAMES = {
 CANARY_GATE_REFRESH_OPERATIONS = frozenset(
     {
         "before-preflight",
-        "before-open",
     }
 )
 NON_TARGET_POSITION_BASELINE_FIELDS = (
@@ -679,7 +678,6 @@ class AccountALiveTradeHttpAdapter:
             "source": "control-plane",
             "valid_seconds": 300,
         }
-        self._refresh_evidence_burst(request, operation="before-open")
         response = self._client.risk_post(
             "/v1/operator/orders",
             body,
@@ -705,7 +703,6 @@ class AccountALiveTradeHttpAdapter:
             request.get("open_client_order_id"),
             "open_client_order_id",
         )
-        self._refresh_evidence(request, operation="before-observe")
         deadline = self._deadline(request)
         exchange_not_before = _exchange_not_before(request)
         status = self._operator_status(str(request["intent_id"]))
@@ -849,7 +846,6 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
-        self._refresh_evidence(request, operation="before-position")
         mirror = self._exchange_state_after(
             (),
             request=request,
@@ -1246,7 +1242,6 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
-        self._refresh_evidence(request, operation="before-final-snapshot")
         mirror = self._exchange_state_after(
             (),
             request=request,
@@ -2356,7 +2351,12 @@ def _execution_summary(
 
 
 def _operator_terminal_no_fill_status(status: Mapping[str, Any]) -> str:
-    raw_status = str(status.get("status") or "").strip().upper()
+    raw_status = ""
+    intent = status.get("intent")
+    if isinstance(intent, Mapping):
+        raw_status = str(intent.get("status") or "").strip().upper()
+    if not raw_status:
+        raw_status = str(status.get("status") or "").strip().upper()
     if raw_status not in TERMINAL_OPERATOR_NO_FILL_STATUSES:
         return ""
     if raw_status == "EXPIRED":

@@ -35,6 +35,7 @@ from strategy.intent_execution_strategy import (  # noqa: E402
 from runtime.live_canary_execution import (  # noqa: E402
     JsonLiveCanaryExecutionStore,
     LiveCanaryExecutionIdentity,
+    LiveCanaryRegisterResult,
 )
 from runtime.intent_execution_inbox import (  # noqa: E402
     IntentDispatchResult,
@@ -2461,6 +2462,47 @@ class StrategyShellTest(unittest.TestCase):
                     strategy.denials[-1].reason,
                     "canary_permit_already_claimed",
                 )
+            finally:
+                strategy.on_stop()
+
+    def test_data_client_received_canary_with_equivalent_price_submits_once(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _CanaryMsgbusStrategy(Path(state_dir))
+            intent = _live_canary_intent(permit_id=str(uuid4()))
+            canary_identity = _canary_execution_identity(
+                permit_id=intent.order_plan["canary_permit"]["permit_id"],
+                intent_id=str(intent.intent_id),
+            )
+            execution_identity = _durable_identity(intent)
+
+            self.assertIs(
+                strategy.live_canary_store.register_received(
+                    canary_identity
+                ),
+                LiveCanaryRegisterResult.REGISTERED,
+            )
+            strategy._intent_execution_inbox.register_received(
+                execution_identity,
+                _durable_payload(intent),
+            )
+
+            try:
+                strategy._on_intent_msg(intent)
+
+                self.assertTrue(
+                    _pump_durable_until(
+                        strategy,
+                        lambda: len(strategy.submitted_orders) == 1,
+                        timeout=1.0,
+                    )
+                )
+                self.assertEqual(
+                    strategy.submitted_orders,
+                    [encode_client_order_id(intent.intent_id)],
+                )
+                self.assertEqual(strategy.denials, [])
             finally:
                 strategy.on_stop()
 
