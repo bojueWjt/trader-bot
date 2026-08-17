@@ -19,6 +19,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER = REPO_ROOT / "scripts" / "account_a_live_trade_http_adapter.py"
+sys.path.insert(
+    0,
+    str(REPO_ROOT / "packages" / "execution-domain"),
+)
 RISK_TOKEN = "risk-admin-test-token"
 NODE_TOKEN = "account-a-node-test-token"
 NODE_ID = "nautilus-node-account-a"
@@ -844,6 +848,95 @@ def test_preflight_is_only_canary_gate_action_that_refreshes_fleet(
         for keys in keys_by_account.values()
         for key in keys
     }) == 4
+
+
+def test_refresh_evidence_contract_covers_all_twenty_freshness_items(
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(str(ADAPTER))
+    supported_targets = namespace["SUPPORTED_ADAPTER_TARGETS"]
+    from execution_domain.control_plane import (
+        REFRESH_EVIDENCE_ACCOUNT_IDS,
+        REFRESH_EVIDENCE_FRESHNESS_FIELDS,
+    )
+    expected_accounts = (
+        "account-a",
+        "account-b",
+        "account-c",
+        "account-d",
+    )
+    expected_fields = (
+        "last_seen_at",
+        "positions_snapshot_at",
+        "regular_orders_snapshot_at",
+        "algo_orders_snapshot_at",
+        "reconciliation_completed_at",
+    )
+    expected_contract = {
+        (account_id, field_name)
+        for account_id in expected_accounts
+        for field_name in expected_fields
+    }
+
+    scenario = Scenario()
+    with FakeControlPlane(scenario) as server:
+        completed, _payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    refresh_posts = _refresh_command_posts(scenario)
+    command_accounts = tuple(sorted(
+        request["body"]["scope"]["account_id"]
+        for request in refresh_posts
+    ))
+    assert REFRESH_EVIDENCE_ACCOUNT_IDS == expected_accounts
+    assert REFRESH_EVIDENCE_FRESHNESS_FIELDS == expected_fields
+    assert tuple(sorted(supported_targets)) == expected_accounts
+    assert command_accounts == expected_accounts
+    assert all(
+        request["body"]["type"] == "REFRESH_EVIDENCE"
+        for request in refresh_posts
+    )
+    actual_contract = {
+        (account_id, field_name)
+        for account_id in command_accounts
+        for field_name in REFRESH_EVIDENCE_FRESHNESS_FIELDS
+    }
+    assert len(expected_contract) == 20
+    assert actual_contract == expected_contract
+
+    actor_source = (
+        REPO_ROOT
+        / "services"
+        / "nautilus-node"
+        / "app"
+        / "nautilus_actors.py"
+    ).read_text(encoding="utf-8")
+    lifecycle_source = (
+        REPO_ROOT
+        / "services"
+        / "nautilus-node"
+        / "runtime"
+        / "lifecycle.py"
+    ).read_text(encoding="utf-8")
+    read_api_source = (
+        REPO_ROOT
+        / "services"
+        / "control-plane"
+        / "api"
+        / "read_api.py"
+    ).read_text(encoding="utf-8")
+    for field_name in expected_fields:
+        source = read_api_source
+        if field_name != "last_seen_at":
+            source = actor_source + lifecycle_source + read_api_source
+        assert field_name in source
+    assert "_missing_refresh_evidence_fields(heartbeat)" in actor_source
+    assert "last_seen_at=now()" in read_api_source
 
 
 def test_portfolio_baseline_ignores_non_target_position_market_refresh(

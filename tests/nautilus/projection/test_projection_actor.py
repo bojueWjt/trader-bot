@@ -120,7 +120,7 @@ class ProjectionActorTests(unittest.TestCase):
 
         durable = actor.ingest_event(event)
         deduped = actor.ingest_event(event)
-        ignored = actor.ingest_event(
+        filtered = actor.ingest_event(
             _Event(
                 "UnsupportedExecutionEvent",
                 ts_event=11,
@@ -139,10 +139,18 @@ class ProjectionActorTests(unittest.TestCase):
         )
         self.assertEqual(deduped.event_id, durable.event_id)
         self.assertEqual(
-            ignored.outcome,
-            ProjectionIngestOutcome.IGNORED,
+            filtered.outcome,
+            ProjectionIngestOutcome.FILTERED,
         )
-        self.assertIsNone(ignored.event_id)
+        self.assertIsNone(filtered.event_id)
+
+        actor.halt_egress("durable spool unavailable")
+        halted = actor.ingest_event(event)
+        self.assertEqual(
+            halted.outcome,
+            ProjectionIngestOutcome.HALTED,
+        )
+        self.assertIsNone(halted.event_id)
 
     def test_offline_spool_replays_in_event_time_order_and_clears_only_acked(self) -> None:
         sink = _RecordingSink(fail=True)

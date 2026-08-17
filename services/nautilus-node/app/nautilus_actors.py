@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, RLock, Thread
@@ -489,6 +490,12 @@ class _ProjectionPublication:
     completed: Event = field(default_factory=Event)
     durable: bool = False
     error: Exception | None = None
+
+
+class _ProjectionPersistenceState(str, Enum):
+    PERSISTED = "PERSISTED"
+    FILTERED = "FILTERED"
+    FAILED = "FAILED"
 
 
 class _QueueingIntentPublisher:
@@ -1052,6 +1059,7 @@ class ExecutionProjectionActor(Actor):
         self._capacity_drain_active = False
         self._capacity_drain_deadline: float | None = None
         self._queue_degraded = False
+        self._filtered_event_degraded = False
         self._halted_reason = ""
         self._halt_lock = RLock()
         self._fatal_callback = fatal_callback
@@ -1256,7 +1264,7 @@ class ExecutionProjectionActor(Actor):
     def _persist_durable_event(
         self,
         publication: _ProjectionPublication,
-    ) -> bool:
+    ) -> _ProjectionPersistenceState:
         self._attach_order_payload_fields(publication.event)
         ingest = getattr(self._projection_actor, "ingest_event")
         try:
@@ -1266,15 +1274,26 @@ class ExecutionProjectionActor(Actor):
             self._halt_egress(
                 f"execution projection durable ingress failed: {exc!r}"
             )
-            return False
+            return _ProjectionPersistenceState.FAILED
         outcome = self._projection_ingest_outcome(result)
-        if outcome == "IGNORED":
+        if outcome == "FILTERED":
+            event_type = publication.event.__class__.__name__
+            if isinstance(publication.event, dict):
+                event_type = str(
+                    publication.event.get("event_type") or event_type
+                )
+            self._mark_filtered_event_degraded(
+                "execution projection filtered subscribed event: "
+                f"{event_type}"
+            )
+            return _ProjectionPersistenceState.FILTERED
+        if outcome in {"HALTED", "IGNORED"}:
             error = RuntimeError(
-                "execution projection ignored subscribed execution event"
+                "execution projection durable ingress is halted"
             )
             publication.error = error
             self._halt_egress(str(error))
-            return False
+            return _ProjectionPersistenceState.FAILED
         if outcome not in {"DURABLE", "DEDUPED"}:
             error = RuntimeError(
                 "execution projection durable ingress returned "
@@ -1282,8 +1301,9 @@ class ExecutionProjectionActor(Actor):
             )
             publication.error = error
             self._halt_egress(str(error))
-            return False
+            return _ProjectionPersistenceState.FAILED
         publication.durable = True
+        self._clear_filtered_event_degraded()
         deadline_at = publication.deadline_at
         if (
             deadline_at is not None
@@ -1292,8 +1312,8 @@ class ExecutionProjectionActor(Actor):
             self._halt_egress(
                 "execution projection durable ingress deadline exceeded"
             )
-            return False
-        return True
+            return _ProjectionPersistenceState.FAILED
+        return _ProjectionPersistenceState.PERSISTED
 
     def _projection_ingest_outcome(self, result: Any) -> str:
         outcome = getattr(result, "outcome", result)
@@ -1394,8 +1414,19 @@ class ExecutionProjectionActor(Actor):
                 if publication.flush_only:
                     self._egress_wake.set()
                 elif self._durable_ingress:
-                    if not self._persist_durable_event(publication):
+                    persistence_state = self._persist_durable_event(
+                        publication
+                    )
+                    if (
+                        persistence_state
+                        is _ProjectionPersistenceState.FAILED
+                    ):
                         return
+                    if (
+                        persistence_state
+                        is _ProjectionPersistenceState.FILTERED
+                    ):
+                        continue
                     session = self._control_plane_session
                     if session is not None:
                         if not self._submit_durable_flush_wake(
@@ -1665,12 +1696,32 @@ class ExecutionProjectionActor(Actor):
         if callable(marker):
             marker(reason)
 
+    def _mark_filtered_event_degraded(self, reason: str) -> None:
+        if self._filtered_event_degraded:
+            return
+        self._filtered_event_degraded = True
+        marker = getattr(self._projection_actor, "mark_egress_degraded", None)
+        if callable(marker):
+            marker(reason)
+
+    def _clear_filtered_event_degraded(self) -> None:
+        if not self._filtered_event_degraded:
+            return
+        self._filtered_event_degraded = False
+        if self._queue_degraded or self._halted_reason:
+            return
+        clearer = getattr(self._projection_actor, "clear_egress_degraded", None)
+        if callable(clearer):
+            clearer()
+
     def _clear_egress_degraded(self) -> None:
         if not self._queue_degraded:
             return
         if self._halted_reason:
             return
         self._queue_degraded = False
+        if self._filtered_event_degraded:
+            return
         clearer = getattr(self._projection_actor, "clear_egress_degraded", None)
         if callable(clearer):
             clearer()
@@ -2653,7 +2704,12 @@ class CommandPollerActor(Actor):
             self._run_heartbeat_lane,
         )
 
-    def _run_heartbeat_lane(self, *, force_refresh: bool = False) -> None:
+    def _run_heartbeat_lane(
+        self,
+        *,
+        force_refresh: bool = False,
+        require_refresh_evidence: bool = False,
+    ) -> Any:
         evidence_provider = self._exchange_evidence_provider
         if evidence_provider is None:
             heartbeat = self._lifecycle.build_heartbeat()
@@ -2695,6 +2751,13 @@ class CommandPollerActor(Actor):
                 heartbeat = self._lifecycle.build_heartbeat(
                     exchange_evidence=snapshot,
                 )
+        if require_refresh_evidence:
+            missing_fields = _missing_refresh_evidence_fields(heartbeat)
+            if missing_fields:
+                raise RuntimeError(
+                    "REFRESH_EVIDENCE heartbeat is incomplete: "
+                    + ", ".join(missing_fields)
+                )
         receipt = self._control_plane.heartbeat(
             self._node_id,
             heartbeat,
@@ -2715,12 +2778,16 @@ class CommandPollerActor(Actor):
             receipt_recorder(receipt)
         self._last_heartbeat_success_at = time.monotonic()
         self._mark_dependency_ready("control_plane")
+        return heartbeat
 
     def session_send_heartbeat(self) -> None:
         self._run_heartbeat_lane()
 
-    def session_refresh_evidence(self) -> None:
-        self._run_heartbeat_lane(force_refresh=True)
+    def session_refresh_evidence(self) -> Any:
+        return self._run_heartbeat_lane(
+            force_refresh=True,
+            require_refresh_evidence=True,
+        )
 
     def session_bootstrap_writer(self) -> None:
         heartbeat = self._lifecycle.build_writer_bootstrap_heartbeat()
@@ -4529,6 +4596,18 @@ def _terminal_command_result_payload(
         "dispatched_at": result.dispatched_at.isoformat(),
         "completed_at": result.completed_at.isoformat(),
     }
+
+
+def _missing_refresh_evidence_fields(heartbeat: Any) -> list[str]:
+    from execution_domain.control_plane import (  # type: ignore
+        REFRESH_EVIDENCE_HEARTBEAT_FIELDS,
+    )
+
+    return [
+        field_name
+        for field_name in REFRESH_EVIDENCE_HEARTBEAT_FIELDS
+        if getattr(heartbeat, field_name, None) is None
+    ]
 
 
 def _terminal_snapshot_fetched_at(snapshot: Any) -> datetime:

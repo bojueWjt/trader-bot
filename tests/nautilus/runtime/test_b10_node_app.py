@@ -1567,9 +1567,77 @@ class NautilusActorAdapterTest(unittest.TestCase):
             self.assertEqual(reconciliation_calls, ["completed"])
             self.assertEqual(provider.force_refresh_values, [True])
             self.assertEqual(len(control_plane.heartbeats), 1)
+            heartbeat = control_plane.heartbeats[0]
+            self.assertIsNotNone(heartbeat.positions_snapshot_at)
+            self.assertIsNotNone(heartbeat.regular_orders_snapshot_at)
+            self.assertIsNotNone(heartbeat.algo_orders_snapshot_at)
+            self.assertIsNotNone(heartbeat.reconciliation_completed_at)
             self.assertEqual(lifecycle.applied_states, [])
         finally:
             actor.on_stop()
+
+    def test_refresh_evidence_command_rejects_each_incomplete_heartbeat_field(
+        self,
+    ) -> None:
+        from app.nautilus_actors import CommandPollerActor
+        from execution_domain.control_plane import (
+            CommandAckStatus,
+            CommandType,
+            NodeCommand,
+            REFRESH_EVIDENCE_HEARTBEAT_FIELDS,
+        )
+
+        expected_fields = (
+            "positions_snapshot_at",
+            "regular_orders_snapshot_at",
+            "algo_orders_snapshot_at",
+            "reconciliation_completed_at",
+        )
+        self.assertEqual(
+            REFRESH_EVIDENCE_HEARTBEAT_FIELDS,
+            expected_fields,
+        )
+
+        for field_name in expected_fields:
+            with self.subTest(field_name=field_name):
+                control_plane = _HeartbeatCaptureControlPlane()
+                lifecycle = _RecordingLifecycle()
+                complete_heartbeat = lifecycle.build_heartbeat
+
+                def incomplete_heartbeat(
+                    exchange_evidence: dict[str, Any] | None = None,
+                ) -> Any:
+                    heartbeat = complete_heartbeat(
+                        exchange_evidence=exchange_evidence,
+                    )
+                    return replace(
+                        heartbeat,
+                        **{field_name: None},
+                    )
+
+                lifecycle.build_heartbeat = incomplete_heartbeat
+                actor = CommandPollerActor(
+                    control_plane=control_plane,
+                    lifecycle=lifecycle,
+                    node_id="node-a",
+                    account_id="account-a",
+                    exchange_evidence_provider=_ExchangeEvidenceProvider(),
+                    reconciliation_refresh=lambda: None,
+                )
+
+                status, error = actor._apply(
+                    NodeCommand(
+                        command_id=f"cmd-refresh-missing-{field_name}",
+                        type=CommandType.REFRESH_EVIDENCE,
+                    )
+                )
+
+                try:
+                    self.assertEqual(status, CommandAckStatus.FAILED)
+                    self.assertIn(field_name, str(error))
+                    self.assertEqual(control_plane.heartbeats, [])
+                finally:
+                    actor.on_stop()
 
     def test_refresh_evidence_command_fails_before_heartbeat_when_reconciliation_fails(
         self,
@@ -2190,6 +2258,9 @@ class _RecordingLifecycle:
             positions = tuple(exchange_evidence["positions"])
             regular_orders = tuple(exchange_evidence["regular_orders"])
             algo_orders = tuple(exchange_evidence["algo_orders"])
+            fetched_at = exchange_evidence["fetched_at"]
+        else:
+            fetched_at = None
         return Heartbeat(
             account_id="account-a",
             ts=datetime.now(timezone.utc),
@@ -2200,6 +2271,10 @@ class _RecordingLifecycle:
             positions=positions,
             regular_orders=regular_orders,
             algo_orders=algo_orders,
+            positions_snapshot_at=fetched_at,
+            regular_orders_snapshot_at=fetched_at,
+            algo_orders_snapshot_at=fetched_at,
+            reconciliation_completed_at=datetime.now(timezone.utc),
             open_orders=open_orders,
         )
 

@@ -30,6 +30,9 @@ __all__ = [
     "IntentAckStatus",
     "CommandType",
     "CommandAckStatus",
+    "REFRESH_EVIDENCE_ACCOUNT_IDS",
+    "REFRESH_EVIDENCE_FRESHNESS_FIELDS",
+    "REFRESH_EVIDENCE_HEARTBEAT_FIELDS",
     "IncidentSeverity",
     "IntentItem",
     "IntentBatch",
@@ -50,6 +53,26 @@ __all__ = [
     "ControlPlaneSnapshotSource",
     "ControlPlaneClient",
 ]
+
+
+REFRESH_EVIDENCE_ACCOUNT_IDS = (
+    "account-a",
+    "account-b",
+    "account-c",
+    "account-d",
+)
+REFRESH_EVIDENCE_FRESHNESS_FIELDS = (
+    "last_seen_at",
+    "positions_snapshot_at",
+    "regular_orders_snapshot_at",
+    "algo_orders_snapshot_at",
+    "reconciliation_completed_at",
+)
+REFRESH_EVIDENCE_HEARTBEAT_FIELDS = tuple(
+    field_name
+    for field_name in REFRESH_EVIDENCE_FRESHNESS_FIELDS
+    if field_name != "last_seen_at"
+)
 
 
 class TradingState(str, Enum):

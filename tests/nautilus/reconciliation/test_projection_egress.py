@@ -408,13 +408,13 @@ def test_projection_shutdown_records_unflushed_position_with_shared_session(
     assert len(session.submissions) >= 2
 
 
-def test_projection_ignored_subscribed_event_is_fatal_fail_closed(
+def test_projection_filtered_subscribed_event_keeps_durable_lane_running(
     tmp_path: Path,
 ) -> None:
     projection = ProjectionActor(
         ProjectionConfig(node_id="node-a", account_id="account-a"),
         _BlockingSink(),
-        JsonExecutionSpool(tmp_path / "ignored-events.wal"),
+        JsonExecutionSpool(tmp_path / "filtered-events.wal"),
     )
     fatal_reasons: list[str] = []
     actor = ExecutionProjectionActor(
@@ -425,16 +425,46 @@ def test_projection_ignored_subscribed_event_is_fatal_fail_closed(
 
     accepted = actor.on_event(
         {
-            "event_type": "UnsupportedExecutionEvent",
-            "client_order_id": "ignored-client",
+            "event_type": "OrderInitialized",
+            "client_order_id": "filtered-client",
             "ts_event": 1_786_000_000_000_000_000,
         }
     )
 
     assert accepted is True
+    assert _wait_until(lambda: bool(projection.egress_degraded_reason))
+    assert "filtered subscribed event" in projection.egress_degraded_reason
+    assert actor.halted_reason == ""
+    assert fatal_reasons == []
+
+    assert actor.on_event(_raw_order_event(1)) is True
+    assert _wait_until(lambda: projection.spool.pending_count == 1)
+    actor.on_stop()
+
+
+def test_projection_halted_core_is_sticky_fatal(
+    tmp_path: Path,
+) -> None:
+    projection = ProjectionActor(
+        ProjectionConfig(node_id="node-a", account_id="account-a"),
+        _BlockingSink(),
+        JsonExecutionSpool(tmp_path / "halted-events.wal"),
+    )
+    projection.halt_egress("durable spool unavailable")
+    fatal_reasons: list[str] = []
+    actor = ExecutionProjectionActor(
+        projection,
+        fatal_callback=fatal_reasons.append,
+    )
+    actor.on_start()
+
+    assert actor.on_event(_raw_order_event(1)) is True
     assert _wait_until(lambda: bool(fatal_reasons))
-    assert "ignored subscribed execution event" in fatal_reasons[0]
-    assert actor.halted_reason == fatal_reasons[0]
+    assert actor.halted_reason == (
+        "execution projection durable ingress is halted"
+    )
+    assert fatal_reasons == [actor.halted_reason]
+    assert actor.on_event(_raw_order_event(2)) is False
     actor.on_stop()
 
 
