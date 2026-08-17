@@ -2556,6 +2556,20 @@ def _heartbeat_release_receipt(
             release_gate_status = "drift"
 
     rollout = _reviewed_rollout_state(cur, release_id)
+    awaiting_rollout_step = False
+    if rollout is None and release_gate_status == "pass":
+        active_rollout = _current_reviewed_rollout_state(cur)
+        if (
+            active_rollout is not None
+            and _account_awaits_rollout_step(
+                account_id=account_id,
+                rollout_phase=active_rollout["phase"],
+            )
+            and active_rollout["redis_fencing_epoch"]
+            == str(redis_fencing_epoch or "")
+        ):
+            rollout = active_rollout
+            awaiting_rollout_step = True
     rollout_phase = None
     live_open_mode = None
     phase_version = None
@@ -2573,7 +2587,8 @@ def _heartbeat_release_receipt(
             rollout["schema_epoch"],
         )
         if (
-            release_gate_status == "pass"
+            not awaiting_rollout_step
+            and release_gate_status == "pass"
             and rollout_identity != release_identity
         ):
             release_gate_status = "drift"
@@ -3469,6 +3484,22 @@ def _peer_awaits_rollout_step(
     return (
         _ACTIVE_ROLLOUT_PHASES.index(peer_phase)
         >= _ACTIVE_ROLLOUT_PHASES.index(rollout_phase)
+    )
+
+
+def _account_awaits_rollout_step(
+    *,
+    account_id: str,
+    rollout_phase: str | None,
+) -> bool:
+    if rollout_phase not in _ACTIVE_ROLLOUT_PHASES:
+        return False
+    account_phase = _CANARY_PHASE_BY_ACCOUNT.get(account_id)
+    if account_phase is None:
+        return False
+    return (
+        _ACTIVE_ROLLOUT_PHASES.index(account_phase)
+        > _ACTIVE_ROLLOUT_PHASES.index(rollout_phase)
     )
 
 

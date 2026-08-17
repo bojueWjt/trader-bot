@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts" / "hk-deploy-20260803.sh"
@@ -85,6 +87,66 @@ def _run_bash(
         capture_output=True,
         check=False,
     )
+
+
+class _RouterStatusHandler(BaseHTTPRequestHandler):
+    response_status = 500
+
+    def do_POST(self) -> None:
+        self.send_response(self.response_status)
+        self.end_headers()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+def _run_router_contract(status: int) -> subprocess.CompletedProcess[str]:
+    handler = type(
+        "RouterStatusHandler",
+        (_RouterStatusHandler,),
+        {"response_status": status},
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        source = (
+            _definitions("verify_control_plane_router_contract")
+            + f"""
+CONTROL_PLANE_ROUTER_URL=http://{host}:{port}
+verify_control_plane_router_contract
+"""
+        )
+        return _run_bash(source, os.environ.copy())
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_incident_resolution_router_contract_rejects_404() -> None:
+    missing_route = _run_router_contract(404)
+    routed_request = _run_router_contract(401)
+
+    assert missing_route.returncode != 0
+    assert "incident resolution route returned 404" in missing_route.stderr
+    assert routed_request.returncode == 0, routed_request.stderr
+
+
+def test_router_contract_runs_before_any_release_node_recreate() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    restart = text.index("restart_control_plane_units\n")
+    router_contract = text.index(
+        "verify_control_plane_router_contract\n",
+        restart,
+    )
+    recreate = text.index(
+        'recreate_release_node "$node"',
+        router_contract,
+    )
+
+    assert restart < router_contract < recreate
 
 
 def test_role_topology_restarts_and_checks_all_three_units(

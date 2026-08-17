@@ -1071,7 +1071,7 @@ def test_refresh_evidence_command_allows_stale_account_binding(
     with _connect(migrated_db) as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT mode
+            SELECT state->>'mode'
             FROM risk_state
             WHERE account_id=%s
             """,

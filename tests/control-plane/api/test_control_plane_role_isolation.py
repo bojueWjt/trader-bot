@@ -95,6 +95,7 @@ def test_role_apps_expose_only_their_owned_routes() -> None:
         "/v1/nodes/{node_id}/exchange-state",
         "/v1/nodes/{node_id}/heartbeat",
         "/v1/nodes/{node_id}/incidents",
+        "/v1/nodes/{node_id}/incidents/resolve",
         "/v1/nodes/{node_id}/intents",
         "/v1/nodes/{node_id}/intents/{intent_id}/ack",
     }
@@ -890,3 +891,51 @@ def test_account_b_old_release_accepts_fresh_halted_account_a_canary(
     assert receipt["release_gate"]["status"] == "pass"
     assert receipt["peers"][0]["node_id"] == NODE_A
     assert receipt["peers"][0]["status"] == "rollout_pending"
+
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE reviewed_release_rollouts
+            SET phase='account_b_rollout',
+                phase_version=phase_version + 1
+            WHERE release_id=%s
+            """,
+            (RELEASE_ID,),
+        )
+
+    with TestClient(read_api.create_app(AppRole.NODE_CONTROL)) as client:
+        tightened_response = client.post(
+            f"/v1/nodes/{NODE_B}/heartbeat",
+            headers={
+                "Authorization": f"Bearer {NODE_B_TOKEN}",
+                "X-Node-Id": NODE_B,
+                "X-Account-Id": ACCOUNT_B,
+            },
+            json={
+                "account_id": ACCOUNT_B,
+                "ts": now.isoformat(),
+                "trading_state": "ACTIVE",
+                "readiness": True,
+                "projection_lag_ms": 0,
+                "reconciliation_state": "healthy",
+                "release_id": old_release_id,
+                "image_digest": old_image_digest,
+                "config_sha256": CONFIG_SHA256,
+                "dependency_lock_sha256": DEPENDENCY_SHA256,
+                "schema_epoch": SCHEMA_EPOCH,
+                "positions": [],
+                "regular_orders": [],
+                "algo_orders": [],
+                "positions_snapshot_at": now.isoformat(),
+                "regular_orders_snapshot_at": now.isoformat(),
+                "algo_orders_snapshot_at": now.isoformat(),
+                "reconciliation_completed_at": now.isoformat(),
+                "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+                "runtime_generation": "runtime-b",
+                "lease_fencing_token": 42,
+                "heartbeat_sequence": 2,
+            },
+        )
+
+    assert tightened_response.status_code == 200
+    assert tightened_response.json()["release_gate"]["status"] == "missing"

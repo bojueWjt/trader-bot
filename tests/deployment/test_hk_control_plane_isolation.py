@@ -831,6 +831,7 @@ def test_control_plane_isolation_script_is_fail_closed() -> None:
     assert "run_timed systemctl reload caddy.service" in text
     assert "event_ingest ^/v1/nodes/" in text
     assert "node_control ^/v1/nodes/" in text
+    assert "incidents(/resolve)?" in text
     assert "account_generated ^/v1/accounts/" in text
     assert "(?:" not in text
     assert "trap rollback EXIT" in text

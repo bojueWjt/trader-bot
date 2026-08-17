@@ -2288,6 +2288,43 @@ restart_control_plane_units() {
       || die "$unit failed to restart"
   done
 }
+verify_control_plane_router_contract() {
+  local router_url
+  router_url="${CONTROL_PLANE_ROUTER_URL:-http://127.0.0.1:8080}"
+  python3 - "$router_url" <<'PY'
+from __future__ import annotations
+
+import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+base_url = sys.argv[1].rstrip("/")
+request = Request(
+    (
+        f"{base_url}/v1/nodes/"
+        "control-plane-router-contract/incidents/resolve"
+    ),
+    data=b"{}",
+    method="POST",
+    headers={"Content-Type": "application/json"},
+)
+try:
+    with urlopen(request, timeout=5) as response:
+        status = response.status
+except HTTPError as exc:
+    status = exc.code
+except URLError as exc:
+    raise SystemExit(
+        f"incident resolution route is unavailable: {exc.reason}"
+    ) from exc
+if status == 404:
+    raise SystemExit("incident resolution route returned 404")
+if status >= 500:
+    raise SystemExit(
+        f"incident resolution route returned unhealthy HTTP {status}"
+    )
+PY
+}
 restart_hermes_units() {
   local unit
   if [ "$HERMES_RESTART_REQUIRED" != "1" ]; then
@@ -10264,6 +10301,7 @@ verify_maintenance_fence "topology-replacement"
 reconcile_control_plane_lock_privileges
 activate_control_plane_topology
 restart_control_plane_units
+verify_control_plane_router_contract
 echo "== control-plane topology=$CONTROL_PLANE_TOPOLOGY units=${CONTROL_PLANE_UNITS[*]}"
 
 verify_maintenance_fence "node-recreate-plan"
