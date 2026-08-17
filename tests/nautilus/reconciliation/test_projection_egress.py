@@ -22,6 +22,7 @@ sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 from app.nautilus_actors import ExecutionProjectionActor  # noqa: E402
 from projection.actor import (  # noqa: E402
+    LifecycleProjectionHealth,
     ProjectionActor,
     ProjectionIngestOutcome,
     ProjectionIngestResult,
@@ -63,6 +64,34 @@ class _BlockingProjection:
 
     def halt_egress(self, reason: str) -> None:
         self.halted_reasons.append(reason)
+
+
+class _ProjectionHeartbeatLifecycle:
+    def __init__(self) -> None:
+        self.heartbeat_health_degraded_reasons: tuple[str, ...] = ()
+
+    def record_projection_progress(
+        self,
+        projection_lag_ms: int,
+        last_event_id: str | None = None,
+    ) -> None:
+        del projection_lag_ms, last_event_id
+
+    def mark_dependency_ready(self, dependency: Any) -> None:
+        del dependency
+
+    def mark_dependency_failed(
+        self,
+        dependency: Any,
+        reason: str,
+    ) -> None:
+        del dependency, reason
+
+    def record_projection_degraded(self, reason: str) -> None:
+        self.heartbeat_health_degraded_reasons = (reason,)
+
+    def clear_projection_degraded(self) -> None:
+        self.heartbeat_health_degraded_reasons = ()
 
 
 class _BlockingSink:
@@ -411,10 +440,12 @@ def test_projection_shutdown_records_unflushed_position_with_shared_session(
 def test_projection_filtered_subscribed_event_keeps_durable_lane_running(
     tmp_path: Path,
 ) -> None:
+    lifecycle = _ProjectionHeartbeatLifecycle()
     projection = ProjectionActor(
         ProjectionConfig(node_id="node-a", account_id="account-a"),
         _BlockingSink(),
         JsonExecutionSpool(tmp_path / "filtered-events.wal"),
+        health=LifecycleProjectionHealth(lifecycle),
     )
     fatal_reasons: list[str] = []
     actor = ExecutionProjectionActor(
@@ -434,11 +465,15 @@ def test_projection_filtered_subscribed_event_keeps_durable_lane_running(
     assert accepted is True
     assert _wait_until(lambda: bool(projection.egress_degraded_reason))
     assert "filtered subscribed event" in projection.egress_degraded_reason
+    assert lifecycle.heartbeat_health_degraded_reasons == (
+        "execution projection filtered subscribed event: OrderInitialized",
+    )
     assert actor.halted_reason == ""
     assert fatal_reasons == []
 
     assert actor.on_event(_raw_order_event(1)) is True
     assert _wait_until(lambda: projection.spool.pending_count == 1)
+    assert lifecycle.heartbeat_health_degraded_reasons == ()
     actor.on_stop()
 
 

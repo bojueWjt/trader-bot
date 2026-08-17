@@ -1583,6 +1583,20 @@ def _validate_live_heartbeat_evidence(
             status_code=409,
             detail="node reconciliation evidence is unhealthy",
         )
+    health_degraded_reasons = payload.get("health_degraded_reasons", [])
+    if not isinstance(health_degraded_reasons, list):
+        raise HTTPException(
+            status_code=409,
+            detail="node heartbeat health evidence is invalid",
+        )
+    if health_degraded_reasons:
+        reason = str(health_degraded_reasons[0] or "").strip()
+        if not reason:
+            reason = "unspecified degradation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"node heartbeat health is degraded: {reason}",
+        )
 
     now = heartbeat["database_now"]
     freshness_fields = (
@@ -2254,6 +2268,7 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
         body,
         "reconciliation_completed_at",
     )
+    health_degraded_reasons = _heartbeat_health_degraded_reasons(body)
     release_id = _optional_identity(body.get("release_id"))
     image_digest = _optional_identity(body.get("image_digest"))
     config_sha256 = _optional_identity(body.get("config_sha256"))
@@ -2299,6 +2314,7 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
             "open_orders",
         )
     }
+    payload["health_degraded_reasons"] = health_degraded_reasons
     conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
@@ -2758,6 +2774,127 @@ def report_node_incident(
         "summary": summary,
         "opened_at": opened_at,
         "deduplicated": deduplicated,
+    }
+
+
+@app.post("/v1/nodes/{node_id}/incidents/resolve")
+def resolve_node_incident(
+    node_id: str,
+    body: dict = Body(default={}),
+    authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
+    x_redis_fencing_epoch: str | None = Header(default=None),
+    x_runtime_generation: str | None = Header(default=None),
+    x_lease_fencing_token: str | None = Header(default=None),
+):
+    account_id = str(body.get("account_id") or "").strip()
+    if _node_auth_bindings() is False:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "node identity bindings are required "
+                "for incident resolution"
+            ),
+        )
+    bound_account_id = require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
+    reason = str(body.get("reason") or "").strip().lower()
+    if _INCIDENT_REASON_PATTERN.fullmatch(reason) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="incident reason is invalid",
+        )
+    summary = str(body.get("summary") or "").strip()
+    if not summary:
+        raise HTTPException(
+            status_code=400,
+            detail="incident resolution summary is required",
+        )
+    if len(summary) > _INCIDENT_SUMMARY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail="incident resolution summary is too long",
+        )
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    incident_key = _incident_deduplication_key(
+        account_id=str(bound_account_id),
+        node_id=node_id,
+        reason=reason,
+    )
+    stored_summary = _stored_incident_summary(
+        incident_key=incident_key,
+        node_id=node_id,
+        reason=reason,
+        summary=summary,
+    )
+    summary_prefix = _stored_incident_summary_prefix(
+        incident_key=incident_key,
+        node_id=node_id,
+        reason=reason,
+    )
+
+    conn = _database_connection(database_url)
+    try:
+        with conn.cursor() as cur:
+            _require_node_writer(
+                cur,
+                node_id=node_id,
+                account_id=str(bound_account_id),
+                redis_fencing_epoch=x_redis_fencing_epoch,
+                runtime_generation=x_runtime_generation,
+                lease_fencing_token=x_lease_fencing_token,
+            )
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (incident_key,),
+            )
+            cur.execute("SELECT now()")
+            closed_at = cur.fetchone()[0]
+            cur.execute(
+                """
+                UPDATE production_incidents
+                SET status='closed',
+                    closed_at=%s,
+                    summary=%s
+                WHERE account_id=%s
+                  AND status='open'
+                  AND LEFT(summary, char_length(%s))=%s
+                RETURNING incident_id
+                """,
+                (
+                    closed_at,
+                    stored_summary,
+                    bound_account_id,
+                    summary_prefix,
+                    summary_prefix,
+                ),
+            )
+            resolved_incident_ids = sorted(
+                str(row[0])
+                for row in cur.fetchall()
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "account_id": str(bound_account_id),
+        "node_id": node_id,
+        "reason": reason,
+        "status": "closed",
+        "summary": summary,
+        "resolved_incident_ids": resolved_incident_ids,
+        "resolved_count": len(resolved_incident_ids),
+        "closed_at": closed_at,
     }
 
 
@@ -3448,6 +3585,34 @@ def _heartbeat_snapshot(
             detail=f"{field_name} entries must be objects",
         )
     return [dict(item) for item in value]
+
+
+def _heartbeat_health_degraded_reasons(body: dict) -> list[str]:
+    raw_reasons = body.get("health_degraded_reasons")
+    if raw_reasons is None:
+        return []
+    if not isinstance(raw_reasons, list):
+        raise HTTPException(
+            status_code=400,
+            detail="health_degraded_reasons must be a list",
+        )
+    reasons: list[str] = []
+    for raw_reason in raw_reasons:
+        reason = str(raw_reason or "").strip()
+        if not reason:
+            raise HTTPException(
+                status_code=400,
+                detail="health_degraded_reasons entries must be non-empty",
+            )
+        if len(reason) > _INCIDENT_SUMMARY_MAX_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail="health_degraded_reasons entry is too long",
+            )
+        if reason in reasons:
+            continue
+        reasons.append(reason)
+    return reasons
 
 
 def _heartbeat_exchange_evidence_is_complete(body: dict) -> bool:
@@ -4289,6 +4454,10 @@ def v1_nodes(authorization: str | None = Header(default=None)):
                 "instrument_count": int(r["instrument_count"] or 0),
                 "projection_lag_ms": payload.get("projection_lag_ms"),
                 "reconciliation_state": payload.get("reconciliation_state"),
+                "health_degraded_reasons": payload.get(
+                    "health_degraded_reasons",
+                    [],
+                ),
                 "version": r["version"],
             })
         return {**env, "nodes": nodes}

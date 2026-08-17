@@ -464,6 +464,12 @@ class _TerminalVerificationResult:
     result: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _PreparedEvidenceRefresh:
+    snapshot: dict[str, Any] | None
+    error: Exception | bool = False
+
+
 @dataclass
 class _IntentPublication:
     intent: Any
@@ -2175,7 +2181,7 @@ class CommandPollerActor(Actor):
         )
         self._prepared_reconciliation_refreshes: dict[
             str,
-            Exception | bool,
+            _PreparedEvidenceRefresh,
         ] = {}
         self._prepared_reconciliation_refreshes_lock = RLock()
         self._fatal_reason = ""
@@ -2709,9 +2715,14 @@ class CommandPollerActor(Actor):
         *,
         force_refresh: bool = False,
         require_refresh_evidence: bool = False,
+        prepared_snapshot: dict[str, Any] | None = None,
     ) -> Any:
         evidence_provider = self._exchange_evidence_provider
-        if evidence_provider is None:
+        if prepared_snapshot is not None:
+            heartbeat = self._lifecycle.build_heartbeat(
+                exchange_evidence=prepared_snapshot,
+            )
+        elif evidence_provider is None:
             heartbeat = self._lifecycle.build_heartbeat()
         else:
             try:
@@ -2783,10 +2794,13 @@ class CommandPollerActor(Actor):
     def session_send_heartbeat(self) -> None:
         self._run_heartbeat_lane()
 
-    def session_refresh_evidence(self) -> Any:
+    def session_refresh_evidence(
+        self,
+        snapshot: dict[str, Any],
+    ) -> Any:
         return self._run_heartbeat_lane(
-            force_refresh=True,
             require_refresh_evidence=True,
+            prepared_snapshot=snapshot,
         )
 
     def session_bootstrap_writer(self) -> None:
@@ -2876,9 +2890,41 @@ class CommandPollerActor(Actor):
         with self._prepared_reconciliation_refreshes_lock:
             if command_id in self._prepared_reconciliation_refreshes:
                 return
-        outcome = self._run_reconciliation_refresh()
+        outcome = self._run_evidence_refresh_preparation()
         with self._prepared_reconciliation_refreshes_lock:
             self._prepared_reconciliation_refreshes[command_id] = outcome
+
+    def _run_evidence_refresh_preparation(
+        self,
+    ) -> _PreparedEvidenceRefresh:
+        evidence_provider = self._exchange_evidence_provider
+        if evidence_provider is None:
+            return _PreparedEvidenceRefresh(
+                snapshot=None,
+                error=RuntimeError(
+                    "exchange evidence provider is unavailable"
+                ),
+            )
+        try:
+            snapshot = evidence_provider.snapshot(force_refresh=True)
+        except Exception as exc:
+            detail = str(exc).strip()
+            if not detail:
+                detail = type(exc).__name__
+            reason = f"exchange evidence unavailable: {detail}"
+            self._exchange_evidence_available = False
+            self._exchange_evidence_failure_reason = reason
+            return _PreparedEvidenceRefresh(
+                snapshot=None,
+                error=RuntimeError(reason),
+            )
+        self._exchange_evidence_available = True
+        self._exchange_evidence_failure_reason = ""
+        reconciliation_error = self._run_reconciliation_refresh()
+        return _PreparedEvidenceRefresh(
+            snapshot=dict(snapshot),
+            error=reconciliation_error,
+        )
 
     def _run_reconciliation_refresh(self) -> Exception | bool:
         callback = self._reconciliation_refresh
@@ -2895,7 +2941,7 @@ class CommandPollerActor(Actor):
     def _take_reconciliation_refresh(
         self,
         command: Any,
-    ) -> Exception | bool:
+    ) -> _PreparedEvidenceRefresh:
         command_id = str(command.command_id)
         with self._prepared_reconciliation_refreshes_lock:
             if command_id in self._prepared_reconciliation_refreshes:
@@ -2903,10 +2949,13 @@ class CommandPollerActor(Actor):
                     command_id
                 )
         if self._control_plane_session is not None:
-            return RuntimeError(
-                "prepared Nautilus reconciliation refresh is unavailable"
+            return _PreparedEvidenceRefresh(
+                snapshot=None,
+                error=RuntimeError(
+                    "prepared Nautilus reconciliation refresh is unavailable"
+                ),
             )
-        return self._run_reconciliation_refresh()
+        return self._run_evidence_refresh_preparation()
 
     def _discard_prepared_reconciliation_refresh(
         self,
@@ -4237,14 +4286,21 @@ class CommandPollerActor(Actor):
                     TradingState.HALTED, "operator_command"
                 )
             elif cmd.type == CommandType.REFRESH_EVIDENCE:
-                reconciliation_error = self._take_reconciliation_refresh(
+                prepared_refresh = self._take_reconciliation_refresh(
                     cmd
                 )
-                if reconciliation_error is not False:
+                if prepared_refresh.error is not False:
                     return self._failed_command_result(
-                        reconciliation_error
+                        prepared_refresh.error
                     )
-                self.session_refresh_evidence()
+                snapshot = prepared_refresh.snapshot
+                if snapshot is None:
+                    return self._failed_command_result(
+                        RuntimeError(
+                            "prepared exchange evidence snapshot is unavailable"
+                        )
+                    )
+                self.session_refresh_evidence(snapshot)
                 return CommandAckStatus.COMPLETED, None
             elif cmd.type == CommandType.RESUME:
                 if _lifecycle_is_live(self._lifecycle):

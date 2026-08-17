@@ -40,6 +40,8 @@ __all__ = [
     "Heartbeat",
     "ProductionIncidentReport",
     "ProductionIncidentReceipt",
+    "ProductionIncidentResolution",
+    "ProductionIncidentResolutionReceipt",
     "NodeWriterIdentity",
     "ReleaseIdentity",
     "ReleaseGateReceipt",
@@ -49,6 +51,7 @@ __all__ = [
     "ControlPlaneIntentSource",
     "ExecutionEventSink",
     "ProductionIncidentSink",
+    "ProductionIncidentResolutionSink",
     "NodeCommandChannel",
     "ControlPlaneSnapshotSource",
     "ControlPlaneClient",
@@ -235,6 +238,7 @@ class Heartbeat:
     readiness: bool
     projection_lag_ms: int
     reconciliation_state: ReconciliationState
+    health_degraded_reasons: tuple[str, ...] = ()
     redis_fencing_epoch: Optional[str] = None
     runtime_generation: Optional[str] = None
     lease_fencing_token: Optional[int] = None
@@ -288,6 +292,33 @@ class ProductionIncidentReceipt:
     summary: str
     opened_at: datetime
     deduplicated: bool
+
+
+@dataclass(frozen=True)
+class ProductionIncidentResolution:
+    account_id: str
+    reason: str
+    summary: str
+
+    def __post_init__(self) -> None:
+        if not str(self.account_id).strip():
+            raise ValueError("incident resolution account_id is required")
+        if not str(self.reason).strip():
+            raise ValueError("incident resolution reason is required")
+        if not str(self.summary).strip():
+            raise ValueError("incident resolution summary is required")
+
+
+@dataclass(frozen=True)
+class ProductionIncidentResolutionReceipt:
+    account_id: str
+    node_id: str
+    reason: str
+    status: str
+    summary: str
+    resolved_incident_ids: tuple[str, ...]
+    resolved_count: int
+    closed_at: datetime
 
 
 @dataclass(frozen=True)
@@ -419,6 +450,17 @@ class ProductionIncidentSink(Protocol):
         node_id: str,
         report: ProductionIncidentReport,
     ) -> ProductionIncidentReceipt: ...
+
+
+@runtime_checkable
+class ProductionIncidentResolutionSink(Protocol):
+    """Node-authenticated resolution of recovered production incidents."""
+
+    def resolve_incident(
+        self,
+        node_id: str,
+        resolution: ProductionIncidentResolution,
+    ) -> ProductionIncidentResolutionReceipt: ...
 
 
 @runtime_checkable

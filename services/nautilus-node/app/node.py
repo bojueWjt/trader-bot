@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -89,6 +90,11 @@ class AccountRuntime:
     redis_runtime_safety_client: Any = None
     control_plane_session: Any = None
     incident_reporter: Callable[[str, str], bool] | None = None
+    incident_resolver: Callable[[str, str], bool] | None = None
+    incident_state_lock: Any = field(default_factory=Lock, repr=False)
+    active_runtime_incident_reasons: set[str] = field(default_factory=set)
+    pending_incident_resolutions: set[str] = field(default_factory=set)
+    resolved_runtime_incident_reasons: set[str] = field(default_factory=set)
     background_workers: list[Any] = field(default_factory=list)
     components: tuple[NodeComponent, ...] = ()
     nautilus_api_todos: tuple[str, ...] = NAUTILUS_API_TODOS
@@ -911,9 +917,13 @@ def _mark_session_lane_ready(
         return
     dependency = _dependency_by_value(dependency_name)
     marker = getattr(runtime.lifecycle, "mark_dependency_ready", None)
-    if dependency is None or not callable(marker):
-        return
-    marker(dependency)
+    if dependency is not None and callable(marker):
+        marker(dependency)
+    _resolve_runtime_incident(
+        runtime,
+        f"{dependency_name}_runtime_failure",
+        f"{lane} recovered with accepted control-plane evidence",
+    )
 
 
 def _register_health_provider(
@@ -2085,7 +2095,40 @@ def _report_runtime_incident(
     reporter = runtime.incident_reporter
     if reporter is None:
         return False
-    return bool(reporter(reason, summary))
+    submitted = bool(reporter(reason, summary))
+    if not submitted:
+        return False
+    lock = runtime.incident_state_lock
+    with lock:
+        runtime.active_runtime_incident_reasons.add(reason)
+        runtime.resolved_runtime_incident_reasons.discard(reason)
+    return True
+
+
+def _resolve_runtime_incident(
+    runtime: AccountRuntime,
+    reason: str,
+    summary: str,
+) -> bool:
+    resolver = runtime.incident_resolver
+    if resolver is None:
+        return False
+    lock = runtime.incident_state_lock
+    with lock:
+        if reason in runtime.pending_incident_resolutions:
+            return False
+        if (
+            reason in runtime.resolved_runtime_incident_reasons
+            and reason not in runtime.active_runtime_incident_reasons
+        ):
+            return False
+        runtime.pending_incident_resolutions.add(reason)
+    submitted = bool(resolver(reason, summary))
+    if submitted:
+        return True
+    with lock:
+        runtime.pending_incident_resolutions.discard(reason)
+    return False
 
 
 def _configure_runtime_incident_reporter(
@@ -2096,20 +2139,53 @@ def _configure_runtime_incident_reporter(
     from execution_domain.control_plane import (
         IncidentSeverity,
         ProductionIncidentReport,
+        ProductionIncidentResolution,
     )
     from runtime.bounded_task_worker import BoundedTaskWorker
 
-    def handle(task: tuple[str, str]) -> None:
-        reason, summary = task
-        runtime.control_plane.report_incident(
-            runtime.config.node_id,
-            ProductionIncidentReport(
-                account_id=runtime.config.account_id,
-                severity=IncidentSeverity.P1,
-                reason=reason,
-                summary=summary[:2000],
-            ),
-        )
+    if not hasattr(runtime, "incident_state_lock"):
+        runtime.incident_state_lock = Lock()
+    if not hasattr(runtime, "active_runtime_incident_reasons"):
+        runtime.active_runtime_incident_reasons = set()
+    if not hasattr(runtime, "pending_incident_resolutions"):
+        runtime.pending_incident_resolutions = set()
+    if not hasattr(runtime, "resolved_runtime_incident_reasons"):
+        runtime.resolved_runtime_incident_reasons = set()
+
+    def handle(task: tuple[str, str, str]) -> None:
+        operation, reason, summary = task
+        if operation == "report":
+            runtime.control_plane.report_incident(
+                runtime.config.node_id,
+                ProductionIncidentReport(
+                    account_id=runtime.config.account_id,
+                    severity=IncidentSeverity.P1,
+                    reason=reason,
+                    summary=summary[:2000],
+                ),
+            )
+            return
+        if operation != "resolve":
+            raise RuntimeError(
+                f"unsupported production incident operation: {operation}"
+            )
+        try:
+            runtime.control_plane.resolve_incident(
+                runtime.config.node_id,
+                ProductionIncidentResolution(
+                    account_id=runtime.config.account_id,
+                    reason=reason,
+                    summary=summary[:2000],
+                ),
+            )
+        except Exception:
+            with runtime.incident_state_lock:
+                runtime.pending_incident_resolutions.discard(reason)
+            raise
+        with runtime.incident_state_lock:
+            runtime.pending_incident_resolutions.discard(reason)
+            runtime.active_runtime_incident_reasons.discard(reason)
+            runtime.resolved_runtime_incident_reasons.add(reason)
 
     def mark_reporter_failed(reason: str) -> None:
         dependency = _dependency_by_value("control_plane")
@@ -2140,9 +2216,13 @@ def _configure_runtime_incident_reporter(
     )
 
     def report(reason: str, summary: str) -> bool:
-        return worker.submit((reason, summary))
+        return worker.submit(("report", reason, summary))
+
+    def resolve(reason: str, summary: str) -> bool:
+        return worker.submit(("resolve", reason, summary))
 
     runtime.incident_reporter = report
+    runtime.incident_resolver = resolve
 
 
 def _check_redis(config: NodeConfig) -> bool:

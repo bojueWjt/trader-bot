@@ -231,6 +231,7 @@ class NodeLifecycle:
         self._last_control_plane_ok_at: Optional[datetime] = None
         self._last_event_id: Optional[str] = None
         self._projection_lag_ms = 0
+        self._health_degraded_reasons: dict[str, str] = {}
         self._reconciliation_state = ReconciliationState.DEGRADED
         self._reconciliation_proof: ReconciliationProof | None = None
         self._last_reconciliation_completed_at: datetime | None = None
@@ -354,6 +355,17 @@ class NodeLifecycle:
                 self._reconciliation_in_flight = False
                 self._reconciliation_state = ReconciliationState.FAILED
             self._halt(f"{dependency.value} failed: {reason}")
+
+    def record_projection_degraded(self, reason: str) -> None:
+        normalized_reason = str(reason).strip()
+        if not normalized_reason:
+            raise ValueError("projection degraded reason is required")
+        with self._state_lock:
+            self._health_degraded_reasons["projection"] = normalized_reason
+
+    def clear_projection_degraded(self) -> None:
+        with self._state_lock:
+            self._health_degraded_reasons.pop("projection", None)
 
     def begin_reconciliation(self, *, halt_active: bool = False) -> int:
         with self._state_lock:
@@ -523,6 +535,9 @@ class NodeLifecycle:
                 readiness=self.readiness.ready,
                 projection_lag_ms=self._projection_lag_ms,
                 reconciliation_state=self._reconciliation_state,
+                health_degraded_reasons=tuple(
+                    sorted(self._health_degraded_reasons.values())
+                ),
                 redis_fencing_epoch=(
                     str(self._redis_fencing_epoch)
                     if self._redis_fencing_epoch is not False
@@ -559,6 +574,9 @@ class NodeLifecycle:
                 readiness=self.readiness.ready,
                 projection_lag_ms=self._projection_lag_ms,
                 reconciliation_state=self._reconciliation_state,
+                health_degraded_reasons=tuple(
+                    sorted(self._health_degraded_reasons.values())
+                ),
                 redis_fencing_epoch=(
                     str(self._redis_fencing_epoch)
                     if self._redis_fencing_epoch is not False

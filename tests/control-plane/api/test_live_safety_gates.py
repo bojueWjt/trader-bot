@@ -462,6 +462,7 @@ def _seed_heartbeat(
     lease_fencing_token: int = LEASE_FENCING_TOKEN,
     heartbeat_sequence: int = HEARTBEAT_SEQUENCE,
     redis_fencing_epoch: str = REDIS_FENCING_EPOCH,
+    health_degraded_reasons: list[str] | None = None,
 ) -> None:
     now = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
     account_snapshot_fetched_at = datetime.now(timezone.utc)
@@ -528,6 +529,9 @@ def _seed_heartbeat(
                         "readiness": True,
                         "projection_lag_ms": 0,
                         "reconciliation_state": "healthy",
+                        "health_degraded_reasons": (
+                            health_degraded_reasons or []
+                        ),
                         "ts": now.isoformat(),
                     }
                 ),
@@ -2237,6 +2241,12 @@ def test_resume_rejects_any_target_symbol_risk(
         ("invalid_order", "node exchange evidence is invalid"),
         ("identity", "node release identity does not match reviewed manifest"),
         ("stale", "node heartbeat evidence is stale"),
+        (
+            "degraded",
+            "node heartbeat health is degraded: "
+            "execution projection filtered subscribed event: "
+            "OrderInitialized",
+        ),
     ),
 )
 def test_resume_fails_closed_on_missing_live_evidence(
@@ -2258,6 +2268,11 @@ def test_resume_fails_closed_on_missing_live_evidence(
         heartbeat_args["release_id"] = "different-release"
     if evidence_change == "stale":
         heartbeat_args["age_seconds"] = 20
+    if evidence_change == "degraded":
+        heartbeat_args["health_degraded_reasons"] = [
+            "execution projection filtered subscribed event: "
+            "OrderInitialized"
+        ]
     _seed_heartbeat(migrated_db, **heartbeat_args)
     permit_id = _seed_reviewed_release_and_permit(migrated_db)
     if evidence_change == "incident":

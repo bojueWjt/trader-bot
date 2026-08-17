@@ -101,6 +101,27 @@ def test_startup_is_halted_and_readiness_requires_all_dependencies(
     assert lifecycle.trading_state is TradingState.HALTED
 
 
+def test_projection_degraded_reason_is_exposed_and_cleared_in_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    lifecycle = NodeLifecycle(config=config, clock=_FixedClock())
+    reason = (
+        "execution projection filtered subscribed event: "
+        "OrderInitialized"
+    )
+
+    lifecycle.record_projection_degraded(reason)
+
+    degraded = lifecycle.build_heartbeat()
+    assert degraded.health_degraded_reasons == (reason,)
+
+    lifecycle.clear_projection_degraded()
+
+    recovered = lifecycle.build_heartbeat()
+    assert recovered.health_degraded_reasons == ()
+
+
 def test_health_service_exposes_runtime_provider_snapshots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -31,6 +31,7 @@ _NODE_CONTROL_ROUTES = frozenset(
         "node_heartbeat",
         "node_intents",
         "report_node_incident",
+        "resolve_node_incident",
     }
 )
 _EVENT_INGEST_ROUTES = frozenset(

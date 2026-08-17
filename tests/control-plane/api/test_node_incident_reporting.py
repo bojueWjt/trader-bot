@@ -20,6 +20,8 @@ if str(EXECUTION_DOMAIN_ROOT) not in sys.path:
 
 from execution_domain.control_plane import (  # noqa: E402
     IncidentSeverity,
+    ProductionIncidentResolution,
+    ProductionIncidentResolutionSink,
     ProductionIncidentReport,
     ProductionIncidentSink,
 )
@@ -219,6 +221,65 @@ def test_closed_incident_allows_a_new_incident_for_the_same_reason(
     assert reopened.json()["deduplicated"] is False
 
 
+def test_node_can_resolve_its_open_incident_by_reason(
+    node_control_client: TestClient,
+    migrated_db: str,
+) -> None:
+    opened = node_control_client.post(
+        f"/v1/nodes/{NODE_A}/incidents",
+        headers=_node_headers(),
+        json={
+            "account_id": ACCOUNT_A,
+            "severity": "P1",
+            "reason": "control_plane_runtime_failure",
+            "summary": (
+                "Heartbeat rejected while exchange evidence was missing."
+            ),
+        },
+    )
+    assert opened.status_code == 200
+
+    resolved = node_control_client.post(
+        f"/v1/nodes/{NODE_A}/incidents/resolve",
+        headers=_node_headers(),
+        json={
+            "account_id": ACCOUNT_A,
+            "reason": "control_plane_runtime_failure",
+            "summary": (
+                "Heartbeat accepted with complete exchange evidence."
+            ),
+        },
+    )
+
+    assert resolved.status_code == 200
+    payload = resolved.json()
+    assert payload["account_id"] == ACCOUNT_A
+    assert payload["node_id"] == NODE_A
+    assert payload["reason"] == "control_plane_runtime_failure"
+    assert payload["status"] == "closed"
+    assert payload["resolved_incident_ids"] == [
+        opened.json()["incident_id"]
+    ]
+    assert payload["resolved_count"] == 1
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, closed_at, summary
+            FROM production_incidents
+            WHERE incident_id=%s
+            """,
+            (opened.json()["incident_id"],),
+        )
+        row = cur.fetchone()
+
+    assert row is not None
+    assert row[0] == "closed"
+    assert row[1] is not None
+    assert row[2].endswith(
+        "Heartbeat accepted with complete exchange evidence."
+    )
+
+
 def test_incident_report_rejects_cross_account_identity_before_write(
     node_control_client: TestClient,
     migrated_db: str,
@@ -269,7 +330,10 @@ def test_incident_report_requires_node_account_binding_configuration(
 
 
 def test_incident_route_is_owned_only_by_node_control() -> None:
-    path = f"/v1/nodes/{{node_id}}/incidents"
+    paths = {
+        f"/v1/nodes/{{node_id}}/incidents",
+        f"/v1/nodes/{{node_id}}/incidents/resolve",
+    }
     node_control_paths = {
         route.path
         for route in read_api.create_app(AppRole.NODE_CONTROL).routes
@@ -283,9 +347,9 @@ def test_incident_route_is_owned_only_by_node_control() -> None:
         for route in read_api.create_app(AppRole.OPERATOR_QUERY).routes
     }
 
-    assert path in node_control_paths
-    assert path not in event_ingest_paths
-    assert path not in operator_query_paths
+    assert paths <= node_control_paths
+    assert paths.isdisjoint(event_ingest_paths)
+    assert paths.isdisjoint(operator_query_paths)
 
 
 def test_http_client_reports_incident_and_parses_deduplication_receipt(
@@ -383,6 +447,76 @@ def test_http_client_rejects_cross_account_incident_before_request(
         )
 
 
+def test_http_client_resolves_incident_and_parses_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = HttpControlPlaneClient(
+        base_url="https://control-plane.invalid",
+        token=NODE_A_TOKEN,
+        node_id=NODE_A,
+        account_id=ACCOUNT_A,
+    )
+    requests = []
+
+    def request_json(method, path, body=None, allow_empty=False):
+        requests.append((method, path, body, allow_empty))
+        return {
+            "account_id": ACCOUNT_A,
+            "node_id": NODE_A,
+            "reason": "control_plane_runtime_failure",
+            "status": "closed",
+            "summary": (
+                "Heartbeat accepted with complete exchange evidence."
+            ),
+            "resolved_incident_ids": [
+                "6206c1b4-432d-4c4e-87f0-52e1cfb75fc6"
+            ],
+            "resolved_count": 1,
+            "closed_at": "2026-08-17T06:30:00+00:00",
+        }
+
+    monkeypatch.setattr(client, "_request_json", request_json)
+    receipt = client.resolve_incident(
+        NODE_A,
+        ProductionIncidentResolution(
+            account_id=ACCOUNT_A,
+            reason="control_plane_runtime_failure",
+            summary="Heartbeat accepted with complete exchange evidence.",
+        ),
+    )
+
+    assert requests == [
+        (
+            "POST",
+            f"/v1/nodes/{NODE_A}/incidents/resolve",
+            {
+                "account_id": ACCOUNT_A,
+                "reason": "control_plane_runtime_failure",
+                "summary": (
+                    "Heartbeat accepted with complete exchange evidence."
+                ),
+            },
+            False,
+        )
+    ]
+    assert receipt.account_id == ACCOUNT_A
+    assert receipt.node_id == NODE_A
+    assert receipt.reason == "control_plane_runtime_failure"
+    assert receipt.status == "closed"
+    assert receipt.resolved_incident_ids == (
+        "6206c1b4-432d-4c4e-87f0-52e1cfb75fc6",
+    )
+    assert receipt.resolved_count == 1
+    assert receipt.closed_at == datetime(
+        2026,
+        8,
+        17,
+        6,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+
 def test_incident_sink_is_an_explicit_client_capability() -> None:
     http_client = HttpControlPlaneClient(
         base_url="https://control-plane.invalid",
@@ -392,4 +526,9 @@ def test_incident_sink_is_an_explicit_client_capability() -> None:
     )
 
     assert isinstance(http_client, ProductionIncidentSink)
+    assert isinstance(http_client, ProductionIncidentResolutionSink)
     assert not isinstance(InMemoryControlPlane(), ProductionIncidentSink)
+    assert not isinstance(
+        InMemoryControlPlane(),
+        ProductionIncidentResolutionSink,
+    )

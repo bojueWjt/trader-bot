@@ -113,6 +113,15 @@ def client(
             },
         ),
         (
+            "post",
+            f"/v1/nodes/{NODE_ID}/incidents/resolve",
+            {
+                "account_id": ACCOUNT_ID,
+                "reason": "writer_fence_test",
+                "summary": "stale writer must not resolve incidents",
+            },
+        ),
+        (
             "get",
             f"/v1/nodes/{NODE_ID}/commands?account_id={ACCOUNT_ID}",
             None,
@@ -200,6 +209,55 @@ def test_current_runtime_with_stale_writer_token_is_rejected(
     assert response.status_code == 409
     assert response.headers["x-writer-fence-rejected"] == "1"
     assert response.json()["detail"] == "lease fencing token mismatch"
+
+
+def test_heartbeat_persists_projection_degraded_health_surface(
+    client: TestClient,
+    migrated_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _heartbeat_body(heartbeat_sequence=2)
+    body["health_degraded_reasons"] = [
+        "execution projection filtered subscribed event: "
+        "OrderInitialized"
+    ]
+
+    response = client.post(
+        f"/v1/nodes/{NODE_ID}/heartbeat",
+        headers=_writer_headers(),
+        json=body,
+    )
+
+    assert response.status_code == 200
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT payload->'health_degraded_reasons'
+            FROM node_heartbeats
+            WHERE node_id=%s
+            """,
+            (NODE_ID,),
+        )
+        row = cur.fetchone()
+
+    assert row == (
+        [
+            "execution projection filtered subscribed event: "
+            "OrderInitialized"
+        ],
+    )
+
+    monkeypatch.setenv("VIEWER_TOKEN", "viewer-token")
+    response = client.get(
+        "/v1/nodes",
+        headers={"Authorization": "Bearer viewer-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["nodes"][0]["health_degraded_reasons"] == [
+        "execution projection filtered subscribed event: "
+        "OrderInitialized"
+    ]
 
 
 def test_heartbeat_rejects_header_body_writer_mismatch(

@@ -190,6 +190,7 @@ class Scenario:
         self.blocked_refresh_started = threading.Event()
         self.release_blocked_refresh = threading.Event()
         self.refresh_status_poll_started = threading.Event()
+        self.refresh_status_completed_at: list[float] = []
 
     def handle(
         self,
@@ -261,6 +262,8 @@ class Scenario:
             status = self.command_statuses.get(command_id)
             if status is None:
                 return 404, {"detail": "command not found"}
+            if status.get("status") == "completed":
+                self.refresh_status_completed_at.append(time.monotonic())
             return 200, status
         if method == "POST" and path == "/v1/operator/orders":
             assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
@@ -822,12 +825,17 @@ def test_preflight_refresh_accounts_run_independent_parallel_pipelines(
         finally:
             scenario.release_blocked_refresh.set()
             thread.join(timeout=3)
+        assert len(scenario.refresh_status_completed_at) == 4
+        ack_tail_seconds = (
+            time.monotonic() - max(scenario.refresh_status_completed_at)
+        )
 
     assert not thread.is_alive()
     completed, payload = invocation["result"]
     assert completed.returncode == 0, completed.stderr
     assert payload["action"] == "preflight"
     assert len(_refresh_command_posts(scenario)) == 4
+    assert ack_tail_seconds < 0.5
 
 
 def test_preflight_uses_explicit_abc_refresh_burst(

@@ -1526,7 +1526,7 @@ class NautilusActorAdapterTest(unittest.TestCase):
         finally:
             actor.on_stop()
 
-    def test_refresh_evidence_command_reconciles_before_exchange_snapshot_heartbeat(
+    def test_refresh_evidence_command_stamps_mirror_then_reconciliation_then_heartbeat(
         self,
     ) -> None:
         from app.nautilus_actors import CommandPollerActor
@@ -1536,13 +1536,15 @@ class NautilusActorAdapterTest(unittest.TestCase):
             NodeCommand,
         )
 
-        control_plane = _HeartbeatCaptureControlPlane()
+        events: list[str] = []
+        control_plane = _HeartbeatCaptureControlPlane(events=events)
         lifecycle = _RecordingLifecycle()
-        provider = _ExchangeEvidenceProvider()
+        provider = _ExchangeEvidenceProvider(events=events)
         reconciliation_calls: list[str] = []
 
         def refresh_reconciliation() -> None:
-            self.assertEqual(provider.force_refresh_values, [])
+            self.assertEqual(provider.force_refresh_values, [True])
+            events.append("reconciliation")
             reconciliation_calls.append("completed")
 
         actor = CommandPollerActor(
@@ -1573,6 +1575,14 @@ class NautilusActorAdapterTest(unittest.TestCase):
             self.assertIsNotNone(heartbeat.algo_orders_snapshot_at)
             self.assertIsNotNone(heartbeat.reconciliation_completed_at)
             self.assertEqual(lifecycle.applied_states, [])
+            self.assertEqual(
+                events,
+                [
+                    "exchange_snapshot",
+                    "reconciliation",
+                    "heartbeat",
+                ],
+            )
         finally:
             actor.on_stop()
 
@@ -1639,7 +1649,7 @@ class NautilusActorAdapterTest(unittest.TestCase):
                 finally:
                     actor.on_stop()
 
-    def test_refresh_evidence_command_fails_before_heartbeat_when_reconciliation_fails(
+    def test_refresh_evidence_command_refreshes_mirror_then_fails_before_heartbeat(
         self,
     ) -> None:
         from app.nautilus_actors import CommandPollerActor
@@ -1675,7 +1685,7 @@ class NautilusActorAdapterTest(unittest.TestCase):
         try:
             self.assertEqual(status, CommandAckStatus.FAILED)
             self.assertIn("venue reconciliation failed", str(error))
-            self.assertEqual(provider.force_refresh_values, [])
+            self.assertEqual(provider.force_refresh_values, [True])
             self.assertEqual(control_plane.heartbeats, [])
             self.assertEqual(lifecycle.applied_states, [])
         finally:
@@ -2173,11 +2183,14 @@ class _BlockingAckControlPlane:
 
 
 class _HeartbeatCaptureControlPlane:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.heartbeats: list[Any] = []
+        self.events = events
 
     def heartbeat(self, node_id: str, heartbeat: Any) -> None:
         del node_id
+        if self.events is not None:
+            self.events.append("heartbeat")
         self.heartbeats.append(heartbeat)
 
     def poll_commands(self, node_id: str, after: str | None) -> list[Any]:
@@ -2198,13 +2211,16 @@ class _OpenOrdersCache:
 
 
 class _ExchangeEvidenceProvider:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.thread_id: int | None = None
         self.force_refresh_values: list[bool] = []
+        self.events = events
 
     def snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
         self.thread_id = threading.get_ident()
         self.force_refresh_values.append(force_refresh)
+        if self.events is not None:
+            self.events.append("exchange_snapshot")
         return {
             "positions": [{"symbol": "ETHUSDT", "quantity": "-0.01"}],
             "regular_orders": [

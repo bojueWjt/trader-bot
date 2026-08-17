@@ -30,6 +30,8 @@ from .control_plane import (
     PeerIdentityReceipt,
     ProductionIncidentReceipt,
     ProductionIncidentReport,
+    ProductionIncidentResolution,
+    ProductionIncidentResolutionReceipt,
     ReleaseGateReceipt,
     ReleaseIdentity,
 )
@@ -300,6 +302,27 @@ class HttpControlPlaneClient(ControlPlaneClient):
             },
         )
         receipt = _production_incident_receipt(payload)
+        self._require_node_id(receipt.node_id)
+        self._require_account_id(receipt.account_id)
+        return receipt
+
+    def resolve_incident(
+        self,
+        node_id: str,
+        resolution: ProductionIncidentResolution,
+    ) -> ProductionIncidentResolutionReceipt:
+        self._require_node_id(node_id)
+        self._require_account_id(resolution.account_id)
+        payload = self._request_json(
+            "POST",
+            f"/v1/nodes/{node_id}/incidents/resolve",
+            {
+                "account_id": resolution.account_id,
+                "reason": resolution.reason,
+                "summary": resolution.summary,
+            },
+        )
+        receipt = _production_incident_resolution_receipt(payload)
         self._require_node_id(receipt.node_id)
         self._require_account_id(receipt.account_id)
         return receipt
@@ -685,6 +708,53 @@ def _production_incident_receipt(
         summary=summary,
         opened_at=opened_at,
         deduplicated=deduplicated,
+    )
+
+
+def _production_incident_resolution_receipt(
+    payload: dict[str, Any],
+) -> ProductionIncidentResolutionReceipt:
+    account_id = _required_response_string(payload, "account_id")
+    node_id = _required_response_string(payload, "node_id")
+    reason = _required_response_string(payload, "reason")
+    status = _required_response_string(payload, "status")
+    summary = _required_response_string(payload, "summary")
+    raw_incident_ids = payload.get("resolved_incident_ids")
+    if not isinstance(raw_incident_ids, list):
+        raise ControlPlaneHttpError(
+            "incident resolution receipt ids must be a list"
+        )
+    incident_ids = tuple(
+        _required_identity(incident_id, "resolved incident_id")
+        for incident_id in raw_incident_ids
+    )
+    resolved_count = payload.get("resolved_count")
+    if (
+        isinstance(resolved_count, bool)
+        or not isinstance(resolved_count, int)
+        or resolved_count < 0
+    ):
+        raise ControlPlaneHttpError(
+            "incident resolution receipt count is invalid"
+        )
+    if resolved_count != len(incident_ids):
+        raise ControlPlaneHttpError(
+            "incident resolution receipt count does not match ids"
+        )
+    closed_at = _parse_datetime(payload.get("closed_at"))
+    if closed_at is None:
+        raise ControlPlaneHttpError(
+            "incident resolution receipt closed_at is required"
+        )
+    return ProductionIncidentResolutionReceipt(
+        account_id=account_id,
+        node_id=node_id,
+        reason=reason,
+        status=status,
+        summary=summary,
+        resolved_incident_ids=incident_ids,
+        resolved_count=resolved_count,
+        closed_at=closed_at,
     )
 
 
