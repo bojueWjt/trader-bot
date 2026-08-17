@@ -552,6 +552,29 @@ class StrategyShellTest(unittest.TestCase):
             self.assertTrue(record)
             self.assertEqual(record.state.value, "dispatched")
 
+    def test_live_canary_limit_ioc_requires_available_mark_price(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _CanarySubmitStrategy(Path(state_dir))
+            identity = _canary_execution_identity()
+            plan = _canary_order_plan(identity)
+            strategy._cache_mark_price = (  # type: ignore[method-assign]
+                lambda instrument_id: False
+            )
+
+            submitted = strategy._submit_order_plan(
+                plan,
+                live_canary_execution=identity,
+            )
+
+            self.assertFalse(submitted)
+            self.assertEqual(strategy.submitted_orders, [])
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "live_entry_mark_price_unavailable",
+            )
+
     def test_live_account_b_rejects_instrument_missing_from_risk_inventory(
         self,
     ) -> None:
@@ -2298,6 +2321,7 @@ class StrategyShellTest(unittest.TestCase):
     def test_live_market_entry_requires_available_mark_price(self) -> None:
         strategy = _LiveEntrySubmitStrategy(
             inventory=(("BTCUSDT-PERP.BINANCE", "100"),),
+            mark_price=False,
         )
         plan = _live_entry_order_plan(
             instrument_id="BTCUSDT-PERP.BINANCE",
@@ -2309,6 +2333,60 @@ class StrategyShellTest(unittest.TestCase):
         submitted = strategy._submit_order_plan(plan)
 
         self.assertFalse(submitted)
+        self.assertEqual(
+            strategy.denials[-1].reason,
+            "live_entry_mark_price_unavailable",
+        )
+
+    def test_live_limit_entry_rejects_stale_mark_price(self) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("BTCUSDT-PERP.BINANCE", "100"),),
+            mark_price="100",
+            mark_price_at=datetime(
+                2026,
+                8,
+                8,
+                11,
+                59,
+                49,
+                tzinfo=timezone.utc,
+            ),
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            order_type="LIMIT",
+            quantity="1",
+            price="100",
+        )
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertFalse(submitted)
+        self.assertEqual(
+            strategy.denials[-1].reason,
+            "live_entry_mark_price_stale",
+        )
+
+    def test_prepared_live_limit_rechecks_mark_before_submit(self) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("BTCUSDT-PERP.BINANCE", "100"),),
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            order_type="LIMIT",
+            quantity="1",
+            price="100",
+        )
+        prepared_order = strategy._submission_order(plan)
+        strategy._mark_price = False
+
+        submitted = strategy._submit_order_plan(
+            plan,
+            prepared_order=prepared_order,
+        )
+
+        self.assertFalse(submitted)
+        self.assertEqual(strategy.submitted_orders, [])
         self.assertEqual(
             strategy.denials[-1].reason,
             "live_entry_mark_price_unavailable",
@@ -3480,6 +3558,102 @@ class StrategyShellTest(unittest.TestCase):
             self.assertEqual(record.state.value, "close_dispatched")
             self.assertEqual(record.close_required_quantity, "0.1")
 
+    def test_live_canary_fill_uses_order_mark_after_18ms_cache_gap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _CanarySubmitStrategy(Path(state_dir))
+            identity = _canary_execution_identity()
+            plan = _canary_order_plan(identity)
+            tasks: list[dict[str, object]] = []
+            halt_reasons: list[str] = []
+            mark_calls = 0
+            submitted_at = datetime(
+                2026,
+                8,
+                8,
+                12,
+                tzinfo=timezone.utc,
+            )
+
+            def transient_mark(_instrument_id: str):
+                nonlocal mark_calls
+                mark_calls += 1
+                if mark_calls == 1:
+                    return SimpleNamespace(
+                        value="99",
+                        ts_event=int(
+                            (
+                                submitted_at
+                                - timedelta(seconds=9, milliseconds=995)
+                            ).timestamp()
+                            * 1_000_000_000
+                        ),
+                    )
+                return False
+
+            strategy.set_live_canary_risk_reporter(
+                lambda task: tasks.append(task) is None
+            )
+            strategy.set_live_canary_halt_handler(halt_reasons.append)
+            strategy._cache_mark_price = transient_mark  # type: ignore[method-assign]
+
+            self.assertTrue(
+                strategy._submit_order_plan(
+                    plan,
+                    live_canary_execution=identity,
+                )
+            )
+            strategy._now = lambda: (  # type: ignore[method-assign]
+                submitted_at + timedelta(milliseconds=18)
+            )
+            strategy.on_order_filled(
+                SimpleNamespace(
+                    trade_id="entry-trade",
+                    client_order_id=identity.client_order_id,
+                    instrument_id="BTCUSDT-PERP.BINANCE",
+                    side="BUY",
+                    last_qty="0.1",
+                    last_px="100",
+                    commission=SimpleNamespace(
+                        amount="0.01",
+                        currency=SimpleNamespace(code="USDT"),
+                    ),
+                    reduce_only=False,
+                    ts_event=int(
+                        (
+                            submitted_at
+                            + timedelta(milliseconds=18)
+                        ).timestamp()
+                        * 1_000_000_000
+                    ),
+                )
+            )
+
+            for task in tasks:
+                decisions = strategy.process_live_canary_risk_task(task)
+                self.assertEqual(decisions, ())
+
+            fill_tasks = [
+                task
+                for task in tasks
+                if task.get("kind") == "fill"
+            ]
+            self.assertEqual(len(fill_tasks), 1)
+            fill = fill_tasks[0]["fill"]
+            self.assertEqual(fill["mark_price_usdt"], "99")
+            self.assertEqual(fill["accounting_error"], "")
+            self.assertEqual(mark_calls, 2)
+            self.assertEqual(halt_reasons, [])
+            self.assertEqual(
+                strategy.submitted_orders,
+                [identity.client_order_id],
+            )
+            record = strategy.live_canary_store.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state.value, "exchange_confirmed")
+            self.assertEqual(record.last_mark_price_usdt, "99")
+
     def test_consumed_canary_baseline_drift_halts_and_closes_position(
         self,
     ) -> None:
@@ -3999,6 +4173,13 @@ class _CanarySubmitStrategy(IntentExecutionStrategy):
             for client_order_id in self.existing_order_ids
         )
 
+    def _cache_mark_price(self, instrument_id: str):
+        del instrument_id
+        return SimpleNamespace(
+            value="100",
+            ts_event=int(self._now().timestamp() * 1_000_000_000),
+        )
+
     def _build_nautilus_order(self, plan, instrument):
         del instrument
         return SimpleNamespace(
@@ -4144,7 +4325,7 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         release_id: str = "",
         final_quantity: str | None = None,
         final_price: str | None = None,
-        mark_price: str | None = None,
+        mark_price: str | bool = "100",
         mark_price_at: datetime | None = None,
         state_dir: Path | None = None,
     ) -> None:
@@ -4155,6 +4336,16 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         self._final_price = final_price
         self._mark_price = mark_price
         self._mark_price_at = mark_price_at
+        if self._mark_price_at is None:
+            self._mark_price_at = datetime(
+                2026,
+                8,
+                8,
+                11,
+                59,
+                55,
+                tzinfo=timezone.utc,
+            )
         self._state_dir = state_dir
         live_canary_execution_path = ""
         intent_execution_inbox_path = ""
@@ -4195,7 +4386,7 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
 
     def _cache_mark_price(self, instrument_id: str):
         del instrument_id
-        if self._mark_price is None or self._mark_price_at is None:
+        if self._mark_price is False or self._mark_price_at is None:
             return False
         return SimpleNamespace(
             value=self._mark_price,

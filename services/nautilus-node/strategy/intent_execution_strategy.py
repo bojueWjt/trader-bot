@@ -94,6 +94,14 @@ class _DurableIoResult:
     outcome: Any = False
 
 
+@dataclass(frozen=True)
+class _LiveEntryMarkSnapshot:
+    instrument_id: str
+    price: Decimal
+    ts_event: int
+    validated_at_ns: int
+
+
 try:  # pragma: no cover - Nautilus is unavailable on local Py3.14 dev hosts.
     from nautilus_trader.trading.strategy import Strategy  # type: ignore[import-not-found]
     from nautilus_trader.trading.config import StrategyConfig  # type: ignore[import-not-found]
@@ -151,6 +159,8 @@ class IntentExecutionStrategy(Strategy):
     _DURABLE_IO_QUEUE_CAPACITY = 128
     _DURABLE_IO_TASK_TIMEOUT_SECONDS = 1.0
     _DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS = 2.0
+    _LIVE_ENTRY_MARK_SNAPSHOT_LIMIT = 256
+    _LIVE_ENTRY_MARK_FALLBACK_MAX_AGE_NS = 1_000_000_000
 
     def __init__(self, config: IntentExecutionStrategyConfig) -> None:
         try:
@@ -181,6 +191,10 @@ class IntentExecutionStrategy(Strategy):
         ] = None
         self._live_canary_monitor_targets: dict[str, str] = {}
         self._live_canary_monitor_baselines: dict[str, tuple[str, str]] = {}
+        self._validated_live_entry_marks: dict[
+            str,
+            _LiveEntryMarkSnapshot,
+        ] = {}
         self._entry_protection_stash: dict[str, dict[str, Any]] = {}
         self._quick_fill_windows: dict[str, list[datetime]] = {}
         self._orphan_cancel_attempts: dict[str, int] = {}
@@ -4209,6 +4223,13 @@ class IntentExecutionStrategy(Strategy):
             mark_update = self._cache_mark_price(instrument_id)
             mark_value = getattr(mark_update, "value", None)
             parsed_mark = _positive_canary_decimal(mark_value)
+            if parsed_mark is None:
+                fallback_mark = self._validated_live_entry_mark_for_fill(
+                    client_order_id,
+                    instrument_id,
+                )
+                if fallback_mark is not False:
+                    parsed_mark = fallback_mark
             if parsed_mark is not None:
                 mark_price = format(parsed_mark, "f")
             else:
@@ -6343,23 +6364,23 @@ class IntentExecutionStrategy(Strategy):
         *,
         prepared_order: Any | bool = False,
     ) -> Any | OrderDenied:
-        if prepared_order is not False:
-            return prepared_order
-        instrument = self._cache_instrument(plan.instrument_id)
-        if instrument is None:
-            return OrderDenied(
-                "instrument_not_found",
-                plan.instrument_id,
-            )
-        try:
-            # Submission kwargs may drop the internal reduce_only flag for
-            # external positions. The live-entry gate uses the original plan.
-            order = self._build_nautilus_order(
-                self._plan_for_submission(plan),
-                instrument,
-            )
-        except Exception as exc:
-            return OrderDenied("order_submit_failed", repr(exc))
+        order = prepared_order
+        if prepared_order is False:
+            instrument = self._cache_instrument(plan.instrument_id)
+            if instrument is None:
+                return OrderDenied(
+                    "instrument_not_found",
+                    plan.instrument_id,
+                )
+            try:
+                # Submission kwargs may drop the internal reduce_only flag for
+                # external positions. The live-entry gate uses the original plan.
+                order = self._build_nautilus_order(
+                    self._plan_for_submission(plan),
+                    instrument,
+                )
+            except Exception as exc:
+                return OrderDenied("order_submit_failed", repr(exc))
         entry_denial = self._live_entry_notional_denial(plan, order)
         if entry_denial is not None:
             return entry_denial
@@ -6394,13 +6415,23 @@ class IntentExecutionStrategy(Strategy):
                 f"instrument={plan.instrument_id}",
             )
 
-        if plan.order_type == "MARKET":
-            price_or_denial = self._fresh_live_mark_price(
-                plan.instrument_id
+        client_order_id = str(
+            getattr(order, "client_order_id", "")
+        ).strip()
+        if client_order_id:
+            self._validated_live_entry_marks.pop(
+                client_order_id,
+                False,
             )
-            if isinstance(price_or_denial, OrderDenied):
-                return price_or_denial
-            price = price_or_denial
+
+        mark_or_denial = self._fresh_live_mark_snapshot(
+            plan.instrument_id
+        )
+        if isinstance(mark_or_denial, OrderDenied):
+            return mark_or_denial
+
+        if plan.order_type == "MARKET":
+            price = mark_or_denial.price
         else:
             price = _positive_canary_decimal(
                 getattr(order, "price", None)
@@ -6434,6 +6465,11 @@ class IntentExecutionStrategy(Strategy):
                     f"actual={format(actual_notional, 'f')}:"
                     f"cap={format(cap, 'f')}"
                 ),
+            )
+        if client_order_id:
+            self._remember_validated_live_entry_mark(
+                client_order_id,
+                mark_or_denial,
             )
         return None
 
@@ -6519,6 +6555,17 @@ class IntentExecutionStrategy(Strategy):
         self,
         instrument_id: str,
     ) -> Decimal | OrderDenied:
+        snapshot_or_denial = self._fresh_live_mark_snapshot(
+            instrument_id
+        )
+        if isinstance(snapshot_or_denial, OrderDenied):
+            return snapshot_or_denial
+        return snapshot_or_denial.price
+
+    def _fresh_live_mark_snapshot(
+        self,
+        instrument_id: str,
+    ) -> _LiveEntryMarkSnapshot | OrderDenied:
         update = self._cache_mark_price(instrument_id)
         if not update:
             return OrderDenied(
@@ -6554,7 +6601,48 @@ class IntentExecutionStrategy(Strategy):
                     f"age_seconds={format(age_seconds, 'f')}"
                 ),
             )
-        return price
+        return _LiveEntryMarkSnapshot(
+            instrument_id=instrument_id,
+            price=price,
+            ts_event=ts_event,
+            validated_at_ns=now_ns,
+        )
+
+    def _remember_validated_live_entry_mark(
+        self,
+        client_order_id: str,
+        snapshot: _LiveEntryMarkSnapshot,
+    ) -> None:
+        snapshots = self._validated_live_entry_marks
+        if (
+            client_order_id not in snapshots
+            and len(snapshots) >= self._LIVE_ENTRY_MARK_SNAPSHOT_LIMIT
+        ):
+            oldest_client_order_id = next(iter(snapshots), False)
+            if oldest_client_order_id:
+                snapshots.pop(oldest_client_order_id, False)
+        snapshots[client_order_id] = snapshot
+
+    def _validated_live_entry_mark_for_fill(
+        self,
+        client_order_id: str,
+        instrument_id: str,
+    ) -> Decimal | bool:
+        snapshot = self._validated_live_entry_marks.get(
+            client_order_id
+        )
+        if snapshot is None:
+            return False
+        if snapshot.instrument_id != instrument_id:
+            return False
+        now_ns = int(self._now().timestamp() * 1_000_000_000)
+        age_ns = now_ns - snapshot.validated_at_ns
+        max_future_skew_ns = 1_000_000_000
+        if age_ns < -max_future_skew_ns:
+            return False
+        if age_ns > self._LIVE_ENTRY_MARK_FALLBACK_MAX_AGE_NS:
+            return False
+        return snapshot.price
 
     def _cache_mark_price(self, instrument_id: str) -> Any:
         cache = getattr(self, "cache", None)
