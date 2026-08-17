@@ -1,0 +1,16 @@
+[Unit]
+Description=Trader v3 watcher outbox delivery to Hermes
+After=network-online.target trader-v3-ingress.service hermes-gateway-trader.service
+Wants=network-online.target trader-v3-ingress.service hermes-gateway-trader.service
+
+[Service]
+Type=simple
+EnvironmentFile=/srv/trader-v3/secrets/ingress.env
+Environment=INGRESS_URL=http://127.0.0.1:8087
+Environment=WATCHER_TRADING_DB=/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db
+ExecStart=/usr/bin/python3 /srv/trader-v3/scripts/hermes_signal_feeder.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

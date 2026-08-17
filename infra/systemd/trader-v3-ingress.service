@@ -1,0 +1,16 @@
+[Unit]
+Description=Trader v3 canonical Telegram ingress
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/trader-v3/services/ingress
+EnvironmentFile=/srv/trader-v3/.env.v3
+EnvironmentFile=/srv/trader-v3/secrets/ingress.env
+ExecStart=/srv/trader-v3/.venv-cp/bin/python -m ingress.http --host 127.0.0.1 --port 8087
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
