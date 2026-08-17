@@ -93,7 +93,6 @@ ACTION_NAMES = {
 CANARY_GATE_REFRESH_OPERATIONS = frozenset(
     {
         "before-preflight",
-        "before-resume",
         "before-open",
     }
 )
@@ -551,11 +550,6 @@ class AccountALiveTradeHttpAdapter:
                 "max_round_trips": request.get("max_round_trips", 1),
             },
         }
-        if command == "RESUME":
-            self._refresh_evidence_burst(
-                request,
-                operation="before-resume",
-            )
         self._client.risk_post(
             "/v1/commands",
             command_body,

@@ -518,11 +518,7 @@ def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
         and request["path"] == "/v1/commands"
         and request["body"]["type"] == "RESUME"
     )
-    _assert_refresh_burst(
-        scenario,
-        operation="before-resume",
-        before_request=command,
-    )
+    assert _refresh_command_posts(scenario) == []
     assert command["method"] == "POST"
     assert command["path"] == "/v1/commands"
     assert command["headers"]["x-request-id"] == "resume-request-id"
@@ -874,13 +870,12 @@ def test_canary_gate_actions_use_distinct_fleet_refresh_idempotency_sets(
             assert completed.returncode == 0, completed.stderr
 
     refresh_posts = _refresh_command_posts(scenario)
-    assert len(refresh_posts) == 12
+    assert len(refresh_posts) == 8
     assert {
         request["body"]["scope"]["operation"]
         for request in refresh_posts
     } == {
         "before-preflight",
-        "before-resume",
         "before-open",
     }
     keys_by_account: dict[str, set[str]] = {}
@@ -896,12 +891,12 @@ def test_canary_gate_actions_use_distinct_fleet_refresh_idempotency_sets(
         "account-c",
         "account-d",
     }
-    assert all(len(keys) == 3 for keys in keys_by_account.values())
+    assert all(len(keys) == 2 for keys in keys_by_account.values())
     assert len({
         key
         for keys in keys_by_account.values()
         for key in keys
-    }) == 12
+    }) == 8
 
 
 def test_portfolio_baseline_ignores_non_target_position_market_refresh(
