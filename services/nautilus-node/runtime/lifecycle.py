@@ -233,6 +233,7 @@ class NodeLifecycle:
         self._projection_lag_ms = 0
         self._reconciliation_state = ReconciliationState.DEGRADED
         self._reconciliation_proof: ReconciliationProof | None = None
+        self._last_reconciliation_completed_at: datetime | None = None
         self._reconciliation_generation = 0
         self._reconciliation_in_flight = False
         self._lease_required = False
@@ -370,6 +371,7 @@ class NodeLifecycle:
             if proof.generation != self._reconciliation_generation:
                 return
             self._reconciliation_proof = proof
+            self._last_reconciliation_completed_at = proof.completed_at
             self._reconciliation_in_flight = False
             snapshot = self._refresh_reconciliation_locked()
             if snapshot.status is ReconciliationProofStatus.HEALTHY:
@@ -508,6 +510,11 @@ class NodeLifecycle:
             normalized_open_orders = regular_orders
         with self._state_lock:
             reconciliation = self._refresh_reconciliation_locked()
+            reconciliation_completed_at = reconciliation.completed_at
+            if reconciliation.status is ReconciliationProofStatus.IN_FLIGHT:
+                reconciliation_completed_at = (
+                    self._last_reconciliation_completed_at
+                )
             self._heartbeat_sequence += 1
             return Heartbeat(
                 account_id=self.config.account_id,
@@ -538,7 +545,7 @@ class NodeLifecycle:
                 positions_snapshot_at=positions_snapshot_at,
                 regular_orders_snapshot_at=regular_orders_snapshot_at,
                 algo_orders_snapshot_at=algo_orders_snapshot_at,
-                reconciliation_completed_at=reconciliation.completed_at,
+                reconciliation_completed_at=reconciliation_completed_at,
                 open_orders=normalized_open_orders,
             )
 

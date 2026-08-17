@@ -751,6 +751,42 @@ def test_heartbeat_carries_release_identity_exchange_evidence_and_proof_time(
     assert heartbeat.reconciliation_completed_at == clock.now()
 
 
+def test_heartbeat_preserves_last_completed_reconciliation_during_next_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_account_a(monkeypatch)
+    clock = _FixedClock()
+    lifecycle = NodeLifecycle(config=config, clock=clock)
+    first_generation = lifecycle.begin_reconciliation()
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(
+            config,
+            completed_at=clock.now(),
+            generation=first_generation,
+        )
+    )
+    last_completed_at = clock.now()
+
+    clock.advance(timedelta(seconds=1))
+    second_generation = lifecycle.begin_reconciliation()
+    heartbeat = lifecycle.build_heartbeat()
+
+    assert lifecycle.reconciliation.status == "in_flight"
+    assert heartbeat.reconciliation_completed_at == last_completed_at
+
+    lifecycle.record_reconciliation_proof(
+        _healthy_proof(
+            config,
+            completed_at=clock.now(),
+            generation=second_generation,
+        )
+    )
+    refreshed_heartbeat = lifecycle.build_heartbeat()
+
+    assert lifecycle.reconciliation.status == "healthy"
+    assert refreshed_heartbeat.reconciliation_completed_at == clock.now()
+
+
 def test_heartbeat_build_enriches_open_orders_from_registered_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
