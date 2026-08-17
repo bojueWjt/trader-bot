@@ -186,6 +186,10 @@ class Scenario:
         self.refresh_exchange_evidence_on_close = True
         self.close_exchange_state_after_post: dict[str, Any] | None = None
         self.close_response_delay_seconds = 0.0
+        self.blocked_refresh_account = ""
+        self.blocked_refresh_started = threading.Event()
+        self.release_blocked_refresh = threading.Event()
+        self.refresh_status_poll_started = threading.Event()
 
     def handle(
         self,
@@ -231,6 +235,19 @@ class Scenario:
                     }
                 ],
             }
+            scope = body.get("scope")
+            refresh_account_id = ""
+            if isinstance(scope, dict):
+                refresh_account_id = str(scope.get("account_id") or "")
+            if (
+                command_type == "REFRESH_EVIDENCE"
+                and refresh_account_id == self.blocked_refresh_account
+            ):
+                self.blocked_refresh_started.set()
+                if not self.release_blocked_refresh.wait(timeout=2):
+                    raise AssertionError(
+                        "blocked refresh command was not released"
+                    )
             self.node_state = command_type
             if command_type == "RESUME":
                 self.node_state = "ACTIVE"
@@ -239,6 +256,7 @@ class Scenario:
             return 200, {"command_id": command_id, "status": command_status}
         if method == "GET" and path.startswith("/v1/commands/"):
             assert headers["authorization"] == f"Bearer {RISK_TOKEN}"
+            self.refresh_status_poll_started.set()
             command_id = path.rsplit("/", 1)[-1]
             status = self.command_statuses.get(command_id)
             if status is None:
@@ -419,7 +437,7 @@ def _assert_refresh_burst(
     scenario: Scenario,
     *,
     operation: str,
-    before_request: dict[str, Any],
+    after_request: dict[str, Any],
     expected_accounts: list[str] | None = None,
 ) -> None:
     refresh_posts = _refresh_command_posts(scenario)
@@ -435,9 +453,9 @@ def _assert_refresh_burst(
         request["body"]["scope"]["account_id"]
         for request in refresh_posts
     ) == expected_accounts
-    before_index = scenario.requests.index(before_request)
+    after_index = scenario.requests.index(after_request)
     for request in refresh_posts:
-        assert scenario.requests.index(request) < before_index
+        assert scenario.requests.index(request) > after_index
         account_id = request["body"]["scope"]["account_id"]
         assert request["body"]["target_nodes"] == [
             f"nautilus-node-{account_id}"
@@ -454,7 +472,7 @@ def _assert_refresh_burst(
     ]
     assert len(status_polls) >= len(expected_accounts)
     for request in status_polls[:len(expected_accounts)]:
-        assert scenario.requests.index(request) < before_index
+        assert scenario.requests.index(request) > after_index
 
 
 def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
@@ -733,8 +751,83 @@ def test_preflight_returns_explicit_exchange_authority(
     _assert_refresh_burst(
         scenario,
         operation="before-preflight",
-        before_request=exchange_request,
+        after_request=exchange_request,
     )
+
+
+def test_preflight_refresh_burst_is_the_final_network_stage(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+
+    with FakeControlPlane(scenario) as server:
+        completed, payload = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server.url,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["action"] == "preflight"
+    refresh_posts = _refresh_command_posts(scenario)
+    assert len(refresh_posts) == 4
+    first_refresh_index = min(
+        scenario.requests.index(request)
+        for request in refresh_posts
+    )
+    prefetch_indexes = [
+        index
+        for index, request in enumerate(scenario.requests)
+        if request["path"] in {
+            f"/v1/nodes/{NODE_ID}/exchange-state",
+            "/v1/nodes",
+        }
+    ]
+    assert prefetch_indexes
+    assert max(prefetch_indexes) < first_refresh_index
+    final_stage_requests = scenario.requests[first_refresh_index:]
+    assert all(
+        request["path"] == "/v1/commands"
+        or request["path"].startswith("/v1/commands/")
+        for request in final_stage_requests
+    )
+
+
+def test_preflight_refresh_accounts_run_independent_parallel_pipelines(
+    tmp_path: Path,
+) -> None:
+    scenario = Scenario()
+    scenario.blocked_refresh_account = "account-d"
+    invocation: dict[str, tuple[Any, Any]] = {}
+
+    def run_preflight(server_url: str) -> None:
+        invocation["result"] = _invoke(
+            "preflight",
+            _request(phase="before-open"),
+            tmp_path,
+            server_url,
+        )
+
+    with FakeControlPlane(scenario) as server:
+        thread = threading.Thread(
+            target=run_preflight,
+            args=(server.url,),
+            daemon=True,
+        )
+        thread.start()
+        assert scenario.blocked_refresh_started.wait(timeout=1)
+        try:
+            assert scenario.refresh_status_poll_started.wait(timeout=0.25)
+        finally:
+            scenario.release_blocked_refresh.set()
+            thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    completed, payload = invocation["result"]
+    assert completed.returncode == 0, completed.stderr
+    assert payload["action"] == "preflight"
+    assert len(_refresh_command_posts(scenario)) == 4
 
 
 def test_preflight_uses_explicit_abc_refresh_burst(
@@ -766,7 +859,7 @@ def test_preflight_uses_explicit_abc_refresh_burst(
     _assert_refresh_burst(
         scenario,
         operation="before-preflight",
-        before_request=exchange_request,
+        after_request=exchange_request,
         expected_accounts=[
             "account-a",
             "account-b",

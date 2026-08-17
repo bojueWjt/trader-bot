@@ -1399,7 +1399,6 @@ class AccountALiveTradeHttpAdapter:
         self,
         request: Mapping[str, Any],
     ) -> dict[str, Any]:
-        self._refresh_evidence_burst(request, operation="before-preflight")
         mirror = self._exchange_state_after(
             (),
             request=request,
@@ -1462,6 +1461,10 @@ class AccountALiveTradeHttpAdapter:
             payload["available_usdt_balance"] = available_balance
         if warnings:
             payload["warnings"] = warnings
+        self._refresh_evidence_burst(
+            request,
+            operation="before-preflight",
+        )
         return _with_evidence(payload)
 
     def _exchange_state(
@@ -1564,9 +1567,9 @@ class AccountALiveTradeHttpAdapter:
         if not targets:
             raise AdapterError("refresh evidence targets are empty")
 
-        issued_by_account: dict[str, dict[str, Any]] = {}
+        records: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=len(targets)) as executor:
-            issue_futures = {}
+            refresh_futures = {}
             for target in targets:
                 refresh_id = _refresh_side_effect_id(
                     side_effect_id,
@@ -1574,60 +1577,40 @@ class AccountALiveTradeHttpAdapter:
                     account_id=target.account_id,
                 )
                 future = executor.submit(
-                    self._issue_refresh_evidence,
+                    self._refresh_evidence_for_target,
                     request,
                     operation=operation,
                     target=target,
                     refresh_id=refresh_id,
                 )
-                issue_futures[future] = target
-            for future in as_completed(issue_futures):
-                target = issue_futures[future]
+                refresh_futures[future] = target
+            for future in as_completed(refresh_futures):
+                target = refresh_futures[future]
                 try:
-                    issued_by_account[target.account_id] = future.result()
-                except AdapterError as exc:
-                    raise AdapterError(
-                        "refresh evidence burst issue failed for "
-                        f"{target.account_id}: {exc}"
-                    ) from exc
-
-        records: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=len(targets)) as executor:
-            status_futures = {}
-            for target in targets:
-                issued = issued_by_account[target.account_id]
-                command_id = _required_text(
-                    issued.get("command_id"),
-                    "refresh command_id",
-                )
-                future = executor.submit(
-                    self._wait_for_command_status,
-                    command_id,
-                    request=request,
-                )
-                status_futures[future] = (target, command_id)
-            for future in as_completed(status_futures):
-                target, command_id = status_futures[future]
-                try:
-                    status = future.result()
+                    refreshed = future.result()
                 except SoftAdapterError as exc:
                     raise SoftAdapterError(
-                        "refresh evidence burst poll failed for "
+                        "refresh evidence burst pipeline failed for "
                         f"{target.account_id}: {exc}",
                         code=exc.code,
                         status_code=exc.status_code,
                     ) from exc
                 except AdapterError as exc:
                     raise AdapterError(
-                        "refresh evidence burst poll failed for "
+                        "refresh evidence burst pipeline failed for "
                         f"{target.account_id}: {exc}"
                     ) from exc
                 records.append(
                     {
                         "account_id": target.account_id,
                         "node_id": target.node_id,
-                        "command_id": command_id,
-                        "command_status": status.get("status"),
+                        "command_id": _required_text(
+                            refreshed.get("command_id"),
+                            "refresh command_id",
+                        ),
+                        "command_status": refreshed.get(
+                            "command_status"
+                        ),
                     }
                 )
 
