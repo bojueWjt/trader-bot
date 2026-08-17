@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FEEDER_PATH = REPO_ROOT / "scripts" / "hermes_signal_feeder.py"
 
@@ -175,6 +174,377 @@ def _create_signal_db(path: Path, signals: list[dict[str, str]]) -> None:
         conn.close()
 
 
+def _ensure_telegram_messages_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS telegram_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            msg_id INTEGER,
+            channel_id TEXT,
+            chat_title TEXT DEFAULT '',
+            sender TEXT DEFAULT '',
+            text TEXT DEFAULT '',
+            has_media INTEGER DEFAULT 0,
+            media_type TEXT DEFAULT '',
+            media_filename TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+
+def _insert_telegram_message(
+    conn: sqlite3.Connection,
+    *,
+    msg_id: int,
+    channel_id: str = "-1002136478186",
+    chat_title: str = "C01",
+    text: str = "BTC long",
+    media_type: str = "",
+    media_filename: str = "",
+    created_at: str = "2026-08-16 00:00:00",
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO telegram_messages (
+            msg_id, channel_id, chat_title, sender, text,
+            has_media, media_type, media_filename, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            msg_id,
+            channel_id,
+            chat_title,
+            "sender",
+            text,
+            1 if media_filename else 0,
+            media_type,
+            media_filename,
+            created_at,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _prepare_watcher_db(path: Path) -> sqlite3.Connection:
+    conn = _create_trading_db(path)
+    conn.row_factory = sqlite3.Row
+    _ensure_telegram_messages_table(conn)
+    _insert_account(
+        conn,
+        "credential-a",
+        execution_account_id="account-a",
+    )
+    conn.execute(
+        "INSERT INTO channel_routing (channel_id, target_account_id) "
+        "VALUES (?, ?)",
+        ("-1002136478186", "credential-a"),
+    )
+    return conn
+
+
+def test_watcher_outbox_cursor_reads_only_new_unique_messages(
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _prepare_watcher_db(db_path)
+    first_id = _insert_telegram_message(conn, msg_id=7001)
+    duplicate_id = _insert_telegram_message(conn, msg_id=7001)
+    second_id = _insert_telegram_message(conn, msg_id=7002)
+    conn.commit()
+
+    assert module.latest_cursor(conn) == f"telegram_messages:{second_id}"
+    rows = module.fetch_new(
+        conn,
+        f"telegram_messages:{first_id}",
+    )
+    conn.close()
+
+    assert duplicate_id > first_id
+    assert [row["watcher_message_id"] for row in rows] == [second_id]
+    assert module._signal_cursor(rows[0]) == f"telegram_messages:{second_id}"
+    payload = module._payload(rows[0])
+    assert payload["source_channel_id"] == "-1002136478186"
+    assert payload["source_message_id"] == "7002"
+    assert payload["raw_text"] == "BTC long"
+
+
+def test_canonical_ingress_succeeds_before_hermes_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _prepare_watcher_db(db_path)
+    _insert_telegram_message(conn, msg_id=7003)
+    conn.commit()
+    row = module.fetch_new(conn, "telegram_messages:0")[0]
+    conn.close()
+
+    monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
+    monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
+    monkeypatch.setattr(module, "V3_MEDIA", str(tmp_path / "v3-media"))
+    monkeypatch.setattr(module, "CHANNEL_CONTEXT_DIR", str(tmp_path / "context"))
+    calls: list[str] = []
+
+    def submit_canonical_ingress(signal):
+        calls.append(f"ingress:{signal['watcher_message_id']}")
+        return {
+            "inserted": True,
+            "raw_message_id": "00000000-0000-0000-0000-000000000001",
+        }
+
+    def run_hermes(prompt, name, dry_run, on_job_created=None):
+        del prompt, name, dry_run
+        calls.append("hermes")
+        if on_job_created is not None:
+            on_job_created("job-1")
+        return "job-1"
+
+    monkeypatch.setattr(
+        module,
+        "submit_canonical_ingress",
+        submit_canonical_ingress,
+    )
+    monkeypatch.setattr(module, "run_hermes", run_hermes)
+    monkeypatch.setattr(
+        module,
+        "_latest_markdown_response",
+        lambda _job_id: "processed",
+    )
+
+    result = module.attempt_batch_delivery(
+        [row],
+        dry_run=False,
+        now_ts=1000,
+    )
+
+    assert result == "success"
+    assert calls == [f"ingress:{row['watcher_message_id']}", "hermes"]
+    pending = module.load_pending_delivery()
+    assert pending["canonical_ingress"][0]["raw_message_id"].endswith("0001")
+
+
+def test_failed_ingress_blocks_hermes_and_cursor_advancement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _prepare_watcher_db(db_path)
+    first_id = _insert_telegram_message(conn, msg_id=7004)
+    second_id = _insert_telegram_message(conn, msg_id=7005)
+    conn.commit()
+    conn.close()
+
+    state_path = tmp_path / "cursor"
+    state_path.write_text(
+        f"telegram_messages:{first_id}",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
+    monkeypatch.setattr(module, "STATE", str(state_path))
+    monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
+    monkeypatch.setattr(
+        module,
+        "QUARANTINE_STATE",
+        str(tmp_path / "quarantine.json"),
+    )
+    monkeypatch.setattr(module, "LOCK", str(tmp_path / "feeder.lock"))
+    monkeypatch.setattr(module, "V3_MEDIA", str(tmp_path / "v3-media"))
+    monkeypatch.setattr(module, "CHANNEL_CONTEXT_DIR", str(tmp_path / "context"))
+    monkeypatch.setattr(module, "compress_channel_contexts", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "submit_canonical_ingress",
+        lambda _signal: (_ for _ in ()).throw(
+            module.CanonicalIngressError("ingress unavailable")
+        ),
+    )
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "run_hermes",
+        lambda *args, **kwargs: dispatched.append("hermes") or "job-1",
+    )
+    monkeypatch.setattr(sys, "argv", ["hermes_signal_feeder.py", "--once"])
+
+    module.main()
+
+    assert second_id > first_id
+    assert state_path.read_text(encoding="utf-8") == (
+        f"telegram_messages:{first_id}"
+    )
+    assert dispatched == []
+    pending = module.load_pending_delivery()
+    assert pending["status"] == "ingress_retry"
+    assert pending["ingress_attempts"] == 1
+
+
+def test_startup_without_cursor_selects_latest_and_emits_no_history(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _prepare_watcher_db(db_path)
+    _insert_telegram_message(conn, msg_id=7006)
+    latest_id = _insert_telegram_message(conn, msg_id=7007)
+    conn.commit()
+    conn.close()
+
+    state_path = tmp_path / "cursor"
+    monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
+    monkeypatch.setattr(module, "STATE", str(state_path))
+    monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
+    monkeypatch.setattr(module, "LOCK", str(tmp_path / "feeder.lock"))
+    monkeypatch.setattr(module, "compress_channel_contexts", lambda: None)
+    ingressed: list[str] = []
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "submit_canonical_ingress",
+        lambda signal: ingressed.append(str(signal["watcher_message_id"])),
+    )
+    monkeypatch.setattr(
+        module,
+        "run_hermes",
+        lambda *args, **kwargs: dispatched.append("hermes") or "job-1",
+    )
+    monkeypatch.setattr(sys, "argv", ["hermes_signal_feeder.py", "--once"])
+
+    module.main()
+
+    assert state_path.read_text(encoding="utf-8") == (
+        f"telegram_messages:{latest_id}"
+    )
+    assert ingressed == []
+    assert dispatched == []
+
+
+def test_media_filename_maps_to_canonical_media_asset(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _prepare_watcher_db(db_path)
+    row_id = _insert_telegram_message(
+        conn,
+        msg_id=7008,
+        media_type="photo",
+        media_filename="photo-7008.jpg",
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM telegram_messages WHERE id = ?",
+        (row_id,),
+    ).fetchone()
+    conn.close()
+
+    watcher_root = tmp_path / "watcher"
+    media_path = watcher_root / "media" / "photo-7008.jpg"
+    media_path.parent.mkdir(parents=True)
+    media_path.write_bytes(b"photo-bytes")
+    monkeypatch.setattr(module, "WATCHER_ROOT", str(watcher_root))
+
+    signal = module.normalize_watcher_row(row)
+    payload = module.canonical_ingress_payload(signal)
+
+    assert payload["message_kind"] == "photo"
+    assert payload["media_assets"][0]["object_key"] == (
+        "watcher/media/photo-7008.jpg"
+    )
+    assert payload["media_assets"][0]["mime"] == "image/jpeg"
+    assert len(payload["media_assets"][0]["sha256"]) == 64
+    signal_payload = module._payload(signal)
+    assert signal_payload["media"][0]["path"] == (
+        "/data/media/photo-7008.jpg"
+    )
+
+
+def test_duplicate_ingress_response_is_accepted_as_idempotent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    signal = {
+        "watcher_message_id": 9,
+        "signal_id": "sig-c1002136478186-m7009",
+        "received_at": "2026-08-16T00:00:00+00:00",
+        "payload": json.dumps(
+            {
+                "source_channel_id": "-1002136478186",
+                "source_channel_name": "C01",
+                "source_message_id": "7009",
+                "raw_text": "BTC long",
+            }
+        ),
+    }
+    monkeypatch.setattr(module, "INGRESS_API_TOKEN", "secret")
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "inserted": False,
+                    "raw_message_id": (
+                        "00000000-0000-0000-0000-000000000009"
+                    ),
+                    "outbox_event_id": None,
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    result = module.submit_canonical_ingress(signal)
+
+    assert result["inserted"] is False
+    assert result["raw_message_id"].endswith("0009")
+
+
+def test_historical_review_export_is_explicitly_non_trading(
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _prepare_watcher_db(db_path)
+    first_id = _insert_telegram_message(conn, msg_id=7010)
+    second_id = _insert_telegram_message(conn, msg_id=7011)
+    conn.commit()
+    output_path = tmp_path / "historical-review.jsonl"
+
+    count = module.export_historical_review(
+        conn,
+        output_path,
+        after_id=first_id - 1,
+        through_id=second_id,
+    )
+    conn.close()
+
+    records = [
+        json.loads(line)
+        for line in output_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert count == 2
+    assert [record["source_message_id"] for record in records] == [
+        "7010",
+        "7011",
+    ]
+    assert all(record["trade_capable"] is False for record in records)
+    assert all(record["dispatch_allowed"] is False for record in records)
+
+
 def test_four_channel_routes_bind_distinct_accounts_in_hermes_prompt(
     monkeypatch,
     tmp_path: Path,
@@ -249,23 +619,10 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
     capsys,
 ) -> None:
     module = _load_feeder()
-    signal_db = tmp_path / "signal-store.db"
-    unknown = _signal(
-        "-1002328068747",
-        "sig-unknown",
-        "9001",
-    )
-    unknown["received_at"] = "2026-08-11T00:00:00+00:00"
-    valid = _signal(
-        "-1002136478186",
-        "sig-valid",
-        "9002",
-    )
-    valid["received_at"] = "2026-08-11T00:01:00+00:00"
-    _create_signal_db(signal_db, [unknown, valid])
-
     trading_db = tmp_path / "watcher-trading.db"
     conn = _create_trading_db(trading_db)
+    conn.row_factory = sqlite3.Row
+    _ensure_telegram_messages_table(conn)
     _insert_account(
         conn,
         "credential-secret-label",
@@ -276,13 +633,28 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
         "VALUES (?, ?)",
         ("-1002136478186", "credential-secret-label"),
     )
+    unknown_id = _insert_telegram_message(
+        conn,
+        msg_id=9001,
+        channel_id="-1002328068747",
+        created_at="2026-08-11 00:00:00",
+    )
+    valid_id = _insert_telegram_message(
+        conn,
+        msg_id=9002,
+        channel_id="-1002136478186",
+        created_at="2026-08-11 00:01:00",
+    )
     conn.commit()
+    unknown, _valid = module.fetch_new(
+        conn,
+        "telegram_messages:0",
+    )
     conn.close()
 
     state_path = tmp_path / "cursor"
-    initial_cursor = "2026-08-10T23:59:00+00:00|seed"
+    initial_cursor = "telegram_messages:0"
     state_path.write_text(initial_cursor, encoding="utf-8")
-    monkeypatch.setattr(module, "WATCHER_DB", str(signal_db))
     monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(trading_db))
     monkeypatch.setattr(module, "STATE", str(state_path))
     monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
@@ -309,6 +681,22 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
         module,
         "append_channel_context",
         lambda *_args, **_kwargs: None,
+    )
+    ingressed: list[int] = []
+
+    def submit_canonical_ingress(signal):
+        ingressed.append(int(signal["watcher_message_id"]))
+        return {
+            "inserted": True,
+            "raw_message_id": (
+                "00000000-0000-0000-0000-000000000001"
+            ),
+        }
+
+    monkeypatch.setattr(
+        module,
+        "submit_canonical_ingress",
+        submit_canonical_ingress,
     )
     notices: list[str] = []
     dispatched: list[str] = []
@@ -341,17 +729,18 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
     quarantine = module.load_quarantine()
     output = capsys.readouterr().out
     assert state_path.read_text(encoding="utf-8") == (
-        "2026-08-11T00:01:00+00:00|sig-valid"
+        f"telegram_messages:{valid_id}"
     )
     assert len(quarantine["entries"]) == 1
     entry = next(iter(quarantine["entries"].values()))
     assert entry["channel_id"] == "-1002328068747"
     assert entry["reason_code"] == "route_not_found"
     assert entry["last_cursor"] == (
-        "2026-08-11T00:00:00+00:00|sig-unknown"
+        f"telegram_messages:{unknown_id}"
     )
     assert notices == []
-    assert dispatched == ["signal-sig-valid"]
+    assert dispatched == ["signal-sig-c1002136478186-m9002"]
+    assert ingressed == [unknown_id, valid_id]
     assert "credential-secret-label" not in output
     assert "matched 0 routes" not in output
     assert "credential-secret-label" not in json.dumps(

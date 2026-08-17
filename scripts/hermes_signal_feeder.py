@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Feed NEW telegram signals from the watcher's SQLite to the Hermes agent.
+"""Feed NEW Telegram watcher messages to the Hermes agent.
 
 Hermes (trader profile) is the trading decision maker: for every new channel
 message it must (1) tell the user on Telegram what arrived, (2) decide whether
@@ -7,9 +7,10 @@ it is an actionable signal, (3) place the order through the v3-trader skill if
 so, and (4) report the outcome. This feeder only transports messages — it makes
 no trading judgement itself.
 
-Read-only on the watcher DB. Cursor = "received_at|signal_id" of the last
-handled row. A message that keeps failing is skipped after MAX_ATTEMPTS so one
-poison message cannot wedge the queue (skips are logged loudly).
+Read-only on watcher-trading.db. Cursor = "telegram_messages:<id>" of the last
+handled raw watcher row. Every new row must reach canonical PostgreSQL ingress
+before Hermes is allowed to process it. A message that keeps failing is skipped
+after MAX_ATTEMPTS so one poison message cannot wedge the queue.
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
+import mimetypes
 import os
 import re
 import shutil
@@ -24,12 +27,14 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-import math
-from typing import Any, Callable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-WATCHER_DB = "/var/lib/docker/volumes/trader_signal-data/_data/signal_store.db"
 DEFAULT_TRADING_DB_PATH = "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db"
 CANONICAL_TRADING_DB_ENV = "TRADER_TRADING_DB_PATH"
 LEGACY_TRADING_DB_ENVS = ("WATCHER_TRADING_DB", "TRADING_DB_PATH")
@@ -75,6 +80,13 @@ HERMES_ENV = {
     "HERMES_ACCEPT_HOOKS": "1",
     "HERMES_HOME": os.environ.get("HERMES_HOME", "/srv/hermes/profiles/trader"),
 }
+INGRESS_URL = os.environ.get(
+    "INGRESS_URL",
+    "http://127.0.0.1:8087",
+).rstrip("/")
+INGRESS_API_TOKEN = os.environ.get("INGRESS_API_TOKEN", "").strip()
+INGRESS_TIMEOUT_SECONDS = 10
+INGRESS_RETRY_DELAY_SECONDS = 15
 POLL_SECONDS = 5
 RUN_TIMEOUT = 240
 MAX_ATTEMPTS = 3
@@ -119,6 +131,10 @@ class ChannelAccountRoute:
 
 
 class ChannelRouteError(RuntimeError):
+    pass
+
+
+class CanonicalIngressError(RuntimeError):
     pass
 
 
@@ -272,7 +288,10 @@ def reconcile_committed_pending(cursor: str | None) -> None:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{WATCHER_DB}?mode=ro", uri=True)
+    conn = sqlite3.connect(
+        f"file:{WATCHER_TRADING_DB}?mode=ro",
+        uri=True,
+    )
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -442,22 +461,50 @@ def resolve_channel_account(channel_id: Any) -> ChannelAccountRoute:
     )
 
 
+def _watcher_cursor_id(cursor: str | None) -> int | None:
+    match = re.fullmatch(r"telegram_messages:(\d+)", str(cursor or ""))
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
 def latest_cursor(conn: sqlite3.Connection) -> str | None:
     row = conn.execute(
-        "SELECT received_at, signal_id FROM signals ORDER BY received_at DESC, signal_id DESC LIMIT 1"
+        "SELECT MAX(id) AS max_id FROM telegram_messages"
     ).fetchone()
-    return f"{row['received_at']}|{row['signal_id']}" if row else None
+    if row is None or row["max_id"] is None:
+        return None
+    return f"telegram_messages:{int(row['max_id'])}"
 
 
-def fetch_new(conn: sqlite3.Connection, cursor: str | None, limit: int = 50) -> list[sqlite3.Row]:
-    if cursor:
-        ts, _, sid = cursor.partition("|")
-        return conn.execute(
-            "SELECT * FROM signals WHERE (received_at, signal_id) > (?, ?) "
-            "ORDER BY received_at, signal_id LIMIT ?",
-            (ts, sid, limit),
-        ).fetchall()
-    return []
+def fetch_new(
+    conn: sqlite3.Connection,
+    cursor: str | None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    cursor_id = _watcher_cursor_id(cursor)
+    if cursor_id is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT current.*
+        FROM telegram_messages AS current
+        WHERE current.id > ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM telegram_messages AS earlier
+              WHERE earlier.id < current.id
+                AND COALESCE(earlier.channel_id, '') =
+                    COALESCE(current.channel_id, '')
+                AND COALESCE(earlier.msg_id, -1) =
+                    COALESCE(current.msg_id, -1)
+          )
+        ORDER BY current.id
+        LIMIT ?
+        """,
+        (cursor_id, limit),
+    ).fetchall()
+    return [normalize_watcher_row(row) for row in rows]
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -476,6 +523,68 @@ def _payload(sig: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _iso_received_at(value: Any) -> str:
+    return _parse_received_at(value).astimezone(timezone.utc).isoformat()
+
+
+def _watcher_signal_id(
+    channel_id: str,
+    message_id: str,
+    row_id: int,
+) -> str:
+    normalized_channel = channel_id.strip().lstrip("-")
+    normalized_message = message_id.strip()
+    if normalized_channel.isdigit() and normalized_message.isdigit():
+        return f"sig-c{normalized_channel}-m{normalized_message}"
+    return f"watcher-row-{row_id}"
+
+
+def normalize_watcher_row(row: Any) -> dict[str, Any]:
+    row_id = int(_row_get(row, "id"))
+    channel_id = str(_row_get(row, "channel_id") or "").strip()
+    message_id = str(_row_get(row, "msg_id") or "").strip()
+    created_at = _iso_received_at(_row_get(row, "created_at"))
+    media_filename = str(
+        _row_get(row, "media_filename") or ""
+    ).strip()
+    media_type = str(_row_get(row, "media_type") or "").strip()
+    media: list[dict[str, Any]] = []
+    if media_filename:
+        media.append(
+            {
+                "type": media_type or "media",
+                "filename": media_filename,
+                "path": f"/data/media/{media_filename}",
+            }
+        )
+    payload = {
+        "source_channel_id": channel_id,
+        "source_channel_name": str(
+            _row_get(row, "chat_title") or ""
+        ).strip(),
+        "source_message_id": message_id,
+        "raw_text": str(_row_get(row, "text") or ""),
+        "sender": str(_row_get(row, "sender") or "").strip(),
+        "media": media,
+        "watcher_row_id": row_id,
+        "watcher_created_at": created_at,
+    }
+    return {
+        "watcher_message_id": row_id,
+        "signal_id": _watcher_signal_id(
+            channel_id,
+            message_id,
+            row_id,
+        ),
+        "received_at": created_at,
+        "payload": json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    }
 
 
 def _parse_received_at(value: Any) -> datetime:
@@ -506,6 +615,9 @@ def _coerce_now(now: Any = None) -> datetime:
 
 
 def _signal_cursor(sig: Any) -> str:
+    watcher_message_id = _row_get(sig, "watcher_message_id")
+    if watcher_message_id is not None:
+        return f"telegram_messages:{int(watcher_message_id)}"
     return f"{_row_get(sig, 'received_at')}|{_row_get(sig, 'signal_id')}"
 
 
@@ -528,6 +640,156 @@ def _canonical_signal_ref(sig: Any) -> str:
             "signal requires numeric source_channel_id and source_message_id"
         )
     return f"tg-sig-c{channel_id}-m{message_id}"
+
+
+def _media_mime(media: dict[str, Any], filename: str) -> str:
+    media_type = str(media.get("type") or "").strip().lower()
+    if media_type == "photo":
+        return "image/jpeg"
+    guessed, _encoding = mimetypes.guess_type(filename)
+    return guessed or "application/octet-stream"
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _canonical_media_assets(
+    signal: Any,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    assets: list[dict[str, Any]] = []
+    for media in payload.get("media") or []:
+        filename = str(media.get("filename") or "").strip()
+        if not filename:
+            continue
+        if os.path.basename(filename) != filename:
+            raise CanonicalIngressError(
+                "watcher media filename must be a basename"
+            )
+        source_path = os.path.join(WATCHER_ROOT, "media", filename)
+        if not os.path.isfile(source_path):
+            raise CanonicalIngressError(
+                f"watcher media file is missing for row "
+                f"{_row_get(signal, 'watcher_message_id')}"
+            )
+        assets.append(
+            {
+                "sha256": _sha256_file(source_path),
+                "object_key": f"watcher/media/{filename}",
+                "mime": _media_mime(media, filename),
+                "width": None,
+                "height": None,
+                "download_status": "downloaded",
+                "downloaded_at": str(
+                    _row_get(signal, "received_at") or ""
+                ),
+            }
+        )
+    return assets
+
+
+def canonical_ingress_payload(signal: Any) -> dict[str, Any]:
+    payload = _payload(signal)
+    channel_id = str(payload.get("source_channel_id") or "").strip()
+    message_id = str(payload.get("source_message_id") or "").strip()
+    if not channel_id or not message_id:
+        raise CanonicalIngressError(
+            "watcher row requires channel_id and source_message_id"
+        )
+    media_assets = _canonical_media_assets(signal, payload)
+    message_kind = "text"
+    if media_assets:
+        first_mime = str(media_assets[0].get("mime") or "")
+        if first_mime.startswith("image/"):
+            message_kind = "photo"
+        else:
+            message_kind = "media"
+    watcher_message_id = _row_get(signal, "watcher_message_id")
+    return {
+        "source": "telegram",
+        "channel_id": channel_id,
+        "source_message_id": message_id,
+        "source_version": "v1",
+        "source_received_at": str(
+            _row_get(signal, "received_at") or ""
+        ),
+        "author_id": str(payload.get("sender") or "") or None,
+        "message_text": str(payload.get("raw_text") or "") or None,
+        "message_kind": message_kind,
+        "update_id": f"watcher-row:{watcher_message_id}",
+        "reply_to": None,
+        "media_assets": media_assets,
+        "raw_payload": {
+            "watcher_row_id": watcher_message_id,
+            "chat_title": str(
+                payload.get("source_channel_name") or ""
+            ),
+            "sender": str(payload.get("sender") or ""),
+            "media": payload.get("media") or [],
+        },
+    }
+
+
+def submit_canonical_ingress(signal: Any) -> dict[str, Any]:
+    if not INGRESS_API_TOKEN:
+        raise CanonicalIngressError("INGRESS_API_TOKEN is required")
+    body = json.dumps(
+        canonical_ingress_payload(signal),
+        ensure_ascii=True,
+        sort_keys=True,
+    ).encode("utf-8")
+    request = Request(
+        f"{INGRESS_URL}/telegram/raw",
+        data=body,
+        headers={
+            "authorization": f"Bearer {INGRESS_API_TOKEN}",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(
+            request,
+            timeout=INGRESS_TIMEOUT_SECONDS,
+        ) as response:
+            response_body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        error_body = exc.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+        raise CanonicalIngressError(
+            f"canonical ingress returned HTTP {exc.code}: "
+            f"{error_body[:240]}"
+        ) from exc
+    except (OSError, URLError) as exc:
+        raise CanonicalIngressError(
+            f"canonical ingress request failed: {exc}"
+        ) from exc
+    try:
+        result = json.loads(response_body)
+    except json.JSONDecodeError as exc:
+        raise CanonicalIngressError(
+            "canonical ingress returned invalid JSON"
+        ) from exc
+    if not isinstance(result, dict):
+        raise CanonicalIngressError(
+            "canonical ingress response must be an object"
+        )
+    raw_message_id = str(result.get("raw_message_id") or "").strip()
+    if not raw_message_id:
+        raise CanonicalIngressError(
+            "canonical ingress response lacks raw_message_id"
+        )
+    return result
 
 
 def select_deliverable_batch(rows: list[Any], now: datetime | None = None) -> list[Any]:
@@ -890,9 +1152,83 @@ def _new_pending_delivery(batch: list[Any]) -> dict[str, Any]:
         "job_id": "",
         "status": "ready",
         "attempts": 0,
+        "ingress_attempts": 0,
+        "canonical_ingress": [],
         "retry_after": 0.0,
         "dispatched_at": 0.0,
     }
+
+
+def _requires_canonical_ingress(signal: Any) -> bool:
+    return _row_get(signal, "watcher_message_id") is not None
+
+
+def _ensure_canonical_ingress(
+    batch: list[Any],
+    pending: dict[str, Any],
+    dry_run: bool,
+    now_ts: float,
+) -> bool:
+    required = [
+        signal
+        for signal in batch
+        if _requires_canonical_ingress(signal)
+    ]
+    if not required:
+        return True
+    if dry_run:
+        log(
+            f"DRY-RUN would submit {len(required)} watcher rows "
+            "to canonical ingress"
+        )
+        return True
+
+    recorded = pending.get("canonical_ingress")
+    if not isinstance(recorded, list):
+        recorded = []
+    completed = {
+        str(item.get("cursor") or "")
+        for item in recorded
+        if isinstance(item, dict)
+    }
+    for signal in required:
+        cursor = _signal_cursor(signal)
+        if cursor in completed:
+            continue
+        try:
+            result = submit_canonical_ingress(signal)
+        except CanonicalIngressError as exc:
+            attempts = int(pending.get("ingress_attempts") or 0) + 1
+            pending["ingress_attempts"] = attempts
+            pending["status"] = "ingress_retry"
+            pending["retry_after"] = (
+                now_ts + INGRESS_RETRY_DELAY_SECONDS
+            )
+            save_pending_delivery(pending)
+            log(
+                f"canonical ingress failed for {cursor}: "
+                f"{str(exc)[:240]}"
+            )
+            return False
+        recorded.append(
+            {
+                "cursor": cursor,
+                "raw_message_id": str(
+                    result.get("raw_message_id") or ""
+                ),
+                "inserted": bool(result.get("inserted")),
+            }
+        )
+        pending["canonical_ingress"] = recorded
+        pending["status"] = "ready"
+        pending["retry_after"] = 0.0
+        save_pending_delivery(pending)
+
+    pending["ingress_attempts"] = 0
+    pending["status"] = "ready"
+    pending["retry_after"] = 0.0
+    save_pending_delivery(pending)
+    return True
 
 
 def _record_delivery_failure(
@@ -1115,6 +1451,13 @@ def attempt_batch_delivery(
             )
         return _record_delivery_success(batch, pending, response, now_ts)
 
+    if not _ensure_canonical_ingress(
+        batch,
+        pending,
+        dry_run,
+        now_ts,
+    ):
+        return "retry"
     try:
         prompt = build_prompt(batch)
     except ChannelRouteError as exc:
@@ -1204,10 +1547,92 @@ def compress_channel_contexts(now_func=time.time) -> None:
             fh.write(header + "\n".join(recent) + "\n")
 
 
+def export_historical_review(
+    conn: sqlite3.Connection,
+    output_path: Path,
+    *,
+    after_id: int = 0,
+    through_id: int | None = None,
+) -> int:
+    upper_bound = through_id
+    if upper_bound is None:
+        row = conn.execute(
+            "SELECT MAX(id) AS max_id FROM telegram_messages"
+        ).fetchone()
+        if row is None or row["max_id"] is None:
+            upper_bound = 0
+        else:
+            upper_bound = int(row["max_id"])
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM telegram_messages
+        WHERE id > ?
+          AND id <= ?
+        ORDER BY id
+        """,
+        (after_id, upper_bound),
+    ).fetchall()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            signal = normalize_watcher_row(row)
+            payload = _payload(signal)
+            record = {
+                "watcher_message_id": int(
+                    _row_get(signal, "watcher_message_id")
+                ),
+                "source_channel_id": str(
+                    payload.get("source_channel_id") or ""
+                ),
+                "source_channel_name": str(
+                    payload.get("source_channel_name") or ""
+                ),
+                "source_message_id": str(
+                    payload.get("source_message_id") or ""
+                ),
+                "received_at": str(
+                    _row_get(signal, "received_at") or ""
+                ),
+                "sender": str(payload.get("sender") or ""),
+                "text": str(payload.get("raw_text") or ""),
+                "media": payload.get("media") or [],
+                "trade_capable": False,
+                "dispatch_allowed": False,
+            }
+            handle.write(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    return len(rows)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", help="print planned hermes commands; no cursor writes")
     ap.add_argument("--once", action="store_true", help="single poll pass, then exit")
+    ap.add_argument(
+        "--historical-review-output",
+        type=Path,
+        help=(
+            "export watcher rows as non-trading JSONL; "
+            "never invokes ingress or Hermes"
+        ),
+    )
+    ap.add_argument(
+        "--historical-after-id",
+        type=int,
+        default=0,
+    )
+    ap.add_argument(
+        "--historical-through-id",
+        type=int,
+        default=None,
+    )
     args = ap.parse_args()
 
     lock_fh = open(LOCK, "w")
@@ -1217,7 +1642,32 @@ def main() -> None:
         print("another feeder instance is running; exiting", file=sys.stderr)
         sys.exit(1)
 
+    if args.historical_review_output is not None:
+        conn = _connect()
+        try:
+            count = export_historical_review(
+                conn,
+                args.historical_review_output,
+                after_id=args.historical_after_id,
+                through_id=args.historical_through_id,
+            )
+        finally:
+            conn.close()
+        log(
+            f"historical review exported rows={count} "
+            f"path={args.historical_review_output}"
+        )
+        return
+
     cursor = load_cursor()
+    if cursor is not None and _watcher_cursor_id(cursor) is None:
+        log(
+            "legacy feeder cursor detected; initializing the watcher "
+            "outbox cursor to latest"
+        )
+        cursor = None
+        if not args.dry_run:
+            clear_pending_delivery()
     reconcile_committed_pending(cursor)
     log(f"feeder start cursor={cursor!r} dry_run={args.dry_run}")
 
