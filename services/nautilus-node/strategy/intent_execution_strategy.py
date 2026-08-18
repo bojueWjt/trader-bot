@@ -436,6 +436,7 @@ class IntentExecutionStrategy(Strategy):
             topic=f"node.commands.{self.config.account_id}",
             handler=self._on_node_command,
         )
+        self._subscribe_live_entry_mark_prices()
         if self._requires_live_canary_runtime():
             if self._live_canary_risk_reporter is None:
                 raise RuntimeError(
@@ -477,6 +478,44 @@ class IntentExecutionStrategy(Strategy):
         elif self._refresh_exchange_state():
             self._retry_pending_take_profit_disables()
         self._register_exchange_state_timer()
+
+    def _subscribe_live_entry_mark_prices(self) -> None:
+        environment = str(
+            getattr(self.config, "environment", "")
+        ).strip().lower()
+        if environment != "live":
+            return
+        inventory = tuple(
+            getattr(
+                self.config,
+                "live_entry_notional_inventory",
+                (),
+            )
+        )
+        if not inventory:
+            return
+        subscribe = getattr(self, "subscribe_mark_prices", None)
+        if not callable(subscribe):
+            raise RuntimeError(
+                "live entry mark price subscription is unavailable"
+            )
+        subscribed: set[str] = set()
+        for raw_instrument_id, _max_notional in inventory:
+            instrument_id = str(raw_instrument_id).strip()
+            if not instrument_id:
+                raise RuntimeError(
+                    "live entry mark price instrument is empty"
+                )
+            if instrument_id in subscribed:
+                continue
+            try:
+                subscribe(self._as_instrument_id(instrument_id))
+            except Exception as exc:
+                raise RuntimeError(
+                    "live entry mark price subscription failed: "
+                    f"instrument={instrument_id}"
+                ) from exc
+            subscribed.add(instrument_id)
 
     def _require_running_terminal_exchange_worker(self) -> None:
         if (

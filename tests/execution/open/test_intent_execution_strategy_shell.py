@@ -55,6 +55,53 @@ from risk.config import (  # noqa: E402
 
 
 class StrategyShellTest(unittest.TestCase):
+    def test_live_entry_inventory_subscribes_mark_prices(self) -> None:
+        strategy = _LiveEntryMarkSubscriptionStrategy(
+            environment="live",
+            inventory=(
+                ("BTCUSDT-PERP.BINANCE", "100"),
+                ("SOLUSDT-PERP.BINANCE", "100"),
+            ),
+        )
+
+        strategy._subscribe_live_entry_mark_prices()
+
+        self.assertEqual(
+            strategy.mark_subscriptions,
+            [
+                "BTCUSDT-PERP.BINANCE",
+                "SOLUSDT-PERP.BINANCE",
+            ],
+        )
+
+    def test_testnet_entry_inventory_skips_mark_subscriptions(self) -> None:
+        strategy = _LiveEntryMarkSubscriptionStrategy(
+            environment="testnet",
+            inventory=(("SOLUSDT-PERP.BINANCE", "100"),),
+        )
+
+        strategy._subscribe_live_entry_mark_prices()
+
+        self.assertEqual(strategy.mark_subscriptions, [])
+
+    def test_live_entry_mark_subscription_failure_blocks_startup(
+        self,
+    ) -> None:
+        strategy = _LiveEntryMarkSubscriptionStrategy(
+            environment="live",
+            inventory=(("SOLUSDT-PERP.BINANCE", "100"),),
+            fail_instrument_id="SOLUSDT-PERP.BINANCE",
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            (
+                "live entry mark price subscription failed: "
+                "instrument=SOLUSDT-PERP.BINANCE"
+            ),
+        ):
+            strategy._subscribe_live_entry_mark_prices()
+
     def test_exchange_dependencies_require_running_worker_on_start(
         self,
     ) -> None:
@@ -4053,6 +4100,40 @@ class _ProtectionTerminalStrategy(IntentExecutionStrategy):
     def _submit_order_plan(self, plan) -> bool:
         self.submitted_plans.append(plan)
         return True
+
+
+class _LiveEntryMarkSubscriptionStrategy(IntentExecutionStrategy):
+    def __init__(
+        self,
+        *,
+        environment: str,
+        inventory: tuple[tuple[str, str], ...],
+        fail_instrument_id: str = "",
+    ) -> None:
+        self.mark_subscriptions: list[str] = []
+        self.fail_instrument_id = fail_instrument_id
+        super().__init__(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                node_id="node-a",
+                trading_state="HALTED",
+                environment=environment,
+                release_id="release-a",
+                live_entry_notional_inventory=inventory,
+            )
+        )
+
+    def subscribe_mark_prices(
+        self,
+        instrument_id,
+        client_id=None,
+        params=None,
+    ) -> None:
+        del client_id, params
+        instrument_text = str(instrument_id)
+        if instrument_text == self.fail_instrument_id:
+            raise RuntimeError("subscription rejected")
+        self.mark_subscriptions.append(instrument_text)
 
 
 class _TerminalExchangeStrategy(IntentExecutionStrategy):
