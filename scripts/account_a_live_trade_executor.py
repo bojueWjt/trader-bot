@@ -193,6 +193,12 @@ class TradeAdapter(Protocol):
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         ...
 
+    def refresh_evidence(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        ...
+
     def submit_open(
         self,
         request: Mapping[str, Any],
@@ -610,6 +616,12 @@ class JsonCommandAdapter:
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._invoke("resume", request)
 
+    def refresh_evidence(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return self._invoke("refresh-evidence", request)
+
     def submit_open(
         self,
         request: Mapping[str, Any],
@@ -705,6 +717,20 @@ class DryRunAdapter:
 
     def resume(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._ack("resume", request)
+
+    def refresh_evidence(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        side_effect_id = _adapter_refresh_side_effect_id(
+            str(request["side_effect_id"])
+        )
+        return self._ack(
+            "refresh-evidence",
+            request,
+            command_status="completed",
+            side_effect_id=side_effect_id,
+        )
 
     def submit_open(
         self,
@@ -1783,6 +1809,42 @@ class AccountALiveTradeExecutor:
                 {
                     "adapter_evidence_sha256": resume_hash,
                     "side_effect_id": resume_request[
+                        "side_effect_id"
+                    ],
+                },
+            )
+
+            refresh_request = self._base_request(authorization)
+            refresh_request.update(
+                {
+                    "side_effect_id": deterministic_side_effect_id(
+                        authorization,
+                        "REFRESH_EVIDENCE",
+                    ),
+                }
+            )
+            refresh_ack = self._adapter.refresh_evidence(
+                refresh_request
+            )
+            refresh_hash = _validate_ack(
+                refresh_ack,
+                authorization,
+                action="refresh-evidence",
+                expected_side_effect_id=(
+                    _adapter_refresh_side_effect_id(
+                        refresh_request["side_effect_id"]
+                    )
+                ),
+            )
+            if refresh_ack.get("command_status") != "completed":
+                raise LiveTradeExecutionError(
+                    "pre-open evidence refresh did not complete"
+                )
+            trail.record(
+                "pre_open_evidence_refreshed",
+                {
+                    "adapter_evidence_sha256": refresh_hash,
+                    "side_effect_id": refresh_ack[
                         "side_effect_id"
                     ],
                 },
@@ -3511,6 +3573,10 @@ class AccountALiveTradeExecutor:
                     authorization,
                     "RESUME",
                 ),
+                "refresh_evidence": deterministic_side_effect_id(
+                    authorization,
+                    "REFRESH_EVIDENCE",
+                ),
                 "open": deterministic_side_effect_id(
                     authorization,
                     "OPEN",
@@ -4208,6 +4274,13 @@ def deterministic_side_effect_id(
         f"{authorization.authorization_sha256}:{normalized_action}"
     )
     return _sha256_bytes(identity.encode("ascii"))
+
+
+def _adapter_refresh_side_effect_id(side_effect_id: str) -> str:
+    return (
+        f"{side_effect_id}:refresh-evidence:"
+        "refresh-evidence"
+    )
 
 
 def _validate_authorization_for_execution(

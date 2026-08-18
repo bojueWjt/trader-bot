@@ -242,6 +242,22 @@ class FakeAdapter:
             side_effect_id=request["side_effect_id"],
         )
 
+    def refresh_evidence(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        self._require_operation_lock()
+        self._record_call("refresh-evidence", request)
+        side_effect_id = (
+            f"{request['side_effect_id']}:refresh-evidence:"
+            "refresh-evidence"
+        )
+        return self._ack(
+            "refresh-evidence",
+            command_status="completed",
+            side_effect_id=side_effect_id,
+        )
+
     def submit_open(
         self,
         request: Mapping[str, Any],
@@ -1606,6 +1622,7 @@ def test_open_timeout_after_exchange_acceptance_recovers_exchange_first(
     assert adapter.calls.count("open") == 1
     assert adapter.calls == [
         "resume",
+        "refresh-evidence",
         "open",
         "cancel-open",
         "position",
@@ -1887,6 +1904,7 @@ def test_loss_threshold_reached_closes_and_halts_immediately(
     assert result.close_submitted is True
     assert adapter.calls == [
         "resume",
+        "refresh-evidence",
         "open",
         "observe",
         "cancel-open",
@@ -2367,6 +2385,10 @@ def test_successful_round_trip_binds_ids_and_evidence_chain(
             authorization,
             "RESUME",
         ),
+        "refresh_evidence": executor.deterministic_side_effect_id(
+            authorization,
+            "REFRESH_EVIDENCE",
+        ),
         "open": executor.deterministic_side_effect_id(
             authorization,
             "OPEN",
@@ -2417,6 +2439,38 @@ def test_successful_round_trip_binds_ids_and_evidence_chain(
         history_states.index(state) for state in required_states
     ]
     assert state_indexes == sorted(state_indexes)
+
+
+def test_refreshes_exchange_evidence_between_resume_and_open(
+    tmp_path: Path,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "pre-open-refresh.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.passed is True
+    resume_index = adapter.calls.index("resume")
+    refresh_index = adapter.calls.index("refresh-evidence")
+    open_index = adapter.calls.index("open")
+    assert resume_index < refresh_index < open_index
+    refresh_request = adapter.requests["refresh-evidence"][0]
+    assert refresh_request["account_id"] == authorization.account_id
+    assert refresh_request["release_id"] == authorization.release.release_id
+    assert refresh_request["permit_id"] == authorization.permit_id
+    assert refresh_request["intent_id"] == authorization.intent_id
+    assert refresh_request["side_effect_id"] == (
+        executor.deterministic_side_effect_id(
+            authorization,
+            "REFRESH_EVIDENCE",
+        )
+    )
 
 
 def test_existing_same_side_position_is_preserved(
