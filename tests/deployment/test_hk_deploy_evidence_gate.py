@@ -8,7 +8,7 @@ import re
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -772,6 +772,21 @@ all_execution_accounts_stopped
             f"{'a' * 64}\tSOLUSDT\t{'b' * 64}",
         )
 
+    def test_fault_report_older_than_one_hour_is_rejected(self) -> None:
+        report = copy.deepcopy(self.reports["fault_report"])
+        report["completed_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=3601)
+        ).isoformat()
+        self._write_report("fault_report", report)
+
+        result = self._run_validator()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "fault_report timestamp stale or in the future: completed_at",
+            result.stderr,
+        )
+
     def test_legacy_redis_schema_epoch_is_rejected(self) -> None:
         self.evidence["redis_schema_epoch"] = (
             "stable-account-namespace/v1"
@@ -1050,7 +1065,10 @@ def connect(_url):
         self.assertLess(version, live)
 
         phase_start = text.index('if [ "$PHASE_ONLY_ROLLOUT" = "1" ]; then')
-        phase_end = text.index("\n# ---------- backup ----------", phase_start)
+        phase_end = text.index(
+            "\n# ---------- database schema ----------",
+            phase_start,
+        )
         phase_section = text[phase_start:phase_end]
         phase_verify = phase_section.index('verify_release_nodes "${ALL_NODES[@]}"')
         phase_fence = phase_section.index("acquire_maintenance_fence_after_bootstrap")

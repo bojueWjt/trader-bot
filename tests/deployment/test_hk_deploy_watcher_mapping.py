@@ -572,10 +572,9 @@ def test_deploy_orders_preflight_evidence_before_schema_and_install() -> None:
         'verify_four_channel_account_mapping "" pre_restart',
         preflight,
     )
-    halt = text.index("# ---------- HALT ----------", preflight_gate)
     backup_creation = text.index(
         '[ ! -e "$BACKUP_ROOT" ]',
-        halt,
+        preflight_gate,
     )
     evidence_gate = text.index(
         'verify_four_channel_account_mapping '
@@ -583,9 +582,10 @@ def test_deploy_orders_preflight_evidence_before_schema_and_install() -> None:
         '\\\n  pre_restart',
         backup_creation,
     )
+    halt = text.index("# ---------- HALT ----------", evidence_gate)
     database_schema = text.index(
         "# ---------- database schema ----------",
-        evidence_gate,
+        halt,
     )
     install = text.index("# ---------- install ----------", database_schema)
     watcher_restart = text.index(
@@ -610,8 +610,8 @@ def test_deploy_orders_preflight_evidence_before_schema_and_install() -> None:
     )
 
     assert preflight_gate < halt
-    assert halt < backup_creation < evidence_gate
-    assert evidence_gate < database_schema < install
+    assert preflight_gate < backup_creation < evidence_gate < halt
+    assert halt < database_schema < install
     assert preflight_gate < transition_change_gate < halt
     assert install < forced_schema_restart < watcher_restart
     assert watcher_restart < strict_gate < recreate

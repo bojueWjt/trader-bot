@@ -152,6 +152,9 @@ EXPECTED_RELEASE_FILE_MAP = {
     EXECUTOR_SOURCE_PATH: EXECUTOR_RELEASE_PATH,
     ADAPTER_SOURCE_PATH: ADAPTER_RELEASE_PATH,
     "scripts/redis_capacity_config.py": "redis_capacity_config.py",
+    (
+        "scripts/refresh_redis_capacity_evidence.py"
+    ): "refresh_redis_capacity_evidence.py",
     "scripts/redis_namespace_janitor.py": "redis_namespace_janitor.py",
     "scripts/redis_namespace_registry.py": "redis_namespace_registry.py",
     "infra/docker/nautilus/uv.node.lock": "uv.node.lock",

@@ -422,10 +422,6 @@ def _write_account_network_docker_fake(bin_dir: Path) -> None:
         """#!/usr/bin/env bash
 set -euo pipefail
 printf 'docker %s\\n' "$*" >>"$FAKE_COMMAND_LOG"
-if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
-  printf 'sha256:%064d\\n' 0
-  exit 0
-fi
 if [ "$1" = "network" ] && [ "$2" = "inspect" ]; then
   exit 0
 fi
@@ -439,48 +435,29 @@ if [ "$1" = "inspect" ]; then
   printf '[{"NetworkSettings":{"Networks":{"%s":{}}}}]\\n' "$network"
   exit 0
 fi
-if [ "$1" = "run" ]; then
-  network=
-  for value in "$@"; do
-    case "$value" in
-      trader-v3-account-*)
-        network="$value"
-        ;;
-    esac
-  done
-  case "$*" in
-    *api.ipify.org)
-      case "$network" in
-        trader-v3-account-a) value=203.0.113.27 ;;
-        trader-v3-account-b) value=203.0.113.28 ;;
-        trader-v3-account-c) value=203.0.113.29 ;;
-        trader-v3-account-d)
-          case "$*" in
-            *"--proxy http://proxy-d.internal:3128"*)
-              value=203.0.113.30
-              ;;
-            *)
-              exit 64
-              ;;
-          esac
-          ;;
-        *) exit 64 ;;
-      esac
-      if [ "${FAKE_BAD_EGRESS_NETWORK:-}" = "$network" ]; then
-        value=198.51.100.200
-      fi
-      printf '%s' "$value"
-      exit 0
+if [ "$1" = "exec" ]; then
+  node="$3"
+  proxy_url="$6"
+  network="${node/trader-v3-node/trader-v3-account}"
+  case "$network" in
+    trader-v3-account-a) value=203.0.113.27 ;;
+    trader-v3-account-b) value=203.0.113.28 ;;
+    trader-v3-account-c) value=203.0.113.29 ;;
+    trader-v3-account-d)
+      [ "$proxy_url" = "http://proxy-d.internal:3128" ] || exit 64
+      value=203.0.113.30
       ;;
-    *fapi.binance.com/fapi/v1/time)
-      if [ "${FAKE_BAD_FAPI_NETWORK:-}" = "$network" ]; then
-        printf '503'
-      else
-        printf '200'
-      fi
-      exit 0
-      ;;
+    *) exit 64 ;;
   esac
+  if [ "${FAKE_BAD_EGRESS_NETWORK:-}" = "$network" ]; then
+    value=198.51.100.200
+  fi
+  status=200
+  if [ "${FAKE_BAD_FAPI_NETWORK:-}" = "$network" ]; then
+    status=503
+  fi
+  printf '%s\\t%s\\n' "$value" "$status"
+  exit 0
 fi
 exit 64
 """,
@@ -491,7 +468,11 @@ exit 64
 
 def _account_network_source() -> str:
     return (
-        _definitions("die", "verify_binance_account_network_egress")
+        _definitions(
+            "die",
+            "probe_existing_node_egress",
+            "verify_binance_account_network_egress",
+        )
         + """
 ALL_NODES=(
   trader-v3-node-a
@@ -513,7 +494,6 @@ BINANCE_PROXY_URL_A=
 BINANCE_PROXY_URL_B=
 BINANCE_PROXY_URL_C=
 BINANCE_PROXY_URL_D=http://proxy-d.internal:3128
-BINANCE_EGRESS_PROBE_IMAGE=curlimages/curl:8.12.1
 verify_binance_account_network_egress
 """
     )
@@ -541,8 +521,9 @@ def test_account_network_mode_verifies_all_nodes_and_egress(
 
     assert result.returncode == 0, result.stderr
     log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
-    assert log.count("docker run --rm --network trader-v3-account-") == 8
-    assert log.count("--proxy http://proxy-d.internal:3128") == 2
+    assert log.count("docker exec -i trader-v3-node-") == 4
+    assert log.count("http://proxy-d.internal:3128") == 1
+    assert "docker run " not in log
     assert result.stdout.count("== Binance account network verified:") == 4
 
 

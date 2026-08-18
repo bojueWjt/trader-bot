@@ -123,6 +123,10 @@ RELEASE_FILES = (
         "account_a_live_trade_http_adapter.py",
     ),
     ("scripts/redis_capacity_config.py", "redis_capacity_config.py"),
+    (
+        "scripts/refresh_redis_capacity_evidence.py",
+        "refresh_redis_capacity_evidence.py",
+    ),
     ("scripts/redis_namespace_janitor.py", "redis_namespace_janitor.py"),
     ("scripts/redis_namespace_registry.py", "redis_namespace_registry.py"),
     ("infra/docker/nautilus/uv.node.lock", "uv.node.lock"),

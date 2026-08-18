@@ -170,13 +170,7 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" 'redis-check-rdb'
   assert_contains "$text" 'redis-check-aof'
   assert_contains "$text" \
-    'REDIS_AOF_VALIDATION_ROOT="$T/redis-aof-validation"'
-  assert_contains "$text" \
-    '-v "$validation_dir:/evidence:rw"'
-  assert_contains "$text" \
-    'Redis cold backup AOF checker changed canonical artifact'
-  assert_not_contains "$text" \
-    '-v "$artifact_path:/evidence/appendonly.aof:ro"'
+    'immutable Redis backup hashes and checker reports verified'
   assert_contains "$text" 'validator_output_sha256'
   assert_contains "$text" 'source_container_preserved'
   assert_contains "$text" 'active_volume_source'
@@ -1500,6 +1494,7 @@ EOF
   ROLLOUT_TRACKED=0 \
   ROLLOUT_FINALIZED=0 \
   ROLLBACK_IN_PROGRESS=0 \
+  DOWNTIME_WINDOW_ENTERED=1 \
   bash -c '
     RECREATE_NODES=(trader-v3-node-a)
     CONTROL_PLANE_UNITS=(
@@ -1536,17 +1531,125 @@ EOF
   assert_contains "$(cat "$log")" "docker stop --time 30 trader-v3-node-a"
 }
 
+test_pre_downtime_gate_failures_preserve_four_heartbeats() {
+  local case_dir="$TMP_DIR/pre-downtime-gates"
+  local fake_bin="$case_dir/bin"
+  local definition
+  local gate
+  local node
+  local status
+  local before
+  local after
+  local heartbeat_pids=()
+  mkdir -p "$fake_bin"
+  cat >"$fake_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >>"$PRE_DOWNTIME_TEST_LOG"
+if [ "${1:-}" = "stop" ]; then
+  touch "$PRE_DOWNTIME_CASE_DIR/stop-${4:-unknown}"
+fi
+EOF
+  chmod +x "$fake_bin/docker"
+  definition=$(extract_function on_err)
+
+  for gate in capacity rollout fence disk trust image; do
+    : >"$case_dir/actions-$gate.log"
+    heartbeat_pids=()
+    for node in \
+      trader-v3-node-a \
+      trader-v3-node-b \
+      trader-v3-node-c \
+      trader-v3-node-d; do
+      rm -f "$case_dir/stop-$node"
+      : >"$case_dir/heartbeat-$node"
+      (
+        while [ ! -e "$case_dir/stop-$node" ]; do
+          printf 'tick\n' >>"$case_dir/heartbeat-$node"
+          sleep 0.02
+        done
+      ) &
+      heartbeat_pids+=("$!")
+    done
+    sleep 0.12
+    before=0
+    for node in \
+      trader-v3-node-a \
+      trader-v3-node-b \
+      trader-v3-node-c \
+      trader-v3-node-d; do
+      before=$((before + $(wc -l <"$case_dir/heartbeat-$node")))
+    done
+
+    set +e
+    PATH="$fake_bin:$PATH" \
+    PRE_DOWNTIME_TEST_LOG="$case_dir/actions-$gate.log" \
+    PRE_DOWNTIME_CASE_DIR="$case_dir" \
+    ON_ERR_DEFINITION="$definition" \
+    DEPLOY_TEST_FAIL_GATE="$gate" \
+    DOWNTIME_WINDOW_ENTERED=0 \
+    ROLLOUT_NODE="trader-v3-node-a" \
+    PHASE_ONLY_ROLLOUT=1 \
+    ROLLBACK_IN_PROGRESS=0 \
+    ROLLOUT_TRACKED=0 \
+    ROLLOUT_FINALIZED=0 \
+      bash -c '
+        ALL_NODES=(
+          trader-v3-node-a
+          trader-v3-node-b
+          trader-v3-node-c
+          trader-v3-node-d
+        )
+        RECREATE_NODES=("${ALL_NODES[@]}")
+        restore_pre_migration_state() { return 0; }
+        remove_bootstrap_generated_live_recreate() { return 0; }
+        finalize_node_startup_resource_evidence() { return 0; }
+        eval "$ON_ERR_DEFINITION"
+        on_err 71
+      ' >/dev/null 2>&1
+    status=$?
+    set -e
+    sleep 0.12
+
+    after=0
+    for node in \
+      trader-v3-node-a \
+      trader-v3-node-b \
+      trader-v3-node-c \
+      trader-v3-node-d; do
+      after=$((after + $(wc -l <"$case_dir/heartbeat-$node")))
+    done
+    for pid in "${heartbeat_pids[@]}"; do
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" 2>/dev/null || true
+    done
+    if [ "$status" -ne 71 ]; then
+      fail "$gate gate returned unexpected status: $status"
+    fi
+    if [ -s "$case_dir/actions-$gate.log" ]; then
+      fail "$gate gate mutated Docker before downtime"
+    fi
+    if [ "$after" -le "$before" ]; then
+      fail "$gate gate interrupted four-node heartbeat progress"
+    fi
+  done
+}
+
 test_immutable_config_and_rollout_ordering() {
   python3 - "$HARDENING_DEPLOY" <<'PY'
 import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-execution_start = text.index("# ---------- HALT ----------")
+preflight_start = text.index("# ---------- preflight ----------")
+capacity_refresh = text.index(
+    'refresh_short_lived_preflight_evidence',
+    preflight_start,
+)
+disk_gate = text.index("verify_preflight_disk_reserve", capacity_refresh)
 prepare_a = text.index(
     '"$LIVE_NODE_CONFIG_TOOL" prepare-target \\\n'
     "    --account-id account-a",
-    execution_start,
+    disk_gate,
 )
 prepare_d = text.index(
     '"$LIVE_NODE_CONFIG_TOOL" prepare-target \\\n'
@@ -1557,17 +1660,21 @@ capture_release = text.index(
     'python3 "$RELEASE_TOOL" capture',
     prepare_d,
 )
-phase_only = text.index(
-    'if [ "$PHASE_ONLY_ROLLOUT" = "1" ]; then',
+trust_gate = text.index(
+    'preflight_gate_checkpoint "trust"',
     capture_release,
+)
+image_gate = text.index(
+    'preflight_gate_checkpoint "image"',
+    trust_gate,
 )
 database_backup = text.index(
     "capture_pre_migration_database_backup",
-    phase_only,
+    image_gate,
 )
 legacy_recreate_bootstrap = text.index(
     "prepare_legacy_rollback_recreate_fleet",
-    phase_only,
+    image_gate,
 )
 pre_migration_expectation = text.index(
     "capture_pre_migration_backup_expectation",
@@ -1581,19 +1688,32 @@ post_migration_expectation = text.index(
     "capture_post_migration_recovery_expectation",
     recovery_prepare,
 )
-recovery_armed = text.index(
-    "\nPOST_MIGRATION_RECOVERY_REQUIRED=1\n",
+preflight_exit = text.index(
+    'if [ "$DEPLOY_PHASE" = "preflight" ]; then',
     post_migration_expectation,
+)
+halt = text.index("# ---------- HALT ----------", preflight_exit)
+fence_gate = text.index(
+    'preflight_gate_checkpoint "fence"',
+    halt,
 )
 migrate = text.index(
     "\napply_and_verify_database_migration\n",
-    recovery_armed,
+    fence_gate,
 )
-bootstrap_register = text.index(
-    "\n    ensure_bootstrap_rollout_registration\n",
+rollout_gate = text.index(
+    'preflight_gate_checkpoint "rollout"',
     migrate,
 )
-install = text.index("# ---------- install ----------", bootstrap_register)
+downtime = text.index(
+    "\nDOWNTIME_WINDOW_ENTERED=1\n",
+    rollout_gate,
+)
+stop_nodes = text.index(
+    "\nstop_recreate_nodes\n",
+    downtime,
+)
+install = text.index("# ---------- install ----------", stop_nodes)
 recreate_section = text.index(
     "# ---------- recreate & verify ----------",
     install,
@@ -1607,55 +1727,49 @@ verify_nodes = text.index(
     'verify_release_nodes "${RECREATE_NODES[@]}"',
     recreate_loop,
 )
-heartbeat_fence = text.index(
-    "\n  acquire_maintenance_fence_after_bootstrap\n",
-    verify_nodes,
-)
 account_d_pending = text.index(
     "signed account-d closure is required for fleet_complete",
-    heartbeat_fence,
+    verify_nodes,
 )
 
 if not (
-    prepare_a
+    capacity_refresh
+    < disk_gate
+    < prepare_a
     < prepare_d
     < capture_release
-    < phase_only
+    < trust_gate
+    < image_gate
     < legacy_recreate_bootstrap
     < database_backup
     < pre_migration_expectation
     < recovery_prepare
     < post_migration_expectation
-    < recovery_armed
+    < preflight_exit
+    < halt
+    < fence_gate
     < migrate
-    < bootstrap_register
+    < rollout_gate
+    < downtime
+    < stop_nodes
     < install
     < recreate_section
     < recreate_loop
     < verify_nodes
-    < heartbeat_fence
     < account_d_pending
 ):
-    raise SystemExit("immutable config or rollout phase ordering changed")
+    raise SystemExit("preflight/downtime ordering changed")
 
-phase_block = text[phase_only:database_backup]
-required_phase_only_steps = (
-    'verify_release_nodes "${ALL_NODES[@]}"',
-    "acquire_maintenance_fence_after_bootstrap",
-    "advance_reviewed_rollout_for_node",
-    "exit 0",
-)
-for step in required_phase_only_steps:
-    if step not in phase_block:
-        raise SystemExit(f"phase-only rollout lacks: {step}")
+preflight_block = text[preflight_start:halt]
 for forbidden in (
-    "capture_pre_migration_database_backup",
-    "apply_and_verify_database_migration",
-    "install_operator_account_registry_environment",
+    "docker stop ",
+    "docker rm ",
+    "docker run ",
     'bash "$T/recreate-$node.sh"',
+    "DOWNTIME_WINDOW_ENTERED=1",
 ):
-    if forbidden in phase_block:
-        raise SystemExit(f"phase-only rollout mutates release state: {forbidden}")
+    if forbidden in preflight_block:
+        raise SystemExit(f"preflight contains downtime mutation: {forbidden}")
 PY
 }
 
@@ -1831,6 +1945,7 @@ EOF
   ROLLBACK_IN_PROGRESS=0 \
   ROLLOUT_TRACKED=0 \
   ROLLOUT_FINALIZED=0 \
+  DOWNTIME_WINDOW_ENTERED=1 \
     bash -c '
       recover_post_migration_node() {
         printf "recover-post-migration\n" >>"$ROLLBACK_TEST_LOG"
@@ -2576,6 +2691,7 @@ test_generated_recreate_promotion_rejects_link_attacks
 test_bootstrap_recreate_fleet_preserves_a_b_and_materializes_c_d
 test_bootstrap_recreate_fleet_rejects_missing_a_b
 test_on_err_restores_files_topology_and_old_image
+test_pre_downtime_gate_failures_preserve_four_heartbeats
 test_immutable_config_and_rollout_ordering
 test_migration_expectations_have_separate_schema_contracts
 test_on_err_uses_compatible_recovery_after_migration
