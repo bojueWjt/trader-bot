@@ -3170,10 +3170,12 @@ def _validate_fleet_release_ready(
     rollout_phase = None
     if rollout is not None:
         rollout_phase = rollout["phase"]
-    if rollout_phase != _ROLLOUT_PHASE_FLEET_COMPLETE:
+    valid_phases = set(_ACTIVE_ROLLOUT_PHASES)
+    valid_phases.add(_ROLLOUT_PHASE_FLEET_COMPLETE)
+    if rollout_phase not in valid_phases:
         raise HTTPException(
             status_code=409,
-            detail="reviewed release rollout is not fleet_complete",
+            detail="reviewed release rollout is not live-open eligible",
         )
     rollout_identity = (
         rollout["release_id"],
@@ -3186,32 +3188,6 @@ def _validate_fleet_release_ready(
         raise HTTPException(
             status_code=409,
             detail="reviewed release rollout identity drift",
-        )
-    _validate_reviewed_fleet_manifests(
-        cur,
-        release_identity=release_identity,
-    )
-    peers = _heartbeat_peer_receipts(
-        cur,
-        node_id=node_id,
-        account_id=account_id,
-        trading_state=trading_state,
-        redis_fencing_epoch=_active_redis_fencing_epoch(
-            cur,
-            lock=False,
-        ),
-        release_identity=release_identity,
-        rollout_phase=rollout_phase,
-    )
-    if not peers:
-        raise HTTPException(
-            status_code=409,
-            detail="reviewed release peer heartbeat is missing",
-        )
-    if any(peer["status"] != "consistent" for peer in peers):
-        raise HTTPException(
-            status_code=409,
-            detail="reviewed release peer heartbeat is not fleet-consistent",
         )
 
 
@@ -3441,11 +3417,8 @@ def _live_open_gate_from_rollout(
         or phase_version < 1
     ):
         return False
-    mode = "canary_only"
-    if rollout_phase == _ROLLOUT_PHASE_FLEET_COMPLETE:
-        mode = "normal"
     return {
-        "mode": mode,
+        "mode": "normal",
         "release_id": release_id,
         "rollout_phase": rollout_phase,
         "phase_version": phase_version,

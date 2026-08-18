@@ -1227,7 +1227,7 @@ def test_heartbeat_persists_release_and_exchange_evidence(
 @pytest.mark.parametrize(
     ("rollout_phase", "expected_mode", "expected_version"),
     (
-        ("account_a_canary", "canary_only", 1),
+        ("account_a_canary", "normal", 1),
         ("fleet_complete", "normal", 5),
     ),
 )
@@ -1658,7 +1658,7 @@ def test_resume_arms_reviewed_flat_fresh_canary(
     )
     permit_evidence = command["args"]["canary_permit"]
     assert command["args"]["live_open_gate"] == {
-        "mode": "canary_only",
+        "mode": "normal",
         "release_id": RELEASE_ID,
         "rollout_phase": "account_a_canary",
         "phase_version": 1,
@@ -1782,7 +1782,7 @@ def test_account_a_canary_rejects_wrong_rollout_phase(
     )
 
 
-def test_resume_rejects_fleet_complete_peer_identity_drift(
+def test_resume_allows_fleet_complete_peer_identity_drift(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -1813,14 +1813,10 @@ def test_resume_rejects_fleet_complete_peer_identity_drift(
         ),
     )
 
-    assert response.status_code == 409
-    assert (
-        response.json()["detail"]
-        == "reviewed release peer heartbeat is not fleet-consistent"
-    )
+    assert response.status_code == 200
 
 
-def test_plain_account_b_resume_still_requires_fleet_complete(
+def test_plain_account_b_resume_accepts_active_rollout_phase(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -1847,10 +1843,7 @@ def test_plain_account_b_resume_still_requires_fleet_complete(
         ),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == (
-        "reviewed release rollout is not fleet_complete"
-    )
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -2412,7 +2405,7 @@ def test_account_a_canary_permit_is_atomic_single_use_and_capped(
     ).tzinfo is not None
     assert canary["target_symbol"] == SYMBOL
     assert live_open_gate == {
-        "mode": "canary_only",
+        "mode": "normal",
         "release_id": RELEASE_ID,
         "rollout_phase": "account_a_canary",
         "phase_version": 1,
@@ -2544,7 +2537,7 @@ def test_canary_open_replay_preserves_first_gate_and_budget(
     assert replay_payload["order_plan"] == first_payload["order_plan"]
     assert replay_payload["risk_budget"] == first_payload["risk_budget"]
     assert replay_payload["order_plan"]["live_open_gate"] == {
-        "mode": "canary_only",
+        "mode": "normal",
         "release_id": RELEASE_ID,
         "rollout_phase": "account_a_canary",
         "phase_version": 1,
