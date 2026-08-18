@@ -2290,10 +2290,10 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
         _heartbeat_exchange_evidence_is_complete(body)
     )
     if release_identity_present and not exchange_evidence_complete:
-        raise HTTPException(
-            status_code=409,
-            detail="node exchange evidence is missing",
+        health_degraded_reasons.append(
+            "node_exchange_evidence_missing"
         )
+    exchange_evidence_accepted = exchange_evidence_complete
     (
         redis_fencing_epoch,
         runtime_generation,
@@ -2345,18 +2345,32 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                     _raise_writer_fence(
                         "redis fencing epoch mismatch"
                     )
-            if release_identity_present:
+            if release_identity_present and exchange_evidence_complete:
                 cur.execute("SELECT now()")
                 database_now = cur.fetchone()[0]
-                _validate_live_heartbeat_exchange_evidence(
-                    positions=positions,
-                    regular_orders=regular_orders,
-                    algo_orders=algo_orders,
-                    positions_snapshot_at=positions_snapshot_at,
-                    regular_orders_snapshot_at=regular_orders_snapshot_at,
-                    algo_orders_snapshot_at=algo_orders_snapshot_at,
-                    database_now=database_now,
-                )
+                try:
+                    _validate_live_heartbeat_exchange_evidence(
+                        positions=positions,
+                        regular_orders=regular_orders,
+                        algo_orders=algo_orders,
+                        positions_snapshot_at=positions_snapshot_at,
+                        regular_orders_snapshot_at=regular_orders_snapshot_at,
+                        algo_orders_snapshot_at=algo_orders_snapshot_at,
+                        database_now=database_now,
+                    )
+                except HTTPException as exc:
+                    detail = str(exc.detail or "")
+                    if (
+                        exc.status_code == 409
+                        and detail.startswith("node exchange evidence ")
+                    ):
+                        exchange_evidence_accepted = False
+                        health_degraded_reasons.append(
+                            detail.replace(" ", "_")
+                        )
+                    else:
+                        raise
+            payload["health_degraded_reasons"] = health_degraded_reasons
             cur.execute(
                 """
                 INSERT INTO node_heartbeats (
@@ -2398,12 +2412,30 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                     config_sha256=EXCLUDED.config_sha256,
                     dependency_lock_sha256=EXCLUDED.dependency_lock_sha256,
                     schema_epoch=EXCLUDED.schema_epoch,
-                    positions=EXCLUDED.positions,
-                    regular_orders=EXCLUDED.regular_orders,
-                    algo_orders=EXCLUDED.algo_orders,
-                    positions_snapshot_at=EXCLUDED.positions_snapshot_at,
-                    regular_orders_snapshot_at=EXCLUDED.regular_orders_snapshot_at,
-                    algo_orders_snapshot_at=EXCLUDED.algo_orders_snapshot_at,
+                    positions=CASE
+                      WHEN %s THEN EXCLUDED.positions
+                      ELSE node_heartbeats.positions
+                    END,
+                    regular_orders=CASE
+                      WHEN %s THEN EXCLUDED.regular_orders
+                      ELSE node_heartbeats.regular_orders
+                    END,
+                    algo_orders=CASE
+                      WHEN %s THEN EXCLUDED.algo_orders
+                      ELSE node_heartbeats.algo_orders
+                    END,
+                    positions_snapshot_at=CASE
+                      WHEN %s THEN EXCLUDED.positions_snapshot_at
+                      ELSE node_heartbeats.positions_snapshot_at
+                    END,
+                    regular_orders_snapshot_at=CASE
+                      WHEN %s THEN EXCLUDED.regular_orders_snapshot_at
+                      ELSE node_heartbeats.regular_orders_snapshot_at
+                    END,
+                    algo_orders_snapshot_at=CASE
+                      WHEN %s THEN EXCLUDED.algo_orders_snapshot_at
+                      ELSE node_heartbeats.algo_orders_snapshot_at
+                    END,
                     reconciliation_completed_at=EXCLUDED.reconciliation_completed_at,
                     redis_fencing_epoch=EXCLUDED.redis_fencing_epoch,
                     runtime_generation=EXCLUDED.runtime_generation,
@@ -2469,6 +2501,12 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                     runtime_generation,
                     lease_fencing_token,
                     heartbeat_sequence,
+                    exchange_evidence_accepted,
+                    exchange_evidence_accepted,
+                    exchange_evidence_accepted,
+                    exchange_evidence_accepted,
+                    exchange_evidence_accepted,
+                    exchange_evidence_accepted,
                 ),
             )
             if cur.rowcount != 1:

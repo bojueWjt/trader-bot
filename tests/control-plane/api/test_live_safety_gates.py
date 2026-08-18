@@ -2895,8 +2895,7 @@ def test_missing_exchange_evidence_cannot_revoke_armed_canary(
         },
     )
 
-    assert missing.status_code == 409
-    assert missing.json()["detail"] == "node exchange evidence is missing"
+    assert missing.status_code == 200
     with _connect(migrated_db) as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -2909,14 +2908,14 @@ def test_missing_exchange_evidence_cannot_revoke_armed_canary(
         assert cur.fetchone()[0] == "armed"
         cur.execute(
             """
-            SELECT heartbeat_sequence, positions
+            SELECT heartbeat_sequence, positions, payload
             FROM node_heartbeats
             WHERE node_id=%s
             """,
             (NODE_A,),
         )
-        heartbeat_sequence, positions = cur.fetchone()
-    assert heartbeat_sequence == HEARTBEAT_SEQUENCE
+        heartbeat_sequence, positions, payload = cur.fetchone()
+    assert heartbeat_sequence == HEARTBEAT_SEQUENCE + 1
     assert positions == [
         {
             "symbol": "XAUUSDT",
@@ -2924,6 +2923,9 @@ def test_missing_exchange_evidence_cannot_revoke_armed_canary(
             "mark_price": "2400",
         }
     ]
+    assert "node_exchange_evidence_missing" in (
+        payload["health_degraded_reasons"]
+    )
 
 
 def test_explicit_empty_exchange_evidence_can_revoke_armed_canary(
@@ -3035,25 +3037,27 @@ def test_stale_exchange_evidence_cannot_replace_fresh_heartbeat(
         },
     )
 
-    assert stale.status_code == 409
-    assert stale.json()["detail"] == "node exchange evidence is stale"
+    assert stale.status_code == 200
     with _connect(migrated_db) as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT heartbeat_sequence, positions
+            SELECT heartbeat_sequence, positions, payload
             FROM node_heartbeats
             WHERE node_id=%s
             """,
             (NODE_A,),
         )
-        heartbeat_sequence, positions = cur.fetchone()
-    assert heartbeat_sequence == HEARTBEAT_SEQUENCE
+        heartbeat_sequence, positions, payload = cur.fetchone()
+    assert heartbeat_sequence == HEARTBEAT_SEQUENCE + 1
     assert positions == [
         {
             "symbol": "XAUUSDT",
             "quantity": "1",
         }
     ]
+    assert "node_exchange_evidence_is_stale" in (
+        payload["health_degraded_reasons"]
+    )
 
 
 def test_non_target_market_data_and_row_order_keep_portfolio_baseline(
