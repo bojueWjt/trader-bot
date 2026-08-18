@@ -2570,12 +2570,29 @@ def _lock_same_epoch_hotfix_predecessor(
         """,
         ([*ACTIVE_ROLLOUT_PHASES, PHASE_FLEET_COMPLETE],),
     )
-    active_rollouts = cur.fetchall()
-    if len(active_rollouts) != 1:
+    predecessor_rows = cur.fetchall()
+    active_rollouts = [
+        row
+        for row in predecessor_rows
+        if str(row["phase"]) in ACTIVE_ROLLOUT_PHASES
+    ]
+    complete_rollouts = [
+        row
+        for row in predecessor_rows
+        if str(row["phase"]) == PHASE_FLEET_COMPLETE
+    ]
+    if len(active_rollouts) > 1:
         raise ReleaseRolloutError(
             "same-epoch hotfix requires exactly one active predecessor rollout"
         )
-    predecessor = active_rollouts[0]
+    if len(active_rollouts) == 1:
+        predecessor = active_rollouts[0]
+    elif len(complete_rollouts) == 1:
+        predecessor = complete_rollouts[0]
+    else:
+        raise ReleaseRolloutError(
+            "same-epoch hotfix requires an active predecessor rollout"
+        )
     if predecessor["release_id"] == document.release_id:
         raise ReleaseRolloutError(
             "same-epoch hotfix predecessor must differ from successor"

@@ -2009,6 +2009,44 @@ def test_same_epoch_hotfix_retains_fleet_complete_predecessor(
     )
 
 
+def test_same_epoch_hotfix_prefers_active_predecessor_over_completed(
+) -> None:
+    document = _migration_rebaseline_document()
+    capacity = _migration_rebaseline_capacity()
+    rows = [
+        {
+            "release_id": "completed-release",
+            "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+            "phase": reviewed_release_rollout.PHASE_FLEET_COMPLETE,
+            "phase_version": 5,
+        },
+        {
+            "release_id": "active-release",
+            "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+            "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+            "phase_version": 1,
+        },
+    ]
+
+    class Cursor:
+        def execute(self, _statement, _params=None) -> None:
+            return
+
+        def fetchall(self):
+            return rows
+
+    predecessor = (
+        reviewed_release_rollout._lock_same_epoch_hotfix_predecessor(
+            Cursor(),
+            document=document,
+            capacity_evidence=capacity,
+            active_redis_fencing_epoch=REDIS_FENCING_EPOCH,
+        )
+    )
+
+    assert predecessor["release_id"] == "active-release"
+
+
 def test_migration_rebaseline_abort_records_transition_and_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
