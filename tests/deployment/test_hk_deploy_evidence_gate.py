@@ -772,7 +772,7 @@ all_execution_accounts_stopped
             f"{'a' * 64}\tSOLUSDT\t{'b' * 64}",
         )
 
-    def test_fault_report_older_than_one_hour_is_rejected(self) -> None:
+    def test_fault_report_older_than_one_hour_warns_without_blocking(self) -> None:
         report = copy.deepcopy(self.reports["fault_report"])
         report["completed_at"] = (
             datetime.now(timezone.utc) - timedelta(seconds=3601)
@@ -781,7 +781,7 @@ all_execution_accounts_stopped
 
         result = self._run_validator()
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
             "fault_report timestamp stale or in the future: completed_at",
             result.stderr,

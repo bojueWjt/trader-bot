@@ -183,6 +183,9 @@ class IntentExecutionStrategy(Strategy):
         self._live_canary_portfolio_baseline: Optional[
             Callable[[str], str | bool]
         ] = None
+        self._live_entry_mark_snapshot_getter: Optional[
+            Callable[[str], Any]
+        ] = None
         self._live_rollout_phase_getter: Optional[
             Callable[[], str | None]
         ] = None
@@ -335,6 +338,12 @@ class IntentExecutionStrategy(Strategy):
         getter: Optional[Callable[[str], str | bool]],
     ) -> None:
         self._live_canary_portfolio_baseline = getter
+
+    def set_live_entry_mark_snapshot_getter(
+        self,
+        getter: Optional[Callable[[str], Any]],
+    ) -> None:
+        self._live_entry_mark_snapshot_getter = getter
 
     def set_live_rollout_phase_getter(
         self,
@@ -6607,19 +6616,23 @@ class IntentExecutionStrategy(Strategy):
     ) -> _LiveEntryMarkSnapshot | OrderDenied:
         update = self._cache_mark_price(instrument_id)
         if not update:
+            update = self._fallback_live_entry_mark_snapshot(
+                instrument_id
+            )
+        if not update:
             return OrderDenied(
                 "live_entry_mark_price_unavailable",
                 f"instrument={instrument_id}",
             )
         price = _positive_canary_decimal(
-            getattr(update, "value", None)
+            _live_entry_mark_update_field(update, "value")
         )
         if price is None:
             return OrderDenied(
                 "live_entry_mark_price_unavailable",
                 f"instrument={instrument_id}",
             )
-        raw_ts_event = getattr(update, "ts_event", None)
+        raw_ts_event = _live_entry_mark_update_field(update, "ts_event")
         try:
             ts_event = int(raw_ts_event)
         except (TypeError, ValueError, OverflowError):
@@ -6646,6 +6659,18 @@ class IntentExecutionStrategy(Strategy):
             ts_event=ts_event,
             validated_at_ns=now_ns,
         )
+
+    def _fallback_live_entry_mark_snapshot(
+        self,
+        instrument_id: str,
+    ) -> Any:
+        getter = getattr(self, "_live_entry_mark_snapshot_getter", None)
+        if not callable(getter):
+            return False
+        try:
+            return getter(instrument_id) or False
+        except Exception:
+            return False
 
     def _remember_validated_live_entry_mark(
         self,
@@ -9086,6 +9111,12 @@ def _approved_max_notional_from_plan(value: Any) -> Decimal | OrderDenied:
             "order_plan.approved_max_notional",
         )
     return budget
+
+
+def _live_entry_mark_update_field(update: Any, field_name: str) -> Any:
+    if isinstance(update, Mapping):
+        return update.get(field_name)
+    return getattr(update, field_name, None)
 
 
 def _fsync_strategy_directory(path: Path) -> None:

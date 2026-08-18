@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import UUID, uuid4
 
 from config.node_config import NodeConfig, load_node_config
@@ -82,6 +84,7 @@ class AccountRuntime:
     exchange_cancel_adapter: Any
     exchange_evidence_provider: Any
     live_canary_portfolio_baseline_provider: Any
+    live_entry_mark_snapshot_provider: Any
     strategy_config: Any
     trading_node_config_kwargs: dict[str, Any]
     trading_node: Any = None
@@ -142,6 +145,9 @@ def build_account_runtime(
             exchange_evidence_provider,
         )
     )
+    live_entry_mark_snapshot_provider = (
+        _build_live_entry_mark_snapshot_provider(config)
+    )
     intent_data_client = _build_intent_data_client(
         config,
         control_plane,
@@ -182,6 +188,9 @@ def build_account_runtime(
         exchange_evidence_provider=exchange_evidence_provider,
         live_canary_portfolio_baseline_provider=(
             live_canary_portfolio_baseline_provider
+        ),
+        live_entry_mark_snapshot_provider=(
+            live_entry_mark_snapshot_provider
         ),
         strategy_config=strategy_config,
         trading_node_config_kwargs=trading_node_config_kwargs,
@@ -1511,9 +1520,7 @@ def _build_exchange_cancel_dependencies(
         base_url=config.control_plane.base_url,
         token=config.control_plane.token,
     )
-    base_url = "https://testnet.binancefuture.com"
-    if config.binance.environment == "live":
-        base_url = "https://fapi.binance.com"
+    base_url = _binance_http_base_url(config)
     transport = SignedBinanceTransport(
         base_url=base_url,
         api_key=config.binance.credentials.api_key,
@@ -1530,6 +1537,74 @@ def _build_exchange_cancel_dependencies(
             transport=transport,
         )
     return mirror, adapter, evidence_provider
+
+
+def _binance_http_base_url(config: NodeConfig) -> str:
+    if config.binance.environment == "live":
+        return "https://fapi.binance.com"
+    return "https://testnet.binancefuture.com"
+
+
+def _build_live_entry_mark_snapshot_provider(
+    config: NodeConfig,
+) -> Any:
+    if config.binance.environment != "live":
+        return None
+    base_url = _binance_http_base_url(config)
+    opener = None
+    proxy_url = config.binance.proxy_url
+    if proxy_url:
+        opener = build_opener(
+            ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+
+    def current_mark(instrument_id: str) -> Any:
+        symbol = _binance_symbol_from_instrument_id(instrument_id)
+        if symbol is False:
+            return False
+        query = urlencode({"symbol": symbol})
+        request = Request(
+            f"{base_url}/fapi/v1/premiumIndex?{query}",
+            headers={"Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            if opener is None:
+                response_context = urlopen(request, timeout=2)
+            else:
+                response_context = opener.open(request, timeout=2)
+            with response_context as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        mark_price = str(payload.get("markPrice") or "").strip()
+        raw_time = payload.get("time")
+        try:
+            time_ms = int(raw_time)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not mark_price or time_ms <= 0:
+            return False
+        return SimpleNamespace(
+            value=mark_price,
+            ts_event=time_ms * 1_000_000,
+        )
+
+    return current_mark
+
+
+def _binance_symbol_from_instrument_id(
+    instrument_id: str,
+) -> str | bool:
+    normalized = str(instrument_id or "").strip().upper()
+    if not normalized.endswith("-PERP.BINANCE"):
+        return False
+    symbol = normalized[: -len("-PERP.BINANCE")]
+    if not symbol:
+        return False
+    return symbol
 
 
 def _build_live_canary_portfolio_baseline_provider(
@@ -1687,6 +1762,17 @@ def _build_strategy(
         is_live_canary_account(runtime.config.account_id)
         and runtime.config.binance.environment == "live"
     ):
+        mark_provider = runtime.live_entry_mark_snapshot_provider
+        set_mark_provider = getattr(
+            strategy,
+            "set_live_entry_mark_snapshot_getter",
+            None,
+        )
+        if mark_provider is None or not callable(set_mark_provider):
+            raise RuntimeError(
+                "live canary strategy lacks mark snapshot provider"
+            )
+        set_mark_provider(mark_provider)
         baseline_provider = (
             runtime.live_canary_portfolio_baseline_provider
         )

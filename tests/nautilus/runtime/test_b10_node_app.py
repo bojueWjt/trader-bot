@@ -326,6 +326,40 @@ class NodeAppAssemblyTest(unittest.TestCase):
                     [5.0, 5.0],
                 )
 
+    def test_live_entry_mark_snapshot_provider_reads_binance_mark(
+        self,
+    ) -> None:
+        from app import node as node_app
+
+        requests: list[Any] = []
+
+        def urlopen(request: Any, timeout: float) -> Any:
+            requests.append((request, timeout))
+            return _JsonResponse(
+                b'{"symbol":"SOLUSDT","markPrice":"76.04","time":1787061297000}'
+            )
+
+        config = types.SimpleNamespace(
+            binance=types.SimpleNamespace(
+                environment="live",
+                proxy_url="",
+            ),
+        )
+        provider = node_app._build_live_entry_mark_snapshot_provider(
+            config,
+        )
+
+        with patch("app.node.urlopen", side_effect=urlopen):
+            snapshot = provider("SOLUSDT-PERP.BINANCE")
+
+        self.assertEqual(snapshot.value, "76.04")
+        self.assertEqual(snapshot.ts_event, 1787061297000000000)
+        self.assertEqual(requests[0][1], 2)
+        self.assertIn(
+            "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=SOLUSDT",
+            requests[0][0].full_url,
+        )
+
     def test_live_canary_strategy_wiring_covers_all_execution_accounts(
         self,
     ) -> None:
@@ -344,6 +378,10 @@ class NodeAppAssemblyTest(unittest.TestCase):
             with self.subTest(account_id=account_id):
                 with tempfile.TemporaryDirectory() as state_dir:
                     baseline_provider = lambda _symbol: "4" * 64
+                    mark_provider = lambda _instrument: types.SimpleNamespace(
+                        value="100",
+                        ts_event=int(time.time() * 1_000_000_000),
+                    )
                     halt_reasons: list[str] = []
                     runtime = types.SimpleNamespace(
                         config=types.SimpleNamespace(
@@ -372,6 +410,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
                         live_canary_portfolio_baseline_provider=(
                             baseline_provider
                         ),
+                        live_entry_mark_snapshot_provider=mark_provider,
                         exchange_cancel_adapter=False,
                         exchange_state_mirror=False,
                         incident_reporter=None,
@@ -629,6 +668,12 @@ class NodeAppAssemblyTest(unittest.TestCase):
             )
             runtime.live_canary_portfolio_baseline_provider = (
                 lambda _symbol: "4" * 64
+            )
+            runtime.live_entry_mark_snapshot_provider = (
+                lambda _instrument: types.SimpleNamespace(
+                    value="100",
+                    ts_event=int(time.time() * 1_000_000_000),
+                )
             )
             build_nautilus_trading_node(
                 runtime,
@@ -2490,6 +2535,7 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
             self.denial_reporter: Any = None
             self.protection_event_reporter: Any = None
             self.live_canary_portfolio_baseline_getter: Any = None
+            self.live_entry_mark_snapshot_getter: Any = None
             self.live_rollout_phase_getter: Any = None
             self.live_open_gate_getter: Any = None
             self.live_canary_risk_reporter: Any = None
@@ -2516,6 +2562,12 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
             getter: Any,
         ) -> None:
             self.live_canary_portfolio_baseline_getter = getter
+
+        def set_live_entry_mark_snapshot_getter(
+            self,
+            getter: Any,
+        ) -> None:
+            self.live_entry_mark_snapshot_getter = getter
 
         def set_live_rollout_phase_getter(
             self,

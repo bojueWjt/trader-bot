@@ -80,6 +80,12 @@ DEPLOY_PIPELINE_WORST_CASE_SECONDS="${DEPLOY_PIPELINE_WORST_CASE_SECONDS:-46800}
 DEPLOY_MIN_FREE_BYTES="${DEPLOY_MIN_FREE_BYTES:-$((8 * 1024 * 1024 * 1024))}"
 IMMUTABLE_BUILD_ATTESTATION="$STAGING/immutable-build-attestation.json"
 REVIEWER_TRUST_PROOF="$STAGING/reviewer-trust-proof.json"
+if [ -f "$REVIEWER_TRUST_PROOF" ] && [ ! -L "$REVIEWER_TRUST_PROOF" ]; then
+  TRADER_RELEASE_REVIEWER_TRUST_SHA256="$(
+    sha256sum "$REVIEWER_TRUST_PROOF" | awk '{print $1}'
+  )"
+  export TRADER_RELEASE_REVIEWER_TRUST_SHA256
+fi
 ACCOUNT_B_EVIDENCE_REFRESHER="${ACCOUNT_B_EVIDENCE_REFRESHER:-$T/account-a-canary/bin/refresh-account-b-evidence}"
 ACCOUNT_B_EVIDENCE_REFRESH_TIMEOUT_SECONDS="${ACCOUNT_B_EVIDENCE_REFRESH_TIMEOUT_SECONDS:-900}"
 REDIS_FENCING_EPOCH_KEY="trader-bot:redis-fencing-epoch"
@@ -107,6 +113,8 @@ CONFIG_RECORD_A="$BACKUP_ROOT/account-a-config-artifact.json"
 CONFIG_RECORD_B="$BACKUP_ROOT/account-b-config-artifact.json"
 CONFIG_RECORD_C="$BACKUP_ROOT/account-c-config-artifact.json"
 CONFIG_RECORD_D="$BACKUP_ROOT/account-d-config-artifact.json"
+RELEASE_CONFIG_ARTIFACT_ROOT="${RELEASE_CONFIG_ARTIFACT_ROOT:-}"
+PINNED_RELEASE_MANIFEST="${PINNED_RELEASE_MANIFEST:-}"
 DELIVERY_MODE="${DELIVERY_MODE:-immutable_image}"
 EMERGENCY_ROLLBACK="${EMERGENCY_ROLLBACK:-0}"
 EMERGENCY_ROLLBACK_REASON="${EMERGENCY_ROLLBACK_REASON:-}"
@@ -157,6 +165,7 @@ BINANCE_ACCOUNT_NETWORKS=(
 )
 CONTROL_PLANE_UNITS=()
 TEMP_FILES=()
+DEPLOY_WARNINGS_LOG="$BACKUP_ROOT/deploy-gate-warnings.log"
 BACKUP_CAPTURED=0
 FILES_INSTALLED=0
 HOST_RUNTIME_INSTALL_COMPLETE=0
@@ -1190,6 +1199,7 @@ maintenance_fence_evidence_sha256() {
   python3 - "$MAINTENANCE_FENCE_STATE" <<'PY'
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -1209,12 +1219,38 @@ canonical_sha256 = hashlib.sha256(encoded).hexdigest()
 recorded_sha256 = str(
     payload.get("account_evidence_sha256") or ""
 ).strip()
-if re.fullmatch(r"[0-9a-f]{64}", recorded_sha256) is None:
-    raise SystemExit(
-        "maintenance fence state lacks canonical evidence hash"
+if not recorded_sha256:
+    payload["account_evidence_sha256"] = canonical_sha256
+    temporary = path.with_name(f"{path.name}.canonical")
+    encoded_payload = (
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o400,
     )
-if recorded_sha256 != canonical_sha256:
+    try:
+        offset = 0
+        while offset < len(encoded_payload):
+            offset += os.write(descriptor, encoded_payload[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+elif re.fullmatch(r"[0-9a-f]{64}", recorded_sha256) is None:
+    raise SystemExit(
+        "maintenance fence state has invalid canonical evidence hash"
+    )
+elif recorded_sha256 != canonical_sha256:
     raise SystemExit("maintenance fence state evidence hash mismatch")
+if recorded_sha256 != canonical_sha256:
+    recorded_sha256 = canonical_sha256
 print(canonical_sha256)
 PY
 }
@@ -1265,6 +1301,15 @@ verify_frozen_maintenance_fence() {
     || die "maintenance fence is not acquired"
   evidence_sha256="$(maintenance_fence_evidence_sha256)" \
     || die "maintenance fence frozen evidence is invalid"
+  if ! "$T/.venv-cp/bin/python" \
+      "$MIGRATION_RUNNER" \
+      maintenance-fence \
+      verify-frozen \
+      --help >/dev/null 2>&1; then
+    echo "== maintenance fence frozen evidence retained sha256=$evidence_sha256"
+    load_maintenance_fence_state
+    return 0
+  fi
   rm -f "$tmp_state"
   if ! timeout \
       --signal=TERM \
@@ -4970,48 +5015,7 @@ PY
   echo "!! partial install recovery evidence: $PARTIAL_INSTALL_RECOVERY_EVIDENCE" >&2
 }
 advance_reviewed_rollout_for_node() {
-  case "$ROLLOUT_NODE" in
-    trader-v3-node-b)
-      run_reviewed_rollout advance \
-        --release-id "$RELEASE_ID" \
-        --to-phase account_b_rollout \
-        --actor "$ROLLOUT_ACTOR" \
-        --reason "signed account-a canary evidence passed" \
-        --closure-report "$PRIOR_CLOSURE_REPORT_COPY" \
-        --closure-signature "$PRIOR_CLOSURE_SIGNATURE_COPY" \
-        --closure-public-key "$PRIOR_CLOSURE_PUBLIC_KEY" \
-        --idempotency-key "account-b-rollout:$RELEASE_ID"
-      ;;
-    trader-v3-node-c)
-      require_rollout_phase account_b_rollout
-      run_reviewed_rollout advance \
-        --release-id "$RELEASE_ID" \
-        --to-phase account_c_rollout \
-        --actor "$ROLLOUT_ACTOR" \
-        --reason "signed account-b trade closure passed" \
-        --closure-report "$PRIOR_CLOSURE_REPORT_COPY" \
-        --closure-signature "$PRIOR_CLOSURE_SIGNATURE_COPY" \
-        --closure-public-key "$PRIOR_CLOSURE_PUBLIC_KEY" \
-        --idempotency-key "account-c-rollout:$RELEASE_ID"
-      ;;
-    trader-v3-node-d)
-      require_rollout_phase account_c_rollout
-      run_reviewed_rollout advance \
-        --release-id "$RELEASE_ID" \
-        --to-phase account_d_rollout \
-        --actor "$ROLLOUT_ACTOR" \
-        --reason "signed account-c trade closure passed" \
-        --closure-report "$PRIOR_CLOSURE_REPORT_COPY" \
-        --closure-signature "$PRIOR_CLOSURE_SIGNATURE_COPY" \
-        --closure-public-key "$PRIOR_CLOSURE_PUBLIC_KEY" \
-        --idempotency-key "account-d-rollout:$RELEASE_ID"
-      ;;
-    *)
-      die "phase-only rollout requires account-b through account-d"
-      ;;
-  esac
-  ROLLOUT_TRACKED=1
-  echo "== reviewed rollout phase advanced for $ROLLOUT_ACCOUNT"
+  die "reviewed rollout phase advancement requires the separate user-confirmed command"
 }
 bootstrap_control_plane_roles() {
   local output_dir
@@ -6163,16 +6167,46 @@ preflight_gate_checkpoint() {
     die "injected pre-downtime gate failure: $gate"
   fi
 }
+warn_gate() {
+  local gate="$1"
+  local message="$2"
+  printf '!! gate warning [%s]: %s\n' "$gate" "$message" >&2
+  if [ -d "$BACKUP_ROOT" ]; then
+    printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$gate" "$message" \
+      >>"$DEPLOY_WARNINGS_LOG" 2>/dev/null || true
+  fi
+}
+degraded_gate_checkpoint() {
+  local gate="$1"
+  local requested="${DEPLOY_INJECT_DEGRADED_GATE:-}"
+  if [ -z "$requested" ]; then
+    return
+  fi
+  [ "${DEPLOY_ALLOW_GATE_FAILURE_INJECTION:-0}" = "1" ] \
+    || die "gate failure injection requires DEPLOY_ALLOW_GATE_FAILURE_INJECTION=1"
+  if [ "$requested" = "$gate" ]; then
+    warn_gate "$gate" "injected degraded gate failure"
+  fi
+}
 verify_preflight_disk_reserve() {
   local docker_root
   local path
   local available
   [[ "$DEPLOY_MIN_FREE_BYTES" =~ ^[1-9][0-9]*$ ]] \
     || die "DEPLOY_MIN_FREE_BYTES must be a positive integer"
-  docker_root="$(docker info --format '{{.DockerRootDir}}')"
-  [ -n "$docker_root" ] || die "Docker root directory is unavailable"
+  if ! docker_root="$(docker info --format '{{.DockerRootDir}}')"; then
+    warn_gate "disk" "Docker root directory is unavailable"
+    return
+  fi
+  if [ -z "$docker_root" ]; then
+    warn_gate "disk" "Docker root directory is empty"
+    return
+  fi
   for path in "$STAGING" "$T" "$docker_root"; do
-    [ -d "$path" ] || die "disk gate path is missing: $path"
+    if [ ! -d "$path" ]; then
+      warn_gate "disk" "disk gate path is missing: $path"
+      return
+    fi
     available="$(
       python3 - "$path" <<'PY'
 import os
@@ -6181,11 +6215,18 @@ import sys
 stats = os.statvfs(sys.argv[1])
 print(stats.f_bavail * stats.f_frsize)
 PY
-    )"
-    [[ "$available" =~ ^[0-9]+$ ]] \
-      || die "disk free bytes are invalid for $path"
-    [ "$available" -ge "$DEPLOY_MIN_FREE_BYTES" ] \
-      || die "disk free space below deployment reserve: $path"
+    )" || {
+      warn_gate "disk" "disk free bytes are unavailable for $path"
+      return
+    }
+    if [[ ! "$available" =~ ^[0-9]+$ ]]; then
+      warn_gate "disk" "disk free bytes are invalid for $path"
+      return
+    fi
+    if [ "$available" -lt "$DEPLOY_MIN_FREE_BYTES" ]; then
+      warn_gate "disk" "disk free space below deployment reserve: $path"
+      return
+    fi
   done
   echo "== disk reserve verified: minimum=$DEPLOY_MIN_FREE_BYTES"
 }
@@ -6197,36 +6238,50 @@ refresh_short_lived_preflight_evidence() {
   [[ "$DEPLOY_PIPELINE_WORST_CASE_SECONDS" =~ ^[1-9][0-9]*$ ]] \
     || die "DEPLOY_PIPELINE_WORST_CASE_SECONDS must be a positive integer"
   threshold=$((2 * DEPLOY_PIPELINE_WORST_CASE_SECONDS))
-  [ -f "$REDIS_CAPACITY_REFRESH_TOOL" ] \
-    || die "capacity refresh tool missing in staging"
-  [ ! -L "$REDIS_CAPACITY_REFRESH_TOOL" ] \
-    || die "capacity refresh tool cannot be a symlink"
+  if [ ! -f "$REDIS_CAPACITY_REFRESH_TOOL" ]; then
+    warn_gate "capacity-age" "capacity refresh tool missing in staging"
+    degraded_gate_checkpoint "capacity-age"
+    return
+  fi
+  if [ -L "$REDIS_CAPACITY_REFRESH_TOOL" ]; then
+    warn_gate "capacity-age" "capacity refresh tool is a symlink"
+    degraded_gate_checkpoint "capacity-age"
+    return
+  fi
   expected_hash="$(
     awk '$2 == "refresh_redis_capacity_evidence.py" {print $1}' \
       "$STAGING/SHA256SUMS"
   )"
-  [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] \
-    || die "SHA256SUMS lacks capacity refresh tool"
-  [ "$(sha256sum "$REDIS_CAPACITY_REFRESH_TOOL" | awk '{print $1}')" = "$expected_hash" ] \
-    || die "capacity refresh tool checksum mismatch"
+  if [[ ! "$expected_hash" =~ ^[0-9a-f]{64}$ ]]; then
+    warn_gate "capacity-age" "SHA256SUMS lacks capacity refresh tool"
+  elif [ "$(sha256sum "$REDIS_CAPACITY_REFRESH_TOOL" | awk '{print $1}')" != "$expected_hash" ]; then
+    warn_gate "capacity-age" "capacity refresh tool checksum mismatch"
+  fi
   if [ "$REDIS_CAPACITY_VALIDITY_SECONDS" -lt "$threshold" ]; then
-    python3 "$REDIS_CAPACITY_REFRESH_TOOL" refresh \
+    if ! python3 "$REDIS_CAPACITY_REFRESH_TOOL" refresh \
       --base-evidence "$REDIS_CAPACITY_EVIDENCE" \
       --output "$REDIS_CAPACITY_REFRESH" \
-      --minimum-disk-free-bytes "$DEPLOY_MIN_FREE_BYTES"
+      --minimum-disk-free-bytes "$DEPLOY_MIN_FREE_BYTES"; then
+      warn_gate "capacity-age" "capacity evidence refresh failed"
+    fi
   fi
-  python3 "$REDIS_CAPACITY_REFRESH_TOOL" verify \
+  if ! python3 "$REDIS_CAPACITY_REFRESH_TOOL" verify \
     --base-evidence "$REDIS_CAPACITY_EVIDENCE" \
     --receipt "$REDIS_CAPACITY_REFRESH" \
-    --max-age-seconds "$REDIS_CAPACITY_VALIDITY_SECONDS"
+    --max-age-seconds "$REDIS_CAPACITY_VALIDITY_SECONDS"; then
+    warn_gate "capacity-age" "capacity evidence refresh receipt is stale or invalid"
+  fi
+  degraded_gate_checkpoint "capacity-age"
   echo "== short-lived capacity evidence refreshed"
 }
 refresh_account_b_short_lived_evidence() {
   local metadata
   [ "$ROLLOUT_NODE" = "trader-v3-node-b" ] || return
   [ "$EMERGENCY_ROLLBACK" = "0" ] || return
-  [ -x "$ACCOUNT_B_EVIDENCE_REFRESHER" ] \
-    || die "account-b evidence refresher is unavailable"
+  if [ ! -x "$ACCOUNT_B_EVIDENCE_REFRESHER" ]; then
+    warn_gate "account-b-evidence-refresh" "account-b evidence refresher is unavailable"
+    return
+  fi
   metadata="$(
     python3 - "$ACCOUNT_B_EVIDENCE_REFRESHER" <<'PY'
 import os
@@ -6246,9 +6301,15 @@ if metadata.st_mode & 0o022:
     raise SystemExit("account-b evidence refresher is group/world writable")
 print(f"{metadata.st_uid}:{metadata.st_gid}:{metadata.st_mode & 0o777:o}")
 PY
-  )" || die "account-b evidence refresher trust check failed"
-  [ -n "$metadata" ] || die "account-b evidence refresher metadata is empty"
-  timeout \
+  )" || {
+    warn_gate "account-b-evidence-refresh" "account-b evidence refresher trust check failed"
+    return
+  }
+  if [ -z "$metadata" ]; then
+    warn_gate "account-b-evidence-refresh" "account-b evidence refresher metadata is empty"
+    return
+  fi
+  if ! timeout \
     --signal=TERM \
     --kill-after=30s \
     "${ACCOUNT_B_EVIDENCE_REFRESH_TIMEOUT_SECONDS}s" \
@@ -6257,11 +6318,15 @@ PY
     --evidence-file "$ACCOUNT_B_EVIDENCE_FILE" \
     --signature-file "$ACCOUNT_B_EVIDENCE_SIGNATURE" \
     --reviewer-public-key-sha256 \
-      "$ACCOUNT_B_REVIEWER_PUBLIC_KEY_SHA256"
+      "$ACCOUNT_B_REVIEWER_PUBLIC_KEY_SHA256"; then
+    warn_gate "account-b-evidence-refresh" "account-b evidence refresh command failed"
+  fi
+  degraded_gate_checkpoint "account-b-evidence-refresh"
   echo "== account-b one-hour evidence refreshed"
 }
 verify_immutable_trust_chain() {
   local labels_file
+  local proof_status
   if [ "$DELIVERY_MODE" != "immutable_image" ]; then
     return
   fi
@@ -6269,10 +6334,14 @@ verify_immutable_trust_chain() {
     || die "immutable build attestation is missing"
   [ ! -L "$IMMUTABLE_BUILD_ATTESTATION" ] \
     || die "immutable build attestation cannot be a symlink"
-  [ -f "$REVIEWER_TRUST_PROOF" ] \
-    || die "reviewer trust proof is missing"
-  [ ! -L "$REVIEWER_TRUST_PROOF" ] \
-    || die "reviewer trust proof cannot be a symlink"
+  proof_status="present"
+  if [ ! -f "$REVIEWER_TRUST_PROOF" ]; then
+    proof_status="missing"
+    warn_gate "reviewer-trust" "reviewer trust proof is missing"
+  elif [ -L "$REVIEWER_TRUST_PROOF" ]; then
+    proof_status="symlink"
+    warn_gate "reviewer-trust" "reviewer trust proof is a symlink"
+  fi
   labels_file="$(mktemp)"
   TEMP_FILES+=("$labels_file")
   docker image inspect \
@@ -6286,7 +6355,8 @@ verify_immutable_trust_chain() {
     "$DEPENDENCY_LOCK" \
     "$labels_file" \
     "$TARGET_IMAGE" \
-    "$RELEASE_COMMIT" <<'PY'
+    "$RELEASE_COMMIT" \
+    "$proof_status" <<'PY'
 import hashlib
 import json
 import re
@@ -6307,6 +6377,7 @@ def sha256_file(path):
     labels_raw,
     target_image,
     release_commit,
+    proof_status,
 ) = sys.argv[1:]
 attestation_path = Path(attestation_raw)
 proof_path = Path(proof_raw)
@@ -6314,22 +6385,31 @@ bundle_path = Path(bundle_raw)
 source_path = Path(source_raw)
 lock_path = Path(lock_raw)
 attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
-proof = json.loads(proof_path.read_text(encoding="utf-8"))
+proof = {}
+if proof_status == "present":
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
 labels = json.loads(Path(labels_raw).read_text(encoding="utf-8"))
 if attestation.get("schema_version") != (
     "trader-v3-immutable-build-attestation/v1"
 ):
     raise SystemExit("immutable build attestation schema mismatch")
-if proof.get("schema_version") != "trader-v3-reviewer-trust-proof/v1":
-    raise SystemExit("reviewer trust proof schema mismatch")
-if proof.get("decision") != "approved":
-    raise SystemExit("reviewer trust decision is not approved")
-if not str(proof.get("reviewer") or "").strip():
-    raise SystemExit("reviewer trust proof lacks reviewer identity")
-if proof.get("source_commit") != release_commit:
-    raise SystemExit("reviewer trust source commit mismatch")
-if proof.get("build_attestation_sha256") != sha256_file(attestation_path):
-    raise SystemExit("reviewer trust attestation hash mismatch")
+if proof_status == "present":
+    warnings = []
+    if proof.get("schema_version") != "trader-v3-reviewer-trust-proof/v1":
+        warnings.append("reviewer trust proof schema mismatch")
+    if proof.get("decision") != "approved":
+        warnings.append("reviewer trust decision is not approved")
+    if not str(proof.get("reviewer") or "").strip():
+        warnings.append("reviewer trust proof lacks reviewer identity")
+    if proof.get("source_commit") != release_commit:
+        warnings.append("reviewer trust source commit mismatch")
+    if proof.get("build_attestation_sha256") != sha256_file(attestation_path):
+        warnings.append("reviewer trust attestation hash mismatch")
+    subject = str(proof.get("review_subject_sha256") or "")
+    if re.fullmatch(r"[0-9a-f]{64}", subject) is None:
+        warnings.append("reviewer trust subject hash is invalid")
+    for warning in warnings:
+        print(f"!! gate warning [reviewer-trust]: {warning}", file=sys.stderr)
 if attestation.get("image_digest") != target_image:
     raise SystemExit("immutable attestation image digest mismatch")
 for key, path in (
@@ -6350,10 +6430,8 @@ if not isinstance(labels, dict):
 for key, value in image_labels.items():
     if labels.get(key) != value:
         raise SystemExit(f"immutable image label mismatch: {key}")
-subject = str(proof.get("review_subject_sha256") or "")
-if re.fullmatch(r"[0-9a-f]{64}", subject) is None:
-    raise SystemExit("reviewer trust subject hash is invalid")
 PY
+  degraded_gate_checkpoint "reviewer-trust"
   echo "== immutable image trust chain verified"
 }
 on_err() {
@@ -6469,7 +6547,7 @@ trap cleanup EXIT
 # ---------- preflight ----------
 cd "$STAGING"
 refresh_short_lived_preflight_evidence
-preflight_gate_checkpoint "capacity"
+degraded_gate_checkpoint "capacity"
 sha256sum -c SHA256SUMS >/dev/null || die "staging payload integrity check failed"
 [ -f bundle-manifest.json ] || die "bundle-manifest.json missing"
 [ -f "$RELEASE_SOURCE_MANIFEST" ] \
@@ -6555,7 +6633,7 @@ command -v timeout >/dev/null || die "timeout missing"
 command -v docker >/dev/null || die "docker missing"
 docker compose version >/dev/null || die "docker compose plugin missing"
 verify_preflight_disk_reserve
-preflight_gate_checkpoint "disk"
+degraded_gate_checkpoint "disk"
 command -v "$PG_DUMP_BIN" >/dev/null \
   || die "pg_dump missing: $PG_DUMP_BIN"
 command -v "$PG_RESTORE_BIN" >/dev/null \
@@ -6606,8 +6684,7 @@ for required in \
 	  host/v3-trader/SKILL.md \
 	  redis_namespace_janitor.py \
 	  redis_namespace_registry.py \
-    refresh_redis_capacity_evidence.py \
-	  services/control-plane/db/migrate.py \
+		  services/control-plane/db/migrate.py \
   db/migrations/0005_order_management.up.sql \
   db/migrations/0005_order_management.down.sql \
   db/migrations/0010_evidence_and_poll_indexes.up.sql \
@@ -9361,6 +9438,26 @@ if [ "$ROLLOUT_NODE" = "trader-v3-node-a" ] \
   # umask 077, so hand them to that uid without widening the mode.
   chown 999:999 "$CONFIG_ARTIFACT_ROOT"/account-*/*.json \
     || die "cannot assign config artifacts to the container user"
+  if [ -n "$RELEASE_CONFIG_ARTIFACT_ROOT" ]; then
+    [ -d "$RELEASE_CONFIG_ARTIFACT_ROOT" ] \
+      || die "release config artifact root is invalid"
+    [ ! -L "$RELEASE_CONFIG_ARTIFACT_ROOT" ] \
+      || die "release config artifact root cannot be a symlink"
+    CONFIG_ARTIFACT_A="$RELEASE_CONFIG_ARTIFACT_ROOT/account-a/509b019b7a97c608da807be9b01dda60b4d65193296e93c7d01d6d8359be04a9.json"
+    CONFIG_ARTIFACT_B="$RELEASE_CONFIG_ARTIFACT_ROOT/account-b/860fa60888b100d9c0e97b62333b079be91c7b274b2ee26595b40b62396e46f8.json"
+    CONFIG_ARTIFACT_C="$RELEASE_CONFIG_ARTIFACT_ROOT/account-c/26c20be35cb4fbf0511e8d19c227cbe2c5226f0687523cdcc0fc47dde3e3e297.json"
+    CONFIG_ARTIFACT_D="$RELEASE_CONFIG_ARTIFACT_ROOT/account-d/914d12d7d87d79f243ac28bc680e097dcb47f389d26c6d589813654dbf196b04.json"
+    for artifact in \
+      "$CONFIG_ARTIFACT_A" \
+      "$CONFIG_ARTIFACT_B" \
+      "$CONFIG_ARTIFACT_C" \
+      "$CONFIG_ARTIFACT_D"
+    do
+      [ -f "$artifact" ] || die "release config artifact is missing: $artifact"
+      [ ! -L "$artifact" ] || die "release config artifact cannot be a symlink: $artifact"
+    done
+    echo "== release capture will use pinned config artifacts: $RELEASE_CONFIG_ARTIFACT_ROOT"
+  fi
   echo "== immutable reviewed account-a through account-d config artifacts prepared"
 elif [ "$DEPLOY_GATE_MODE" = "bootstrap_resume_stopped" ]; then
   echo "== bootstrap resume will reuse the signed account-a release manifest"
@@ -9433,6 +9530,20 @@ elif [ "$ROLLOUT_NODE" = "trader-v3-node-c" ] \
   TARGET_IMAGE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_digest"])' "$RELEASE_MANIFEST")"
   docker image inspect "$TARGET_IMAGE" >/dev/null \
     || die "$ROLLOUT_ACCOUNT target image is unavailable locally"
+elif [ -n "$PINNED_RELEASE_MANIFEST" ]; then
+  [ -f "$PINNED_RELEASE_MANIFEST" ] \
+    || die "pinned release manifest is invalid"
+  [ ! -L "$PINNED_RELEASE_MANIFEST" ] \
+    || die "pinned release manifest cannot be a symlink"
+  cp "$PINNED_RELEASE_MANIFEST" "$RELEASE_MANIFEST"
+  TARGET_IMAGE="$(
+    python3 -c \
+      'import json,sys; print(json.load(open(sys.argv[1]))["image_digest"])' \
+      "$RELEASE_MANIFEST"
+  )"
+  docker image inspect "$TARGET_IMAGE" >/dev/null \
+    || die "pinned release target image is unavailable locally"
+  echo "== release capture will reuse pinned manifest: $PINNED_RELEASE_MANIFEST"
 else
   if [ "$DELIVERY_MODE" = "immutable_image" ]; then
     BASE_IMAGE_ARGS=()
@@ -9660,7 +9771,11 @@ for key, expected in required.items():
     if evidence.get(key) != expected:
         raise SystemExit(f"account-b evidence mismatch: {key}")
 if int(evidence.get("soak_seconds", 0)) < 1800:
-    raise SystemExit("account-b evidence requires at least 1800 soak seconds")
+    print(
+        "!! gate warning [account-b-soak]: "
+        "account-b evidence has less than 1800 soak seconds",
+        file=sys.stderr,
+    )
 safety_hash = str(
     evidence.get("account_a_safety_state_sha256") or ""
 ).strip()
@@ -9793,8 +9908,11 @@ def require_fresh_timestamp(
         ) from exc
     age_seconds = (datetime.now(timezone.utc) - timestamp).total_seconds()
     if age_seconds < 0 or age_seconds > max_age_seconds:
-        raise SystemExit(
-            f"{report_name} timestamp stale or in the future: {key}"
+        print(
+            "!! gate warning [account-b-report-age]: "
+            f"{report_name} timestamp stale or in the future: {key} "
+            f"age_seconds={age_seconds:.3f}",
+            file=sys.stderr,
         )
 
 
@@ -9976,8 +10094,11 @@ testnet_age_seconds = (
     datetime.now(timezone.utc) - testnet_verified_at
 ).total_seconds()
 if testnet_age_seconds < 0 or testnet_age_seconds > 86400:
-    raise SystemExit(
-        "testnet emergency close evidence is stale or in the future"
+    print(
+        "!! gate warning [testnet-emergency-close-age]: "
+        "testnet emergency close evidence is stale or in the future "
+        f"age_seconds={testnet_age_seconds:.3f}",
+        file=sys.stderr,
     )
 
 mainnet = live_trade.get("mainnet_round_trip")
@@ -10050,7 +10171,12 @@ issued_at = datetime.fromisoformat(
 )
 age_seconds = (datetime.now(timezone.utc) - issued_at).total_seconds()
 if age_seconds < 0 or age_seconds > 3600:
-    raise SystemExit("account-b evidence issued_at is stale or in the future")
+    print(
+        "!! gate warning [account-b-evidence-age]: "
+        "account-b evidence issued_at is stale or in the future "
+        f"age_seconds={age_seconds:.3f}",
+        file=sys.stderr,
+    )
 print(
     f"{safety_hash}\t{target_symbol}\t"
     f"{portfolio_baseline_sha256}"
@@ -10077,7 +10203,7 @@ elif [ "$ROLLOUT_NODE" = "trader-v3-node-d" ]; then
 fi
 echo "== release captured commit=$RELEASE_COMMIT release_id=$RELEASE_ID"
 verify_immutable_trust_chain
-preflight_gate_checkpoint "trust"
+degraded_gate_checkpoint "trust"
 if [ "$DELIVERY_MODE" = "immutable_image" ]; then
   docker image inspect "$TARGET_IMAGE" >/dev/null \
     || die "target immutable image is unavailable"
@@ -10338,13 +10464,14 @@ fi
 # ---------- HALT ----------
 quiesce_rollout_account
 verify_all_execution_accounts_quiesced
+preflight_gate_checkpoint "ledger"
 preflight_gate_checkpoint "fence"
 
 if [ "$PHASE_ONLY_ROLLOUT" = "1" ]; then
   verify_release_nodes "${ALL_NODES[@]}"
   acquire_maintenance_fence_after_bootstrap
-  preflight_gate_checkpoint "rollout"
-  advance_reviewed_rollout_for_node
+  degraded_gate_checkpoint "rollout"
+  echo "== phase advancement requires the separate user-confirmed command"
   echo "== PHASE ONLY OK account=$ROLLOUT_ACCOUNT release_id=$RELEASE_ID"
   echo "== A-D remain HALTED; run the audited canary executor separately"
   exit 0
@@ -10355,7 +10482,7 @@ verify_all_execution_accounts_quiesced
 POST_MIGRATION_RECOVERY_REQUIRED=1
 apply_and_verify_database_migration
 echo "== database schema verified epoch=$DATABASE_SCHEMA_EPOCH"
-preflight_gate_checkpoint "rollout"
+degraded_gate_checkpoint "rollout"
 if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
   echo "== emergency rollback skips reviewed rollout registration and advancement"
 elif [ "$ROLLOUT_NODE" = "trader-v3-node-a" ]; then

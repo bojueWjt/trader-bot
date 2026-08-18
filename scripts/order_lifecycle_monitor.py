@@ -689,8 +689,12 @@ def _exchange_state_snapshots() -> dict[str, dict]:
 def _heartbeat_open_order_snapshot() -> tuple[list[dict] | None, float | None]:
     rows = q(
         "SELECT node_id, EXTRACT(EPOCH FROM (now() - last_seen_at)), "
-        "COALESCE(payload->'open_orders','[]'::jsonb)::text "
-        "FROM node_heartbeats WHERE payload ? 'open_orders' ORDER BY last_seen_at DESC"
+        "(COALESCE(regular_orders,'[]'::jsonb) || "
+        "COALESCE(algo_orders,'[]'::jsonb))::text "
+        "FROM node_heartbeats "
+        "WHERE jsonb_array_length(COALESCE(regular_orders,'[]'::jsonb)) > 0 "
+        "OR jsonb_array_length(COALESCE(algo_orders,'[]'::jsonb)) > 0 "
+        "ORDER BY last_seen_at DESC"
     )
     if not rows:
         return None, None

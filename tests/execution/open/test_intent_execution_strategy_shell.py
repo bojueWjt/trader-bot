@@ -2385,6 +2385,60 @@ class StrategyShellTest(unittest.TestCase):
             "live_entry_mark_price_unavailable",
         )
 
+    def test_live_market_entry_uses_fallback_mark_snapshot(self) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("BTCUSDT-PERP.BINANCE", "100"),),
+            mark_price=False,
+            fallback_mark_price="99",
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            order_type="MARKET",
+            quantity="1",
+            price=None,
+        )
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertTrue(submitted)
+        self.assertEqual(
+            strategy.submitted_orders,
+            [plan.client_order_id],
+        )
+        self.assertEqual(strategy.denials, [])
+
+    def test_live_market_entry_rejects_stale_fallback_mark_snapshot(
+        self,
+    ) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("BTCUSDT-PERP.BINANCE", "100"),),
+            mark_price=False,
+            fallback_mark_price="99",
+            fallback_mark_price_at=datetime(
+                2026,
+                8,
+                8,
+                11,
+                59,
+                49,
+                tzinfo=timezone.utc,
+            ),
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            order_type="MARKET",
+            quantity="1",
+            price=None,
+        )
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertFalse(submitted)
+        self.assertEqual(
+            strategy.denials[-1].reason,
+            "live_entry_mark_price_stale",
+        )
+
     def test_live_limit_entry_rejects_stale_mark_price(self) -> None:
         strategy = _LiveEntrySubmitStrategy(
             inventory=(("BTCUSDT-PERP.BINANCE", "100"),),
@@ -4408,6 +4462,8 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         final_price: str | None = None,
         mark_price: str | bool = "100",
         mark_price_at: datetime | None = None,
+        fallback_mark_price: str | bool = False,
+        fallback_mark_price_at: datetime | None = None,
         state_dir: Path | None = None,
     ) -> None:
         self.submitted_orders: list[str] = []
@@ -4417,8 +4473,23 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         self._final_price = final_price
         self._mark_price = mark_price
         self._mark_price_at = mark_price_at
+        self._fallback_mark_price = fallback_mark_price
+        self._fallback_mark_price_at = fallback_mark_price_at
         if self._mark_price_at is None:
             self._mark_price_at = datetime(
+                2026,
+                8,
+                8,
+                11,
+                59,
+                55,
+                tzinfo=timezone.utc,
+            )
+        if (
+            self._fallback_mark_price is not False
+            and self._fallback_mark_price_at is None
+        ):
+            self._fallback_mark_price_at = datetime(
                 2026,
                 8,
                 8,
@@ -4449,6 +4520,9 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
                 live_entry_notional_inventory=inventory,
             )
         )
+        self.set_live_entry_mark_snapshot_getter(
+            self._fallback_mark_snapshot
+        )
 
     def _cache_instrument(self, instrument_id: str):
         return SimpleNamespace(id=instrument_id)
@@ -4472,6 +4546,21 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         return SimpleNamespace(
             value=self._mark_price,
             ts_event=int(self._mark_price_at.timestamp() * 1_000_000_000),
+        )
+
+    def _fallback_mark_snapshot(self, instrument_id: str):
+        del instrument_id
+        if (
+            self._fallback_mark_price is False
+            or self._fallback_mark_price_at is None
+        ):
+            return False
+        return SimpleNamespace(
+            value=self._fallback_mark_price,
+            ts_event=int(
+                self._fallback_mark_price_at.timestamp()
+                * 1_000_000_000
+            ),
         )
 
     def _cache_orders(self, instrument_id):

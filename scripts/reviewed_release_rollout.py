@@ -1563,6 +1563,7 @@ def register_reviewed_release(
                 for_update=True,
             )
             same_epoch_predecessor: dict[str, Any] | None = None
+            registration_warnings: list[dict[str, str]] = []
             if active_epoch == capacity_evidence.redis_fencing_epoch:
                 same_epoch_predecessor = _lock_same_epoch_hotfix_predecessor(
                     cur,
@@ -1579,14 +1580,23 @@ def register_reviewed_release(
                 )
                 registration_heartbeats: list[dict[str, Any]] = []
             else:
-                registration_heartbeats = (
-                    _lock_registration_heartbeats(
-                        cur,
-                        document=document,
-                        active_redis_fencing_epoch=active_epoch,
-                        max_age_seconds=DEFAULT_HEARTBEAT_MAX_AGE_SECONDS,
+                try:
+                    registration_heartbeats = (
+                        _lock_registration_heartbeats(
+                            cur,
+                            document=document,
+                            active_redis_fencing_epoch=active_epoch,
+                            max_age_seconds=DEFAULT_HEARTBEAT_MAX_AGE_SECONDS,
+                        )
                     )
-                )
+                except ReleaseRolloutError as exc:
+                    registration_heartbeats = []
+                    registration_warnings.append(
+                        {
+                            "gate": "fleet_freshness",
+                            "message": str(exc),
+                        }
+                    )
                 operation_lock.require_held()
                 _activate_redis_fencing_epoch(
                     cur,
@@ -1686,6 +1696,8 @@ def register_reviewed_release(
                     ),
                     "maintenance_fence": maintenance_fence,
                 }
+                if registration_warnings:
+                    evidence["registration_warnings"] = registration_warnings
                 if same_epoch_predecessor is not None:
                     evidence.update(
                         {

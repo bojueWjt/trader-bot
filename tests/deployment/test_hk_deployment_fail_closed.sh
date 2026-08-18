@@ -323,17 +323,18 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" 'CONTROL_PLANE_ISOLATION_ACTIVATED=1'
   assert_contains "$text" '--rollback "$BACKUP_ROOT/control-plane-isolation"'
   assert_contains "$text" 'reviewed_release_rollout.py'
-  assert_contains "$text" '--to-phase account_b_rollout'
-  assert_contains "$text" '--to-phase account_c_rollout'
-  assert_contains "$text" '--to-phase account_d_rollout'
+  assert_not_contains "$text" '--to-phase account_b_rollout'
+  assert_not_contains "$text" '--to-phase account_c_rollout'
+  assert_not_contains "$text" '--to-phase account_d_rollout'
   assert_not_contains "$text" '--to-phase fleet_complete'
+  assert_contains "$text" 'phase advancement requires the separate user-confirmed command'
   assert_contains "$rollout" 'PHASE_FLEET_COMPLETE'
   assert_contains "$rollout" 'def finalize_fleet_rollout('
   assert_contains "$rollout" '"finalize"'
-  assert_contains "$text" '--closure-report "$PRIOR_CLOSURE_REPORT_COPY"'
-  assert_contains "$text" \
+  assert_not_contains "$text" '--closure-report "$PRIOR_CLOSURE_REPORT_COPY"'
+  assert_not_contains "$text" \
     '--closure-signature "$PRIOR_CLOSURE_SIGNATURE_COPY"'
-  assert_contains "$text" \
+  assert_not_contains "$text" \
     '--closure-public-key "$PRIOR_CLOSURE_PUBLIC_KEY"'
   assert_contains "$text" '--to-phase aborted'
   assert_contains "$generator" 'NAUTILUS_MAX_NOTIONAL_PER_ORDER_JSON|'
@@ -1724,7 +1725,7 @@ capture_release = text.index(
     prepare_d,
 )
 trust_gate = text.index(
-    'preflight_gate_checkpoint "trust"',
+    'degraded_gate_checkpoint "trust"',
     capture_release,
 )
 image_gate = text.index(
@@ -1765,11 +1766,11 @@ phase_only_branch = text.index(
     fence_gate,
 )
 phase_only_rollout_gate = text.index(
-    'preflight_gate_checkpoint "rollout"',
+    'degraded_gate_checkpoint "rollout"',
     phase_only_branch,
 )
 phase_only_rollout_mutation = text.index(
-    "advance_reviewed_rollout_for_node",
+    "phase advancement requires the separate user-confirmed command",
     phase_only_branch,
 )
 migrate = text.index(
@@ -1777,7 +1778,7 @@ migrate = text.index(
     fence_gate,
 )
 rollout_gate = text.index(
-    'preflight_gate_checkpoint "rollout"',
+    'degraded_gate_checkpoint "rollout"',
     migrate,
 )
 rollout_registration = text.index(
