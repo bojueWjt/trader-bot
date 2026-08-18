@@ -698,6 +698,42 @@ bash "$ISOLATION_SCRIPT" --rollback "$ROLLBACK_ROOT"
     assert "CONTROL_PLANE_ISOLATION_ROLLBACK_OK" in result.stdout
 
 
+def test_inherited_frozen_fence_skips_heartbeat_freshness() -> None:
+    source = "\n".join(
+        (
+            _isolation_function_source("die"),
+            _isolation_function_source("verify_maintenance_fence"),
+            """
+maintenance_fence_command() {
+  printf '%s\n' "$*" >&2
+}
+MAINTENANCE_FENCE_OWNERSHIP=inherited
+MAINTENANCE_FENCE_ACQUIRED=1
+MAINTENANCE_FENCE_VERIFICATION_MODE=frozen
+MAINTENANCE_FENCE_EVIDENCE_SHA256=$(printf '%064d' 0)
+MAINTENANCE_FENCE_ID=00000000-0000-4000-8000-000000000001
+MAINTENANCE_FENCE_OWNER_TOKEN=$(printf '%064d' 1)
+MAINTENANCE_FENCE_LEASE_SECONDS=120
+MAINTENANCE_HEARTBEAT_MAX_AGE_SECONDS=15
+verify_maintenance_fence isolation-frozen-test
+""",
+        )
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", f"set -Eeuo pipefail\n{source}"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "verify-frozen" in result.stderr
+    assert "--account-evidence-sha256" in result.stderr
+    assert "--heartbeat-max-age-seconds" not in result.stderr
+
+
 def test_rollback_failure_stops_all_control_plane_roles(tmp_path: Path) -> None:
     env, _systemd_root, state_root, _caddy_file = _write_fixture(tmp_path)
     env["FAKE_FAIL_DAEMON_RELOAD_AT"] = "2"

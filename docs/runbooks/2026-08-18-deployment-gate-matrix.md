@@ -9,6 +9,9 @@
 - `execute` 重跑完整 `preflight`，完成在线 HALT、fence、migration 和 rollout
   一致性检查后，才将 `DOWNTIME_WINDOW_ENTERED` 设为 `1` 并调用
   `stop_recreate_nodes`。
+- 停机前 fence 每次重新采集 A-D heartbeat，并原子刷新 receipt；停机后按
+  receipt 内 `account_evidence_sha256` 复验 owner、lease 和 Redis fencing
+  epoch，不再要求节点产生新 heartbeat。
 
 ## 门禁矩阵
 
@@ -40,9 +43,9 @@
 | Backup readiness | PostgreSQL custom dump、restore list、SHA256、旧镜像/容器 inspect、旧文件索引 | 本次 deploy run | 每次 preflight 自动生成；`pg_dump`/`pg_restore --list` 各受 300s timeout 约束 | 13h |
 | Recovery readiness | post-migration release payload、recreate scripts、container env、expectation hash | 本次 deploy run | 每次 preflight 自动生成并验证 | 13h |
 | Online HALT | 控制面 ACK、A-D HALTED 状态、heartbeat sequence 持续推进 | 15s | execute 自动发送/验证；失败时容器继续运行 | 13h |
-| Maintenance fence | operation lock、DB fence row、owner token、A-D HALTED heartbeat | lease 120s；heartbeat 15s | execute 在停机前自动 acquire/verify；每个安装阶段续验 | 13h |
+| Maintenance fence | operation lock、DB fence row、owner token、A-D HALTED heartbeat、receipt canonical `account_evidence_sha256`、active Redis fencing epoch | lease 120s 自动续租；停机前 heartbeat 15s；停机后冻结证据 | execute 在停机前在线 acquire/verify 并原子刷新 receipt；停机后主脚本、isolation、recovery、rollback 均以 `verify-frozen` 复验 owner/lease/hash/epoch | 13h |
 | Migration/schema | SQL hash、`schema_migrations`、required epochs、事务提交 marker | 当前事务快照 | execute 在停机前自动 apply/verify；幂等迁移复用已提交结果 | 13h |
-| Stop boundary | `DOWNTIME_WINDOW_ENTERED=0/1`、Docker mutation trace | 本次 deploy process | 仅全部前置 gate PASS 后置 `1`；此前 ERR 只释放 fence 并退出 | 13h |
+| Stop boundary | `DOWNTIME_WINDOW_ENTERED=0/1`、fence verification mode、Docker mutation trace | 本次 deploy process | 仅全部前置 gate PASS 后置 `1`，同时把 inherited fence 切换为 frozen；此前 ERR 只释放 fence 并退出 | 13h |
 | Recreate/ready | recreate plan、resource evidence、`/ready`、version endpoint、`verify-live` | 启动后实时 | execute 在停机窗口内自动执行和验证 | 13h |
 | Gate-failure acceptance | 六类注入 `capacity/disk/trust/image/fence/rollout`；A-D heartbeat sequence；Docker event/mutation 计数 | 每个 release | CI 自动跑 fail-closed harness；上线前对目标 release 再跑一次 | 13h |
 

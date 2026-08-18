@@ -800,6 +800,63 @@ test_die_routes_failure_through_err_trap() {
   assert_contains "$output" "ERR_TRAP_FIRED"
 }
 
+test_maintenance_fence_dispatches_to_frozen_evidence_after_downtime() {
+  local dispatcher_definition
+  local frozen_definition
+  local online_definition
+  local output
+  dispatcher_definition=$(extract_function verify_maintenance_fence)
+
+  output=$(
+    DISPATCHER_DEFINITION="$dispatcher_definition" \
+    DOWNTIME_WINDOW_ENTERED=0 \
+    DEPLOY_GATE_MODE=maintenance_fence \
+      bash -c '
+        verify_online_maintenance_fence() {
+          printf "online:%s\n" "$1"
+        }
+        verify_frozen_maintenance_fence() {
+          printf "frozen:%s\n" "$1"
+        }
+        eval "$DISPATCHER_DEFINITION"
+        verify_maintenance_fence "pre-stop-test"
+      '
+  )
+  if [ "$output" != "online:pre-stop-test" ]; then
+    fail "pre-stop maintenance fence did not use online verification"
+  fi
+
+  output=$(
+    DISPATCHER_DEFINITION="$dispatcher_definition" \
+    DOWNTIME_WINDOW_ENTERED=1 \
+    DEPLOY_GATE_MODE=maintenance_fence \
+      bash -c '
+        verify_online_maintenance_fence() {
+          printf "online:%s\n" "$1"
+        }
+        verify_frozen_maintenance_fence() {
+          printf "frozen:%s\n" "$1"
+        }
+        eval "$DISPATCHER_DEFINITION"
+        verify_maintenance_fence "post-stop-test"
+      '
+  )
+  if [ "$output" != "frozen:post-stop-test" ]; then
+    fail "post-stop maintenance fence did not use frozen verification"
+  fi
+
+  frozen_definition=$(extract_function verify_frozen_maintenance_fence)
+  online_definition=$(extract_function verify_online_maintenance_fence)
+  assert_contains "$frozen_definition" "maintenance-fence"
+  assert_contains "$frozen_definition" "verify-frozen"
+  assert_contains "$frozen_definition" "--account-evidence-sha256"
+  assert_not_contains "$frozen_definition" "--heartbeat-max-age-seconds"
+  assert_contains "$online_definition" "--heartbeat-max-age-seconds"
+  assert_contains "$online_definition" '>"$tmp_state"'
+  assert_contains "$online_definition" \
+    'mv "$tmp_state" "$MAINTENANCE_FENCE_STATE"'
+}
+
 test_node_recreate_is_sequential_and_memory_gated() {
   local case_dir="$TMP_DIR/node-recreate-memory-gate"
   local trader_root="$case_dir/trader-v3"
@@ -1725,9 +1782,13 @@ downtime = text.index(
     "\nDOWNTIME_WINDOW_ENTERED=1\n",
     rollout_gate,
 )
+frozen_fence_context = text.index(
+    "\nload_maintenance_fence_state\n",
+    downtime,
+)
 stop_nodes = text.index(
     "\nstop_recreate_nodes\n",
-    downtime,
+    frozen_fence_context,
 )
 install = text.index("# ---------- install ----------", stop_nodes)
 recreate_section = text.index(
@@ -1771,6 +1832,7 @@ if not (
     < rollout_gate
     < rollout_registration
     < downtime
+    < frozen_fence_context
     < stop_nodes
     < install
     < recreate_section
@@ -2704,6 +2766,7 @@ test_account_stall_operation_lock_is_exclusive_and_configurable
 test_pre_migration_database_backup_is_bounded_and_validated
 test_pre_migration_database_backup_rejects_invalid_restore_listing
 test_die_routes_failure_through_err_trap
+test_maintenance_fence_dispatches_to_frozen_evidence_after_downtime
 test_node_recreate_is_sequential_and_memory_gated
 test_bootstrap_generated_recreate_cleanup_preserves_existing_scripts
 test_existing_recreate_mode_remains_compatible

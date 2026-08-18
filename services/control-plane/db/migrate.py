@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -11,6 +12,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import psycopg2
+from psycopg2.extras import Json
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -252,6 +254,200 @@ def verify_maintenance_fence(
     return _maintenance_fence_receipt(row)
 
 
+def verify_frozen_maintenance_fence(
+    conn,
+    *,
+    fence_id: UUID,
+    owner_token: str,
+    stage: str,
+    lease_seconds: int,
+    account_evidence_sha256: str,
+) -> dict[str, object]:
+    if re.fullmatch(r"[0-9a-f]{64}", owner_token) is None:
+        raise RuntimeError("maintenance owner token is invalid")
+    if re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,127}", stage) is None:
+        raise RuntimeError("maintenance stage is invalid")
+    if lease_seconds < 15 or lease_seconds > 300:
+        raise RuntimeError(
+            "maintenance lease must be between 15 and 300 seconds"
+        )
+    if re.fullmatch(r"[0-9a-f]{64}", account_evidence_sha256) is None:
+        raise RuntimeError("maintenance fence evidence hash is invalid")
+
+    owner_token_sha256 = hashlib.sha256(
+        owner_token.encode("utf-8")
+    ).hexdigest()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pg_advisory_xact_lock(
+                    hashtext(
+                        'trader-v3-control-plane-maintenance-fence'
+                    )
+                )
+                """
+            )
+            cur.execute(
+                """
+                SELECT operation,
+                       actor,
+                       owner_token_sha256,
+                       status,
+                       lease_version,
+                       account_evidence,
+                       expires_at > clock_timestamp()
+                FROM control_plane_maintenance_fences
+                WHERE fence_id=%s
+                FOR UPDATE
+                """,
+                (str(fence_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("maintenance fence is unavailable")
+            (
+                operation,
+                actor,
+                current_owner_token_sha256,
+                status,
+                lease_version,
+                account_evidence,
+                lease_active,
+            ) = row
+            if status != "active" or not lease_active:
+                raise RuntimeError(
+                    "maintenance fence is inactive or expired"
+                )
+            if current_owner_token_sha256 != owner_token_sha256:
+                raise RuntimeError(
+                    "maintenance fence owner token mismatch"
+                )
+
+            current_evidence_sha256 = _canonical_json_sha256(
+                account_evidence
+            )
+            if current_evidence_sha256 != account_evidence_sha256:
+                raise RuntimeError(
+                    "maintenance fence evidence hash mismatch"
+                )
+            if not isinstance(account_evidence, list):
+                raise RuntimeError(
+                    "maintenance fence account evidence is invalid"
+                )
+            evidence_epochs = set()
+            for item in account_evidence:
+                if not isinstance(item, dict):
+                    raise RuntimeError(
+                        "maintenance fence account evidence is invalid"
+                    )
+                epoch = str(item.get("redis_fencing_epoch") or "").strip()
+                if not epoch:
+                    raise RuntimeError(
+                        "maintenance fence account evidence lacks "
+                        "Redis fencing epoch"
+                    )
+                evidence_epochs.add(epoch)
+            if len(evidence_epochs) != 1:
+                raise RuntimeError(
+                    "maintenance fence account evidence has mixed "
+                    "Redis fencing epochs"
+                )
+
+            cur.execute(
+                """
+                SELECT redis_fencing_epoch::text
+                FROM redis_fencing_epochs
+                WHERE domain='trader-v3'
+                  AND status='active'
+                FOR SHARE
+                """
+            )
+            active_epoch_rows = cur.fetchall()
+            if len(active_epoch_rows) != 1:
+                raise RuntimeError(
+                    "active trader-v3 Redis fencing epoch is unavailable"
+                )
+            active_redis_fencing_epoch = str(active_epoch_rows[0][0])
+            if evidence_epochs != {active_redis_fencing_epoch}:
+                raise RuntimeError(
+                    "maintenance fence Redis fencing epoch drifted"
+                )
+
+            cur.execute(
+                """
+                UPDATE control_plane_maintenance_fences
+                SET lease_version=lease_version + 1,
+                    refreshed_at=clock_timestamp(),
+                    expires_at=clock_timestamp()
+                        + make_interval(secs => %s),
+                    last_stage=%s
+                WHERE fence_id=%s
+                  AND status='active'
+                  AND expires_at > clock_timestamp()
+                RETURNING lease_version,
+                          expires_at,
+                          account_evidence
+                """,
+                (lease_seconds, stage, str(fence_id)),
+            )
+            updated = cur.fetchone()
+            if updated is None:
+                raise RuntimeError(
+                    "maintenance fence is inactive or expired"
+                )
+            next_lease_version, expires_at, frozen_evidence = updated
+            details = {
+                "account_evidence_sha256": account_evidence_sha256,
+                "redis_fencing_epoch": active_redis_fencing_epoch,
+                "verification_mode": "frozen_pre_stop_evidence",
+            }
+            cur.execute(
+                """
+                INSERT INTO control_plane_maintenance_fence_events (
+                    fence_id,
+                    event_type,
+                    operation,
+                    actor,
+                    stage,
+                    lease_version,
+                    expires_at,
+                    account_evidence,
+                    details
+                )
+                VALUES (
+                    %s,
+                    'stage_verified',
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    str(fence_id),
+                    operation,
+                    actor,
+                    stage,
+                    next_lease_version,
+                    expires_at,
+                    Json(frozen_evidence),
+                    Json(details),
+                ),
+            )
+    return _maintenance_fence_receipt(
+        (
+            str(fence_id),
+            next_lease_version,
+            expires_at,
+            frozen_evidence,
+        )
+    )
+
+
 def release_maintenance_fence(
     conn,
     *,
@@ -279,12 +475,27 @@ def release_maintenance_fence(
 
 
 def _maintenance_fence_receipt(row) -> dict[str, object]:
+    account_evidence = row[3]
     return {
+        "schema_version": "trader-v3-maintenance-fence-receipt/v1",
         "fence_id": str(row[0]),
         "lease_version": int(row[1]),
         "expires_at": row[2].isoformat(),
-        "account_evidence": row[3],
+        "account_evidence": account_evidence,
+        "account_evidence_sha256": _canonical_json_sha256(
+            account_evidence
+        ),
     }
+
+
+def _canonical_json_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _required_uuid(value: str, label: str) -> UUID:
@@ -320,10 +531,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     acquire_parser = fence_actions.add_parser("acquire")
     verify_parser = fence_actions.add_parser("verify")
+    verify_frozen_parser = fence_actions.add_parser("verify-frozen")
     release_parser = fence_actions.add_parser("release")
     for action_parser in (
         acquire_parser,
         verify_parser,
+        verify_frozen_parser,
         release_parser,
     ):
         _add_database_source_argument(action_parser)
@@ -346,6 +559,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--heartbeat-max-age-seconds",
         type=int,
         default=15,
+    )
+
+    verify_frozen_parser.add_argument("--fence-id", required=True)
+    verify_frozen_parser.add_argument("--stage", required=True)
+    verify_frozen_parser.add_argument("--lease-seconds", type=int, default=120)
+    verify_frozen_parser.add_argument(
+        "--account-evidence-sha256",
+        required=True,
     )
 
     release_parser.add_argument("--fence-id", required=True)
@@ -393,6 +614,15 @@ def main(argv: list[str] | None = None) -> int:
                 heartbeat_max_age_seconds=(
                     args.heartbeat_max_age_seconds
                 ),
+            )
+        elif args.fence_action == "verify-frozen":
+            receipt = verify_frozen_maintenance_fence(
+                conn,
+                fence_id=fence_id,
+                owner_token=args.owner_token,
+                stage=args.stage,
+                lease_seconds=args.lease_seconds,
+                account_evidence_sha256=args.account_evidence_sha256,
             )
         else:
             receipt = release_maintenance_fence(

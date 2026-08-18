@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
+import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import ModuleType
 from uuid import uuid4
 
 import psycopg2
@@ -16,14 +21,40 @@ FOUR_ACCOUNT_ROLLOUT_UP = (
 FOUR_ACCOUNT_ROLLOUT_DOWN = (
     REPO_ROOT / "db" / "migrations" / "0013_four_account_rollout.down.sql"
 )
+MIGRATE = REPO_ROOT / "services" / "control-plane" / "db" / "migrate.py"
 ACCOUNTS = ("account-a", "account-b", "account-c", "account-d")
 REDIS_FENCING_EPOCH = "11111111-1111-4111-8111-111111111111"
+REPLACEMENT_REDIS_FENCING_EPOCH = "22222222-2222-4222-8222-222222222222"
 OWNER_TOKEN = "a" * 64
 RELEASE_ID = "release-maintenance-test"
 IMAGE_DIGEST = "sha256:" + ("1" * 64)
 CONFIG_SHA256 = "2" * 64
 DEPENDENCY_LOCK_SHA256 = "3" * 64
 SCHEMA_EPOCH = "0015_refresh_evidence_command"
+
+
+def _load_migrate_module() -> ModuleType:
+    module_name = "trader_control_plane_migrate"
+    spec = importlib.util.spec_from_file_location(module_name, MIGRATE)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("control-plane migration module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+MIGRATE_MODULE = _load_migrate_module()
+
+
+def _canonical_evidence_sha256(evidence: object) -> str:
+    encoded = json.dumps(
+        evidence,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _seed_fleet(
@@ -140,6 +171,99 @@ def _acquire(
         ),
     )
     return cur.fetchone()
+
+
+def _acquire_frozen_evidence(database_url: str) -> tuple[str, object, str]:
+    with psycopg2.connect(database_url) as conn, conn.cursor() as cur:
+        fence_id, _lease_version, _expires_at, evidence = _acquire(
+            cur,
+            lease_seconds=30,
+        )
+    return fence_id, evidence, _canonical_evidence_sha256(evidence)
+
+
+def _verify_frozen(
+    database_url: str,
+    *,
+    fence_id: str,
+    evidence_sha256: str,
+    owner_token: str = OWNER_TOKEN,
+) -> dict[str, object]:
+    conn = psycopg2.connect(database_url)
+    try:
+        return MIGRATE_MODULE.verify_frozen_maintenance_fence(
+            conn,
+            fence_id=MIGRATE_MODULE.UUID(fence_id),
+            owner_token=owner_token,
+            stage="post-stop-test",
+            lease_seconds=30,
+            account_evidence_sha256=evidence_sha256,
+        )
+    finally:
+        conn.close()
+
+
+def _replace_active_redis_fencing_epoch(cur) -> None:
+    cur.execute(
+        """
+        UPDATE redis_fencing_epochs
+        SET status='retired',
+            retired_at=now()
+        WHERE domain='trader-v3'
+          AND status='active'
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO redis_fencing_epochs (
+            redis_fencing_epoch,
+            domain,
+            status,
+            marker_sha256,
+            capacity_evidence_sha256,
+            initial_redis_run_id,
+            active_volume,
+            activated_by,
+            activated_at
+        )
+        VALUES (
+            %s, 'trader-v3', 'active', %s, %s, %s,
+            'replacement-maintenance-test-volume', 'pytest', now()
+        )
+        """,
+        (
+            REPLACEMENT_REDIS_FENCING_EPOCH,
+            "7" * 64,
+            "8" * 64,
+            "9" * 40,
+        ),
+    )
+
+
+@pytest.fixture()
+def frozen_fence_db(migrated_db: str):
+    try:
+        yield migrated_db
+    finally:
+        with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                ALTER TABLE control_plane_maintenance_fence_events
+                DISABLE TRIGGER
+                    trg_control_plane_maintenance_fence_events_append_only
+                """
+            )
+            cur.execute(
+                "DELETE FROM control_plane_maintenance_fence_events"
+            )
+            cur.execute("DELETE FROM control_plane_maintenance_fences")
+            cur.execute(
+                """
+                ALTER TABLE control_plane_maintenance_fence_events
+                ENABLE TRIGGER
+                    trg_control_plane_maintenance_fence_events_append_only
+                """
+            )
 
 
 def test_fence_acquisition_captures_exact_halted_fleet_identity(
@@ -361,6 +485,132 @@ def test_forward_migration_preserves_released_two_account_evidence(
         )
         assert cur.fetchone() == ([2, 2],)
         conn.rollback()
+
+
+def test_frozen_stage_verification_accepts_stale_heartbeats(
+    frozen_fence_db: str,
+) -> None:
+    migrated_db = frozen_fence_db
+    _seed_fleet(migrated_db)
+    fence_id, evidence, evidence_sha256 = _acquire_frozen_evidence(
+        migrated_db
+    )
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE node_heartbeats
+            SET last_seen_at=now() - interval '5 minutes'
+            """
+        )
+
+    receipt = _verify_frozen(
+        migrated_db,
+        fence_id=fence_id,
+        evidence_sha256=evidence_sha256,
+    )
+
+    assert receipt["lease_version"] == 2
+    assert receipt["account_evidence"] == evidence
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT event_type, details
+            FROM control_plane_maintenance_fence_events
+            WHERE fence_id=%s
+            ORDER BY maintenance_event_id DESC
+            LIMIT 1
+            """,
+            (fence_id,),
+        )
+        event_type, details = cur.fetchone()
+    assert event_type == "stage_verified"
+    assert details == {
+        "account_evidence_sha256": evidence_sha256,
+        "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+        "verification_mode": "frozen_pre_stop_evidence",
+    }
+
+
+def test_frozen_stage_verification_rejects_evidence_hash_drift(
+    frozen_fence_db: str,
+) -> None:
+    migrated_db = frozen_fence_db
+    _seed_fleet(migrated_db)
+    fence_id, _evidence, _evidence_sha256 = _acquire_frozen_evidence(
+        migrated_db
+    )
+
+    with pytest.raises(RuntimeError, match="evidence hash mismatch"):
+        _verify_frozen(
+            migrated_db,
+            fence_id=fence_id,
+            evidence_sha256="0" * 64,
+        )
+
+
+def test_frozen_stage_verification_rejects_owner_token_drift(
+    frozen_fence_db: str,
+) -> None:
+    migrated_db = frozen_fence_db
+    _seed_fleet(migrated_db)
+    fence_id, _evidence, evidence_sha256 = _acquire_frozen_evidence(
+        migrated_db
+    )
+
+    with pytest.raises(RuntimeError, match="owner token mismatch"):
+        _verify_frozen(
+            migrated_db,
+            fence_id=fence_id,
+            evidence_sha256=evidence_sha256,
+            owner_token="b" * 64,
+        )
+
+
+def test_frozen_stage_verification_rejects_expired_lease(
+    frozen_fence_db: str,
+) -> None:
+    migrated_db = frozen_fence_db
+    _seed_fleet(migrated_db)
+    fence_id, _evidence, evidence_sha256 = _acquire_frozen_evidence(
+        migrated_db
+    )
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE control_plane_maintenance_fences
+            SET acquired_at=now() - interval '2 minutes',
+                refreshed_at=now() - interval '1 minute',
+                expires_at=now() - interval '1 second'
+            WHERE fence_id=%s
+            """,
+            (fence_id,),
+        )
+
+    with pytest.raises(RuntimeError, match="inactive or expired"):
+        _verify_frozen(
+            migrated_db,
+            fence_id=fence_id,
+            evidence_sha256=evidence_sha256,
+        )
+
+
+def test_frozen_stage_verification_rejects_redis_epoch_drift(
+    frozen_fence_db: str,
+) -> None:
+    migrated_db = frozen_fence_db
+    _seed_fleet(migrated_db)
+    fence_id, _evidence, evidence_sha256 = _acquire_frozen_evidence(
+        migrated_db
+    )
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        _replace_active_redis_fencing_epoch(cur)
+
+    with pytest.raises(RuntimeError, match="Redis fencing epoch drifted"):
+        _verify_frozen(
+            migrated_db,
+            fence_id=fence_id,
+            evidence_sha256=evidence_sha256,
+        )
 
 
 def test_stage_verification_rejects_writer_and_release_drift(

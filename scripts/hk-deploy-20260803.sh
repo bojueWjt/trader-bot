@@ -1170,10 +1170,129 @@ PY
   ACCOUNT_STALL_MAINTENANCE_FENCE_OWNERSHIP="inherited"
   ACCOUNT_STALL_MAINTENANCE_FENCE_ID="$MAINTENANCE_FENCE_ID"
   ACCOUNT_STALL_MAINTENANCE_FENCE_OWNER_TOKEN="$ACCOUNT_STALL_OPERATION_LOCK_TOKEN"
+  ACCOUNT_STALL_MAINTENANCE_FENCE_EVIDENCE_SHA256="$(
+    maintenance_fence_evidence_sha256
+  )" || die "maintenance fence state evidence is invalid"
+  if [ "${DOWNTIME_WINDOW_ENTERED:-0}" = "1" ]; then
+    ACCOUNT_STALL_MAINTENANCE_FENCE_VERIFICATION_MODE="frozen"
+  else
+    ACCOUNT_STALL_MAINTENANCE_FENCE_VERIFICATION_MODE="online"
+  fi
   export \
     ACCOUNT_STALL_MAINTENANCE_FENCE_OWNERSHIP \
     ACCOUNT_STALL_MAINTENANCE_FENCE_ID \
-    ACCOUNT_STALL_MAINTENANCE_FENCE_OWNER_TOKEN
+    ACCOUNT_STALL_MAINTENANCE_FENCE_OWNER_TOKEN \
+    ACCOUNT_STALL_MAINTENANCE_FENCE_EVIDENCE_SHA256 \
+    ACCOUNT_STALL_MAINTENANCE_FENCE_VERIFICATION_MODE
+}
+
+maintenance_fence_evidence_sha256() {
+  python3 - "$MAINTENANCE_FENCE_STATE" <<'PY'
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+evidence = payload.get("account_evidence")
+if not isinstance(evidence, list):
+    raise SystemExit("maintenance fence state lacks account_evidence")
+encoded = json.dumps(
+    evidence,
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+canonical_sha256 = hashlib.sha256(encoded).hexdigest()
+recorded_sha256 = str(
+    payload.get("account_evidence_sha256") or ""
+).strip()
+if re.fullmatch(r"[0-9a-f]{64}", recorded_sha256) is None:
+    raise SystemExit(
+        "maintenance fence state lacks canonical evidence hash"
+    )
+if recorded_sha256 != canonical_sha256:
+    raise SystemExit("maintenance fence state evidence hash mismatch")
+print(canonical_sha256)
+PY
+}
+
+verify_online_maintenance_fence() {
+  local stage="$1"
+  local tmp_state="$MAINTENANCE_FENCE_STATE.new"
+  verify_account_stall_operation_lock
+  [ "$MAINTENANCE_FENCE_ACQUIRED" = "1" ] \
+    || die "maintenance fence is not acquired"
+  rm -f "$tmp_state"
+  if ! timeout \
+      --signal=TERM \
+      --kill-after=5s \
+      "${ACCOUNT_STALL_OPERATION_TIMEOUT_SECONDS}s" \
+      "$T/.venv-cp/bin/python" \
+      "$MIGRATION_RUNNER" \
+      maintenance-fence \
+      verify \
+      --database-env-file "$T/.env.v3" \
+      --fence-id "$MAINTENANCE_FENCE_ID" \
+      --owner-token "$ACCOUNT_STALL_OPERATION_LOCK_TOKEN" \
+      --stage "$stage" \
+      --lease-seconds "$ACCOUNT_STALL_FENCE_LEASE_SECONDS" \
+      --heartbeat-max-age-seconds \
+        "$ACCOUNT_STALL_HEARTBEAT_MAX_AGE_SECONDS" \
+      >"$tmp_state"; then
+    rm -f "$tmp_state"
+    return 1
+  fi
+  chmod 0400 "$tmp_state" || {
+    rm -f "$tmp_state"
+    return 1
+  }
+  mv "$tmp_state" "$MAINTENANCE_FENCE_STATE" || {
+    rm -f "$tmp_state"
+    return 1
+  }
+  load_maintenance_fence_state
+}
+
+verify_frozen_maintenance_fence() {
+  local stage="$1"
+  local evidence_sha256
+  local tmp_state="$MAINTENANCE_FENCE_STATE.new"
+  verify_account_stall_operation_lock
+  [ "$MAINTENANCE_FENCE_ACQUIRED" = "1" ] \
+    || die "maintenance fence is not acquired"
+  evidence_sha256="$(maintenance_fence_evidence_sha256)" \
+    || die "maintenance fence frozen evidence is invalid"
+  rm -f "$tmp_state"
+  if ! timeout \
+      --signal=TERM \
+      --kill-after=5s \
+      "${ACCOUNT_STALL_OPERATION_TIMEOUT_SECONDS}s" \
+      "$T/.venv-cp/bin/python" \
+      "$MIGRATION_RUNNER" \
+      maintenance-fence \
+      verify-frozen \
+      --database-env-file "$T/.env.v3" \
+      --fence-id "$MAINTENANCE_FENCE_ID" \
+      --owner-token "$ACCOUNT_STALL_OPERATION_LOCK_TOKEN" \
+      --stage "$stage" \
+      --lease-seconds "$ACCOUNT_STALL_FENCE_LEASE_SECONDS" \
+      --account-evidence-sha256 "$evidence_sha256" \
+      >"$tmp_state"; then
+    rm -f "$tmp_state"
+    return 1
+  fi
+  chmod 0400 "$tmp_state" || {
+    rm -f "$tmp_state"
+    return 1
+  }
+  mv "$tmp_state" "$MAINTENANCE_FENCE_STATE" || {
+    rm -f "$tmp_state"
+    return 1
+  }
+  load_maintenance_fence_state
 }
 
 verify_maintenance_fence() {
@@ -1182,25 +1301,11 @@ verify_maintenance_fence() {
     verify_bootstrap_stopped_gate "$stage"
     return
   fi
-  verify_account_stall_operation_lock
-  [ "$MAINTENANCE_FENCE_ACQUIRED" = "1" ] \
-    || die "maintenance fence is not acquired"
-  timeout \
-    --signal=TERM \
-    --kill-after=5s \
-    "${ACCOUNT_STALL_OPERATION_TIMEOUT_SECONDS}s" \
-    "$T/.venv-cp/bin/python" \
-    "$MIGRATION_RUNNER" \
-    maintenance-fence \
-    verify \
-    --database-env-file "$T/.env.v3" \
-    --fence-id "$MAINTENANCE_FENCE_ID" \
-    --owner-token "$ACCOUNT_STALL_OPERATION_LOCK_TOKEN" \
-    --stage "$stage" \
-    --lease-seconds "$ACCOUNT_STALL_FENCE_LEASE_SECONDS" \
-    --heartbeat-max-age-seconds \
-      "$ACCOUNT_STALL_HEARTBEAT_MAX_AGE_SECONDS" \
-    >/dev/null
+  if [ "${DOWNTIME_WINDOW_ENTERED:-0}" = "1" ]; then
+    verify_frozen_maintenance_fence "$stage"
+    return
+  fi
+  verify_online_maintenance_fence "$stage"
 }
 
 release_maintenance_fence() {
@@ -8371,6 +8476,14 @@ try:
                     "lease_version": int(row[1]),
                     "expires_at": row[2].isoformat(),
                     "account_evidence": row[3],
+                    "account_evidence_sha256": hashlib.sha256(
+                        json.dumps(
+                            row[3],
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    ).hexdigest(),
                 }
 
     if migration_commit_marker is not False:
@@ -10246,6 +10359,7 @@ elif [ "$ROLLOUT_NODE" = "trader-v3-node-a" ]; then
 fi
 
 DOWNTIME_WINDOW_ENTERED=1
+load_maintenance_fence_state
 
 stop_recreate_nodes
 

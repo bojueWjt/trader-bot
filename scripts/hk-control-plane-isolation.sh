@@ -28,6 +28,8 @@ MAINTENANCE_FENCE_OWNER_TOKEN="${ACCOUNT_STALL_MAINTENANCE_FENCE_OWNER_TOKEN:-}"
 MAINTENANCE_FENCE_ACTOR="${ACCOUNT_STALL_MAINTENANCE_FENCE_ACTOR:-control-plane-isolation}"
 MAINTENANCE_FENCE_LEASE_SECONDS="${ACCOUNT_STALL_FENCE_LEASE_SECONDS:-120}"
 MAINTENANCE_HEARTBEAT_MAX_AGE_SECONDS="${ACCOUNT_STALL_HEARTBEAT_MAX_AGE_SECONDS:-15}"
+MAINTENANCE_FENCE_VERIFICATION_MODE="${ACCOUNT_STALL_MAINTENANCE_FENCE_VERIFICATION_MODE:-online}"
+MAINTENANCE_FENCE_EVIDENCE_SHA256="${ACCOUNT_STALL_MAINTENANCE_FENCE_EVIDENCE_SHA256:-}"
 BOOTSTRAP_STOPPED_GATE="${ACCOUNT_STALL_BOOTSTRAP_STOPPED_GATE:-0}"
 BOOTSTRAP_REDIS_FENCING_EPOCH="${ACCOUNT_STALL_BOOTSTRAP_REDIS_FENCING_EPOCH:-}"
 REDIS_FENCING_EPOCH_KEY="${ACCOUNT_STALL_REDIS_FENCING_EPOCH_KEY:-trader-bot:redis-fencing-epoch}"
@@ -231,15 +233,37 @@ verify_maintenance_fence() {
   fi
   [ "$MAINTENANCE_FENCE_ACQUIRED" = "1" ] \
     || die "maintenance fence is not acquired"
-  maintenance_fence_command \
-    verify \
-    --fence-id "$MAINTENANCE_FENCE_ID" \
-    --owner-token "$MAINTENANCE_FENCE_OWNER_TOKEN" \
-    --stage "$stage" \
-    --lease-seconds "$MAINTENANCE_FENCE_LEASE_SECONDS" \
-    --heartbeat-max-age-seconds \
-      "$MAINTENANCE_HEARTBEAT_MAX_AGE_SECONDS" \
-    >/dev/null
+  case "$MAINTENANCE_FENCE_VERIFICATION_MODE" in
+    frozen)
+      [ "$MAINTENANCE_FENCE_OWNERSHIP" = "inherited" ] \
+        || die "frozen maintenance fence requires inherited ownership"
+      [[ "$MAINTENANCE_FENCE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || die "frozen maintenance fence evidence hash is invalid"
+      maintenance_fence_command \
+        verify-frozen \
+        --fence-id "$MAINTENANCE_FENCE_ID" \
+        --owner-token "$MAINTENANCE_FENCE_OWNER_TOKEN" \
+        --stage "$stage" \
+        --lease-seconds "$MAINTENANCE_FENCE_LEASE_SECONDS" \
+        --account-evidence-sha256 \
+          "$MAINTENANCE_FENCE_EVIDENCE_SHA256" \
+        >/dev/null
+      ;;
+    online)
+      maintenance_fence_command \
+        verify \
+        --fence-id "$MAINTENANCE_FENCE_ID" \
+        --owner-token "$MAINTENANCE_FENCE_OWNER_TOKEN" \
+        --stage "$stage" \
+        --lease-seconds "$MAINTENANCE_FENCE_LEASE_SECONDS" \
+        --heartbeat-max-age-seconds \
+          "$MAINTENANCE_HEARTBEAT_MAX_AGE_SECONDS" \
+        >/dev/null
+      ;;
+    *)
+      die "invalid maintenance fence verification mode"
+      ;;
+  esac
 }
 
 verify_mutation_guards() {
