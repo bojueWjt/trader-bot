@@ -82,6 +82,27 @@ def test_durable_inbox_binds_one_permit_to_one_intent(tmp_path: Path) -> None:
     assert record.intent_id == first.intent_id
 
 
+def test_durable_inbox_allows_new_permit_for_same_release(
+    tmp_path: Path,
+) -> None:
+    store = JsonLiveCanaryExecutionStore(tmp_path / "live-canary.json")
+    first = _identity()
+    second = _identity()
+
+    assert first.release_id == second.release_id
+    assert first.permit_id != second.permit_id
+    assert (
+        store.register_received(first)
+        is LiveCanaryRegisterResult.REGISTERED
+    )
+    assert (
+        store.register_received(second)
+        is LiveCanaryRegisterResult.REGISTERED
+    )
+    assert store.get(first)
+    assert store.get(second)
+
+
 def test_claim_replay_requires_recovery_and_preserves_state(
     tmp_path: Path,
 ) -> None:

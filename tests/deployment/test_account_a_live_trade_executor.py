@@ -1253,6 +1253,44 @@ def test_single_use_store_rejects_repeated_permit_per_account(
         store.claim(authorization, mode="live")
 
 
+def test_single_use_store_allows_new_permit_for_same_release(
+    tmp_path: Path,
+) -> None:
+    first = _authorization(tmp_path)
+    second_intent_id = str(uuid4())
+    second = replace(
+        first,
+        permit_id=str(uuid4()),
+        intent_id=second_intent_id,
+        close_intent_id=executor.deterministic_close_intent_id(
+            second_intent_id,
+            account_id=first.account_id,
+        ),
+        open_client_order_id=(
+            executor.deterministic_open_client_order_id(
+                second_intent_id
+            )
+        ),
+        close_client_order_id=(
+            executor.deterministic_close_client_order_id(
+                second_intent_id,
+                account_id=first.account_id,
+            )
+        ),
+        authorization_sha256=_digest("same-release-second-permit"),
+    )
+    store = _permit_store(tmp_path / "same-release-ledger.json")
+
+    store.claim(first, mode="live")
+    store.claim(second, mode="live")
+
+    with pytest.raises(
+        executor.DuplicatePermitError,
+        match="already has durable state",
+    ):
+        store.claim(first, mode="live")
+
+
 def test_live_store_rejects_cross_account_store_identity(
     tmp_path: Path,
 ) -> None:

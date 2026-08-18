@@ -34,6 +34,8 @@ from urllib.error import HTTPError
 
 import psycopg2
 
+DEFAULT_REFRESH_INTERVAL_SECONDS = 3
+
 ACCOUNTS = {
     "account-a": ("trader-v3-node-a", "BINANCE_ACCOUNT_A"),
     "account-b": ("trader-v3-node-b", "BINANCE_ACCOUNT_B"),
@@ -469,7 +471,11 @@ def run_once(conn, base: str, opener=None) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--interval", type=int, default=45)
+    ap.add_argument(
+        "--interval",
+        type=int,
+        default=DEFAULT_REFRESH_INTERVAL_SECONDS,
+    )
     ap.add_argument("--db-url", default=os.environ.get("DATABASE_URL"))
     ap.add_argument("--base-url", default=os.environ.get("EXCHANGE_STATE_BASE_URL", "https://fapi.binance.com"))
     ap.add_argument("--once", action="store_true")

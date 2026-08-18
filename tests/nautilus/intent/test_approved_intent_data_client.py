@@ -137,7 +137,7 @@ def test_halted_node_rejects_new_position_intent(tmp_path: Path) -> None:
     ]
 
 
-def test_live_account_a_canary_is_single_use_per_release(
+def test_live_account_a_canary_allows_new_permit_for_same_release(
     tmp_path: Path,
 ) -> None:
     control_plane = InMemoryControlPlane(now=lambda: NOW)
@@ -162,7 +162,8 @@ def test_live_account_a_canary_is_single_use_per_release(
     assert client.poll_once(limit=10) == 2
 
     assert [intent.intent_id for intent in publisher.published] == [
-        first.intent_id
+        first.intent_id,
+        second.intent_id,
     ]
     assert control_plane.intent_acks == [
         (
@@ -176,8 +177,8 @@ def test_live_account_a_canary_is_single_use_per_release(
             ACCOUNT_ID,
             NODE_ID,
             second.intent_id,
-            IntentAckStatus.REJECTED,
-            "canary_permit_already_claimed",
+            IntentAckStatus.RECEIVED,
+            "canary_received",
         ),
     ]
 

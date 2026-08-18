@@ -886,8 +886,6 @@ class JsonLiveCanaryExecutionStore:
             record = self._record_from_raw(raw)
             if record.permit_id == identity.permit_id:
                 return record
-            if record.release_id == identity.release_id:
-                return record
         return False
 
     def _record_from_raw(

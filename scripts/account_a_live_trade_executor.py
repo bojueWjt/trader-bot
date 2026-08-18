@@ -1011,7 +1011,6 @@ class SingleUsePermitStore:
                 )
             live_identity_fields = (
                 "permit_id",
-                "release_id",
                 "intent_id",
                 "open_client_order_id",
                 "close_client_order_id",

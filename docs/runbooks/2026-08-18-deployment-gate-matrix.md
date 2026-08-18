@@ -39,6 +39,7 @@
 | Account-B fault report | fault scenarios、PASS、HALTED、release/image/config identity | 1h | 同一 hook 在 900s timeout 内自动重跑并重签 | 13h |
 | Account-B top-level evidence | evidence `issued_at`、四类报告 hash、reviewer signature | 1h | 同一 hook 原子替换 evidence 和 signature | 13h |
 | Testnet emergency close | signed live-trade report 内的 testnet open/close/flat proof | 24h | 同一 account-B hook 自动刷新；过期或刷新失败直接阻断 | 13h |
+| Live canary exchange risk | `exchange_state_mirror`、目标节点 `REFRESH_EVIDENCE` ACK、heartbeat 仓位/普通挂单/algo 挂单时间戳 | 5s | recorder 每 3s 自动采集 A-D；每个 canary 在 permit 创建前再次刷新目标节点并等待新 heartbeat | 13h |
 | Prior closure evidence | 前一账号 live closure report、signature、pinned reviewer public key | 与对应 release/phase 同寿命 | 每次 preflight 复制到临时只读文件并验签 | 13h |
 | Backup readiness | PostgreSQL custom dump、restore list、SHA256、旧镜像/容器 inspect、旧文件索引 | 本次 deploy run | 每次 preflight 自动生成；`pg_dump`/`pg_restore --list` 各受 300s timeout 约束 | 13h |
 | Recovery readiness | post-migration release payload、recreate scripts、container env、expectation hash | 本次 deploy run | 每次 preflight 自动生成并验证 | 13h |

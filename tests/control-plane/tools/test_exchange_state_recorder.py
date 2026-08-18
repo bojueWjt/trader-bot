@@ -21,6 +21,13 @@ MODULE_PATH = (
 
 
 class ExchangeStateRecorderTest(unittest.TestCase):
+    def test_default_refresh_interval_stays_below_five_second_gate(
+        self,
+    ) -> None:
+        module = _load_module()
+
+        self.assertEqual(module.DEFAULT_REFRESH_INTERVAL_SECONDS, 3)
+
     def test_live_mirror_matches_deployment_source(self) -> None:
         mirror_path = (
             REPO_ROOT / ".live-mirror" / "tools" / "exchange_state_recorder.py"
