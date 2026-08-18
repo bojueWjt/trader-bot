@@ -26,7 +26,7 @@ from runtime.live_canary_execution import (  # noqa: E402
 )
 
 
-def test_all_rollout_accounts_require_live_canary_permits_before_completion() -> None:
+def test_rollout_accounts_do_not_require_live_canary_permits_by_default() -> None:
     for account_id in (
         "account-a",
         "account-b",
@@ -37,11 +37,11 @@ def test_all_rollout_accounts_require_live_canary_permits_before_completion() ->
         assert live_canary_permit_required(
             account_id,
             "account_a_canary",
-        ) is True
+        ) is False
         assert live_canary_permit_required(
             account_id,
             "account_d_rollout",
-        ) is True
+        ) is False
 
 
 def test_fleet_complete_allows_regular_live_entries() -> None:

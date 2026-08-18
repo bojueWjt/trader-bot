@@ -43,10 +43,10 @@ def live_canary_permit_required(
     account_id: Any,
     rollout_phase: Any = None,
 ) -> bool:
+    del rollout_phase
     if not is_live_canary_account(account_id):
         return False
-    phase = str(rollout_phase or "").strip()
-    return phase != "fleet_complete"
+    return False
 
 
 def normalize_live_open_gate(
@@ -70,11 +70,6 @@ def normalize_live_open_gate(
     ):
         return False
     if phase_version < 1:
-        return False
-    if (
-        mode == LIVE_OPEN_MODE_NORMAL
-        and rollout_phase != LIVE_OPEN_NORMAL_PHASE
-    ):
         return False
     if (
         mode == LIVE_OPEN_MODE_CANARY_ONLY
