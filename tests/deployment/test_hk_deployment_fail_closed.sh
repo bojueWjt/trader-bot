@@ -358,6 +358,12 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" \
     'staging missing host/execution_domain/control_plane.py'
   assert_contains "$text" 'EXECUTION_DOMAIN_CONTROL_PLANE_TGT'
+  assert_contains "$text" \
+    'staging missing host/execution_domain/portfolio_baseline.py'
+  assert_contains "$text" 'EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT'
+  assert_contains "$text" 'execution_domain_portfolio_baseline'
+  assert_contains "$text" 'host__execution_domain_portfolio_baseline.py'
+  assert_contains "$text" 'host/execution_domain/portfolio_baseline.py'
   assert_contains "$text" 'DECISION_GATEWAY_TGT'
   assert_contains "$text" 'EXCHANGE_STATE_RECORDER_TGT'
   assert_contains "$text" 'HERMES_FEEDER_TGT'

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -13,13 +14,54 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import UUID, uuid5
+
+_SCRIPT_ROOT = Path(__file__).resolve().parent
+_PORTFOLIO_BASELINE_PATHS = (
+    _SCRIPT_ROOT / "host" / "execution_domain" / "portfolio_baseline.py",
+    (
+        _SCRIPT_ROOT.parent
+        / "packages"
+        / "execution-domain"
+        / "execution_domain"
+        / "portfolio_baseline.py"
+    ),
+)
+_portfolio_baseline_path = next(
+    (
+        candidate
+        for candidate in _PORTFOLIO_BASELINE_PATHS
+        if candidate.is_file()
+    ),
+    False,
+)
+if _portfolio_baseline_path is False:
+    raise RuntimeError("shared portfolio baseline module is missing")
+_portfolio_baseline_spec = importlib.util.spec_from_file_location(
+    "_trader_portfolio_baseline",
+    _portfolio_baseline_path,
+)
+if (
+    _portfolio_baseline_spec is None
+    or _portfolio_baseline_spec.loader is None
+):
+    raise RuntimeError("shared portfolio baseline module cannot be loaded")
+_portfolio_baseline_module = importlib.util.module_from_spec(
+    _portfolio_baseline_spec
+)
+_portfolio_baseline_spec.loader.exec_module(_portfolio_baseline_module)
+shared_portfolio_baseline_sha256 = getattr(
+    _portfolio_baseline_module,
+    "portfolio_baseline_sha256",
+    False,
+)
+if not callable(shared_portfolio_baseline_sha256):
+    raise RuntimeError("shared portfolio baseline function is missing")
 
 ACCOUNT_ID = "account-a"
 SYMBOL = "SOLUSDT"
@@ -90,23 +132,6 @@ ACTION_NAMES = {
     "halt",
     "preflight",
 }
-CANARY_GATE_REFRESH_OPERATIONS = frozenset(
-    {
-        "before-preflight",
-    }
-)
-NON_TARGET_POSITION_BASELINE_FIELDS = (
-    "symbol",
-    "position_side",
-    "position_amt",
-    "entry_price",
-    "leverage",
-    "margin_type",
-    "isolated_margin",
-    "is_auto_add_margin",
-)
-
-
 class AdapterError(RuntimeError):
     pass
 
@@ -182,39 +207,6 @@ def _selected_adapter_target() -> AdapterTarget:
     return target
 
 
-def _refresh_targets_from_environment(
-    selected_target: AdapterTarget,
-) -> tuple[AdapterTarget, ...]:
-    default_accounts = tuple(SUPPORTED_ADAPTER_TARGETS)
-    prefix = selected_target.environment_prefix
-    raw = os.environ.get(f"{prefix}_REFRESH_ACCOUNTS", "").strip()
-    if not raw:
-        raw = os.environ.get("HARDENED_CANARY_REFRESH_ACCOUNTS", "").strip()
-    if raw:
-        accounts = tuple(
-            item.strip().lower()
-            for item in re.split(r"[\s,]+", raw)
-            if item.strip()
-        )
-    else:
-        accounts = default_accounts
-    if not accounts:
-        raise AdapterError("refresh account list is empty")
-    if len(set(accounts)) != len(accounts):
-        raise AdapterError("refresh account list contains duplicates")
-    if selected_target.account_id not in accounts:
-        raise AdapterError("refresh account list must include canary account")
-    targets = []
-    for account_id in accounts:
-        target = SUPPORTED_ADAPTER_TARGETS.get(account_id)
-        if target is None:
-            raise AdapterError(
-                "refresh account list must contain supported accounts"
-            )
-        targets.append(target)
-    return tuple(targets)
-
-
 @dataclass(frozen=True)
 class Config:
     account_id: str
@@ -229,7 +221,6 @@ class Config:
     action_timeout_seconds: float
     exchange_freshness_seconds: float
     node_freshness_seconds: float
-    refresh_targets: tuple[AdapterTarget, ...]
 
     @classmethod
     def from_environment(cls) -> Config:
@@ -310,7 +301,6 @@ class Config:
                 ),
                 "node freshness threshold",
             ),
-            refresh_targets=_refresh_targets_from_environment(target),
         )
 
 
@@ -1461,10 +1451,6 @@ class AccountALiveTradeHttpAdapter:
             payload["available_usdt_balance"] = available_balance
         if warnings:
             payload["warnings"] = warnings
-        self._refresh_evidence_burst(
-            request,
-            operation="before-preflight",
-        )
         return _with_evidence(payload)
 
     def _exchange_state(
@@ -1554,81 +1540,6 @@ class AccountALiveTradeHttpAdapter:
                 idempotency_operation,
             ),
         )
-
-    def _refresh_evidence_burst(
-        self,
-        request: Mapping[str, Any],
-        *,
-        operation: str,
-    ) -> dict[str, Any]:
-        side_effect_id = _refresh_side_effect_seed(request, operation)
-        idempotency_operation = _refresh_idempotency_operation(operation)
-        targets = self._config.refresh_targets
-        if not targets:
-            raise AdapterError("refresh evidence targets are empty")
-
-        records: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=len(targets)) as executor:
-            refresh_futures = {}
-            for target in targets:
-                refresh_id = _refresh_side_effect_id(
-                    side_effect_id,
-                    idempotency_operation,
-                    account_id=target.account_id,
-                )
-                future = executor.submit(
-                    self._refresh_evidence_for_target,
-                    request,
-                    operation=operation,
-                    target=target,
-                    refresh_id=refresh_id,
-                )
-                refresh_futures[future] = target
-            for future in as_completed(refresh_futures):
-                target = refresh_futures[future]
-                try:
-                    refreshed = future.result()
-                except SoftAdapterError as exc:
-                    raise SoftAdapterError(
-                        "refresh evidence burst pipeline failed for "
-                        f"{target.account_id}: {exc}",
-                        code=exc.code,
-                        status_code=exc.status_code,
-                    ) from exc
-                except AdapterError as exc:
-                    raise AdapterError(
-                        "refresh evidence burst pipeline failed for "
-                        f"{target.account_id}: {exc}"
-                    ) from exc
-                records.append(
-                    {
-                        "account_id": target.account_id,
-                        "node_id": target.node_id,
-                        "command_id": _required_text(
-                            refreshed.get("command_id"),
-                            "refresh command_id",
-                        ),
-                        "command_status": refreshed.get(
-                            "command_status"
-                        ),
-                    }
-                )
-
-        records.sort(key=lambda item: str(item["account_id"]))
-        payload = {
-            **_identity(request),
-            "accepted": True,
-            "action": "refresh-evidence-burst",
-            "operation": operation,
-            "refresh_accounts": [
-                target.account_id
-                for target in targets
-            ],
-            "commands": records,
-            "source": "control-plane",
-            "observed_at": _now(),
-        }
-        return _with_evidence(payload)
 
     def _refresh_evidence_for_target(
         self,
@@ -2586,52 +2497,18 @@ def _open_status(
 def _portfolio_baseline_sha256(
     exchange_payload: Mapping[str, Any],
 ) -> str:
-    baseline = {
-        "positions": _non_target_rows(
-            exchange_payload.get("positions"),
-            baseline_fields=NON_TARGET_POSITION_BASELINE_FIELDS,
-        ),
-        "open_orders": _non_target_rows(
-            exchange_payload.get("open_orders"),
-        ),
-        "algo_orders": _non_target_rows(
-            exchange_payload.get("algo_orders"),
-        ),
+    snapshot = {
+        "positions": exchange_payload.get("positions"),
+        "regular_orders": exchange_payload.get("open_orders"),
+        "algo_orders": exchange_payload.get("algo_orders"),
     }
-    return hashlib.sha256(_canonical_json_bytes(baseline)).hexdigest()
-
-
-def _non_target_rows(
-    raw_rows: Any,
-    *,
-    baseline_fields: tuple[str, ...] = (),
-) -> list[dict[str, Any]]:
-    if not isinstance(raw_rows, list):
-        raise AdapterError("portfolio collection is invalid")
-    rows = []
-    for raw in raw_rows:
-        if not isinstance(raw, dict):
-            continue
-        symbol = str(raw.get("symbol") or "").upper()
-        if symbol == SYMBOL:
-            continue
-        row = raw
-        if baseline_fields:
-            row = {
-                key: raw[key]
-                for key in baseline_fields
-                if key in raw
-            }
-        rows.append(_json_safe(row))
-    rows.sort(
-        key=lambda row: json.dumps(
-            row,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
+    try:
+        return shared_portfolio_baseline_sha256(
+            snapshot,
+            SYMBOL,
         )
-    )
-    return rows
+    except ValueError as exc:
+        raise AdapterError("portfolio collection is invalid") from exc
 
 
 def _derived_round_trip_pnl(
@@ -2722,15 +2599,6 @@ def _refresh_side_effect_seed(
     request: Mapping[str, Any],
     operation: str,
 ) -> str:
-    if operation in CANARY_GATE_REFRESH_OPERATIONS:
-        release_id = _required_text(request.get("release_id"), "release_id")
-        permit_id = _required_text(request.get("permit_id"), "permit_id")
-        intent_id = _canonical_uuid(request.get("intent_id"), "intent_id")
-        identity = (
-            f"{release_id}:{permit_id}:{intent_id}:"
-            f"{operation}"
-        )
-        return hashlib.sha256(identity.encode("ascii")).hexdigest()
     raw = request.get("side_effect_id")
     if raw is not None and str(raw).strip():
         return _required_text(raw, "side_effect_id")

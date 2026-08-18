@@ -2613,22 +2613,43 @@ class AccountALiveTradeExecutor:
             exchange_confirmed_fill = (
                 position.exchange_confirmed_open_fill_quantity
             )
+            if exchange_confirmed_fill == 0:
+                if position.quantity == 0:
+                    risk_state_confirmed = True
+                    last_errors = []
+                    break
+                if (
+                    expected_close_quantity > 0
+                    and position.quantity >= expected_close_quantity
+                ):
+                    last_errors = [
+                        "exchange-confirmed open fill evidence is pending"
+                    ]
+                    trail.record(
+                        "open_fill_evidence_pending",
+                        {
+                            "expected_close_quantity": _decimal_text(
+                                expected_close_quantity
+                            ),
+                            "position_quantity": _decimal_text(
+                                position.quantity
+                            ),
+                            "attempt": attempt,
+                        },
+                    )
+                    self._recovery_sleep(close_started_at)
+                    continue
+                last_errors = [
+                    "target position exists without exchange-confirmed "
+                    "canary open fill"
+                ]
+                break
             if (
                 expected_close_quantity > 0
                 and exchange_confirmed_fill != expected_close_quantity
             ):
                 last_errors = [
                     "exchange-confirmed open fill differs from observation"
-                ]
-                break
-            if exchange_confirmed_fill == 0:
-                if position.quantity == 0:
-                    risk_state_confirmed = True
-                    last_errors = []
-                    break
-                last_errors = [
-                    "target position exists without exchange-confirmed "
-                    "canary open fill"
                 ]
                 break
             if position.quantity < exchange_confirmed_fill:

@@ -89,6 +89,10 @@ EXPECTED_IMMUTABLE_ENTRIES = (
     ),
     ("contracts.py", "/app/execution_domain/contracts.py"),
     ("control_plane.py", "/app/execution_domain/control_plane.py"),
+    (
+        "portfolio_baseline.py",
+        "/app/execution_domain/portfolio_baseline.py",
+    ),
     ("http_client.py", "/app/execution_domain/http_client.py"),
     ("projection_actor.py", "/app/projection/actor.py"),
     ("projection_spool.py", "/app/projection/spool.py"),

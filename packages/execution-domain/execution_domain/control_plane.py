@@ -9,13 +9,9 @@ so transport (pull vs. push) can change without touching execution logic.
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 from uuid import UUID
@@ -24,6 +20,7 @@ from .contracts import (
     ExecutionEventEnvelopeV1,
     ReconciliationState,
 )
+from .portfolio_baseline import portfolio_baseline_sha256
 
 __all__ = [
     "TradingState",
@@ -116,104 +113,6 @@ class IncidentSeverity(str, Enum):
     P0 = "P0"
     P1 = "P1"
     P2 = "P2"
-
-
-_PORTFOLIO_SNAPSHOT_FIELDS = (
-    "positions",
-    "regular_orders",
-    "algo_orders",
-)
-_PORTFOLIO_VOLATILE_FIELDS = frozenset(
-    {
-        "initial_margin",
-        "mark_price",
-        "maint_margin",
-        "notional",
-        "open_order_initial_margin",
-        "position_initial_margin",
-        "unrealized_pnl",
-        "unrealized_profit",
-        "liquidation_price",
-        "update_time",
-    }
-)
-_PORTFOLIO_DECIMAL_FIELD_PATTERN = re.compile(
-    r"(?:amount|margin|price|quantity|qty|rate)$"
-)
-
-
-def portfolio_baseline_sha256(
-    snapshot: Mapping[str, Any],
-    target_symbol: str,
-) -> str:
-    """Hash canonical non-target positions and orders from exchange evidence."""
-    snapshots: dict[str, list[Any]] = {}
-    for field_name in _PORTFOLIO_SNAPSHOT_FIELDS:
-        rows = snapshot.get(field_name)
-        if not isinstance(rows, list):
-            raise ValueError("portfolio snapshot fields must be lists")
-        canonical_rows = []
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ValueError("portfolio snapshot rows must be objects")
-            if _portfolio_snapshot_item_symbol(row) == target_symbol:
-                continue
-            canonical_rows.append(_canonical_portfolio_value(row))
-        canonical_rows.sort(key=_canonical_json)
-        snapshots[field_name] = canonical_rows
-    payload = _canonical_json(snapshots).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _portfolio_snapshot_item_symbol(item: dict[str, Any]) -> str:
-    for field_name in ("symbol", "instrument_id", "instrument"):
-        symbol = _canonical_portfolio_symbol(item.get(field_name))
-        if symbol:
-            return symbol
-    return ""
-
-
-def _canonical_portfolio_symbol(value: Any) -> str:
-    return str(value or "").strip().upper().split("-")[0].split(".")[0]
-
-
-def _canonical_portfolio_value(value: Any, field_name: str = "") -> Any:
-    if isinstance(value, dict):
-        normalized = {}
-        for key in sorted(value):
-            normalized_key = str(key)
-            if normalized_key in _PORTFOLIO_VOLATILE_FIELDS:
-                continue
-            normalized[normalized_key] = _canonical_portfolio_value(
-                value[key],
-                normalized_key,
-            )
-        return normalized
-    if isinstance(value, list):
-        normalized_items = [
-            _canonical_portfolio_value(item, field_name)
-            for item in value
-        ]
-        normalized_items.sort(key=_canonical_json)
-        return normalized_items
-    if field_name == "symbol":
-        return _canonical_portfolio_symbol(value)
-    if _PORTFOLIO_DECIMAL_FIELD_PATTERN.search(field_name):
-        try:
-            numeric = Decimal(str(value))
-        except (InvalidOperation, TypeError, ValueError):
-            return str(value)
-        if numeric.is_finite():
-            return format(numeric.normalize(), "f")
-    return value
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
 
 
 @dataclass(frozen=True)

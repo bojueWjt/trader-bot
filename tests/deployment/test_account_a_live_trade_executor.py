@@ -2554,8 +2554,49 @@ def test_missing_exchange_confirmed_fill_does_not_submit_close(
     assert result.passed is False
     assert result.close_submitted is False
     assert adapter.close_requests == []
-    assert "exchange-confirmed open fill differs from observation" in (
+    assert "exchange-confirmed open fill evidence is pending" in (
         result.failure_reason
+    )
+
+
+def test_lagging_exchange_confirmed_fill_retries_before_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_current_position = adapter.current_position
+    position_calls = 0
+
+    def current_position_with_lagging_fill(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        nonlocal position_calls
+        position_calls += 1
+        payload = dict(original_current_position(request))
+        if position_calls == 1:
+            payload["exchange_confirmed_open_fill_quantity"] = "0"
+        return payload
+
+    monkeypatch.setattr(
+        adapter,
+        "current_position",
+        current_position_with_lagging_fill,
+    )
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "lagging-fill-proof.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.passed is True
+    assert position_calls >= 2
+    assert result.close_submitted is True
+    assert adapter.close_requests[0]["quantity"] == str(
+        authorization.quantity
     )
 
 

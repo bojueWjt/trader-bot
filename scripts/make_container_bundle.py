@@ -28,6 +28,11 @@ BUNDLE_FILES = (
         "/app/execution_domain/control_plane.py",
     ),
     (
+        "portfolio_baseline.py",
+        "packages/execution-domain/execution_domain/portfolio_baseline.py",
+        "/app/execution_domain/portfolio_baseline.py",
+    ),
+    (
         "http_client.py",
         "packages/execution-domain/execution_domain/http_client.py",
         "/app/execution_domain/http_client.py",

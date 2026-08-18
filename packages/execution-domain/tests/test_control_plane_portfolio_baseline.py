@@ -99,6 +99,95 @@ def test_portfolio_baseline_canonicalizes_non_target_evidence() -> None:
     )
 
 
+def test_portfolio_baseline_matches_exchange_mirror_aliases() -> None:
+    node_snapshot = {
+        "positions": [
+            {
+                "symbol": "ETHUSDT",
+                "quantity": "-0.250",
+                "position_side": "SHORT",
+                "entry_price": "3000.0",
+                "mark_price": "2999",
+            }
+        ],
+        "regular_orders": [
+            {
+                "symbol": "BTCUSDT",
+                "position_side": "LONG",
+                "side": "BUY",
+                "order_type": "LIMIT",
+                "quantity": "0.050",
+                "price": "61536.50",
+                "stop_price": "0",
+                "reduce_only": False,
+                "client_order_id": "btc-order",
+                "venue_order_id": "1092374819069",
+                "order_kind": "regular",
+            }
+        ],
+        "algo_orders": [
+            {
+                "symbol": "MUUSDT",
+                "position_side": "SHORT",
+                "side": "BUY",
+                "order_type": "STOP_MARKET",
+                "quantity": "5.0",
+                "price": "0.0",
+                "stop_price": "1085.0",
+                "reduce_only": True,
+                "client_order_id": "mu-stop",
+                "venue_order_id": "1000002511312702",
+                "order_kind": "algo",
+            }
+        ],
+    }
+    exchange_mirror = {
+        "positions": [
+            {
+                "symbol": "ETHUSDT",
+                "position_amt": "-0.250",
+                "position_side": "SHORT",
+                "entry_price": "3000.0",
+                "mark_price": "2998",
+                "unrealized_pnl": "0.5",
+            }
+        ],
+        "open_orders": [
+            {
+                "symbol": "BTCUSDT",
+                "position_side": "LONG",
+                "side": "BUY",
+                "type": "LIMIT",
+                "quantity": "0.050",
+                "price": "61536.50",
+                "trigger_price": "0",
+                "reduce_only": False,
+                "client_order_id": "btc-order",
+                "venue_order_id": 1092374819069,
+            }
+        ],
+        "algo_orders": [
+            {
+                "symbol": "MUUSDT",
+                "position_side": "SHORT",
+                "side": "BUY",
+                "type": "STOP_MARKET",
+                "quantity": "5.0",
+                "price": "0.0",
+                "trigger_price": "1085.0",
+                "reduce_only": True,
+                "client_order_id": "mu-stop",
+                "venue_order_id": 1000002511312702,
+            }
+        ],
+    }
+
+    assert (
+        portfolio_baseline_sha256(node_snapshot, "SOLUSDT")
+        == portfolio_baseline_sha256(exchange_mirror, "SOLUSDT")
+    )
+
+
 def test_portfolio_baseline_ignores_position_risk_market_refresh() -> None:
     original = {
         "positions": [

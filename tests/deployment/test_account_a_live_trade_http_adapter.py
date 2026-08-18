@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid5
 
@@ -23,6 +23,8 @@ sys.path.insert(
     0,
     str(REPO_ROOT / "packages" / "execution-domain"),
 )
+from execution_domain.control_plane import portfolio_baseline_sha256
+
 RISK_TOKEN = "risk-admin-test-token"
 NODE_TOKEN = "account-a-node-test-token"
 NODE_ID = "nautilus-node-account-a"
@@ -41,18 +43,14 @@ CLOSE_INTENT_ID = str(
 )
 OPEN_CLIENT_ORDER_ID = "B1111111111114111811111111111111101"
 CLOSE_CLIENT_ORDER_ID = f"B{UUID(CLOSE_INTENT_ID).hex}01"
-EMPTY_PORTFOLIO_SHA256 = hashlib.sha256(
-    json.dumps(
-        {
-            "positions": [],
-            "open_orders": [],
-            "algo_orders": [],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("ascii")
-).hexdigest()
+EMPTY_PORTFOLIO_SHA256 = portfolio_baseline_sha256(
+    {
+        "positions": [],
+        "regular_orders": [],
+        "algo_orders": [],
+    },
+    SYMBOL,
+)
 
 
 @pytest.mark.parametrize(
@@ -105,12 +103,6 @@ def test_config_selects_restricted_account_environment(
     assert config.node_id == node_id
     assert config.risk_token == risk_token
     assert config.node_token == node_token
-    assert [target.account_id for target in config.refresh_targets] == [
-        "account-a",
-        "account-b",
-        "account-c",
-        "account-d",
-    ]
     adapter = adapter_type(config)
     conflicting_request = _request()
     conflicting_request["account_id"] = "account-a"
@@ -123,41 +115,6 @@ def test_config_selects_restricted_account_environment(
         match="request account differs from selected target",
     ):
         adapter.dispatch("preflight", conflicting_request)
-
-
-def test_config_accepts_explicit_abc_refresh_accounts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    namespace = runpy.run_path(str(ADAPTER))
-    config_type = namespace["Config"]
-    risk_path = tmp_path / "risk.token"
-    node_path = tmp_path / "node.token"
-    risk_path.write_text(RISK_TOKEN + "\n", encoding="ascii")
-    node_path.write_text(NODE_TOKEN + "\n", encoding="ascii")
-    risk_path.chmod(0o600)
-    node_path.chmod(0o400)
-    monkeypatch.setenv("HARDENED_CANARY_ACCOUNT_ID", ACCOUNT_ID)
-    monkeypatch.setenv(
-        "HARDENED_CANARY_REFRESH_ACCOUNTS",
-        "account-a,account-b,account-c",
-    )
-    monkeypatch.setenv(
-        "ACCOUNT_A_LIVE_TRADE_RISK_ADMIN_TOKEN_FILE",
-        str(risk_path),
-    )
-    monkeypatch.setenv(
-        "ACCOUNT_A_LIVE_TRADE_NODE_TOKEN_FILE",
-        str(node_path),
-    )
-
-    config = config_type.from_environment()
-
-    assert [target.account_id for target in config.refresh_targets] == [
-        "account-a",
-        "account-b",
-        "account-c",
-    ]
 
 
 class Scenario:
@@ -436,48 +393,6 @@ def _refresh_command_posts(scenario: Scenario) -> list[dict[str, Any]]:
     ]
 
 
-def _assert_refresh_burst(
-    scenario: Scenario,
-    *,
-    operation: str,
-    after_request: dict[str, Any],
-    expected_accounts: list[str] | None = None,
-) -> None:
-    refresh_posts = _refresh_command_posts(scenario)
-    if expected_accounts is None:
-        expected_accounts = [
-            "account-a",
-            "account-b",
-            "account-c",
-            "account-d",
-        ]
-    assert len(refresh_posts) == len(expected_accounts)
-    assert sorted(
-        request["body"]["scope"]["account_id"]
-        for request in refresh_posts
-    ) == expected_accounts
-    after_index = scenario.requests.index(after_request)
-    for request in refresh_posts:
-        assert scenario.requests.index(request) > after_index
-        account_id = request["body"]["scope"]["account_id"]
-        assert request["body"]["target_nodes"] == [
-            f"nautilus-node-{account_id}"
-        ]
-        assert request["body"]["scope"]["operation"] == operation
-        assert request["body"]["idempotency_key"].endswith(
-            f":{account_id}"
-        )
-    status_polls = [
-        request
-        for request in scenario.requests
-        if request["method"] == "GET"
-        and request["path"].startswith("/v1/commands/")
-    ]
-    assert len(status_polls) >= len(expected_accounts)
-    for request in status_polls[:len(expected_accounts)]:
-        assert scenario.requests.index(request) > after_index
-
-
 def test_resume_posts_command_polls_fresh_active_and_hashes_evidence(
     tmp_path: Path,
 ) -> None:
@@ -745,20 +660,10 @@ def test_preflight_returns_explicit_exchange_authority(
     assert payload["source"] == "exchange"
     assert payload["mirror_stale"] is False
     assert payload["available_usdt_balance"] == "100"
-    exchange_request = next(
-        request
-        for request in scenario.requests
-        if request["method"] == "GET"
-        and request["path"] == f"/v1/nodes/{NODE_ID}/exchange-state"
-    )
-    _assert_refresh_burst(
-        scenario,
-        operation="before-preflight",
-        after_request=exchange_request,
-    )
+    assert _refresh_command_posts(scenario) == []
 
 
-def test_preflight_refresh_burst_is_the_final_network_stage(
+def test_preflight_does_not_issue_exchange_refresh_commands(
     tmp_path: Path,
 ) -> None:
     scenario = Scenario()
@@ -773,185 +678,10 @@ def test_preflight_refresh_burst_is_the_final_network_stage(
 
     assert completed.returncode == 0, completed.stderr
     assert payload["action"] == "preflight"
-    refresh_posts = _refresh_command_posts(scenario)
-    assert len(refresh_posts) == 4
-    first_refresh_index = min(
-        scenario.requests.index(request)
-        for request in refresh_posts
-    )
-    prefetch_indexes = [
-        index
-        for index, request in enumerate(scenario.requests)
-        if request["path"] in {
-            f"/v1/nodes/{NODE_ID}/exchange-state",
-            "/v1/nodes",
-        }
-    ]
-    assert prefetch_indexes
-    assert max(prefetch_indexes) < first_refresh_index
-    final_stage_requests = scenario.requests[first_refresh_index:]
-    assert all(
-        request["path"] == "/v1/commands"
-        or request["path"].startswith("/v1/commands/")
-        for request in final_stage_requests
-    )
+    assert _refresh_command_posts(scenario) == []
 
 
-def test_preflight_refresh_accounts_run_independent_parallel_pipelines(
-    tmp_path: Path,
-) -> None:
-    scenario = Scenario()
-    scenario.blocked_refresh_account = "account-d"
-    invocation: dict[str, tuple[Any, Any]] = {}
-
-    def run_preflight(server_url: str) -> None:
-        invocation["result"] = _invoke(
-            "preflight",
-            _request(phase="before-open"),
-            tmp_path,
-            server_url,
-        )
-
-    with FakeControlPlane(scenario) as server:
-        thread = threading.Thread(
-            target=run_preflight,
-            args=(server.url,),
-            daemon=True,
-        )
-        thread.start()
-        assert scenario.blocked_refresh_started.wait(timeout=1)
-        try:
-            assert scenario.refresh_status_poll_started.wait(timeout=0.25)
-        finally:
-            scenario.release_blocked_refresh.set()
-            thread.join(timeout=3)
-        assert len(scenario.refresh_status_completed_at) == 4
-        ack_tail_seconds = (
-            time.monotonic() - max(scenario.refresh_status_completed_at)
-        )
-
-    assert not thread.is_alive()
-    completed, payload = invocation["result"]
-    assert completed.returncode == 0, completed.stderr
-    assert payload["action"] == "preflight"
-    assert len(_refresh_command_posts(scenario)) == 4
-    assert ack_tail_seconds < 0.5
-
-
-def test_preflight_uses_explicit_abc_refresh_burst(
-    tmp_path: Path,
-) -> None:
-    scenario = Scenario()
-
-    with FakeControlPlane(scenario) as server:
-        completed, payload = _invoke(
-            "preflight",
-            _request(phase="before-open"),
-            tmp_path,
-            server.url,
-            environment_overrides={
-                "HARDENED_CANARY_REFRESH_ACCOUNTS": (
-                    "account-a,account-b,account-c"
-                ),
-            },
-        )
-
-    assert completed.returncode == 0, completed.stderr
-    assert payload["action"] == "preflight"
-    exchange_request = next(
-        request
-        for request in scenario.requests
-        if request["method"] == "GET"
-        and request["path"] == f"/v1/nodes/{NODE_ID}/exchange-state"
-    )
-    _assert_refresh_burst(
-        scenario,
-        operation="before-preflight",
-        after_request=exchange_request,
-        expected_accounts=[
-            "account-a",
-            "account-b",
-            "account-c",
-        ],
-    )
-
-
-def test_preflight_is_only_canary_gate_action_that_refreshes_fleet(
-    tmp_path: Path,
-) -> None:
-    scenario = Scenario()
-
-    with FakeControlPlane(scenario) as server:
-        invocations = (
-            (
-                "preflight",
-                _request(
-                    phase="before-open",
-                    side_effect_id="preflight-request-id",
-                ),
-            ),
-            (
-                "resume",
-                _request(
-                    command="RESUME",
-                    scope="single-canary-round-trip",
-                    max_round_trips=1,
-                    side_effect_id="resume-request-id",
-                ),
-            ),
-            (
-                "open",
-                _request(
-                    client_order_id=OPEN_CLIENT_ORDER_ID,
-                    side="BUY",
-                    order_type="LIMIT",
-                    time_in_force="IOC",
-                    quantity="0.07",
-                    limit_price_usdt="100",
-                    max_actual_open_notional_usdt="12",
-                    side_effect_id="open-request-id",
-                ),
-            ),
-        )
-        for action, request in invocations:
-            invocation_path = tmp_path / action
-            invocation_path.mkdir()
-            completed, _payload = _invoke(
-                action,
-                request,
-                invocation_path,
-                server.url,
-            )
-            assert completed.returncode == 0, completed.stderr
-
-    refresh_posts = _refresh_command_posts(scenario)
-    assert len(refresh_posts) == 4
-    assert {
-        request["body"]["scope"]["operation"]
-        for request in refresh_posts
-    } == {"before-preflight"}
-    keys_by_account: dict[str, set[str]] = {}
-    for request in refresh_posts:
-        body = request["body"]
-        account_id = body["scope"]["account_id"]
-        keys_by_account.setdefault(account_id, set()).add(
-            body["idempotency_key"]
-        )
-    assert set(keys_by_account) == {
-        "account-a",
-        "account-b",
-        "account-c",
-        "account-d",
-    }
-    assert all(len(keys) == 1 for keys in keys_by_account.values())
-    assert len({
-        key
-        for keys in keys_by_account.values()
-        for key in keys
-    }) == 4
-
-
-def test_refresh_evidence_contract_covers_all_twenty_freshness_items(
+def test_refresh_evidence_contract_covers_selected_account_freshness(
     tmp_path: Path,
 ) -> None:
     namespace = runpy.run_path(str(ADAPTER))
@@ -973,17 +703,11 @@ def test_refresh_evidence_contract_covers_all_twenty_freshness_items(
         "algo_orders_snapshot_at",
         "reconciliation_completed_at",
     )
-    expected_contract = {
-        (account_id, field_name)
-        for account_id in expected_accounts
-        for field_name in expected_fields
-    }
-
     scenario = Scenario()
     with FakeControlPlane(scenario) as server:
         completed, _payload = _invoke(
-            "preflight",
-            _request(phase="before-open"),
+            "refresh-evidence",
+            _request(side_effect_id="contract-refresh-request-id"),
             tmp_path,
             server.url,
         )
@@ -997,18 +721,13 @@ def test_refresh_evidence_contract_covers_all_twenty_freshness_items(
     assert REFRESH_EVIDENCE_ACCOUNT_IDS == expected_accounts
     assert REFRESH_EVIDENCE_FRESHNESS_FIELDS == expected_fields
     assert tuple(sorted(supported_targets)) == expected_accounts
-    assert command_accounts == expected_accounts
+    assert command_accounts == (ACCOUNT_ID,)
     assert all(
         request["body"]["type"] == "REFRESH_EVIDENCE"
         for request in refresh_posts
     )
-    actual_contract = {
-        (account_id, field_name)
-        for account_id in command_accounts
-        for field_name in REFRESH_EVIDENCE_FRESHNESS_FIELDS
-    }
-    assert len(expected_contract) == 20
-    assert actual_contract == expected_contract
+    assert len(REFRESH_EVIDENCE_ACCOUNT_IDS) * len(expected_fields) == 20
+    assert len(command_accounts) * len(expected_fields) == 5
 
     actor_source = (
         REPO_ROOT
@@ -1081,6 +800,124 @@ def test_portfolio_baseline_ignores_non_target_position_market_refresh(
     assert refreshed_baseline == baseline
 
 
+def test_adapter_portfolio_baseline_matches_node_shared_contract() -> None:
+    namespace = runpy.run_path(str(ADAPTER))
+    adapter_hash = namespace["_portfolio_baseline_sha256"]
+    exchange_payload = {
+        "positions": [
+            {
+                "symbol": "ETHUSDT",
+                "position_amt": "-0.250",
+                "position_side": "SHORT",
+                "entry_price": "3000.0",
+                "mark_price": "2999",
+                "unrealized_pnl": "0.25",
+            },
+            {
+                "symbol": SYMBOL,
+                "position_amt": "0.07",
+                "position_side": "LONG",
+                "entry_price": "75.88",
+                "mark_price": "75.87",
+            },
+        ],
+        "open_orders": [
+            {
+                "symbol": "BTCUSDT",
+                "position_side": "LONG",
+                "side": "BUY",
+                "type": "LIMIT",
+                "quantity": "0.050",
+                "executed_quantity": "0",
+                "price": "61536.50",
+                "trigger_price": "0",
+                "reduce_only": False,
+                "client_order_id": "btc-order",
+                "venue_order_id": 1092374819069,
+            }
+        ],
+        "algo_orders": [
+            {
+                "symbol": "MUUSDT",
+                "position_side": "SHORT",
+                "side": "BUY",
+                "type": "STOP_MARKET",
+                "quantity": "5.0",
+                "price": "0.0",
+                "trigger_price": "1085.0",
+                "reduce_only": True,
+                "price_protect": True,
+                "client_order_id": "mu-stop",
+                "venue_order_id": 1000002511312702,
+            }
+        ],
+    }
+    node_snapshot = {
+        "positions": [
+            {
+                "symbol": "ETHUSDT",
+                "quantity": "-0.250",
+                "position_side": "SHORT",
+                "entry_price": "3000.0",
+                "mark_price": "2999",
+            }
+        ],
+        "regular_orders": [
+            {
+                "symbol": "BTCUSDT",
+                "position_side": "LONG",
+                "side": "BUY",
+                "order_type": "LIMIT",
+                "quantity": "0.050",
+                "executed_quantity": "0",
+                "price": "61536.50",
+                "stop_price": "0",
+                "activation_price": "",
+                "callback_rate": "",
+                "time_in_force": "",
+                "working_type": "",
+                "price_match": "",
+                "reduce_only": False,
+                "close_position": False,
+                "price_protect": False,
+                "good_till_date": "",
+                "client_order_id": "btc-order",
+                "venue_order_id": "1092374819069",
+                "order_kind": "regular",
+            }
+        ],
+        "algo_orders": [
+            {
+                "symbol": "MUUSDT",
+                "position_side": "SHORT",
+                "side": "BUY",
+                "order_type": "STOP_MARKET",
+                "quantity": "5.0",
+                "executed_quantity": "",
+                "price": "0.0",
+                "stop_price": "1085.0",
+                "activation_price": "",
+                "callback_rate": "",
+                "time_in_force": "",
+                "working_type": "",
+                "price_match": "",
+                "reduce_only": True,
+                "close_position": False,
+                "price_protect": True,
+                "good_till_date": "",
+                "client_order_id": "mu-stop",
+                "venue_order_id": "1000002511312702",
+                "order_kind": "algo",
+            }
+        ],
+    }
+
+    assert adapter_hash(exchange_payload) == portfolio_baseline_sha256(
+        node_snapshot,
+        SYMBOL,
+    )
+
+
 @pytest.mark.parametrize(
     ("field_name", "field_value"),
     [
@@ -1088,10 +925,6 @@ def test_portfolio_baseline_ignores_non_target_position_market_refresh(
         ("position_side", "SHORT"),
         ("position_amt", "0.5"),
         ("entry_price", "99"),
-        ("leverage", "10"),
-        ("margin_type", "isolated"),
-        ("isolated_margin", "5"),
-        ("is_auto_add_margin", "true"),
     ],
 )
 def test_portfolio_baseline_binds_non_target_position_fields(

@@ -22,6 +22,7 @@ EXPECTED_PATCH_MOUNTS = {
     "intent_execution_planner.py": "/app/strategy/intent_execution_planner.py",
     "contracts.py": "/app/execution_domain/contracts.py",
     "control_plane.py": "/app/execution_domain/control_plane.py",
+    "portfolio_baseline.py": "/app/execution_domain/portfolio_baseline.py",
     "http_client.py": "/app/execution_domain/http_client.py",
     "projection_actor.py": "/app/projection/actor.py",
     "projection_spool.py": "/app/projection/spool.py",
@@ -172,7 +173,19 @@ class NodePatchMountContractTest(unittest.TestCase):
             deploy,
         )
         self.assertIn(
+            "staging missing host/execution_domain/portfolio_baseline.py",
+            deploy,
+        )
+        self.assertIn(
             "EXECUTION_DOMAIN_CONTROL_PLANE_TGT",
+            deploy,
+        )
+        self.assertIn(
+            "EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT",
+            deploy,
+        )
+        self.assertIn(
+            "host__execution_domain_portfolio_baseline.py",
             deploy,
         )
         self.assertIn("DECISION_GATEWAY_TGT", deploy)

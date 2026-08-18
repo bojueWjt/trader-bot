@@ -7844,6 +7844,7 @@ EXECUTION_DOMAIN_TGT="$T/packages/execution-domain/execution_domain"
 EXECUTION_DOMAIN_INIT_TGT="$EXECUTION_DOMAIN_TGT/__init__.py"
 EXECUTION_DOMAIN_CONTRACTS_TGT="$EXECUTION_DOMAIN_TGT/contracts.py"
 EXECUTION_DOMAIN_CONTROL_PLANE_TGT="$EXECUTION_DOMAIN_TGT/control_plane.py"
+EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT="$EXECUTION_DOMAIN_TGT/portfolio_baseline.py"
 EXECUTION_DOMAIN_IDEMPOTENCY_TGT="$EXECUTION_DOMAIN_TGT/idempotency.py"
 EXECUTION_DOMAIN_IDENTIFIERS_TGT="$EXECUTION_DOMAIN_TGT/identifiers.py"
 SETTINGS_PACKAGE_TGT="$T/services/control-plane/settings"
@@ -7875,6 +7876,8 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
   || die "staging missing host/execution_domain/contracts.py"
 [ -f host/execution_domain/control_plane.py ] \
   || die "staging missing host/execution_domain/control_plane.py"
+[ -f host/execution_domain/portfolio_baseline.py ] \
+  || die "staging missing host/execution_domain/portfolio_baseline.py"
 [ -f host/execution_domain/idempotency.py ] \
   || die "staging missing host/execution_domain/idempotency.py"
 [ -f host/execution_domain/identifiers.py ] \
@@ -9089,6 +9092,9 @@ cmp -s host/execution_domain/__init__.py "$EXECUTION_DOMAIN_INIT_TGT" \
   || CHANGED_HOST+=("execution_domain_init")
 cmp -s host/execution_domain/contracts.py "$EXECUTION_DOMAIN_CONTRACTS_TGT" \
   || CHANGED_HOST+=("execution_domain_contracts")
+cmp -s host/execution_domain/portfolio_baseline.py \
+  "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT" \
+  || CHANGED_HOST+=("execution_domain_portfolio_baseline")
 cmp -s host/execution_domain/idempotency.py \
   "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" \
   || CHANGED_HOST+=("execution_domain_idempotency")
@@ -10154,6 +10160,15 @@ for h in "${CHANGED_HOST[@]:-}"; do
           >> "$BACKUP_ROOT/new-files.txt"
       fi
       ;;
+    execution_domain_portfolio_baseline)
+      if [ -f "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT" ]; then
+        bk "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT" \
+          "host__execution_domain_portfolio_baseline.py"
+      else
+        printf '%s\n' "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
     execution_domain_idempotency)
       if [ -f "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" ]; then
         bk "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" \
@@ -10437,6 +10452,16 @@ for h in "${CHANGED_HOST[@]:-}"; do
       else
         install -m 0644 host/execution_domain/control_plane.py \
           "$EXECUTION_DOMAIN_CONTROL_PLANE_TGT"
+      fi
+      ;;
+    execution_domain_portfolio_baseline)
+      mkdir -p "$EXECUTION_DOMAIN_TGT"
+      if [ -f "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT" ]; then
+        cat host/execution_domain/portfolio_baseline.py \
+          > "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT"
+      else
+        install -m 0644 host/execution_domain/portfolio_baseline.py \
+          "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT"
       fi
       ;;
     execution_domain_idempotency)

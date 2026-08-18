@@ -157,6 +157,10 @@ RELEASE_FILES = (
         "host/execution_domain/control_plane.py",
     ),
     (
+        "packages/execution-domain/execution_domain/portfolio_baseline.py",
+        "host/execution_domain/portfolio_baseline.py",
+    ),
+    (
         "packages/execution-domain/execution_domain/idempotency.py",
         "host/execution_domain/idempotency.py",
     ),

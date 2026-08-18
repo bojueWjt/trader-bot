@@ -16,6 +16,7 @@ NODE_PATCH_MOUNTS=(
   "intent_execution_planner.py=/app/strategy/intent_execution_planner.py"
   "contracts.py=/app/execution_domain/contracts.py"
   "control_plane.py=/app/execution_domain/control_plane.py"
+  "portfolio_baseline.py=/app/execution_domain/portfolio_baseline.py"
   "http_client.py=/app/execution_domain/http_client.py"
   "projection_actor.py=/app/projection/actor.py"
   "event_mapper.py=/app/projection/event_mapper.py"
