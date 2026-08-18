@@ -10215,8 +10215,8 @@ preflight_gate_checkpoint "fence"
 if [ "$PHASE_ONLY_ROLLOUT" = "1" ]; then
   verify_release_nodes "${ALL_NODES[@]}"
   acquire_maintenance_fence_after_bootstrap
-  advance_reviewed_rollout_for_node
   preflight_gate_checkpoint "rollout"
+  advance_reviewed_rollout_for_node
   echo "== PHASE ONLY OK account=$ROLLOUT_ACCOUNT release_id=$RELEASE_ID"
   echo "== A-D remain HALTED; run the audited canary executor separately"
   exit 0
@@ -10227,6 +10227,7 @@ verify_all_execution_accounts_quiesced
 POST_MIGRATION_RECOVERY_REQUIRED=1
 apply_and_verify_database_migration
 echo "== database schema verified epoch=$DATABASE_SCHEMA_EPOCH"
+preflight_gate_checkpoint "rollout"
 if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
   echo "== emergency rollback skips reviewed rollout registration and advancement"
 elif [ "$ROLLOUT_NODE" = "trader-v3-node-a" ]; then
@@ -10243,7 +10244,6 @@ elif [ "$ROLLOUT_NODE" = "trader-v3-node-a" ]; then
     echo "== reviewed rollout registered in account_a_canary"
   fi
 fi
-preflight_gate_checkpoint "rollout"
 
 DOWNTIME_WINDOW_ENTERED=1
 

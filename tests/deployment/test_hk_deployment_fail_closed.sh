@@ -1697,12 +1697,28 @@ fence_gate = text.index(
     'preflight_gate_checkpoint "fence"',
     halt,
 )
+phase_only_branch = text.index(
+    'if [ "$PHASE_ONLY_ROLLOUT" = "1" ]; then',
+    fence_gate,
+)
+phase_only_rollout_gate = text.index(
+    'preflight_gate_checkpoint "rollout"',
+    phase_only_branch,
+)
+phase_only_rollout_mutation = text.index(
+    "advance_reviewed_rollout_for_node",
+    phase_only_branch,
+)
 migrate = text.index(
     "\napply_and_verify_database_migration\n",
     fence_gate,
 )
 rollout_gate = text.index(
     'preflight_gate_checkpoint "rollout"',
+    migrate,
+)
+rollout_registration = text.index(
+    "run_reviewed_rollout register",
     migrate,
 )
 downtime = text.index(
@@ -1748,8 +1764,12 @@ if not (
     < preflight_exit
     < halt
     < fence_gate
+    < phase_only_branch
+    < phase_only_rollout_gate
+    < phase_only_rollout_mutation
     < migrate
     < rollout_gate
+    < rollout_registration
     < downtime
     < stop_nodes
     < install
