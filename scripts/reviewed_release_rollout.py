@@ -3738,6 +3738,135 @@ def _has_bootstrap_all_halted_registration(
     return True
 
 
+def _has_same_epoch_hotfix_registration(
+    cur,
+    rollout: dict[str, Any],
+) -> bool:
+    registration_key = str(
+        rollout["registration_idempotency_key"] or ""
+    ).strip()
+    reviewed_by = str(rollout["reviewed_by"] or "").strip()
+    if not registration_key or not reviewed_by:
+        raise ReleaseRolloutError(
+            "rollout registration identity is invalid"
+        )
+    cur.execute(
+        """
+        SELECT release_id,
+               event_type,
+               from_phase,
+               to_phase,
+               phase_version,
+               actor,
+               evidence
+        FROM reviewed_release_rollout_events
+        WHERE idempotency_key=%s
+        FOR SHARE
+        """,
+        (registration_key,),
+    )
+    event = cur.fetchone()
+    if event is None:
+        return False
+    evidence = event["evidence"]
+    if not isinstance(evidence, dict):
+        return False
+    registration_mode = evidence.get("registration_mode")
+    hotfix_marked = (
+        registration_mode == SAME_EPOCH_HOTFIX_REGISTRATION_MODE
+        or evidence.get("redis_epoch_reused") is not None
+    )
+    if not hotfix_marked:
+        return False
+    predecessor_release_id = str(
+        evidence.get("predecessor_release_id") or ""
+    ).strip()
+    event_identity = (
+        event["release_id"],
+        event["event_type"],
+        event["from_phase"],
+        event["to_phase"],
+        int(event["phase_version"]),
+        event["actor"],
+    )
+    expected_event_identity = (
+        rollout["release_id"],
+        "registered",
+        None,
+        PHASE_ACCOUNT_A_CANARY,
+        1,
+        reviewed_by,
+    )
+    event_evidence = (
+        registration_mode,
+        evidence.get("redis_epoch_reused"),
+        predecessor_release_id,
+        str(evidence.get("redis_fencing_epoch") or ""),
+    )
+    expected_event_evidence = (
+        SAME_EPOCH_HOTFIX_REGISTRATION_MODE,
+        True,
+        predecessor_release_id,
+        str(rollout["redis_fencing_epoch"]),
+    )
+    if (
+        event_identity != expected_event_identity
+        or not predecessor_release_id
+        or event_evidence != expected_event_evidence
+    ):
+        raise ReleaseRolloutError(
+            "same-epoch hotfix registration evidence is incomplete"
+        )
+    cur.execute(
+        """
+        SELECT actor,
+               payload
+        FROM audit_events
+        WHERE event_type='reviewed_release_registered'
+          AND aggregate_type='reviewed_release_rollout'
+          AND aggregate_id=%s
+        FOR SHARE
+        """,
+        (str(rollout["release_id"]),),
+    )
+    matching = []
+    for row in cur.fetchall():
+        payload = row["payload"]
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("idempotency_key") != registration_key:
+            continue
+        matching.append((row["actor"], payload))
+    if len(matching) != 1:
+        raise ReleaseRolloutError(
+            "same-epoch hotfix registration audit is missing or ambiguous"
+        )
+    actor, payload = matching[0]
+    audit_identity = (
+        actor,
+        payload.get("phase"),
+        payload.get("phase_version"),
+        payload.get("registration_mode"),
+        payload.get("redis_epoch_reused"),
+        str(payload.get("predecessor_release_id") or "").strip(),
+        str(payload.get("redis_fencing_epoch") or ""),
+    )
+    expected_audit_identity = (
+        reviewed_by,
+        PHASE_ACCOUNT_A_CANARY,
+        1,
+        SAME_EPOCH_HOTFIX_REGISTRATION_MODE,
+        True,
+        predecessor_release_id,
+        str(rollout["redis_fencing_epoch"]),
+    )
+    if audit_identity != expected_audit_identity:
+        raise ReleaseRolloutError(
+            "same-epoch hotfix registration audit conflicts"
+        )
+    return True
+
+
 def _require_maintenance_fence(
     cur,
     operation_lock: AccountStallOperationLock,
@@ -4215,12 +4344,18 @@ def _require_account_rollout_readiness(
         raise ReleaseRolloutError(
             f"{next_account} heartbeat Redis fencing epoch mismatch"
         )
+    predeployed_release_label = ""
     if _has_bootstrap_all_halted_registration(cur, rollout):
+        predeployed_release_label = "bootstrap"
+    elif _has_same_epoch_hotfix_registration(cur, rollout):
+        predeployed_release_label = "same-epoch hotfix"
+    if predeployed_release_label:
         if _heartbeat_release_identity(
             next_heartbeat
         ) != expected_new_identity:
             raise ReleaseRolloutError(
-                f"{next_account} must run the bootstrap reviewed release"
+                f"{next_account} must run the "
+                f"{predeployed_release_label} reviewed release"
             )
         evidence.append(_heartbeat_evidence(next_heartbeat))
         return evidence

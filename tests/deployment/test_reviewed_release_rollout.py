@@ -2160,6 +2160,26 @@ def _bootstrap_registration_audit() -> dict:
     }
 
 
+def _same_epoch_hotfix_registration_evidence() -> dict:
+    return {
+        "registration_mode": (
+            reviewed_release_rollout.SAME_EPOCH_HOTFIX_REGISTRATION_MODE
+        ),
+        "redis_epoch_reused": True,
+        "predecessor_release_id": "previous-release",
+        "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+    }
+
+
+def _same_epoch_hotfix_registration_audit() -> dict:
+    return {
+        "idempotency_key": "register:bootstrap-release",
+        "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+        "phase_version": 1,
+        **_same_epoch_hotfix_registration_evidence(),
+    }
+
+
 def _stub_readiness_heartbeats(
     monkeypatch: pytest.MonkeyPatch,
     rows_by_account: dict[str, list[dict]],
@@ -2403,6 +2423,162 @@ def test_bootstrap_readiness_requires_next_account_writer_identity(
     with pytest.raises(
         reviewed_release_rollout.ReleaseRolloutError,
         match="heartbeat writer identity is invalid",
+    ):
+        reviewed_release_rollout._require_account_rollout_readiness(
+            cursor,
+            rollout,
+            upgraded_accounts=("account-a",),
+            next_account="account-b",
+            max_age_seconds=5.0,
+        )
+
+
+def test_same_epoch_hotfix_readiness_accepts_next_account_on_new_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rollout = _readiness_rollout()
+    rows_by_account = {
+        "account-a": [_readiness_heartbeat("account-a", rollout)],
+        "account-b": [_readiness_heartbeat("account-b", rollout)],
+    }
+    _stub_readiness_heartbeats(monkeypatch, rows_by_account)
+    cursor = _ReadinessCursor(
+        event_evidence=_same_epoch_hotfix_registration_evidence(),
+        audit_payload=_same_epoch_hotfix_registration_audit(),
+    )
+
+    evidence = reviewed_release_rollout._require_account_rollout_readiness(
+        cursor,
+        rollout,
+        upgraded_accounts=("account-a",),
+        next_account="account-b",
+        max_age_seconds=5.0,
+    )
+
+    assert [row["account_id"] for row in evidence] == [
+        "account-a",
+        "account-b",
+    ]
+    assert cursor.manifest_queries == 0
+
+
+def test_same_epoch_hotfix_readiness_rejects_next_account_identity_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rollout = _readiness_rollout()
+    rows_by_account = {
+        "account-a": [_readiness_heartbeat("account-a", rollout)],
+        "account-b": [
+            _readiness_heartbeat(
+                "account-b",
+                rollout,
+                image_digest="sha256:" + ("9" * 64),
+            )
+        ],
+    }
+    _stub_readiness_heartbeats(monkeypatch, rows_by_account)
+    cursor = _ReadinessCursor(
+        event_evidence=_same_epoch_hotfix_registration_evidence(),
+        audit_payload=_same_epoch_hotfix_registration_audit(),
+    )
+
+    with pytest.raises(
+        reviewed_release_rollout.ReleaseRolloutError,
+        match="must run the same-epoch hotfix reviewed release",
+    ):
+        reviewed_release_rollout._require_account_rollout_readiness(
+            cursor,
+            rollout,
+            upgraded_accounts=("account-a",),
+            next_account="account-b",
+            max_age_seconds=5.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "event_evidence",
+    (
+        {
+            "registration_mode": "same_epoch_hotfix",
+            "redis_epoch_reused": True,
+            "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+        },
+        {
+            "registration_mode": "same_epoch_hotfix",
+            "redis_epoch_reused": False,
+            "predecessor_release_id": "previous-release",
+            "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+        },
+    ),
+)
+def test_same_epoch_hotfix_readiness_rejects_incomplete_event_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    event_evidence: dict,
+) -> None:
+    rollout = _readiness_rollout()
+    rows_by_account = {
+        "account-a": [_readiness_heartbeat("account-a", rollout)],
+        "account-b": [_readiness_heartbeat("account-b", rollout)],
+    }
+    _stub_readiness_heartbeats(monkeypatch, rows_by_account)
+    cursor = _ReadinessCursor(
+        event_evidence=event_evidence,
+        audit_payload=_same_epoch_hotfix_registration_audit(),
+    )
+
+    with pytest.raises(
+        reviewed_release_rollout.ReleaseRolloutError,
+        match="same-epoch hotfix registration evidence is incomplete",
+    ):
+        reviewed_release_rollout._require_account_rollout_readiness(
+            cursor,
+            rollout,
+            upgraded_accounts=("account-a",),
+            next_account="account-b",
+            max_age_seconds=5.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "audit_payload",
+    (
+        {
+            "idempotency_key": "register:bootstrap-release",
+            "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+            "phase_version": 1,
+            "registration_mode": "same_epoch_hotfix",
+            "redis_epoch_reused": True,
+            "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+        },
+        {
+            "idempotency_key": "register:bootstrap-release",
+            "phase": reviewed_release_rollout.PHASE_ACCOUNT_A_CANARY,
+            "phase_version": 1,
+            "registration_mode": "same_epoch_hotfix",
+            "redis_epoch_reused": False,
+            "predecessor_release_id": "previous-release",
+            "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+        },
+    ),
+)
+def test_same_epoch_hotfix_readiness_rejects_incomplete_audit_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    audit_payload: dict,
+) -> None:
+    rollout = _readiness_rollout()
+    rows_by_account = {
+        "account-a": [_readiness_heartbeat("account-a", rollout)],
+        "account-b": [_readiness_heartbeat("account-b", rollout)],
+    }
+    _stub_readiness_heartbeats(monkeypatch, rows_by_account)
+    cursor = _ReadinessCursor(
+        event_evidence=_same_epoch_hotfix_registration_evidence(),
+        audit_payload=audit_payload,
+    )
+
+    with pytest.raises(
+        reviewed_release_rollout.ReleaseRolloutError,
+        match="same-epoch hotfix registration audit conflicts",
     ):
         reviewed_release_rollout._require_account_rollout_readiness(
             cursor,
