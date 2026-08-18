@@ -2612,6 +2612,21 @@ def _abort_same_epoch_hotfix_predecessor(
             successor_capacity_evidence.redis_fencing_epoch
         ),
     }
+    if predecessor_phase == PHASE_FLEET_COMPLETE:
+        _record_global_audit(
+            cur,
+            release_id=predecessor_release_id,
+            event_type="reviewed_release_hotfix_predecessor_retained",
+            actor=actor,
+            payload={
+                "phase": predecessor_phase,
+                "phase_version": predecessor_version,
+                "idempotency_key": abort_key,
+                "reason": reason,
+                **evidence,
+            },
+        )
+        return
     cur.execute(
         """
         UPDATE reviewed_release_rollouts

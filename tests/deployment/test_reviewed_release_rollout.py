@@ -1958,6 +1958,57 @@ def test_register_same_epoch_hotfix_supersedes_active_rollout(
     assert audits[0]["payload"]["redis_epoch_reused"] is True
 
 
+def test_same_epoch_hotfix_retains_fleet_complete_predecessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _migration_rebaseline_document()
+    capacity = _migration_rebaseline_capacity()
+    predecessor = {
+        "release_id": "previous-release",
+        "redis_fencing_epoch": REDIS_FENCING_EPOCH,
+        "phase": reviewed_release_rollout.PHASE_FLEET_COMPLETE,
+        "phase_version": 5,
+    }
+    statements = []
+    events = []
+    audits = []
+
+    class Cursor:
+        def execute(self, statement, params=None) -> None:
+            statements.append((statement, params))
+
+        def fetchone(self):
+            return {"release_id": predecessor["release_id"]}
+
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_rollout_event",
+        lambda *_args, **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(
+        reviewed_release_rollout,
+        "_record_global_audit",
+        lambda *_args, **kwargs: audits.append(kwargs),
+    )
+
+    reviewed_release_rollout._abort_same_epoch_hotfix_predecessor(
+        Cursor(),
+        predecessor=predecessor,
+        successor_document=document,
+        successor_capacity_evidence=capacity,
+        actor="release-reviewer",
+    )
+
+    assert statements == []
+    assert events == []
+    assert audits[0]["event_type"] == (
+        "reviewed_release_hotfix_predecessor_retained"
+    )
+    assert audits[0]["payload"]["phase"] == (
+        reviewed_release_rollout.PHASE_FLEET_COMPLETE
+    )
+
+
 def test_migration_rebaseline_abort_records_transition_and_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
