@@ -47,6 +47,18 @@ class ImmutableBuildError(ValueError):
     pass
 
 
+def _rootfs_destination(rootfs_dir: Path, target: str) -> Path:
+    target_path = Path(target)
+    if not target_path.is_absolute() or ".." in target_path.parts:
+        raise ImmutableBuildError(
+            f"immutable target must be an absolute normalized path: {target}"
+        )
+    relative_parts = target_path.parts[1:]
+    if not relative_parts:
+        raise ImmutableBuildError("immutable target cannot be the root path")
+    return rootfs_dir.joinpath(*relative_parts)
+
+
 def resolve_common_base_image(images: list[str]) -> str:
     if not images:
         raise ImmutableBuildError("at least one source image is required")
@@ -195,17 +207,16 @@ def prepare_build_context(
         )
     context_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(context_dir, 0o700)
-    payload_dir = context_dir / "payload"
-    payload_dir.mkdir(mode=0o700)
+    rootfs_dir = context_dir / "rootfs"
+    rootfs_dir.mkdir(mode=0o755)
 
     files = validate_bundle_payload(
         bundle_manifest,
         bundle_manifest.parent,
         require_transition_runtime=True,
     )
-    dockerfile_lines = []
     copied_files = []
-    for index, item in enumerate(files):
+    for item in files:
         if not item["bundle_path"].endswith(".py"):
             raise ImmutableBuildError(
                 "immutable context accepts Python business modules only"
@@ -214,13 +225,13 @@ def prepare_build_context(
             raise ImmutableBuildError(
                 "immutable target must be a Python module path"
             )
-        context_name = f"{index:04d}"
         source = bundle_manifest.parent / item["bundle_path"]
-        destination = payload_dir / context_name
+        destination = _rootfs_destination(
+            rootfs_dir,
+            item["mount_target"],
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
-        # COPY preserves context file modes and the image runs as a
-        # non-root user; pin 0o644 so the caller's umask cannot produce
-        # unreadable in-image payloads.
         os.chmod(destination, 0o644)
         if destination.stat().st_size != source.stat().st_size:
             raise ImmutableBuildError(
@@ -228,18 +239,12 @@ def prepare_build_context(
             )
         copied_files.append(
             {
-                "context_path": f"payload/{context_name}",
+                "context_path": destination.relative_to(
+                    context_dir
+                ).as_posix(),
                 "mount_target": item["mount_target"],
                 "sha256": item["sha256"],
             }
-        )
-        dockerfile_lines.append(
-            "COPY "
-            + json.dumps(
-                [f"payload/{context_name}", item["mount_target"]],
-                ensure_ascii=True,
-                separators=(",", ":"),
-            )
         )
 
     if not dependency_lock.is_file():
@@ -264,7 +269,11 @@ def prepare_build_context(
         dependency_lock,
         inventory_release_path,
     )
-    inventory_payload = payload_dir / "dependency-inventory.json"
+    inventory_payload = _rootfs_destination(
+        rootfs_dir,
+        IMMUTABLE_DEPENDENCY_INVENTORY_TARGET,
+    )
+    inventory_payload.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(inventory_release_path, inventory_payload)
     os.chmod(inventory_payload, 0o644)
     if sha256_file(inventory_payload) != sha256_file(
@@ -273,33 +282,15 @@ def prepare_build_context(
         raise ImmutableBuildError(
             "dependency inventory context copy hash mismatch"
         )
-    lock_payload = payload_dir / "dependency.lock"
+    lock_payload = _rootfs_destination(
+        rootfs_dir,
+        IMMUTABLE_DEPENDENCY_LOCK_TARGET,
+    )
+    lock_payload.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(dependency_lock, lock_payload)
     os.chmod(lock_payload, 0o644)
     if sha256_file(lock_payload) != sha256_file(dependency_lock):
         raise ImmutableBuildError("dependency lock context copy hash mismatch")
-    dockerfile_lines.append(
-        "COPY "
-        + json.dumps(
-            [
-                "payload/dependency.lock",
-                IMMUTABLE_DEPENDENCY_LOCK_TARGET,
-            ],
-            ensure_ascii=True,
-            separators=(",", ":"),
-        )
-    )
-    dockerfile_lines.append(
-        "COPY "
-        + json.dumps(
-            [
-                "payload/dependency-inventory.json",
-                IMMUTABLE_DEPENDENCY_INVENTORY_TARGET,
-            ],
-            ensure_ascii=True,
-            separators=(",", ":"),
-        )
-    )
 
     selected_migration_manifest = migration_manifest
     if selected_migration_manifest is None:
@@ -315,7 +306,11 @@ def prepare_build_context(
         selected_migration_manifest,
         payload_root=bundle_manifest.parent,
     )
-    migration_payload = payload_dir / MIGRATION_MANIFEST_NAME
+    migration_payload = _rootfs_destination(
+        rootfs_dir,
+        IMMUTABLE_MIGRATION_MANIFEST_TARGET,
+    )
+    migration_payload.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(selected_migration_manifest, migration_payload)
     os.chmod(migration_payload, 0o644)
     if sha256_file(migration_payload) != sha256_file(
@@ -324,18 +319,17 @@ def prepare_build_context(
         raise ImmutableBuildError(
             "migration manifest context copy hash mismatch"
         )
-    dockerfile_lines.append(
+    for directory in rootfs_dir.rglob("*"):
+        if directory.is_dir():
+            os.chmod(directory, 0o755)
+
+    dockerfile_lines = [
         "COPY "
         + json.dumps(
-            [
-                f"payload/{MIGRATION_MANIFEST_NAME}",
-                IMMUTABLE_MIGRATION_MANIFEST_TARGET,
-            ],
+            ["rootfs/", "/"],
             ensure_ascii=True,
             separators=(",", ":"),
-        )
-    )
-    dockerfile_lines.append(
+        ),
         "RUN "
         + json.dumps(
             dependency_inventory_verifier_command(
@@ -343,8 +337,8 @@ def prepare_build_context(
             ),
             ensure_ascii=True,
             separators=(",", ":"),
-        )
-    )
+        ),
+    ]
 
     (context_dir / "Dockerfile.body").write_text(
         "\n".join(dockerfile_lines) + "\n",

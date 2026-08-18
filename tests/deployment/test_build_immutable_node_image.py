@@ -517,7 +517,7 @@ def _build_with_layer_results(
     }
 
 
-def test_context_contains_numbered_python_payload_only(tmp_path: Path) -> None:
+def test_context_contains_reviewed_rootfs_payload_only(tmp_path: Path) -> None:
     actual_runtime_entries = {
         (bundle_name, mount_target)
         for bundle_name, _source_path, mount_target in (
@@ -542,30 +542,48 @@ def test_context_contains_numbered_python_payload_only(tmp_path: Path) -> None:
         if path.is_file()
     )
     expected_payloads = [
-        f"payload/{index:04d}"
-        for index in range(len(EXPECTED_IMMUTABLE_ENTRIES))
+        f"rootfs{target}"
+        for _name, target in EXPECTED_IMMUTABLE_ENTRIES
     ]
     assert names == [
         "Dockerfile.body",
-        *expected_payloads,
-        "payload/dependency-inventory.json",
-        "payload/dependency.lock",
-        f"payload/{release_manifest.MIGRATION_MANIFEST_NAME}",
+        *sorted(
+            [
+                *expected_payloads,
+                (
+                    "rootfs"
+                    + release_manifest.IMMUTABLE_DEPENDENCY_INVENTORY_TARGET
+                ),
+                (
+                    "rootfs"
+                    + release_manifest.IMMUTABLE_DEPENDENCY_LOCK_TARGET
+                ),
+                (
+                    "rootfs"
+                    + release_manifest.IMMUTABLE_MIGRATION_MANIFEST_TARGET
+                ),
+            ]
+        ),
     ]
     dockerfile = (context / "Dockerfile.body").read_text(encoding="utf-8")
     assert "bundle-manifest.json" not in dockerfile
     assert "/cfg.json" not in dockerfile
     assert ".env" not in dockerfile
-    assert dockerfile.count("\n") == len(EXPECTED_IMMUTABLE_ENTRIES) + 4
-    assert release_manifest.IMMUTABLE_DEPENDENCY_LOCK_TARGET in dockerfile
+    assert dockerfile.count("\n") == 2
+    assert dockerfile.splitlines()[0] == 'COPY ["rootfs/","/"]'
     assert (
         release_manifest.IMMUTABLE_DEPENDENCY_INVENTORY_TARGET
         in dockerfile
     )
-    assert release_manifest.IMMUTABLE_MIGRATION_MANIFEST_TARGET in dockerfile
     assert "importlib.metadata" in dockerfile
     inventory = json.loads(
-        (context / "payload/dependency-inventory.json").read_text(
+        (
+            context
+            / (
+                "rootfs"
+                + release_manifest.IMMUTABLE_DEPENDENCY_INVENTORY_TARGET
+            )
+        ).read_text(
             encoding="utf-8"
         )
     )
@@ -618,10 +636,22 @@ def test_context_payload_modes_survive_restrictive_umask(
     finally:
         os.umask(previous_umask)
 
-    payload_files = sorted((context / "payload").iterdir())
+    payload_files = sorted(
+        path
+        for path in (context / "rootfs").rglob("*")
+        if path.is_file()
+    )
     assert payload_files
     for path in payload_files:
         assert stat.S_IMODE(path.stat().st_mode) == 0o644, path.name
+    payload_directories = sorted(
+        path
+        for path in (context / "rootfs").rglob("*")
+        if path.is_dir()
+    )
+    assert payload_directories
+    for path in payload_directories:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o755, path.name
 
 
 def test_context_rejects_non_python_config_payload(tmp_path: Path) -> None:
