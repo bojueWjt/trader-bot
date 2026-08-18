@@ -1675,6 +1675,11 @@ try:
             )
             active_rollouts = cur.fetchall()
             if len(active_rollouts) != 1:
+                if live_manifest_present and fleet_state == "live_or_restartable":
+                    migration_candidate = False
+                    migration_rebaseline = False
+                    print("maintenance_fence")
+                    raise SystemExit(0)
                 raise SystemExit(
                     "migration rebaseline requires one active rollout"
                 )

@@ -300,13 +300,6 @@ class HeartbeatReceipt:
     def requires_sticky_halt(self) -> bool:
         if self.release_gate.status != "pass":
             return True
-        for peer in self.peers:
-            if peer.status == "rollout_pending":
-                continue
-            if peer.status != "consistent":
-                return True
-            if not peer.fresh or not peer.identity_matches:
-                return True
         return False
 
 

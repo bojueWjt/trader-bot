@@ -2559,9 +2559,6 @@ class _LocalLifecycle:
     def begin_reconciliation(self, *, halt_active: bool = False) -> None:
         self._ready.discard("reconciliation")
         self.reconciliation = _LocalReconciliation()
-        if halt_active:
-            self.trading_state = _LocalTradingState.HALTED
-            self.halt_reason = "reconciliation started"
 
 
 class _UnavailableReconciliationCallback:

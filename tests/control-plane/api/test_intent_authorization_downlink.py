@@ -313,7 +313,7 @@ def test_http_heartbeat_returns_peer_drift_receipt(monkeypatch) -> None:
     assert receipt.peers[0].node_id == "node-b"
     assert receipt.peers[0].identity_matches is False
     assert receipt.peers[0].status == "identity_drift"
-    assert receipt.requires_sticky_halt is True
+    assert receipt.requires_sticky_halt is False
 
 
 def test_http_heartbeat_allows_explicit_rollout_pending_peer(

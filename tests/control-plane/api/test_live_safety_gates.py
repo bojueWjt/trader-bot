@@ -463,8 +463,15 @@ def _seed_heartbeat(
     heartbeat_sequence: int = HEARTBEAT_SEQUENCE,
     redis_fencing_epoch: str = REDIS_FENCING_EPOCH,
     health_degraded_reasons: list[str] | None = None,
+    projection_lag_ms: int = 0,
+    reconciliation_state: str = "healthy",
+    evidence_age_seconds: int | None = None,
 ) -> None:
-    now = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    now = datetime.now(timezone.utc)
+    heartbeat_at = now - timedelta(seconds=age_seconds)
+    if evidence_age_seconds is None:
+        evidence_age_seconds = age_seconds
+    evidence_at = now - timedelta(seconds=evidence_age_seconds)
     account_snapshot_fetched_at = datetime.now(timezone.utc)
     with _connect(url) as conn, conn.cursor() as cur:
         cur.execute(
@@ -527,12 +534,12 @@ def _seed_heartbeat(
                 Json(
                     {
                         "readiness": True,
-                        "projection_lag_ms": 0,
-                        "reconciliation_state": "healthy",
+                        "projection_lag_ms": projection_lag_ms,
+                        "reconciliation_state": reconciliation_state,
                         "health_degraded_reasons": (
                             health_degraded_reasons or []
                         ),
-                        "ts": now.isoformat(),
+                        "ts": heartbeat_at.isoformat(),
                     }
                 ),
                 release_id,
@@ -543,15 +550,15 @@ def _seed_heartbeat(
                 Json(positions or []),
                 Json(regular_orders or []),
                 Json(algo_orders or []),
-                now,
-                now,
-                now,
-                now,
+                evidence_at,
+                evidence_at,
+                evidence_at,
+                evidence_at,
                 redis_fencing_epoch,
                 runtime_generation,
                 lease_fencing_token,
                 heartbeat_sequence,
-                now,
+                heartbeat_at,
             ),
         )
         cur.execute(
@@ -2193,7 +2200,7 @@ def test_migration_rebaseline_all_halted_allows_later_account_canary_resume(
 
 
 @pytest.mark.parametrize("target_risk", ("position", "regular_order", "algo_order"))
-def test_resume_rejects_any_target_symbol_risk(
+def test_resume_allows_existing_target_symbol_risk(
     client: TestClient,
     migrated_db: str,
     target_risk: str,
@@ -2203,7 +2210,6 @@ def test_resume_rejects_any_target_symbol_risk(
         "regular_orders": [{"symbol": "ETHUSDT", "client_order_id": "eth-order"}],
         "algo_orders": [{"symbol": "SOLUSDT", "client_order_id": "sol-stop"}],
     }
-    expected_detail = "target symbol is not flat"
     if target_risk == "position":
         heartbeat_args["positions"].append(
             {"symbol": SYMBOL, "quantity": "0.001"}
@@ -2212,12 +2218,10 @@ def test_resume_rejects_any_target_symbol_risk(
         heartbeat_args["regular_orders"].append(
             {"symbol": SYMBOL, "client_order_id": "target-order"}
         )
-        expected_detail = "target symbol has regular orders"
     if target_risk == "algo_order":
         heartbeat_args["algo_orders"].append(
             {"symbol": SYMBOL, "client_order_id": "target-stop"}
         )
-        expected_detail = "target symbol has algo orders"
     _seed_heartbeat(migrated_db, **heartbeat_args)
     permit_id = _seed_reviewed_release_and_permit(migrated_db)
 
@@ -2227,32 +2231,41 @@ def test_resume_rejects_any_target_symbol_risk(
         json=_resume_body(permit_id),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == expected_detail
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize(
-    ("evidence_change", "expected_detail"),
+    ("evidence_change", "expected_status", "expected_detail"),
     (
-        ("incident", "account has an open P0/P1 incident"),
-        ("position", "target symbol is not flat"),
-        ("regular_order", "target symbol has regular orders"),
-        ("algo_order", "target symbol has algo orders"),
-        ("invalid_order", "node exchange evidence is invalid"),
-        ("identity", "node release identity does not match reviewed manifest"),
-        ("stale", "node heartbeat evidence is stale"),
+        ("incident", 409, "account has an open P0/P1 incident"),
+        ("position", 200, ""),
+        ("regular_order", 200, ""),
+        ("algo_order", 200, ""),
+        ("invalid_order", 200, ""),
+        ("identity", 409, "node release identity does not match reviewed manifest"),
+        ("stale", 200, ""),
         (
             "degraded",
-            "node heartbeat health is degraded: "
-            "execution projection filtered subscribed event: "
-            "OrderInitialized",
+            200,
+            "",
+        ),
+        (
+            "projection_lag",
+            200,
+            "",
+        ),
+        (
+            "unhealthy_reconciliation",
+            200,
+            "",
         ),
     ),
 )
-def test_resume_fails_closed_on_missing_live_evidence(
+def test_resume_allows_reconciliation_and_portfolio_warnings(
     client: TestClient,
     migrated_db: str,
     evidence_change: str,
+    expected_status: int,
     expected_detail: str,
 ) -> None:
     heartbeat_args = {}
@@ -2267,12 +2280,16 @@ def test_resume_fails_closed_on_missing_live_evidence(
     if evidence_change == "identity":
         heartbeat_args["release_id"] = "different-release"
     if evidence_change == "stale":
-        heartbeat_args["age_seconds"] = 20
+        heartbeat_args["evidence_age_seconds"] = 20
     if evidence_change == "degraded":
         heartbeat_args["health_degraded_reasons"] = [
             "execution projection filtered subscribed event: "
             "OrderInitialized"
         ]
+    if evidence_change == "projection_lag":
+        heartbeat_args["projection_lag_ms"] = 60_000
+    if evidence_change == "unhealthy_reconciliation":
+        heartbeat_args["reconciliation_state"] = "degraded"
     _seed_heartbeat(migrated_db, **heartbeat_args)
     permit_id = _seed_reviewed_release_and_permit(migrated_db)
     if evidence_change == "incident":
@@ -2293,8 +2310,9 @@ def test_resume_fails_closed_on_missing_live_evidence(
         json=_resume_body(permit_id),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == expected_detail
+    assert response.status_code == expected_status
+    if expected_detail:
+        assert response.json()["detail"] == expected_detail
 
 
 def test_account_a_canary_permit_is_atomic_single_use_and_capped(

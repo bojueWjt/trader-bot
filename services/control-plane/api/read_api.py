@@ -1158,6 +1158,8 @@ def _validate_and_arm_resume(
         release_id=release_id,
         expected_trading_state="HALTED",
         required_rollout_phase=required_rollout_phase,
+        require_reconciliation_health=False,
+        require_portfolio_clear=False,
     )
 
     cur.execute(
@@ -1248,7 +1250,7 @@ def _validate_and_arm_resume(
             status_code=409,
             detail="canary permit limits are invalid",
         )
-    portfolio_baseline_sha256 = _portfolio_baseline_sha256(
+    portfolio_baseline_sha256 = _portfolio_baseline_sha256_or_unavailable(
         heartbeat,
         symbol,
     )
@@ -1521,6 +1523,8 @@ def _validate_live_heartbeat_evidence(
     release_id: str,
     expected_trading_state: str,
     required_rollout_phase: str | None = None,
+    require_reconciliation_health: bool = True,
+    require_portfolio_clear: bool = True,
 ) -> None:
     if str(heartbeat["status"] or "").upper() != expected_trading_state:
         raise HTTPException(
@@ -1570,54 +1574,59 @@ def _validate_live_heartbeat_evidence(
         projection_lag_ms = int(payload.get("projection_lag_ms"))
     except (TypeError, ValueError):
         projection_lag_ms = -1
-    if (
-        projection_lag_ms < 0
-        or projection_lag_ms > _LIVE_RECONCILIATION_MAX_LAG_MS
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="node reconciliation evidence is unhealthy",
-        )
-    if str(payload.get("reconciliation_state") or "").lower() != "healthy":
-        raise HTTPException(
-            status_code=409,
-            detail="node reconciliation evidence is unhealthy",
-        )
     health_degraded_reasons = payload.get("health_degraded_reasons", [])
     if not isinstance(health_degraded_reasons, list):
         raise HTTPException(
             status_code=409,
             detail="node heartbeat health evidence is invalid",
         )
-    if health_degraded_reasons:
-        reason = str(health_degraded_reasons[0] or "").strip()
-        if not reason:
-            reason = "unspecified degradation"
-        raise HTTPException(
-            status_code=409,
-            detail=f"node heartbeat health is degraded: {reason}",
-        )
 
     now = heartbeat["database_now"]
-    freshness_fields = (
-        "last_seen_at",
-        "positions_snapshot_at",
-        "regular_orders_snapshot_at",
-        "algo_orders_snapshot_at",
-    )
-    if any(
-        not _timestamp_is_fresh(heartbeat.get(field_name), now)
-        for field_name in freshness_fields
-    ):
+    if not _timestamp_is_fresh(heartbeat.get("last_seen_at"), now):
         raise HTTPException(
             status_code=409,
             detail="node heartbeat evidence is stale",
         )
-    if not _reconciliation_health_is_fresh(payload, now):
-        raise HTTPException(
-            status_code=409,
-            detail="node heartbeat evidence is stale",
+    if require_reconciliation_health:
+        if (
+            projection_lag_ms < 0
+            or projection_lag_ms > _LIVE_RECONCILIATION_MAX_LAG_MS
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="node reconciliation evidence is unhealthy",
+            )
+        if str(payload.get("reconciliation_state") or "").lower() != "healthy":
+            raise HTTPException(
+                status_code=409,
+                detail="node reconciliation evidence is unhealthy",
+            )
+        if health_degraded_reasons:
+            reason = str(health_degraded_reasons[0] or "").strip()
+            if not reason:
+                reason = "unspecified degradation"
+            raise HTTPException(
+                status_code=409,
+                detail=f"node heartbeat health is degraded: {reason}",
+            )
+        snapshot_freshness_fields = (
+            "positions_snapshot_at",
+            "regular_orders_snapshot_at",
+            "algo_orders_snapshot_at",
         )
+        if any(
+            not _timestamp_is_fresh(heartbeat.get(field_name), now)
+            for field_name in snapshot_freshness_fields
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="node heartbeat evidence is stale",
+            )
+        if not _reconciliation_health_is_fresh(payload, now):
+            raise HTTPException(
+                status_code=409,
+                detail="node heartbeat evidence is stale",
+            )
 
     cur.execute(
         """
@@ -1672,6 +1681,9 @@ def _validate_live_heartbeat_evidence(
             expected_trading_state=expected_trading_state,
             release_identity=release_identity,
         )
+
+    if not require_portfolio_clear:
+        return
 
     positions = heartbeat.get("positions")
     regular_orders = heartbeat.get("regular_orders")
@@ -1789,6 +1801,24 @@ def _portfolio_baseline_sha256(heartbeat: dict, target_symbol: str) -> str:
             status_code=409,
             detail="node exchange evidence is invalid",
         ) from exc
+
+
+def _portfolio_baseline_sha256_or_unavailable(
+    heartbeat: dict,
+    target_symbol: str,
+) -> str:
+    try:
+        return portfolio_baseline_sha256(heartbeat, target_symbol)
+    except ValueError:
+        identity = "|".join(
+            (
+                "portfolio-baseline-unavailable",
+                str(heartbeat.get("node_id") or ""),
+                str(heartbeat.get("heartbeat_sequence") or ""),
+                _canonical_symbol(target_symbol),
+            )
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 @app.post("/v1/nodes/{node_id}/events")

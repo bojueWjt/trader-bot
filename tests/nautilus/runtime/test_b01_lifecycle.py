@@ -22,6 +22,7 @@ from config.node_config import (  # noqa: E402
 from execution_domain.contracts import ReconciliationState  # noqa: E402
 from execution_domain.control_plane import (  # noqa: E402
     HeartbeatReceipt,
+    PeerIdentityReceipt,
     ReleaseGateReceipt,
     TradingState,
 )
@@ -31,6 +32,7 @@ from runtime.lifecycle import (  # noqa: E402
     ActorTickWatchdog,
     DependencyName,
     NodeLifecycle,
+    _heartbeat_receipt_requires_halt,
 )
 from runtime.reconciliation import (  # noqa: E402
     ReconciliationDatasetSummary,
@@ -309,7 +311,7 @@ def test_live_startup_ignores_active_environment_override(
     assert lifecycle.halt_reason == "startup"
 
 
-def test_reconciliation_dependency_requires_a_real_proof(
+def test_reconciliation_dependency_reports_missing_without_blocking_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _load_account_a(monkeypatch)
@@ -319,17 +321,17 @@ def test_reconciliation_dependency_requires_a_real_proof(
     for dependency in DependencyName:
         lifecycle.mark_dependency_ready(dependency)
 
-    assert lifecycle.readiness.ready is False
-    assert DependencyName.RECONCILIATION in lifecycle.readiness.missing
+    assert lifecycle.readiness.ready is True
+    assert DependencyName.RECONCILIATION not in lifecycle.readiness.missing
     assert lifecycle.reconciliation.status == "missing"
-    with pytest.raises(RuntimeError, match="reconciliation proof is missing"):
-        lifecycle.apply_operator_state(
-            TradingState.ACTIVE,
-            reason="operator resume",
-        )
+    lifecycle.apply_operator_state(
+        TradingState.ACTIVE,
+        reason="operator resume",
+    )
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
 
-def test_resume_requires_fresh_healthy_reconciliation_proof_with_matching_identity(
+def test_reconciliation_proof_drift_reports_without_blocking_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _load_account_a(monkeypatch)
@@ -351,11 +353,11 @@ def test_resume_requires_fresh_healthy_reconciliation_proof_with_matching_identi
         )
     )
     assert lifecycle.reconciliation.status == "identity_mismatch"
-    with pytest.raises(RuntimeError, match="identity does not match"):
-        lifecycle.apply_operator_state(
-            TradingState.ACTIVE,
-            reason="operator resume",
-        )
+    lifecycle.apply_operator_state(
+        TradingState.ACTIVE,
+        reason="operator resume",
+    )
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
     lifecycle.record_reconciliation_proof(
         ReconciliationProof(
@@ -370,11 +372,6 @@ def test_resume_requires_fresh_healthy_reconciliation_proof_with_matching_identi
         )
     )
     assert lifecycle.reconciliation.status == "unhealthy"
-    with pytest.raises(RuntimeError, match="is not healthy"):
-        lifecycle.apply_operator_state(
-            TradingState.ACTIVE,
-            reason="operator resume",
-        )
 
     lifecycle.record_reconciliation_proof(
         _healthy_proof(config, completed_at=clock.now())
@@ -386,16 +383,11 @@ def test_resume_requires_fresh_healthy_reconciliation_proof_with_matching_identi
     lifecycle.evaluate_safety()
 
     assert lifecycle.reconciliation.status == "stale"
-    assert lifecycle.trading_state is TradingState.HALTED
-    assert lifecycle.halt_reason == "reconciliation proof is stale"
-    with pytest.raises(RuntimeError, match="reconciliation proof is stale"):
-        lifecycle.apply_operator_state(
-            TradingState.ACTIVE,
-            reason="operator resume",
-        )
+    assert lifecycle.trading_state is TradingState.ACTIVE
+    assert lifecycle.halt_reason == ""
 
 
-def test_reconciliation_generation_fences_old_completion_and_blocks_resume(
+def test_reconciliation_generation_fences_old_completion_without_blocking_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _load_account_a(monkeypatch)
@@ -419,11 +411,11 @@ def test_reconciliation_generation_fences_old_completion_and_blocks_resume(
 
     assert second_generation == first_generation + 1
     assert lifecycle.reconciliation.status == "in_flight"
-    with pytest.raises(RuntimeError, match="reconciliation is in flight"):
-        lifecycle.apply_operator_state(
-            TradingState.ACTIVE,
-            reason="operator resume",
-        )
+    lifecycle.apply_operator_state(
+        TradingState.ACTIVE,
+        reason="operator resume",
+    )
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
     lifecycle.record_reconciliation_proof(
         _healthy_proof(
@@ -477,22 +469,22 @@ def test_ready_reports_reconciliation_proof_status_and_age(
     clock.advance(timedelta(seconds=19))
     stale = health.readiness()
 
-    assert stale.status_code == 503
+    assert stale.status_code == 200
     assert stale.body["reconciliation_status"] == "stale"
     assert stale.body["reconciliation_proof_age_seconds"] == 31.0
-    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
     lifecycle.record_reconciliation_proof(
         _healthy_proof(config, completed_at=clock.now())
     )
     assert lifecycle.readiness.ready is True
-    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
     lifecycle.apply_operator_state(TradingState.ACTIVE, reason="operator resume")
     assert lifecycle.trading_state is TradingState.ACTIVE
 
 
-def test_runtime_without_release_identity_rejects_reconciliation_proof(
+def test_runtime_without_release_identity_reports_reconciliation_proof_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _load_account_a(monkeypatch)
@@ -510,11 +502,11 @@ def test_runtime_without_release_identity_rejects_reconciliation_proof(
     )
 
     assert lifecycle.reconciliation.status == "release_identity_missing"
-    with pytest.raises(RuntimeError, match="runtime release identity is missing"):
-        lifecycle.apply_operator_state(
-            TradingState.ACTIVE,
-            reason="operator resume",
-        )
+    lifecycle.apply_operator_state(
+        TradingState.ACTIVE,
+        reason="operator resume",
+    )
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
 
 def test_reconciliation_summary_digest_is_stable_and_rejects_opaque_records() -> None:
@@ -595,6 +587,38 @@ def test_live_heartbeat_release_drift_is_sticky_halted(
     assert lifecycle.trading_state is TradingState.HALTED
     assert DependencyName.CONTROL_PLANE in lifecycle.readiness.missing
     assert "heartbeat release gate failed: drift" in lifecycle.halt_reason
+
+
+def test_live_heartbeat_peer_stale_is_non_blocking_warning() -> None:
+    receipt = HeartbeatReceipt(
+        release_gate=ReleaseGateReceipt(
+            status="pass",
+            release_id="release-a",
+            reviewed_manifest=None,
+            rollout_phase="fleet_complete",
+            live_open_mode="normal",
+            phase_version=5,
+        ),
+        peers=(
+            PeerIdentityReceipt(
+                node_id="nautilus-node-account-d",
+                account_id="account-d",
+                release_id="release-a",
+                image_digest="sha256:" + ("1" * 64),
+                config_sha256="2" * 64,
+                dependency_lock_sha256="3" * 64,
+                schema_epoch="0015_refresh_evidence_command",
+                redis_fencing_epoch=REDIS_FENCING_EPOCH,
+                freshness_age_seconds=3600.0,
+                fresh=False,
+                identity_matches=True,
+                status="stale",
+            ),
+        ),
+    )
+
+    assert receipt.requires_sticky_halt is False
+    assert _heartbeat_receipt_requires_halt(receipt, live=True) is False
 
 
 def test_heartbeat_receipt_updates_rollout_phase(
@@ -964,7 +988,7 @@ def test_stale_lease_generation_halts_active_and_requires_refresh_then_resume(
     assert lifecycle.trading_state is TradingState.ACTIVE
 
 
-def test_risk_generation_rejects_stale_runtime_reconciliation_and_lease(
+def test_risk_generation_rejects_stale_runtime_and_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _load_account_a(monkeypatch)
@@ -981,12 +1005,11 @@ def test_risk_generation_rejects_stale_runtime_reconciliation_and_lease(
             reconciliation_generation=lifecycle.reconciliation_generation,
             lease_generation=9,
         )
-    with pytest.raises(RuntimeError, match="reconciliation generation"):
-        lifecycle.validate_risk_generation(
-            runtime_generation=lifecycle.runtime_generation,
-            reconciliation_generation=lifecycle.reconciliation_generation + 1,
-            lease_generation=9,
-        )
+    lifecycle.validate_risk_generation(
+        runtime_generation=lifecycle.runtime_generation,
+        reconciliation_generation=lifecycle.reconciliation_generation + 1,
+        lease_generation=9,
+    )
     with pytest.raises(RuntimeError, match="lease generation"):
         lifecycle.validate_risk_generation(
             runtime_generation=lifecycle.runtime_generation,

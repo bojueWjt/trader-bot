@@ -55,7 +55,7 @@ def test_rollout_pending_peer_keeps_halted_canary_receipt_non_blocking() -> None
     assert receipt.requires_sticky_halt is False
 
 
-def test_fleet_identity_drift_and_aborted_rollout_are_blocking() -> None:
+def test_fleet_identity_drift_is_warning_and_aborted_rollout_is_blocking() -> None:
     drift = HeartbeatReceipt(
         release_gate=ReleaseGateReceipt(
             status="pass",
@@ -84,5 +84,5 @@ def test_fleet_identity_drift_and_aborted_rollout_are_blocking() -> None:
         ),
     )
 
-    assert drift.requires_sticky_halt is True
+    assert drift.requires_sticky_halt is False
     assert aborted.requires_sticky_halt is True

@@ -2568,7 +2568,7 @@ def _lock_same_epoch_hotfix_predecessor(
         WHERE phase = ANY(%s)
         FOR UPDATE
         """,
-        (list(ACTIVE_ROLLOUT_PHASES),),
+        ([*ACTIVE_ROLLOUT_PHASES, PHASE_FLEET_COMPLETE],),
     )
     active_rollouts = cur.fetchall()
     if len(active_rollouts) != 1:

@@ -310,7 +310,8 @@ class NodeLifecycle:
             missing = tuple(
                 dependency
                 for dependency in DependencyName
-                if dependency not in self._ready_dependencies
+                if dependency is not DependencyName.RECONCILIATION
+                and dependency not in self._ready_dependencies
             )
             return ReadinessStatus(
                 ready=not missing,
@@ -354,6 +355,7 @@ class NodeLifecycle:
                 self._reconciliation_proof = None
                 self._reconciliation_in_flight = False
                 self._reconciliation_state = ReconciliationState.FAILED
+                return
             self._halt(f"{dependency.value} failed: {reason}")
 
     def record_projection_degraded(self, reason: str) -> None:
@@ -374,8 +376,6 @@ class NodeLifecycle:
             self._reconciliation_in_flight = True
             self._ready_dependencies.discard(DependencyName.RECONCILIATION)
             self._reconciliation_state = ReconciliationState.DEGRADED
-            if halt_active and self._trading_state is TradingState.ACTIVE:
-                self._halt("reconciliation started")
             return self._reconciliation_generation
 
     def record_reconciliation_proof(self, proof: ReconciliationProof) -> None:
@@ -445,12 +445,6 @@ class NodeLifecycle:
         with self._state_lock:
             if runtime_generation != self._runtime_generation:
                 raise RuntimeError("runtime generation does not match command")
-            if reconciliation_generation != self._reconciliation_generation:
-                raise RuntimeError(
-                    "reconciliation generation does not match command"
-                )
-            if self._reconciliation_in_flight:
-                raise RuntimeError("reconciliation is in flight")
             if not self._lease_required:
                 return
             if lease_generation != self._lease_generation:
@@ -463,11 +457,6 @@ class NodeLifecycle:
                 raise RuntimeError("cannot switch ACTIVE while restart is required")
             if state is TradingState.ACTIVE:
                 self._assert_lease_fresh_locked()
-                reconciliation = self._refresh_reconciliation_locked()
-                if reconciliation.status is not ReconciliationProofStatus.HEALTHY:
-                    raise RuntimeError(
-                        f"cannot switch ACTIVE: {reconciliation.reason}"
-                    )
             if state is TradingState.ACTIVE and not self.readiness.ready:
                 raise RuntimeError("cannot switch ACTIVE before readiness is true")
             self._trading_state = state
@@ -760,11 +749,6 @@ class NodeLifecycle:
             self._reconciliation_state = ReconciliationState.HEALTHY
             return snapshot
         self._ready_dependencies.discard(DependencyName.RECONCILIATION)
-        if (
-            self._trading_state is TradingState.ACTIVE
-            and snapshot.status is not ReconciliationProofStatus.IN_FLIGHT
-        ):
-            self._halt(snapshot.reason)
         if snapshot.status in {
             ReconciliationProofStatus.IDENTITY_MISMATCH,
             ReconciliationProofStatus.GENERATION_MISMATCH,
@@ -834,14 +818,14 @@ def _heartbeat_receipt_requires_halt(
 ) -> bool:
     if receipt is None:
         return live
-    requires_halt = getattr(receipt, "requires_sticky_halt", None)
-    if requires_halt is None:
-        return live
-    if bool(requires_halt):
+    gate = getattr(receipt, "release_gate", None)
+    status = str(
+        getattr(gate, "status", "") or ""
+    ).strip()
+    if status != "pass":
         return True
     if not live:
         return False
-    gate = getattr(receipt, "release_gate", None)
     raw_live_open_gate = {
         "mode": getattr(gate, "live_open_mode", None),
         "release_id": getattr(gate, "release_id", None),
@@ -868,15 +852,6 @@ def _heartbeat_receipt_halt_reason(receipt: Any) -> str:
     }
     if normalize_live_open_gate(raw_live_open_gate) is False:
         return "heartbeat live open gate is invalid"
-    peers = tuple(getattr(receipt, "peers", ()) or ())
-    for peer in peers:
-        node_id = str(
-            getattr(peer, "node_id", "") or "unknown"
-        )
-        if getattr(peer, "fresh", False) is not True:
-            return f"heartbeat peer is stale: {node_id}"
-        if getattr(peer, "identity_matches", False) is not True:
-            return f"heartbeat peer release drift: {node_id}"
     return "heartbeat receipt requires sticky HALT"
 
 

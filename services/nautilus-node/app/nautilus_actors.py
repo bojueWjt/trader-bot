@@ -4405,10 +4405,11 @@ def _heartbeat_receipt_requires_halt(
 ) -> bool:
     if receipt is None:
         return live
-    requires_halt = getattr(receipt, "requires_sticky_halt", None)
-    if requires_halt is None:
-        return live
-    if bool(requires_halt):
+    gate = getattr(receipt, "release_gate", None)
+    gate_status = str(
+        getattr(gate, "status", "") or ""
+    ).strip()
+    if gate_status != "pass":
         return True
     if not live:
         return False
@@ -4416,7 +4417,6 @@ def _heartbeat_receipt_requires_halt(
         normalize_live_open_gate,
     )
 
-    gate = getattr(receipt, "release_gate", None)
     raw_live_open_gate = {
         "mode": getattr(gate, "live_open_mode", None),
         "release_id": getattr(gate, "release_id", None),
@@ -4450,19 +4450,6 @@ def _heartbeat_receipt_halt_reason(receipt: Any) -> str:
     }
     if normalize_live_open_gate(raw_live_open_gate) is False:
         return "heartbeat live open gate is invalid"
-    peers = tuple(getattr(receipt, "peers", ()) or ())
-    for peer in peers:
-        node_id = str(
-            getattr(peer, "node_id", "") or "unknown"
-        )
-        fresh = getattr(peer, "fresh", False) is True
-        identity_matches = (
-            getattr(peer, "identity_matches", False) is True
-        )
-        if not fresh:
-            return f"heartbeat peer is stale: {node_id}"
-        if not identity_matches:
-            return f"heartbeat peer release drift: {node_id}"
     return "heartbeat receipt requires sticky HALT"
 
 

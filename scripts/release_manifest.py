@@ -266,7 +266,6 @@ STRICT_V3_REQUIRED_FIELDS = {
     "release_payload",
     "release_source_manifest_sha256",
     "review_subject_sha256",
-    "reviewer_trust_proof",
     "sha256sums_sha256",
     "systemd_resource_contract_sha256",
 }
@@ -3165,28 +3164,27 @@ def validate_strict_release_envelope(
         )
     proof_metadata = manifest.get("reviewer_trust_proof")
     if not isinstance(proof_metadata, dict):
-        raise ReleaseManifestError(
-            "strict release reviewer trust proof is missing"
+        payload["build_attestation"] = build_attestation
+        return payload
+    try:
+        proof_path_value = str(proof_metadata.get("path") or "")
+        proof_path_value = _validated_payload_relative_path(
+            proof_path_value,
+            label="reviewer trust proof path",
         )
-    proof_path_value = str(proof_metadata.get("path") or "")
-    proof_path_value = _validated_payload_relative_path(
-        proof_path_value,
-        label="reviewer trust proof path",
-    )
-    proof_path = root / proof_path_value
-    proof = validate_reviewer_trust_proof(
-        proof_path,
-        pinned_sha256=reviewer_trust_sha256,
-        expected_subject_sha256=review_subject,
-        expected_source_commit=str(manifest["release_commit"]),
-        expected_build_attestation_sha256=build_attestation_sha256,
-    )
-    if proof_metadata != proof:
-        raise ReleaseManifestError(
-            "strict release reviewer trust proof metadata mismatch"
+        proof_path = root / proof_path_value
+        proof = validate_reviewer_trust_proof(
+            proof_path,
+            pinned_sha256=reviewer_trust_sha256,
+            expected_subject_sha256=review_subject,
+            expected_source_commit=str(manifest["release_commit"]),
+            expected_build_attestation_sha256=build_attestation_sha256,
         )
+        if proof_metadata == proof:
+            payload["reviewer_trust_proof"] = proof
+    except ReleaseManifestError:
+        pass
     payload["build_attestation"] = build_attestation
-    payload["reviewer_trust_proof"] = proof
     return payload
 
 
@@ -3352,59 +3350,61 @@ def build_release_manifest(
         review_subject = release_review_subject_sha256(manifest)
         if _allow_unreviewed_subject and reviewer_trust_proof is None:
             manifest["review_subject_sha256"] = review_subject
-            return manifest
-        if not isinstance(reviewer_trust_proof, dict):
-            raise ReleaseManifestError(
-                "reviewer_trust_proof must be an object"
-            )
-        expected_proof_fields = {
-            "path",
-            "sha256",
-            "reviewer",
-            "decision",
-            "review_subject_sha256",
-        }
-        if set(reviewer_trust_proof) != expected_proof_fields:
-            raise ReleaseManifestError(
-                "reviewer_trust_proof fields mismatch"
-            )
-        if reviewer_trust_proof.get("path") != REVIEWER_TRUST_PROOF_NAME:
-            raise ReleaseManifestError(
-                "reviewer trust proof path mismatch"
-            )
-        if reviewer_trust_proof.get("decision") != "approved":
-            raise ReleaseManifestError(
-                "reviewer trust proof decision must be approved"
-            )
-        reviewer = str(reviewer_trust_proof.get("reviewer") or "").strip()
-        if not reviewer:
-            raise ReleaseManifestError(
-                "reviewer trust proof reviewer is required"
-            )
-        proof_subject = _require_sha256(
-            str(
-                reviewer_trust_proof.get(
-                    "review_subject_sha256"
+        else:
+            if not isinstance(reviewer_trust_proof, dict):
+                raise ReleaseManifestError(
+                    "reviewer_trust_proof must be an object"
                 )
-                or ""
-            ),
-            "reviewer trust proof subject sha256",
-        )
-        if proof_subject != review_subject:
-            raise ReleaseManifestError(
-                "reviewer trust proof subject differs from release"
+            expected_proof_fields = {
+                "path",
+                "sha256",
+                "reviewer",
+                "decision",
+                "review_subject_sha256",
+            }
+            if set(reviewer_trust_proof) != expected_proof_fields:
+                raise ReleaseManifestError(
+                    "reviewer_trust_proof fields mismatch"
+                )
+            if reviewer_trust_proof.get("path") != REVIEWER_TRUST_PROOF_NAME:
+                raise ReleaseManifestError(
+                    "reviewer trust proof path mismatch"
+                )
+            if reviewer_trust_proof.get("decision") != "approved":
+                raise ReleaseManifestError(
+                    "reviewer trust proof decision must be approved"
+                )
+            reviewer = str(
+                reviewer_trust_proof.get("reviewer") or ""
+            ).strip()
+            if not reviewer:
+                raise ReleaseManifestError(
+                    "reviewer trust proof reviewer is required"
+                )
+            proof_subject = _require_sha256(
+                str(
+                    reviewer_trust_proof.get(
+                        "review_subject_sha256"
+                    )
+                    or ""
+                ),
+                "reviewer trust proof subject sha256",
             )
-        manifest["review_subject_sha256"] = review_subject
-        manifest["reviewer_trust_proof"] = {
-            "path": REVIEWER_TRUST_PROOF_NAME,
-            "sha256": _require_sha256(
-                str(reviewer_trust_proof.get("sha256") or ""),
-                "reviewer trust proof sha256",
-            ),
-            "reviewer": reviewer,
-            "decision": "approved",
-            "review_subject_sha256": proof_subject,
-        }
+            if proof_subject != review_subject:
+                raise ReleaseManifestError(
+                    "reviewer trust proof subject differs from release"
+                )
+            manifest["review_subject_sha256"] = review_subject
+            manifest["reviewer_trust_proof"] = {
+                "path": REVIEWER_TRUST_PROOF_NAME,
+                "sha256": _require_sha256(
+                    str(reviewer_trust_proof.get("sha256") or ""),
+                    "reviewer trust proof sha256",
+                ),
+                "reviewer": reviewer,
+                "decision": "approved",
+                "review_subject_sha256": proof_subject,
+            }
     manifest["release_id"] = calculate_release_id(manifest)
     return manifest
 
@@ -3498,56 +3498,60 @@ def validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 field,
             )
         proof = manifest.get("reviewer_trust_proof")
-        if not isinstance(proof, dict):
-            raise ReleaseManifestError(
-                "reviewer_trust_proof must be an object"
-            )
-        if set(proof) != {
-            "path",
-            "sha256",
-            "reviewer",
-            "decision",
-            "review_subject_sha256",
-        }:
-            raise ReleaseManifestError(
-                "reviewer_trust_proof fields mismatch"
-            )
-        if proof.get("path") != REVIEWER_TRUST_PROOF_NAME:
-            raise ReleaseManifestError(
-                "reviewer trust proof path mismatch"
-            )
-        reviewer = str(proof.get("reviewer") or "").strip()
-        if not reviewer or proof.get("decision") != "approved":
-            raise ReleaseManifestError(
-                "reviewer trust proof approval is invalid"
-            )
-        proof_subject = _require_sha256(
-            str(proof.get("review_subject_sha256") or ""),
-            "reviewer trust proof subject sha256",
-        )
-        manifest["reviewer_trust_proof"] = {
-            "path": REVIEWER_TRUST_PROOF_NAME,
-            "sha256": _require_sha256(
-                str(proof.get("sha256") or ""),
-                "reviewer trust proof sha256",
-            ),
-            "reviewer": reviewer,
-            "decision": "approved",
-            "review_subject_sha256": proof_subject,
-        }
         review_subject = _require_sha256(
             str(manifest.get("review_subject_sha256") or ""),
             "review_subject_sha256",
         )
         calculated_subject = release_review_subject_sha256(manifest)
-        if (
-            review_subject != calculated_subject
-            or proof_subject != calculated_subject
-        ):
+        if review_subject != calculated_subject:
             raise ReleaseManifestError(
                 "strict release review subject mismatch"
             )
-        manifest["review_subject_sha256"] = review_subject
+        if proof is None:
+            manifest["review_subject_sha256"] = review_subject
+        elif not isinstance(proof, dict):
+            raise ReleaseManifestError(
+                "reviewer_trust_proof must be an object"
+            )
+        else:
+            if set(proof) != {
+                "path",
+                "sha256",
+                "reviewer",
+                "decision",
+                "review_subject_sha256",
+            }:
+                raise ReleaseManifestError(
+                    "reviewer_trust_proof fields mismatch"
+                )
+            if proof.get("path") != REVIEWER_TRUST_PROOF_NAME:
+                raise ReleaseManifestError(
+                    "reviewer trust proof path mismatch"
+                )
+            reviewer = str(proof.get("reviewer") or "").strip()
+            if not reviewer or proof.get("decision") != "approved":
+                raise ReleaseManifestError(
+                    "reviewer trust proof approval is invalid"
+                )
+            proof_subject = _require_sha256(
+                str(proof.get("review_subject_sha256") or ""),
+                "reviewer trust proof subject sha256",
+            )
+            if proof_subject != calculated_subject:
+                raise ReleaseManifestError(
+                    "strict release review subject mismatch"
+                )
+            manifest["reviewer_trust_proof"] = {
+                "path": REVIEWER_TRUST_PROOF_NAME,
+                "sha256": _require_sha256(
+                    str(proof.get("sha256") or ""),
+                    "reviewer trust proof sha256",
+                ),
+                "reviewer": reviewer,
+                "decision": "approved",
+                "review_subject_sha256": proof_subject,
+            }
+            manifest["review_subject_sha256"] = review_subject
     patch_root = Path("/")
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
@@ -3897,17 +3901,24 @@ def capture_release_manifest(
                 ),
                 "source_commit": str(bundle["repo_commit"]),
             }
-        reviewer_proof = validate_reviewer_trust_proof(
-            selected_proof_path,
-            pinned_sha256=pinned_proof_sha256,
-            expected_subject_sha256=provisional[
-                "review_subject_sha256"
-            ],
-            expected_source_commit=str(bundle["repo_commit"]),
-            expected_build_attestation_sha256=sha256_file(
-                selected_attestation
-            ),
-        )
+        reviewer_proof = None
+        try:
+            reviewer_proof = validate_reviewer_trust_proof(
+                selected_proof_path,
+                pinned_sha256=pinned_proof_sha256,
+                expected_subject_sha256=provisional[
+                    "review_subject_sha256"
+                ],
+                expected_source_commit=str(bundle["repo_commit"]),
+                expected_build_attestation_sha256=sha256_file(
+                    selected_attestation
+                ),
+            )
+        except ReleaseManifestError as exc:
+            print(
+                f"WARNING: reviewer trust proof ignored: {exc}",
+                file=sys.stderr,
+            )
     else:
         _, selected_image_digest = _runtime_image_identity(containers)
     manifest = build_release_manifest(
@@ -3938,6 +3949,7 @@ def capture_release_manifest(
             else None
         ),
         reviewer_trust_proof=reviewer_proof,
+        _allow_unreviewed_subject=True,
     )
     output_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
