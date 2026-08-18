@@ -1999,6 +1999,51 @@ def test_terminal_zero_fill_observation_proves_flat_without_mark_price(
     assert evidence["mainnet_round_trip"]["close_filled_quantity"] == "0"
 
 
+def test_pending_zero_fill_ignores_stale_mark_and_continues_polling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = _authorization(tmp_path)
+    adapter = FakeAdapter(authorization)
+    original_observe = adapter.observe
+
+    def staged_observe(
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = dict(original_observe(request))
+        if len(adapter.requests["observe"]) == 1:
+            payload.update(
+                {
+                    "open_status": "PENDING",
+                    "filled_quantity": "0",
+                    "average_fill_price_usdt": "0",
+                    "mark_fresh": False,
+                    "loss_monitor_healthy": False,
+                    "mark_at": (
+                        NOW - timedelta(seconds=60)
+                    ).isoformat(),
+                    "loss_monitor_at": (
+                        NOW - timedelta(seconds=60)
+                    ).isoformat(),
+                }
+            )
+        return payload
+
+    monkeypatch.setattr(adapter, "observe", staged_observe)
+    live_executor = _executor(
+        tmp_path,
+        authorization,
+        adapter,
+        evidence_path=tmp_path / "pending-zero-fill.json",
+    )
+
+    result = live_executor.execute(authorization)
+
+    assert result.passed is True
+    assert adapter.calls.count("observe") == 2
+    assert adapter.calls[-1] == "halt"
+
+
 @pytest.mark.parametrize(
     ("adapter_kwargs", "expected_error"),
     [

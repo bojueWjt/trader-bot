@@ -125,7 +125,13 @@ _PORTFOLIO_SNAPSHOT_FIELDS = (
 )
 _PORTFOLIO_VOLATILE_FIELDS = frozenset(
     {
+        "initial_margin",
         "mark_price",
+        "maint_margin",
+        "notional",
+        "open_order_initial_margin",
+        "position_initial_margin",
+        "unrealized_pnl",
         "unrealized_profit",
         "liquidation_price",
         "update_time",

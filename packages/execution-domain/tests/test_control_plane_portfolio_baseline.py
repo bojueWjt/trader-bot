@@ -99,6 +99,65 @@ def test_portfolio_baseline_canonicalizes_non_target_evidence() -> None:
     )
 
 
+def test_portfolio_baseline_ignores_position_risk_market_refresh() -> None:
+    original = {
+        "positions": [
+            {
+                "symbol": "ETHUSDT",
+                "quantity": "-0.25",
+                "position_side": "SHORT",
+                "entry_price": "3000",
+                "mark_price": "2999",
+                "notional": "-749.75",
+                "initial_margin": "37.4875",
+                "position_initial_margin": "37.4875",
+                "open_order_initial_margin": "0",
+                "maint_margin": "3.74875",
+                "unrealized_pnl": "0.25",
+                "unrealized_profit": "0.25",
+                "liquidation_price": "4000",
+                "update_time": 1_787_034_181_545,
+            }
+        ],
+        "regular_orders": [],
+        "algo_orders": [],
+    }
+    refreshed = {
+        "positions": [
+            {
+                "symbol": "ETHUSDT",
+                "quantity": "-0.250",
+                "position_side": "SHORT",
+                "entry_price": "3000.0",
+                "mark_price": "2995",
+                "notional": "-748.75",
+                "initial_margin": "37.4375",
+                "position_initial_margin": "37.4375",
+                "open_order_initial_margin": "1.25",
+                "maint_margin": "3.74375",
+                "unrealized_pnl": "1.25",
+                "unrealized_profit": "1.25",
+                "liquidation_price": "3998",
+                "update_time": 1_787_034_184_520,
+            }
+        ],
+        "regular_orders": [],
+        "algo_orders": [],
+    }
+
+    assert (
+        portfolio_baseline_sha256(original, "SOLUSDT")
+        == portfolio_baseline_sha256(refreshed, "SOLUSDT")
+    )
+
+    refreshed["positions"][0]["entry_price"] = "3001"
+
+    assert (
+        portfolio_baseline_sha256(original, "SOLUSDT")
+        != portfolio_baseline_sha256(refreshed, "SOLUSDT")
+    )
+
+
 def test_portfolio_baseline_changes_with_non_target_order_price() -> None:
     heartbeat = {
         "positions": [],

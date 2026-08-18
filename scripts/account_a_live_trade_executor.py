@@ -4304,11 +4304,8 @@ def _parse_observation(
         raise LiveTradeExecutionError(
             "filled quantity exceeds authorized quantity"
         )
-    terminal_no_fill = (
-        open_status in TERMINAL_OPEN_STATUSES
-        and filled_quantity == 0
-    )
-    if not terminal_no_fill:
+    requires_live_risk_evidence = filled_quantity > 0
+    if requires_live_risk_evidence:
         if payload.get("mark_fresh") is not True:
             raise LiveTradeExecutionError(
                 "observation mark price is stale"
@@ -4339,7 +4336,10 @@ def _parse_observation(
         "mark_at": mark_at,
         "loss_monitor_at": loss_monitor_at,
     }.items():
-        if terminal_no_fill and field_name != "observed_at":
+        if (
+            not requires_live_risk_evidence
+            and field_name != "observed_at"
+        ):
             continue
         _require_fresh_timestamp(
             timestamp,
