@@ -26,3 +26,10 @@ env/
 
 # Local Git worktrees
 .worktrees/
+
+# Generated local orchestration and release artifacts
+.agent-team/*/team-proposal.json
+.agent-team/*/team-selection.json
+.codex-tmp/
+.codex/releases/
+apps/*/dist/
