@@ -284,6 +284,10 @@ REQUIRED_HERMES_RELEASE_PATHS = {
     "host/v3_trade.py",
     "host/v3-trader/SKILL.md",
 }
+HERMES_FEEDER_SOURCE_PATH = "scripts/hermes_signal_feeder.py"
+HERMES_FEEDER_REQUIRED_SHA256 = (
+    "e9341a3a098aa1e8864c7423a29241b458d97fa43988f1686ebfbcba7012e780"
+)
 REQUIRED_CONTROL_PLANE_HOST_RELEASE_PATHS = {
     "host/read_api.py",
     "host/snapshot.py",
@@ -633,6 +637,13 @@ def _validate_release_payload(
     source_relative: str,
     payload: bytes,
 ) -> None:
+    if source_relative == HERMES_FEEDER_SOURCE_PATH:
+        digest = _sha256_bytes(payload)
+        if digest != HERMES_FEEDER_REQUIRED_SHA256:
+            raise ReleaseBundleError(
+                "Hermes feeder SHA256 does not match the canonical "
+                f"watcher ingress version: {digest}"
+            )
     if FORBIDDEN_RELEASE_CONTENT_RE.search(payload):
         raise ReleaseBundleError(
             "account-stall release includes forbidden Attention content: "
