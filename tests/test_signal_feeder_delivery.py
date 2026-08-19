@@ -201,6 +201,16 @@ def test_successful_pending_response_is_committed_before_state_clears(
         }
     )
     monkeypatch.setattr(module, "_latest_markdown_response", lambda job_id: "processed")
+    monkeypatch.setattr(
+        module,
+        "load_cron_job_status",
+        lambda _job_id: {
+            "last_run_at": "2026-08-19T00:00:00+00:00",
+            "last_status": "ok",
+            "last_delivery_error": None,
+        },
+    )
+    monkeypatch.setattr(module, "remove_cron_job", lambda _job_id: True)
     contexts: list[str] = []
     monkeypatch.setattr(
         module,

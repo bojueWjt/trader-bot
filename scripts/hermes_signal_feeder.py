@@ -71,6 +71,8 @@ LOCK = "/srv/trader-v3/scripts/.hermes_feeder.lock"
 CHANNEL_CONTEXT_DIR = "/srv/trader-v3/scripts/.channel_ctx"
 HERMES_OUTPUT_DIR = "/srv/hermes/profiles/trader/cron/output"
 HERMES_BIN = os.environ.get("HERMES_BIN", "/srv/hermes/hermes-agent/venv/bin/hermes")
+HERMES_AGENT_ROOT = str(Path(HERMES_BIN).resolve().parents[2])
+HERMES_PYTHON = str(Path(HERMES_BIN).with_name("python"))
 # HERMES_HOME must match the gateway service's env (unit sets it to the profile
 # dir) — the cron job store lives under it; a job created under a different
 # home is invisible to the gateway scheduler and never runs.
@@ -80,6 +82,7 @@ HERMES_ENV = {
     "HERMES_ACCEPT_HOOKS": "1",
     "HERMES_HOME": os.environ.get("HERMES_HOME", "/srv/hermes/profiles/trader"),
 }
+HERMES_JOBS_FILE = os.path.join(HERMES_ENV["HERMES_HOME"], "cron", "jobs.json")
 INGRESS_URL = os.environ.get(
     "INGRESS_URL",
     "http://127.0.0.1:8087",
@@ -103,6 +106,9 @@ RESPONSE_CAPTURE_SECONDS = 420
 # (with pacing) instead of advancing the cursor past a dropped signal.
 BRAIN_FAILURE_MARKERS = ("API call failed", "auth_unavailable", "no auth available")
 BRAIN_RETRY_DELAY_SECONDS = 120
+DELIVERY_RETRY_DELAY_SECONDS = 30
+DELIVERY_UNCERTAIN_GRACE_SECONDS = 5 * 60
+DELIVERY_MAX_REDELIVERY_ATTEMPTS = 3
 QUARANTINE_SCHEMA_VERSION = 1
 
 # Hermes' cron guard hard-blocks prompts containing these invisible unicode chars
@@ -949,14 +955,16 @@ def run_hermes(
     on_job_created: Callable[[str], None] | None = None,
 ) -> str | None:
     schedule = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    # Hermes coerces one-shot repeat <= 0 to 1 and deletes after the first run.
+    # Repeat 2 retains the completed job until delivery is confirmed and cleaned.
     create_cmd = [
         HERMES_BIN, "cron", "create", schedule, prompt,
-        "--name", name, "--deliver", "telegram", "--repeat", "1",
+        "--name", name, "--deliver", "telegram", "--repeat", "2",
         "--skill", "v3-trader",
     ]
     if dry_run:
         log(f"DRY-RUN would exec: {' '.join(create_cmd[:4])} <prompt {len(prompt)} chars> "
-            f"--name {name} --deliver telegram --repeat 1 --skill v3-trader ; then cron run <job>")
+            f"--name {name} --deliver telegram --repeat 2 --skill v3-trader ; then cron run <job>")
         return "dry-run"
     out = subprocess.run(create_cmd, env=HERMES_ENV, capture_output=True, text=True, timeout=60)
     match = re.search(r"Created job:\s*(\S+)", out.stdout or "")
@@ -1074,6 +1082,130 @@ def find_existing_cron_job(name: str) -> str | None | bool:
     except json.JSONDecodeError:
         return _find_job_in_text(stdout, name)
     return _find_job_in_json(data, name)
+
+
+def load_cron_job_status(job_id: str) -> dict[str, Any] | None | bool:
+    """Return a retained Hermes job, None when absent, False on read failure."""
+    try:
+        with open(HERMES_JOBS_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f"cron job status read failed for {job_id}: {exc!r}")
+        return False
+    jobs = data.get("jobs") if isinstance(data, dict) else data
+    if not isinstance(jobs, list):
+        log(f"cron job status store has invalid shape for {job_id}")
+        return False
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("id") or "") == job_id:
+            return job
+    return None
+
+
+def remove_cron_job(job_id: str) -> bool:
+    try:
+        result = subprocess.run(
+            [HERMES_BIN, "cron", "remove", job_id],
+            env=HERMES_ENV,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"cron cleanup failed for {job_id}: {exc!r}")
+        return False
+    if result.returncode == 0:
+        return True
+    log(
+        f"cron cleanup failed for {job_id}: rc={result.returncode} "
+        f"stderr={result.stderr[-300:]!r}"
+    )
+    return False
+
+
+_HERMES_TELEGRAM_REDELIVERY_SCRIPT = r"""
+import asyncio
+import json
+import os
+import sys
+
+from dotenv import load_dotenv
+
+load_dotenv(
+    os.path.join(os.environ["HERMES_HOME"], ".env"),
+    override=True,
+)
+
+from gateway.config import Platform, load_gateway_config
+from tools.send_message_tool import _send_to_platform
+
+payload = json.load(sys.stdin)
+config = load_gateway_config()
+pconfig = config.platforms.get(Platform.TELEGRAM)
+if not pconfig or not pconfig.enabled or not pconfig.home_channel:
+    print(json.dumps({"success": False, "error": "telegram platform unavailable"}))
+    raise SystemExit(1)
+
+result = asyncio.run(
+    _send_to_platform(
+        Platform.TELEGRAM,
+        pconfig,
+        pconfig.home_channel.chat_id,
+        str(payload.get("message") or ""),
+    )
+)
+print(json.dumps(result or {"success": False, "error": "empty send result"}))
+"""
+
+
+def redeliver_hermes_response(response: str) -> dict[str, Any]:
+    """Send an existing Hermes response without running the trading agent again."""
+    try:
+        result = subprocess.run(
+            [HERMES_PYTHON, "-c", _HERMES_TELEGRAM_REDELIVERY_SCRIPT],
+            cwd=HERMES_AGENT_ROOT,
+            env=HERMES_ENV,
+            input=json.dumps({"message": response}),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "success": False,
+            "error": f"Hermes Telegram redelivery failed: {exc}",
+        }
+    output = (result.stdout or "").strip().splitlines()
+    if not output:
+        return {
+            "success": False,
+            "error": (
+                f"Hermes Telegram redelivery returned rc={result.returncode} "
+                "without a result"
+            ),
+        }
+    try:
+        parsed = json.loads(output[-1])
+    except json.JSONDecodeError:
+        return {
+            "success": False,
+            "error": (
+                f"Hermes Telegram redelivery returned invalid JSON "
+                f"(rc={result.returncode})"
+            ),
+        }
+    if not isinstance(parsed, dict):
+        return {
+            "success": False,
+            "error": "Hermes Telegram redelivery result must be an object",
+        }
+    if result.returncode != 0 and parsed.get("success"):
+        parsed["success"] = False
+    return parsed
 
 
 def _latest_markdown_response(job_id: str) -> str | None:
@@ -1281,6 +1413,173 @@ def _record_delivery_success(
     return "success"
 
 
+def _record_telegram_delivery_retry(
+    pending: dict[str, Any],
+    response: str,
+    error: str,
+    now_ts: float,
+) -> str:
+    pending["status"] = "delivery_retry"
+    pending["response"] = response
+    pending["delivery_error"] = str(error)[:500]
+    pending["retry_after"] = now_ts + DELIVERY_RETRY_DELAY_SECONDS
+    save_pending_delivery(pending)
+    log(
+        f"Telegram delivery retry scheduled for {pending['batch_key']} "
+        f"after {DELIVERY_RETRY_DELAY_SECONDS}s"
+    )
+    return "retry"
+
+
+def _delivery_outcome_is_uncertain(error: str) -> bool:
+    compact = re.sub(r"[\s_-]+", "", str(error or "").lower())
+    if "connecttimeout" in compact:
+        return False
+    return bool(
+        re.search(
+            r"(?:read|write)?timeout|timedout",
+            compact,
+        )
+    )
+
+
+def _record_uncertain_telegram_delivery(
+    pending: dict[str, Any],
+    response: str,
+    error: str,
+    now_ts: float,
+) -> str:
+    pending["status"] = "delivery_uncertain"
+    pending["response"] = response
+    pending["delivery_error"] = str(error)[:500]
+    pending["delivery_origin_uncertain"] = True
+    pending["delivery_uncertain_at"] = now_ts
+    pending["retry_after"] = now_ts + DELIVERY_UNCERTAIN_GRACE_SECONDS
+    save_pending_delivery(pending)
+    log(
+        f"Telegram delivery outcome uncertain for {pending['batch_key']}; "
+        f"one fallback attempt allowed after {DELIVERY_UNCERTAIN_GRACE_SECONDS}s"
+    )
+    return "retry"
+
+
+def _record_delivery_manual_review(
+    pending: dict[str, Any],
+    response: str,
+    error: str,
+) -> str:
+    pending["status"] = "delivery_manual_review"
+    pending["response"] = response
+    pending["delivery_error"] = str(error)[:500]
+    pending["retry_after"] = 0.0
+    save_pending_delivery(pending)
+    log(
+        f"Telegram delivery requires manual review for "
+        f"{pending['batch_key']}: {str(error)[:240]}"
+    )
+    return "pending"
+
+
+def _confirm_job_delivery(
+    batch: list[Any],
+    pending: dict[str, Any],
+    response: str,
+    dry_run: bool,
+    now_ts: float,
+) -> str:
+    job_id = str(pending.get("job_id") or "")
+    job = load_cron_job_status(job_id)
+    if job is False:
+        return "pending"
+    if job is None:
+        log(
+            f"cron job {job_id} disappeared before Telegram delivery "
+            "could be confirmed"
+        )
+        return "pending"
+    if not job.get("last_run_at"):
+        return "pending"
+    if str(job.get("last_status") or "") != "ok":
+        log(
+            f"cron job {job_id} completed with status "
+            f"{job.get('last_status')!r}"
+        )
+        return _record_delivery_failure(
+            batch,
+            pending,
+            dry_run,
+            now_ts,
+        )
+
+    delivery_error = str(job.get("last_delivery_error") or "").strip()
+    if delivery_error:
+        origin_uncertain = bool(
+            pending.get("delivery_origin_uncertain")
+        )
+        if _delivery_outcome_is_uncertain(delivery_error):
+            origin_uncertain = True
+            if not pending.get("delivery_uncertain_at"):
+                return _record_uncertain_telegram_delivery(
+                    pending,
+                    response,
+                    delivery_error,
+                    now_ts,
+                )
+
+        redelivery_attempts = int(
+            pending.get("redelivery_attempts") or 0
+        )
+        max_attempts = DELIVERY_MAX_REDELIVERY_ATTEMPTS
+        if origin_uncertain:
+            max_attempts = 1
+        if redelivery_attempts >= max_attempts:
+            return _record_delivery_manual_review(
+                pending,
+                response,
+                delivery_error,
+            )
+
+        redelivery = redeliver_hermes_response(response)
+        redelivery_attempts += 1
+        pending["redelivery_attempts"] = redelivery_attempts
+        if not bool(redelivery.get("success")):
+            error = str(
+                redelivery.get("error")
+                or "Hermes Telegram redelivery did not confirm success"
+            )
+            if (
+                origin_uncertain
+                or _delivery_outcome_is_uncertain(error)
+                or redelivery_attempts >= max_attempts
+            ):
+                return _record_delivery_manual_review(
+                    pending,
+                    response,
+                    error,
+                )
+            return _record_telegram_delivery_retry(
+                pending,
+                response,
+                error,
+                now_ts,
+            )
+        pending["delivery_recovered"] = True
+        pending["telegram_message_id"] = str(
+            redelivery.get("message_id") or ""
+        )
+
+    pending["delivery_confirmed"] = True
+    pending.pop("delivery_error", None)
+    result = _record_delivery_success(
+        batch,
+        pending,
+        response,
+        now_ts,
+    )
+    remove_cron_job(job_id)
+    return result
+
+
 def _route_error_code(reason: str) -> str:
     text = str(reason or "").lower()
     route_match = re.search(r"matched\s+(\d+)\s+routes", text)
@@ -1410,6 +1709,8 @@ def attempt_batch_delivery(
         return "quarantined"
     if status == "skipped":
         return "skip"
+    if status == "delivery_manual_review":
+        return "pending"
     if status == "succeeded":
         response = str(pending.get("response") or "")
         if response and not bool(pending.get("context_written")):
@@ -1449,7 +1750,13 @@ def attempt_batch_delivery(
                 dry_run,
                 now_ts,
             )
-        return _record_delivery_success(batch, pending, response, now_ts)
+        return _confirm_job_delivery(
+            batch,
+            pending,
+            response,
+            dry_run,
+            now_ts,
+        )
 
     if not _ensure_canonical_ingress(
         batch,
@@ -1513,7 +1820,13 @@ def attempt_batch_delivery(
         return "pending"
     if is_brain_failure(response):
         return _record_delivery_failure(batch, pending, dry_run, now_ts)
-    return _record_delivery_success(batch, pending, response, now_ts)
+    return _confirm_job_delivery(
+        batch,
+        pending,
+        response,
+        dry_run,
+        now_ts,
+    )
 
 
 def compress_channel_contexts(now_func=time.time) -> None:

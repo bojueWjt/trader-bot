@@ -314,6 +314,16 @@ def test_canonical_ingress_succeeds_before_hermes_dispatch(
         "_latest_markdown_response",
         lambda _job_id: "processed",
     )
+    monkeypatch.setattr(
+        module,
+        "load_cron_job_status",
+        lambda _job_id: {
+            "last_run_at": "2026-08-19T00:00:00+00:00",
+            "last_status": "ok",
+            "last_delivery_error": None,
+        },
+    )
+    monkeypatch.setattr(module, "remove_cron_job", lambda _job_id: True)
 
     result = module.attempt_batch_delivery(
         [row],
@@ -721,6 +731,16 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
         "_latest_markdown_response",
         lambda _job_id: "processed",
     )
+    monkeypatch.setattr(
+        module,
+        "load_cron_job_status",
+        lambda _job_id: {
+            "last_run_at": "2026-08-19T00:00:00+00:00",
+            "last_status": "ok",
+            "last_delivery_error": None,
+        },
+    )
+    monkeypatch.setattr(module, "remove_cron_job", lambda _job_id: True)
     monkeypatch.setattr(sys, "argv", ["hermes_signal_feeder.py", "--once"])
 
     module.main()
@@ -838,6 +858,366 @@ def test_malformed_signal_provenance_is_rejected_before_hermes_dispatch(
     quarantine = module.load_quarantine()
     entry = next(iter(quarantine["entries"].values()))
     assert entry["reason_code"] == "signal_provenance_invalid"
+
+
+def test_response_waits_until_telegram_delivery_status_is_recorded(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _create_trading_db(db_path)
+    _insert_account(conn, "credential-a", execution_account_id="account-a")
+    conn.execute(
+        "INSERT INTO channel_routing (channel_id, target_account_id) "
+        "VALUES (?, ?)",
+        ("-1002136478186", "credential-a"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
+    monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
+    monkeypatch.setattr(module, "V3_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setattr(
+        module,
+        "submit_canonical_ingress",
+        lambda _signal: {
+            "inserted": True,
+            "raw_message_id": "00000000-0000-0000-0000-000000000001",
+        },
+    )
+
+    def run_hermes(prompt, name, dry_run, on_job_created=None):
+        del prompt, name, dry_run
+        if on_job_created is not None:
+            on_job_created("job-waiting")
+        return "job-waiting"
+
+    monkeypatch.setattr(module, "run_hermes", run_hermes)
+    monkeypatch.setattr(
+        module,
+        "_latest_markdown_response",
+        lambda _job_id: "processed",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_cron_job_status",
+        lambda _job_id: {
+            "last_run_at": None,
+            "last_status": None,
+            "last_delivery_error": None,
+        },
+    )
+
+    result = module.attempt_batch_delivery(
+        [_signal("-1002136478186", "sig-waiting")],
+        dry_run=False,
+        now_ts=1000,
+    )
+
+    assert result == "pending"
+    pending = module.load_pending_delivery()
+    assert pending["status"] == "observing"
+    assert pending["job_id"] == "job-waiting"
+
+
+def test_definitive_delivery_error_resends_without_rerunning_agent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _create_trading_db(db_path)
+    _insert_account(conn, "credential-a", execution_account_id="account-a")
+    conn.execute(
+        "INSERT INTO channel_routing (channel_id, target_account_id) "
+        "VALUES (?, ?)",
+        ("-1002136478186", "credential-a"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
+    monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
+    monkeypatch.setattr(module, "V3_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setattr(module, "CHANNEL_CONTEXT_DIR", str(tmp_path / "context"))
+    monkeypatch.setattr(
+        module,
+        "submit_canonical_ingress",
+        lambda _signal: {
+            "inserted": True,
+            "raw_message_id": "00000000-0000-0000-0000-000000000001",
+        },
+    )
+    agent_runs: list[str] = []
+
+    def run_hermes(prompt, name, dry_run, on_job_created=None):
+        del prompt, dry_run
+        agent_runs.append(name)
+        if on_job_created is not None:
+            on_job_created("job-delivery-error")
+        return "job-delivery-error"
+
+    monkeypatch.setattr(module, "run_hermes", run_hermes)
+    monkeypatch.setattr(
+        module,
+        "_latest_markdown_response",
+        lambda _job_id: "Hermes already processed this signal",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_cron_job_status",
+        lambda _job_id: {
+            "last_run_at": "2026-08-19T00:00:00+00:00",
+            "last_status": "ok",
+            "last_delivery_error": "Telegram send failed: ConnectTimeout",
+        },
+    )
+    redelivered: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "redeliver_hermes_response",
+        lambda response: (
+            redelivered.append(response)
+            or {"success": True, "message_id": "2160"}
+        ),
+    )
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "remove_cron_job",
+        lambda job_id: cleaned.append(job_id) or True,
+    )
+
+    result = module.attempt_batch_delivery(
+        [_signal("-1002136478186", "sig-delivery-error")],
+        dry_run=False,
+        now_ts=1000,
+    )
+
+    assert result == "success"
+    assert len(agent_runs) == 1
+    assert redelivered == ["Hermes already processed this signal"]
+    assert cleaned == ["job-delivery-error"]
+    pending = module.load_pending_delivery()
+    assert pending["delivery_confirmed"] is True
+    assert pending["delivery_recovered"] is True
+    assert pending["telegram_message_id"] == "2160"
+
+
+def test_uncertain_delivery_waits_then_redelivers_at_most_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _create_trading_db(db_path)
+    _insert_account(conn, "credential-a", execution_account_id="account-a")
+    conn.execute(
+        "INSERT INTO channel_routing (channel_id, target_account_id) "
+        "VALUES (?, ?)",
+        ("-1002136478186", "credential-a"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
+    monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
+    monkeypatch.setattr(module, "V3_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setattr(module, "CHANNEL_CONTEXT_DIR", str(tmp_path / "context"))
+    monkeypatch.setattr(
+        module,
+        "submit_canonical_ingress",
+        lambda _signal: {
+            "inserted": True,
+            "raw_message_id": "00000000-0000-0000-0000-000000000001",
+        },
+    )
+    agent_runs: list[str] = []
+
+    def run_hermes(prompt, name, dry_run, on_job_created=None):
+        del prompt, dry_run
+        agent_runs.append(name)
+        if on_job_created is not None:
+            on_job_created("job-uncertain")
+        return "job-uncertain"
+
+    monkeypatch.setattr(module, "run_hermes", run_hermes)
+    monkeypatch.setattr(
+        module,
+        "_latest_markdown_response",
+        lambda _job_id: "Hermes already processed this signal",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_cron_job_status",
+        lambda _job_id: {
+            "last_run_at": "2026-08-19T00:00:00+00:00",
+            "last_status": "ok",
+            "last_delivery_error": "Telegram send failed: Timed out",
+        },
+    )
+    redelivered: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "redeliver_hermes_response",
+        lambda response: (
+            redelivered.append(response)
+            or {"success": True, "message_id": "2161"}
+        ),
+    )
+    monkeypatch.setattr(module, "remove_cron_job", lambda _job_id: True)
+    signal = _signal("-1002136478186", "sig-delivery-uncertain")
+
+    first = module.attempt_batch_delivery(
+        [signal],
+        dry_run=False,
+        now_ts=1000,
+    )
+    early = module.attempt_batch_delivery(
+        [signal],
+        dry_run=False,
+        now_ts=1001,
+    )
+    recovered = module.attempt_batch_delivery(
+        [signal],
+        dry_run=False,
+        now_ts=1000 + module.DELIVERY_UNCERTAIN_GRACE_SECONDS,
+    )
+
+    assert [first, early, recovered] == ["retry", "retry", "success"]
+    assert len(agent_runs) == 1
+    assert redelivered == ["Hermes already processed this signal"]
+    pending = module.load_pending_delivery()
+    assert pending["redelivery_attempts"] == 1
+    assert pending["telegram_message_id"] == "2161"
+
+
+def test_uncertain_redelivery_timeout_stops_automatic_retries(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    pending_path = tmp_path / "pending.json"
+    monkeypatch.setattr(module, "PENDING_STATE", str(pending_path))
+    module.save_pending_delivery(
+        {
+            "batch_key": "2026-08-11T00:00:00+00:00|sig-uncertain",
+            "last_cursor": "2026-08-11T00:00:00+00:00|sig-uncertain",
+            "job_name": "signal-sig-uncertain",
+            "job_id": "job-uncertain",
+            "status": "delivery_uncertain",
+            "attempts": 0,
+            "redelivery_attempts": 0,
+            "delivery_origin_uncertain": True,
+            "delivery_uncertain_at": 1000,
+            "retry_after": 1000,
+        }
+    )
+    monkeypatch.setattr(
+        module,
+        "_latest_markdown_response",
+        lambda _job_id: "processed",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_cron_job_status",
+        lambda _job_id: {
+            "last_run_at": "2026-08-19T00:00:00+00:00",
+            "last_status": "ok",
+            "last_delivery_error": "Telegram send failed: Timed out",
+        },
+    )
+    redeliveries: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "redeliver_hermes_response",
+        lambda response: (
+            redeliveries.append(response)
+            or {
+                "success": False,
+                "error": "Telegram redelivery timed out",
+            }
+        ),
+    )
+    signal = _signal("-1002136478186", "sig-uncertain")
+
+    first = module.attempt_batch_delivery(
+        [signal],
+        dry_run=False,
+        now_ts=1300,
+    )
+    second = module.attempt_batch_delivery(
+        [signal],
+        dry_run=False,
+        now_ts=1600,
+    )
+
+    assert [first, second] == ["pending", "pending"]
+    assert redeliveries == ["processed"]
+    pending = module.load_pending_delivery()
+    assert pending["status"] == "delivery_manual_review"
+    assert pending["redelivery_attempts"] == 1
+
+
+def test_run_hermes_retains_one_shot_job_for_delivery_confirmation(
+    monkeypatch,
+) -> None:
+    module = _load_feeder()
+    commands: list[list[str]] = []
+
+    class Result:
+        def __init__(self, stdout: str = "") -> None:
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = ""
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[1:3] == ["cron", "create"]:
+            return Result("Created job: job-retained\n")
+        return Result("completed\n")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    job_id = module.run_hermes(
+        "review only",
+        name="signal-retained",
+        dry_run=False,
+    )
+
+    assert job_id == "job-retained"
+    create_command = commands[0]
+    repeat_index = create_command.index("--repeat")
+    assert create_command[repeat_index + 1] == "2"
+    assert create_command[-2:] == ["--skill", "v3-trader"]
+
+
+def test_load_cron_job_status_reads_retained_job(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "job-retained",
+                        "last_status": "ok",
+                        "last_delivery_error": None,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "HERMES_JOBS_FILE", str(jobs_path))
+
+    job = module.load_cron_job_status("job-retained")
+
+    assert isinstance(job, dict)
+    assert job["last_status"] == "ok"
+    assert module.load_cron_job_status("missing") is None
 
 
 def test_missing_channel_mapping_blocks_new_risk_dispatch(

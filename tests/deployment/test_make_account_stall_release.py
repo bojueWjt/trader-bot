@@ -35,7 +35,7 @@ WATCHER_BUILDER_RELEASE_PATH = "build_immutable_watcher_image.py"
 HERMES_FEEDER_SOURCE_PATH = "scripts/hermes_signal_feeder.py"
 HERMES_FEEDER_RELEASE_PATH = "host/hermes_signal_feeder.py"
 HERMES_FEEDER_REQUIRED_SHA256 = (
-    "e9341a3a098aa1e8864c7423a29241b458d97fa43988f1686ebfbcba7012e780"
+    "4bd121f9e34ca887568b00d2331ca7299d36941702e244751529e4384e3ee7b4"
 )
 V3_TRADE_SOURCE_PATH = (
     "hermes-profile/skills/trading/v3-trader/scripts/v3_trade.py"
