@@ -176,6 +176,46 @@ class StrategyShellTest(unittest.TestCase):
         self.assertEqual(len(strategy.command_results), 2)
         self.assertEqual(strategy.command_results[1], payload)
 
+    def test_terminal_exchange_skips_manual_orders(self) -> None:
+        strategy = _TerminalExchangeStrategy()
+        mirror = _SlowTerminalMirror(client_order_id="manual-sol-order")
+        adapter = _SlowTerminalAdapter()
+        worker = TerminalExchangeWorker(
+            account_id="account-a",
+            mirror=mirror,
+            adapter=adapter,
+            result_publisher=strategy.enqueue_terminal_exchange_result,
+            capacity=4,
+            total_deadline_seconds=1,
+        )
+        strategy.set_exchange_cancel_adapter(adapter, mirror)
+        strategy.set_terminal_exchange_worker(worker)
+        worker.start()
+        command = SimpleNamespace(
+            command_id="manual-read-only",
+            type="cancel_all",
+            args={
+                "account_id": "account-a",
+                "instrument_ids": ["SOLUSDT-PERP.BINANCE"],
+                "authorization": {
+                    "authorized_by_type": "user",
+                    "authorized_by_id": "risk-admin",
+                    "source_message_id": "manual-read-only",
+                },
+            },
+        )
+
+        try:
+            strategy._on_node_command(command)
+            self.assertTrue(worker.wait_empty(timeout_seconds=1))
+            strategy.drain_terminal_exchange_mailbox()
+        finally:
+            worker.stop()
+
+        self.assertEqual(mirror.refresh_count, 1)
+        self.assertEqual(adapter.cancel_count, 0)
+        self.assertEqual(strategy.command_results[0]["operations"], [])
+
     def test_active_intent_ids_reads_client_order_id_and_tags(self) -> None:
         order_intent_id = uuid4()
         tagged_intent_id = uuid4()
@@ -199,6 +239,79 @@ class StrategyShellTest(unittest.TestCase):
         self.assertEqual(
             strategy._active_intent_ids("BTCUSDT-PERP.BINANCE"),
             {str(order_intent_id), str(tagged_intent_id)},
+        )
+
+    def test_symbol_open_freeze_is_symbol_scoped(self) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+            )
+        )
+
+        strategy._freeze_symbol_new_opens(
+            "SOLUSDT-PERP.BINANCE",
+            "robot order terminal confirmation pending",
+        )
+
+        sol_denial = strategy._symbol_open_freeze_denial(
+            "open_position",
+            "SOLUSDT-PERP.BINANCE",
+        )
+        btc_denial = strategy._symbol_open_freeze_denial(
+            "open_position",
+            "BTCUSDT-PERP.BINANCE",
+        )
+        sol_management = strategy._symbol_open_freeze_denial(
+            "close_position",
+            "SOLUSDT-PERP.BINANCE",
+        )
+
+        self.assertIsNotNone(sol_denial)
+        self.assertEqual(sol_denial.reason, "symbol_new_open_frozen")
+        self.assertIsNone(btc_denial)
+        self.assertIsNone(sol_management)
+
+    def test_protection_watchdog_freezes_symbol_after_two_missing_stops(
+        self,
+    ) -> None:
+        intent_id = uuid4()
+        strategy = _ProtectionWatchdogStrategy()
+        strategy._entry_protection_stash[str(intent_id)] = {
+            "stop_loss": "95",
+            "take_profits": (),
+            "instrument_id": "SOLUSDT-PERP.BINANCE",
+            "entry_side": "BUY",
+            "entry_tags": (f"intent_id={intent_id}",),
+            "stop_loss_parent_intent_id": str(intent_id),
+            "stop_loss_authorization": {
+                "parent_intent_id": str(intent_id),
+                "authorized_by_type": "user",
+                "authorized_by_id": "risk-admin",
+                "source_message_id": "watchdog-test",
+            },
+            "take_profit_parent_intent_id": str(intent_id),
+            "take_profit_authorization": {
+                "parent_intent_id": str(intent_id),
+                "authorized_by_type": "user",
+                "authorized_by_id": "risk-admin",
+                "source_message_id": "watchdog-test",
+            },
+            "entry_sequence_max": 1,
+            "protection_sequence_start": 11,
+            "protection_roles": {},
+            "tp_consumed": {},
+            "pending_cancel_ids": (),
+        }
+
+        strategy._check_protection_watchdog(str(intent_id))
+        strategy._check_protection_watchdog(str(intent_id))
+
+        self.assertEqual(strategy.scheduled, [0.0, 0.0])
+        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertEqual(
+            strategy.reported_events[0]["event_type"],
+            "ProtectionWatchdogSymbolStopped",
         )
 
     def test_trading_state_getter_accepts_enum_values(self) -> None:
@@ -298,7 +411,7 @@ class StrategyShellTest(unittest.TestCase):
             "canary_portfolio_baseline_drift",
         )
 
-    def test_live_secondary_accounts_enter_canary_only_with_explicit_permit(
+    def test_live_secondary_accounts_ignore_canary_only_permit_requirement(
         self,
     ) -> None:
         for account_id, node_id in (
@@ -338,10 +451,7 @@ class StrategyShellTest(unittest.TestCase):
                     action="open_position",
                     order_plan=regular.order_plan,
                 )
-                self.assertEqual(
-                    denial.reason,
-                    "canary_permit_missing",
-                )
+                self.assertIsNone(denial)
                 regular_plan = _live_entry_order_plan(
                     instrument_id="BTCUSDT-PERP.BINANCE",
                     quantity="0.001",
@@ -353,60 +463,7 @@ class StrategyShellTest(unittest.TestCase):
                         regular_plan,
                     )
                 )
-                self.assertEqual(
-                    identity_denial.reason,
-                    "canary_permit_missing",
-                )
-
-                canary = _live_canary_intent(
-                    permit_id=str(uuid4()),
-                    account_id=account_id,
-                    node_id=node_id,
-                )
-                canary.order_plan["canary_permit"]["expires_at"] = (
-                    datetime.now(timezone.utc) + timedelta(hours=1)
-                ).isoformat()
-                identity = _canary_execution_identity(
-                    intent_id=str(canary.intent_id),
-                    account_id=account_id,
-                    node_id=node_id,
-                )
-                canary_plan = _canary_order_plan(identity)
-                self.assertIsNone(
-                    strategy._live_canary_intent_denial(
-                        canary,
-                        action="open_position",
-                        order_plan=canary.order_plan,
-                    )
-                )
-                parsed = strategy._live_canary_execution_identity(
-                    canary,
-                    canary_plan,
-                )
-                self.assertIsInstance(
-                    parsed,
-                    LiveCanaryExecutionIdentity,
-                )
-                self.assertEqual(parsed.account_id, account_id)
-                self.assertEqual(parsed.node_id, node_id)
-
-                cross_account = _live_canary_intent(
-                    permit_id=str(uuid4()),
-                    account_id="account-a",
-                    node_id=node_id,
-                )
-                cross_account.order_plan["canary_permit"]["expires_at"] = (
-                    datetime.now(timezone.utc) + timedelta(hours=1)
-                ).isoformat()
-                denial = strategy._live_canary_intent_denial(
-                    cross_account,
-                    action="open_position",
-                    order_plan=cross_account.order_plan,
-                )
-                self.assertEqual(
-                    denial.reason,
-                    "canary_identity_mismatch",
-                )
+                self.assertFalse(identity_denial)
 
     def test_fleet_complete_regular_open_skips_canary_runtime(self) -> None:
         for account_id, node_id in (
@@ -3849,7 +3906,7 @@ class StrategyShellTest(unittest.TestCase):
             order_plan={},
         )
 
-        self.assertEqual(denial.reason, "canary_open_position_only")
+        self.assertEqual(denial.reason, "live_open_gate_unavailable")
 
     def test_protection_rejection_is_persisted_before_retry_without_advancing_revision(self) -> None:
         intent_id = uuid4()
@@ -4216,9 +4273,62 @@ class _TerminalExchangeStrategy(IntentExecutionStrategy):
         return ()
 
 
-class _SlowTerminalMirror:
+class _ProtectionWatchdogStrategy(IntentExecutionStrategy):
     def __init__(self) -> None:
+        self.scheduled: list[float | None] = []
+        self.reported_events: list[dict] = []
+        super().__init__(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                node_id="node-a",
+                trading_state="ACTIVE",
+            )
+        )
+        self.set_protection_event_reporter(
+            lambda event: self.reported_events.append(event) is None or True
+        )
+
+    def _cache_positions(self, instrument_id):
+        del instrument_id
+        return (
+            SimpleNamespace(
+                instrument_id="SOLUSDT-PERP.BINANCE",
+                side="LONG",
+                quantity="1",
+                position_id="SOLUSDT-PERP.BINANCE-LONG",
+                entry_price="100",
+            ),
+        )
+
+    def _cache_orders_all(self, instrument_id):
+        del instrument_id
+        return ()
+
+    def _schedule_protection_sync(
+        self,
+        _intent_key: str,
+        delay_seconds: float | None = None,
+    ) -> None:
+        self.scheduled.append(delay_seconds)
+
+    def _queue_entry_protection_stash_persist(
+        self,
+        *,
+        continuation=False,
+    ) -> bool:
+        del continuation
+        return True
+
+
+class _SlowTerminalMirror:
+    def __init__(
+        self,
+        *,
+        client_order_id: str | None = None,
+    ) -> None:
         self.refresh_count = 0
+        if client_order_id is None:
+            client_order_id = "B" + ("1" * 32) + "01"
         self._orders = (
             ExchangeOrderRef(
                 account_id="account-a",
@@ -4226,7 +4336,7 @@ class _SlowTerminalMirror:
                 position_side="LONG",
                 order_kind="regular",
                 venue_order_id="42",
-                client_order_id="terminal-order",
+                client_order_id=client_order_id,
                 order_type="LIMIT",
                 side="SELL",
                 quantity="0.1",

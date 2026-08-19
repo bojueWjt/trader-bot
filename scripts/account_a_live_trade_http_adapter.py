@@ -42,6 +42,9 @@ _portfolio_baseline_path = next(
 )
 if _portfolio_baseline_path is False:
     raise RuntimeError("shared portfolio baseline module is missing")
+_portfolio_baseline_module_root = str(_portfolio_baseline_path.parent)
+if _portfolio_baseline_module_root not in sys.path:
+    sys.path.insert(0, _portfolio_baseline_module_root)
 _portfolio_baseline_spec = importlib.util.spec_from_file_location(
     "_trader_portfolio_baseline",
     _portfolio_baseline_path,

@@ -54,6 +54,7 @@ PATCH_MOUNT_TARGETS = (
         "portfolio_baseline.py",
         "/app/execution_domain/portfolio_baseline.py",
     ),
+    ("order_ownership.py", "/app/execution_domain/order_ownership.py"),
     ("http_client.py", "/app/execution_domain/http_client.py"),
     ("projection_actor.py", "/app/projection/actor.py"),
     ("projection_spool.py", "/app/projection/spool.py"),

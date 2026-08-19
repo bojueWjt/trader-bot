@@ -44,14 +44,6 @@ NODE_A_TOKEN = "node-a-token"
 NODE_B_TOKEN = "node-b-token"
 NODE_C_TOKEN = "node-c-token"
 NODE_D_TOKEN = "node-d-token"
-ROLLOUT_PHASE_BY_ACCOUNT = {
-    ACCOUNT_A: "account_a_canary",
-    ACCOUNT_B: "account_b_rollout",
-    ACCOUNT_C: "account_c_rollout",
-    ACCOUNT_D: "account_d_rollout",
-}
-
-
 @pytest.fixture()
 def client(monkeypatch: pytest.MonkeyPatch, migrated_db: str) -> TestClient:
     monkeypatch.setenv("DATABASE_URL", migrated_db)
@@ -466,6 +458,8 @@ def _seed_heartbeat(
     projection_lag_ms: int = 0,
     reconciliation_state: str = "healthy",
     evidence_age_seconds: int | None = None,
+    available_balance: int | float = 100,
+    equity: int | float = 100,
 ) -> None:
     now = datetime.now(timezone.utc)
     heartbeat_at = now - timedelta(seconds=age_seconds)
@@ -572,7 +566,7 @@ def _seed_heartbeat(
                 updated_at,
                 payload
             )
-            VALUES (%s, 'USDT', 100, 0, 100, now(), %s)
+            VALUES (%s, 'USDT', %s, 0, %s, now(), %s)
             ON CONFLICT (account_id) DO UPDATE SET
                 currency=EXCLUDED.currency,
                 equity=EXCLUDED.equity,
@@ -583,6 +577,8 @@ def _seed_heartbeat(
             """,
             (
                 account_id,
+                equity,
+                available_balance,
                 Json(
                     {
                         "account_snapshot_source": (
@@ -593,9 +589,9 @@ def _seed_heartbeat(
                         ),
                         "exchange_account": {
                             "currency": "USDT",
-                            "equity": 100,
+                            "equity": equity,
                             "margin": 0,
-                            "free": 100,
+                            "free": available_balance,
                         },
                     }
                 ),
@@ -935,6 +931,51 @@ def _seed_reviewed_release_and_permit(
                     ),
                 )
     return permit_id
+
+
+def _seed_execution_fill(
+    url: str,
+    *,
+    account_id: str = ACCOUNT_A,
+    node_id: str = NODE_A,
+    client_order_id: str = "Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+    symbol: str = SYMBOL,
+    side: str = "BUY",
+    quantity: str = "0.1",
+    event_id: str | None = None,
+) -> None:
+    if event_id is None:
+        event_id = str(uuid4())
+    with _connect(url) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO execution_events (
+                execution_event_row_id,
+                event_id,
+                node_id,
+                account_id,
+                client_order_id,
+                event_type,
+                ts_event,
+                payload
+            )
+            VALUES (%s, %s, %s, %s, %s, 'OrderFilled', now(), %s)
+            """,
+            (
+                str(uuid4()),
+                event_id,
+                node_id,
+                account_id,
+                client_order_id,
+                Json(
+                    {
+                        "instrument_id": f"{symbol}-PERP.BINANCE",
+                        "side": side,
+                        "last_qty": quantity,
+                    }
+                ),
+            ),
+        )
 
 
 def _resume_body(
@@ -2101,6 +2142,172 @@ def test_resume_allows_existing_non_target_risk_and_binds_portfolio_baseline(
     assert len(baseline) == 64
 
 
+def test_resume_ignores_manual_orders_and_positions(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(
+        migrated_db,
+        positions=[{"symbol": SYMBOL, "quantity": "0.25"}],
+        regular_orders=[
+            {"symbol": SYMBOL, "client_order_id": "manual-target-order"}
+        ],
+        algo_orders=[
+            {"symbol": SYMBOL, "client_order_id": "manual-target-stop"}
+        ],
+    )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 200
+
+
+def test_resume_ignores_manual_fills(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db)
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="manual-sol-fill",
+        quantity="0.25",
+    )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 200
+
+
+def test_resume_rejects_robot_owned_target_position_footprint(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db)
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+        side="BUY",
+        quantity="0.25",
+    )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 409
+    assert (
+        response.json()["detail"]
+        == "robot-owned target symbol position is not flat"
+    )
+
+
+def test_resume_allows_robot_owned_target_position_round_trip_flat(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db)
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+        side="BUY",
+        quantity="0.25",
+        event_id="robot-open-fill",
+    )
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02",
+        side="SELL",
+        quantity="0.25",
+        event_id="robot-close-fill",
+    )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("source", ("projection", "heartbeat"))
+def test_resume_rejects_robot_owned_non_terminal_orders(
+    client: TestClient,
+    migrated_db: str,
+    source: str,
+) -> None:
+    robot_client_order_id = "B" + ("a" * 32) + "01"
+    heartbeat_args = {}
+    if source == "heartbeat":
+        heartbeat_args["regular_orders"] = [
+            {"symbol": SYMBOL, "client_order_id": robot_client_order_id}
+        ]
+    _seed_heartbeat(migrated_db, **heartbeat_args)
+    if source == "projection":
+        with _connect(migrated_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO orders_projection (
+                    order_projection_id, account_id, instrument_id,
+                    client_order_id, status, side, order_type, quantity,
+                    updated_at, payload
+                )
+                VALUES (
+                    %s, %s, %s, %s, 'working', 'long', 'LIMIT', 1,
+                    now(), %s
+                )
+                """,
+                (
+                    str(uuid4()),
+                    ACCOUNT_A,
+                    "BTCUSDT-PERP.BINANCE",
+                    robot_client_order_id,
+                    Json({}),
+                ),
+            )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "robot-owned orders are not terminal"
+
+
+def test_resume_rejects_low_margin_ratio(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db, equity=100, available_balance=3)
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "account margin ratio is below threshold"
+
+
 def test_resume_uses_payload_timestamp_for_reconciliation_health(
     client: TestClient,
     migrated_db: str,
@@ -2421,6 +2628,50 @@ def test_account_a_canary_permit_is_atomic_single_use_and_capped(
     ).tzinfo is not None
 
 
+def test_canary_open_rejects_robot_owned_target_position_footprint(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db, trading_state="ACTIVE")
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+        side="BUY",
+        quantity="0.25",
+    )
+    permit_id = _seed_reviewed_release_and_permit(
+        migrated_db,
+        permit_status="armed",
+    )
+
+    response = client.post(
+        "/v1/operator/orders",
+        headers=_risk_headers("canary-open-owned-position"),
+        json={
+            "action": "open_position",
+            "account_id": ACCOUNT_A,
+            "symbol": SYMBOL,
+            "side": "long",
+            "entry": {
+                "type": "limit",
+                "price": 100,
+                "time_in_force": "IOC",
+            },
+            "quantity": 0.12,
+            "notional_usdt": 12,
+            "reason": "account-a canary",
+            "canary_permit_id": permit_id,
+            "client_ref": "canary-open-owned-position",
+        },
+    )
+
+    assert response.status_code == 409
+    assert (
+        response.json()["detail"]
+        == "robot-owned target symbol position is not flat"
+    )
+
+
 def test_account_a_canary_rejects_invalid_supplied_intent_id(
     client: TestClient,
     migrated_db: str,
@@ -2548,7 +2799,7 @@ def test_canary_open_replay_preserves_first_gate_and_budget(
     "account_id",
     (ACCOUNT_A, ACCOUNT_B, ACCOUNT_C, ACCOUNT_D),
 )
-def test_rollout_account_live_open_requires_canary_permit(
+def test_rollout_accounts_accept_regular_zone_open(
     client: TestClient,
     migrated_db: str,
     account_id: str,
@@ -2562,7 +2813,7 @@ def test_rollout_account_live_open_requires_canary_permit(
     permit_id = _seed_reviewed_release_and_permit(
         migrated_db,
         permit_account_id=account_id,
-        rollout_phase=ROLLOUT_PHASE_BY_ACCOUNT[account_id],
+        rollout_phase="account_a_canary",
     )
     with _connect(migrated_db) as conn, conn.cursor() as cur:
         cur.execute(
@@ -2571,28 +2822,34 @@ def test_rollout_account_live_open_requires_canary_permit(
         )
     response = client.post(
         "/v1/operator/orders",
-        headers=_risk_headers(f"{account_id}-missing-permit"),
+        headers=_risk_headers(f"{account_id}-regular-zone"),
         json={
             "action": "open_position",
             "account_id": account_id,
             "symbol": SYMBOL,
             "side": "long",
             "entry": {
-                "type": "limit",
-                "price": 100,
-                "time_in_force": "IOC",
+                "type": "zone",
+                "price_min": 99,
+                "price_max": 101,
             },
             "quantity": 0.12,
             "notional_usdt": 12,
-            "reason": f"{account_id} missing permit",
-            "client_ref": f"{account_id}-missing-permit",
+            "reason": f"{account_id} regular zone signal",
+            "client_ref": f"{account_id}-regular-zone",
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == (
-        f"canary_permit_id is required for {account_id} open_position"
-    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["order_plan"]["entry"]["type"] == "zone"
+    assert payload["order_plan"]["live_open_gate"] == {
+        "mode": "normal",
+        "release_id": RELEASE_ID,
+        "rollout_phase": "account_a_canary",
+        "phase_version": 1,
+    }
+    assert "canary_permit" not in payload["order_plan"]
 
 
 def test_account_a_canary_rejects_notional_above_permit(
@@ -2805,7 +3062,7 @@ def test_account_a_canary_rejects_unsafe_order_shape_before_permit_lock(
         assert cur.fetchone() == ("armed", 0)
 
 
-def test_non_target_portfolio_change_revokes_armed_canary(
+def test_non_owned_portfolio_change_keeps_armed_canary(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -2857,7 +3114,7 @@ def test_non_target_portfolio_change_revokes_armed_canary(
             "SELECT status FROM live_canary_permits WHERE permit_id=%s",
             (permit_id,),
         )
-        assert cur.fetchone()[0] == "revoked"
+        assert cur.fetchone()[0] == "armed"
 
 
 def test_missing_exchange_evidence_cannot_revoke_armed_canary(
@@ -2939,7 +3196,7 @@ def test_missing_exchange_evidence_cannot_revoke_armed_canary(
     )
 
 
-def test_explicit_empty_exchange_evidence_can_revoke_armed_canary(
+def test_explicit_empty_non_owned_exchange_evidence_keeps_armed_canary(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -3000,7 +3257,7 @@ def test_explicit_empty_exchange_evidence_can_revoke_armed_canary(
             """,
             (permit_id,),
         )
-        assert cur.fetchone()[0] == "revoked"
+        assert cur.fetchone()[0] == "armed"
 
 
 def test_stale_exchange_evidence_cannot_replace_fresh_heartbeat(
@@ -3139,7 +3396,7 @@ def test_non_target_market_data_and_row_order_keep_portfolio_baseline(
         assert cur.fetchone()[0] == "armed"
 
 
-def test_non_target_order_price_change_revokes_portfolio_baseline(
+def test_non_owned_order_price_change_keeps_portfolio_baseline(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -3205,10 +3462,10 @@ def test_non_target_order_price_change_revokes_portfolio_baseline(
             "SELECT status FROM live_canary_permits WHERE permit_id=%s",
             (permit_id,),
         )
-        assert cur.fetchone()[0] == "revoked"
+        assert cur.fetchone()[0] == "armed"
 
 
-def test_permit_consumption_revokes_direct_non_target_baseline_change(
+def test_permit_consumption_allows_non_owned_baseline_change(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -3251,14 +3508,13 @@ def test_permit_consumption_revokes_direct_non_target_baseline_change(
         },
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "non-target portfolio baseline changed"
+    assert response.status_code == 200
     with _connect(migrated_db) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT status FROM live_canary_permits WHERE permit_id=%s",
             (permit_id,),
         )
-        assert cur.fetchone()[0] == "revoked"
+        assert cur.fetchone()[0] == "consumed"
 
 
 def test_node_command_ack_preserves_progress_states_and_rejects_unknown(

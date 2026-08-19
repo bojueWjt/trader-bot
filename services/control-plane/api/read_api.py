@@ -43,6 +43,10 @@ for _module_path in (
 from execution_domain.control_plane import (  # noqa: E402
     portfolio_baseline_sha256,
 )
+from execution_domain.order_ownership import (  # noqa: E402
+    is_robot_client_order_id,
+    row_is_robot_order,
+)
 
 from app_roles import (  # noqa: E402
     AppRole,
@@ -1161,6 +1165,16 @@ def _validate_and_arm_resume(
         require_reconciliation_health=False,
         require_portfolio_clear=False,
     )
+    _validate_owned_orders_terminal(
+        cur,
+        heartbeat=heartbeat,
+        account_id=account_id,
+    )
+    _validate_margin_ratio_guard(
+        cur,
+        account_id=account_id,
+        database_now=heartbeat["database_now"],
+    )
 
     cur.execute(
         """
@@ -1244,6 +1258,11 @@ def _validate_and_arm_resume(
         emergency_close_evidence_sha256=emergency_close_evidence_sha256,
         emergency_close_verified_at=emergency_close_verified_at,
         database_now=heartbeat["database_now"],
+    )
+    _validate_robot_owned_symbol_flat(
+        cur,
+        account_id=account_id,
+        symbol=symbol,
     )
     if int(max_open_count) != 1 or int(consumed_open_count) != 0:
         raise HTTPException(
@@ -1408,33 +1427,6 @@ def _is_canary_request(
 ) -> bool:
     del account_id
     return raw_permit_id not in (None, "")
-
-
-def _live_open_rollout_phase(account_id: str) -> str | None:
-    if account_id not in _ROLLOUT_ACCOUNTS:
-        return None
-    database_url = os.environ.get("DATABASE_URL", "").strip()
-    if not database_url:
-        raise HTTPException(
-            status_code=503,
-            detail="reviewed release rollout state is unavailable",
-        )
-    conn = _database_connection(database_url)
-    try:
-        with conn.cursor() as cur:
-            rollout = _current_reviewed_rollout_state(cur)
-    finally:
-        conn.close()
-    if rollout is None:
-        return None
-    return rollout["phase"]
-
-
-def _live_open_requires_canary_permit(account_id: str) -> bool:
-    if account_id not in _ROLLOUT_ACCOUNTS:
-        return False
-    phase = _live_open_rollout_phase(account_id)
-    return phase != _ROLLOUT_PHASE_FLEET_COMPLETE
 
 
 def _required_uuid(value, detail: str) -> str:
@@ -1791,6 +1783,241 @@ def _snapshot_has_nonzero_position(item: dict, symbol: str) -> bool:
         return Decimal(str(raw_quantity)) != 0
     except InvalidOperation:
         return True
+
+
+def _validate_owned_orders_terminal(
+    cur,
+    *,
+    heartbeat: dict,
+    account_id: str,
+) -> None:
+    cur.execute(
+        """
+        SELECT client_order_id, status
+        FROM orders_projection
+        WHERE account_id=%s
+          AND client_order_id ~ '^B[0-9a-f]{32}[0-9]{2}$'
+          AND lower(status) NOT IN %s
+        ORDER BY updated_at DESC
+        LIMIT 1
+        FOR SHARE
+        """,
+        (account_id, _TERMINAL_ORDER_STATES),
+    )
+    row = cur.fetchone()
+    if row is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="robot-owned orders are not terminal",
+        )
+    for field_name in ("regular_orders", "algo_orders"):
+        snapshot = heartbeat.get(field_name)
+        if not isinstance(snapshot, list):
+            raise HTTPException(
+                status_code=409,
+                detail="node exchange evidence is invalid",
+            )
+        for item in snapshot:
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=409,
+                    detail="node exchange evidence is invalid",
+                )
+            if not row_is_robot_order(item):
+                continue
+            raise HTTPException(
+                status_code=409,
+                detail="robot-owned orders are not terminal",
+            )
+
+
+def _validate_robot_owned_symbol_flat(
+    cur,
+    *,
+    account_id: str,
+    symbol: str,
+) -> None:
+    footprint = _robot_owned_symbol_footprint(
+        cur,
+        account_id=account_id,
+        symbol=symbol,
+    )
+    if footprint != Decimal("0"):
+        raise HTTPException(
+            status_code=409,
+            detail="robot-owned target symbol position is not flat",
+        )
+
+
+def _robot_owned_symbol_footprint(
+    cur,
+    *,
+    account_id: str,
+    symbol: str,
+) -> Decimal:
+    cur.execute(
+        """
+        SELECT ee.client_order_id,
+               ee.event_type,
+               ee.payload,
+               op.instrument_id
+        FROM execution_events AS ee
+        LEFT JOIN orders_projection AS op
+          ON op.account_id=ee.account_id
+         AND op.client_order_id=ee.client_order_id
+        WHERE ee.account_id=%s
+          AND ee.client_order_id ~ '^B[0-9a-f]{32}[0-9]{2}$'
+          AND ee.event_type IN ('OrderFilled', 'OrderPartiallyFilled')
+        ORDER BY ee.ts_event, ee.created_at, ee.event_id
+        FOR SHARE OF ee
+        """,
+        (account_id,),
+    )
+    net_quantity = Decimal("0")
+    target_symbol = _canonical_symbol(symbol)
+    for client_order_id, event_type, raw_payload, projection_instrument in cur.fetchall():
+        if not is_robot_client_order_id(client_order_id):
+            continue
+        payload = raw_payload
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status_code=409,
+                detail="robot-owned fill evidence is invalid",
+            )
+        event_symbol = _robot_fill_symbol(
+            payload,
+            projection_instrument=projection_instrument,
+        )
+        if event_symbol != target_symbol:
+            continue
+        signed_quantity = _robot_fill_signed_quantity(
+            payload,
+            event_type=str(event_type or ""),
+        )
+        net_quantity += signed_quantity
+    return net_quantity
+
+
+def _robot_fill_symbol(
+    payload: dict,
+    *,
+    projection_instrument,
+) -> str:
+    for field_name in ("instrument_id", "symbol", "instrument"):
+        symbol = _canonical_symbol(payload.get(field_name))
+        if symbol:
+            return symbol
+    return _canonical_symbol(projection_instrument)
+
+
+def _robot_fill_signed_quantity(
+    payload: dict,
+    *,
+    event_type: str,
+) -> Decimal:
+    if event_type not in {"OrderFilled", "OrderPartiallyFilled"}:
+        return Decimal("0")
+    quantity = _robot_fill_quantity(payload)
+    side = _order_side(payload.get("side") or payload.get("order_side"))
+    if side is None:
+        raise HTTPException(
+            status_code=409,
+            detail="robot-owned fill evidence is invalid",
+        )
+    if side == "short":
+        return -quantity
+    return quantity
+
+
+def _robot_fill_quantity(payload: dict) -> Decimal:
+    raw_quantity = payload.get("last_qty")
+    if raw_quantity is None:
+        raw_quantity = payload.get("last_fill_qty")
+    if raw_quantity is None:
+        raw_quantity = payload.get("filled_qty")
+    if raw_quantity is None:
+        raw_quantity = payload.get("quantity")
+    try:
+        quantity = Decimal(str(raw_quantity))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="robot-owned fill evidence is invalid",
+        ) from exc
+    if not quantity.is_finite() or quantity <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail="robot-owned fill evidence is invalid",
+        )
+    return quantity
+
+
+def _validate_margin_ratio_guard(
+    cur,
+    *,
+    account_id: str,
+    database_now: datetime,
+) -> None:
+    cur.execute(
+        """
+        SELECT equity, available_balance, updated_at
+        FROM accounts_projection
+        WHERE account_id=%s
+        LIMIT 1
+        FOR SHARE
+        """,
+        (account_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail="account margin evidence is unavailable",
+        )
+    equity_raw, available_raw, updated_at = row
+    try:
+        equity = Decimal(str(equity_raw))
+        available = Decimal(str(available_raw))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="account margin evidence is invalid",
+        ) from exc
+    if (
+        not equity.is_finite()
+        or not available.is_finite()
+        or equity <= 0
+        or available < 0
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="account margin evidence is invalid",
+        )
+    if not _timestamp_is_fresh(updated_at, database_now):
+        raise HTTPException(
+            status_code=409,
+            detail="account margin evidence is stale",
+        )
+    threshold = _minimum_free_margin_ratio()
+    if available / equity < threshold:
+        raise HTTPException(
+            status_code=409,
+            detail="account margin ratio is below threshold",
+        )
+
+
+def _minimum_free_margin_ratio() -> Decimal:
+    raw = os.environ.get(
+        "CONTROL_PLANE_MIN_FREE_MARGIN_RATIO",
+        "0.05",
+    ).strip()
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0.05")
+    if value < 0 or value > 1 or not value.is_finite():
+        return Decimal("0.05")
+    return value
 
 
 def _portfolio_baseline_sha256(heartbeat: dict, target_symbol: str) -> str:
@@ -6610,6 +6837,11 @@ def _lock_canary_permit(
         expected_trading_state="ACTIVE",
         required_rollout_phase=_canary_phase_for_account(account_id),
     )
+    _validate_robot_owned_symbol_flat(
+        cur,
+        account_id=account_id,
+        symbol=symbol,
+    )
     current_baseline = _portfolio_baseline_sha256(heartbeat, symbol)
     if current_baseline != portfolio_baseline_sha256:
         cur.execute(
@@ -6624,7 +6856,7 @@ def _lock_canary_permit(
         cur.connection.commit()
         raise HTTPException(
             status_code=409,
-            detail="non-target portfolio baseline changed",
+            detail="robot-owned target symbol baseline changed",
         )
     cur.execute(
         """
@@ -6831,24 +7063,12 @@ def operator_order(
         if replay is not False:
             return replay
     raw_canary_permit_id = body.get("canary_permit_id")
-    rollout_requires_canary = False
-    if (
-        action == "open_position"
-        and not dry_run
-        and account_id in _ROLLOUT_ACCOUNTS
-    ):
-        rollout_requires_canary = _live_open_requires_canary_permit(
-            account_id
-        )
     canary_open = (
         action == "open_position"
         and not dry_run
-        and (
-            rollout_requires_canary
-            or _is_canary_request(
-                account_id=account_id,
-                raw_permit_id=raw_canary_permit_id,
-            )
+        and _is_canary_request(
+            account_id=account_id,
+            raw_permit_id=raw_canary_permit_id,
         )
     )
     canary_quantity = None

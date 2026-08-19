@@ -28,6 +28,8 @@ from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from uuid import UUID
 
+from execution_domain.order_ownership import object_is_robot_order
+
 REGULAR_ORDER = "regular"
 ALGO_ORDER = "algo"
 _CANCEL_ACTIONS = frozenset({"cancel", "cancel_order"})
@@ -520,6 +522,7 @@ class TerminalExchangeWorker:
                 str(getattr(order, "instrument_id", "") or ""),
                 request.instrument_ids,
             )
+            and object_is_robot_order(order)
         )
         return self._cancel_batch(
             cancel_requests,

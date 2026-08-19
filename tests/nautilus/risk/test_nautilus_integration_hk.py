@@ -22,11 +22,7 @@ from nautilus_simulated_harness import (  # noqa: E402
     nautilus_version,
 )
 from execution_domain.contracts import IntentAction  # noqa: E402
-from nautilus_trader.model.enums import (  # noqa: E402
-    OrderSide,
-    OrderStatus,
-    OrderType,
-)
+from nautilus_trader.model.enums import OrderStatus  # noqa: E402
 from nautilus_trader.model.identifiers import Venue  # noqa: E402
 from risk.config import (  # noqa: E402
     RiskLimitConfig,
@@ -94,6 +90,12 @@ def test_margin_risk_engine_cap_is_bypassed_and_live_strategy_fails_closed() -> 
             live_entry_notional_inventory=(
                 (instrument_id, "100"),
             ),
+        )
+        strategy.set_live_entry_mark_snapshot_getter(
+            lambda _instrument_id: {
+                "value": "100000",
+                "ts_event": fail_closed_engine.clock.timestamp_ns(),
+            }
         )
         fail_closed_engine.prime_quote()
         intent = build_intent(
@@ -197,30 +199,31 @@ def test_emergency_cancel_all_and_reduce_only_close_all_confirm_events() -> None
         }
         assert pending_order.status is OrderStatus.CANCELED
         assert type(pending_order.last_event).__name__ == "OrderCanceled"
-        close_orders = [
+        assert [
             order
             for order in engine.cache.orders()
             if str(order.client_order_id) not in known_order_ids
+        ] == []
+        close_operations = [
+            operation
+            for operation in result["operations"]
+            if operation["kind"] == "close_position"
         ]
-        assert len(close_orders) == 1
-        close_order = close_orders[0]
-        assert close_order.order_type is OrderType.MARKET
-        assert close_order.side is OrderSide.SELL
-        assert close_order.is_reduce_only is True
-        assert close_order.status is OrderStatus.FILLED
-        assert type(close_order.last_event).__name__ == "OrderFilled"
-        assert engine.cache.positions_open(
+        assert close_operations[0]["status"] == "skipped"
+        assert (
+            close_operations[0]["outcome"]
+            == "manual_position_read_only"
+        )
+        remaining_positions = engine.cache.positions_open(
             instrument_id=engine.instrument.id
-        ) == []
+        )
+        assert len(remaining_positions) == 1
+        assert str(remaining_positions[0].id) == str(position.id)
         closed_events = [
             event
             for event in position_events
             if type(event).__name__ == "PositionClosed"
         ]
-        assert len(closed_events) == 1
-        assert str(closed_events[0].position_id) == str(position.id)
-        assert str(closed_events[0].closing_order_id) == str(
-            close_order.client_order_id
-        )
+        assert closed_events == []
     finally:
         engine.close()

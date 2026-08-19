@@ -23,6 +23,7 @@ EXPECTED_PATCH_MOUNTS = {
     "contracts.py": "/app/execution_domain/contracts.py",
     "control_plane.py": "/app/execution_domain/control_plane.py",
     "portfolio_baseline.py": "/app/execution_domain/portfolio_baseline.py",
+    "order_ownership.py": "/app/execution_domain/order_ownership.py",
     "http_client.py": "/app/execution_domain/http_client.py",
     "projection_actor.py": "/app/projection/actor.py",
     "projection_spool.py": "/app/projection/spool.py",
@@ -68,6 +69,7 @@ LEGACY_PATCH_MOUNTS = {
         "intent_execution_inbox.py",
         "live_canary_execution.py",
         "node_config.py",
+        "order_ownership.py",
         "projection_spool.py",
         "reconciliation.py",
         "redis_safety.py",
@@ -177,6 +179,10 @@ class NodePatchMountContractTest(unittest.TestCase):
             deploy,
         )
         self.assertIn(
+            "staging missing host/execution_domain/order_ownership.py",
+            deploy,
+        )
+        self.assertIn(
             "EXECUTION_DOMAIN_CONTROL_PLANE_TGT",
             deploy,
         )
@@ -185,7 +191,15 @@ class NodePatchMountContractTest(unittest.TestCase):
             deploy,
         )
         self.assertIn(
+            "EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT",
+            deploy,
+        )
+        self.assertIn(
             "host__execution_domain_portfolio_baseline.py",
+            deploy,
+        )
+        self.assertIn(
+            "host__execution_domain_order_ownership.py",
             deploy,
         )
         self.assertIn("DECISION_GATEWAY_TGT", deploy)

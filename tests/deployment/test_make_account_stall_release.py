@@ -103,6 +103,7 @@ REQUIRED_HOST_PATHS = {
     "host/execution_domain/contracts.py",
     "host/execution_domain/control_plane.py",
     "host/execution_domain/portfolio_baseline.py",
+    "host/execution_domain/order_ownership.py",
     "host/execution_domain/idempotency.py",
     "host/execution_domain/identifiers.py",
     "host/settings/__init__.py",
@@ -185,6 +186,9 @@ EXPECTED_RELEASE_FILE_MAP = {
     (
         "packages/execution-domain/execution_domain/portfolio_baseline.py"
     ): "host/execution_domain/portfolio_baseline.py",
+    (
+        "packages/execution-domain/execution_domain/order_ownership.py"
+    ): "host/execution_domain/order_ownership.py",
     (
         "packages/execution-domain/execution_domain/idempotency.py"
     ): "host/execution_domain/idempotency.py",

@@ -7927,6 +7927,7 @@ EXECUTION_DOMAIN_INIT_TGT="$EXECUTION_DOMAIN_TGT/__init__.py"
 EXECUTION_DOMAIN_CONTRACTS_TGT="$EXECUTION_DOMAIN_TGT/contracts.py"
 EXECUTION_DOMAIN_CONTROL_PLANE_TGT="$EXECUTION_DOMAIN_TGT/control_plane.py"
 EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT="$EXECUTION_DOMAIN_TGT/portfolio_baseline.py"
+EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT="$EXECUTION_DOMAIN_TGT/order_ownership.py"
 EXECUTION_DOMAIN_IDEMPOTENCY_TGT="$EXECUTION_DOMAIN_TGT/idempotency.py"
 EXECUTION_DOMAIN_IDENTIFIERS_TGT="$EXECUTION_DOMAIN_TGT/identifiers.py"
 SETTINGS_PACKAGE_TGT="$T/services/control-plane/settings"
@@ -7960,6 +7961,8 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
   || die "staging missing host/execution_domain/control_plane.py"
 [ -f host/execution_domain/portfolio_baseline.py ] \
   || die "staging missing host/execution_domain/portfolio_baseline.py"
+[ -f host/execution_domain/order_ownership.py ] \
+  || die "staging missing host/execution_domain/order_ownership.py"
 [ -f host/execution_domain/idempotency.py ] \
   || die "staging missing host/execution_domain/idempotency.py"
 [ -f host/execution_domain/identifiers.py ] \
@@ -9177,6 +9180,9 @@ cmp -s host/execution_domain/contracts.py "$EXECUTION_DOMAIN_CONTRACTS_TGT" \
 cmp -s host/execution_domain/portfolio_baseline.py \
   "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT" \
   || CHANGED_HOST+=("execution_domain_portfolio_baseline")
+cmp -s host/execution_domain/order_ownership.py \
+  "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
+  || CHANGED_HOST+=("execution_domain_order_ownership")
 cmp -s host/execution_domain/idempotency.py \
   "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" \
   || CHANGED_HOST+=("execution_domain_idempotency")
@@ -10300,6 +10306,15 @@ for h in "${CHANGED_HOST[@]:-}"; do
           >> "$BACKUP_ROOT/new-files.txt"
       fi
       ;;
+    execution_domain_order_ownership)
+      if [ -f "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" ]; then
+        bk "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
+          "host__execution_domain_order_ownership.py"
+      else
+        printf '%s\n' "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
     execution_domain_idempotency)
       if [ -f "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" ]; then
         bk "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" \
@@ -10596,6 +10611,16 @@ for h in "${CHANGED_HOST[@]:-}"; do
           "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT"
       fi
       ;;
+    execution_domain_order_ownership)
+      mkdir -p "$EXECUTION_DOMAIN_TGT"
+      if [ -f "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" ]; then
+        cat host/execution_domain/order_ownership.py \
+          > "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT"
+      else
+        install -m 0644 host/execution_domain/order_ownership.py \
+          "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT"
+      fi
+      ;;
     execution_domain_idempotency)
       mkdir -p "$EXECUTION_DOMAIN_TGT"
       if [ -f "$EXECUTION_DOMAIN_IDEMPOTENCY_TGT" ]; then
@@ -10693,6 +10718,9 @@ for h in "${CHANGED_HOST[@]:-}"; do
 	  || die "post-install mismatch: host/v3_trade.py"
 	cmp -s host/v3-trader/SKILL.md "$HERMES_V3_SKILL_TGT" \
 	  || die "post-install mismatch: host/v3-trader/SKILL.md"
+	cmp -s host/execution_domain/order_ownership.py \
+	  "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
+	  || die "post-install mismatch: host/execution_domain/order_ownership.py"
 	cmp -s host/app_roles.py "$APP_ROLES_TGT" \
 	  || die "post-install mismatch: host/app_roles.py"
 	cmp -s host/pools.py "$DB_POOLS_TGT" \

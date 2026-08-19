@@ -35,6 +35,12 @@ ACCOUNT_ID = "account-a"
 INSTRUMENT_ID = "BTCUSDT-PERP.BINANCE"
 POSITION_ID = "BTCUSDT-PERP.BINANCE-LONG"
 NOW = datetime(2026, 7, 29, 12, 30, tzinfo=timezone.utc)
+ROBOT_OLD_STOP_ID = "Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01"
+ROBOT_OLD_TP_ID = "Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02"
+ROBOT_LONG_STOP_ID = "Bcccccccccccccccccccccccccccccccc03"
+ROBOT_LONG_TP_ID = "Bdddddddddddddddddddddddddddddddd04"
+ROBOT_SHORT_STOP_ID = "Beeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee05"
+ROBOT_SHORT_TP_ID = "Bffffffffffffffffffffffffffffffff06"
 
 
 def _pump_durable(strategy: IntentExecutionStrategy) -> None:
@@ -149,7 +155,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
         self.assertIsInstance(result, ManagementPlan)
         assert isinstance(result, ManagementPlan)
         self.assertEqual(result.orders, ())
-        self.assertEqual(result.cancel_order_ids, ("old-tp",))
+        self.assertEqual(result.cancel_order_ids, (ROBOT_OLD_TP_ID,))
         self.assertEqual(result.authorization["authorized_by_type"], "user")
         self.assertEqual(result.authorization["authorized_by_id"], "balen")
 
@@ -196,10 +202,13 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             strategy._handle_intent(disable_intent)
 
-            self.assertEqual(strategy.cancelled_client_order_ids, ["old-tp"])
+            self.assertEqual(
+                strategy.cancelled_client_order_ids,
+                [ROBOT_OLD_TP_ID],
+            )
             self.assertEqual(
                 [order.client_order_id for order in strategy._orders],
-                ["old-stop"],
+                [ROBOT_OLD_STOP_ID],
             )
             stash = strategy._entry_protection_stash[str(entry_intent_id)]
             tombstone = stash["take_profit_tombstone"]
@@ -222,7 +231,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
             )
             self.assertEqual(
                 [order.client_order_id for order in strategy._orders],
-                ["old-stop"],
+                [ROBOT_OLD_STOP_ID],
             )
 
     def test_new_authorized_replace_supersedes_tombstone_and_can_rehang_tp(self) -> None:
@@ -994,10 +1003,17 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             strategy._handle_intent(disable_intent)
 
-            self.assertEqual(strategy.cancelled_client_order_ids, ["long-tp"])
+            self.assertEqual(
+                strategy.cancelled_client_order_ids,
+                [ROBOT_LONG_TP_ID],
+            )
             self.assertEqual(
                 [order.client_order_id for order in strategy._orders],
-                ["long-stop", "short-stop", "short-tp"],
+                [
+                    ROBOT_LONG_STOP_ID,
+                    ROBOT_SHORT_STOP_ID,
+                    ROBOT_SHORT_TP_ID,
+                ],
             )
             long_stash = strategy._entry_protection_stash[
                 str(long_entry_intent_id)
@@ -1463,7 +1479,7 @@ def _seed_entry_stash(strategy: _Strategy) -> UUID:
 def _live_protection_orders() -> list[Any]:
     return [
         SimpleNamespace(
-            client_order_id="old-stop",
+            client_order_id=ROBOT_OLD_STOP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="STOP_MARKET",
             side="SELL",
@@ -1474,7 +1490,7 @@ def _live_protection_orders() -> list[Any]:
             tags=(f"position_id={POSITION_ID}", "lifecycle_role=stop_loss"),
         ),
         SimpleNamespace(
-            client_order_id="old-tp",
+            client_order_id=ROBOT_OLD_TP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="LIMIT",
             side="SELL",
@@ -1532,7 +1548,7 @@ def _mirror_from_local_order(order: Any) -> Any:
 def _dual_side_protection_orders() -> list[Any]:
     return [
         SimpleNamespace(
-            client_order_id="long-stop",
+            client_order_id=ROBOT_LONG_STOP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="STOP_MARKET",
             side="SELL",
@@ -1543,7 +1559,7 @@ def _dual_side_protection_orders() -> list[Any]:
             tags=(f"position_id={POSITION_ID}", "lifecycle_role=stop_loss"),
         ),
         SimpleNamespace(
-            client_order_id="long-tp",
+            client_order_id=ROBOT_LONG_TP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="LIMIT",
             side="SELL",
@@ -1554,7 +1570,7 @@ def _dual_side_protection_orders() -> list[Any]:
             tags=(f"position_id={POSITION_ID}", "lifecycle_role=take_profit"),
         ),
         SimpleNamespace(
-            client_order_id="short-stop",
+            client_order_id=ROBOT_SHORT_STOP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="STOP_MARKET",
             side="BUY",
@@ -1568,7 +1584,7 @@ def _dual_side_protection_orders() -> list[Any]:
             ),
         ),
         SimpleNamespace(
-            client_order_id="short-tp",
+            client_order_id=ROBOT_SHORT_TP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="LIMIT",
             side="BUY",

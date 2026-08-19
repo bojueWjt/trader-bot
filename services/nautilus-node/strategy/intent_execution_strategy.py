@@ -16,6 +16,11 @@ from threading import Lock, RLock
 from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID, uuid4
 
+from execution_domain.order_ownership import (
+    is_robot_client_order_id,
+    object_client_order_id,
+    object_is_robot_order,
+)
 from runtime.bounded_task_worker import BoundedTaskWorker
 from runtime.live_canary_execution import (
     JsonLiveCanaryExecutionStore,
@@ -215,6 +220,7 @@ class IntentExecutionStrategy(Strategy):
             str,
             dict[str, Any],
         ] = {}
+        self._symbol_open_freezes: dict[str, str] = {}
         self._terminal_command_request_ids: dict[str, str] = {}
         self._terminal_command_results: dict[
             str,
@@ -400,13 +406,14 @@ class IntentExecutionStrategy(Strategy):
         return drained
 
     def _requires_live_canary_runtime(self) -> bool:
-        return (
-            is_live_canary_account(
-                getattr(self.config, "account_id", "")
-            )
-            and str(getattr(self.config, "environment", "")).lower()
-            == "live"
-        )
+        if (
+            str(getattr(self.config, "environment", "")).lower()
+            != "live"
+        ):
+            return False
+        return str(
+            getattr(self.config, "account_id", "") or ""
+        ).strip() == "account-a"
 
     def _live_canary_loss_topic(self) -> str:
         return f"live-canary.loss.{self.config.account_id}"
@@ -648,10 +655,25 @@ class IntentExecutionStrategy(Strategy):
                 interval=interval,
                 callback=self._on_exchange_state_timer,
             )
-            return
         except TypeError:
-            pass
-        set_timer("exchange-state.reconcile", interval, self._on_exchange_state_timer)
+            set_timer(
+                "exchange-state.reconcile",
+                interval,
+                self._on_exchange_state_timer,
+            )
+        protection_interval = timedelta(seconds=30)
+        try:
+            set_timer(
+                name="protection.watchdog",
+                interval=protection_interval,
+                callback=self._on_protection_watchdog_timer,
+            )
+        except TypeError:
+            set_timer(
+                "protection.watchdog",
+                protection_interval,
+                self._on_protection_watchdog_timer,
+            )
 
     def _on_exchange_state_timer(self, *_args: Any, **_kwargs: Any) -> None:
         if self._terminal_exchange_worker:
@@ -662,6 +684,68 @@ class IntentExecutionStrategy(Strategy):
             return
         if self._refresh_exchange_state():
             self._retry_pending_take_profit_disables()
+
+    def _on_protection_watchdog_timer(
+        self,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        for intent_key in tuple(self._entry_protection_stash):
+            self._check_protection_watchdog(intent_key)
+
+    def _check_protection_watchdog(self, intent_key: str) -> None:
+        stash = self._entry_protection_stash.get(intent_key)
+        if not isinstance(stash, dict):
+            return
+        if stash.get("protection_frozen"):
+            return
+        instrument_id = str(stash.get("instrument_id") or "")
+        if not instrument_id:
+            return
+        if stash.get("stop_loss") is None:
+            return
+        position = self._protection_position(
+            instrument_id,
+            str(stash.get("entry_side") or ""),
+        )
+        if position is None:
+            stash.pop("watchdog_missing_stop_count", None)
+            return
+        sequence_start = int(stash.get("protection_sequence_start", 11))
+        live = self._live_protection_orders(
+            instrument_id,
+            intent_key,
+            sequence_start,
+            position_id=_position_id(position),
+        )
+        has_stop = any(
+            self._protection_order_role(stash, order) == "stop_loss"
+            for order in live
+        )
+        if has_stop:
+            stash.pop("watchdog_missing_stop_count", None)
+            return
+        count = int(stash.get("watchdog_missing_stop_count", 0)) + 1
+        stash["watchdog_missing_stop_count"] = count
+        self._schedule_protection_sync(intent_key, delay_seconds=0.0)
+        if count < 2:
+            return
+        self._freeze_symbol_new_opens(
+            instrument_id,
+            "protection stop-loss missing after watchdog repair",
+        )
+        self._report_protection_event(
+            intent_key,
+            stash,
+            event_type="ProtectionWatchdogSymbolStopped",
+            event_key=f"{intent_key}:stop_loss_missing:{count}",
+            payload={
+                "reason": "stop_loss_missing",
+                "consecutive_failures": count,
+                "action": "symbol_new_open_frozen",
+            },
+        )
+        self._queue_entry_protection_stash_persist()
 
     def _refresh_exchange_state(self) -> bool:
         mirror = self._exchange_state_mirror
@@ -1414,6 +1498,8 @@ class IntentExecutionStrategy(Strategy):
                 )
                 return
             for order in orders:
+                if not object_is_robot_order(order):
+                    continue
                 instrument_id = str(
                     getattr(order, "instrument_id", "") or ""
                 )
@@ -1435,6 +1521,8 @@ class IntentExecutionStrategy(Strategy):
             errors.append("exchange cancel adapter unavailable")
             return
         for order in self._all_open_orders():
+            if not object_is_robot_order(order):
+                continue
             instrument_id = str(
                 getattr(order, "instrument_id", "") or ""
             )
@@ -1444,7 +1532,7 @@ class IntentExecutionStrategy(Strategy):
             ):
                 continue
             client_order_id = str(
-                getattr(order, "client_order_id", "") or ""
+                object_client_order_id(order)
             )
             operation = {
                 "kind": "cancel_order",
@@ -1469,6 +1557,7 @@ class IntentExecutionStrategy(Strategy):
     ) -> dict[str, Any]:
         from runtime.exchange_cancel_adapter import CancelOrderRequest
 
+        client_order_id = object_client_order_id(order)
         operation = {
             "kind": "cancel_order",
             "instrument_id": str(
@@ -1482,11 +1571,13 @@ class IntentExecutionStrategy(Strategy):
             "venue_order_id": str(
                 getattr(order, "venue_order_id", "") or ""
             ),
-            "client_order_id": str(
-                getattr(order, "client_order_id", "") or ""
-            ),
+            "client_order_id": client_order_id,
             "status": "requested",
         }
+        if not is_robot_client_order_id(client_order_id):
+            operation["status"] = "skipped"
+            operation["outcome"] = "manual_order_read_only"
+            return operation
         request = CancelOrderRequest(
             account_id=str(getattr(order, "account_id", "") or ""),
             symbol=operation["symbol"],
@@ -1537,17 +1628,9 @@ class IntentExecutionStrategy(Strategy):
                 "position_side": _position_side(position),
                 "quantity": _position_quantity(position),
                 "reduce_only": True,
-                "status": "requested",
+                "status": "skipped",
+                "outcome": "manual_position_read_only",
             }
-            try:
-                self.close_position(position)  # type: ignore[attr-defined]
-            except Exception as exc:
-                operation["status"] = "failed"
-                operation["error"] = repr(exc)
-                errors.append(repr(exc))
-                self._record_denial(
-                    OrderDenied("position_close_failed", repr(exc))
-                )
             operations.append(operation)
 
     def _publish_terminal_command_result(
@@ -1735,6 +1818,10 @@ class IntentExecutionStrategy(Strategy):
                 "intent_exchange_confirmation_required",
                 execution_identity.intent_id,
             )
+            self._freeze_symbol_new_opens(
+                str(getattr(durable_record, "instrument_id", "")),
+                denial.detail,
+            )
             self._record_denial(denial)
             self._report_denial(intent, denial)
             return
@@ -1858,6 +1945,14 @@ class IntentExecutionStrategy(Strategy):
         raw_action = getattr(intent, "action", "")
         action = str(getattr(raw_action, "value", raw_action))
         raw_order_plan = getattr(intent, "order_plan", {}) or {}
+        freeze_denial = self._symbol_open_freeze_denial(
+            action,
+            str(getattr(intent, "instrument_id", "")),
+        )
+        if freeze_denial is not None:
+            self._record_denial(freeze_denial)
+            self._report_denial(intent, freeze_denial)
+            return
         context = PlannerContext(
             account_id=self.config.account_id,
             trading_state=self._trading_state(),
@@ -2173,6 +2268,12 @@ class IntentExecutionStrategy(Strategy):
             rollout_phase,
         ):
             return True
+        trusted_gate = normalize_live_open_gate(self._live_open_gate())
+        if (
+            trusted_gate is not False
+            and trusted_gate["mode"] == "canary_only"
+        ):
+            return True
         return "canary_permit" in order_plan
 
     def _live_canary_execution_identity(
@@ -2185,18 +2286,9 @@ class IntentExecutionStrategy(Strategy):
         if plan.reduce_only:
             return False
         order_plan = getattr(intent, "order_plan", {}) or {}
-        account_id = getattr(self.config, "account_id", "")
-        rollout_phase = str(
-            order_plan.get("rollout_phase") or ""
-        ).strip()
-        if not rollout_phase:
-            rollout_phase = self._live_rollout_phase()
-        if (
-            not live_canary_permit_required(
-                account_id,
-                rollout_phase,
-            )
-            and "canary_permit" not in order_plan
+        if not self._live_canary_applies(
+            action="open_position",
+            order_plan=order_plan,
         ):
             return False
         permit = order_plan.get("canary_permit")
@@ -2517,6 +2609,10 @@ class IntentExecutionStrategy(Strategy):
             denial = OrderDenied(
                 "intent_exchange_confirmation_required",
                 intent_execution.intent_id,
+            )
+            self._freeze_symbol_new_opens(
+                str(getattr(record, "instrument_id", "")),
+                denial.detail,
             )
             self._record_denial(denial)
             self._report_denial(intent, denial)
@@ -2933,6 +3029,7 @@ class IntentExecutionStrategy(Strategy):
             self._strategy_stopping = True
         self._cancel_clock_timer("strategy.durable-io.mailbox")
         self._cancel_clock_timer("exchange-state.reconcile")
+        self._cancel_clock_timer("protection.watchdog")
         self._cancel_clock_timer("terminal-exchange.mailbox")
         self._cancel_clock_timer("live-canary.mark-to-market")
         for intent_key in tuple(self._entry_protection_stash):
@@ -2988,6 +3085,11 @@ class IntentExecutionStrategy(Strategy):
         client_order_id = _event_client_order_id(event)
         if client_order_id is None:
             return
+        if not is_robot_client_order_id(client_order_id):
+            return
+        instrument_id = _event_instrument_id(event)
+        if instrument_id is not None:
+            self._clear_symbol_open_freeze(str(instrument_id))
         self._submit_durable_io_task(
             _DurableIoTask(
                 kind=_DurableIoTaskKind.INTENT_EXCHANGE_CONFIRMED,
@@ -4072,6 +4174,8 @@ class IntentExecutionStrategy(Strategy):
         client_order_id = _event_client_order_id(event)
         if client_order_id is None:
             return
+        if not is_robot_client_order_id(client_order_id):
+            return
         reporter = self._live_canary_risk_reporter
         if reporter is None:
             self._halt_live_canary(
@@ -4249,6 +4353,8 @@ class IntentExecutionStrategy(Strategy):
     ) -> dict[str, Any] | bool:
         client_order_id = _event_client_order_id(event)
         if client_order_id is None:
+            return False
+        if not is_robot_client_order_id(client_order_id):
             return False
         instrument_id = _event_instrument_id(event)
         side = _event_order_side(event)
@@ -5692,7 +5798,9 @@ class IntentExecutionStrategy(Strategy):
         intents). Position-scoped ownership prevents duplicate SL/TP stacks."""
         result: dict[str, Any] = {}
         for order in self._cache_orders_all(instrument_id):
-            oid = str(getattr(order, "client_order_id", ""))
+            oid = object_client_order_id(order)
+            if not is_robot_client_order_id(oid):
+                continue
             if oid in result:
                 continue
             if self._order_status_name(order) in self._PROTECTION_TERMINAL_STATUSES:
@@ -5933,6 +6041,50 @@ class IntentExecutionStrategy(Strategy):
             raw_state = self.config.trading_state
         return str(getattr(raw_state, "value", raw_state))
 
+    @property
+    def symbol_open_freezes(self) -> dict[str, str]:
+        return dict(self._symbol_open_freezes)
+
+    def _symbol_open_freeze_denial(
+        self,
+        action: str,
+        instrument_id: str,
+    ) -> OrderDenied | None:
+        if action not in {"open_position", "add_position"}:
+            return None
+        key = _canonical_symbol(instrument_id)
+        reason = self._symbol_open_freezes.get(key)
+        if reason is None:
+            return None
+        return OrderDenied(
+            "symbol_new_open_frozen",
+            f"{key}:{reason}",
+        )
+
+    def _freeze_symbol_new_opens(
+        self,
+        instrument_id: str,
+        reason: str,
+    ) -> None:
+        key = _canonical_symbol(instrument_id)
+        if not key:
+            return
+        detail = str(reason or "").strip()
+        if not detail:
+            detail = "robot order terminal confirmation pending"
+        self._symbol_open_freezes[key] = detail
+        self._record_denial(
+            OrderDenied(
+                "symbol_new_open_frozen",
+                f"{key}:{detail}",
+            )
+        )
+
+    def _clear_symbol_open_freeze(self, instrument_id: str) -> None:
+        key = _canonical_symbol(instrument_id)
+        if key:
+            self._symbol_open_freezes.pop(key, None)
+
     def _now(self) -> datetime:
         clock = getattr(self, "clock", None)
         if clock is not None and hasattr(clock, "utc_now"):
@@ -5996,11 +6148,11 @@ class IntentExecutionStrategy(Strategy):
     ) -> tuple[OrderSnapshot, ...]:
         snapshots: dict[str, OrderSnapshot] = {}
         for order in self._cache_orders(instrument_id):
-            client_order_id = getattr(order, "client_order_id", None)
-            if client_order_id is None:
+            client_order_id = object_client_order_id(order)
+            if not is_robot_client_order_id(client_order_id):
                 continue
             snapshot = OrderSnapshot(
-                client_order_id=str(client_order_id),
+                client_order_id=client_order_id,
                 instrument_id=str(getattr(order, "instrument_id", instrument_id)),
                 order_type=_enum_name(getattr(order, "order_type", "")),
                 side=_enum_name(getattr(order, "side", getattr(order, "order_side", ""))),
@@ -6019,8 +6171,11 @@ class IntentExecutionStrategy(Strategy):
             if callable(orders_for_instrument):
                 mirror_orders = orders_for_instrument(instrument_id)
         for order in mirror_orders:
-            client_order_id = str(getattr(order, "client_order_id", ""))
-            if not client_order_id or client_order_id in snapshots:
+            client_order_id = object_client_order_id(order)
+            if (
+                not is_robot_client_order_id(client_order_id)
+                or client_order_id in snapshots
+            ):
                 continue
             snapshots[client_order_id] = OrderSnapshot(
                 client_order_id=client_order_id,
@@ -6041,7 +6196,7 @@ class IntentExecutionStrategy(Strategy):
         ):
             ids.update(_intent_ids_from_tags(item))
             client_order_id = getattr(item, "client_order_id", None)
-            if client_order_id is not None:
+            if is_robot_client_order_id(str(client_order_id or "")):
                 try:
                     ids.add(str(decode_client_order_id(str(client_order_id)).intent_id))
                 except ValueError:

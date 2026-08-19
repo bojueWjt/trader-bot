@@ -759,12 +759,11 @@ def test_refresh_evidence_contract_covers_selected_account_freshness(
     assert "last_seen_at=now()" in read_api_source
 
 
-def test_portfolio_baseline_ignores_non_target_position_market_refresh(
-    tmp_path: Path,
-) -> None:
-    scenario = Scenario()
+def test_portfolio_baseline_ignores_owned_position_market_refresh() -> None:
+    namespace = runpy.run_path(str(ADAPTER))
+    adapter_hash = namespace["_portfolio_baseline_sha256"]
     position = {
-        "symbol": "ETHUSDT",
+        "symbol": SYMBOL,
         "position_side": "LONG",
         "position_amt": "0.25",
         "entry_price": "100",
@@ -775,27 +774,22 @@ def test_portfolio_baseline_ignores_non_target_position_market_refresh(
         "break_even_price": "100.1",
         "update_time_ms": 1_754_700_000_000,
         "adl": 1,
+        "tags": ["intent_id=owned-position"],
     }
-    scenario.exchange_state["payload"]["positions"] = [position]
-
-    with FakeControlPlane(scenario) as server:
-        baseline = _preflight_portfolio_baseline(
-            scenario,
-            tmp_path,
-            server.url,
-        )
-        position["mark_price"] = "102"
-        position["unrealized_pnl"] = "0.5"
-        position["notional"] = "25.5"
-        position["liquidation_price"] = "51"
-        position["break_even_price"] = "100.2"
-        position["update_time_ms"] = 1_754_700_001_000
-        position["adl"] = 2
-        refreshed_baseline = _preflight_portfolio_baseline(
-            scenario,
-            tmp_path,
-            server.url,
-        )
+    exchange_payload = {
+        "positions": [position],
+        "open_orders": [],
+        "algo_orders": [],
+    }
+    baseline = adapter_hash(exchange_payload)
+    position["mark_price"] = "102"
+    position["unrealized_pnl"] = "0.5"
+    position["notional"] = "25.5"
+    position["liquidation_price"] = "51"
+    position["break_even_price"] = "100.2"
+    position["update_time_ms"] = 1_754_700_001_000
+    position["adl"] = 2
+    refreshed_baseline = adapter_hash(exchange_payload)
 
     assert refreshed_baseline == baseline
 
@@ -806,24 +800,18 @@ def test_adapter_portfolio_baseline_matches_node_shared_contract() -> None:
     exchange_payload = {
         "positions": [
             {
-                "symbol": "ETHUSDT",
+                "symbol": SYMBOL,
                 "position_amt": "-0.250",
                 "position_side": "SHORT",
                 "entry_price": "3000.0",
                 "mark_price": "2999",
                 "unrealized_pnl": "0.25",
-            },
-            {
-                "symbol": SYMBOL,
-                "position_amt": "0.07",
-                "position_side": "LONG",
-                "entry_price": "75.88",
-                "mark_price": "75.87",
+                "tags": ["intent_id=owned-position"],
             },
         ],
         "open_orders": [
             {
-                "symbol": "BTCUSDT",
+                "symbol": SYMBOL,
                 "position_side": "LONG",
                 "side": "BUY",
                 "type": "LIMIT",
@@ -832,13 +820,13 @@ def test_adapter_portfolio_baseline_matches_node_shared_contract() -> None:
                 "price": "61536.50",
                 "trigger_price": "0",
                 "reduce_only": False,
-                "client_order_id": "btc-order",
+                "client_order_id": OPEN_CLIENT_ORDER_ID,
                 "venue_order_id": 1092374819069,
             }
         ],
         "algo_orders": [
             {
-                "symbol": "MUUSDT",
+                "symbol": SYMBOL,
                 "position_side": "SHORT",
                 "side": "BUY",
                 "type": "STOP_MARKET",
@@ -847,7 +835,7 @@ def test_adapter_portfolio_baseline_matches_node_shared_contract() -> None:
                 "trigger_price": "1085.0",
                 "reduce_only": True,
                 "price_protect": True,
-                "client_order_id": "mu-stop",
+                "client_order_id": CLOSE_CLIENT_ORDER_ID,
                 "venue_order_id": 1000002511312702,
             }
         ],
@@ -855,16 +843,17 @@ def test_adapter_portfolio_baseline_matches_node_shared_contract() -> None:
     node_snapshot = {
         "positions": [
             {
-                "symbol": "ETHUSDT",
+                "symbol": SYMBOL,
                 "quantity": "-0.250",
                 "position_side": "SHORT",
                 "entry_price": "3000.0",
                 "mark_price": "2999",
+                "tags": ["intent_id=owned-position"],
             }
         ],
         "regular_orders": [
             {
-                "symbol": "BTCUSDT",
+                "symbol": SYMBOL,
                 "position_side": "LONG",
                 "side": "BUY",
                 "order_type": "LIMIT",
@@ -881,14 +870,14 @@ def test_adapter_portfolio_baseline_matches_node_shared_contract() -> None:
                 "close_position": False,
                 "price_protect": False,
                 "good_till_date": "",
-                "client_order_id": "btc-order",
+                "client_order_id": OPEN_CLIENT_ORDER_ID,
                 "venue_order_id": "1092374819069",
                 "order_kind": "regular",
             }
         ],
         "algo_orders": [
             {
-                "symbol": "MUUSDT",
+                "symbol": SYMBOL,
                 "position_side": "SHORT",
                 "side": "BUY",
                 "order_type": "STOP_MARKET",
@@ -905,7 +894,7 @@ def test_adapter_portfolio_baseline_matches_node_shared_contract() -> None:
                 "close_position": False,
                 "price_protect": True,
                 "good_till_date": "",
-                "client_order_id": "mu-stop",
+                "client_order_id": CLOSE_CLIENT_ORDER_ID,
                 "venue_order_id": "1000002511312702",
                 "order_kind": "algo",
             }
@@ -927,14 +916,14 @@ def test_adapter_portfolio_baseline_matches_node_shared_contract() -> None:
         ("entry_price", "99"),
     ],
 )
-def test_portfolio_baseline_binds_non_target_position_fields(
-    tmp_path: Path,
+def test_portfolio_baseline_binds_owned_target_position_fields(
     field_name: str,
     field_value: str,
 ) -> None:
-    scenario = Scenario()
+    namespace = runpy.run_path(str(ADAPTER))
+    adapter_hash = namespace["_portfolio_baseline_sha256"]
     position = {
-        "symbol": "ETHUSDT",
+        "symbol": SYMBOL,
         "position_side": "LONG",
         "position_amt": "0.25",
         "entry_price": "100",
@@ -944,82 +933,70 @@ def test_portfolio_baseline_binds_non_target_position_fields(
         "margin_type": "cross",
         "isolated_margin": "0",
         "is_auto_add_margin": "false",
+        "tags": ["intent_id=owned-position"],
     }
-    scenario.exchange_state["payload"]["positions"] = [position]
-
-    with FakeControlPlane(scenario) as server:
-        baseline = _preflight_portfolio_baseline(
-            scenario,
-            tmp_path,
-            server.url,
-        )
-        position[field_name] = field_value
-        changed_baseline = _preflight_portfolio_baseline(
-            scenario,
-            tmp_path,
-            server.url,
-        )
+    exchange_payload = {
+        "positions": [position],
+        "open_orders": [],
+        "algo_orders": [],
+    }
+    baseline = adapter_hash(exchange_payload)
+    position[field_name] = field_value
+    changed_baseline = adapter_hash(exchange_payload)
 
     assert changed_baseline != baseline
 
 
-def test_portfolio_baseline_ignores_unknown_non_target_position_fields(
-    tmp_path: Path,
-) -> None:
-    scenario = Scenario()
+def test_portfolio_baseline_ignores_unknown_owned_position_fields() -> None:
+    namespace = runpy.run_path(str(ADAPTER))
+    adapter_hash = namespace["_portfolio_baseline_sha256"]
     position = {
-        "symbol": "ETHUSDT",
+        "symbol": SYMBOL,
         "position_side": "LONG",
         "position_amt": "0.25",
         "entry_price": "100",
         "mark_price": "101",
         "unrealized_pnl": "0.25",
         "future_exchange_field": "before",
+        "tags": ["intent_id=owned-position"],
     }
-    scenario.exchange_state["payload"]["positions"] = [position]
-
-    with FakeControlPlane(scenario) as server:
-        baseline = _preflight_portfolio_baseline(
-            scenario,
-            tmp_path,
-            server.url,
-        )
-        position["future_exchange_field"] = "after"
-        refreshed_baseline = _preflight_portfolio_baseline(
-            scenario,
-            tmp_path,
-            server.url,
-        )
+    exchange_payload = {
+        "positions": [position],
+        "open_orders": [],
+        "algo_orders": [],
+    }
+    baseline = adapter_hash(exchange_payload)
+    position["future_exchange_field"] = "after"
+    refreshed_baseline = adapter_hash(exchange_payload)
 
     assert refreshed_baseline == baseline
 
 
 @pytest.mark.parametrize("collection_name", ["open_orders", "algo_orders"])
-def test_portfolio_baseline_hashes_complete_non_target_orders(
-    tmp_path: Path,
+def test_portfolio_baseline_hashes_owned_target_order_fields(
     collection_name: str,
 ) -> None:
-    scenario = Scenario()
+    namespace = runpy.run_path(str(ADAPTER))
+    adapter_hash = namespace["_portfolio_baseline_sha256"]
+    client_order_id = OPEN_CLIENT_ORDER_ID
+    if collection_name == "algo_orders":
+        client_order_id = CLOSE_CLIENT_ORDER_ID
     order = {
-        "symbol": "ETHUSDT",
+        "symbol": SYMBOL,
         "order_id": "order-1",
+        "client_order_id": client_order_id,
         "price": "99",
         "status": "NEW",
     }
-    scenario.exchange_state["payload"][collection_name] = [order]
-
-    with FakeControlPlane(scenario) as server:
-        baseline = _preflight_portfolio_baseline(
-            scenario,
-            tmp_path,
-            server.url,
-        )
-        order["price"] = "100"
-        changed_baseline = _preflight_portfolio_baseline(
-            scenario,
-            tmp_path,
-            server.url,
-        )
+    exchange_payload = {
+        "positions": [],
+        "open_orders": [],
+        "algo_orders": [],
+    }
+    exchange_payload[collection_name] = [order]
+    baseline = adapter_hash(exchange_payload)
+    order["price"] = "100"
+    changed_baseline = adapter_hash(exchange_payload)
 
     assert changed_baseline != baseline
 

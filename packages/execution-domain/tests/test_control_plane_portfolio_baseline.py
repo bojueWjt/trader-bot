@@ -18,6 +18,8 @@ from execution_domain.control_plane import (  # noqa: E402
 EMPTY_PORTFOLIO_BASELINE_SHA256 = (
     "6ae771d5d317b151109d3933059c0c46ec02368fc826444c9a805bdaa775813f"
 )
+ROBOT_OPEN_CLIENT_ORDER_ID = "B" + ("a" * 32) + "01"
+ROBOT_STOP_CLIENT_ORDER_ID = "B" + ("b" * 32) + "02"
 
 
 def test_empty_portfolio_baseline_has_stable_digest() -> None:
@@ -33,33 +35,41 @@ def test_empty_portfolio_baseline_has_stable_digest() -> None:
     )
 
 
-def test_portfolio_baseline_canonicalizes_non_target_evidence() -> None:
+def test_portfolio_baseline_canonicalizes_owned_target_evidence() -> None:
     original = {
         "positions": [
             {
-                "symbol": "XAUUSDT-PERP",
+                "symbol": "SOLUSDT-PERP",
                 "quantity": "1.00",
+                "entry_price": "100.00",
                 "mark_price": "2400",
+                "tags": ["intent_id=owned-position"],
             },
             {
                 "symbol": "SOLUSDT",
                 "quantity": "0.5",
             },
+            {
+                "symbol": "XAUUSDT-PERP",
+                "quantity": "2",
+                "tags": ["intent_id=other-symbol"],
+            },
         ],
         "regular_orders": [
             {
-                "symbol": "ETHUSDT",
-                "client_order_id": "eth-order",
+                "symbol": "SOLUSDT",
+                "client_order_id": ROBOT_OPEN_CLIENT_ORDER_ID,
                 "quantity": "0.10",
-                "price": "3000.00",
-                "legs": [
-                    {"price": "3200.0", "quantity": "0.05"},
-                    {"price": "3100", "quantity": "0.050"},
-                ],
+                "price": "100.00",
+            },
+            {
+                "symbol": "SOLUSDT",
+                "client_order_id": "manual-order",
+                "price": "99",
             },
             {
                 "symbol": "BTCUSDT",
-                "client_order_id": "btc-order",
+                "client_order_id": ROBOT_STOP_CLIENT_ORDER_ID,
                 "price": "60000",
             },
         ],
@@ -69,25 +79,27 @@ def test_portfolio_baseline_canonicalizes_non_target_evidence() -> None:
         "positions": [
             {
                 "quantity": "1",
-                "symbol": "xauusdt",
+                "symbol": "solusdt",
+                "entry_price": "100",
                 "mark_price": "2500",
-            }
+                "tags": ["intent_id=owned-position"],
+            },
+            {
+                "symbol": "SOLUSDT",
+                "quantity": "9",
+            },
         ],
         "regular_orders": [
             {
-                "price": "60000.0",
-                "client_order_id": "btc-order",
-                "symbol": "btcusdt",
+                "price": "101",
+                "client_order_id": "manual-order",
+                "symbol": "SOLUSDT",
             },
             {
-                "legs": [
-                    {"quantity": "0.05", "price": "3100.00"},
-                    {"quantity": "0.0500", "price": "3200"},
-                ],
-                "price": "3000",
+                "price": "100",
                 "quantity": "0.1",
-                "client_order_id": "eth-order",
-                "symbol": "ETHUSDT",
+                "client_order_id": ROBOT_OPEN_CLIENT_ORDER_ID,
+                "symbol": "SOLUSDT",
             },
         ],
         "algo_orders": [],
@@ -103,16 +115,17 @@ def test_portfolio_baseline_matches_exchange_mirror_aliases() -> None:
     node_snapshot = {
         "positions": [
             {
-                "symbol": "ETHUSDT",
+                "symbol": "SOLUSDT",
                 "quantity": "-0.250",
                 "position_side": "SHORT",
                 "entry_price": "3000.0",
                 "mark_price": "2999",
+                "tags": ["intent_id=owned-position"],
             }
         ],
         "regular_orders": [
             {
-                "symbol": "BTCUSDT",
+                "symbol": "SOLUSDT",
                 "position_side": "LONG",
                 "side": "BUY",
                 "order_type": "LIMIT",
@@ -120,14 +133,14 @@ def test_portfolio_baseline_matches_exchange_mirror_aliases() -> None:
                 "price": "61536.50",
                 "stop_price": "0",
                 "reduce_only": False,
-                "client_order_id": "btc-order",
+                "client_order_id": ROBOT_OPEN_CLIENT_ORDER_ID,
                 "venue_order_id": "1092374819069",
                 "order_kind": "regular",
             }
         ],
         "algo_orders": [
             {
-                "symbol": "MUUSDT",
+                "symbol": "SOLUSDT",
                 "position_side": "SHORT",
                 "side": "BUY",
                 "order_type": "STOP_MARKET",
@@ -135,7 +148,7 @@ def test_portfolio_baseline_matches_exchange_mirror_aliases() -> None:
                 "price": "0.0",
                 "stop_price": "1085.0",
                 "reduce_only": True,
-                "client_order_id": "mu-stop",
+                "client_order_id": ROBOT_STOP_CLIENT_ORDER_ID,
                 "venue_order_id": "1000002511312702",
                 "order_kind": "algo",
             }
@@ -144,17 +157,18 @@ def test_portfolio_baseline_matches_exchange_mirror_aliases() -> None:
     exchange_mirror = {
         "positions": [
             {
-                "symbol": "ETHUSDT",
+                "symbol": "SOLUSDT",
                 "position_amt": "-0.250",
                 "position_side": "SHORT",
                 "entry_price": "3000.0",
                 "mark_price": "2998",
                 "unrealized_pnl": "0.5",
+                "tags": ["intent_id=owned-position"],
             }
         ],
         "open_orders": [
             {
-                "symbol": "BTCUSDT",
+                "symbol": "SOLUSDT",
                 "position_side": "LONG",
                 "side": "BUY",
                 "type": "LIMIT",
@@ -162,13 +176,13 @@ def test_portfolio_baseline_matches_exchange_mirror_aliases() -> None:
                 "price": "61536.50",
                 "trigger_price": "0",
                 "reduce_only": False,
-                "client_order_id": "btc-order",
+                "client_order_id": ROBOT_OPEN_CLIENT_ORDER_ID,
                 "venue_order_id": 1092374819069,
             }
         ],
         "algo_orders": [
             {
-                "symbol": "MUUSDT",
+                "symbol": "SOLUSDT",
                 "position_side": "SHORT",
                 "side": "BUY",
                 "type": "STOP_MARKET",
@@ -176,7 +190,7 @@ def test_portfolio_baseline_matches_exchange_mirror_aliases() -> None:
                 "price": "0.0",
                 "trigger_price": "1085.0",
                 "reduce_only": True,
-                "client_order_id": "mu-stop",
+                "client_order_id": ROBOT_STOP_CLIENT_ORDER_ID,
                 "venue_order_id": 1000002511312702,
             }
         ],
@@ -192,7 +206,7 @@ def test_portfolio_baseline_ignores_position_risk_market_refresh() -> None:
     original = {
         "positions": [
             {
-                "symbol": "ETHUSDT",
+                "symbol": "SOLUSDT",
                 "quantity": "-0.25",
                 "position_side": "SHORT",
                 "entry_price": "3000",
@@ -206,6 +220,7 @@ def test_portfolio_baseline_ignores_position_risk_market_refresh() -> None:
                 "unrealized_profit": "0.25",
                 "liquidation_price": "4000",
                 "update_time": 1_787_034_181_545,
+                "tags": ["intent_id=owned-position"],
             }
         ],
         "regular_orders": [],
@@ -214,7 +229,7 @@ def test_portfolio_baseline_ignores_position_risk_market_refresh() -> None:
     refreshed = {
         "positions": [
             {
-                "symbol": "ETHUSDT",
+                "symbol": "SOLUSDT",
                 "quantity": "-0.250",
                 "position_side": "SHORT",
                 "entry_price": "3000.0",
@@ -228,6 +243,7 @@ def test_portfolio_baseline_ignores_position_risk_market_refresh() -> None:
                 "unrealized_profit": "1.25",
                 "liquidation_price": "3998",
                 "update_time": 1_787_034_184_520,
+                "tags": ["intent_id=owned-position"],
             }
         ],
         "regular_orders": [],
@@ -247,13 +263,13 @@ def test_portfolio_baseline_ignores_position_risk_market_refresh() -> None:
     )
 
 
-def test_portfolio_baseline_changes_with_non_target_order_price() -> None:
+def test_portfolio_baseline_changes_with_owned_target_order_price() -> None:
     heartbeat = {
         "positions": [],
         "regular_orders": [
             {
-                "symbol": "ETHUSDT",
-                "client_order_id": "eth-order",
+                "symbol": "SOLUSDT",
+                "client_order_id": ROBOT_OPEN_CLIENT_ORDER_ID,
                 "price": "3000",
             }
         ],
@@ -263,8 +279,8 @@ def test_portfolio_baseline_changes_with_non_target_order_price() -> None:
         "positions": [],
         "regular_orders": [
             {
-                "symbol": "ETHUSDT",
-                "client_order_id": "eth-order",
+                "symbol": "SOLUSDT",
+                "client_order_id": ROBOT_OPEN_CLIENT_ORDER_ID,
                 "price": "3001",
             }
         ],

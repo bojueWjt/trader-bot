@@ -24,6 +24,9 @@ AUTHORIZATION = {
     "authorized_by_id": "risk-admin",
     "source_message_id": "terminal-strategy-test",
 }
+ROBOT_SOL_ORDER_ID = "Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01"
+ROBOT_SOL_ALGO_ID = "Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02"
+ROBOT_BTC_ORDER_ID = "Bcccccccccccccccccccccccccccccccc03"
 
 
 class _MessageBus:
@@ -97,9 +100,14 @@ class _Adapter:
 def test_cancel_all_uses_exchange_refs_for_regular_and_algo_orders() -> None:
     strategy = _Strategy(environment="live")
     orders = [
-        _exchange_order("regular", "regular-1", "1001"),
-        _exchange_order("algo", "algo-1", "2001"),
-        _exchange_order("regular", "btc-1", "3001", symbol="BTCUSDT"),
+        _exchange_order("regular", ROBOT_SOL_ORDER_ID, "1001"),
+        _exchange_order("algo", ROBOT_SOL_ALGO_ID, "2001"),
+        _exchange_order(
+            "regular",
+            ROBOT_BTC_ORDER_ID,
+            "3001",
+            symbol="BTCUSDT",
+        ),
     ]
     mirror = _Mirror(orders)
     adapter = _Adapter()
@@ -124,11 +132,11 @@ def test_cancel_all_uses_exchange_refs_for_regular_and_algo_orders() -> None:
 def test_close_all_filters_scope_and_records_reduce_only_requests() -> None:
     strategy = _Strategy()
     sol_order = SimpleNamespace(
-        client_order_id="sol-order",
+        client_order_id=ROBOT_SOL_ORDER_ID,
         instrument_id="SOLUSDT-PERP.BINANCE",
     )
     btc_order = SimpleNamespace(
-        client_order_id="btc-order",
+        client_order_id=ROBOT_BTC_ORDER_ID,
         instrument_id="BTCUSDT-PERP.BINANCE",
     )
     sol_position = SimpleNamespace(
@@ -148,8 +156,8 @@ def test_close_all_filters_scope_and_records_reduce_only_requests() -> None:
 
     strategy._on_node_command(_command("close-all", CommandType.CLOSE_ALL))
 
-    assert strategy.cancelled == ["sol-order"]
-    assert strategy.closed == ["sol-position"]
+    assert strategy.cancelled == [ROBOT_SOL_ORDER_ID]
+    assert strategy.closed == []
     payload = strategy.message_bus.messages[0][1]
     close_operations = [
         item
@@ -159,6 +167,8 @@ def test_close_all_filters_scope_and_records_reduce_only_requests() -> None:
     assert len(close_operations) == 1
     assert close_operations[0]["reduce_only"] is True
     assert close_operations[0]["position_id"] == "sol-position"
+    assert close_operations[0]["status"] == "skipped"
+    assert close_operations[0]["outcome"] == "manual_position_read_only"
 
 
 def _command(command_id: str, command_type: CommandType) -> NodeCommand:

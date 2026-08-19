@@ -1,4 +1,4 @@
-"""Dependency-free canonical hashing for non-target exchange portfolios."""
+"""Canonical hashing for robot-owned target-symbol exchange evidence."""
 
 from __future__ import annotations
 
@@ -8,6 +8,11 @@ import re
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+if __package__:
+    from .order_ownership import row_has_robot_owner
+else:
+    from order_ownership import row_has_robot_owner
 
 _PORTFOLIO_SNAPSHOT_FIELDS = (
     "positions",
@@ -23,7 +28,11 @@ def portfolio_baseline_sha256(
     snapshot: Mapping[str, Any],
     target_symbol: str,
 ) -> str:
-    """Hash canonical non-target positions and orders from exchange evidence."""
+    """Hash robot-owned target-symbol baseline evidence.
+
+    The canary gate checks the robot's own symbol footprint. User/manual
+    exchange rows are intentionally read-only and excluded from this baseline.
+    """
     canonical_target_symbol = _canonical_portfolio_symbol(target_symbol)
     snapshots: dict[str, list[Any]] = {}
     for field_name in _PORTFOLIO_SNAPSHOT_FIELDS:
@@ -39,7 +48,9 @@ def portfolio_baseline_sha256(
             symbol = _portfolio_snapshot_item_symbol(row)
             if not symbol:
                 raise ValueError("portfolio snapshot rows require a symbol")
-            if symbol == canonical_target_symbol:
+            if symbol != canonical_target_symbol:
+                continue
+            if not row_has_robot_owner(row):
                 continue
             canonical_rows.append(
                 _canonical_portfolio_row(field_name, row)

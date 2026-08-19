@@ -33,6 +33,11 @@ BUNDLE_FILES = (
         "/app/execution_domain/portfolio_baseline.py",
     ),
     (
+        "order_ownership.py",
+        "packages/execution-domain/execution_domain/order_ownership.py",
+        "/app/execution_domain/order_ownership.py",
+    ),
+    (
         "http_client.py",
         "packages/execution-domain/execution_domain/http_client.py",
         "/app/execution_domain/http_client.py",

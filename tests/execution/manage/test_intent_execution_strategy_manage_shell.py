@@ -37,6 +37,8 @@ ACCOUNT_ID = "account-a"
 INSTRUMENT_ID = "BTCUSDT-PERP.BINANCE"
 POSITION_ID = "P-1"
 NOW = datetime(2026, 6, 19, 12, tzinfo=timezone.utc)
+ROBOT_OLD_STOP_ID = "Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01"
+ROBOT_OLD_TP_ID = "Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02"
 
 
 class StrategyManageShellTest(unittest.TestCase):
@@ -53,7 +55,7 @@ class StrategyManageShellTest(unittest.TestCase):
             position_side="LONG",
             order_kind="regular",
             venue_order_id="venue-old-stop",
-            client_order_id="old-stop",
+            client_order_id=ROBOT_OLD_STOP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="STOP_MARKET",
             side="SELL",
@@ -137,7 +139,7 @@ class StrategyManageShellTest(unittest.TestCase):
             order_plan={"stop_price": "26000.114"},
         )
         old_stop = SimpleNamespace(
-            client_order_id="old-stop",
+            client_order_id=ROBOT_OLD_STOP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="STOP_MARKET",
             side="SELL",
@@ -149,7 +151,7 @@ class StrategyManageShellTest(unittest.TestCase):
 
         strategy._handle_intent(intent)
 
-        self.assertEqual(strategy.cancelled_client_order_ids, ["old-stop"])
+        self.assertEqual(strategy.cancelled_client_order_ids, [ROBOT_OLD_STOP_ID])
         self.assertEqual(len(strategy.submitted_plans), 1)
         submitted = strategy.submitted_plans[0]
         self.assertEqual(submitted.order_type, "STOP_MARKET")
@@ -190,7 +192,7 @@ class StrategyManageShellTest(unittest.TestCase):
             },
         )
         old_tp = SimpleNamespace(
-            client_order_id="old-tp",
+            client_order_id=ROBOT_OLD_TP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="MARKET_IF_TOUCHED",
             side="SELL",
@@ -205,7 +207,7 @@ class StrategyManageShellTest(unittest.TestCase):
 
         strategy._handle_intent(intent)
 
-        self.assertEqual(strategy.cancelled_client_order_ids, ["old-tp"])
+        self.assertEqual(strategy.cancelled_client_order_ids, [ROBOT_OLD_TP_ID])
         self.assertEqual(
             [plan.order_type for plan in strategy.submitted_plans],
             ["MARKET_IF_TOUCHED", "MARKET_IF_TOUCHED"],
@@ -387,7 +389,7 @@ class StrategyManageShellTest(unittest.TestCase):
             order_plan={"stop_price": "26000"},
         )
         old_stop = SimpleNamespace(
-            client_order_id="old-stop",
+            client_order_id=ROBOT_OLD_STOP_ID,
             instrument_id=INSTRUMENT_ID,
             order_type="STOP_MARKET",
             side="SELL",
