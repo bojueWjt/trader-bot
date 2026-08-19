@@ -354,7 +354,7 @@ class NodeLifecycle:
             if dependency is DependencyName.RECONCILIATION:
                 self._reconciliation_proof = None
                 self._reconciliation_in_flight = False
-                self._reconciliation_state = ReconciliationState.FAILED
+                self._reconciliation_state = ReconciliationState.DEGRADED
                 return
             self._halt(f"{dependency.value} failed: {reason}")
 
@@ -388,8 +388,6 @@ class NodeLifecycle:
             snapshot = self._refresh_reconciliation_locked()
             if snapshot.status is ReconciliationProofStatus.HEALTHY:
                 return
-            if self._trading_state is TradingState.ACTIVE:
-                self._halt(snapshot.reason)
 
     def configure_lease(
         self,
@@ -756,7 +754,7 @@ class NodeLifecycle:
             ReconciliationProofStatus.UNHEALTHY,
             ReconciliationProofStatus.INVALID_TIME,
         }:
-            self._reconciliation_state = ReconciliationState.FAILED
+            self._reconciliation_state = ReconciliationState.DEGRADED
             return snapshot
         self._reconciliation_state = ReconciliationState.DEGRADED
         return snapshot

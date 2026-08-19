@@ -160,10 +160,10 @@ def test_reconciliation_total_deadline_records_failed_current_generation(
                 engine.reconcile_execution_state(0.01),
                 timeout=0.1,
             )
-        )
+    )
 
     assert lifecycle.reconciliation.status == "unhealthy"
-    assert lifecycle.trading_state is TradingState.HALTED
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
 
 def test_wired_proof_enforces_release_identity_and_freshness(

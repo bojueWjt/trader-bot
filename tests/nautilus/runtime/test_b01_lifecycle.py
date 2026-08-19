@@ -372,6 +372,10 @@ def test_reconciliation_proof_drift_reports_without_blocking_runtime(
         )
     )
     assert lifecycle.reconciliation.status == "unhealthy"
+    assert lifecycle.build_heartbeat().reconciliation_state is (
+        ReconciliationState.DEGRADED
+    )
+    assert lifecycle.trading_state is TradingState.ACTIVE
 
     lifecycle.record_reconciliation_proof(
         _healthy_proof(config, completed_at=clock.now())
