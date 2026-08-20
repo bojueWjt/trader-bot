@@ -45,6 +45,8 @@ class FakeLeaseRedis:
 
     def eval(self, script: str, numkeys: int, *keys_and_args: object):
         del numkeys
+        if "redis-namespace-lease:acquire-v6" in script:
+            return self._acquire(*keys_and_args)
         if "redis-namespace-lease:acquire-v4" in script:
             return self._acquire(*keys_and_args)
         if "redis-namespace-lease:refresh-v4" in script:
@@ -157,6 +159,8 @@ class FakeLeaseRedis:
                 ]
             if current_is_fresh:
                 return [0, current_token, "HELD"]
+            if not _owner_matches_node_identity(current["owner"], owner):
+                return [0, current_token, "STALE_FOREIGN"]
         elif self.scores.get(namespace, 0) >= fresh_after:
             return [0, 0, "HELD_LEGACY"]
         if current is not None:
@@ -1255,6 +1259,26 @@ def _record_metadata_valid(
     if isinstance(refreshed_at, bool) or not isinstance(refreshed_at, int):
         return False
     return refreshed_at > 0
+
+
+def _owner_matches_node_identity(current_owner: object, owner: str) -> bool:
+    if current_owner == owner:
+        return True
+    if not isinstance(current_owner, str):
+        return False
+    prefix = owner + ":"
+    if not current_owner.startswith(prefix):
+        return False
+    suffix = current_owner[len(prefix) :]
+    parts = suffix.split(":")
+    if len(parts) != 3:
+        return False
+    host, process_id, uuid = parts
+    if not host or not process_id.isascii() or not process_id.isdecimal():
+        return False
+    if len(uuid) != 32:
+        return False
+    return all(character in "0123456789abcdef" for character in uuid)
 
 
 def _is_canonical_uuid4(value: object) -> bool:

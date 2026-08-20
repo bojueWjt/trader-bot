@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable
 from urllib.parse import urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from config.node_config import NodeConfig, load_node_config
 from execution_domain.contracts import ReconciliationState
@@ -92,6 +92,7 @@ class AccountRuntime:
     redis_runtime_safety_guard: Any = None
     redis_runtime_safety_client: Any = None
     control_plane_session: Any = None
+    projection_egress_progress_callback: Callable[[], None] | None = None
     incident_reporter: Callable[[str, str], bool] | None = None
     incident_resolver: Callable[[str, str], bool] | None = None
     incident_state_lock: Any = field(default_factory=Lock, repr=False)
@@ -317,6 +318,12 @@ def build_nautilus_trading_node(
             persistence_instance_id,
         )
         runtime.components = _component_list(runtime)
+        if runtime.config.binance.environment == "live":
+            from runtime.nautilus_reconciliation_scope import (
+                install_scoped_reconciliation,
+            )
+
+            install_scoped_reconciliation()
         node_config = TradingNodeConfig(**node_config_kwargs)
         node = TradingNode(config=node_config)
         node.add_data_client_factory("BINANCE", BinanceLiveDataClientFactory)
@@ -342,7 +349,30 @@ def build_nautilus_trading_node(
         projection_wrapper = ExecutionProjectionActor(
             runtime.projection_actor,
             fatal_callback=fatal_callback,
+            progress_stalled_callback=lambda age: (
+                _report_runtime_incident(
+                    runtime,
+                    "projection_progress_stall",
+                    "execution projection made no egress progress for "
+                    f"{age:.3f} seconds",
+                )
+            ),
+            progress_recovered_callback=lambda: (
+                _resolve_runtime_incident(
+                    runtime,
+                    "projection_progress_stall",
+                    "execution projection egress progress recovered",
+                )
+            ),
             control_plane_session=control_plane_session,
+        )
+        runtime.projection_egress_progress_callback = (
+            projection_wrapper.record_egress_progress
+        )
+        _register_health_provider(
+            runtime,
+            "projection_progress",
+            projection_wrapper.progress_snapshot,
         )
         callback = restart_required_callback
         if callback is None:
@@ -405,6 +435,7 @@ def build_nautilus_trading_node(
         return node
     finally:
         if not node_assembly_complete:
+            runtime.projection_egress_progress_callback = None
             _stop_control_plane_session(runtime)
             _stop_redis_runtime_safety(runtime)
             _stop_background_workers(runtime)
@@ -454,18 +485,10 @@ def _build_redis_namespace_lease(config: NodeConfig) -> Any:
     from persistence.redis_namespace_lease import RedisNamespaceLease
     from persistence.redis_resp_client import RedisRespClient
 
-    owner = ":".join(
-        (
-            config.node_id,
-            socket.gethostname(),
-            str(os.getpid()),
-            uuid4().hex,
-        )
-    )
     return RedisNamespaceLease(
         RedisRespClient(config.redis.url),
         namespace=derive_nautilus_cache_key_root(config),
-        owner=owner,
+        owner=config.node_id,
         release_id=release_id,
     )
 
@@ -873,9 +896,16 @@ def _flush_projection_session_event(
     event: Any,
 ) -> None:
     del event
+    progress_callback = getattr(
+        runtime,
+        "projection_egress_progress_callback",
+        None,
+    )
     while True:
         before = int(runtime.projection_actor.spool.pending_count)
         if before <= 0:
+            if callable(progress_callback):
+                progress_callback()
             return
         runtime.projection_actor.flush()
         after = int(runtime.projection_actor.spool.pending_count)
@@ -883,6 +913,8 @@ def _flush_projection_session_event(
             raise RuntimeError(
                 "execution projection durable spool made no egress progress"
             )
+        if callable(progress_callback):
+            progress_callback()
 
 
 def _mark_session_lane_failed(
@@ -1496,8 +1528,25 @@ def _build_projection_actor(
     lifecycle: Any,
     route: AccountRoute,
 ) -> ProjectionActor:
+    allowed_instrument_ids: frozenset[str] = frozenset()
+    require_robot_order_ownership = False
+    if config.binance.environment == "live":
+        if config.risk is None:
+            raise RuntimeError(
+                "live execution projection requires owned instruments"
+            )
+        allowed_instrument_ids = frozenset(
+            str(instrument_id)
+            for instrument_id in config.risk.max_notional_per_order
+        )
+        require_robot_order_ownership = True
     return ProjectionActor(
-        config=ProjectionConfig(node_id=config.node_id, account_id=config.account_id),
+        config=ProjectionConfig(
+            node_id=config.node_id,
+            account_id=config.account_id,
+            allowed_instrument_ids=allowed_instrument_ids,
+            require_robot_order_ownership=require_robot_order_ownership,
+        ),
         sink=control_plane,
         spool=JsonExecutionSpool(route.spool_path),
         health=LifecycleProjectionHealth(lifecycle),

@@ -94,8 +94,22 @@ class _CapturedExecConfig(_CapturedDataConfig):
 
 
 class _CapturedProviderConfig:
-    def __init__(self, *, load_all: bool) -> None:
-        self.kwargs = {"load_all": load_all}
+    def __init__(
+        self,
+        *,
+        load_all: bool,
+        load_ids: frozenset[object] | None = None,
+    ) -> None:
+        self.kwargs = {
+            "load_all": load_all,
+            "load_ids": load_ids,
+        }
+
+
+class _InstrumentId:
+    @classmethod
+    def from_str(cls, value: str) -> str:
+        return f"instrument:{value}"
 
 
 class _BinanceAccountType:
@@ -108,11 +122,41 @@ class _BinanceEnvironment:
 
 
 class BinanceAdapterConfigTest(unittest.TestCase):
+    def test_targeted_reconciliation_queries_do_not_expand_to_cached_symbols(
+        self,
+    ) -> None:
+        source = COMMON_PATCH_PATH.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            source.count(
+                "active_symbols = {str(BinanceSymbol(symbol))}"
+            ),
+            1,
+        )
+        self.assertIn(
+            "query_symbol = str(BinanceSymbol(symbol)) "
+            "if symbol is not None else None",
+            source,
+        )
+        self.assertNotIn(
+            "active_symbols = self._get_cache_active_symbols()\n"
+            "        active_symbols.update("
+            "await self._get_binance_active_position_symbols(symbol)"
+            ")",
+            source,
+        )
+
     def test_exec_client_uses_extended_recv_window(self) -> None:
         modules = _fake_nautilus_modules()
         with patch.dict(sys.modules, modules):
             module = _load_module()
             config = SimpleNamespace(
+                risk=SimpleNamespace(
+                    max_notional_per_order={
+                        "ETHUSDT-PERP.BINANCE": "100000",
+                        "BTCUSDT-PERP.BINANCE": "100000",
+                    },
+                ),
                 binance=SimpleNamespace(
                     environment="live",
                     proxy_url="http://100.107.72.78:13128",
@@ -133,6 +177,17 @@ class BinanceAdapterConfigTest(unittest.TestCase):
         self.assertEqual(
             exec_config.kwargs["proxy_url"],
             "http://100.107.72.78:13128",
+        )
+        provider = data_config.kwargs["instrument_provider"]
+        self.assertFalse(provider.kwargs["load_all"])
+        self.assertEqual(
+            provider.kwargs["load_ids"],
+            frozenset(
+                {
+                    "instrument:BTCUSDT-PERP.BINANCE",
+                    "instrument:ETHUSDT-PERP.BINANCE",
+                }
+            ),
         )
 
     def test_futures_account_initialization_uses_configured_recv_window(self) -> None:
@@ -171,6 +226,8 @@ def _fake_nautilus_modules() -> dict[str, types.ModuleType]:
         "nautilus_trader.adapters.binance.common",
         "nautilus_trader.adapters.binance.common.enums",
         "nautilus_trader.adapters.binance.config",
+        "nautilus_trader.model",
+        "nautilus_trader.model.identifiers",
     ):
         modules[name] = types.ModuleType(name)
     enums = modules["nautilus_trader.adapters.binance.common.enums"]
@@ -180,6 +237,8 @@ def _fake_nautilus_modules() -> dict[str, types.ModuleType]:
     config.BinanceDataClientConfig = _CapturedDataConfig
     config.BinanceExecClientConfig = _CapturedExecConfig
     config.BinanceInstrumentProviderConfig = _CapturedProviderConfig
+    identifiers = modules["nautilus_trader.model.identifiers"]
+    identifiers.InstrumentId = _InstrumentId
     return modules
 
 

@@ -6,7 +6,6 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
-from uuid import UUID
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
@@ -74,7 +73,6 @@ class RedisLeaseBuilderTest(unittest.TestCase):
     def test_live_environment_builds_stable_fenced_namespace_identity(self) -> None:
         redis_client = object()
         lease = object()
-        release_uuid = UUID("12345678-1234-5678-1234-567812345678")
 
         with (
             patch.dict(
@@ -90,9 +88,6 @@ class RedisLeaseBuilderTest(unittest.TestCase):
                 "persistence.redis_namespace_lease.RedisNamespaceLease",
                 return_value=lease,
             ) as lease_type,
-            patch("app.node.socket.gethostname", return_value="hk-node-01"),
-            patch("app.node.os.getpid", return_value=4242),
-            patch("app.node.uuid4", return_value=release_uuid),
         ):
             built = _build_redis_namespace_lease(self.live_config)
 
@@ -101,10 +96,7 @@ class RedisLeaseBuilderTest(unittest.TestCase):
         lease_type.assert_called_once_with(
             redis_client,
             namespace=derive_nautilus_cache_key_root(self.live_config),
-            owner=(
-                f"{self.live_config.node_id}:hk-node-01:4242:"
-                "12345678123456781234567812345678"
-            ),
+            owner=self.live_config.node_id,
             release_id="release-20260808-a",
         )
 

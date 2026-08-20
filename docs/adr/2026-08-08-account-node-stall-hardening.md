@@ -365,3 +365,42 @@ release identity。
 4. immutable image 与 `/version`，A/B release gate。
 5. Redis/Nautilus integration 与 fault matrix。
 6. HALTED canary、真实小额交易、fleet rollout、legacy namespace cleanup。
+
+## 2026-08-20 Decision Amendment
+
+### Stable Node Lease Takeover
+
+- live lease `owner` 使用稳定 `node_id`，`release_id` 继续标识具体发布。
+- 同一 `node_id` 的旧进程租约超过 300 秒 freshness window 后，新 release 可以接管；
+  Redis Lua 原子递增 fencing token，并为新 persistence generation 分配独立 UUID。
+- 不同 `node_id` 的陈旧租约返回 `STALE_FOREIGN`。跨身份 takeover 保持 fail-closed。
+- 新鲜租约拒绝 takeover。120 秒本地 lease freshness 继续早于 300 秒 Redis takeover
+  window，将旧进程先置为 sticky HALTED。
+- 升级兼容窗口严格接受旧版本
+  `node_id:hostname:pid:uuid` owner 格式，且只在记录陈旧时接管；新记录统一写回稳定
+  `node_id`。其他 owner 格式继续按 foreign identity 处理。
+
+### Projection Progress Alert
+
+- execution projection 每 60 秒向 worker queue 投递 progress probe。
+- egress 连续 600 秒没有完成 flush 或空闲 egress cycle 时，记录
+  `projection_progress_stall` incident，并在 readiness provider 暴露 stalled 状态。
+- egress 恢复 progress 后关闭同 reason incident。启动回滚和正常停止负责终止 watchdog。
+
+### Temporary Ownership Isolation
+
+- live Binance instrument provider 和 Nautilus
+  `reconciliation_instrument_ids` 共同使用 release-bound
+  `risk.max_notional_per_order` inventory。
+- live execution projection 只接收 inventory 内的 instrument；order event 同时要求机器人
+  client order ID，`*-EXTERNAL` position event 被丢弃。
+- continuous reconciliation 的 order/position report 和 startup mass status
+  逐 owned `InstrumentId` 发请求；Binance adapter 的 targeted order/fill query
+  只访问请求 symbol，不并入缓存中的其他 active symbol。
+- 临时策略把 inventory symbol 视为机器人独占 book。发布 gate 要求操作员停止在这些
+  symbol 上进行手工交易，直至 position-side ownership ledger 上线。
+- 最终所有权策略以 `(account_id, instrument_id, position_side)` 为仓位 book 主键，
+  以机器人 client order ID、intent lot ledger 和 venue position evidence 证明 ownership。
+  推断成交只允许更新具备机器人 ownership proof 的仓位；无 proof 的差异进入
+  `unattributed_qty` 和人工对账流程。
+- 该临时策略收窄权重和污染范围；同一 inventory symbol 内的手工活动仍属于发布阻断项。

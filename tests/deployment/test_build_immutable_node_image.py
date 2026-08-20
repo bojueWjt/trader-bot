@@ -66,6 +66,10 @@ EXPECTED_RUNTIME_ENTRIES = (
     ),
     ("redis_safety.py", "/app/runtime/redis_safety.py"),
     ("reconciliation.py", "/app/runtime/reconciliation.py"),
+    (
+        "nautilus_reconciliation_scope.py",
+        "/app/runtime/nautilus_reconciliation_scope.py",
+    ),
     ("risk_config.py", "/app/risk/config.py"),
     ("risk_init.py", "/app/risk/__init__.py"),
     ("projection_spool.py", "/app/projection/spool.py"),
@@ -122,6 +126,10 @@ EXPECTED_IMMUTABLE_ENTRIES = (
     ),
     ("redis_safety.py", "/app/runtime/redis_safety.py"),
     ("reconciliation.py", "/app/runtime/reconciliation.py"),
+    (
+        "nautilus_reconciliation_scope.py",
+        "/app/runtime/nautilus_reconciliation_scope.py",
+    ),
     (
         "binance_adapter_config.py",
         "/app/runtime/binance_adapter_config.py",

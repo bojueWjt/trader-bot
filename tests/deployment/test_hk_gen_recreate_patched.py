@@ -38,6 +38,7 @@ PATCH_FILES = (
     "intent_execution_inbox.py",
     "redis_safety.py",
     "reconciliation.py",
+    "nautilus_reconciliation_scope.py",
     "live_canary_execution.py",
     "node_config.py",
     "risk_config.py",
@@ -78,6 +79,9 @@ PATCH_TARGETS = {
     "intent_execution_inbox.py": "/app/runtime/intent_execution_inbox.py",
     "redis_safety.py": "/app/runtime/redis_safety.py",
     "reconciliation.py": "/app/runtime/reconciliation.py",
+    "nautilus_reconciliation_scope.py": (
+        "/app/runtime/nautilus_reconciliation_scope.py"
+    ),
     "live_canary_execution.py": "/app/runtime/live_canary_execution.py",
     "node_config.py": "/app/config/node_config.py",
     "risk_config.py": "/app/risk/config.py",

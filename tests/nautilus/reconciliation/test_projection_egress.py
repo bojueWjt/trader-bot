@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -184,6 +185,32 @@ class _RecordingDurableProjection:
         self.halted_reasons.append(reason)
 
 
+class _StalledDurableProjection:
+    def __init__(self) -> None:
+        self.spool = SimpleNamespace(pending_count=1)
+        self.degraded_reasons: list[str] = []
+        self.halted_reasons: list[str] = []
+
+    def ingest_event(self, event: Any) -> ProjectionIngestResult:
+        del event
+        return ProjectionIngestResult(
+            outcome=ProjectionIngestOutcome.DURABLE,
+            event_id="probe",
+        )
+
+    def flush(self) -> list[str]:
+        return []
+
+    def mark_egress_degraded(self, reason: str) -> None:
+        self.degraded_reasons.append(reason)
+
+    def clear_egress_degraded(self) -> None:
+        return
+
+    def halt_egress(self, reason: str) -> None:
+        self.halted_reasons.append(reason)
+
+
 class _NonDrainingSession:
     def __init__(self) -> None:
         self.submissions: list[Any] = []
@@ -322,6 +349,25 @@ def test_projection_wal_write_failure_is_fatal_fail_closed() -> None:
     assert _wait_until(lambda: bool(actor.halted_reason))
     assert "durable ingress failed" in actor.halted_reason
     assert fatal_reasons == [actor.halted_reason]
+
+    actor.on_stop()
+
+
+def test_projection_watchdog_tracks_egress_progress_not_ingress_progress() -> None:
+    projection = _StalledDurableProjection()
+    stalled: list[float] = []
+    actor = ExecutionProjectionActor(
+        projection,
+        progress_stalled_callback=stalled.append,
+        progress_probe_interval_seconds=0.01,
+        progress_stale_after_seconds=0.05,
+        worker_shutdown_wait_seconds=0.1,
+    )
+    actor.on_start()
+
+    assert _wait_until(lambda: bool(stalled), timeout=0.3)
+    assert actor.progress_snapshot()["stalled"] is True
+    assert projection.degraded_reasons
 
     actor.on_stop()
 

@@ -79,6 +79,10 @@ PATCH_MOUNT_TARGETS = (
     ("reconciliation.py", "/app/runtime/reconciliation.py"),
     ("binance_adapter_config.py", "/app/runtime/binance_adapter_config.py"),
     (
+        "nautilus_reconciliation_scope.py",
+        "/app/runtime/nautilus_reconciliation_scope.py",
+    ),
+    (
         "live_canary_execution.py",
         "/app/runtime/live_canary_execution.py",
     ),

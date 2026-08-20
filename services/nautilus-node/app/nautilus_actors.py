@@ -54,6 +54,8 @@ DEFAULT_PENDING_COMMAND_LIMIT = 128
 MAX_PENDING_COMMAND_LIMIT = 1024
 DEFAULT_EXECUTION_EVENT_QUEUE_CAPACITY = 1024
 DEFAULT_QUEUE_DEGRADED_RATIO = 0.8
+DEFAULT_PROJECTION_PROGRESS_PROBE_INTERVAL_SECONDS = 60.0
+DEFAULT_PROJECTION_PROGRESS_STALE_AFTER_SECONDS = 600.0
 DEFAULT_NAMESPACE_LEASE_REFRESH_INTERVAL_SECONDS = 60.0
 DEFAULT_COMMAND_JOURNAL_MAX_ENTRIES = 4096
 DEFAULT_COMMAND_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
@@ -490,6 +492,7 @@ class _SessionCommandPublication:
 class _ProjectionPublication:
     event: Any = None
     flush_only: bool = False
+    progress_probe: bool = False
     submitted_at: float = 0.0
     deadline_at: float | None = None
     worker_started: Event = field(default_factory=Event)
@@ -1002,6 +1005,15 @@ class ExecutionProjectionActor(Actor):
             DEFAULT_PROJECTION_DURABLE_INGRESS_DEADLINE_SECONDS
         ),
         fatal_callback: Callable[[str], None] | None = None,
+        progress_stalled_callback: Callable[[float], None] | None = None,
+        progress_recovered_callback: Callable[[], None] | None = None,
+        progress_probe_interval_seconds: float = (
+            DEFAULT_PROJECTION_PROGRESS_PROBE_INTERVAL_SECONDS
+        ),
+        progress_stale_after_seconds: float = (
+            DEFAULT_PROJECTION_PROGRESS_STALE_AFTER_SECONDS
+        ),
+        monotonic: Callable[[], float] = time.monotonic,
         control_plane_session: Any = None,
         manage_control_plane_session: bool = True,
     ) -> None:
@@ -1017,6 +1029,17 @@ class ExecutionProjectionActor(Actor):
         if durable_ingress_deadline_seconds <= 0:
             raise ValueError(
                 "durable_ingress_deadline_seconds must be positive"
+            )
+        if progress_probe_interval_seconds <= 0:
+            raise ValueError(
+                "progress_probe_interval_seconds must be positive"
+            )
+        if (
+            progress_stale_after_seconds
+            <= progress_probe_interval_seconds
+        ):
+            raise ValueError(
+                "progress_stale_after_seconds must exceed probe interval"
             )
         if (
             callback_time_budget_seconds
@@ -1070,6 +1093,22 @@ class ExecutionProjectionActor(Actor):
         self._halt_lock = RLock()
         self._fatal_callback = fatal_callback
         self._fatal_reported = False
+        self._progress_stalled_callback = progress_stalled_callback
+        self._progress_recovered_callback = progress_recovered_callback
+        self._progress_probe_interval_seconds = float(
+            progress_probe_interval_seconds
+        )
+        self._progress_stale_after_seconds = float(
+            progress_stale_after_seconds
+        )
+        self._monotonic = monotonic
+        self._progress_stop = Event()
+        self._progress_thread: Thread | None = None
+        self._progress_started_once = False
+        self._progress_lock = RLock()
+        self._last_progress_at = self._monotonic()
+        self._progress_stalled = False
+        self._progress_degraded = False
         self._control_plane_session = control_plane_session
         self._session_started = False
         self._manage_control_plane_session = bool(
@@ -1085,6 +1124,24 @@ class ExecutionProjectionActor(Actor):
     @property
     def halted_reason(self) -> str:
         return self._halted_reason
+
+    def progress_snapshot(self) -> dict[str, Any]:
+        with self._progress_lock:
+            last_progress_at = self._last_progress_at
+            stalled = self._progress_stalled
+        thread = self._progress_thread
+        process_liveness = not self._progress_started_once
+        if thread is not None and thread.is_alive():
+            process_liveness = True
+        return {
+            "process_liveness": process_liveness,
+            "last_progress_monotonic": last_progress_at,
+            "progress_age_seconds": max(
+                self._monotonic() - last_progress_at,
+                0.0,
+            ),
+            "stalled": stalled,
+        }
 
     def on_start(self) -> None:
         deadline = time.monotonic() + self._worker_shutdown_wait_seconds
@@ -1107,6 +1164,7 @@ class ExecutionProjectionActor(Actor):
                         return
                 else:
                     self._egress_wake.set()
+            self._start_progress_watchdog()
             for topic in self._event_topics:
                 self._subscribe_execution_topic(topic)
         except Exception as exc:
@@ -1121,6 +1179,7 @@ class ExecutionProjectionActor(Actor):
 
     def on_stop(self) -> None:
         deadline = time.monotonic() + self._worker_shutdown_wait_seconds
+        self._stop_progress_watchdog(deadline)
         if self._unsubscribe_execution_topics(deadline) is False:
             self._halt_egress(
                 "execution projection subscription rollback "
@@ -1374,6 +1433,91 @@ class ExecutionProjectionActor(Actor):
         self._deadline_thread = thread
         thread.start()
 
+    def _start_progress_watchdog(self) -> None:
+        thread = self._progress_thread
+        if thread is not None and thread.is_alive():
+            return
+        with self._progress_lock:
+            self._last_progress_at = self._monotonic()
+            self._progress_stalled = False
+        self._progress_stop.clear()
+        self._progress_started_once = True
+        thread = Thread(
+            target=self._run_progress_watchdog,
+            name="execution-projection.progress-watchdog",
+            daemon=True,
+        )
+        self._progress_thread = thread
+        thread.start()
+
+    def _stop_progress_watchdog(self, deadline: float) -> None:
+        thread = self._progress_thread
+        if thread is None:
+            return
+        self._progress_stop.set()
+        thread.join(timeout=max(deadline - time.monotonic(), 0.0))
+        if thread.is_alive():
+            self._halt_egress(
+                "execution projection progress watchdog "
+                "shutdown deadline exceeded"
+            )
+            return
+        self._progress_thread = None
+
+    def _run_progress_watchdog(self) -> None:
+        while not self._progress_stop.wait(
+            self._progress_probe_interval_seconds
+        ):
+            self._submit_progress_probe()
+            self._check_projection_progress()
+
+    def _submit_progress_probe(self) -> bool:
+        try:
+            self._event_queue.put_nowait(
+                _ProjectionPublication(
+                    flush_only=True,
+                    progress_probe=True,
+                )
+            )
+        except Full:
+            return False
+        return True
+
+    def _check_projection_progress(self) -> None:
+        callback_age: float | None = None
+        now = self._monotonic()
+        with self._progress_lock:
+            age_seconds = max(now - self._last_progress_at, 0.0)
+            if (
+                age_seconds >= self._progress_stale_after_seconds
+                and self._progress_stalled is False
+            ):
+                self._progress_stalled = True
+                callback_age = age_seconds
+        if callback_age is None:
+            return
+        self._mark_progress_degraded(
+            "execution projection made no egress progress for "
+            f"{callback_age:.3f} seconds"
+        )
+        callback = self._progress_stalled_callback
+        if callback is not None:
+            callback(callback_age)
+
+    def record_egress_progress(self) -> None:
+        recovered = False
+        with self._progress_lock:
+            self._last_progress_at = self._monotonic()
+            if self._progress_stalled:
+                self._progress_stalled = False
+                recovered = True
+        if not recovered:
+            return
+        self._clear_progress_degraded()
+        callback = self._progress_recovered_callback
+        if callback is not None:
+            callback()
+
     def _stop_deadline_worker(self, deadline: float) -> None:
         thread = self._deadline_thread
         if thread is None:
@@ -1418,7 +1562,16 @@ class ExecutionProjectionActor(Actor):
             publication.worker_started.set()
             try:
                 if publication.flush_only:
-                    self._egress_wake.set()
+                    session = self._control_plane_session
+                    if publication.progress_probe and session is not None:
+                        result = session.submit_execution_event(False)
+                        if _submission_was_accepted(result) is False:
+                            self._halt_egress(
+                                "execution projection progress probe "
+                                "backpressured"
+                            )
+                    else:
+                        self._egress_wake.set()
                 elif self._durable_ingress:
                     persistence_state = self._persist_durable_event(
                         publication
@@ -1574,11 +1727,14 @@ class ExecutionProjectionActor(Actor):
         while True:
             before, after = self._flush_projection()
             if before is None or after is None:
+                self.record_egress_progress()
                 return
             if after <= 0:
+                self.record_egress_progress()
                 return
             if after >= before:
                 return
+            self.record_egress_progress()
             if self._egress_deadline_reached():
                 return
 
@@ -1710,11 +1866,45 @@ class ExecutionProjectionActor(Actor):
         if callable(marker):
             marker(reason)
 
+    def _mark_progress_degraded(self, reason: str) -> None:
+        if self._progress_degraded:
+            return
+        self._progress_degraded = True
+        marker = getattr(
+            self._projection_actor,
+            "mark_egress_degraded",
+            None,
+        )
+        if callable(marker):
+            marker(reason)
+
+    def _clear_progress_degraded(self) -> None:
+        if not self._progress_degraded:
+            return
+        self._progress_degraded = False
+        if (
+            self._queue_degraded
+            or self._filtered_event_degraded
+            or self._halted_reason
+        ):
+            return
+        clearer = getattr(
+            self._projection_actor,
+            "clear_egress_degraded",
+            None,
+        )
+        if callable(clearer):
+            clearer()
+
     def _clear_filtered_event_degraded(self) -> None:
         if not self._filtered_event_degraded:
             return
         self._filtered_event_degraded = False
-        if self._queue_degraded or self._halted_reason:
+        if (
+            self._queue_degraded
+            or self._progress_degraded
+            or self._halted_reason
+        ):
             return
         clearer = getattr(self._projection_actor, "clear_egress_degraded", None)
         if callable(clearer):
@@ -1726,7 +1916,7 @@ class ExecutionProjectionActor(Actor):
         if self._halted_reason:
             return
         self._queue_degraded = False
-        if self._filtered_event_degraded:
+        if self._filtered_event_degraded or self._progress_degraded:
             return
         clearer = getattr(self._projection_actor, "clear_egress_degraded", None)
         if callable(clearer):
@@ -1880,6 +2070,7 @@ class ExecutionProjectionActor(Actor):
 
     def _rollback_startup(self, deadline: float) -> None:
         self._unsubscribe_execution_topics(deadline)
+        self._stop_progress_watchdog(deadline)
         worker = self._worker_thread
         if worker is not None:
             self._worker_stop_deadline = deadline

@@ -58,6 +58,12 @@ class _ServerTimeLeaseRedis:
             return self._remove(numkeys, keys_and_args)
         if "redis-namespace-lease:force-remove-stale-v1" in script:
             return self._force_remove(numkeys, keys_and_args)
+        if "redis-namespace-lease:acquire-v6" in script:
+            result = self._acquire(numkeys, keys_and_args)
+            if self.fail_after_next_acquire:
+                self.fail_after_next_acquire = False
+                raise TimeoutError("response lost after acquire commit")
+            return result
         if "redis-namespace-lease:acquire-v4" in script:
             result = self._acquire(numkeys, keys_and_args)
             if self.fail_after_next_acquire:
@@ -171,6 +177,8 @@ class _ServerTimeLeaseRedis:
                 return self._acquired_result(current)
             if current_is_fresh:
                 return [0, current_token, "HELD"]
+            if not _owner_matches_node_identity(current["owner"], owner):
+                return [0, current_token, "STALE_FOREIGN"]
         elif current_score is not None and current_score >= fresh_after_epoch:
             return [0, 0, "HELD_LEGACY"]
 
@@ -552,7 +560,7 @@ def test_acquire_uses_redis_server_time_for_freshness() -> None:
     first = RedisNamespaceLease(
         redis,
         namespace=ACCOUNT_A_NAMESPACE,
-        owner="node-a:process-1",
+        owner="node-a",
         release_id="release-a",
         max_age_seconds=300,
         clock_fn=lambda: 1,
@@ -561,7 +569,7 @@ def test_acquire_uses_redis_server_time_for_freshness() -> None:
     contender = RedisNamespaceLease(
         redis,
         namespace=ACCOUNT_A_NAMESPACE,
-        owner="node-a:process-2",
+        owner="node-a",
         release_id="release-b",
         max_age_seconds=300,
         clock_fn=lambda: 9999999999,
@@ -590,7 +598,7 @@ def test_replacement_start_before_old_stop_fences_resumed_old_runtime() -> None:
     old_runtime = RedisNamespaceLease(
         redis,
         namespace=ACCOUNT_A_NAMESPACE,
-        owner="node-a:process-old",
+        owner="node-a",
         release_id="release-a",
         max_age_seconds=300,
         persistence_instance_id_factory=_CandidateFactory(FIRST_INSTANCE_ID),
@@ -598,7 +606,7 @@ def test_replacement_start_before_old_stop_fences_resumed_old_runtime() -> None:
     replacement = RedisNamespaceLease(
         redis,
         namespace=ACCOUNT_A_NAMESPACE,
-        owner="node-a:process-new",
+        owner="node-a",
         release_id="release-b",
         max_age_seconds=300,
         persistence_instance_id_factory=_CandidateFactory(SECOND_INSTANCE_ID),
@@ -621,6 +629,68 @@ def test_replacement_start_before_old_stop_fences_resumed_old_runtime() -> None:
     )
     assert current == replacement_record
     assert replacement_record.fencing_token == 2
+
+
+def test_stale_foreign_owner_cannot_acquire_namespace() -> None:
+    redis = _ServerTimeLeaseRedis(server_time=1000)
+    RedisNamespaceLease(
+        redis,
+        namespace=ACCOUNT_A_NAMESPACE,
+        owner="node-a",
+        release_id="release-a",
+        max_age_seconds=300,
+        persistence_instance_id_factory=_CandidateFactory(FIRST_INSTANCE_ID),
+    ).acquire()
+    foreign = RedisNamespaceLease(
+        redis,
+        namespace=ACCOUNT_A_NAMESPACE,
+        owner="node-b",
+        release_id="release-b",
+        max_age_seconds=300,
+        persistence_instance_id_factory=_CandidateFactory(SECOND_INSTANCE_ID),
+    )
+
+    redis.server_time = 1301
+
+    with pytest.raises(RedisNamespaceLeaseLost, match="foreign"):
+        foreign.acquire()
+
+    current = lease_module.get_namespace_lease(
+        redis,
+        ACCOUNT_A_NAMESPACE,
+    )
+    assert current is not False
+    assert current.owner == "node-a"
+    assert current.fencing_token == 1
+
+
+def test_stale_legacy_owner_from_same_node_can_be_taken_over() -> None:
+    redis = _ServerTimeLeaseRedis(server_time=1000)
+    RedisNamespaceLease(
+        redis,
+        namespace=ACCOUNT_A_NAMESPACE,
+        owner="node-a:jp-24:1234:" + ("a" * 32),
+        release_id="release-old",
+        max_age_seconds=300,
+        persistence_instance_id_factory=_CandidateFactory(FIRST_INSTANCE_ID),
+    ).acquire()
+    replacement = RedisNamespaceLease(
+        redis,
+        namespace=ACCOUNT_A_NAMESPACE,
+        owner="node-a",
+        release_id="release-new",
+        max_age_seconds=300,
+        persistence_instance_id_factory=_CandidateFactory(SECOND_INSTANCE_ID),
+    )
+
+    redis.server_time = 1301
+
+    record = replacement.acquire()
+
+    assert record.owner == "node-a"
+    assert record.release_id == "release-new"
+    assert record.fencing_token == 2
+    assert record.persistence_instance_id == SECOND_INSTANCE_ID
 
 
 def test_refresh_uses_redis_time_and_cannot_resurrect_expired_lease() -> None:
@@ -1196,13 +1266,33 @@ def test_lua_contract_reads_fixed_epoch_marker_inside_every_mutation() -> None:
         assert 'redis.call("GET", epoch_key)' in script
         assert "is_canonical_uuid4(redis_fencing_epoch)" in script
 
-    assert "-- redis-namespace-lease:acquire-v4" in lease_module._ACQUIRE_LUA
+    assert "-- redis-namespace-lease:acquire-v6" in lease_module._ACQUIRE_LUA
     assert "-- redis-namespace-lease:refresh-v4" in lease_module._REFRESH_LUA
     assert "-- redis-namespace-lease:remove-v4" in lease_module._REMOVE_LUA
     assert (
         "-- redis-namespace-lease:force-remove-stale-v2"
         in lease_module._FORCE_REMOVE_STALE_LUA
     )
+
+
+def _owner_matches_node_identity(current_owner: object, owner: str) -> bool:
+    if current_owner == owner:
+        return True
+    if not isinstance(current_owner, str):
+        return False
+    prefix = owner + ":"
+    if not current_owner.startswith(prefix):
+        return False
+    suffix = current_owner[len(prefix) :]
+    parts = suffix.split(":")
+    if len(parts) != 3:
+        return False
+    host, process_id, uuid = parts
+    if not host or not process_id.isascii() or not process_id.isdecimal():
+        return False
+    if len(uuid) != 32:
+        return False
+    return all(character in "0123456789abcdef" for character in uuid)
 
 
 def test_lua_contract_validates_stored_tokens_and_counter_exactly() -> None:

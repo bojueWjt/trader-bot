@@ -14,15 +14,13 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 sys.path.insert(0, str(SERVICE_ROOT))
 
-from config.node_config import NodeConfigError, load_node_config
+from config.node_config import (
+    NodeConfigError,
+    RiskNodeConfig,
+    load_node_config,
+)
 from persistence.nautilus_config import (
     DEFAULT_MESSAGE_BUS_AUTOTRIM_MINS,
-    DEFAULT_REDIS_RUNTIME_SAFETY_CRITICAL_WINDOW_SECONDS,
-    DEFAULT_REDIS_RUNTIME_SAFETY_SAMPLE_INTERVAL_SECONDS,
-    DEFAULT_REDIS_RUNTIME_SAFETY_SCAN_COUNT,
-    DEFAULT_REDIS_STREAM_MAX_BYTES,
-    DEFAULT_REDIS_STREAM_MAX_ENTRIES,
-    DEFAULT_REDIS_TOTAL_STREAM_MAX_BYTES,
     MESSAGE_BUS_AUTOTRIM_MINS_ENV,
     build_cache_config,
     build_live_exec_engine_kwargs,
@@ -226,27 +224,27 @@ class PersistenceConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             safety.stream_max_entries,
-            DEFAULT_REDIS_STREAM_MAX_ENTRIES,
+            account.runtime_resources.redis.stream_max_entries,
         )
         self.assertEqual(
             safety.stream_max_bytes,
-            DEFAULT_REDIS_STREAM_MAX_BYTES,
+            account.runtime_resources.redis.stream_max_bytes,
         )
         self.assertEqual(
             safety.total_stream_max_bytes,
-            DEFAULT_REDIS_TOTAL_STREAM_MAX_BYTES,
+            account.runtime_resources.redis.total_stream_max_bytes,
         )
         self.assertEqual(
             safety.scan_count,
-            DEFAULT_REDIS_RUNTIME_SAFETY_SCAN_COUNT,
+            account.runtime_resources.redis.scan_count,
         )
         self.assertEqual(
             safety.sample_interval_seconds,
-            DEFAULT_REDIS_RUNTIME_SAFETY_SAMPLE_INTERVAL_SECONDS,
+            account.runtime_resources.redis.sample_interval_seconds,
         )
         self.assertEqual(
             safety.critical_window_seconds,
-            DEFAULT_REDIS_RUNTIME_SAFETY_CRITICAL_WINDOW_SECONDS,
+            account.runtime_resources.redis.critical_window_seconds,
         )
 
     def test_runtime_safety_config_rejects_environment_drift(self) -> None:
@@ -426,6 +424,48 @@ class PersistenceConfigTests(unittest.TestCase):
         self.assertGreaterEqual(kwargs["open_check_lookback_mins"], 60)
         self.assertGreater(kwargs["position_check_interval_secs"], 0)
         self.assertGreaterEqual(kwargs["position_check_lookback_mins"], 60)
+
+    def test_live_exec_engine_limits_reconciliation_to_owned_instruments(self) -> None:
+        account = load_node_config(
+            SERVICE_ROOT / "config" / "examples" / "account-a.sandbox.json"
+        )
+        account = replace(
+            account,
+            binance=replace(account.binance, environment="live"),
+            risk=RiskNodeConfig(
+                max_notional_per_order={
+                    "ETHUSDT-PERP.BINANCE": "100",
+                    "BTCUSDT-PERP.BINANCE": "100",
+                },
+                max_order_submit_rate="50/00:00:01",
+                max_order_modify_rate="1/00:00:01",
+            ),
+        )
+
+        kwargs = build_live_exec_engine_kwargs(account)
+
+        self.assertEqual(
+            kwargs["reconciliation_instrument_ids"],
+            [
+                "BTCUSDT-PERP.BINANCE",
+                "ETHUSDT-PERP.BINANCE",
+            ],
+        )
+
+    def test_live_exec_engine_fails_closed_without_owned_instruments(self) -> None:
+        account = load_node_config(
+            SERVICE_ROOT / "config" / "examples" / "account-a.sandbox.json"
+        )
+        account = replace(
+            account,
+            binance=replace(account.binance, environment="live"),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "live reconciliation requires owned instruments",
+        ):
+            build_live_exec_engine_kwargs(account)
 
     def test_cache_and_message_bus_cannot_be_disabled(self) -> None:
         base_path = SERVICE_ROOT / "config" / "examples" / "account-a.sandbox.json"

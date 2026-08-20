@@ -477,7 +477,6 @@ class NodeAppAssemblyTest(unittest.TestCase):
                 "control_plane",
                 "intent_stream",
                 "command_stream",
-                "reconciliation",
                 "projection",
             },
         )
@@ -498,7 +497,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
         ):
             run_startup_readiness_checks(runtime)
 
-        self.assertIn("reconciliation", {
+        self.assertNotIn("reconciliation", {
             dependency.value for dependency in runtime.lifecycle.readiness.missing
         })
         self.assertEqual(runtime.lifecycle.reconciliation.status, "in_flight")
@@ -624,6 +623,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
         self,
     ) -> None:
         from app.node import build_account_runtime, build_nautilus_trading_node
+        from config.node_config import RiskNodeConfig
 
         events: list[str] = []
         fatal_reasons: list[str] = []
@@ -665,6 +665,13 @@ class NodeAppAssemblyTest(unittest.TestCase):
             runtime.config = replace(
                 runtime.config,
                 binance=replace(runtime.config.binance, environment="live"),
+                risk=RiskNodeConfig(
+                    max_notional_per_order={
+                        "BTCUSDT-PERP.BINANCE": "1",
+                    },
+                    max_order_submit_rate="50/00:00:01",
+                    max_order_modify_rate="1/00:00:01",
+                ),
             )
             runtime.live_canary_portfolio_baseline_provider = (
                 lambda _symbol: "4" * 64
@@ -2017,6 +2024,36 @@ class NautilusActorAdapterTest(unittest.TestCase):
         )
         actor.on_stop()
 
+    def test_projection_actor_alerts_after_ten_minutes_and_recovers(self) -> None:
+        from app.nautilus_actors import ExecutionProjectionActor
+
+        now = [100.0]
+        stalled: list[float] = []
+        recovered: list[bool] = []
+        actor = ExecutionProjectionActor(
+            _PlainProjection(),
+            progress_stalled_callback=stalled.append,
+            progress_recovered_callback=lambda: recovered.append(True),
+            progress_probe_interval_seconds=60.0,
+            progress_stale_after_seconds=600.0,
+            monotonic=lambda: now[0],
+        )
+
+        now[0] = 699.0
+        actor._check_projection_progress()
+        self.assertEqual(stalled, [])
+
+        now[0] = 700.0
+        actor._check_projection_progress()
+        actor._check_projection_progress()
+        self.assertEqual(stalled, [600.0])
+        self.assertTrue(actor.progress_snapshot()["stalled"])
+
+        now[0] = 701.0
+        actor.record_egress_progress()
+        self.assertEqual(recovered, [True])
+        self.assertFalse(actor.progress_snapshot()["stalled"])
+
 
 class DeploymentFilesTest(unittest.TestCase):
     def test_compose_uses_real_node_image_readiness_healthcheck_and_no_public_ports(self) -> None:
@@ -2690,6 +2727,14 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
     runtime_binance_config = types.ModuleType("runtime.binance_adapter_config")
     runtime_binance_config.build_binance_client_configs = lambda config: (_Config(), _Config())
     _install_module("runtime.binance_adapter_config", runtime_binance_config)
+    runtime_reconciliation_scope = types.ModuleType(
+        "runtime.nautilus_reconciliation_scope"
+    )
+    runtime_reconciliation_scope.install_scoped_reconciliation = lambda: None
+    _install_module(
+        "runtime.nautilus_reconciliation_scope",
+        runtime_reconciliation_scope,
+    )
     runtime_exchange_cancel = types.ModuleType("runtime.exchange_cancel_adapter")
     runtime_exchange_cancel.BinanceExchangeCancelAdapter = _Config
     runtime_exchange_cancel.BinanceExchangeEvidenceProvider = _Config

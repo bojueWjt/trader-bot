@@ -211,7 +211,7 @@ def build_live_exec_engine_kwargs(config: NodeConfig) -> dict[str, Any]:
     the hk container because pudu-mini cannot import nautilus_trader.
     """
 
-    return {
+    kwargs: dict[str, Any] = {
         "reconciliation": config.reconciliation.startup,
         "reconciliation_lookback_mins": config.reconciliation.lookback_mins,
         "open_check_interval_secs": config.reconciliation.interval_mins * 60,
@@ -219,6 +219,18 @@ def build_live_exec_engine_kwargs(config: NodeConfig) -> dict[str, Any]:
         "position_check_interval_secs": config.reconciliation.interval_mins * 60,
         "position_check_lookback_mins": config.reconciliation.lookback_mins,
     }
+    if config.binance.environment != "live":
+        return kwargs
+    risk = config.risk
+    if risk is None or not risk.max_notional_per_order:
+        raise RuntimeError(
+            "live reconciliation requires owned instruments"
+        )
+    kwargs["reconciliation_instrument_ids"] = sorted(
+        str(instrument_id)
+        for instrument_id in risk.max_notional_per_order
+    )
+    return kwargs
 
 
 def build_trading_node_kwargs(
@@ -337,8 +349,18 @@ def build_live_exec_engine_config(config: NodeConfig) -> Any:
     from nautilus_trader.config import (
         LiveExecEngineConfig,  # type: ignore[import-not-found]
     )
+    from nautilus_trader.model.identifiers import (  # type: ignore[import-not-found]
+        InstrumentId,
+    )
 
-    return LiveExecEngineConfig(**build_live_exec_engine_kwargs(config))
+    kwargs = build_live_exec_engine_kwargs(config)
+    raw_instrument_ids = kwargs.get("reconciliation_instrument_ids")
+    if raw_instrument_ids:
+        kwargs["reconciliation_instrument_ids"] = [
+            InstrumentId.from_str(value)
+            for value in raw_instrument_ids
+        ]
+    return LiveExecEngineConfig(**kwargs)
 
 
 def _redis_database_payload(config: NodeConfig) -> dict[str, Any]:

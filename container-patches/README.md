@@ -12,7 +12,9 @@ Patched copy of nautilus_trader 1.227.0
 `adapters/binance/execution.py` (image path
 `/usr/local/lib/python3.12/site-packages/nautilus_trader/adapters/binance/execution.py`).
 
-Two upstream bugs made every node restart forget all pre-restart resting
+Three upstream behaviors required local hardening:
+
+Two bugs made every node restart forget all pre-restart resting
 orders (2026-07-10 incident, see
 `docs/incidents/2026-07-10-node-order-amnesia.md`):
 
@@ -25,6 +27,13 @@ orders (2026-07-10 incident, see
 
 Patch: open orders (NEW / PARTIALLY_FILLED) bypass the time filter, and the
 openOrders snapshot is merged into the report set (dedupe on symbol+orderId).
+
+The 2026-08-13 projection stall investigation also found that a targeted
+reconciliation command still expanded to every active symbol in the Nautilus
+cache. Targeted order and fill queries now normalize the requested Nautilus
+symbol through `BinanceSymbol` and keep the HTTP request set to that one Binance
+symbol. `runtime/nautilus_reconciliation_scope.py` issues continuous and startup
+reconciliation commands once per release-owned instrument.
 
 Mount line added to both recreate scripts:
 

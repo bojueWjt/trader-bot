@@ -7,6 +7,8 @@ from hashlib import sha256
 from typing import Any, Callable
 from uuid import UUID
 
+from execution_domain.order_ownership import is_robot_client_order_id
+
 from .contracts import ExecutionEventEnvelopeV1
 
 
@@ -51,6 +53,8 @@ class ProjectionConfig:
     account_id: str
     lag_degrade_threshold_ms: int = 30_000
     max_flush_batch_size: int = 100
+    allowed_instrument_ids: frozenset[str] = frozenset()
+    require_robot_order_ownership: bool = False
 
 
 class ProjectionEventMapper:
@@ -87,6 +91,15 @@ class ProjectionEventMapper:
         venue_order_id = _optional_str(_attr(event, "venue_order_id", "order_id"))
         trade_id = _optional_str(_attr(event, "trade_id", "venue_trade_id"))
         instrument_id = _optional_str(_attr(event, "instrument_id"))
+        position_id = _optional_str(_attr(event, "position_id"))
+        if not _event_is_in_scope(
+            self._config,
+            event_type=event_type,
+            client_order_id=client_order_id,
+            instrument_id=instrument_id,
+            position_id=position_id,
+        ):
+            return None
         intent_id = _intent_id(event, client_order_id)
         payload = _payload(event, instrument_id=instrument_id)
         event_id = stable_event_id(
@@ -218,6 +231,30 @@ def _intent_from_client_order_id(client_order_id: str) -> UUID | None:
         return UUID(hex=client_order_id[1:33])
     except ValueError:
         return None
+
+
+def _event_is_in_scope(
+    config: ProjectionConfig,
+    *,
+    event_type: str,
+    client_order_id: str | None,
+    instrument_id: str | None,
+    position_id: str | None,
+) -> bool:
+    family = EVENT_MAPPING_CATALOG[event_type]
+    if family == "account":
+        return True
+    allowed_instrument_ids = config.allowed_instrument_ids
+    if allowed_instrument_ids:
+        if instrument_id not in allowed_instrument_ids:
+            return False
+    if not config.require_robot_order_ownership:
+        return True
+    if family == "order":
+        return is_robot_client_order_id(client_order_id)
+    if position_id is None:
+        return False
+    return not position_id.upper().endswith("-EXTERNAL")
 
 
 def _timestamp_to_datetime(raw: Any) -> datetime:

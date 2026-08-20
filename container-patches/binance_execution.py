@@ -507,9 +507,9 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         open_positions: list[Position] = self._cache.positions_open(venue=self.venue)
         active_symbols: set[str] = set()
         for o in open_orders:
-            active_symbols.add(o.instrument_id.symbol.value)
+            active_symbols.add(str(BinanceSymbol(o.instrument_id.symbol.value)))
         for p in open_positions:
-            active_symbols.add(p.instrument_id.symbol.value)
+            active_symbols.add(str(BinanceSymbol(p.instrument_id.symbol.value)))
         return active_symbols
 
     async def _get_binance_position_status_reports(
@@ -533,10 +533,14 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         if self._active_symbols_cache is not None and self._active_symbols_cache[0] == symbol:
             return self._active_symbols_cache[1], self._active_symbols_cache[2]
 
-        active_symbols = self._get_cache_active_symbols()
-        active_symbols.update(await self._get_binance_active_position_symbols(symbol))
+        query_symbol = str(BinanceSymbol(symbol)) if symbol is not None else None
+        if query_symbol is not None:
+            active_symbols = {query_symbol}
+        else:
+            active_symbols = self._get_cache_active_symbols()
+            active_symbols.update(await self._get_binance_active_position_symbols())
         open_orders = await self._http_account.query_open_orders(
-            symbol,
+            query_symbol,
             recv_window=str(self._recv_window),
         )
 
@@ -653,8 +657,11 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
             symbol = (
                 command.instrument_id.symbol.value if command.instrument_id is not None else None
             )
-            active_symbols = self._get_cache_active_symbols()
-            active_symbols.update(await self._get_binance_active_position_symbols(symbol))
+            if symbol is not None:
+                active_symbols = {str(BinanceSymbol(symbol))}
+            else:
+                active_symbols = self._get_cache_active_symbols()
+                active_symbols.update(await self._get_binance_active_position_symbols())
             binance_trades: list[BinanceUserTrade] = []
 
             for symbol in active_symbols:

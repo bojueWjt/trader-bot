@@ -26,6 +26,9 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
         BinanceExecClientConfig,
         BinanceInstrumentProviderConfig,
     )
+    from nautilus_trader.model.identifiers import (  # type: ignore[import-not-found]
+        InstrumentId,
+    )
 
     account_type = _enum_value(BinanceAccountType, ("USDT_FUTURES", "USDT_M_FUTURES"))
     # Honor the validated config.binance.environment. node_config restricts it to
@@ -39,7 +42,21 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
         "sandbox": ("TESTNET", "SANDBOX", "DEMO"),
     }.get(env_name, ("TESTNET", "SANDBOX", "DEMO"))
     environment = _enum_value(BinanceEnvironment, env_candidates)
-    instrument_provider = BinanceInstrumentProviderConfig(load_all=True)
+    owned_instrument_ids = _owned_instrument_ids(config)
+    if owned_instrument_ids:
+        instrument_provider = BinanceInstrumentProviderConfig(
+            load_all=False,
+            load_ids=frozenset(
+                InstrumentId.from_str(value)
+                for value in owned_instrument_ids
+            ),
+        )
+    else:
+        if env_name == "live":
+            raise RuntimeError(
+                "live Binance instrument provider requires owned instruments"
+            )
+        instrument_provider = BinanceInstrumentProviderConfig(load_all=True)
     proxy_url = config.binance.proxy_url
     if proxy_url is False:
         proxy_url = None
@@ -74,4 +91,22 @@ def _enum_value(enum_type: Any, names: tuple[str, ...]) -> Any:
             return getattr(enum_type, name)
     raise RuntimeError(
         f"unsupported Nautilus enum {enum_type!r}; tried {', '.join(names)}"
+    )
+
+
+def _owned_instrument_ids(config: NodeConfig) -> tuple[str, ...]:
+    risk = getattr(config, "risk", None)
+    if risk is None:
+        return ()
+    raw_limits = getattr(risk, "max_notional_per_order", None)
+    if not raw_limits:
+        return ()
+    return tuple(
+        sorted(
+            {
+                str(instrument_id).strip()
+                for instrument_id in raw_limits
+                if str(instrument_id).strip()
+            }
+        )
     )

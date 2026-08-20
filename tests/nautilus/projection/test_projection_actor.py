@@ -220,6 +220,72 @@ class ProjectionActorTests(unittest.TestCase):
         self.assertEqual(health.progress[-1], (6, event_id))
         self.assertIn("projection lag 6ms exceeds 5ms", health.failed)
 
+    def test_live_scope_filters_foreign_symbols_and_unowned_orders(self) -> None:
+        mapper = ProjectionEventMapper(
+            ProjectionConfig(
+                node_id=NODE_ID,
+                account_id=ACCOUNT_ID,
+                allowed_instrument_ids=frozenset(
+                    {"BTCUSDT-PERP.BINANCE"}
+                ),
+                require_robot_order_ownership=True,
+            ),
+            now=lambda: NOW,
+        )
+
+        foreign_symbol = mapper.to_envelope(
+            _Event(
+                "OrderFilled",
+                ts_event=_ns(NOW),
+                client_order_id=CLIENT_ORDER_ID,
+                instrument_id="GOOGLUSDT-PERP.BINANCE",
+            )
+        )
+        manual_order = mapper.to_envelope(
+            _Event(
+                "OrderFilled",
+                ts_event=_ns(NOW),
+                client_order_id="manual-order",
+                instrument_id="BTCUSDT-PERP.BINANCE",
+            )
+        )
+        robot_order = mapper.to_envelope(
+            _Event(
+                "OrderFilled",
+                ts_event=_ns(NOW),
+                client_order_id=CLIENT_ORDER_ID,
+                instrument_id="BTCUSDT-PERP.BINANCE",
+            )
+        )
+
+        self.assertIsNone(foreign_symbol)
+        self.assertIsNone(manual_order)
+        self.assertIsNotNone(robot_order)
+
+    def test_live_scope_filters_external_inferred_position(self) -> None:
+        mapper = ProjectionEventMapper(
+            ProjectionConfig(
+                node_id=NODE_ID,
+                account_id=ACCOUNT_ID,
+                allowed_instrument_ids=frozenset(
+                    {"BTCUSDT-PERP.BINANCE"}
+                ),
+                require_robot_order_ownership=True,
+            ),
+            now=lambda: NOW,
+        )
+
+        inferred = mapper.to_envelope(
+            _Event(
+                "PositionOpened",
+                ts_event=_ns(NOW),
+                instrument_id="BTCUSDT-PERP.BINANCE",
+                position_id="BTCUSDT-PERP.BINANCE-EXTERNAL",
+            )
+        )
+
+        self.assertIsNone(inferred)
+
     def test_event_mapping_catalog_lists_required_families(self) -> None:
         self.assertIn("OrderFilled", EVENT_MAPPING_CATALOG)
         self.assertIn("PositionOpened", EVENT_MAPPING_CATALOG)
@@ -265,6 +331,7 @@ class _Event:
     venue_order_id: str | None = None
     trade_id: str | None = None
     instrument_id: str | None = None
+    position_id: str | None = None
     quantity: str | None = None
     price: str | None = None
     id: str = "ignored-nautilus-id"

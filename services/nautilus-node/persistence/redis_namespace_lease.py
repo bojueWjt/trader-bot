@@ -19,7 +19,7 @@ MAX_PERSISTENCE_GENERATION_FENCING_TOKEN = 0xFFFFFFFFFFFF
 _ASCII_DECIMAL_PATTERN = re.compile(r"^[0-9]+$")
 
 _ACQUIRE_LUA = r"""
--- redis-namespace-lease:acquire-v4
+-- redis-namespace-lease:acquire-v6
 local registry_key = KEYS[1]
 local metadata_key = KEYS[2]
 local fencing_key = KEYS[3]
@@ -36,6 +36,49 @@ local current_json = redis.call("HGET", metadata_key, namespace)
 local max_fencing_token = 281474976710655
 local max_json_integer_token = 99999999999999
 local current_fencing_token = 0
+
+local function owner_matches_node_identity(current_owner)
+    if current_owner == owner then
+        return true
+    end
+    local prefix = owner .. ":"
+    if string.sub(current_owner, 1, string.len(prefix)) ~= prefix then
+        return false
+    end
+    local suffix = string.sub(
+        current_owner,
+        string.len(prefix) + 1
+    )
+    local host_separator = string.find(suffix, ":", 1, true)
+    if not host_separator then
+        return false
+    end
+    local host = string.sub(suffix, 1, host_separator - 1)
+    local process_and_uuid = string.sub(suffix, host_separator + 1)
+    local process_separator = string.find(
+        process_and_uuid,
+        ":",
+        1,
+        true
+    )
+    if not process_separator then
+        return false
+    end
+    local process_id = string.sub(
+        process_and_uuid,
+        1,
+        process_separator - 1
+    )
+    local uuid = string.sub(
+        process_and_uuid,
+        process_separator + 1
+    )
+    return host ~= ""
+        and string.match(host, "^[^:]+$") ~= nil
+        and string.match(process_id, "^[0-9]+$") ~= nil
+        and string.len(uuid) == 32
+        and string.match(uuid, "^[0-9a-f]+$") ~= nil
+end
 
 local function decode_fencing_token(value)
     local token = nil
@@ -211,6 +254,9 @@ if current_json then
     end
     if current_is_fresh then
         return {0, fencing_token, "HELD"}
+    end
+    if not owner_matches_node_identity(current["owner"]) then
+        return {0, fencing_token, "STALE_FOREIGN"}
     end
 else
     local legacy_score = redis.call("ZSCORE", registry_key, namespace)

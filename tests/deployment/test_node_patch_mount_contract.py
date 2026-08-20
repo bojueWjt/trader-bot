@@ -38,6 +38,9 @@ EXPECTED_PATCH_MOUNTS = {
     "redis_safety.py": "/app/runtime/redis_safety.py",
     "live_canary_execution.py": "/app/runtime/live_canary_execution.py",
     "reconciliation.py": "/app/runtime/reconciliation.py",
+    "nautilus_reconciliation_scope.py": (
+        "/app/runtime/nautilus_reconciliation_scope.py"
+    ),
     "binance_adapter_config.py": "/app/runtime/binance_adapter_config.py",
     "node.py": "/app/app/node.py",
     "run_node.py": "/app/app/run_node.py",
@@ -72,6 +75,7 @@ LEGACY_PATCH_MOUNTS = {
         "order_ownership.py",
         "projection_spool.py",
         "reconciliation.py",
+        "nautilus_reconciliation_scope.py",
         "redis_safety.py",
         "risk_config.py",
         "risk_init.py",

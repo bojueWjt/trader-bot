@@ -672,7 +672,11 @@ def test_execution_queue_reports_degraded_then_fatal_at_capacity() -> None:
 
 def test_session_startup_wake_drains_every_projection_spool_batch() -> None:
     projection = _BatchProjection(pending_count=3)
-    runtime = SimpleNamespace(projection_actor=projection)
+    progress: list[bool] = []
+    runtime = SimpleNamespace(
+        projection_actor=projection,
+        projection_egress_progress_callback=lambda: progress.append(True),
+    )
     session = NodeControlPlaneSession(
         execution_event_sink=lambda event: _flush_projection_session_event(
             runtime,
@@ -689,6 +693,7 @@ def test_session_startup_wake_drains_every_projection_spool_batch() -> None:
 
     assert _wait_until(lambda: projection.spool.pending_count == 0)
     assert projection.flush_calls == 3
+    assert progress
     actor.on_stop()
 
 

@@ -455,6 +455,11 @@ TRANSITION_RUNTIME_FILES = (
         "/app/runtime/reconciliation.py",
     ),
     (
+        "nautilus_reconciliation_scope.py",
+        "services/nautilus-node/runtime/nautilus_reconciliation_scope.py",
+        "/app/runtime/nautilus_reconciliation_scope.py",
+    ),
+    (
         "live_canary_execution.py",
         "services/nautilus-node/runtime/live_canary_execution.py",
         "/app/runtime/live_canary_execution.py",

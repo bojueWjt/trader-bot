@@ -29,6 +29,9 @@ EXPECTED_RUNTIME_FILES = {
     "intent_execution_inbox.py": "/app/runtime/intent_execution_inbox.py",
     "redis_safety.py": "/app/runtime/redis_safety.py",
     "reconciliation.py": "/app/runtime/reconciliation.py",
+    "nautilus_reconciliation_scope.py": (
+        "/app/runtime/nautilus_reconciliation_scope.py"
+    ),
     "live_canary_execution.py": "/app/runtime/live_canary_execution.py",
     "routing_init.py": "/app/routing/__init__.py",
     "routing_multi_account.py": "/app/routing/multi_account.py",
@@ -132,6 +135,11 @@ EXPECTED_BUNDLE_FILES = {
         "reconciliation.py",
         "services/nautilus-node/runtime/reconciliation.py",
         "/app/runtime/reconciliation.py",
+    ),
+    (
+        "nautilus_reconciliation_scope.py",
+        "services/nautilus-node/runtime/nautilus_reconciliation_scope.py",
+        "/app/runtime/nautilus_reconciliation_scope.py",
     ),
     (
         "binance_adapter_config.py",

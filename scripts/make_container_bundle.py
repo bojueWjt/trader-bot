@@ -108,6 +108,11 @@ BUNDLE_FILES = (
         "/app/runtime/binance_adapter_config.py",
     ),
     (
+        "nautilus_reconciliation_scope.py",
+        "services/nautilus-node/runtime/nautilus_reconciliation_scope.py",
+        "/app/runtime/nautilus_reconciliation_scope.py",
+    ),
+    (
         "live_canary_execution.py",
         "services/nautilus-node/runtime/live_canary_execution.py",
         "/app/runtime/live_canary_execution.py",
@@ -204,6 +209,7 @@ REQUIRED_RUNTIME_BUNDLE_TARGETS = {
     "/app/runtime/intent_execution_inbox.py",
     "/app/runtime/redis_safety.py",
     "/app/runtime/reconciliation.py",
+    "/app/runtime/nautilus_reconciliation_scope.py",
     "/app/runtime/live_canary_execution.py",
     "/app/routing/__init__.py",
     "/app/routing/multi_account.py",
