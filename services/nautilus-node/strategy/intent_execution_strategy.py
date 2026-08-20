@@ -6604,6 +6604,10 @@ class IntentExecutionStrategy(Strategy):
 
         cap = self._live_entry_notional_caps.get(plan.instrument_id)
         if cap is None:
+            cap = self._live_entry_notional_caps.get(
+                DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
+            )
+        if cap is None:
             return OrderDenied(
                 "live_entry_instrument_not_allowed",
                 f"instrument={plan.instrument_id}",
@@ -9233,6 +9237,9 @@ def _permit_expiry(value: Any) -> datetime | bool:
     if parsed.tzinfo is None:
         return False
     return parsed.astimezone(timezone.utc)
+
+
+DEFAULT_LIVE_ENTRY_NOTIONAL_KEY = "*"
 
 
 def _parse_live_entry_notional_inventory(

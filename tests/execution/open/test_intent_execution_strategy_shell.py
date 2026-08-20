@@ -700,6 +700,56 @@ class StrategyShellTest(unittest.TestCase):
             "live_entry_instrument_not_allowed",
         )
 
+    def test_live_default_cap_allows_instrument_missing_from_inventory(
+        self,
+    ) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("BTCUSDT-PERP.BINANCE", "100"), ("*", "100")),
+            final_quantity="1",
+            final_price="100",
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="XAUUSDT-PERP.BINANCE",
+            quantity="0.5",
+            price="90",
+        )
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertTrue(submitted)
+        self.assertEqual(
+            strategy.submitted_orders,
+            [plan.client_order_id],
+        )
+        self.assertEqual(strategy.denials, [])
+
+    def test_live_default_cap_enforces_notional_for_unlisted_instrument(
+        self,
+    ) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("*", "100"),),
+            final_quantity="1.01",
+            final_price="100",
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="XAUUSDT-PERP.BINANCE",
+            quantity="0.5",
+            price="90",
+        )
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertFalse(submitted)
+        self.assertEqual(strategy.submitted_orders, [])
+        self.assertEqual(
+            strategy.denials[-1].reason,
+            "live_entry_notional_exceeded",
+        )
+        self.assertEqual(
+            strategy.denials[-1].detail,
+            "instrument=XAUUSDT-PERP.BINANCE:actual=101.00:cap=100",
+        )
+
     def test_live_account_b_rejects_final_limit_notional_over_cap(
         self,
     ) -> None:
