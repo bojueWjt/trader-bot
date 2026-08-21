@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from config.node_config import NodeConfig
+from risk.config import DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
 
 
 BINANCE_RECV_WINDOW_MS = 30_000
@@ -43,7 +44,11 @@ def build_binance_client_configs(config: NodeConfig) -> tuple[Any, Any]:
     }.get(env_name, ("TESTNET", "SANDBOX", "DEMO"))
     environment = _enum_value(BinanceEnvironment, env_candidates)
     owned_instrument_ids = _owned_instrument_ids(config)
-    if owned_instrument_ids:
+    if _has_default_notional_cap(config):
+        # The "*" default cap admits instruments beyond the explicit
+        # inventory, so their definitions must be loadable too.
+        instrument_provider = BinanceInstrumentProviderConfig(load_all=True)
+    elif owned_instrument_ids:
         instrument_provider = BinanceInstrumentProviderConfig(
             load_all=False,
             load_ids=frozenset(
@@ -107,6 +112,21 @@ def _owned_instrument_ids(config: NodeConfig) -> tuple[str, ...]:
                 str(instrument_id).strip()
                 for instrument_id in raw_limits
                 if str(instrument_id).strip()
+                and str(instrument_id).strip()
+                != DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
             }
         )
+    )
+
+
+def _has_default_notional_cap(config: NodeConfig) -> bool:
+    risk = getattr(config, "risk", None)
+    if risk is None:
+        return False
+    raw_limits = getattr(risk, "max_notional_per_order", None)
+    if not raw_limits:
+        return False
+    return any(
+        str(instrument_id).strip() == DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
+        for instrument_id in raw_limits
     )

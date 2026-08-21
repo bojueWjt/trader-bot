@@ -190,6 +190,33 @@ class BinanceAdapterConfigTest(unittest.TestCase):
             ),
         )
 
+    def test_default_notional_cap_switches_provider_to_load_all(self) -> None:
+        modules = _fake_nautilus_modules()
+        with patch.dict(sys.modules, modules):
+            module = _load_module()
+            config = SimpleNamespace(
+                risk=SimpleNamespace(
+                    max_notional_per_order={
+                        "ETHUSDT-PERP.BINANCE": "100000",
+                        "*": "10000",
+                    },
+                ),
+                binance=SimpleNamespace(
+                    environment="live",
+                    proxy_url=None,
+                    credentials=SimpleNamespace(
+                        api_key="api-key",
+                        api_secret="api-secret",
+                    ),
+                )
+            )
+
+            data_config, _ = module.build_binance_client_configs(config)
+
+        provider = data_config.kwargs["instrument_provider"]
+        self.assertTrue(provider.kwargs["load_all"])
+        self.assertIsNone(provider.kwargs.get("load_ids"))
+
     def test_futures_account_initialization_uses_configured_recv_window(self) -> None:
         source = FUTURES_PATCH_PATH.read_text(encoding="utf-8")
 
