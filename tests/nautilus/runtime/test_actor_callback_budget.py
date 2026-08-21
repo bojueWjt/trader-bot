@@ -528,16 +528,18 @@ def test_session_refresh_reconciles_on_command_delivery_thread() -> None:
     actor_holder["actor"] = actor
     actor.on_start()
 
-    deadline = time.monotonic() + 1.0
-    while not control_plane.acked.is_set() and time.monotonic() < deadline:
-        actor._on_poll_timer()
-        time.sleep(0.001)
+    try:
+        deadline = time.monotonic() + 1.0
+        while not control_plane.acked.is_set() and time.monotonic() < deadline:
+            actor._on_poll_timer()
+            time.sleep(0.001)
 
-    assert control_plane.acked.is_set()
-    assert len(reconciliation_thread_ids) == 1
-    assert reconciliation_thread_ids[0] != get_ident()
-    assert provider.thread_id == get_ident()
-    actor.on_stop()
+        assert control_plane.acked.is_set()
+        assert len(reconciliation_thread_ids) == 1
+        assert reconciliation_thread_ids[0] != get_ident()
+        assert provider.thread_id == reconciliation_thread_ids[0]
+    finally:
+        actor.on_stop()
 
 
 def test_exchange_evidence_wait_keeps_actor_timer_callback_bounded() -> None:

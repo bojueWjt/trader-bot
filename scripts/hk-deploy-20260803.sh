@@ -4038,6 +4038,7 @@ probe_existing_node_egress() {
   local proxy_url="$2"
   docker exec -i "$node" python3 - "$proxy_url" <<'PY'
 import sys
+import urllib.error
 import urllib.request
 
 proxy_url = sys.argv[1]
@@ -4052,24 +4053,43 @@ opener = urllib.request.build_opener(
 )
 with opener.open("https://api.ipify.org", timeout=15) as response:
     actual_egress = response.read().decode("ascii").strip()
-with opener.open(
-    "https://fapi.binance.com/fapi/v1/time",
-    timeout=15,
-) as response:
-    fapi_http_code = response.status
-print(f"{actual_egress}\t{fapi_http_code}")
+retry_after = ""
+try:
+    with opener.open(
+        "https://fapi.binance.com/fapi/v1/time",
+        timeout=15,
+    ) as response:
+        fapi_http_code = response.status
+except urllib.error.HTTPError as exc:
+    if exc.code != 429:
+        raise
+    fapi_http_code = exc.code
+    retry_after = str(exc.headers.get("Retry-After") or "").strip()
+print(f"{actual_egress}\t{fapi_http_code}\t{retry_after}")
 PY
 }
 verify_binance_account_network_egress() {
   local actual_egress
+  local attempt
+  local attempts
+  local delay_seconds
   local expected_egress
   local fapi_http_code
   local index
+  local max_retry_after_seconds
   local network
   local network_names
   local node
   local probe_output
   local proxy_url
+  local retry_after
+  local retry_after_seconds
+  attempts="${BINANCE_ACCOUNT_NETWORK_PROBE_ATTEMPTS:-6}"
+  max_retry_after_seconds="${BINANCE_ACCOUNT_NETWORK_PROBE_MAX_RETRY_AFTER_SECONDS:-60}"
+  [[ "$attempts" =~ ^[1-9][0-9]{0,2}$ ]] \
+    || die "BINANCE_ACCOUNT_NETWORK_PROBE_ATTEMPTS must be 1 through 999"
+  [[ "$max_retry_after_seconds" =~ ^(0|[1-9][0-9]{0,3})$ ]] \
+    || die "BINANCE_ACCOUNT_NETWORK_PROBE_MAX_RETRY_AFTER_SECONDS must be 0 through 9999"
   local expected_egress_ips=(
     "$BINANCE_EXPECTED_EGRESS_IP_A"
     "$BINANCE_EXPECTED_EGRESS_IP_B"
@@ -4096,15 +4116,37 @@ verify_binance_account_network_egress() {
     )" || die "Binance node network inspection failed: $node"
     [ "$network_names" = "$network" ] \
       || die "Binance node network differs from account allocation: $node"
-    probe_output="$(
-      probe_existing_node_egress "$node" "$proxy_url"
-    )" || die "Binance account-network probe failed: $network"
-    IFS=$'\t' read -r actual_egress fapi_http_code \
-      <<<"$probe_output"
-    [ "$actual_egress" = "$expected_egress" ] \
-      || die "Binance account-network egress differs: $network"
-    [ "$fapi_http_code" = "200" ] \
-      || die "Binance account-network FAPI probe did not return HTTP 200: $network"
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+      probe_output="$(
+        probe_existing_node_egress "$node" "$proxy_url"
+      )" || die "Binance account-network probe failed: $network"
+      IFS=$'\t' read -r actual_egress fapi_http_code retry_after \
+        <<<"$probe_output"
+      [ "$actual_egress" = "$expected_egress" ] \
+        || die "Binance account-network egress differs: $network"
+      if [ "$fapi_http_code" = "200" ]; then
+        break
+      fi
+      [ "$fapi_http_code" = "429" ] \
+        || die "Binance account-network FAPI probe did not return HTTP 200: $network"
+      [ "$attempt" -lt "$attempts" ] \
+        || die "Binance account-network FAPI probe exhausted HTTP 429 retries: $network"
+      [[ "$retry_after" =~ ^[0-9]{1,6}$ ]] \
+        || die "Binance account-network HTTP 429 Retry-After is invalid: $network"
+      retry_after_seconds=$((10#$retry_after))
+      delay_seconds="$retry_after_seconds"
+      if [ "$delay_seconds" -gt "$max_retry_after_seconds" ]; then
+        delay_seconds="$max_retry_after_seconds"
+      fi
+      printf '== Binance account network rate limited: %s network=%s attempt=%s/%s retry_after=%ss sleep=%ss\n' \
+        "$node" \
+        "$network" \
+        "$attempt" \
+        "$attempts" \
+        "$retry_after_seconds" \
+        "$delay_seconds" >&2
+      sleep "$delay_seconds"
+    done
     printf '== Binance account network verified: %s network=%s egress=%s proxy=%s\n' \
       "$node" \
       "$network" \

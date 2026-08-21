@@ -453,10 +453,27 @@ if [ "$1" = "exec" ]; then
     value=198.51.100.200
   fi
   status=200
+  retry_after=
+  if [ "${FAKE_FAPI_SEQUENCE_NETWORK:-}" = "$network" ]; then
+    count_file="${FAKE_FAPI_SEQUENCE_COUNT_FILE:?}"
+    count=0
+    if [ -f "$count_file" ]; then
+      count="$(cat "$count_file")"
+    fi
+    count=$((count + 1))
+    printf '%s\\n' "$count" >"$count_file"
+    IFS=',' read -r -a statuses <<<"${FAKE_FAPI_SEQUENCE:?}"
+    sequence_index=$((count - 1))
+    if [ "$sequence_index" -ge "${#statuses[@]}" ]; then
+      sequence_index=$((${#statuses[@]} - 1))
+    fi
+    status="${statuses[$sequence_index]}"
+    retry_after="${FAKE_RETRY_AFTER:-16}"
+  fi
   if [ "${FAKE_BAD_FAPI_NETWORK:-}" = "$network" ]; then
     status=503
   fi
-  printf '%s\\t%s\\n' "$value" "$status"
+  printf '%s\\t%s\\t%s\\n' "$value" "$status" "$retry_after"
   exit 0
 fi
 exit 64
@@ -465,8 +482,22 @@ exit 64
     )
     docker_command.chmod(0o755)
 
+    sleep_command = bin_dir / "sleep"
+    sleep_command.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'sleep %s\\n' "$*" >>"$FAKE_COMMAND_LOG"
+""",
+        encoding="utf-8",
+    )
+    sleep_command.chmod(0o755)
 
-def _account_network_source() -> str:
+
+def _account_network_source(
+    *,
+    attempts: int = 6,
+    max_retry_after_seconds: int = 60,
+) -> str:
     return (
         _definitions(
             "die",
@@ -494,8 +525,13 @@ BINANCE_PROXY_URL_A=
 BINANCE_PROXY_URL_B=
 BINANCE_PROXY_URL_C=
 BINANCE_PROXY_URL_D=http://proxy-d.internal:3128
+BINANCE_ACCOUNT_NETWORK_PROBE_ATTEMPTS={attempts}
+BINANCE_ACCOUNT_NETWORK_PROBE_MAX_RETRY_AFTER_SECONDS={max_retry_after_seconds}
 verify_binance_account_network_egress
-"""
+""".format(
+            attempts=attempts,
+            max_retry_after_seconds=max_retry_after_seconds,
+        )
     )
 
 
@@ -525,6 +561,112 @@ def test_account_network_mode_verifies_all_nodes_and_egress(
     assert log.count("http://proxy-d.internal:3128") == 1
     assert "docker run " not in log
     assert result.stdout.count("== Binance account network verified:") == 4
+
+
+def test_account_network_mode_retries_http_429_then_requires_200(
+    tmp_path: Path,
+) -> None:
+    env = _account_network_environment(tmp_path)
+    env.update(
+        {
+            "FAKE_FAPI_SEQUENCE_NETWORK": "trader-v3-account-d",
+            "FAKE_FAPI_SEQUENCE": "429,429,200",
+            "FAKE_FAPI_SEQUENCE_COUNT_FILE": str(tmp_path / "probe-count"),
+            "FAKE_RETRY_AFTER": "16",
+        }
+    )
+
+    result = _run_bash(_account_network_source(), env)
+
+    assert result.returncode == 0, result.stderr
+    log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+    assert log.count("docker exec -i trader-v3-node-d") == 3
+    assert log.count("sleep 16\n") == 2
+    assert result.stderr.count("rate limited: trader-v3-node-d") == 2
+    assert result.stdout.count("== Binance account network verified:") == 4
+
+
+def test_account_network_mode_caps_retry_after_sleep(
+    tmp_path: Path,
+) -> None:
+    env = _account_network_environment(tmp_path)
+    env.update(
+        {
+            "FAKE_FAPI_SEQUENCE_NETWORK": "trader-v3-account-d",
+            "FAKE_FAPI_SEQUENCE": "429,200",
+            "FAKE_FAPI_SEQUENCE_COUNT_FILE": str(tmp_path / "probe-count"),
+            "FAKE_RETRY_AFTER": "120",
+        }
+    )
+
+    result = _run_bash(
+        _account_network_source(max_retry_after_seconds=60),
+        env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+    assert "sleep 60\n" in log
+    assert "retry_after=120s sleep=60s" in result.stderr
+
+
+def test_account_network_mode_fails_after_bounded_http_429_retries(
+    tmp_path: Path,
+) -> None:
+    env = _account_network_environment(tmp_path)
+    env.update(
+        {
+            "FAKE_FAPI_SEQUENCE_NETWORK": "trader-v3-account-d",
+            "FAKE_FAPI_SEQUENCE": "429",
+            "FAKE_FAPI_SEQUENCE_COUNT_FILE": str(tmp_path / "probe-count"),
+            "FAKE_RETRY_AFTER": "0",
+        }
+    )
+
+    result = _run_bash(_account_network_source(attempts=3), env)
+
+    assert result.returncode != 0
+    assert "exhausted HTTP 429 retries" in result.stderr
+    log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+    assert log.count("docker exec -i trader-v3-node-d") == 3
+    assert log.count("sleep 0\n") == 2
+
+
+def test_account_network_mode_rejects_invalid_retry_after(
+    tmp_path: Path,
+) -> None:
+    env = _account_network_environment(tmp_path)
+    env.update(
+        {
+            "FAKE_FAPI_SEQUENCE_NETWORK": "trader-v3-account-d",
+            "FAKE_FAPI_SEQUENCE": "429,200",
+            "FAKE_FAPI_SEQUENCE_COUNT_FILE": str(tmp_path / "probe-count"),
+            "FAKE_RETRY_AFTER": "soon",
+        }
+    )
+
+    result = _run_bash(_account_network_source(), env)
+
+    assert result.returncode != 0
+    assert "HTTP 429 Retry-After is invalid" in result.stderr
+    log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+    assert log.count("docker exec -i trader-v3-node-d") == 1
+    assert "sleep " not in log
+
+
+def test_account_network_mode_does_not_retry_non_429_response(
+    tmp_path: Path,
+) -> None:
+    env = _account_network_environment(tmp_path)
+    env["FAKE_BAD_FAPI_NETWORK"] = "trader-v3-account-d"
+
+    result = _run_bash(_account_network_source(), env)
+
+    assert result.returncode != 0
+    assert "did not return HTTP 200" in result.stderr
+    log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+    assert log.count("docker exec -i trader-v3-node-d") == 1
+    assert "sleep " not in log
 
 
 @pytest.mark.parametrize(
