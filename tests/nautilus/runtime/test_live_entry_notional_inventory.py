@@ -18,6 +18,7 @@ from risk.config import (  # noqa: E402
 def test_live_risk_config_builds_serializable_entry_inventory_snapshot() -> None:
     config = RiskLimitConfig(
         max_notional_per_order={
+            "*": "10",
             "BTCUSDT-PERP.BINANCE": "100.00",
             "SOLUSDT-PERP.BINANCE": "12",
         },
@@ -25,9 +26,14 @@ def test_live_risk_config_builds_serializable_entry_inventory_snapshot() -> None
         max_order_modify_rate="1/00:00:01",
     )
 
-    build_live_risk_engine_kwargs(config)
+    risk_engine_kwargs = build_live_risk_engine_kwargs(config)
 
     assert build_live_entry_notional_inventory(config) == (
+        ("*", "10"),
         ("BTCUSDT-PERP.BINANCE", "100.00"),
         ("SOLUSDT-PERP.BINANCE", "12"),
     )
+    assert risk_engine_kwargs["max_notional_per_order"] == {
+        "BTCUSDT-PERP.BINANCE": "100.00",
+        "SOLUSDT-PERP.BINANCE": "12",
+    }

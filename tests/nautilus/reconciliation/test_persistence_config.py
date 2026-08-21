@@ -434,6 +434,7 @@ class PersistenceConfigTests(unittest.TestCase):
             binance=replace(account.binance, environment="live"),
             risk=RiskNodeConfig(
                 max_notional_per_order={
+                    "*": "10",
                     "ETHUSDT-PERP.BINANCE": "100",
                     "BTCUSDT-PERP.BINANCE": "100",
                 },

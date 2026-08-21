@@ -28,6 +28,7 @@ from projection.actor import LifecycleProjectionHealth, ProjectionActor
 from projection.event_mapper import ProjectionConfig
 from projection.spool import JsonExecutionSpool
 from risk.config import (
+    DEFAULT_LIVE_ENTRY_NOTIONAL_KEY,
     RiskLimitConfig,
     build_live_entry_notional_inventory,
     build_live_risk_engine_kwargs,
@@ -1538,7 +1539,13 @@ def _build_projection_actor(
         allowed_instrument_ids = frozenset(
             str(instrument_id)
             for instrument_id in config.risk.max_notional_per_order
+            if instrument_id != DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
         )
+        if (
+            DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
+            in config.risk.max_notional_per_order
+        ):
+            allowed_instrument_ids = frozenset()
         require_robot_order_ownership = True
     return ProjectionActor(
         config=ProjectionConfig(
@@ -1807,10 +1814,7 @@ def _build_strategy(
     strategy.set_protection_event_reporter(
         _build_protection_event_reporter(runtime)
     )
-    if (
-        is_live_canary_account(runtime.config.account_id)
-        and runtime.config.binance.environment == "live"
-    ):
+    if runtime.config.binance.environment == "live":
         mark_provider = runtime.live_entry_mark_snapshot_provider
         set_mark_provider = getattr(
             strategy,
@@ -1819,9 +1823,13 @@ def _build_strategy(
         )
         if mark_provider is None or not callable(set_mark_provider):
             raise RuntimeError(
-                "live canary strategy lacks mark snapshot provider"
+                "live strategy lacks mark snapshot provider"
             )
         set_mark_provider(mark_provider)
+    if (
+        is_live_canary_account(runtime.config.account_id)
+        and runtime.config.binance.environment == "live"
+    ):
         baseline_provider = (
             runtime.live_canary_portfolio_baseline_provider
         )

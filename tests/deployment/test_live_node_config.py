@@ -178,8 +178,15 @@ def test_apply_policy_updates_caps_and_preserves_secret_references(
         assert config["binance"]["api_key"]["env"]
         assert config["binance"]["api_secret"]["file"]
         caps = config["risk"]["max_notional_per_order"]
-        assert set(caps) == live_config.ALLOWED_INSTRUMENTS
-        assert set(caps.values()) == {"100000"}
+        assert set(caps) == (
+            live_config.ALLOWED_INSTRUMENTS
+            | {live_config.DEFAULT_NOTIONAL_KEY}
+        )
+        assert caps[live_config.DEFAULT_NOTIONAL_KEY] == "10000"
+        assert {
+            caps[instrument]
+            for instrument in live_config.ALLOWED_INSTRUMENTS
+        } == {"100000"}
         assert config["risk"]["max_order_submit_rate"] == "50/00:00:01"
         assert config["risk"]["max_order_modify_rate"] == "1/00:00:01"
     manifest = json.loads(
@@ -401,9 +408,12 @@ def test_prepare_target_creates_immutable_artifact_without_touching_peer(
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact["account_id"] == "account-a"
     assert artifact["risk"]["max_notional_per_order"]
-    assert set(
-        artifact["risk"]["max_notional_per_order"].values()
-    ) == {"100000"}
+    caps = artifact["risk"]["max_notional_per_order"]
+    assert caps[live_config.DEFAULT_NOTIONAL_KEY] == "10000"
+    assert {
+        caps[instrument]
+        for instrument in live_config.ALLOWED_INSTRUMENTS
+    } == {"100000"}
     for account_id, path in configs.items():
         assert path.read_bytes() == originals[account_id]["payload"]
         assert path.stat().st_ino == originals[account_id]["inode"]

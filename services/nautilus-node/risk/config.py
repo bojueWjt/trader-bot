@@ -5,6 +5,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Optional
 
 
+DEFAULT_LIVE_ENTRY_NOTIONAL_KEY = "*"
+
+
 @dataclass(frozen=True)
 class RiskLimitConfig:
     """Serializable risk limits for Nautilus ``LiveRiskEngineConfig``.
@@ -36,12 +39,17 @@ def build_live_risk_engine_kwargs(config: RiskLimitConfig) -> dict[str, Any]:
     module does not invent hard-coded symbol rules.
     """
 
-    _validate_limit_config(config)
+    inventory = _validate_limit_config(config)
+    max_notional_per_order = {
+        instrument_id: format(cap, "f")
+        for instrument_id, cap in inventory
+        if instrument_id != DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
+    }
     return {
         "bypass": False,
         "max_order_submit_rate": config.max_order_submit_rate,
         "max_order_modify_rate": config.max_order_modify_rate,
-        "max_notional_per_order": dict(config.max_notional_per_order),
+        "max_notional_per_order": max_notional_per_order,
     }
 
 

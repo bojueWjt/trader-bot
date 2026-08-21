@@ -36,6 +36,7 @@ ALLOWED_INSTRUMENTS = {
     "ETHUSDT-PERP.BINANCE",
     "SOLUSDT-PERP.BINANCE",
 }
+DEFAULT_NOTIONAL_KEY = "*"
 IDENTITY_PATTERNS = (
     re.compile(r"trader[-_]?account[-_]?[abcd]", re.IGNORECASE),
     re.compile(r"instance[-_]?account[-_]?[abcd]", re.IGNORECASE),
@@ -193,6 +194,11 @@ def load_risk_policy(path: Path) -> dict[str, Any]:
         "risk policy global_safety_max_notional_usdt",
         ceiling=ceiling,
     )
+    default_cap = _positive_cap(
+        migration.get("default_max_notional_usdt"),
+        "risk policy default_max_notional_usdt",
+        ceiling=ceiling,
+    )
     default_rates = {
         "max_order_submit_rate": _required_rate(
             migration.get("default_order_submit_rate"),
@@ -216,6 +222,7 @@ def load_risk_policy(path: Path) -> dict[str, Any]:
     return {
         "max_notional_ceiling_usdt": ceiling,
         "global_safety_max_notional_usdt": target_cap,
+        "default_max_notional_usdt": default_cap,
         "default_rates": default_rates,
         "entry_contract": dict(entry),
     }
@@ -238,6 +245,7 @@ def _validate_migration_risk(
     raw: Any,
     *,
     ceiling: Decimal,
+    allow_default: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise LiveNodeConfigError("legacy risk must be an object")
@@ -246,7 +254,13 @@ def _validate_migration_risk(
         raise LiveNodeConfigError(
             "legacy risk max_notional_per_order must be an object"
         )
-    if set(raw_caps) != ALLOWED_INSTRUMENTS:
+    allowed_keys = set(ALLOWED_INSTRUMENTS)
+    if allow_default:
+        allowed_keys.add(DEFAULT_NOTIONAL_KEY)
+    raw_keys = set(raw_caps)
+    if not ALLOWED_INSTRUMENTS.issubset(raw_keys):
+        raise LiveNodeConfigError("legacy risk instrument allowlist mismatch")
+    if not raw_keys.issubset(allowed_keys):
         raise LiveNodeConfigError("legacy risk instrument allowlist mismatch")
     caps = {
         instrument: _positive_cap(
@@ -428,11 +442,13 @@ def _policy_target_risk(
     policy: dict[str, Any],
 ) -> dict[str, Any]:
     target_cap = policy["global_safety_max_notional_usdt"]
+    caps = {
+        instrument: target_cap
+        for instrument in sorted(ALLOWED_INSTRUMENTS)
+    }
+    caps[DEFAULT_NOTIONAL_KEY] = policy["default_max_notional_usdt"]
     return {
-        "max_notional_per_order": {
-            instrument: target_cap
-            for instrument in sorted(ALLOWED_INSTRUMENTS)
-        },
+        "max_notional_per_order": caps,
         "max_order_submit_rate": captured_risk["max_order_submit_rate"],
         "max_order_modify_rate": captured_risk["max_order_modify_rate"],
     }
@@ -654,6 +670,7 @@ def _config_with_captured_risk(
         validated_current = _validate_migration_risk(
             current_risk,
             ceiling=policy["max_notional_ceiling_usdt"],
+            allow_default=True,
         )
         if validated_current not in (legacy_risk, target_risk):
             raise LiveNodeConfigError(
@@ -859,6 +876,7 @@ def apply_policy(
             validated_current = _validate_migration_risk(
                 current_risk,
                 ceiling=policy["max_notional_ceiling_usdt"],
+                allow_default=True,
             )
             if validated_current not in (legacy_risk, target_risk):
                 raise LiveNodeConfigError(

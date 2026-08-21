@@ -360,6 +360,40 @@ class NodeAppAssemblyTest(unittest.TestCase):
             requests[0][0].full_url,
         )
 
+    def test_live_projection_wildcard_allows_robot_owned_instruments(
+        self,
+    ) -> None:
+        from app.node import _build_projection_actor
+        from config.node_config import RiskNodeConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            actor = _build_projection_actor(
+                types.SimpleNamespace(
+                    account_id="account-a",
+                    node_id="node-a",
+                    binance=types.SimpleNamespace(environment="live"),
+                    risk=RiskNodeConfig(
+                        max_notional_per_order={
+                            "*": "10000",
+                            "BTCUSDT-PERP.BINANCE": "100000",
+                        },
+                        max_order_submit_rate="50/00:00:01",
+                        max_order_modify_rate="1/00:00:01",
+                    ),
+                ),
+                types.SimpleNamespace(),
+                types.SimpleNamespace(),
+                types.SimpleNamespace(
+                    spool_path=Path(tmp) / "execution-events.json"
+                ),
+            )
+
+        self.assertEqual(
+            actor.config.allowed_instrument_ids,
+            frozenset(),
+        )
+        self.assertTrue(actor.config.require_robot_order_ownership)
+
     def test_live_canary_strategy_wiring_covers_all_execution_accounts(
         self,
     ) -> None:

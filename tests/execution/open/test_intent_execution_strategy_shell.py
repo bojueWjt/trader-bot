@@ -59,6 +59,7 @@ class StrategyShellTest(unittest.TestCase):
         strategy = _LiveEntryMarkSubscriptionStrategy(
             environment="live",
             inventory=(
+                ("*", "100"),
                 ("BTCUSDT-PERP.BINANCE", "100"),
                 ("SOLUSDT-PERP.BINANCE", "100"),
             ),
@@ -704,12 +705,12 @@ class StrategyShellTest(unittest.TestCase):
         self,
     ) -> None:
         strategy = _LiveEntrySubmitStrategy(
-            inventory=(("BTCUSDT-PERP.BINANCE", "100"), ("*", "100")),
-            final_quantity="1",
+            inventory=(("BTCUSDT-PERP.BINANCE", "100000"), ("*", "10000")),
+            final_quantity="99",
             final_price="100",
         )
         plan = _live_entry_order_plan(
-            instrument_id="XAUUSDT-PERP.BINANCE",
+            instrument_id="JTOUSDT-PERP.BINANCE",
             quantity="0.5",
             price="90",
         )
@@ -727,12 +728,12 @@ class StrategyShellTest(unittest.TestCase):
         self,
     ) -> None:
         strategy = _LiveEntrySubmitStrategy(
-            inventory=(("*", "100"),),
-            final_quantity="1.01",
+            inventory=(("*", "10000"),),
+            final_quantity="100.01",
             final_price="100",
         )
         plan = _live_entry_order_plan(
-            instrument_id="XAUUSDT-PERP.BINANCE",
+            instrument_id="JTOUSDT-PERP.BINANCE",
             quantity="0.5",
             price="90",
         )
@@ -747,8 +748,30 @@ class StrategyShellTest(unittest.TestCase):
         )
         self.assertEqual(
             strategy.denials[-1].detail,
-            "instrument=XAUUSDT-PERP.BINANCE:actual=101.00:cap=100",
+            "instrument=JTOUSDT-PERP.BINANCE:actual=10001.00:cap=10000",
         )
+
+    def test_live_explicit_cap_overrides_default_cap(self) -> None:
+        strategy = _LiveEntrySubmitStrategy(
+            inventory=(("*", "10000"), ("BTCUSDT-PERP.BINANCE", "100000")),
+            final_quantity="500",
+            final_price="100",
+        )
+        plan = _live_entry_order_plan(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            quantity="0.5",
+            price="90",
+            approved_max_notional="100000",
+        )
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertTrue(submitted)
+        self.assertEqual(
+            strategy.submitted_orders,
+            [plan.client_order_id],
+        )
+        self.assertEqual(strategy.denials, [])
 
     def test_live_account_b_rejects_final_limit_notional_over_cap(
         self,

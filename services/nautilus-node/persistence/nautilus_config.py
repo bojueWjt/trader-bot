@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from config.node_config import NodeConfig
+from risk.config import DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
 
 DEFAULT_MESSAGE_BUS_AUTOTRIM_MINS = 24 * 60
 MESSAGE_BUS_AUTOTRIM_MINS_ENV = "NAUTILUS_MESSAGE_BUS_AUTOTRIM_MINS"
@@ -229,7 +230,12 @@ def build_live_exec_engine_kwargs(config: NodeConfig) -> dict[str, Any]:
     kwargs["reconciliation_instrument_ids"] = sorted(
         str(instrument_id)
         for instrument_id in risk.max_notional_per_order
+        if instrument_id != DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
     )
+    if not kwargs["reconciliation_instrument_ids"]:
+        raise RuntimeError(
+            "live reconciliation requires owned instruments"
+        )
     return kwargs
 
 

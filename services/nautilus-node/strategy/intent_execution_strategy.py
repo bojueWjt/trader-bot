@@ -21,6 +21,7 @@ from execution_domain.order_ownership import (
     object_client_order_id,
     object_is_robot_order,
 )
+from risk.config import DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
 from runtime.bounded_task_worker import BoundedTaskWorker
 from runtime.live_canary_execution import (
     JsonLiveCanaryExecutionStore,
@@ -522,6 +523,8 @@ class IntentExecutionStrategy(Strategy):
                 raise RuntimeError(
                     "live entry mark price instrument is empty"
                 )
+            if instrument_id == DEFAULT_LIVE_ENTRY_NOTIONAL_KEY:
+                continue
             if instrument_id in subscribed:
                 continue
             try:
@@ -9237,9 +9240,6 @@ def _permit_expiry(value: Any) -> datetime | bool:
     if parsed.tzinfo is None:
         return False
     return parsed.astimezone(timezone.utc)
-
-
-DEFAULT_LIVE_ENTRY_NOTIONAL_KEY = "*"
 
 
 def _parse_live_entry_notional_inventory(
