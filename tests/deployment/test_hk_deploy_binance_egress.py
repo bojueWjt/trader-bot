@@ -457,9 +457,9 @@ if [ "$1" = "exec" ]; then
   proxy_url="$6"
   network="${node/trader-v3-node/trader-v3-account}"
 elif [ "$1" = "run" ]; then
-  network="$4"
-  proxy_url="$9"
-  [ "$7" = "sha256:fake-image" ] || exit 64
+  network="$5"
+  proxy_url="${10}"
+  [ "$8" = "sha256:fake-image" ] || exit 64
 else
   exit 64
 fi
@@ -600,7 +600,7 @@ def test_account_network_mode_uses_ephemeral_probe_for_stopped_node(
     log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
     assert log.count("docker exec -i trader-v3-node-") == 3
     assert (
-        "docker run --rm --network trader-v3-account-a "
+        "docker run --rm -i --network trader-v3-account-a "
         "--entrypoint python3 sha256:fake-image - "
     ) in log
     assert result.stdout.count("== Binance account network verified:") == 4

@@ -4054,6 +4054,7 @@ probe_existing_node_egress() {
     probe=(
       docker run
       --rm
+      -i
       --network "$network"
       --entrypoint python3
       "$image"
