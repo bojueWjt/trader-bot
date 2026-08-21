@@ -425,6 +425,23 @@ printf 'docker %s\\n' "$*" >>"$FAKE_COMMAND_LOG"
 if [ "$1" = "network" ] && [ "$2" = "inspect" ]; then
   exit 0
 fi
+if [ "$1" = "inspect" ] && [ "$2" = "--format" ]; then
+  format="$3"
+  node="$4"
+  if [ "$format" = "{{.State.Running}}" ]; then
+    if [ "${FAKE_STOPPED_NODE:-}" = "$node" ]; then
+      printf 'false\n'
+    else
+      printf 'true\n'
+    fi
+    exit 0
+  fi
+  if [ "$format" = "{{.Image}}" ]; then
+    printf 'sha256:fake-image\n'
+    exit 0
+  fi
+  exit 64
+fi
 if [ "$1" = "inspect" ]; then
   node="$2"
   suffix="${node##*-}"
@@ -439,6 +456,14 @@ if [ "$1" = "exec" ]; then
   node="$3"
   proxy_url="$6"
   network="${node/trader-v3-node/trader-v3-account}"
+elif [ "$1" = "run" ]; then
+  network="$4"
+  proxy_url="$9"
+  [ "$7" = "sha256:fake-image" ] || exit 64
+else
+  exit 64
+fi
+if [ "$1" = "exec" ] || [ "$1" = "run" ]; then
   case "$network" in
     trader-v3-account-a) value=203.0.113.27 ;;
     trader-v3-account-b) value=203.0.113.28 ;;
@@ -560,6 +585,24 @@ def test_account_network_mode_verifies_all_nodes_and_egress(
     assert log.count("docker exec -i trader-v3-node-") == 4
     assert log.count("http://proxy-d.internal:3128") == 1
     assert "docker run " not in log
+    assert result.stdout.count("== Binance account network verified:") == 4
+
+
+def test_account_network_mode_uses_ephemeral_probe_for_stopped_node(
+    tmp_path: Path,
+) -> None:
+    env = _account_network_environment(tmp_path)
+    env["FAKE_STOPPED_NODE"] = "trader-v3-node-a"
+
+    result = _run_bash(_account_network_source(), env)
+
+    assert result.returncode == 0, result.stderr
+    log = Path(env["FAKE_COMMAND_LOG"]).read_text(encoding="utf-8")
+    assert log.count("docker exec -i trader-v3-node-") == 3
+    assert (
+        "docker run --rm --network trader-v3-account-a "
+        "--entrypoint python3 sha256:fake-image - "
+    ) in log
     assert result.stdout.count("== Binance account network verified:") == 4
 
 

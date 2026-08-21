@@ -4035,8 +4035,35 @@ verify_binance_route_egress() {
 }
 probe_existing_node_egress() {
   local node="$1"
-  local proxy_url="$2"
-  docker exec -i "$node" python3 - "$proxy_url" <<'PY'
+  local network="$2"
+  local proxy_url="$3"
+  local image
+  local running
+  local probe=()
+  running="$(
+    docker inspect --format '{{.State.Running}}' "$node"
+  )" || die "Binance node running-state inspection failed: $node"
+  if [ "$running" = "true" ]; then
+    probe=(docker exec -i "$node" python3 - "$proxy_url")
+  elif [ "$running" = "false" ]; then
+    image="$(
+      docker inspect --format '{{.Image}}' "$node"
+    )" || die "Binance node image inspection failed: $node"
+    [ -n "$image" ] \
+      || die "Binance stopped-node image is empty: $node"
+    probe=(
+      docker run
+      --rm
+      --network "$network"
+      --entrypoint python3
+      "$image"
+      -
+      "$proxy_url"
+    )
+  else
+    die "Binance node running state is invalid: $node"
+  fi
+  "${probe[@]}" <<'PY'
 import sys
 import urllib.error
 import urllib.request
@@ -4118,7 +4145,7 @@ verify_binance_account_network_egress() {
       || die "Binance node network differs from account allocation: $node"
     for ((attempt = 1; attempt <= attempts; attempt++)); do
       probe_output="$(
-        probe_existing_node_egress "$node" "$proxy_url"
+        probe_existing_node_egress "$node" "$network" "$proxy_url"
       )" || die "Binance account-network probe failed: $network"
       IFS=$'\t' read -r actual_egress fapi_http_code retry_after \
         <<<"$probe_output"
