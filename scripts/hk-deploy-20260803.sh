@@ -68,6 +68,11 @@ MIGRATION_CANCEL_ORDER_CONTRACT_UP="$STAGING/db/migrations/0014_cancel_order_con
 MIGRATION_CANCEL_ORDER_CONTRACT_DOWN="$STAGING/db/migrations/0014_cancel_order_contract.down.sql"
 MIGRATION_REFRESH_EVIDENCE_COMMAND_UP="$STAGING/db/migrations/0015_refresh_evidence_command.up.sql"
 MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN="$STAGING/db/migrations/0015_refresh_evidence_command.down.sql"
+MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP="$STAGING/db/migrations/0016_control_plane_lock_privileges.up.sql"
+MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN="$STAGING/db/migrations/0016_control_plane_lock_privileges.down.sql"
+MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP="$STAGING/db/migrations/0017_operator_query_projection_reads.up.sql"
+MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN="$STAGING/db/migrations/0017_operator_query_projection_reads.down.sql"
+JP24_REDIS_DEAD_INSTANCE_JANITOR="$STAGING/jp24_redis_dead_instance_janitor.py"
 CONTROL_PLANE_ISOLATION_SCRIPT="$STAGING/hk-control-plane-isolation.sh"
 CONTROL_PLANE_ISOLATION_MODE="${CONTROL_PLANE_ISOLATION_MODE:-require}"
 LEGACY_CONTROL_PLANE_UNIT="${LEGACY_CONTROL_PLANE_UNIT:-trader-v3-controlplane.service}"
@@ -216,7 +221,7 @@ LEGACY_RECREATE_BOOTSTRAP_EVIDENCE="$BACKUP_ROOT/legacy-recreate-bootstrap.json"
 LEGACY_RECREATE_GENERATED_LIST="$BACKUP_ROOT/legacy-recreate-generated.tsv"
 LEGACY_RECREATE_RECORDS="$BACKUP_ROOT/legacy-recreate-records.tsv"
 LEGACY_RECREATE_SNAPSHOT_ROOT="$BACKUP_ROOT/legacy-recreate-snapshots"
-MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0015-migration-committed.json"
+MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0017-migration-committed.json"
 MAINTENANCE_FENCE_STATE="$BACKUP_ROOT/maintenance-fence.json"
 MAINTENANCE_FENCE_ID=""
 MAINTENANCE_FENCE_ACQUIRED=0
@@ -2333,9 +2338,8 @@ verify_control_plane_isolation_artifact() {
     || die "SHA256SUMS does not cover hk-control-plane-isolation.sh"
 }
 reconcile_control_plane_lock_privileges() {
-  # Roles serve traffic in every non-rollback deploy, whether the role
-  # topology is freshly activated in this run or discovered already
-  # active, so the lock privileges must be reconciled on both paths.
+  # Migration 0016 is the schema source of truth. Repeating its column grants
+  # keeps older databases recoverable while the migration is reconciled.
   if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
     return
   fi
@@ -2345,13 +2349,8 @@ from pathlib import Path
 
 import psycopg2
 
-# PostgreSQL only permits FOR SHARE/FOR UPDATE row locks to roles that hold
-# UPDATE on at least one column of the locked table.  The role handlers
-# take these locks while validating writer fencing, but the role startup
-# probes (app_roles._ROLLBACK_ONLY_PERMISSION_PROBES) require that the
-# probed write stays forbidden, so grant UPDATE on a single bookkeeping
-# column instead of the whole table: the lock works and the probe column
-# stays unwritable.  Each entry is (role, table, lock_column,
+# These grants mirror migration 0016. The probe column remains unwritable.
+# Each entry is (role, table, lock_column,
 # probe_column_that_must_stay_forbidden_or_None).
 LOCK_PRIVILEGES = (
     ("trader_v3_node_control", "redis_fencing_epochs", "created_at", None),
@@ -4612,7 +4611,7 @@ try:
     UUID(redis_fencing_epoch)
 except ValueError as exc:
     raise SystemExit("post-migration Redis fencing epoch is invalid") from exc
-if database_schema_epoch != "0015_refresh_evidence_command":
+if database_schema_epoch != "0017_operator_query_projection_reads":
     raise SystemExit("post-migration database schema epoch is invalid")
 if redis_schema_epoch != "fenced-generation-namespace/v2":
     raise SystemExit("post-migration Redis schema epoch is invalid")
@@ -6676,6 +6675,14 @@ require_staging_artifact \
   || die "0015 up migration missing"
 [ -f "$MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN" ] \
   || die "0015 down migration missing"
+[ -f "$MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP" ] \
+  || die "0016 up migration missing"
+[ -f "$MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN" ] \
+  || die "0016 down migration missing"
+[ -f "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP" ] \
+  || die "0017 up migration missing"
+[ -f "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN" ] \
+  || die "0017 down migration missing"
 case "$DELIVERY_MODE" in
   immutable_image|transition_bind_mount) ;;
   *) die "invalid DELIVERY_MODE: $DELIVERY_MODE" ;;
@@ -6738,6 +6745,8 @@ fi
   || die "redis_namespace_janitor.py missing in staging"
 [ -f "$REDIS_NAMESPACE_REGISTRY" ] \
   || die "redis_namespace_registry.py missing in staging"
+[ -f "$JP24_REDIS_DEAD_INSTANCE_JANITOR" ] \
+  || die "jp24_redis_dead_instance_janitor.py missing in staging"
 for required in \
   bundle-manifest.json \
   release-source-manifest.json \
@@ -6759,6 +6768,11 @@ for required in \
 	  host/v3-trader/SKILL.md \
 	  redis_namespace_janitor.py \
 	  redis_namespace_registry.py \
+  jp24_redis_dead_instance_janitor.py \
+  infra/systemd/trader-v3-redis-dead-instance-janitor.service \
+  infra/systemd/trader-v3-redis-dead-instance-janitor.timer \
+  infra/systemd/trader-v3-redis-namespace-janitor.service \
+  infra/systemd/trader-v3-redis-namespace-janitor.timer \
 		  services/control-plane/db/migrate.py \
   db/migrations/0005_order_management.up.sql \
   db/migrations/0005_order_management.down.sql \
@@ -6774,6 +6788,10 @@ for required in \
   db/migrations/0014_cancel_order_contract.down.sql \
   db/migrations/0015_refresh_evidence_command.up.sql \
   db/migrations/0015_refresh_evidence_command.down.sql \
+  db/migrations/0016_control_plane_lock_privileges.up.sql \
+  db/migrations/0016_control_plane_lock_privileges.down.sql \
+  db/migrations/0017_operator_query_projection_reads.up.sql \
+  db/migrations/0017_operator_query_projection_reads.down.sql \
   "$(basename "$DEPENDENCY_LOCK")"; do
   require_checksum_artifact "$required"
 done
@@ -6921,6 +6939,39 @@ expected_steps = [
             "db/migrations/0014_cancel_order_contract.up.sql",
         ],
     },
+    {
+        "version": "0016",
+        "name": "control_plane_lock_privileges",
+        "up": (
+            "db/migrations/"
+            "0016_control_plane_lock_privileges.up.sql"
+        ),
+        "down": (
+            "db/migrations/"
+            "0016_control_plane_lock_privileges.down.sql"
+        ),
+        "prerequisites": [
+            "db/migrations/0015_refresh_evidence_command.up.sql",
+        ],
+    },
+    {
+        "version": "0017",
+        "name": "operator_query_projection_reads",
+        "up": (
+            "db/migrations/"
+            "0017_operator_query_projection_reads.up.sql"
+        ),
+        "down": (
+            "db/migrations/"
+            "0017_operator_query_projection_reads.down.sql"
+        ),
+        "prerequisites": [
+            (
+                "db/migrations/"
+                "0016_control_plane_lock_privileges.up.sql"
+            ),
+        ],
+    },
 ]
 if migration.get("steps") != expected_steps:
     raise SystemExit("release migration metadata mismatch: steps")
@@ -6937,17 +6988,21 @@ required_migration_files = {
     "db/migrations/0014_cancel_order_contract.down.sql",
     "db/migrations/0015_refresh_evidence_command.up.sql",
     "db/migrations/0015_refresh_evidence_command.down.sql",
+    "db/migrations/0016_control_plane_lock_privileges.up.sql",
+    "db/migrations/0016_control_plane_lock_privileges.down.sql",
+    "db/migrations/0017_operator_query_projection_reads.up.sql",
+    "db/migrations/0017_operator_query_projection_reads.down.sql",
 }
 migration_files = migration.get("migration_files")
 if not isinstance(migration_files, list):
     raise SystemExit("release migration metadata mismatch: migration_files")
 if not required_migration_files.issubset(set(migration_files)):
-    raise SystemExit("release migration metadata lacks four-account files")
+    raise SystemExit("release migration metadata lacks canonical files")
 print(epochs["app"], epochs["db"], epochs["redis"])
 PY
 )
-[ "$DATABASE_SCHEMA_EPOCH" = "0015_refresh_evidence_command" ] \
-  || die "reviewed database schema epoch must be 0015_refresh_evidence_command"
+[ "$DATABASE_SCHEMA_EPOCH" = "0017_operator_query_projection_reads" ] \
+  || die "reviewed database schema epoch must be 0017_operator_query_projection_reads"
 [ "$REDIS_SCHEMA_EPOCH" = "fenced-generation-namespace/v2" ] \
   || die "reviewed Redis schema epoch mismatch"
 
@@ -8103,6 +8158,8 @@ apply_and_verify_database_migration() {
     "$MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP" \
     "$MIGRATION_CANCEL_ORDER_CONTRACT_UP" \
     "$MIGRATION_REFRESH_EVIDENCE_COMMAND_UP" \
+    "$MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP" \
+    "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP" \
     "$DATABASE_SCHEMA_EPOCH" \
     "$MIGRATION_COMMIT_MARKER" \
     "$MAINTENANCE_FENCE_ID" \
@@ -8150,15 +8207,17 @@ maintenance_fence_path = Path(sys.argv[5])
 four_account_rollout_path = Path(sys.argv[6])
 cancel_order_contract_path = Path(sys.argv[7])
 refresh_evidence_command_path = Path(sys.argv[8])
-expected_epoch = sys.argv[9]
-migration_commit_marker = Path(sys.argv[10])
-maintenance_fence_id_raw = sys.argv[11]
-maintenance_owner_token = sys.argv[12]
-maintenance_actor = sys.argv[13]
-maintenance_fence_state = Path(sys.argv[14])
-maintenance_lease_seconds = int(sys.argv[15])
-heartbeat_max_age_seconds = int(sys.argv[16])
-deploy_gate_mode = sys.argv[17]
+control_plane_lock_privileges_path = Path(sys.argv[9])
+operator_query_projection_reads_path = Path(sys.argv[10])
+expected_epoch = sys.argv[11]
+migration_commit_marker = Path(sys.argv[12])
+maintenance_fence_id_raw = sys.argv[13]
+maintenance_owner_token = sys.argv[14]
+maintenance_actor = sys.argv[15]
+maintenance_fence_state = Path(sys.argv[16])
+maintenance_lease_seconds = int(sys.argv[17])
+heartbeat_max_age_seconds = int(sys.argv[18])
+deploy_gate_mode = sys.argv[19]
 if deploy_gate_mode not in {
     "bootstrap_stopped",
     "bootstrap_resume_stopped",
@@ -8174,7 +8233,7 @@ elif maintenance_fence_id_raw:
 database_url = env.get("DATABASE_URL", "")
 if not database_url:
     raise SystemExit("DATABASE_URL is required for migration")
-if expected_epoch != "0015_refresh_evidence_command":
+if expected_epoch != "0017_operator_query_projection_reads":
     raise SystemExit("unexpected database schema epoch")
 migration_specs = (
     ("0005", "order_management", order_management_path),
@@ -8203,6 +8262,16 @@ migration_specs = (
         "0015",
         "refresh_evidence_command",
         refresh_evidence_command_path,
+    ),
+    (
+        "0016",
+        "control_plane_lock_privileges",
+        control_plane_lock_privileges_path,
+    ),
+    (
+        "0017",
+        "operator_query_projection_reads",
+        operator_query_projection_reads_path,
     ),
 )
 migrations = []
@@ -8732,7 +8801,7 @@ try:
                 )
 finally:
     conn.close()
-print("database_schema_epoch=0015_refresh_evidence_command")
+print("database_schema_epoch=0017_operator_query_projection_reads")
 PY
   if [ "$DEPLOY_GATE_MODE" = "maintenance_fence" ]; then
     load_maintenance_fence_state

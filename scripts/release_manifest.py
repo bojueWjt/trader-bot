@@ -38,7 +38,7 @@ NODE_CONFIG_SCHEMA_VERSIONS = {
 }
 SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0015_refresh_evidence_command",
+    "db": "0017_operator_query_projection_reads",
     "redis": "fenced-generation-namespace/v2",
 }
 DEFAULT_CONTAINERS = (
@@ -177,6 +177,18 @@ MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH = (
 MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN_PATH = (
     "db/migrations/0015_refresh_evidence_command.down.sql"
 )
+MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP_PATH = (
+    "db/migrations/0016_control_plane_lock_privileges.up.sql"
+)
+MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN_PATH = (
+    "db/migrations/0016_control_plane_lock_privileges.down.sql"
+)
+MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH = (
+    "db/migrations/0017_operator_query_projection_reads.up.sql"
+)
+MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH = (
+    "db/migrations/0017_operator_query_projection_reads.down.sql"
+)
 MIGRATION_PREREQUISITE_PATHS = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -211,6 +223,10 @@ CANONICAL_MIGRATION_PATHS = (
     MIGRATION_CANCEL_ORDER_CONTRACT_DOWN_PATH,
     MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH,
     MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN_PATH,
+    MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP_PATH,
+    MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN_PATH,
+    MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH,
+    MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH,
 )
 CANONICAL_MIGRATION_STEPS = (
     {
@@ -257,6 +273,20 @@ CANONICAL_MIGRATION_STEPS = (
         "up": MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH,
         "down": MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN_PATH,
         "prerequisites": [MIGRATION_CANCEL_ORDER_CONTRACT_UP_PATH],
+    },
+    {
+        "version": "0016",
+        "name": "control_plane_lock_privileges",
+        "up": MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP_PATH,
+        "down": MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN_PATH,
+        "prerequisites": [MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH],
+    },
+    {
+        "version": "0017",
+        "name": "operator_query_projection_reads",
+        "up": MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH,
+        "down": MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH,
+        "prerequisites": [MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP_PATH],
     },
 )
 STRICT_V3_REQUIRED_FIELDS = {
@@ -1037,6 +1067,10 @@ def validate_migration_manifest(
         MIGRATION_CANCEL_ORDER_CONTRACT_DOWN_PATH,
         MIGRATION_REFRESH_EVIDENCE_COMMAND_UP_PATH,
         MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN_PATH,
+        MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP_PATH,
+        MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN_PATH,
+        MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH,
+        MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH,
         *prerequisite_paths,
     }
     if not required_paths.issubset(migration_paths):

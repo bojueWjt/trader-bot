@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Trader v3 Redis dead persistence instances every five minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=trader-v3-redis-dead-instance-janitor.service
+
+[Install]
+WantedBy=timers.target

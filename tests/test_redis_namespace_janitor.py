@@ -12,6 +12,18 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "redis_namespace_janitor.py"
+JANITOR_SERVICE = (
+    REPO_ROOT
+    / "infra"
+    / "systemd"
+    / "trader-v3-redis-namespace-janitor.service"
+)
+JANITOR_TIMER = (
+    REPO_ROOT
+    / "infra"
+    / "systemd"
+    / "trader-v3-redis-namespace-janitor.timer"
+)
 ACCOUNT_A_PERSISTENCE_NAMESPACE = (
     "trader-TRADER-ACCOUNT-A:00000000-0000-4000-8000-000000000001"
 )
@@ -282,6 +294,37 @@ def _write_safety_manifest(
     backup = tmp_path / "dump.rdb"
     backup.write_bytes(b"verified cold redis backup")
     artifact_sha256 = hashlib.sha256(backup.read_bytes()).hexdigest()
+    nodes = _seed_live_generation_leases(
+        redis,
+        persistence_namespaces=persistence_namespaces,
+        reconciliation_completed_at_epoch=(
+            reconciliation_completed_at_epoch
+        ),
+    )
+    return {
+        "schema_version": "trader-redis-janitor-safety/v2",
+        "backup": {
+            "mode": "cold",
+            "source_run_id": "stopped-source-run-id",
+            "completed_at_epoch": backup_completed_at_epoch,
+            "artifacts": [
+                {
+                    "kind": "rdb",
+                    "path": str(backup.resolve()),
+                    "sha256": artifact_sha256,
+                }
+            ],
+        },
+        "nodes": nodes,
+    }
+
+
+def _seed_live_generation_leases(
+    redis: FakeRedis,
+    *,
+    persistence_namespaces: dict[str, str] | None = None,
+    reconciliation_completed_at_epoch: int = 990,
+) -> list[dict[str, object]]:
     if persistence_namespaces is None:
         persistence_namespaces = {
             "account-a": ACCOUNT_A_PERSISTENCE_NAMESPACE,
@@ -327,22 +370,7 @@ def _write_safety_manifest(
                 },
             }
         )
-    return {
-        "schema_version": "trader-redis-janitor-safety/v2",
-        "backup": {
-            "mode": "cold",
-            "source_run_id": "stopped-source-run-id",
-            "completed_at_epoch": backup_completed_at_epoch,
-            "artifacts": [
-                {
-                    "kind": "rdb",
-                    "path": str(backup.resolve()),
-                    "sha256": artifact_sha256,
-                }
-            ],
-        },
-        "nodes": nodes,
-    }
+    return nodes
 
 
 def test_expected_stable_namespaces_cover_exactly_accounts_a_to_d() -> None:
@@ -548,6 +576,232 @@ def test_janitor_requires_safety_manifest_before_apply() -> None:
         assert "safety manifest" in str(exc)
     else:
         raise AssertionError("apply must require a verified safety manifest")
+
+
+def test_scheduled_apply_deletes_retired_generation_and_protects_live() -> None:
+    module = _load_script()
+    retired_id = "22222222-2222-4222-8222-222222222222"
+    retired_namespace = f"trader-TRADER-ACCOUNT-A:{retired_id}"
+    live_key = (
+        f"{ACCOUNT_A_PERSISTENCE_NAMESPACE}:nautilus:account-a:stream:live"
+    )
+    retired_key = _legacy_key(
+        "TRADER-ACCOUNT-A",
+        retired_id,
+        "stream:retired",
+    )
+    redis = FakeRedis(
+        [live_key, retired_key],
+        idle_seconds={
+            live_key: 7200,
+            retired_key: 301,
+        },
+    )
+    _seed_live_generation_leases(redis)
+
+    report = module.run_janitor(
+        redis,
+        legacy_prefixes=[
+            f"{namespace}:"
+            for namespace in module.EXPECTED_STABLE_NAMESPACES.values()
+        ],
+        active_namespaces=set(),
+        registry_key=module.DEFAULT_REGISTRY_KEY,
+        registry_fresh_after_epoch=1,
+        min_idle_seconds=300,
+        max_namespaces=20,
+        max_keys=20_000,
+        apply=True,
+        scheduled_apply=True,
+    )
+
+    assert report.selected_namespaces == (retired_namespace,)
+    assert report.deleted_keys == 1
+    assert live_key.encode("utf-8") in redis.keys
+    assert retired_key.encode("utf-8") not in redis.keys
+    assert ACCOUNT_A_PERSISTENCE_NAMESPACE in report.protected_namespaces
+
+
+def test_scheduled_apply_skips_recent_retired_generation() -> None:
+    module = _load_script()
+    retired_id = "22222222-2222-4222-8222-222222222222"
+    retired_namespace = f"trader-TRADER-ACCOUNT-A:{retired_id}"
+    retired_key = _legacy_key(
+        "TRADER-ACCOUNT-A",
+        retired_id,
+        "stream:recent",
+    )
+    redis = FakeRedis(
+        [retired_key],
+        idle_seconds={retired_key: 299},
+    )
+    _seed_live_generation_leases(redis)
+
+    report = module.run_janitor(
+        redis,
+        legacy_prefixes=[
+            f"{namespace}:"
+            for namespace in module.EXPECTED_STABLE_NAMESPACES.values()
+        ],
+        active_namespaces=set(),
+        registry_key=module.DEFAULT_REGISTRY_KEY,
+        registry_fresh_after_epoch=1,
+        min_idle_seconds=300,
+        max_namespaces=20,
+        max_keys=20_000,
+        apply=True,
+        scheduled_apply=True,
+    )
+
+    assert report.deleted_keys == 0
+    assert report.skipped_namespaces == (retired_namespace,)
+    assert retired_key.encode("utf-8") in redis.keys
+
+
+def test_scheduled_apply_requires_all_live_generation_metadata() -> None:
+    module = _load_script()
+    retired_id = "22222222-2222-4222-8222-222222222222"
+    retired_key = _legacy_key(
+        "TRADER-ACCOUNT-A",
+        retired_id,
+        "stream:retired",
+    )
+    redis = FakeRedis(
+        [retired_key],
+        idle_seconds={retired_key: 7200},
+    )
+    _seed_live_generation_leases(redis)
+    account_d = "trader-TRADER-ACCOUNT-D"
+    del redis.lease_records[account_d]["persistence_instance_id"]
+    del redis.lease_records[account_d]["persistence_namespace"]
+
+    with pytest.raises(
+        module.JanitorSafetyError,
+        match="generation metadata is incomplete",
+    ):
+        module.run_janitor(
+            redis,
+            legacy_prefixes=[
+                f"{namespace}:"
+                for namespace in module.EXPECTED_STABLE_NAMESPACES.values()
+            ],
+            active_namespaces=set(),
+            registry_key=module.DEFAULT_REGISTRY_KEY,
+            registry_fresh_after_epoch=1,
+            min_idle_seconds=300,
+            max_namespaces=20,
+            max_keys=20_000,
+            apply=True,
+            scheduled_apply=True,
+        )
+
+    assert redis.unlinked == []
+    assert retired_key.encode("utf-8") in redis.keys
+
+
+def test_scheduled_apply_aborts_when_candidate_becomes_active() -> None:
+    module = _load_script()
+    retired_id = "22222222-2222-4222-8222-222222222222"
+    retired_namespace = f"trader-TRADER-ACCOUNT-A:{retired_id}"
+    retired_key = _legacy_key(
+        "TRADER-ACCOUNT-A",
+        retired_id,
+        "stream:retired",
+    )
+    redis = FakeRedis(
+        [retired_key],
+        idle_seconds={retired_key: 7200},
+    )
+    _seed_live_generation_leases(redis)
+
+    def activate_candidate_generation() -> None:
+        lease_namespace = "trader-TRADER-ACCOUNT-A"
+        record = redis.lease_records[lease_namespace]
+        record["persistence_instance_id"] = retired_id
+        record["persistence_namespace"] = retired_namespace
+        record["refreshed_at_epoch"] = redis.server_time
+        redis.registry_scores[lease_namespace] = redis.server_time
+
+    redis.before_eval = activate_candidate_generation
+
+    with pytest.raises(
+        module.JanitorSafetyError,
+        match="namespace became active before key deletion",
+    ):
+        module.run_janitor(
+            redis,
+            legacy_prefixes=[
+                f"{namespace}:"
+                for namespace in module.EXPECTED_STABLE_NAMESPACES.values()
+            ],
+            active_namespaces=set(),
+            registry_key=module.DEFAULT_REGISTRY_KEY,
+            registry_fresh_after_epoch=1,
+            min_idle_seconds=300,
+            max_namespaces=20,
+            max_keys=20_000,
+            apply=True,
+            scheduled_apply=True,
+        )
+
+    assert redis.unlinked == []
+    assert retired_key.encode("utf-8") in redis.keys
+
+
+def test_manual_apply_without_manifest_still_fails(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_script()
+
+    result = module.main(
+        [
+            "--redis-url",
+            "redis://127.0.0.1:6379/0",
+            "--legacy-prefix",
+            "trader-TRADER-ACCOUNT-A:",
+            "--apply",
+        ]
+    )
+
+    assert result == 2
+    assert "apply requires --safety-manifest" in capsys.readouterr().err
+
+
+def test_scheduled_apply_parser_uses_operational_defaults() -> None:
+    module = _load_script()
+    args = module._parser().parse_args(
+        [
+            "--redis-url",
+            "redis://127.0.0.1:6379/0",
+            "--scheduled-apply",
+        ]
+    )
+
+    assert args.legacy_prefix == []
+    assert args.min_idle_seconds is None
+    assert args.max_namespaces is None
+    assert args.max_keys is None
+    assert module.SCHEDULED_MIN_IDLE_SECONDS == 300
+    assert module.SCHEDULED_MAX_NAMESPACES == 20
+    assert module.SCHEDULED_MAX_KEYS == 20_000
+
+
+def test_scheduled_janitor_systemd_contract() -> None:
+    service = JANITOR_SERVICE.read_text(encoding="utf-8")
+    timer = JANITOR_TIMER.read_text(encoding="utf-8")
+
+    assert "Type=oneshot" in service
+    assert "WorkingDirectory=/srv/trader-v3" in service
+    assert "EnvironmentFile=/etc/trader-v3/redis-janitor.env" in service
+    assert "/usr/bin/flock -n" in service
+    assert "/srv/trader-v3/.venv-cp/bin/python" in service
+    assert "scripts/redis_namespace_janitor.py --scheduled-apply" in service
+    assert "StandardOutput=append:/var/log/trader-v3/redis-janitor.log" in service
+    assert "StandardError=append:/var/log/trader-v3/redis-janitor.log" in service
+    assert "TimeoutStartSec=30m" in service
+    assert "OnCalendar=*-*-* *:00/10:00" in timer
+    assert "Persistent=true" in timer
+    assert "Unit=trader-v3-redis-namespace-janitor.service" in timer
 
 
 def test_legacy_v1_manifest_remains_available_for_dry_run(

@@ -1,0 +1,10 @@
+[Unit]
+Description=Trader v3: sweep retired Redis persistence generations
+
+[Timer]
+OnCalendar=*-*-* *:00/10:00
+Persistent=true
+Unit=trader-v3-redis-namespace-janitor.service
+
+[Install]
+WantedBy=timers.target

@@ -63,14 +63,24 @@ REQUIRED_RELEASE_PATHS = {
     V3_TRADE_RELEASE_PATH,
     V3_SKILL_RELEASE_PATH,
     EXCHANGE_STATE_RECORDER_RELEASE_PATH,
+    "jp24_redis_dead_instance_janitor.py",
     "redis_namespace_janitor.py",
     "redis_namespace_registry.py",
+    "infra/systemd/trader-v3-redis-dead-instance-janitor.service",
+    "infra/systemd/trader-v3-redis-dead-instance-janitor.timer",
+    "infra/systemd/trader-v3-redis-namespace-janitor.service",
+    "infra/systemd/trader-v3-redis-namespace-janitor.timer",
     "reviewed_release_rollout.py",
     CONTROL_PLANE_BOOTSTRAP_RELEASE_PATH,
 }
 REQUIRED_REDIS_RELEASE_PATHS = {
+    "jp24_redis_dead_instance_janitor.py",
     "redis_namespace_janitor.py",
     "redis_namespace_registry.py",
+    "infra/systemd/trader-v3-redis-dead-instance-janitor.service",
+    "infra/systemd/trader-v3-redis-dead-instance-janitor.timer",
+    "infra/systemd/trader-v3-redis-namespace-janitor.service",
+    "infra/systemd/trader-v3-redis-namespace-janitor.timer",
 }
 REQUIRED_HERMES_RELEASE_PATHS = {
     HERMES_FEEDER_RELEASE_PATH,
@@ -162,6 +172,21 @@ EXPECTED_RELEASE_FILE_MAP = {
     ): "refresh_redis_capacity_evidence.py",
     "scripts/redis_namespace_janitor.py": "redis_namespace_janitor.py",
     "scripts/redis_namespace_registry.py": "redis_namespace_registry.py",
+    (
+        "scripts/jp24_redis_dead_instance_janitor.py"
+    ): "jp24_redis_dead_instance_janitor.py",
+    (
+        "infra/systemd/trader-v3-redis-dead-instance-janitor.service"
+    ): "infra/systemd/trader-v3-redis-dead-instance-janitor.service",
+    (
+        "infra/systemd/trader-v3-redis-dead-instance-janitor.timer"
+    ): "infra/systemd/trader-v3-redis-dead-instance-janitor.timer",
+    (
+        "infra/systemd/trader-v3-redis-namespace-janitor.service"
+    ): "infra/systemd/trader-v3-redis-namespace-janitor.service",
+    (
+        "infra/systemd/trader-v3-redis-namespace-janitor.timer"
+    ): "infra/systemd/trader-v3-redis-namespace-janitor.timer",
     "infra/docker/nautilus/uv.node.lock": "uv.node.lock",
     "services/control-plane/api/read_api.py": "host/read_api.py",
     "services/control-plane/api/snapshot.py": "host/snapshot.py",
@@ -348,20 +373,25 @@ def _commit_path(root: Path, path: Path, message: str) -> None:
     )
 
 
-def test_release_builder_includes_refresh_evidence_command_migration() -> None:
-    assert release.SCHEMA_EPOCHS["db"] == "0015_refresh_evidence_command"
+def test_release_builder_includes_operator_query_reads_migration() -> None:
+    assert (
+        release.SCHEMA_EPOCHS["db"]
+        == "0017_operator_query_projection_reads"
+    )
     assert release.MIGRATION_FILES[-4:] == (
-        release.MIGRATION_CANCEL_ORDER_CONTRACT_UP,
-        release.MIGRATION_CANCEL_ORDER_CONTRACT_DOWN,
-        release.MIGRATION_REFRESH_EVIDENCE_COMMAND_UP,
-        release.MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN,
+        release.MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP,
+        release.MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN,
+        release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP,
+        release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN,
     )
     assert release.MIGRATION_STEPS[-1] == {
-        "version": "0015",
-        "name": "refresh_evidence_command",
-        "up": release.MIGRATION_REFRESH_EVIDENCE_COMMAND_UP,
-        "down": release.MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN,
-        "prerequisites": [release.MIGRATION_CANCEL_ORDER_CONTRACT_UP],
+        "version": "0017",
+        "name": "operator_query_projection_reads",
+        "up": release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP,
+        "down": release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN,
+        "prerequisites": [
+            release.MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP
+        ],
     }
 
 
@@ -446,7 +476,7 @@ def test_release_builder_writes_complete_checksummed_payload(
         "python_dependencies": ["psycopg2"],
         "migration_files": list(release.MIGRATION_FILES),
         "steps": [dict(item) for item in release.MIGRATION_STEPS],
-        "db_schema_epoch": "0015_refresh_evidence_command",
+        "db_schema_epoch": "0017_operator_query_projection_reads",
         "manifest": release.MIGRATION_MANIFEST_NAME,
         "manifest_sha256": hashlib.sha256(
             (output / release.MIGRATION_MANIFEST_NAME).read_bytes()
@@ -529,7 +559,10 @@ def test_release_builder_writes_complete_checksummed_payload(
     assert migration_manifest["schema_version"] == (
         release.MIGRATION_MANIFEST_SCHEMA_VERSION
     )
-    assert migration_manifest["schema_epoch"] == "0015_refresh_evidence_command"
+    assert (
+        migration_manifest["schema_epoch"]
+        == "0017_operator_query_projection_reads"
+    )
     assert {
         item["path"]
         for item in migration_manifest["migrations"]

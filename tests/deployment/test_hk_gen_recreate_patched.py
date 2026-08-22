@@ -101,7 +101,7 @@ PATCH_TARGETS = {
     "binance_execution.py": BINANCE_DST,
     "binance_futures_execution.py": BINANCE_FUTURES_DST,
 }
-DATABASE_SCHEMA_EPOCH = "0015_refresh_evidence_command"
+DATABASE_SCHEMA_EPOCH = "0017_operator_query_projection_reads"
 
 
 class GenRecreatePatchedTest(unittest.TestCase):

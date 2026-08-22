@@ -22,6 +22,9 @@ DEFAULT_RECONCILIATION_MAX_AGE_SECONDS = 300
 DEFAULT_MIN_IDLE_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_NAMESPACES = 10
 DEFAULT_MAX_KEYS = 1000
+SCHEDULED_MIN_IDLE_SECONDS = 300
+SCHEDULED_MAX_NAMESPACES = 20
+SCHEDULED_MAX_KEYS = 20_000
 DEFAULT_SCAN_COUNT = 500
 DEFAULT_UNLINK_BATCH_SIZE = 100
 DEFAULT_MAX_UNLINK_KEYS_PER_SECOND = 200
@@ -383,6 +386,7 @@ def run_janitor(
     max_namespaces: int,
     max_keys: int,
     apply: bool,
+    scheduled_apply: bool = False,
     safety_manifest: Mapping[str, object] | None = None,
     registry_max_age_seconds: int = DEFAULT_REGISTRY_MAX_AGE_SECONDS,
     backup_max_age_seconds: int = DEFAULT_BACKUP_MAX_AGE_SECONDS,
@@ -395,6 +399,8 @@ def run_janitor(
     sleep_fn=time.sleep,
     monotonic_fn=time.monotonic,
 ) -> JanitorReport:
+    if scheduled_apply and not apply:
+        raise JanitorSafetyError("scheduled apply requires apply mode")
     prefixes = _validated_prefixes(legacy_prefixes)
     _require_positive("min_idle_seconds", min_idle_seconds)
     _require_positive("max_namespaces", max_namespaces)
@@ -416,25 +422,34 @@ def run_janitor(
     manifest_nodes: object = ()
     safety_manifest_verified = False
     if apply:
-        if safety_manifest is None:
-            raise JanitorSafetyError(
-                "apply requires a verified safety manifest"
+        if scheduled_apply:
+            safety_evidence = _load_scheduled_live_evidence(
+                redis_client,
+                registry_key=registry_key,
+                registry_max_age_seconds=registry_max_age_seconds,
             )
-        safety_evidence = _validate_safety_manifest(
-            redis_client,
-            safety_manifest,
-            registry_key=registry_key,
-            registry_max_age_seconds=registry_max_age_seconds,
-            backup_max_age_seconds=backup_max_age_seconds,
-            reconciliation_max_age_seconds=reconciliation_max_age_seconds,
-        )
+        else:
+            if safety_manifest is None:
+                raise JanitorSafetyError(
+                    "apply requires a verified safety manifest"
+                )
+            safety_evidence = _validate_safety_manifest(
+                redis_client,
+                safety_manifest,
+                registry_key=registry_key,
+                registry_max_age_seconds=registry_max_age_seconds,
+                backup_max_age_seconds=backup_max_age_seconds,
+                reconciliation_max_age_seconds=(
+                    reconciliation_max_age_seconds
+                ),
+            )
+            manifest_nodes = safety_manifest.get("nodes")
+            safety_manifest_verified = True
         registry_fresh_after_epoch = safety_evidence.fresh_after_epoch
         manifest_namespaces.update(
             safety_evidence.active_persistence_namespaces
         )
         manifest_lease_namespaces.update(safety_evidence.lease_namespaces)
-        manifest_nodes = safety_manifest.get("nodes")
-        safety_manifest_verified = True
 
     registered = _load_active_registry(
         redis_client,
@@ -514,6 +529,7 @@ def run_janitor(
                 reconciliation_max_age_seconds=(
                     reconciliation_max_age_seconds
                 ),
+                scheduled_apply=scheduled_apply,
                 sleep_fn=sleep_fn,
                 monotonic_fn=monotonic_fn,
             )
@@ -597,6 +613,60 @@ def _load_active_registry(
             )
         )
     return active_namespaces
+
+
+def _load_scheduled_live_evidence(
+    redis_client: RedisJanitorClient,
+    *,
+    registry_key: str,
+    registry_max_age_seconds: int,
+) -> _SafetyEvidence:
+    server_time = _redis_server_time(redis_client)
+    fresh_after_epoch = server_time - registry_max_age_seconds
+    metadata_key = f"{registry_key}:leases"
+    lease_namespaces = tuple(sorted(EXPECTED_STABLE_NAMESPACES.values()))
+    persistence_namespaces = []
+    for lease_namespace in lease_namespaces:
+        score = redis_client.zscore(registry_key, lease_namespace)
+        if score is None:
+            raise JanitorSafetyError(
+                f"{lease_namespace} live lease is missing"
+            )
+        refreshed_at_epoch = int(score)
+        if refreshed_at_epoch < fresh_after_epoch:
+            raise JanitorSafetyError(
+                f"{lease_namespace} live lease is stale"
+            )
+        if refreshed_at_epoch > server_time:
+            raise JanitorSafetyError(
+                f"{lease_namespace} live lease is from the future"
+            )
+        raw_record = redis_client.hget(metadata_key, lease_namespace)
+        if raw_record is None:
+            raise JanitorSafetyError(
+                f"{lease_namespace} live lease metadata is missing"
+            )
+        persistence_namespace = (
+            _active_persistence_namespace_from_lease_record(
+                redis_client,
+                raw_record,
+                registry_key=registry_key,
+                lease_namespace=lease_namespace,
+                require_generation=True,
+            )
+        )
+        persistence_namespaces.append(persistence_namespace)
+    if len(set(persistence_namespaces)) != len(lease_namespaces):
+        raise JanitorSafetyError(
+            "A-D active persistence namespaces must be distinct"
+        )
+    return _SafetyEvidence(
+        fresh_after_epoch=fresh_after_epoch,
+        lease_namespaces=lease_namespaces,
+        active_persistence_namespaces=tuple(
+            sorted(persistence_namespaces)
+        ),
+    )
 
 
 def _active_persistence_namespace_from_lease_record(
@@ -703,6 +773,7 @@ def _unlink_rate_limited(
     expected_persistence_namespaces: tuple[str, ...],
     registry_max_age_seconds: int,
     reconciliation_max_age_seconds: int,
+    scheduled_apply: bool,
     sleep_fn,
     monotonic_fn,
 ) -> _UnlinkResult:
@@ -753,6 +824,7 @@ def _unlink_rate_limited(
             reconciliation_max_age_seconds=(
                 reconciliation_max_age_seconds
             ),
+            scheduled_apply=scheduled_apply,
         )
         post_batch_verifications += 1
     return _UnlinkResult(
@@ -777,6 +849,7 @@ def _verify_post_unlink_batch(
     registry_key: str,
     registry_max_age_seconds: int,
     reconciliation_max_age_seconds: int,
+    scheduled_apply: bool,
 ) -> None:
     actual_dbsize = _non_negative_int(
         redis_client.dbsize(),
@@ -804,27 +877,40 @@ def _verify_post_unlink_batch(
             "Redis memory usage reached the 85% post-batch safety threshold"
         )
 
-    server_time = _redis_server_time(redis_client)
-    server_info = _required_mapping(
-        redis_client.info("server"),
-        "Redis INFO server",
-    )
-    uptime_in_seconds = _non_negative_int(
-        server_info.get("uptime_in_seconds"),
-        "Redis uptime_in_seconds",
-    )
-    startup_epoch = server_time - uptime_in_seconds
-    if startup_epoch <= 0:
-        raise JanitorSafetyError("Redis startup time is invalid")
-    lease_namespaces, persistence_namespaces = _validate_node_evidence(
-        redis_client,
-        manifest_nodes,
-        registry_key=registry_key,
-        server_time=server_time,
-        startup_epoch=startup_epoch,
-        registry_max_age_seconds=registry_max_age_seconds,
-        reconciliation_max_age_seconds=reconciliation_max_age_seconds,
-    )
+    if scheduled_apply:
+        live_evidence = _load_scheduled_live_evidence(
+            redis_client,
+            registry_key=registry_key,
+            registry_max_age_seconds=registry_max_age_seconds,
+        )
+        lease_namespaces = live_evidence.lease_namespaces
+        persistence_namespaces = (
+            live_evidence.active_persistence_namespaces
+        )
+    else:
+        server_time = _redis_server_time(redis_client)
+        server_info = _required_mapping(
+            redis_client.info("server"),
+            "Redis INFO server",
+        )
+        uptime_in_seconds = _non_negative_int(
+            server_info.get("uptime_in_seconds"),
+            "Redis uptime_in_seconds",
+        )
+        startup_epoch = server_time - uptime_in_seconds
+        if startup_epoch <= 0:
+            raise JanitorSafetyError("Redis startup time is invalid")
+        lease_namespaces, persistence_namespaces = _validate_node_evidence(
+            redis_client,
+            manifest_nodes,
+            registry_key=registry_key,
+            server_time=server_time,
+            startup_epoch=startup_epoch,
+            registry_max_age_seconds=registry_max_age_seconds,
+            reconciliation_max_age_seconds=(
+                reconciliation_max_age_seconds
+            ),
+        )
     if lease_namespaces != expected_lease_namespaces:
         raise JanitorSafetyError(
             "stable lease namespaces drifted after unlink batch"
@@ -1406,7 +1492,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--legacy-prefix",
         action="append",
-        required=True,
+        default=[],
         help="Scoped prefix immediately before the runtime UUID; repeatable.",
     )
     parser.add_argument(
@@ -1434,14 +1520,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-idle-seconds",
         type=int,
-        default=DEFAULT_MIN_IDLE_SECONDS,
+        default=None,
     )
     parser.add_argument(
         "--max-namespaces",
         type=int,
-        default=DEFAULT_MAX_NAMESPACES,
+        default=None,
     )
-    parser.add_argument("--max-keys", type=int, default=DEFAULT_MAX_KEYS)
+    parser.add_argument("--max-keys", type=int, default=None)
     parser.add_argument("--scan-count", type=int, default=DEFAULT_SCAN_COUNT)
     parser.add_argument(
         "--unlink-batch-size",
@@ -1453,7 +1539,9 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_UNLINK_KEYS_PER_SECOND,
     )
-    parser.add_argument("--apply", action="store_true")
+    apply_mode = parser.add_mutually_exclusive_group()
+    apply_mode.add_argument("--apply", action="store_true")
+    apply_mode.add_argument("--scheduled-apply", action="store_true")
     parser.add_argument(
         "--safety-manifest",
         type=Path,
@@ -1489,19 +1577,41 @@ def _execute(args: argparse.Namespace) -> int:
         print("redis-py is required", file=sys.stderr)
         return 2
 
+    legacy_prefixes = tuple(args.legacy_prefix)
+    if args.scheduled_apply and not legacy_prefixes:
+        legacy_prefixes = tuple(
+            f"{namespace}:"
+            for namespace in EXPECTED_STABLE_NAMESPACES.values()
+        )
+    min_idle_seconds = args.min_idle_seconds
+    max_namespaces = args.max_namespaces
+    max_keys = args.max_keys
+    if min_idle_seconds is None:
+        min_idle_seconds = DEFAULT_MIN_IDLE_SECONDS
+        if args.scheduled_apply:
+            min_idle_seconds = SCHEDULED_MIN_IDLE_SECONDS
+    if max_namespaces is None:
+        max_namespaces = DEFAULT_MAX_NAMESPACES
+        if args.scheduled_apply:
+            max_namespaces = SCHEDULED_MAX_NAMESPACES
+    if max_keys is None:
+        max_keys = DEFAULT_MAX_KEYS
+        if args.scheduled_apply:
+            max_keys = SCHEDULED_MAX_KEYS
     fresh_after = int(time.time()) - args.registry_max_age_seconds
     try:
         client = redis.Redis.from_url(args.redis_url, decode_responses=False)
         report = run_janitor(
             client,
-            legacy_prefixes=args.legacy_prefix,
+            legacy_prefixes=legacy_prefixes,
             active_namespaces=set(args.active_namespace),
             registry_key=args.registry_key,
             registry_fresh_after_epoch=fresh_after,
-            min_idle_seconds=args.min_idle_seconds,
-            max_namespaces=args.max_namespaces,
-            max_keys=args.max_keys,
-            apply=args.apply,
+            min_idle_seconds=min_idle_seconds,
+            max_namespaces=max_namespaces,
+            max_keys=max_keys,
+            apply=args.apply or args.scheduled_apply,
+            scheduled_apply=args.scheduled_apply,
             safety_manifest=safety_manifest,
             registry_max_age_seconds=args.registry_max_age_seconds,
             backup_max_age_seconds=args.backup_max_age_seconds,
@@ -1519,7 +1629,10 @@ def _execute(args: argparse.Namespace) -> int:
         print("Redis janitor operation failed", file=sys.stderr)
         return 1
 
-    print(json.dumps(asdict(report), sort_keys=True))
+    report_payload = asdict(report)
+    report_payload["protected"] = report.protected_namespaces
+    report_payload["skipped"] = report.skipped_namespaces
+    print(json.dumps(report_payload, sort_keys=True))
     return 0
 
 
@@ -1531,14 +1644,28 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if not args.legacy_prefix and not args.scheduled_apply:
+        print(
+            "safety gate: at least one --legacy-prefix is required",
+            file=sys.stderr,
+        )
+        return 2
     if args.apply and args.safety_manifest is None:
         print(
             "safety gate: apply requires --safety-manifest",
             file=sys.stderr,
         )
         return 2
+    if args.scheduled_apply and args.safety_manifest is not None:
+        print(
+            "safety gate: scheduled apply uses live lease evidence",
+            file=sys.stderr,
+        )
+        return 2
     try:
-        with AccountStallOperationLock(enabled=args.apply):
+        with AccountStallOperationLock(
+            enabled=args.apply or args.scheduled_apply
+        ):
             return _execute(args)
     except JanitorSafetyError as exc:
         print(f"safety gate: {exc}", file=sys.stderr)

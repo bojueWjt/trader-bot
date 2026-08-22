@@ -33,7 +33,7 @@ RELEASE_ID = "release-reviewed-a"
 IMAGE_DIGEST = "sha256:" + ("1" * 64)
 CONFIG_SHA256 = "2" * 64
 DEPENDENCY_SHA256 = "3" * 64
-SCHEMA_EPOCH = "0015_refresh_evidence_command"
+SCHEMA_EPOCH = "0017_operator_query_projection_reads"
 REDIS_FENCING_EPOCH = "11111111-1111-4111-8111-111111111111"
 
 

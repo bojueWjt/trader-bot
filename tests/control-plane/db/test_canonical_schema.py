@@ -831,6 +831,104 @@ def test_fresh_migration_creates_required_tables_constraints_indexes_and_project
         assert cur.fetchone() == (True, True, False, False)
 
 
+def test_control_plane_lock_privileges_are_migrated_and_isolated(
+    migrated_db,
+) -> None:
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                has_column_privilege(
+                    'trader_v3_node_control',
+                    'redis_fencing_epochs',
+                    'created_at',
+                    'UPDATE'
+                ),
+                has_column_privilege(
+                    'trader_v3_event_ingest',
+                    'redis_fencing_epochs',
+                    'created_at',
+                    'UPDATE'
+                ),
+                has_column_privilege(
+                    'trader_v3_event_ingest',
+                    'node_heartbeats',
+                    'created_at',
+                    'UPDATE'
+                ),
+                has_column_privilege(
+                    'trader_v3_operator_query',
+                    'node_heartbeats',
+                    'created_at',
+                    'UPDATE'
+                ),
+                has_column_privilege(
+                    'trader_v3_operator_query',
+                    'control_plane_maintenance_fences',
+                    'acquired_at',
+                    'UPDATE'
+                )
+            """
+        )
+        assert cur.fetchone() == (True, True, True, True, True)
+
+        cur.execute(
+            """
+            SELECT
+                has_column_privilege(
+                    'trader_v3_event_ingest',
+                    'node_heartbeats',
+                    'status',
+                    'UPDATE'
+                ),
+                has_column_privilege(
+                    'trader_v3_operator_query',
+                    'node_heartbeats',
+                    'status',
+                    'UPDATE'
+                ),
+                has_table_privilege(
+                    'trader_v3_operator_query',
+                    'orders_projection',
+                    'UPDATE'
+                ),
+                has_table_privilege(
+                    'trader_v3_operator_query',
+                    'accounts_projection',
+                    'UPDATE'
+                ),
+                has_table_privilege(
+                    'trader_v3_operator_query',
+                    'execution_events',
+                    'UPDATE'
+                )
+            """
+        )
+        assert cur.fetchone() == (False, False, False, False, False)
+
+        cur.execute(
+            """
+            SELECT
+                has_table_privilege(
+                    'trader_v3_event_ingest',
+                    'orders_projection',
+                    'UPDATE'
+                ),
+                has_table_privilege(
+                    'trader_v3_event_ingest',
+                    'accounts_projection',
+                    'UPDATE'
+                ),
+                has_table_privilege(
+                    'trader_v3_event_ingest',
+                    'execution_events',
+                    'INSERT'
+                )
+            """
+        )
+        assert cur.fetchone() == (True, True, True)
+
+
 def test_transaction_rollback_removes_raw_message(db_conn, db_url):
     raw_id = uuid4()
     _insert_raw_message(db_conn, raw_id=raw_id, source_message_id="rollback")

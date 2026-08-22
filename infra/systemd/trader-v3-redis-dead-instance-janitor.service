@@ -1,0 +1,21 @@
+[Unit]
+Description=Trader v3 Redis dead persistence instance janitor
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=balen
+Group=balen
+WorkingDirectory=/srv/trader-v3
+EnvironmentFile=/etc/trader-v3/redis-janitor.env
+StateDirectory=trader-v3
+RuntimeDirectory=trader-v3
+ExecStart=/srv/trader-v3/.venv-cp/bin/python /srv/trader-v3/scripts/jp24_redis_dead_instance_janitor.py --apply --state-file /var/lib/trader-v3/redis-dead-instance-janitor.json --lock-file /run/trader-v3/redis-dead-instance-janitor.lock
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/trader-v3 /run/trader-v3
+TimeoutStartSec=10min
+UMask=0077

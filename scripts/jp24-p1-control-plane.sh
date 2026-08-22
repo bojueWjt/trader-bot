@@ -71,6 +71,8 @@ require_source() {
     "$SOURCE_ROOT/packages/execution-domain/execution_domain/__init__.py" \
     "$SOURCE_ROOT/db/migrations/0014_cancel_order_contract.up.sql" \
     "$SOURCE_ROOT/db/migrations/0015_refresh_evidence_command.up.sql" \
+    "$SOURCE_ROOT/db/migrations/0016_control_plane_lock_privileges.up.sql" \
+    "$SOURCE_ROOT/db/migrations/0017_operator_query_projection_reads.up.sql" \
     "$SOURCE_ROOT/infra/systemd/account-stall-control-plane-writer.conf" \
     "$SOURCE_ROOT/infra/systemd/account-stall-control-plane-reader.conf" \
     "$SOURCE_ROOT/scripts/bootstrap_control_plane_roles.py"; do
@@ -178,6 +180,7 @@ def read_database_url(path: Path) -> str:
     return values[0]
 
 
+# Migration 0016 owns this contract; reconciliation remains idempotent.
 lock_privileges = (
     ("trader_v3_node_control", "redis_fencing_epochs", "created_at", False),
     ("trader_v3_event_ingest", "redis_fencing_epochs", "created_at", False),

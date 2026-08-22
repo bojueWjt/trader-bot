@@ -24,7 +24,7 @@ def _peer(*, status: str, fresh: bool, identity_matches: bool):
         image_digest="sha256:" + ("1" * 64),
         config_sha256="2" * 64,
         dependency_lock_sha256="3" * 64,
-        schema_epoch="0015_refresh_evidence_command",
+        schema_epoch="0017_operator_query_projection_reads",
         redis_fencing_epoch="11111111-1111-4111-8111-111111111111",
         freshness_age_seconds=0.5,
         fresh=fresh,

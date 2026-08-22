@@ -45,6 +45,7 @@ from execution_domain.control_plane import (  # noqa: E402
 )
 from execution_domain.order_ownership import (  # noqa: E402
     is_robot_client_order_id,
+    row_is_robot_order,
 )
 
 from app_roles import (  # noqa: E402
@@ -91,8 +92,21 @@ _ACCOUNT_SCOPED_NODE_COMMANDS = _TRADING_STATE_COMMANDS | frozenset(
 )
 _COMMAND_TARGET_MAX_AGE_SECONDS = 5.0
 _LIVE_EVIDENCE_MAX_AGE_SECONDS = 5.0
+_RESUME_MARGIN_EVIDENCE_MAX_AGE_SECONDS = 30.0
 _TESTNET_EMERGENCY_CLOSE_EVIDENCE_MAX_AGE_SECONDS = 86_400.0
 _LIVE_RECONCILIATION_MAX_LAG_MS = 5_000
+_PROTECTIVE_ORDER_TYPES = frozenset(
+    {
+        "STOP",
+        "STOP_MARKET",
+        "STOP_LOSS",
+        "STOP_LOSS_LIMIT",
+        "TAKE_PROFIT",
+        "TAKE_PROFIT_MARKET",
+        "TAKE_PROFIT_LIMIT",
+        "TRAILING_STOP_MARKET",
+    }
+)
 _COMMAND_ACK_STATUSES = frozenset(
     {"accepted", "running", "completed", "failed"}
 )
@@ -1069,6 +1083,14 @@ def _live_evidence_max_age_seconds() -> float:
     )
 
 
+def _resume_margin_evidence_max_age_seconds() -> float:
+    return _bounded_positive_env_seconds(
+        "CONTROL_PLANE_RESUME_MARGIN_EVIDENCE_MAX_AGE_SECONDS",
+        _RESUME_MARGIN_EVIDENCE_MAX_AGE_SECONDS,
+        maximum=120.0,
+    )
+
+
 def _testnet_emergency_close_evidence_max_age_seconds() -> float:
     return _bounded_positive_env_seconds(
         "CONTROL_PLANE_TESTNET_EMERGENCY_CLOSE_EVIDENCE_MAX_AGE_SECONDS",
@@ -1166,6 +1188,16 @@ def _validate_and_arm_resume(
         required_rollout_phase=required_rollout_phase,
         require_reconciliation_health=False,
         require_portfolio_clear=False,
+    )
+    _validate_owned_orders_terminal(
+        cur,
+        heartbeat=heartbeat,
+        account_id=account_id,
+    )
+    _validate_margin_ratio_guard(
+        cur,
+        account_id=account_id,
+        database_now=heartbeat["database_now"],
     )
     cur.execute(
         """
@@ -1786,6 +1818,105 @@ def _snapshot_has_nonzero_position(item: dict, symbol: str) -> bool:
         return True
 
 
+def _validate_owned_orders_terminal(
+    cur,
+    *,
+    heartbeat: dict,
+    account_id: str,
+) -> None:
+    for field_name in ("regular_orders", "algo_orders"):
+        snapshot = heartbeat.get(field_name)
+        if not isinstance(snapshot, list):
+            raise HTTPException(
+                status_code=409,
+                detail="node exchange evidence is invalid",
+            )
+        for item in snapshot:
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=409,
+                    detail="node exchange evidence is invalid",
+                )
+            if not row_is_robot_order(item):
+                continue
+            if _robot_order_is_resume_exempt(item):
+                continue
+            raise HTTPException(
+                status_code=409,
+                detail="robot-owned orders are not terminal",
+            )
+
+    # RESUME only observes projection evidence. Row locks would require UPDATE
+    # privilege without making exchange or heartbeat evidence atomic.
+    cur.execute(
+        """
+        SELECT client_order_id,
+               status,
+               order_type,
+               reduce_only,
+               payload
+        FROM orders_projection
+        WHERE account_id=%s
+          AND client_order_id ~ '^B[0-9a-f]{32}[0-9]{2}$'
+        ORDER BY updated_at DESC
+        """,
+        (account_id,),
+    )
+    for (
+        client_order_id,
+        status,
+        order_type,
+        reduce_only,
+        raw_payload,
+    ) in cur.fetchall():
+        if str(status or "").strip().lower() in _TERMINAL_ORDER_STATES:
+            continue
+        projection_order = {}
+        if isinstance(raw_payload, dict):
+            projection_order.update(raw_payload)
+        projection_order["client_order_id"] = client_order_id
+        projection_order["order_type"] = order_type
+        if reduce_only is not None:
+            projection_order["reduce_only"] = reduce_only
+        if _robot_order_is_resume_exempt(projection_order):
+            continue
+        raise HTTPException(
+            status_code=409,
+            detail="robot-owned orders are not terminal",
+        )
+
+
+def _robot_order_is_resume_exempt(row: dict) -> bool:
+    if not row_is_robot_order(row):
+        return False
+    if _explicit_reduce_only(row) is not True:
+        return False
+    order_kind = str(
+        row.get("order_kind") or row.get("orderKind") or ""
+    ).strip().lower()
+    if order_kind != "algo":
+        return False
+    raw_order_type = row.get("order_type")
+    if raw_order_type is None:
+        raw_order_type = row.get("type")
+    order_type = str(raw_order_type or "").strip().upper()
+    return order_type in _PROTECTIVE_ORDER_TYPES
+
+
+def _explicit_reduce_only(row: dict) -> bool | None:
+    values = []
+    for field_name in ("reduce_only", "reduceOnly"):
+        if field_name in row:
+            values.append(row[field_name])
+    if not values:
+        return None
+    if any(value is False for value in values):
+        return False
+    if all(value is True for value in values):
+        return True
+    return False
+
+
 def _validate_robot_owned_symbol_flat(
     cur,
     *,
@@ -1810,6 +1941,8 @@ def _robot_owned_symbol_footprint(
     account_id: str,
     symbol: str,
 ) -> Decimal:
+    # The fill footprint is historical read evidence. A row lock adds no
+    # consistency with exchange state and would force a read role to hold UPDATE.
     cur.execute(
         """
         SELECT ee.client_order_id,
@@ -1824,7 +1957,6 @@ def _robot_owned_symbol_footprint(
           AND ee.client_order_id ~ '^B[0-9a-f]{32}[0-9]{2}$'
           AND ee.event_type IN ('OrderFilled', 'OrderPartiallyFilled')
         ORDER BY ee.ts_event, ee.created_at, ee.event_id
-        FOR SHARE OF ee
         """,
         (account_id,),
     )
@@ -1905,6 +2037,93 @@ def _robot_fill_quantity(payload: dict) -> Decimal:
             detail="robot-owned fill evidence is invalid",
         )
     return quantity
+
+
+def _validate_margin_ratio_guard(
+    cur,
+    *,
+    account_id: str,
+    database_now: datetime,
+) -> None:
+    # Margin evidence is a pure RESUME read. A row lock would require UPDATE
+    # privilege while providing no atomicity with the exchange snapshot.
+    cur.execute(
+        """
+        SELECT equity, available_balance, updated_at
+        FROM accounts_projection
+        WHERE account_id=%s
+        LIMIT 1
+        """,
+        (account_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail="account margin evidence is unavailable",
+        )
+    equity_raw, available_raw, updated_at = row
+    try:
+        equity = Decimal(str(equity_raw))
+        available = Decimal(str(available_raw))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="account margin evidence is invalid",
+        ) from exc
+    if (
+        not equity.is_finite()
+        or not available.is_finite()
+        or equity <= 0
+        or available < 0
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="account margin evidence is invalid",
+        )
+    if not isinstance(updated_at, datetime) or not isinstance(
+        database_now,
+        datetime,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="account margin evidence is invalid",
+        )
+    age_seconds = (database_now - updated_at).total_seconds()
+    max_age_seconds = _resume_margin_evidence_max_age_seconds()
+    if (
+        not math.isfinite(age_seconds)
+        or age_seconds < -1.0
+        or age_seconds > max_age_seconds
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "account margin evidence is stale: "
+                f"age_seconds={age_seconds:.3f} "
+                f"max_age_seconds={max_age_seconds:.3f}"
+            ),
+        )
+    threshold = _minimum_free_margin_ratio()
+    if available / equity < threshold:
+        raise HTTPException(
+            status_code=409,
+            detail="account margin ratio is below threshold",
+        )
+
+
+def _minimum_free_margin_ratio() -> Decimal:
+    raw = os.environ.get(
+        "CONTROL_PLANE_MIN_FREE_MARGIN_RATIO",
+        "0.05",
+    ).strip()
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0.05")
+    if value < 0 or value > 1 or not value.is_finite():
+        return Decimal("0.05")
+    return value
 
 
 def _portfolio_baseline_sha256(heartbeat: dict, target_symbol: str) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -477,6 +478,7 @@ def _seed_heartbeat(
     projection_lag_ms: int = 0,
     reconciliation_state: str = "healthy",
     evidence_age_seconds: int | None = None,
+    margin_age_seconds: int = 0,
     available_balance: int | float = 100,
     equity: int | float = 100,
 ) -> None:
@@ -485,7 +487,8 @@ def _seed_heartbeat(
     if evidence_age_seconds is None:
         evidence_age_seconds = age_seconds
     evidence_at = now - timedelta(seconds=evidence_age_seconds)
-    account_snapshot_fetched_at = datetime.now(timezone.utc)
+    margin_at = now - timedelta(seconds=margin_age_seconds)
+    account_snapshot_fetched_at = margin_at
     with _connect(url) as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -585,7 +588,7 @@ def _seed_heartbeat(
                 updated_at,
                 payload
             )
-            VALUES (%s, 'USDT', %s, 0, %s, now(), %s)
+            VALUES (%s, 'USDT', %s, 0, %s, %s, %s)
             ON CONFLICT (account_id) DO UPDATE SET
                 currency=EXCLUDED.currency,
                 equity=EXCLUDED.equity,
@@ -598,6 +601,7 @@ def _seed_heartbeat(
                 account_id,
                 equity,
                 available_balance,
+                margin_at,
                 Json(
                     {
                         "account_snapshot_source": (
@@ -1617,6 +1621,87 @@ def test_legacy_heartbeat_writer_identity_can_be_fully_absent() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    (
+        "order",
+        "expected",
+    ),
+    (
+        (
+            {
+                "client_order_id": "B" + ("a" * 32) + "01",
+                "order_type": "LIMIT",
+                "reduce_only": True,
+                "order_kind": "regular",
+            },
+            False,
+        ),
+        (
+            {
+                "clientOrderId": "B" + ("b" * 32) + "02",
+                "type": "STOP_MARKET",
+                "order_kind": "algo",
+                "reduceOnly": True,
+            },
+            True,
+        ),
+        (
+            {
+                "clientAlgoId": "B" + ("c" * 32) + "03",
+                "type": "TAKE_PROFIT_MARKET",
+                "order_kind": "algo",
+                "reduceOnly": False,
+            },
+            False,
+        ),
+        (
+            {
+                "client_order_id": "B" + ("d" * 32) + "04",
+                "order_type": "TAKE_PROFIT_MARKET",
+                "order_kind": "algo",
+            },
+            False,
+        ),
+        (
+            {
+                "client_order_id": "manual-order",
+                "order_type": "STOP_MARKET",
+                "order_kind": "algo",
+                "reduce_only": True,
+            },
+            False,
+        ),
+    ),
+)
+def test_robot_order_resume_exemption_is_fail_closed(
+    order: dict,
+    expected: bool,
+) -> None:
+    assert read_api._robot_order_is_resume_exempt(order) is expected
+
+
+def test_resume_projection_reads_use_plain_selects() -> None:
+    terminal_source = inspect.getsource(
+        read_api._validate_owned_orders_terminal
+    )
+    footprint_source = inspect.getsource(
+        read_api._robot_owned_symbol_footprint
+    )
+    margin_source = inspect.getsource(
+        read_api._validate_margin_ratio_guard
+    )
+    resume_source = inspect.getsource(read_api._validate_and_arm_resume)
+
+    assert "orders_projection" in terminal_source
+    assert "FOR SHARE" not in terminal_source
+    assert "execution_events" in footprint_source
+    assert "FOR SHARE" not in footprint_source
+    assert "accounts_projection" in margin_source
+    assert "FOR SHARE" not in margin_source
+    assert "_validate_owned_orders_terminal" in resume_source
+    assert "_validate_margin_ratio_guard" in resume_source
+
+
 def test_heartbeat_concurrent_sequences_keep_highest_snapshot(
     client: TestClient,
     migrated_db: str,
@@ -2264,7 +2349,7 @@ def test_resume_allows_robot_owned_target_position_round_trip_flat(
 
 
 @pytest.mark.parametrize("source", ("projection", "heartbeat"))
-def test_resume_leaves_robot_owned_non_terminal_orders_to_symbol_guard(
+def test_resume_rejects_robot_owned_non_terminal_orders(
     client: TestClient,
     migrated_db: str,
     source: str,
@@ -2273,7 +2358,11 @@ def test_resume_leaves_robot_owned_non_terminal_orders_to_symbol_guard(
     heartbeat_args = {}
     if source == "heartbeat":
         heartbeat_args["regular_orders"] = [
-            {"symbol": SYMBOL, "client_order_id": robot_client_order_id}
+            {
+                "symbol": SYMBOL,
+                "client_order_id": robot_client_order_id,
+                "order_type": "LIMIT",
+            }
         ]
     _seed_heartbeat(migrated_db, **heartbeat_args)
     if source == "projection":
@@ -2306,10 +2395,251 @@ def test_resume_leaves_robot_owned_non_terminal_orders_to_symbol_guard(
         json=_resume_body(permit_id),
     )
 
+    assert response.status_code == 409
+    assert (
+        response.json()["detail"]
+        == "robot-owned orders are not terminal"
+    )
+
+
+@pytest.mark.parametrize("source", ("projection", "heartbeat"))
+def test_resume_allows_robot_owned_reduce_only_protection_orders(
+    client: TestClient,
+    migrated_db: str,
+    source: str,
+) -> None:
+    robot_client_order_id = "B" + ("b" * 32) + "02"
+    heartbeat_args = {}
+    if source == "heartbeat":
+        heartbeat_args["algo_orders"] = [
+            {
+                "symbol": SYMBOL,
+                "clientOrderId": robot_client_order_id,
+                "type": "STOP_MARKET",
+                "order_kind": "algo",
+                "reduceOnly": True,
+            }
+        ]
+    _seed_heartbeat(migrated_db, **heartbeat_args)
+    if source == "projection":
+        with _connect(migrated_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO orders_projection (
+                    order_projection_id, account_id, instrument_id,
+                    client_order_id, status, side, order_type, quantity,
+                    updated_at, payload
+                )
+                VALUES (
+                    %s, %s, %s, %s, 'working', 'short',
+                    'STOP_MARKET', 1, now(), %s
+                )
+                """,
+                (
+                    str(uuid4()),
+                    ACCOUNT_A,
+                    "BTCUSDT-PERP.BINANCE",
+                    robot_client_order_id,
+                    Json(
+                        {
+                            "order_kind": "algo",
+                            "reduce_only": True,
+                        }
+                    ),
+                ),
+            )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
     assert response.status_code == 200
 
 
-def test_resume_leaves_low_margin_ratio_to_per_order_guard(
+def test_regular_resume_allows_owned_position_with_protection_in_place(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    robot_client_order_id = "B" + ("e" * 32) + "05"
+    _seed_heartbeat(
+        migrated_db,
+        positions=[{"symbol": SYMBOL, "quantity": "0.25"}],
+        algo_orders=[
+            {
+                "symbol": SYMBOL,
+                "client_order_id": robot_client_order_id,
+                "order_type": "STOP_MARKET",
+                "order_kind": "algo",
+                "reduce_only": True,
+            }
+        ],
+    )
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="B" + ("f" * 32) + "06",
+        side="BUY",
+        quantity="0.25",
+    )
+    _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(None),
+    )
+
+    assert response.status_code == 200
+
+
+def test_resume_rejects_robot_owned_algo_protection_without_reduce_only(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    robot_client_order_id = "B" + ("c" * 32) + "03"
+    _seed_heartbeat(
+        migrated_db,
+        algo_orders=[
+            {
+                "symbol": SYMBOL,
+                "client_algo_id": robot_client_order_id,
+                "order_type": "TAKE_PROFIT_MARKET",
+                "order_kind": "algo",
+            }
+        ],
+    )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "robot-owned orders are not terminal"
+    )
+
+
+@pytest.mark.parametrize("source", ("projection", "heartbeat"))
+def test_resume_rejects_robot_owned_explicit_non_reduce_only_orders(
+    client: TestClient,
+    migrated_db: str,
+    source: str,
+) -> None:
+    robot_client_order_id = "B" + ("d" * 32) + "04"
+    heartbeat_args = {}
+    if source == "heartbeat":
+        heartbeat_args["regular_orders"] = [
+            {
+                "symbol": SYMBOL,
+                "client_order_id": robot_client_order_id,
+                "type": "LIMIT",
+                "order_kind": "regular",
+                "reduce_only": False,
+            }
+        ]
+    _seed_heartbeat(migrated_db, **heartbeat_args)
+    if source == "projection":
+        with _connect(migrated_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO orders_projection (
+                    order_projection_id, account_id, instrument_id,
+                    client_order_id, status, side, order_type, quantity,
+                    updated_at, payload
+                )
+                VALUES (
+                    %s, %s, %s, %s, 'working', 'long',
+                    'LIMIT', 1, now(), %s
+                )
+                """,
+                (
+                    str(uuid4()),
+                    ACCOUNT_A,
+                    "BTCUSDT-PERP.BINANCE",
+                    robot_client_order_id,
+                    Json(
+                        {
+                            "order_kind": "regular",
+                            "reduceOnly": False,
+                        }
+                    ),
+                ),
+            )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 409
+    assert (
+        response.json()["detail"]
+        == "robot-owned orders are not terminal"
+    )
+
+
+def test_resume_keeps_five_second_heartbeat_freshness_window(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db, age_seconds=6)
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "node heartbeat evidence is stale"
+
+
+@pytest.mark.parametrize(
+    ("margin_age_seconds", "expected_status"),
+    (
+        (6, 200),
+        (29, 200),
+        (31, 409),
+    ),
+)
+def test_resume_uses_thirty_second_margin_freshness_window(
+    client: TestClient,
+    migrated_db: str,
+    margin_age_seconds: int,
+    expected_status: int,
+) -> None:
+    _seed_heartbeat(
+        migrated_db,
+        margin_age_seconds=margin_age_seconds,
+    )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == expected_status
+    if expected_status == 409:
+        detail = response.json()["detail"]
+        assert detail.startswith(
+            "account margin evidence is stale: age_seconds="
+        )
+        assert "max_age_seconds=30.000" in detail
+        age_text = detail.split("age_seconds=", 1)[1].split(" ", 1)[0]
+        assert float(age_text) > 30
+
+
+def test_resume_rejects_low_margin_ratio(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -2322,7 +2652,11 @@ def test_resume_leaves_low_margin_ratio_to_per_order_guard(
         json=_resume_body(permit_id),
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 409
+    assert (
+        response.json()["detail"]
+        == "account margin ratio is below threshold"
+    )
 
 
 def test_resume_uses_payload_timestamp_for_reconciliation_health(

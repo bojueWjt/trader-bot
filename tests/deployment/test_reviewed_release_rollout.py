@@ -622,7 +622,7 @@ def test_load_release_document_verifies_manifest_bundle_and_payload(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert document.config_sha256 == manifest["config_sha256"]
     assert document.dependency_lock_sha256 == "3" * 64
-    assert document.schema_epoch == "0015_refresh_evidence_command"
+    assert document.schema_epoch == "0017_operator_query_projection_reads"
     assert document.delivery_mode == release_manifest.DELIVERY_IMMUTABLE
     assert document.manifest_sha256 == release_manifest.sha256_file(
         manifest_path
@@ -1202,7 +1202,7 @@ def test_bootstrap_registration_audit_marks_all_accounts_halted(
         image_digest="sha256:" + ("1" * 64),
         config_sha256="2" * 64,
         dependency_lock_sha256="3" * 64,
-        schema_epoch="0015_refresh_evidence_command",
+        schema_epoch="0017_operator_query_projection_reads",
         manifest_sha256="4" * 64,
         bundle_manifest_sha256="5" * 64,
         delivery_mode=release_manifest.DELIVERY_IMMUTABLE,
@@ -1364,7 +1364,7 @@ def test_bootstrap_stopped_registration_supersedes_active_predecessor(
         image_digest="sha256:" + ("1" * 64),
         config_sha256="2" * 64,
         dependency_lock_sha256="3" * 64,
-        schema_epoch="0015_refresh_evidence_command",
+        schema_epoch="0017_operator_query_projection_reads",
         manifest_sha256="4" * 64,
         bundle_manifest_sha256="5" * 64,
         delivery_mode=release_manifest.DELIVERY_IMMUTABLE,
@@ -1526,7 +1526,7 @@ def _migration_rebaseline_document() -> reviewed_release_rollout.ReleaseDocument
         image_digest="sha256:" + ("1" * 64),
         config_sha256="2" * 64,
         dependency_lock_sha256="3" * 64,
-        schema_epoch="0015_refresh_evidence_command",
+        schema_epoch="0017_operator_query_projection_reads",
         manifest_sha256="4" * 64,
         bundle_manifest_sha256="5" * 64,
         delivery_mode=release_manifest.DELIVERY_IMMUTABLE,
@@ -1804,7 +1804,7 @@ def test_register_same_epoch_hotfix_supersedes_active_rollout(
         image_digest="sha256:" + ("1" * 64),
         config_sha256="2" * 64,
         dependency_lock_sha256="3" * 64,
-        schema_epoch="0015_refresh_evidence_command",
+        schema_epoch="0017_operator_query_projection_reads",
         manifest_sha256="4" * 64,
         bundle_manifest_sha256="5" * 64,
         delivery_mode=release_manifest.DELIVERY_IMMUTABLE,
@@ -2139,7 +2139,7 @@ def _readiness_rollout() -> dict:
         "image_digest": "sha256:" + ("1" * 64),
         "config_sha256": "2" * 64,
         "dependency_lock_sha256": "3" * 64,
-        "schema_epoch": "0015_refresh_evidence_command",
+        "schema_epoch": "0017_operator_query_projection_reads",
         "redis_fencing_epoch": REDIS_FENCING_EPOCH,
         "registration_idempotency_key": "register:bootstrap-release",
         "reviewed_by": "release-reviewer",

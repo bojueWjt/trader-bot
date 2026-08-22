@@ -65,6 +65,10 @@ MIGRATION_FILES = (
     "db/migrations/0014_cancel_order_contract.down.sql",
     "db/migrations/0015_refresh_evidence_command.up.sql",
     "db/migrations/0015_refresh_evidence_command.down.sql",
+    "db/migrations/0016_control_plane_lock_privileges.up.sql",
+    "db/migrations/0016_control_plane_lock_privileges.down.sql",
+    "db/migrations/0017_operator_query_projection_reads.up.sql",
+    "db/migrations/0017_operator_query_projection_reads.down.sql",
 )
 SYSTEMD_RESOURCE_FILES = (
     "infra/systemd/account-stall-account-node.conf",
@@ -129,6 +133,26 @@ RELEASE_FILES = (
     ),
     ("scripts/redis_namespace_janitor.py", "redis_namespace_janitor.py"),
     ("scripts/redis_namespace_registry.py", "redis_namespace_registry.py"),
+    (
+        "scripts/jp24_redis_dead_instance_janitor.py",
+        "jp24_redis_dead_instance_janitor.py",
+    ),
+    (
+        "infra/systemd/trader-v3-redis-dead-instance-janitor.service",
+        "infra/systemd/trader-v3-redis-dead-instance-janitor.service",
+    ),
+    (
+        "infra/systemd/trader-v3-redis-dead-instance-janitor.timer",
+        "infra/systemd/trader-v3-redis-dead-instance-janitor.timer",
+    ),
+    (
+        "infra/systemd/trader-v3-redis-namespace-janitor.service",
+        "infra/systemd/trader-v3-redis-namespace-janitor.service",
+    ),
+    (
+        "infra/systemd/trader-v3-redis-namespace-janitor.timer",
+        "infra/systemd/trader-v3-redis-namespace-janitor.timer",
+    ),
     ("infra/docker/nautilus/uv.node.lock", "uv.node.lock"),
     ("services/control-plane/api/read_api.py", "host/read_api.py"),
     ("services/control-plane/api/snapshot.py", "host/snapshot.py"),
@@ -280,8 +304,13 @@ RELEASE_FILES = (
     for path in MIGRATION_FILES + SYSTEMD_RESOURCE_FILES
 )
 REQUIRED_REDIS_RELEASE_PATHS = {
+    "jp24_redis_dead_instance_janitor.py",
     "redis_namespace_janitor.py",
     "redis_namespace_registry.py",
+    "infra/systemd/trader-v3-redis-dead-instance-janitor.service",
+    "infra/systemd/trader-v3-redis-dead-instance-janitor.timer",
+    "infra/systemd/trader-v3-redis-namespace-janitor.service",
+    "infra/systemd/trader-v3-redis-namespace-janitor.timer",
 }
 REQUIRED_HERMES_RELEASE_PATHS = {
     "host/hermes_signal_feeder.py",
@@ -384,6 +413,18 @@ MIGRATION_REFRESH_EVIDENCE_COMMAND_UP = (
 MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN = (
     "db/migrations/0015_refresh_evidence_command.down.sql"
 )
+MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP = (
+    "db/migrations/0016_control_plane_lock_privileges.up.sql"
+)
+MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN = (
+    "db/migrations/0016_control_plane_lock_privileges.down.sql"
+)
+MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP = (
+    "db/migrations/0017_operator_query_projection_reads.up.sql"
+)
+MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN = (
+    "db/migrations/0017_operator_query_projection_reads.down.sql"
+)
 MIGRATION_PREREQUISITES = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -432,6 +473,20 @@ MIGRATION_STEPS = (
         "up": MIGRATION_REFRESH_EVIDENCE_COMMAND_UP,
         "down": MIGRATION_REFRESH_EVIDENCE_COMMAND_DOWN,
         "prerequisites": [MIGRATION_CANCEL_ORDER_CONTRACT_UP],
+    },
+    {
+        "version": "0016",
+        "name": "control_plane_lock_privileges",
+        "up": MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP,
+        "down": MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN,
+        "prerequisites": [MIGRATION_REFRESH_EVIDENCE_COMMAND_UP],
+    },
+    {
+        "version": "0017",
+        "name": "operator_query_projection_reads",
+        "up": MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP,
+        "down": MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN,
+        "prerequisites": [MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP],
     },
 )
 MIGRATION_PYTHON_DEPENDENCIES = ("psycopg2",)

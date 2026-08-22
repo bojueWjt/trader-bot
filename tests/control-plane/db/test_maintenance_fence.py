@@ -30,7 +30,7 @@ RELEASE_ID = "release-maintenance-test"
 IMAGE_DIGEST = "sha256:" + ("1" * 64)
 CONFIG_SHA256 = "2" * 64
 DEPENDENCY_LOCK_SHA256 = "3" * 64
-SCHEMA_EPOCH = "0015_refresh_evidence_command"
+SCHEMA_EPOCH = "0017_operator_query_projection_reads"
 
 
 def _load_migrate_module() -> ModuleType:

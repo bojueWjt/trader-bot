@@ -95,6 +95,19 @@ test_hardening_deploy_contract_is_fail_closed() {
     'db/migrations/0015_refresh_evidence_command.up.sql'
   assert_contains "$text" \
     'db/migrations/0015_refresh_evidence_command.down.sql'
+  assert_contains "$text" \
+    'db/migrations/0016_control_plane_lock_privileges.up.sql'
+  assert_contains "$text" \
+    'db/migrations/0016_control_plane_lock_privileges.down.sql'
+  assert_contains "$text" \
+    'db/migrations/0017_operator_query_projection_reads.up.sql'
+  assert_contains "$text" \
+    'db/migrations/0017_operator_query_projection_reads.down.sql'
+  assert_contains "$text" 'jp24_redis_dead_instance_janitor.py'
+  assert_contains "$text" \
+    'infra/systemd/trader-v3-redis-dead-instance-janitor.service'
+  assert_contains "$text" \
+    'infra/systemd/trader-v3-redis-dead-instance-janitor.timer'
   assert_contains "$text" 'db/migrations/0005_order_management.up.sql'
   assert_contains "$text" 'db/migrations/0005_order_management.down.sql'
   assert_contains "$text" '"0005", "order_management"'
@@ -107,6 +120,10 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" '"cancel_order_contract",'
   assert_contains "$text" '"0015",'
   assert_contains "$text" '"refresh_evidence_command",'
+  assert_contains "$text" '"0016",'
+  assert_contains "$text" '"control_plane_lock_privileges",'
+  assert_contains "$text" '"0017",'
+  assert_contains "$text" '"operator_query_projection_reads",'
   assert_contains "$text" 'release migration metadata mismatch: steps'
   assert_contains "$text" \
     'release migration metadata lacks four-account files'

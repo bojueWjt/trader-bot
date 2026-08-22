@@ -1,0 +1,18 @@
+[Unit]
+Description=Trader v3: remove retired Redis persistence generations
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=balen
+Group=balen
+WorkingDirectory=/srv/trader-v3
+EnvironmentFile=/etc/trader-v3/redis-janitor.env
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=+/usr/bin/install -d -m 0750 /var/log/trader-v3
+ExecStart=/usr/bin/flock -n /var/lock/trader-v3-redis-namespace-janitor.lock /srv/trader-v3/.venv-cp/bin/python /srv/trader-v3/scripts/redis_namespace_janitor.py --scheduled-apply
+StandardOutput=append:/var/log/trader-v3/redis-janitor.log
+StandardError=append:/var/log/trader-v3/redis-janitor.log
+TimeoutStartSec=30m
+UMask=0027

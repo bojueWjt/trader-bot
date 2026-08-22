@@ -14,7 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts" / "hk-deploy-20260803.sh"
 APP_SCHEMA_EPOCH = "account-stall-hardening-runtime/v1"
-DATABASE_SCHEMA_EPOCH = "0015_refresh_evidence_command"
+DATABASE_SCHEMA_EPOCH = "0017_operator_query_projection_reads"
 REDIS_SCHEMA_EPOCH = "fenced-generation-namespace/v2"
 REVIEWER_KEY_SHA256 = (
     "2b149fe2d7357dfea74441a1f6d6f1dd"
@@ -486,6 +486,12 @@ def connect(_url):
         refresh_evidence_spec = migration_function.index(
             '"0015",\n        "refresh_evidence_command",',
         )
+        lock_privileges_spec = migration_function.index(
+            '"0016",\n        "control_plane_lock_privileges",',
+        )
+        projection_reads_spec = migration_function.index(
+            '"0017",\n        "operator_query_projection_reads",',
+        )
         migration_sql = migration_function.index("cur.execute(sql)")
         migration_record = migration_function.index(
             "INSERT INTO schema_migrations",
@@ -497,7 +503,9 @@ def connect(_url):
         self.assertLess(evidence_indexes_spec, live_safety_spec)
         self.assertLess(live_safety_spec, cancel_order_spec)
         self.assertLess(cancel_order_spec, refresh_evidence_spec)
-        self.assertLess(refresh_evidence_spec, migration_sql)
+        self.assertLess(refresh_evidence_spec, lock_privileges_spec)
+        self.assertLess(lock_privileges_spec, projection_reads_spec)
+        self.assertLess(projection_reads_spec, migration_sql)
         self.assertLess(migration_sql, migration_record)
         self.assertLess(migration_record, durable_check)
 
@@ -914,7 +922,7 @@ all_execution_accounts_stopped
         source = _migration_validator_source()
 
         self.assertIn('"$DEPLOY_GATE_MODE"', invocation)
-        self.assertIn("deploy_gate_mode = sys.argv[17]", source)
+        self.assertIn("deploy_gate_mode = sys.argv[19]", source)
         self.assertIn('"bootstrap_stopped"', source)
         self.assertIn('"bootstrap_resume_stopped"', source)
         self.assertIn('"maintenance_fence"', source)
@@ -1012,6 +1020,20 @@ def connect(_url):
             migration_payload,
             encoding="utf-8",
         )
+        lock_privileges_path = (
+            self.root / "0016_control_plane_lock_privileges.up.sql"
+        )
+        lock_privileges_path.write_text(
+            migration_payload,
+            encoding="utf-8",
+        )
+        projection_reads_path = (
+            self.root / "0017_operator_query_projection_reads.up.sql"
+        )
+        projection_reads_path.write_text(
+            migration_payload,
+            encoding="utf-8",
+        )
         marker_path = self.root / "migration-marker.json"
         fence_state_path = self.root / "maintenance-fence.json"
         environment = dict(os.environ)
@@ -1030,6 +1052,8 @@ def connect(_url):
                 str(four_account_path),
                 str(cancel_order_path),
                 str(refresh_evidence_path),
+                str(lock_privileges_path),
+                str(projection_reads_path),
                 DATABASE_SCHEMA_EPOCH,
                 str(marker_path),
                 "58deee06-3a70-47d3-b056-92854fc6c322",

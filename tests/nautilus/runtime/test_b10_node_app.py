@@ -38,7 +38,7 @@ class NodeAppAssemblyTest(unittest.TestCase):
         os.environ["TRADER_RELEASE_DEPENDENCY_LOCK_SHA256"] = "3" * 64
         os.environ[
             "TRADER_RELEASE_SCHEMA_EPOCH"
-        ] = "0015_refresh_evidence_command"
+        ] = "0017_operator_query_projection_reads"
 
     def tearDown(self) -> None:
         os.environ.clear()

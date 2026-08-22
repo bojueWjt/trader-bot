@@ -8,6 +8,18 @@ from threading import Thread
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts" / "hk-deploy-20260803.sh"
+LOCK_PRIVILEGES_UP = (
+    REPO_ROOT
+    / "db"
+    / "migrations"
+    / "0016_control_plane_lock_privileges.up.sql"
+)
+LOCK_PRIVILEGES_DOWN = (
+    REPO_ROOT
+    / "db"
+    / "migrations"
+    / "0016_control_plane_lock_privileges.down.sql"
+)
 
 
 def _function_source(name: str) -> str:
@@ -940,6 +952,29 @@ def test_lock_privilege_reconciliation_covers_row_locking_roles() -> None:
     assert "lock privilege verification failed" in source
     assert "forbidden write column is grantable" in source
     assert "CONTROL_PLANE_ROLE_LOCK_PRIVILEGES_OK" in source
+
+
+def test_lock_privilege_migration_is_schema_source_of_truth() -> None:
+    up = LOCK_PRIVILEGES_UP.read_text(encoding="utf-8")
+    down = LOCK_PRIVILEGES_DOWN.read_text(encoding="utf-8")
+
+    for grant in (
+        "GRANT UPDATE (created_at) ON redis_fencing_epochs\n"
+        "    TO trader_v3_node_control;",
+        "GRANT UPDATE (created_at) ON redis_fencing_epochs\n"
+        "    TO trader_v3_event_ingest;",
+        "GRANT UPDATE (created_at) ON node_heartbeats\n"
+        "    TO trader_v3_event_ingest;",
+        "GRANT UPDATE (created_at) ON node_heartbeats\n"
+        "    TO trader_v3_operator_query;",
+        "GRANT UPDATE (acquired_at) ON control_plane_maintenance_fences\n"
+        "    TO trader_v3_operator_query;",
+    ):
+        assert grant in up
+    assert "orders_projection" not in down
+    assert "accounts_projection" not in down
+    assert "execution_events" not in down
+    assert down.count("REVOKE UPDATE (") == 5
 
 
 def test_lock_privilege_reconciliation_precedes_topology_replacement() -> None:
