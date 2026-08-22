@@ -1341,6 +1341,8 @@ class ExecutionProjectionActor(Actor):
             )
             return _ProjectionPersistenceState.FAILED
         outcome = self._projection_ingest_outcome(result)
+        if outcome == "IGNORED":
+            return _ProjectionPersistenceState.FILTERED
         if outcome == "FILTERED":
             event_type = publication.event.__class__.__name__
             if isinstance(publication.event, dict):
@@ -1352,7 +1354,7 @@ class ExecutionProjectionActor(Actor):
                 f"{event_type}"
             )
             return _ProjectionPersistenceState.FILTERED
-        if outcome in {"HALTED", "IGNORED"}:
+        if outcome == "HALTED":
             error = RuntimeError(
                 "execution projection durable ingress is halted"
             )
@@ -4542,6 +4544,14 @@ class CommandPollerActor(Actor):
             elif cmd.type in (CommandType.CANCEL_ALL, CommandType.CLOSE_ALL):
                 if not _node_command_has_authorization(cmd):
                     return CommandAckStatus.FAILED, "authorization_source_required"
+                if (
+                    cmd.type == CommandType.CLOSE_ALL
+                    and not _node_command_is_user_authorized(cmd)
+                ):
+                    return (
+                        CommandAckStatus.FAILED,
+                        "user_authorization_required",
+                    )
                 command_account_id = _node_command_account_id(cmd)
                 if not command_account_id:
                     return CommandAckStatus.FAILED, "command_account_required"
@@ -4968,6 +4978,17 @@ def _node_command_has_authorization(cmd: Any) -> bool:
         authorized_by_type in {"user", "channel"}
         and bool(authorized_by_id)
         and bool(source_message_id)
+    )
+
+
+def _node_command_is_user_authorized(cmd: Any) -> bool:
+    if not _node_command_has_authorization(cmd):
+        return False
+    args = getattr(cmd, "args", {})
+    authorization = args.get("authorization")
+    return (
+        str(authorization.get("authorized_by_type") or "").strip()
+        == "user"
     )
 
 

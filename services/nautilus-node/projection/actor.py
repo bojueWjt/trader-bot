@@ -34,6 +34,7 @@ class ProjectionHealth(Protocol):
 class ProjectionIngestOutcome(str, Enum):
     DURABLE = "DURABLE"
     DEDUPED = "DEDUPED"
+    IGNORED = "IGNORED"
     FILTERED = "FILTERED"
     HALTED = "HALTED"
 
@@ -106,6 +107,11 @@ class ProjectionActor:
             )
         envelope = self._mapper.to_envelope(event)
         if envelope is None:
+            if self._mapper.is_expected_ownership_ignore(event):
+                return ProjectionIngestResult(
+                    outcome=ProjectionIngestOutcome.IGNORED,
+                    event_id=None,
+                )
             return ProjectionIngestResult(
                 outcome=ProjectionIngestOutcome.FILTERED,
                 event_id=None,
@@ -215,13 +221,6 @@ class ProjectionActor:
         lag_ms = _lag_ms(now=self._now(), ts_event=envelope.ts_event)
         if self._health is not None:
             self._health.record_projection_progress(lag_ms, envelope.event_id)
-            if lag_ms > self.config.lag_degrade_threshold_ms:
-                self._health.mark_projection_failed(
-                    "projection lag "
-                    f"{lag_ms}ms exceeds {self.config.lag_degrade_threshold_ms}ms"
-                )
-            else:
-                self._mark_projection_ready()
 
     def _mark_projection_ready(self) -> None:
         if self._health is None:

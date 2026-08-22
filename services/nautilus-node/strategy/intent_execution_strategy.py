@@ -210,6 +210,7 @@ class IntentExecutionStrategy(Strategy):
         self._reported_protection_denials: set[tuple[str, str]] = set()
         self._exchange_cancel_adapter: Any = False
         self._exchange_state_mirror: Any = False
+        self._exchange_evidence_provider: Any = False
         self._terminal_exchange_worker: Any = False
         self._terminal_exchange_halt_handler: Optional[
             Callable[[str], None]
@@ -220,6 +221,11 @@ class IntentExecutionStrategy(Strategy):
         self._pending_terminal_exchange: dict[
             str,
             dict[str, Any],
+        ] = {}
+        self._pending_order_confirmations: dict[str, str] = {}
+        self._user_directed_robot_fill_remaining: dict[
+            str,
+            Decimal,
         ] = {}
         self._symbol_open_freezes: dict[str, str] = {}
         self._terminal_command_request_ids: dict[str, str] = {}
@@ -232,6 +238,9 @@ class IntentExecutionStrategy(Strategy):
         )
         self._live_entry_notional_caps = (
             _parse_live_entry_notional_inventory(inventory)
+        )
+        self._minimum_shared_margin_ratio = (
+            _configured_minimum_shared_margin_ratio()
         )
         execution_path = str(
             getattr(config, "live_canary_execution_path", "") or ""
@@ -369,6 +378,9 @@ class IntentExecutionStrategy(Strategy):
     def set_exchange_cancel_adapter(self, adapter: Any, mirror: Any) -> None:
         self._exchange_cancel_adapter = adapter
         self._exchange_state_mirror = mirror
+
+    def set_exchange_evidence_provider(self, provider: Any) -> None:
+        self._exchange_evidence_provider = provider
 
     def set_terminal_exchange_worker(
         self,
@@ -705,50 +717,314 @@ class IntentExecutionStrategy(Strategy):
         instrument_id = str(stash.get("instrument_id") or "")
         if not instrument_id:
             return
-        if stash.get("stop_loss") is None:
+        if self._has_pending_tp_market_fallback(stash):
+            return
+        expected_keys = self._expected_protection_keys(stash)
+        if not expected_keys:
             return
         position = self._protection_position(
             instrument_id,
             str(stash.get("entry_side") or ""),
         )
         if position is None:
-            stash.pop("watchdog_missing_stop_count", None)
+            stash.pop("watchdog_repair_failure_count", None)
             return
-        sequence_start = int(stash.get("protection_sequence_start", 11))
-        live = self._live_protection_orders(
-            instrument_id,
+        observed_keys = self._exchange_protection_keys(
             intent_key,
-            sequence_start,
-            position_id=_position_id(position),
+            stash,
         )
-        has_stop = any(
-            self._protection_order_role(stash, order) == "stop_loss"
-            for order in live
-        )
-        if has_stop:
-            stash.pop("watchdog_missing_stop_count", None)
+        if observed_keys is None:
             return
-        count = int(stash.get("watchdog_missing_stop_count", 0)) + 1
-        stash["watchdog_missing_stop_count"] = count
-        self._schedule_protection_sync(intent_key, delay_seconds=0.0)
+        missing_keys = tuple(
+            expected_key
+            for expected_key in expected_keys
+            if not any(
+                _protection_keys_match(expected_key, observed_key)
+                for observed_key in observed_keys
+            )
+        )
+        if not missing_keys:
+            stash.pop("watchdog_repair_failure_count", None)
+            return
+        repaired = self._repair_missing_protection_orders(
+            intent_key,
+            stash,
+            position,
+            missing_keys,
+        )
+        if repaired:
+            stash.pop("watchdog_repair_failure_count", None)
+            return
+        count = int(
+            stash.get("watchdog_repair_failure_count", 0)
+        ) + 1
+        stash["watchdog_repair_failure_count"] = count
         if count < 2:
+            self._queue_entry_protection_stash_persist()
             return
         self._freeze_symbol_new_opens(
             instrument_id,
-            "protection stop-loss missing after watchdog repair",
+            "protection order repair failed twice",
+        )
+        missing_labels = tuple(
+            _protection_key_label(key)
+            for key in missing_keys
         )
         self._report_protection_event(
             intent_key,
             stash,
             event_type="ProtectionWatchdogSymbolStopped",
-            event_key=f"{intent_key}:stop_loss_missing:{count}",
+            event_key=(
+                f"{intent_key}:protection_missing:"
+                f"{','.join(missing_labels)}:{count}"
+            ),
             payload={
-                "reason": "stop_loss_missing",
+                "reason": "protection_order_missing",
+                "missing_protections": missing_labels,
                 "consecutive_failures": count,
                 "action": "symbol_new_open_frozen",
             },
         )
         self._queue_entry_protection_stash_persist()
+
+    def _expected_protection_keys(
+        self,
+        stash: dict[str, Any],
+    ) -> tuple[tuple[str, str | None], ...]:
+        expected: list[tuple[str, str | None]] = []
+        if stash.get("stop_loss") is not None:
+            expected.append(("stop_loss", None))
+        tombstone = stash.get("take_profit_tombstone")
+        if _valid_take_profit_tombstone(
+            tombstone,
+            stash.get("take_profit_parent_intent_id"),
+        ):
+            return tuple(expected)
+        targets = _take_profit_prices(stash.get("take_profits"))[:8]
+        quantities = stash.get("take_profit_quantities")
+        consumed = stash.get("tp_consumed")
+        consumed_by_price = consumed if isinstance(consumed, dict) else {}
+        for index, target in enumerate(targets):
+            price_key = _price_key(target)
+            raw_consumed = consumed_by_price.get(price_key, "0")
+            try:
+                consumed_quantity = Decimal(str(raw_consumed))
+            except (InvalidOperation, TypeError, ValueError):
+                consumed_quantity = Decimal("0")
+            if (
+                isinstance(quantities, (list, tuple))
+                and index < len(quantities)
+            ):
+                try:
+                    target_quantity = Decimal(str(quantities[index]))
+                except (InvalidOperation, TypeError, ValueError):
+                    target_quantity = Decimal("0")
+                if (
+                    target_quantity <= 0
+                    or consumed_quantity >= target_quantity
+                ):
+                    continue
+            elif consumed_quantity > 0:
+                continue
+            expected.append(("take_profit", price_key))
+        return tuple(expected)
+
+    def _exchange_protection_keys(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+    ) -> tuple[tuple[str, str | None], ...] | None:
+        provider = self._exchange_evidence_provider
+        if not provider:
+            instrument_id = str(stash.get("instrument_id") or "")
+            sequence_start = int(
+                stash.get("protection_sequence_start", 11)
+            )
+            live = self._live_protection_orders(
+                instrument_id,
+                intent_key,
+                sequence_start,
+            )
+            return tuple(
+                key
+                for order in live
+                for key in (
+                    self._protection_key_for_order(stash, order),
+                )
+                if key is not None
+            )
+        snapshot_method = getattr(provider, "snapshot", None)
+        if not callable(snapshot_method):
+            return None
+        try:
+            snapshot = snapshot_method(force_refresh=True)
+        except Exception:
+            return None
+        if not isinstance(snapshot, Mapping):
+            return None
+        instrument_symbol = _canonical_symbol(
+            str(stash.get("instrument_id") or "")
+        )
+        observed: list[tuple[str, str | None]] = []
+        for field_name in ("regular_orders", "algo_orders"):
+            rows = snapshot.get(field_name)
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    return None
+                client_order_id = str(
+                    row.get("client_order_id") or ""
+                )
+                if not is_robot_client_order_id(client_order_id):
+                    continue
+                if _canonical_symbol(
+                    str(row.get("symbol") or "")
+                ) != instrument_symbol:
+                    continue
+                key = self._protection_key_for_client_order_id(
+                    intent_key,
+                    stash,
+                    client_order_id,
+                )
+                if key is not None:
+                    observed.append(key)
+        return tuple(observed)
+
+    def _protection_key_for_client_order_id(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+        client_order_id: str,
+    ) -> tuple[str, str | None] | None:
+        roles = stash.get("protection_roles")
+        if isinstance(roles, dict):
+            role_info = roles.get(client_order_id)
+            if isinstance(role_info, dict):
+                role = str(role_info.get("role") or "")
+                if role:
+                    price = None
+                    if role == "take_profit":
+                        price = str(role_info.get("tp_price") or "")
+                    return role, price
+        if client_order_id not in tuple(
+            stash.get("protection_ids") or ()
+        ):
+            return None
+        role_info = self._legacy_protection_role_info(
+            client_order_id,
+            stash,
+        )
+        if role_info is None:
+            return None
+        role = str(role_info.get("role") or "")
+        if role:
+            price = None
+            if role == "take_profit":
+                price = str(role_info.get("tp_price") or "")
+            return role, price
+        try:
+            trace = decode_client_order_id(client_order_id)
+        except ValueError:
+            return None
+        if str(trace.intent_id) != intent_key:
+            return None
+        return None
+
+    def _protection_key_for_order(
+        self,
+        stash: dict[str, Any],
+        order: Any,
+    ) -> tuple[str, str | None] | None:
+        role = self._protection_order_role(stash, order)
+        if role is None:
+            return None
+        price = None
+        if role == "take_profit":
+            client_order_id = str(
+                getattr(order, "client_order_id", "") or ""
+            )
+            roles = stash.get("protection_roles")
+            if isinstance(roles, dict):
+                role_info = roles.get(client_order_id)
+                if isinstance(role_info, dict):
+                    price = str(role_info.get("tp_price") or "")
+            if not price:
+                trigger = getattr(order, "trigger_price", None)
+                if trigger is None:
+                    trigger = getattr(order, "price", None)
+                price = str(trigger or "")
+        return role, price
+
+    def _repair_missing_protection_orders(
+        self,
+        intent_key: str,
+        stash: dict[str, Any],
+        position: Any,
+        missing_keys: tuple[tuple[str, str | None], ...],
+    ) -> bool:
+        instrument_id = str(stash.get("instrument_id") or "")
+        instrument = self._instrument_spec(instrument_id)
+        if instrument is None:
+            return False
+        quantity = _round_down_positive(
+            _position_quantity(position),
+            instrument.quantity_increment,
+        )
+        if quantity is None:
+            return False
+        revision = int(stash.get("protection_revision", -1)) + 1
+        if revision > self._PROTECTION_MAX_REVISION:
+            return False
+        plans = self._protection_order_plans(
+            UUID(intent_key),
+            stash,
+            instrument,
+            position,
+            quantity,
+            revision=revision,
+        )
+        repair_plans = tuple(
+            plan
+            for plan in plans
+            if any(
+                _protection_keys_match(
+                    _protection_plan_key(plan),
+                    missing_key,
+                )
+                for missing_key in missing_keys
+            )
+        )
+        if not repair_plans:
+            return False
+        stash["protection_revision"] = revision
+        submitted_ids: list[str] = []
+        all_submitted = True
+        for plan in repair_plans:
+            if not self._submit_order_plan(plan):
+                all_submitted = False
+                continue
+            submitted_ids.append(plan.client_order_id)
+            self._register_protection_role(
+                intent_key,
+                stash,
+                plan.client_order_id,
+                plan,
+            )
+        protection_ids = tuple(
+            str(value)
+            for value in stash.get("protection_ids", ())
+            if str(value)
+        )
+        stash["protection_ids"] = tuple(
+            dict.fromkeys(
+                protection_ids + tuple(submitted_ids)
+            )
+        )
+        if submitted_ids:
+            stash["protected_quantity"] = quantity
+        self._queue_entry_protection_stash_persist()
+        return all_submitted and len(submitted_ids) == len(repair_plans)
 
     def _refresh_exchange_state(self) -> bool:
         mirror = self._exchange_state_mirror
@@ -1093,10 +1369,21 @@ class IntentExecutionStrategy(Strategy):
         ctype = str(getattr(ctype, "value", ctype)).lower()
         if ctype not in {"cancel_all", "close_all"}:
             return
+        if ctype == "close_all" and not _node_command_is_user_authorized(
+            cmd
+        ):
+            self._record_denial(
+                OrderDenied(
+                    "user_authorization_required",
+                    "close_all",
+                )
+            )
+            return
         command_id = str(getattr(cmd, "command_id", "") or "").strip()
         args = getattr(cmd, "args", {})
         if not isinstance(args, dict):
             return
+        authorization = dict(args.get("authorization") or {})
         command_account_id = str(
             args.get("account_id") or self.config.account_id
         ).strip()
@@ -1130,6 +1417,7 @@ class IntentExecutionStrategy(Strategy):
                 command_type=ctype,
                 instrument_ids=instrument_ids,
                 dispatched_at=dispatched_at,
+                authorization=authorization,
             )
             return
         operations: list[dict[str, Any]] = []
@@ -1144,6 +1432,8 @@ class IntentExecutionStrategy(Strategy):
                 instrument_ids,
                 operations,
                 errors,
+                command_id=command_id,
+                authorization=authorization,
             )
         payload = {
             "command_id": command_id,
@@ -1169,6 +1459,7 @@ class IntentExecutionStrategy(Strategy):
         command_type: str,
         instrument_ids: tuple[str, ...],
         dispatched_at: datetime,
+        authorization: dict[str, Any],
     ) -> bool:
         if not command_id:
             self._record_denial(
@@ -1199,6 +1490,7 @@ class IntentExecutionStrategy(Strategy):
             "command_type": command_type,
             "instrument_ids": instrument_ids,
             "dispatched_at": dispatched_at,
+            "authorization": authorization,
         }
         self._terminal_command_request_ids[command_id] = request_id
         if self._terminal_exchange_worker.submit(request):
@@ -1355,6 +1647,10 @@ class IntentExecutionStrategy(Strategy):
                 instrument_ids,
                 operations,
                 errors,
+                command_id=command_id,
+                authorization=dict(
+                    pending.get("authorization") or {}
+                ),
             )
         dispatched_at = pending["dispatched_at"]
         payload = {
@@ -1614,27 +1910,203 @@ class IntentExecutionStrategy(Strategy):
         instrument_ids: tuple[str, ...],
         operations: list[dict[str, Any]],
         errors: list[str],
+        *,
+        command_id: str,
+        authorization: Mapping[str, Any],
     ) -> None:
-        for position in self._all_open_positions():
-            instrument_id = str(
-                getattr(position, "instrument_id", "") or ""
-            )
+        positions = self._terminal_positions_for_close(errors)
+        for position in positions:
+            instrument_id = _position_instrument_id(position)
             if not _terminal_instrument_matches(
                 instrument_id,
                 instrument_ids,
             ):
                 continue
+            position_side = _position_side(position)
+            quantity = _position_quantity(position)
+            robot_owned_quantity = self._robot_owned_position_quantity(
+                instrument_id,
+                position_side,
+                quantity,
+            )
+            user_directed_quantity = _decimal_difference(
+                quantity,
+                robot_owned_quantity,
+            )
             operation = {
                 "kind": "close_position",
                 "position_id": _position_id(position) or "",
                 "instrument_id": instrument_id,
-                "position_side": _position_side(position),
-                "quantity": _position_quantity(position),
+                "position_side": position_side,
+                "quantity": quantity,
+                "robot_owned_quantity": robot_owned_quantity,
+                "user_directed_quantity": user_directed_quantity,
                 "reduce_only": True,
-                "status": "skipped",
-                "outcome": "manual_position_read_only",
+                "status": "requested",
+                "outcome": "user_directed_account_close",
             }
+            plan = self._user_directed_close_plan(
+                command_id=command_id,
+                authorization=authorization,
+                position=position,
+                instrument_id=instrument_id,
+                position_side=position_side,
+                quantity=quantity,
+                robot_owned_quantity=robot_owned_quantity,
+                user_directed_quantity=user_directed_quantity,
+            )
+            if not self._submit_order_plan(plan):
+                operation["status"] = "failed"
+                detail = (
+                    self.denials[-1].detail
+                    if self.denials
+                    else plan.client_order_id
+                )
+                operation["error"] = detail
+                errors.append(detail)
+            else:
+                operation["status"] = "submitted"
+                operation["client_order_id"] = plan.client_order_id
             operations.append(operation)
+
+    def _terminal_positions_for_close(
+        self,
+        errors: list[str],
+    ) -> tuple[Any, ...]:
+        provider = self._exchange_evidence_provider
+        if provider:
+            snapshot_method = getattr(provider, "snapshot", None)
+            if not callable(snapshot_method):
+                errors.append(
+                    "exchange position evidence provider is unavailable"
+                )
+                return ()
+            try:
+                snapshot = snapshot_method(force_refresh=True)
+            except Exception as exc:
+                errors.append(
+                    f"exchange position snapshot failed: {exc!r}"
+                )
+                return ()
+            if not isinstance(snapshot, Mapping):
+                errors.append("exchange position snapshot is invalid")
+                return ()
+            rows = snapshot.get("positions")
+            if not isinstance(rows, list):
+                errors.append("exchange position snapshot is invalid")
+                return ()
+            positions: list[dict[str, Any]] = []
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    errors.append(
+                        "exchange position snapshot is invalid"
+                    )
+                    return ()
+                symbol = _canonical_symbol(row.get("symbol"))
+                if not symbol:
+                    errors.append(
+                        "exchange position snapshot is invalid"
+                    )
+                    return ()
+                positions.append(
+                    {
+                        **dict(row),
+                        "instrument_id": (
+                            f"{symbol}-PERP.BINANCE"
+                        ),
+                    }
+                )
+            return tuple(positions)
+        return self._all_open_positions()
+
+    def _robot_owned_position_quantity(
+        self,
+        instrument_id: str,
+        position_side: str,
+        account_quantity: str,
+    ) -> str:
+        owned_quantities: list[Decimal] = []
+        for stash in self._entry_protection_stash.values():
+            if not isinstance(stash, Mapping):
+                continue
+            if str(stash.get("instrument_id") or "") != instrument_id:
+                continue
+            entry_side = str(stash.get("entry_side") or "").upper()
+            owned_side = "LONG" if entry_side == "BUY" else "SHORT"
+            if owned_side != position_side:
+                continue
+            try:
+                protected_quantity = Decimal(
+                    str(stash.get("protected_quantity") or "0")
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if (
+                protected_quantity.is_finite()
+                and protected_quantity > 0
+            ):
+                owned_quantities.append(protected_quantity)
+        owned_quantity = sum(owned_quantities, Decimal("0"))
+        try:
+            account = Decimal(str(account_quantity))
+        except (InvalidOperation, TypeError, ValueError):
+            account = Decimal("0")
+        owned_quantity = min(max(owned_quantity, Decimal("0")), account)
+        return format(owned_quantity, "f")
+
+    def _user_directed_close_plan(
+        self,
+        *,
+        command_id: str,
+        authorization: Mapping[str, Any],
+        position: Any,
+        instrument_id: str,
+        position_side: str,
+        quantity: str,
+        robot_owned_quantity: str,
+        user_directed_quantity: str,
+    ) -> OrderPlan:
+        material = "|".join(
+            (
+                str(command_id),
+                instrument_id,
+                str(_position_id(position) or position_side),
+            )
+        )
+        intent_id = UUID(
+            hex=sha256(material.encode("utf-8")).hexdigest()[:32]
+        )
+        side = "SELL" if position_side == "LONG" else "BUY"
+        tags = (
+            f"intent_id={intent_id}",
+            "lifecycle_role=user_directed_close",
+            "user_directed=true",
+            f"robot_owned_quantity={robot_owned_quantity}",
+            f"user_directed_quantity={user_directed_quantity}",
+            "authorized_by_type=user",
+            "authorized_by_id="
+            f"{str(authorization.get('authorized_by_id') or '')}",
+            "source_message_id="
+            f"{str(authorization.get('source_message_id') or '')}",
+        )
+        position_id = _position_id(position)
+        if position_id:
+            tags += (f"position_id={position_id}",)
+        return OrderPlan(
+            intent_id=intent_id,
+            client_order_id=encode_client_order_id(
+                intent_id,
+                sequence=99,
+            ),
+            tags=tags,
+            instrument_id=instrument_id,
+            side=side,
+            order_type="MARKET",
+            quantity=quantity,
+            price=None,
+            time_in_force="IOC",
+            reduce_only=True,
+        )
 
     def _publish_terminal_command_result(
         self,
@@ -2796,6 +3268,7 @@ class IntentExecutionStrategy(Strategy):
 
     def on_order_filled(self, event: Any) -> None:
         self._confirm_durable_intent_order_event(event)
+        self._confirm_filled_order_event(event)
         self._confirm_live_canary_order_event(event)
         self._queue_live_canary_fill(event)
         client_order_id = _event_client_order_id(event)
@@ -3066,14 +3539,17 @@ class IntentExecutionStrategy(Strategy):
     # attacking the stop. Any terminal event on a protection id re-arms the sync.
     def on_order_rejected(self, event: Any) -> None:
         self._confirm_durable_intent_order_event(event)
+        self._confirm_terminal_order_event(event)
         self._confirm_live_canary_order_event(event)
         self._on_protection_order_terminal(event, count_retry=True)
 
     def on_order_denied(self, event: Any) -> None:
+        self._confirm_terminal_order_event(event)
         self._on_protection_order_terminal(event, count_retry=True)
 
     def on_order_canceled(self, event: Any) -> None:
         self._confirm_durable_intent_order_event(event)
+        self._confirm_terminal_order_event(event)
         self._confirm_live_canary_order_event(event)
         # Usually our own make-before-break cancel confirmations: resync to
         # verify convergence, but do NOT feed the backoff counter (review P2-3).
@@ -3081,6 +3557,7 @@ class IntentExecutionStrategy(Strategy):
 
     def on_order_expired(self, event: Any) -> None:
         self._confirm_durable_intent_order_event(event)
+        self._confirm_terminal_order_event(event)
         self._confirm_live_canary_order_event(event)
         self._on_protection_order_terminal(event, count_retry=True)
 
@@ -3090,15 +3567,54 @@ class IntentExecutionStrategy(Strategy):
             return
         if not is_robot_client_order_id(client_order_id):
             return
-        instrument_id = _event_instrument_id(event)
-        if instrument_id is not None:
-            self._clear_symbol_open_freeze(str(instrument_id))
         self._submit_durable_io_task(
             _DurableIoTask(
                 kind=_DurableIoTaskKind.INTENT_EXCHANGE_CONFIRMED,
                 client_order_id=client_order_id,
             )
         )
+
+    def _register_pending_order_confirmation(
+        self,
+        plan: OrderPlan,
+    ) -> None:
+        client_order_id = str(plan.client_order_id)
+        if not is_robot_client_order_id(client_order_id):
+            return
+        instrument_id = str(plan.instrument_id)
+        if not instrument_id:
+            return
+        self._pending_order_confirmations[client_order_id] = instrument_id
+
+    def _confirm_terminal_order_event(self, event: Any) -> None:
+        client_order_id = _event_client_order_id(event)
+        if client_order_id is None:
+            return
+        if not is_robot_client_order_id(client_order_id):
+            return
+        self._pending_order_confirmations.pop(client_order_id, None)
+
+    def _confirm_filled_order_event(self, event: Any) -> None:
+        client_order_id = _event_client_order_id(event)
+        if client_order_id is None:
+            return
+        if not is_robot_client_order_id(client_order_id):
+            return
+        instrument_id = self._pending_order_confirmations.get(
+            client_order_id
+        )
+        if not instrument_id:
+            return
+        for order in self._cache_orders(instrument_id):
+            order_client_order_id = str(
+                getattr(order, "client_order_id", "") or ""
+            )
+            if order_client_order_id != client_order_id:
+                continue
+            status = self._order_status_name(order)
+            if status not in self._PROTECTION_TERMINAL_STATUSES:
+                return
+        self._pending_order_confirmations.pop(client_order_id, None)
 
     def _submit_durable_io_task(
         self,
@@ -4362,6 +4878,14 @@ class IntentExecutionStrategy(Strategy):
         instrument_id = _event_instrument_id(event)
         side = _event_order_side(event)
         quantity = _event_last_qty(event)
+        if _event_has_tag(event, "user_directed=true"):
+            quantity = self._user_directed_robot_fill_quantity(
+                client_order_id,
+                event,
+                quantity,
+            )
+            if quantity is None:
+                return False
         price = _event_fill_price(event)
         fee, fee_error = _event_fee_usdt(event)
         accounting_errors = []
@@ -4413,6 +4937,38 @@ class IntentExecutionStrategy(Strategy):
             "occurred_at": _event_occurred_at(event),
             "accounting_error": "; ".join(accounting_errors),
         }
+
+    def _user_directed_robot_fill_quantity(
+        self,
+        client_order_id: str,
+        event: Any,
+        fill_quantity: str | None,
+    ) -> str | None:
+        fill = _positive_canary_decimal(fill_quantity)
+        if fill is None:
+            return fill_quantity
+        remaining = self._user_directed_robot_fill_remaining.get(
+            client_order_id
+        )
+        if remaining is None:
+            raw_owned = _event_tag_value(
+                event,
+                "robot_owned_quantity=",
+            )
+            try:
+                remaining = Decimal(str(raw_owned))
+            except (InvalidOperation, TypeError, ValueError):
+                return fill_quantity
+            if not remaining.is_finite() or remaining < 0:
+                return fill_quantity
+        attributed = min(fill, remaining)
+        remaining -= attributed
+        self._user_directed_robot_fill_remaining[
+            client_order_id
+        ] = remaining
+        if attributed <= 0:
+            return None
+        return format(attributed, "f")
 
     def process_live_canary_risk_task(
         self,
@@ -6046,7 +6602,16 @@ class IntentExecutionStrategy(Strategy):
 
     @property
     def symbol_open_freezes(self) -> dict[str, str]:
-        return dict(self._symbol_open_freezes)
+        freezes = dict(self._symbol_open_freezes)
+        for instrument_id in self._pending_order_confirmations.values():
+            key = _canonical_symbol(instrument_id)
+            if not key:
+                continue
+            freezes.setdefault(
+                key,
+                "robot order terminal confirmation pending",
+            )
+        return freezes
 
     def _symbol_open_freeze_denial(
         self,
@@ -6056,7 +6621,7 @@ class IntentExecutionStrategy(Strategy):
         if action not in {"open_position", "add_position"}:
             return None
         key = _canonical_symbol(instrument_id)
-        reason = self._symbol_open_freezes.get(key)
+        reason = self.symbol_open_freezes.get(key)
         if reason is None:
             return None
         return OrderDenied(
@@ -6379,6 +6944,7 @@ class IntentExecutionStrategy(Strategy):
                     )
                 else:
                     self.submit_order(order)  # type: ignore[attr-defined]
+                self._register_pending_order_confirmation(plan)
         except Exception as exc:
             self._record_denial(
                 OrderDenied("order_submit_failed", repr(exc))
@@ -6551,6 +7117,7 @@ class IntentExecutionStrategy(Strategy):
                 self.submit_order(order, position_id=position_id)  # type: ignore[attr-defined]
             else:
                 self.submit_order(order)  # type: ignore[attr-defined]
+            self._register_pending_order_confirmation(plan)
         except Exception as exc:  # Fail closed: no silent drops on adapter/API mismatch.
             self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
             return False
@@ -6587,10 +7154,80 @@ class IntentExecutionStrategy(Strategy):
                 )
             except Exception as exc:
                 return OrderDenied("order_submit_failed", repr(exc))
+        margin_denial = self._live_shared_margin_denial(plan)
+        if margin_denial is not None:
+            return margin_denial
         entry_denial = self._live_entry_notional_denial(plan, order)
         if entry_denial is not None:
             return entry_denial
         return order
+
+    def _live_shared_margin_denial(
+        self,
+        plan: OrderPlan,
+    ) -> OrderDenied | None:
+        environment = str(
+            getattr(self.config, "environment", "")
+        ).strip().lower()
+        if environment != "live" or plan.reduce_only:
+            return None
+        provider = self._exchange_evidence_provider
+        if not provider:
+            return OrderDenied(
+                "shared_margin_evidence_unavailable",
+                str(plan.instrument_id),
+            )
+        margin_snapshot = getattr(provider, "margin_snapshot", None)
+        if not callable(margin_snapshot):
+            return OrderDenied(
+                "shared_margin_evidence_unavailable",
+                str(plan.instrument_id),
+            )
+        try:
+            evidence = margin_snapshot()
+        except Exception as exc:
+            return OrderDenied(
+                "shared_margin_evidence_unavailable",
+                repr(exc),
+            )
+        if not isinstance(evidence, Mapping):
+            return OrderDenied(
+                "shared_margin_evidence_invalid",
+                str(plan.instrument_id),
+            )
+        try:
+            available_balance = Decimal(
+                str(evidence.get("available_balance"))
+            )
+            total_margin_balance = Decimal(
+                str(evidence.get("total_margin_balance"))
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            return OrderDenied(
+                "shared_margin_evidence_invalid",
+                str(plan.instrument_id),
+            )
+        if (
+            not available_balance.is_finite()
+            or not total_margin_balance.is_finite()
+            or available_balance < 0
+            or total_margin_balance <= 0
+        ):
+            return OrderDenied(
+                "shared_margin_evidence_invalid",
+                str(plan.instrument_id),
+            )
+        ratio = available_balance / total_margin_balance
+        if ratio < self._minimum_shared_margin_ratio:
+            return OrderDenied(
+                "shared_margin_ratio_below_threshold",
+                (
+                    f"ratio={format(ratio, 'f')}:"
+                    "threshold="
+                    f"{format(self._minimum_shared_margin_ratio, 'f')}"
+                ),
+            )
+        return None
 
     def _live_entry_notional_denial(
         self,
@@ -8627,6 +9264,31 @@ def _protection_plan_key(plan: OrderPlan) -> tuple[str, Optional[str]]:
     return role, str(plan.trigger_price) if role == "take_profit" else None
 
 
+def _protection_keys_match(
+    left: tuple[str, str | None],
+    right: tuple[str, str | None],
+) -> bool:
+    left_role, left_price = left
+    right_role, right_price = right
+    if left_role != right_role:
+        return False
+    if left_role == "stop_loss":
+        return True
+    try:
+        return Decimal(str(left_price)) == Decimal(str(right_price))
+    except (InvalidOperation, TypeError, ValueError):
+        return str(left_price or "") == str(right_price or "")
+
+
+def _protection_key_label(
+    key: tuple[str, str | None],
+) -> str:
+    role, price = key
+    if role == "take_profit" and price:
+        return f"{role}:{price}"
+    return role
+
+
 def _price_key(value: Any) -> str:
     if isinstance(value, dict):
         raw = value.get(
@@ -8950,6 +9612,17 @@ def _node_command_has_authorization(cmd: Any) -> bool:
     )
 
 
+def _node_command_is_user_authorized(cmd: Any) -> bool:
+    if not _node_command_has_authorization(cmd):
+        return False
+    args = getattr(cmd, "args", {})
+    authorization = args.get("authorization")
+    return (
+        str(authorization.get("authorized_by_type") or "").strip()
+        == "user"
+    )
+
+
 def _terminal_command_instrument_ids(
     args: dict[str, Any],
 ) -> tuple[str, ...]:
@@ -9083,6 +9756,22 @@ def _nonzero_positions(positions: Iterable[Any]) -> tuple[Any, ...]:
 
 
 def _position_side(position: Any) -> str:
+    if isinstance(position, Mapping):
+        raw_side = position.get("side")
+        if raw_side is None:
+            raw_side = position.get("position_side")
+        if raw_side is not None:
+            raw = str(raw_side).upper()
+            if "SHORT" in raw:
+                return "SHORT"
+            if "LONG" in raw:
+                return "LONG"
+        signed_qty = position.get("signed_qty")
+        if signed_qty is None:
+            signed_qty = position.get("quantity")
+        if signed_qty is not None and str(signed_qty).startswith("-"):
+            return "SHORT"
+        return "LONG"
     for name in ("side", "position_side"):
         value = getattr(position, name, None)
         if value is not None:
@@ -9098,6 +9787,12 @@ def _position_side(position: Any) -> str:
 
 
 def _position_quantity(position: Any) -> str:
+    if isinstance(position, Mapping):
+        for name in ("quantity", "qty", "signed_qty"):
+            value = position.get(name)
+            if value is not None:
+                return str(value).lstrip("-")
+        return "0"
     for name in ("quantity", "qty", "signed_qty"):
         value = getattr(position, name, None)
         if value is not None:
@@ -9106,6 +9801,12 @@ def _position_quantity(position: Any) -> str:
 
 
 def _position_id(position: Any) -> Optional[str]:
+    if isinstance(position, Mapping):
+        for name in ("id", "position_id"):
+            value = position.get(name)
+            if value is not None:
+                return str(value)
+        return None
     for name in ("id", "position_id"):
         value = getattr(position, name, None)
         if value is not None:
@@ -9144,6 +9845,62 @@ def _optional_str(value: Any) -> Optional[str]:
 
 def _canonical_symbol(value: Any) -> str:
     return str(value or "").strip().upper().split("-")[0].split(".")[0]
+
+
+def _position_instrument_id(position: Any) -> str:
+    if isinstance(position, Mapping):
+        return str(position.get("instrument_id") or "")
+    return str(getattr(position, "instrument_id", "") or "")
+
+
+def _decimal_difference(
+    total: str,
+    owned: str,
+) -> str:
+    try:
+        difference = Decimal(str(total)) - Decimal(str(owned))
+    except (InvalidOperation, TypeError, ValueError):
+        return "0"
+    return format(max(difference, Decimal("0")), "f")
+
+
+def _event_has_tag(event: Any, expected: str) -> bool:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        tags = getattr(holder, "tags", ())
+        if expected in {str(tag) for tag in (tags or ())}:
+            return True
+    return False
+
+
+def _event_tag_value(event: Any, prefix: str) -> str | None:
+    for holder in (event, getattr(event, "order", None)):
+        if holder is None:
+            continue
+        tags = getattr(holder, "tags", ())
+        for raw_tag in tags or ():
+            tag = str(raw_tag)
+            if tag.startswith(prefix):
+                return tag[len(prefix):]
+    return None
+
+
+def _configured_minimum_shared_margin_ratio() -> Decimal:
+    raw = os.environ.get(
+        "TRADER_MIN_FREE_MARGIN_RATIO",
+        os.environ.get(
+            "CONTROL_PLANE_MIN_FREE_MARGIN_RATIO",
+            "0.05",
+        ),
+    ).strip()
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0.05")
+    if not value.is_finite() or value < 0 or value > 1:
+        return Decimal("0.05")
+    return value
 
 
 def _positive_canary_decimal(value: Any) -> Decimal | None:

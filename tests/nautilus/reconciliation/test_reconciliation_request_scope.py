@@ -2,22 +2,35 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
+EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
+sys.path.insert(0, str(SERVICE_ROOT))
+sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 pytest.importorskip("nautilus_trader")
 pd = pytest.importorskip("pandas")
 
 from nautilus_trader.core.uuid import UUID4  # noqa: E402
 from nautilus_trader.execution.messages import GenerateFillReports  # noqa: E402
+from nautilus_trader.execution.reports import OrderStatusReport  # noqa: E402
+from nautilus_trader.model.enums import OrderSide  # noqa: E402
+from nautilus_trader.model.enums import OrderStatus  # noqa: E402
+from nautilus_trader.model.enums import OrderType  # noqa: E402
+from nautilus_trader.model.enums import TimeInForce  # noqa: E402
 from nautilus_trader.model.identifiers import AccountId  # noqa: E402
 from nautilus_trader.model.identifiers import ClientId  # noqa: E402
+from nautilus_trader.model.identifiers import ClientOrderId  # noqa: E402
 from nautilus_trader.model.identifiers import InstrumentId  # noqa: E402
 from nautilus_trader.model.identifiers import Venue  # noqa: E402
+from nautilus_trader.model.identifiers import VenueOrderId  # noqa: E402
+from nautilus_trader.model.objects import Quantity  # noqa: E402
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 MODULE_PATH = (
     SERVICE_ROOT / "runtime" / "nautilus_reconciliation_scope.py"
 )
@@ -77,10 +90,26 @@ class _Client:
         self._log = _Log()
         self.reconciliation_active = False
         self.commands: list[tuple[str, object]] = []
+        self._cache = _Cache()
 
-    async def generate_order_status_reports(self, command: object) -> list[object]:
+    async def generate_order_status_report(self, command: object) -> object:
         self.commands.append(("order", command))
-        return []
+        return OrderStatusReport(
+            account_id=self.account_id,
+            instrument_id=command.instrument_id,
+            venue_order_id=VenueOrderId("42"),
+            order_side=OrderSide.BUY,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.GTC,
+            order_status=OrderStatus.ACCEPTED,
+            quantity=Quantity.from_str("1"),
+            filled_qty=Quantity.from_str("0"),
+            report_id=UUID4(),
+            ts_accepted=self._clock.timestamp_ns(),
+            ts_last=self._clock.timestamp_ns(),
+            ts_init=self._clock.timestamp_ns(),
+            client_order_id=command.client_order_id,
+        )
 
     async def generate_fill_reports(self, command: object) -> list[object]:
         self.commands.append(("fill", command))
@@ -99,6 +128,52 @@ class _Engine:
         self.reconciliation_instrument_ids = list(OWNED_INSTRUMENTS)
         self.open_check_lookback_mins = 60
         self.open_check_open_only = False
+        self._cache = client._cache
+
+
+class _Cache:
+    def __init__(self) -> None:
+        self._orders = (
+            _order(OWNED_INSTRUMENTS[0], "a", 1),
+            _order(OWNED_INSTRUMENTS[1], "b", 2),
+            type(
+                "_ManualOrder",
+                (),
+                {
+                    "instrument_id": OWNED_INSTRUMENTS[0],
+                    "client_order_id": ClientOrderId("manual-order"),
+                    "venue_order_id": None,
+                },
+            )(),
+        )
+
+    def orders(self, instrument_id=None) -> tuple[object, ...]:
+        if instrument_id is None:
+            return self._orders
+        return tuple(
+            order
+            for order in self._orders
+            if order.instrument_id == instrument_id
+        )
+
+
+def _order(
+    instrument_id: InstrumentId,
+    fill: str,
+    sequence: int,
+) -> object:
+    client_order_id = ClientOrderId(
+        f"B{fill * 32}{sequence:02d}"
+    )
+    return type(
+        "_OwnedOrder",
+        (),
+        {
+            "instrument_id": instrument_id,
+            "client_order_id": client_order_id,
+            "venue_order_id": None,
+        },
+    )()
 
 
 class _HttpAccount:
@@ -164,19 +239,21 @@ def test_continuous_reconciliation_commands_are_scoped_per_owned_instrument() ->
     asyncio.run(scope._query_position_status_reports_scoped(engine))
     asyncio.run(scope._query_order_status_reports_scoped(engine))
 
-    assert _command_instrument_ids(client, "position") == set(
-        OWNED_INSTRUMENTS
-    )
+    assert _command_instrument_ids(client, "position") == set()
     assert _command_instrument_ids(client, "order") == set(
         OWNED_INSTRUMENTS
     )
+    assert _command_client_order_ids(client) == {
+        f"B{'a' * 32}01",
+        f"B{'b' * 32}02",
+    }
     assert all(
         getattr(command, "instrument_id", None) is not None
         for _kind, command in client.commands
     )
 
 
-def test_startup_mass_status_queries_each_owned_instrument_only() -> None:
+def test_startup_mass_status_queries_each_owned_order_only() -> None:
     client = _Client()
     engine = _Engine(client)
     scope._bind_client_scopes(engine)
@@ -190,17 +267,17 @@ def test_startup_mass_status_queries_each_owned_instrument_only() -> None:
     assert _command_instrument_ids(client, "order") == set(
         OWNED_INSTRUMENTS
     )
-    assert _command_instrument_ids(client, "fill") == set(
-        OWNED_INSTRUMENTS
-    )
-    assert _command_instrument_ids(client, "position") == set(
-        OWNED_INSTRUMENTS
-    )
+    assert _command_instrument_ids(client, "fill") == set()
+    assert _command_instrument_ids(client, "position") == set()
+    assert _command_client_order_ids(client) == {
+        f"B{'a' * 32}01",
+        f"B{'b' * 32}02",
+    }
     assert all(
         getattr(command, "instrument_id", None) is not None
         for _kind, command in client.commands
     )
-    assert len(client.commands) == len(OWNED_INSTRUMENTS) * 3
+    assert len(client.commands) == len(OWNED_INSTRUMENTS)
 
 
 def test_targeted_order_scope_does_not_read_other_active_symbols() -> None:
@@ -249,4 +326,12 @@ def _command_instrument_ids(
         command.instrument_id
         for command_kind, command in client.commands
         if command_kind == kind
+    }
+
+
+def _command_client_order_ids(client: _Client) -> set[str]:
+    return {
+        str(command.client_order_id)
+        for command_kind, command in client.commands
+        if command_kind == "order"
     }

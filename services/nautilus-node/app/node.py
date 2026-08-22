@@ -370,11 +370,6 @@ def build_nautilus_trading_node(
         runtime.projection_egress_progress_callback = (
             projection_wrapper.record_egress_progress
         )
-        _register_health_provider(
-            runtime,
-            "projection_progress",
-            projection_wrapper.progress_snapshot,
-        )
         callback = restart_required_callback
         if callback is None:
             callback = _build_actor_restart_required_callback()
@@ -491,6 +486,9 @@ def _build_redis_namespace_lease(config: NodeConfig) -> Any:
         namespace=derive_nautilus_cache_key_root(config),
         owner=config.node_id,
         release_id=release_id,
+        max_age_seconds=int(
+            DEFAULT_NAMESPACE_LEASE_FRESHNESS_SECONDS
+        ),
     )
 
 
@@ -1872,6 +1870,18 @@ def _build_strategy(
     strategy.set_exchange_cancel_adapter(
         runtime.exchange_cancel_adapter,
         runtime.exchange_state_mirror,
+    )
+    set_evidence_provider = getattr(
+        strategy,
+        "set_exchange_evidence_provider",
+        None,
+    )
+    if not callable(set_evidence_provider):
+        raise RuntimeError(
+            "strategy lacks exchange evidence provider injection"
+        )
+    set_evidence_provider(
+        getattr(runtime, "exchange_evidence_provider", False)
     )
     terminal_exchange_worker = _build_terminal_exchange_worker(
         runtime,

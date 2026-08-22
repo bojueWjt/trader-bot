@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 DEFAULT_REDIS_NAMESPACE_REGISTRY_KEY = "trader-bot:redis-namespaces:active"
 DEFAULT_REDIS_FENCING_EPOCH_KEY = "trader-bot:redis-fencing-epoch"
-DEFAULT_REDIS_NAMESPACE_LEASE_MAX_AGE_SECONDS = 300
+DEFAULT_REDIS_NAMESPACE_LEASE_MAX_AGE_SECONDS = 120
 DEFAULT_REDIS_NAMESPACE_LEASE_REFRESH_INTERVAL_SECONDS = 60.0
 DEFAULT_REDIS_NAMESPACE_LEASE_THREAD_JOIN_SECONDS = 5.0
 DEFAULT_REDIS_NAMESPACE_LIST_SNAPSHOT_ATTEMPTS = 3
@@ -19,7 +19,7 @@ MAX_PERSISTENCE_GENERATION_FENCING_TOKEN = 0xFFFFFFFFFFFF
 _ASCII_DECIMAL_PATTERN = re.compile(r"^[0-9]+$")
 
 _ACQUIRE_LUA = r"""
--- redis-namespace-lease:acquire-v6
+-- redis-namespace-lease:acquire-v7
 local registry_key = KEYS[1]
 local metadata_key = KEYS[2]
 local fencing_key = KEYS[3]
@@ -231,7 +231,7 @@ if current_json then
         return {0, fencing_token, "CORRUPT"}
     end
     local current_is_fresh = (
-        current_refreshed_at_epoch >= fresh_after_epoch
+        current_refreshed_at_epoch > fresh_after_epoch
     )
     if current["owner"] == owner
         and current["release_id"] == release_id
@@ -261,7 +261,7 @@ if current_json then
     end
 else
     local legacy_score = redis.call("ZSCORE", registry_key, namespace)
-    if legacy_score and tonumber(legacy_score) >= fresh_after_epoch then
+    if legacy_score and tonumber(legacy_score) > fresh_after_epoch then
         return {0, 0, "HELD_LEGACY"}
     end
 end
@@ -321,7 +321,7 @@ return {
 """
 
 _REFRESH_LUA = r"""
--- redis-namespace-lease:refresh-v4
+-- redis-namespace-lease:refresh-v5
 local registry_key = KEYS[1]
 local metadata_key = KEYS[2]
 local epoch_key = KEYS[3]
@@ -496,7 +496,7 @@ if not current_score
     return {0, "CORRUPT", refreshed_at_epoch}
 end
 local fresh_after_epoch = refreshed_at_epoch - max_age_seconds
-if current_refreshed_at_epoch < fresh_after_epoch then
+if current_refreshed_at_epoch <= fresh_after_epoch then
     return {0, "EXPIRED", refreshed_at_epoch}
 end
 
@@ -676,7 +676,7 @@ return {1, "REMOVED"}
 """
 
 _FORCE_REMOVE_STALE_LUA = r"""
--- redis-namespace-lease:force-remove-stale-v2
+-- redis-namespace-lease:force-remove-stale-v3
 local registry_key = KEYS[1]
 local metadata_key = KEYS[2]
 local epoch_key = KEYS[3]
@@ -823,7 +823,7 @@ if current_json then
         or tonumber(current_score) ~= refreshed_at_epoch then
         return {0, "CORRUPT", server_time}
     end
-    if refreshed_at_epoch >= fresh_after_epoch then
+    if refreshed_at_epoch > fresh_after_epoch then
         return {0, "FRESH", server_time}
     end
     redis.call("HDEL", metadata_key, namespace)

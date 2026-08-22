@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from typing import Any, Awaitable, Callable, cast
+
+from execution_domain.order_ownership import is_robot_client_order_id
 
 
 EXPECTED_NAUTILUS_VERSION = "1.227.0"
@@ -90,62 +91,10 @@ async def _query_position_status_reports_scoped(
             "LiveExecutionEngine._query_position_status_reports",
         )
         return await original(engine)
-
-    from nautilus_trader.common.enums import LogLevel
-    from nautilus_trader.core.uuid import UUID4
-    from nautilus_trader.execution.messages import (
-        GeneratePositionStatusReports,
-    )
-
-    clients = list(engine._clients.values())
-    tasks: list[Awaitable[Any]] = []
-    task_clients: list[Any] = []
-    for client in clients:
-        for instrument_id in _instrument_ids_for_client(
-            instrument_ids,
-            client,
-        ):
-            command = GeneratePositionStatusReports(
-                instrument_id=instrument_id,
-                start=None,
-                end=None,
-                command_id=UUID4(),
-                ts_init=engine._clock.timestamp_ns(),
-                log_receipt_level=LogLevel.DEBUG,
-            )
-            tasks.append(client.generate_position_status_reports(command))
-            task_clients.append(client)
-
-    try:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as exc:
-        engine._log.error(
-            f"Failed to gather scoped position status reports: {exc}"
-        )
-        return {}, {client.venue for client in clients}
-
-    venue_positions: dict[tuple[Any, Any], Any] = {}
-    failed_venues: set[Any] = set()
-    for client, reports_or_exception in zip(
-        task_clients,
-        results,
-        strict=True,
-    ):
-        if isinstance(reports_or_exception, Exception):
-            failed_venues.add(client.venue)
-            engine._log.error(
-                "Failed to generate scoped position status reports for "
-                f"venue {client.venue}: {reports_or_exception}"
-            )
-            continue
-
-        reports = cast(list[Any], reports_or_exception)
-        for report in reports:
-            venue_positions[(report.instrument_id, report.account_id)] = (
-                report
-            )
-
-    return venue_positions, failed_venues
+    # Account position deltas cannot prove ownership. Feeding them to Nautilus
+    # reconciliation can synthesize external orders and inferred fills from
+    # manual trading, so ownership mode deliberately excludes this evidence.
+    return {}, set()
 
 
 async def _query_order_status_reports_scoped(
@@ -159,46 +108,59 @@ async def _query_order_status_reports_scoped(
         )
         return await original(engine)
 
-    from nautilus_trader.common.enums import LogLevel
     from nautilus_trader.core.uuid import UUID4
-    from nautilus_trader.execution.messages import GenerateOrderStatusReports
+    from nautilus_trader.execution.messages import GenerateOrderStatusReport
 
-    order_status_start = engine._clock.utc_now() - timedelta(
-        minutes=engine.open_check_lookback_mins,
-    )
     tasks: list[Awaitable[Any]] = []
-    for client in engine._clients.values():
-        for instrument_id in _instrument_ids_for_client(
-            instrument_ids,
-            client,
-        ):
-            command = GenerateOrderStatusReports(
-                instrument_id=instrument_id,
-                start=order_status_start,
-                end=None,
-                open_only=engine.open_check_open_only,
-                command_id=UUID4(),
-                ts_init=engine._clock.timestamp_ns(),
-                log_receipt_level=LogLevel.DEBUG,
-            )
-            tasks.append(client.generate_order_status_reports(command))
+    task_clients: list[Any] = []
+    for order in _owned_cached_orders(engine._cache, instrument_ids):
+        client = _client_for_instrument(engine, order.instrument_id)
+        if client is None:
+            continue
+        command = GenerateOrderStatusReport(
+            instrument_id=order.instrument_id,
+            client_order_id=order.client_order_id,
+            venue_order_id=getattr(order, "venue_order_id", None),
+            command_id=UUID4(),
+            ts_init=engine._clock.timestamp_ns(),
+        )
+        tasks.append(client.generate_order_status_report(command))
+        task_clients.append(client)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     all_order_reports: list[Any] = []
-    for reports_or_exception in results:
-        if isinstance(reports_or_exception, Exception):
+    failed_venues: set[Any] = set()
+    for client, report_or_exception in zip(
+        task_clients,
+        results,
+        strict=True,
+    ):
+        if isinstance(report_or_exception, Exception):
+            failed_venues.add(client.venue)
             engine._log.error(
-                "Failed to generate scoped order status reports: "
-                f"{reports_or_exception}"
+                "Failed to generate owned order status report for "
+                f"venue {client.venue}: {report_or_exception}"
             )
             continue
-        all_order_reports.extend(cast(list[Any], reports_or_exception))
+        if report_or_exception is None:
+            continue
+        report = cast(Any, report_or_exception)
+        if not is_robot_client_order_id(
+            str(getattr(report, "client_order_id", "") or "")
+        ):
+            continue
+        all_order_reports.append(report)
 
     venue_reported_ids = {
         report.client_order_id
         for report in all_order_reports
         if report.client_order_id is not None
     }
+    if failed_venues:
+        engine._log.error(
+            "Owned order status polling failed for venue(s): "
+            f"{sorted(str(venue) for venue in failed_venues)}"
+        )
     return all_order_reports, venue_reported_ids
 
 
@@ -214,13 +176,8 @@ async def _generate_mass_status_scoped(
         )
         return await original(client, lookback_mins)
 
-    from nautilus_trader.common.enums import LogLevel
     from nautilus_trader.core.uuid import UUID4
-    from nautilus_trader.execution.messages import GenerateFillReports
-    from nautilus_trader.execution.messages import GenerateOrderStatusReports
-    from nautilus_trader.execution.messages import (
-        GeneratePositionStatusReports,
-    )
+    from nautilus_trader.execution.messages import GenerateOrderStatusReport
     from nautilus_trader.execution.reports import ExecutionMassStatus
 
     instrument_ids = tuple(raw_instrument_ids)
@@ -236,45 +193,28 @@ async def _generate_mass_status_scoped(
         report_id=UUID4(),
         ts_init=client._clock.timestamp_ns(),
     )
-    since = None
-    if lookback_mins is not None:
-        since = client._clock.utc_now() - timedelta(minutes=lookback_mins)
+    del lookback_mins
 
     try:
-        for instrument_id in instrument_ids:
-            order_command = GenerateOrderStatusReports(
-                instrument_id=instrument_id,
-                start=since,
-                end=None,
-                open_only=False,
-                command_id=UUID4(),
-                ts_init=client._clock.timestamp_ns(),
-                log_receipt_level=LogLevel.DEBUG,
-            )
-            fill_command = GenerateFillReports(
-                instrument_id=instrument_id,
-                venue_order_id=None,
-                start=since,
-                end=None,
+        cache = getattr(client, "_cache", None)
+        for order in _owned_cached_orders(cache, instrument_ids):
+            order_command = GenerateOrderStatusReport(
+                instrument_id=order.instrument_id,
+                client_order_id=order.client_order_id,
+                venue_order_id=getattr(order, "venue_order_id", None),
                 command_id=UUID4(),
                 ts_init=client._clock.timestamp_ns(),
             )
-            position_command = GeneratePositionStatusReports(
-                instrument_id=instrument_id,
-                start=since,
-                end=None,
-                command_id=UUID4(),
-                ts_init=client._clock.timestamp_ns(),
-                log_receipt_level=LogLevel.DEBUG,
+            report = await client.generate_order_status_report(
+                order_command
             )
-            reports = await asyncio.gather(
-                client.generate_order_status_reports(order_command),
-                client.generate_fill_reports(fill_command),
-                client.generate_position_status_reports(position_command),
-            )
-            mass_status.add_order_reports(reports=reports[0])
-            mass_status.add_fill_reports(reports=reports[1])
-            mass_status.add_position_reports(reports=reports[2])
+            if report is None:
+                continue
+            if not is_robot_client_order_id(
+                str(getattr(report, "client_order_id", "") or "")
+            ):
+                continue
+            mass_status.add_order_reports(reports=[report])
         return mass_status
     except Exception as exc:
         client._log.exception(
@@ -323,6 +263,46 @@ def _instrument_ids_for_client(
         for instrument_id in instrument_ids
         if instrument_id.venue == client_venue
     )
+
+
+def _client_for_instrument(engine: Any, instrument_id: Any) -> Any | None:
+    venue = getattr(instrument_id, "venue", None)
+    for client in engine._clients.values():
+        if venue is None or getattr(client, "venue", None) == venue:
+            return client
+    return None
+
+
+def _owned_cached_orders(
+    cache: Any,
+    instrument_ids: tuple[Any, ...],
+) -> tuple[Any, ...]:
+    if cache is None:
+        return ()
+    orders_method = getattr(cache, "orders", None)
+    if not callable(orders_method):
+        return ()
+    owned: list[Any] = []
+    seen: set[str] = set()
+    for instrument_id in instrument_ids:
+        try:
+            orders = orders_method(instrument_id=instrument_id)
+        except TypeError:
+            orders = orders_method()
+        for order in orders or ():
+            order_instrument_id = getattr(order, "instrument_id", None)
+            if order_instrument_id != instrument_id:
+                continue
+            client_order_id = str(
+                getattr(order, "client_order_id", "") or ""
+            )
+            if not is_robot_client_order_id(client_order_id):
+                continue
+            if client_order_id in seen:
+                continue
+            seen.add(client_order_id)
+            owned.append(order)
+    return tuple(owned)
 
 
 def _require_original(

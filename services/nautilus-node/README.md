@@ -36,12 +36,12 @@ The typed contracts and the `ControlPlaneClient` Protocol live in
 boot → HALTED
   → load instruments
   → connect Redis cache/bus           (per-account prefix)
-  → startup reconciliation            (adopt exchange reality)
+  → startup reconciliation            (confirm robot-owned orders)
   → connect control-plane (intents/events/commands)
   → register node + first heartbeat
   → READY (still HALTED)
   → operator/control-plane → ACTIVE   (never automatic)
-auto-HALT on: lost control-plane heartbeat · stale snapshot · projection lag over threshold · reconciliation failed
+auto-HALT on: lost control-plane heartbeat · Redis fencing loss · durable projection egress failure
 ```
 
 `cancel` is allowed in HALTED. `close_all` = REDUCING → cancel working orders →

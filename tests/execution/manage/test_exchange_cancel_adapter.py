@@ -537,6 +537,33 @@ class ExchangeStateMirrorTest(unittest.TestCase):
 
 
 class ExchangeEvidenceProviderTest(unittest.TestCase):
+    def test_margin_snapshot_reads_and_caches_account_margin_ratio(
+        self,
+    ) -> None:
+        transport = _ScriptedTransport(
+            {
+                ("GET", "/fapi/v2/account"): [
+                    {
+                        "availableBalance": "25",
+                        "totalMarginBalance": "100",
+                    }
+                ],
+            }
+        )
+        provider = BinanceExchangeEvidenceProvider(
+            transport=transport,
+            monotonic=lambda: 10.0,
+        )
+
+        first = provider.margin_snapshot()
+        second = provider.margin_snapshot()
+
+        self.assertEqual(first["available_balance"], "25")
+        self.assertEqual(first["total_margin_balance"], "100")
+        self.assertEqual(first["margin_ratio"], "0.25")
+        self.assertEqual(second, first)
+        self.assertEqual(len(transport.calls), 1)
+
     def test_default_refresh_interval_reuses_evidence_for_five_seconds(
         self,
     ) -> None:

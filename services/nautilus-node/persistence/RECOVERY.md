@@ -107,7 +107,7 @@ python3 scripts/redis_namespace_registry.py register \
 
 Store the full returned record in process memory and deployment evidence. The
 independent heartbeat lane must refresh the lease at least every 60 seconds,
-well inside the default 300-second freshness window:
+inside the default 120-second freshness window:
 
 ```bash
 python3 scripts/redis_namespace_registry.py refresh \

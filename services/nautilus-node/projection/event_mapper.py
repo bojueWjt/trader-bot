@@ -125,6 +125,21 @@ class ProjectionEventMapper:
             payload=payload,
         )
 
+    def is_expected_ownership_ignore(self, event: Any) -> bool:
+        event_type = _event_type(event)
+        if event_type not in EVENT_MAPPING_CATALOG:
+            return False
+        client_order_id = _optional_str(_attr(event, "client_order_id"))
+        instrument_id = _optional_str(_attr(event, "instrument_id"))
+        position_id = _optional_str(_attr(event, "position_id"))
+        return not _event_is_in_scope(
+            self._config,
+            event_type=event_type,
+            client_order_id=client_order_id,
+            instrument_id=instrument_id,
+            position_id=position_id,
+        )
+
 
 def stable_event_id(
     *,

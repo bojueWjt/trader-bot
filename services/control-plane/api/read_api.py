@@ -45,7 +45,6 @@ from execution_domain.control_plane import (  # noqa: E402
 )
 from execution_domain.order_ownership import (  # noqa: E402
     is_robot_client_order_id,
-    row_is_robot_order,
 )
 
 from app_roles import (  # noqa: E402
@@ -1120,7 +1119,6 @@ def _validate_and_arm_resume(
             detail="RESUME is blocked by active maintenance fence",
         )
 
-    symbol = _resume_scope_symbol(scope)
     release_id = str(scope.get("release_id") or "").strip()
     if not release_id:
         raise HTTPException(
@@ -1144,6 +1142,10 @@ def _validate_and_arm_resume(
         account_id=account_id,
         raw_permit_id=raw_permit_id,
     )
+    symbol = _resume_scope_symbol(
+        scope,
+        required=canary_request,
+    )
     required_rollout_phase = None
     if canary_request:
         required_rollout_phase = _canary_phase_for_account(account_id)
@@ -1165,17 +1167,6 @@ def _validate_and_arm_resume(
         require_reconciliation_health=False,
         require_portfolio_clear=False,
     )
-    _validate_owned_orders_terminal(
-        cur,
-        heartbeat=heartbeat,
-        account_id=account_id,
-    )
-    _validate_margin_ratio_guard(
-        cur,
-        account_id=account_id,
-        database_now=heartbeat["database_now"],
-    )
-
     cur.execute(
         """
         SELECT 1
@@ -1387,7 +1378,11 @@ def _canary_permit_downlink_evidence(
     }
 
 
-def _resume_scope_symbol(scope: dict) -> str:
+def _resume_scope_symbol(
+    scope: dict,
+    *,
+    required: bool,
+) -> str | None:
     raw_instruments = scope.get("instruments")
     candidates: list[str] = []
     if raw_instruments is not None:
@@ -1402,10 +1397,16 @@ def _resume_scope_symbol(scope: dict) -> str:
         candidates.append(str(raw_symbol))
     symbols = {_canonical_symbol(value) for value in candidates}
     symbols.discard("")
+    if not symbols and not required:
+        return None
     if len(symbols) != 1:
         raise HTTPException(
             status_code=400,
-            detail="RESUME requires exactly one target symbol",
+            detail=(
+                "canary RESUME requires exactly one target symbol"
+                if required
+                else "RESUME scope must contain at most one target symbol"
+            ),
         )
     return next(iter(symbols))
 
@@ -1511,7 +1512,7 @@ def _validate_live_heartbeat_evidence(
     heartbeat: dict,
     node_id: str,
     account_id: str,
-    symbol: str,
+    symbol: str | None,
     release_id: str,
     expected_trading_state: str,
     required_rollout_phase: str | None = None,
@@ -1785,52 +1786,6 @@ def _snapshot_has_nonzero_position(item: dict, symbol: str) -> bool:
         return True
 
 
-def _validate_owned_orders_terminal(
-    cur,
-    *,
-    heartbeat: dict,
-    account_id: str,
-) -> None:
-    cur.execute(
-        """
-        SELECT client_order_id, status
-        FROM orders_projection
-        WHERE account_id=%s
-          AND client_order_id ~ '^B[0-9a-f]{32}[0-9]{2}$'
-          AND lower(status) NOT IN %s
-        ORDER BY updated_at DESC
-        LIMIT 1
-        FOR SHARE
-        """,
-        (account_id, _TERMINAL_ORDER_STATES),
-    )
-    row = cur.fetchone()
-    if row is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="robot-owned orders are not terminal",
-        )
-    for field_name in ("regular_orders", "algo_orders"):
-        snapshot = heartbeat.get(field_name)
-        if not isinstance(snapshot, list):
-            raise HTTPException(
-                status_code=409,
-                detail="node exchange evidence is invalid",
-            )
-        for item in snapshot:
-            if not isinstance(item, dict):
-                raise HTTPException(
-                    status_code=409,
-                    detail="node exchange evidence is invalid",
-                )
-            if not row_is_robot_order(item):
-                continue
-            raise HTTPException(
-                status_code=409,
-                detail="robot-owned orders are not terminal",
-            )
-
-
 def _validate_robot_owned_symbol_flat(
     cur,
     *,
@@ -1950,74 +1905,6 @@ def _robot_fill_quantity(payload: dict) -> Decimal:
             detail="robot-owned fill evidence is invalid",
         )
     return quantity
-
-
-def _validate_margin_ratio_guard(
-    cur,
-    *,
-    account_id: str,
-    database_now: datetime,
-) -> None:
-    cur.execute(
-        """
-        SELECT equity, available_balance, updated_at
-        FROM accounts_projection
-        WHERE account_id=%s
-        LIMIT 1
-        FOR SHARE
-        """,
-        (account_id,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=409,
-            detail="account margin evidence is unavailable",
-        )
-    equity_raw, available_raw, updated_at = row
-    try:
-        equity = Decimal(str(equity_raw))
-        available = Decimal(str(available_raw))
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="account margin evidence is invalid",
-        ) from exc
-    if (
-        not equity.is_finite()
-        or not available.is_finite()
-        or equity <= 0
-        or available < 0
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="account margin evidence is invalid",
-        )
-    if not _timestamp_is_fresh(updated_at, database_now):
-        raise HTTPException(
-            status_code=409,
-            detail="account margin evidence is stale",
-        )
-    threshold = _minimum_free_margin_ratio()
-    if available / equity < threshold:
-        raise HTTPException(
-            status_code=409,
-            detail="account margin ratio is below threshold",
-        )
-
-
-def _minimum_free_margin_ratio() -> Decimal:
-    raw = os.environ.get(
-        "CONTROL_PLANE_MIN_FREE_MARGIN_RATIO",
-        "0.05",
-    ).strip()
-    try:
-        value = Decimal(raw)
-    except (InvalidOperation, TypeError, ValueError):
-        return Decimal("0.05")
-    if value < 0 or value > 1 or not value.is_finite():
-        return Decimal("0.05")
-    return value
 
 
 def _portfolio_baseline_sha256(heartbeat: dict, target_symbol: str) -> str:

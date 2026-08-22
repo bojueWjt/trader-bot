@@ -98,6 +98,7 @@ class RedisLeaseBuilderTest(unittest.TestCase):
             namespace=derive_nautilus_cache_key_root(self.live_config),
             owner=self.live_config.node_id,
             release_id="release-20260808-a",
+            max_age_seconds=120,
         )
 
 

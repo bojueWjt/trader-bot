@@ -51,6 +51,7 @@ class _Strategy(IntentExecutionStrategy):
         self.positions: list[Any] = []
         self.cancelled: list[str] = []
         self.closed: list[str] = []
+        self.submitted_plans: list[Any] = []
 
     def _all_open_orders(self) -> tuple[Any, ...]:
         return tuple(self.orders)
@@ -72,6 +73,10 @@ class _Strategy(IntentExecutionStrategy):
 
     def close_position(self, position: Any) -> None:
         self.closed.append(str(position.id))
+
+    def _submit_order_plan(self, plan: Any, **_kwargs: Any) -> bool:
+        self.submitted_plans.append(plan)
+        return True
 
 
 class _Mirror:
@@ -153,11 +158,22 @@ def test_close_all_filters_scope_and_records_reduce_only_requests() -> None:
     )
     strategy.orders = [sol_order, btc_order]
     strategy.positions = [sol_position, btc_position]
+    strategy._entry_protection_stash["owned-sol"] = {
+        "instrument_id": "SOLUSDT-PERP.BINANCE",
+        "entry_side": "BUY",
+        "protected_quantity": "0.1",
+    }
 
     strategy._on_node_command(_command("close-all", CommandType.CLOSE_ALL))
 
     assert strategy.cancelled == [ROBOT_SOL_ORDER_ID]
     assert strategy.closed == []
+    assert len(strategy.submitted_plans) == 1
+    close_plan = strategy.submitted_plans[0]
+    assert close_plan.reduce_only is True
+    assert close_plan.side == "SELL"
+    assert close_plan.quantity == "0.2"
+    assert "user_directed=true" in close_plan.tags
     payload = strategy.message_bus.messages[0][1]
     close_operations = [
         item
@@ -167,18 +183,51 @@ def test_close_all_filters_scope_and_records_reduce_only_requests() -> None:
     assert len(close_operations) == 1
     assert close_operations[0]["reduce_only"] is True
     assert close_operations[0]["position_id"] == "sol-position"
-    assert close_operations[0]["status"] == "skipped"
-    assert close_operations[0]["outcome"] == "manual_position_read_only"
+    assert close_operations[0]["status"] == "submitted"
+    assert close_operations[0]["outcome"] == "user_directed_account_close"
+    assert close_operations[0]["robot_owned_quantity"] == "0.1"
+    assert close_operations[0]["user_directed_quantity"] == "0.1"
 
 
-def _command(command_id: str, command_type: CommandType) -> NodeCommand:
+def test_close_all_rejects_channel_authorization() -> None:
+    strategy = _Strategy()
+    strategy.positions = [
+        SimpleNamespace(
+            id="sol-position",
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            quantity="0.2",
+            side="LONG",
+        )
+    ]
+
+    strategy._on_node_command(
+        _command(
+            "channel-close-all",
+            CommandType.CLOSE_ALL,
+            authorized_by_type="channel",
+        )
+    )
+
+    assert strategy.submitted_plans == []
+    assert strategy.message_bus.messages == []
+    assert strategy.denials[-1].reason == "user_authorization_required"
+
+
+def _command(
+    command_id: str,
+    command_type: CommandType,
+    *,
+    authorized_by_type: str = "user",
+) -> NodeCommand:
+    authorization = dict(AUTHORIZATION)
+    authorization["authorized_by_type"] = authorized_by_type
     return NodeCommand(
         command_id=command_id,
         type=command_type,
         args={
             "account_id": "account-b",
             "instrument_ids": ["SOLUSDT-PERP.BINANCE"],
-            "authorization": AUTHORIZATION,
+            "authorization": authorization,
         },
     )
 

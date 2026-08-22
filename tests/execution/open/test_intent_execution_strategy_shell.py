@@ -273,6 +273,131 @@ class StrategyShellTest(unittest.TestCase):
         self.assertIsNone(btc_denial)
         self.assertIsNone(sol_management)
 
+    def test_terminal_confirmation_freezes_only_its_symbol_until_all_orders_finish(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+            )
+        )
+        sol_intent = uuid4()
+        btc_intent = uuid4()
+        sol_first = SimpleNamespace(
+            intent_id=sol_intent,
+            client_order_id=encode_client_order_id(
+                sol_intent,
+                sequence=1,
+            ),
+            instrument_id="SOLUSDT-PERP.BINANCE",
+        )
+        sol_second = SimpleNamespace(
+            intent_id=sol_intent,
+            client_order_id=encode_client_order_id(
+                sol_intent,
+                sequence=2,
+            ),
+            instrument_id="SOLUSDT-PERP.BINANCE",
+        )
+        btc_order = SimpleNamespace(
+            intent_id=btc_intent,
+            client_order_id=encode_client_order_id(
+                btc_intent,
+                sequence=1,
+            ),
+            instrument_id="BTCUSDT-PERP.BINANCE",
+        )
+
+        strategy._register_pending_order_confirmation(sol_first)
+        strategy._register_pending_order_confirmation(sol_second)
+        strategy._register_pending_order_confirmation(btc_order)
+
+        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertIn("BTCUSDT", strategy.symbol_open_freezes)
+        self.assertIsNone(
+            strategy._symbol_open_freeze_denial(
+                "open_position",
+                "ETHUSDT-PERP.BINANCE",
+            )
+        )
+
+        strategy._confirm_terminal_order_event(
+            SimpleNamespace(client_order_id=sol_first.client_order_id)
+        )
+        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertIn("BTCUSDT", strategy.symbol_open_freezes)
+
+        strategy._confirm_terminal_order_event(
+            SimpleNamespace(client_order_id=sol_second.client_order_id)
+        )
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertIn("BTCUSDT", strategy.symbol_open_freezes)
+
+    def test_partial_fill_keeps_symbol_frozen_until_order_is_terminal(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+            )
+        )
+        intent_id = uuid4()
+        plan = SimpleNamespace(
+            client_order_id=encode_client_order_id(intent_id),
+            instrument_id="SOLUSDT-PERP.BINANCE",
+        )
+        open_orders = [
+            SimpleNamespace(
+                client_order_id=plan.client_order_id,
+                status="PARTIALLY_FILLED",
+            )
+        ]
+        strategy._cache_orders = (  # type: ignore[method-assign]
+            lambda _instrument_id: tuple(open_orders)
+        )
+        strategy._register_pending_order_confirmation(plan)
+
+        strategy._confirm_filled_order_event(
+            SimpleNamespace(client_order_id=plan.client_order_id)
+        )
+        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+
+        open_orders.clear()
+        strategy._confirm_filled_order_event(
+            SimpleNamespace(client_order_id=plan.client_order_id)
+        )
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+
+    def test_protection_watchdog_timer_runs_every_thirty_seconds(
+        self,
+    ) -> None:
+        timers: dict[str, timedelta] = {}
+
+        class _Clock:
+            def set_timer(
+                self,
+                *,
+                name: str,
+                interval: timedelta,
+                callback,
+            ) -> None:
+                del callback
+                timers[name] = interval
+
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(account_id="account-a")
+        )
+        strategy.clock = _Clock()
+
+        strategy._register_exchange_state_timer()
+
+        self.assertEqual(
+            timers["protection.watchdog"],
+            timedelta(seconds=30),
+        )
+
     def test_protection_watchdog_freezes_symbol_after_two_missing_stops(
         self,
     ) -> None:
@@ -308,11 +433,108 @@ class StrategyShellTest(unittest.TestCase):
         strategy._check_protection_watchdog(str(intent_id))
         strategy._check_protection_watchdog(str(intent_id))
 
-        self.assertEqual(strategy.scheduled, [0.0, 0.0])
+        self.assertEqual(strategy.repair_attempts, 2)
         self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
         self.assertEqual(
             strategy.reported_events[0]["event_type"],
             "ProtectionWatchdogSymbolStopped",
+        )
+
+    def test_protection_watchdog_repairs_missing_stop_without_freezing_symbol(
+        self,
+    ) -> None:
+        intent_id = uuid4()
+        strategy = _ProtectionWatchdogStrategy(
+            repair_results=[True],
+        )
+        strategy._entry_protection_stash[str(intent_id)] = (
+            _watchdog_stash(intent_id)
+        )
+
+        strategy._check_protection_watchdog(str(intent_id))
+
+        self.assertEqual(strategy.repair_attempts, 1)
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertEqual(strategy.reported_events, [])
+
+    def test_protection_watchdog_repairs_missing_take_profit_without_freezing_symbol(
+        self,
+    ) -> None:
+        intent_id = uuid4()
+        stop_client_order_id = encode_client_order_id(
+            intent_id,
+            sequence=11,
+        )
+        strategy = _ProtectionWatchdogStrategy(
+            repair_results=[True],
+            evidence_rows=[
+                {
+                    "symbol": "SOLUSDT",
+                    "client_order_id": stop_client_order_id,
+                }
+            ],
+        )
+        stash = _watchdog_stash(intent_id)
+        stash["take_profits"] = ("110",)
+        stash["protection_ids"] = (stop_client_order_id,)
+        stash["protection_roles"] = {
+            stop_client_order_id: {
+                "role": "stop_loss",
+                "tp_price": None,
+            }
+        }
+        strategy._entry_protection_stash[str(intent_id)] = stash
+
+        strategy._check_protection_watchdog(str(intent_id))
+
+        self.assertEqual(strategy.repair_attempts, 1)
+        self.assertEqual(
+            strategy.repair_keys,
+            [(("take_profit", "110"),)],
+        )
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertEqual(strategy.reported_events, [])
+
+    def test_protection_watchdog_submits_only_missing_take_profit(
+        self,
+    ) -> None:
+        intent_id = uuid4()
+        stop_client_order_id = encode_client_order_id(
+            intent_id,
+            sequence=11,
+        )
+        strategy = _ActualProtectionWatchdogStrategy(
+            evidence_rows=[
+                {
+                    "symbol": "SOLUSDT",
+                    "client_order_id": stop_client_order_id,
+                }
+            ],
+        )
+        stash = _watchdog_stash(intent_id)
+        stash["take_profits"] = ("110",)
+        stash["protection_ids"] = (stop_client_order_id,)
+        stash["protection_roles"] = {
+            stop_client_order_id: {
+                "role": "stop_loss",
+                "tp_price": None,
+            }
+        }
+        strategy._entry_protection_stash[str(intent_id)] = stash
+
+        strategy._check_protection_watchdog(str(intent_id))
+
+        self.assertEqual(len(strategy.submitted_plans), 1)
+        plan = strategy.submitted_plans[0]
+        self.assertIn("lifecycle_role=take_profit", plan.tags)
+        self.assertEqual(plan.trigger_price, "110.00")
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertEqual(
+            stash["protection_ids"],
+            (
+                stop_client_order_id,
+                plan.client_order_id,
+            ),
         )
 
     def test_trading_state_getter_accepts_enum_values(self) -> None:
@@ -410,6 +632,111 @@ class StrategyShellTest(unittest.TestCase):
         self.assertEqual(
             drifted.reason,
             "canary_portfolio_baseline_drift",
+        )
+
+    def test_live_shared_margin_guard_blocks_only_new_open_orders(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-b",
+                node_id="node-b",
+                trading_state="ACTIVE",
+                environment="live",
+            )
+        )
+        strategy.set_exchange_evidence_provider(
+            _MarginEvidence("4", "100")
+        )
+        open_plan = SimpleNamespace(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            reduce_only=False,
+        )
+        close_plan = SimpleNamespace(
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            reduce_only=True,
+        )
+
+        denial = strategy._live_shared_margin_denial(open_plan)
+
+        self.assertIsNotNone(denial)
+        self.assertEqual(
+            denial.reason,
+            "shared_margin_ratio_below_threshold",
+        )
+        self.assertIsNone(
+            strategy._live_shared_margin_denial(close_plan)
+        )
+
+    def test_pure_user_directed_close_fill_is_excluded_from_canary_loss(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                node_id="node-a",
+                trading_state="ACTIVE",
+                environment="live",
+            )
+        )
+        event = SimpleNamespace(
+            client_order_id="B" + ("a" * 32) + "99",
+            tags=(
+                "user_directed=true",
+                "robot_owned_quantity=0",
+            ),
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            side="SELL",
+            last_qty="0.1",
+            last_px="100",
+        )
+
+        self.assertIs(
+            strategy._live_canary_fill_payload(event),
+            False,
+        )
+
+    def test_user_directed_close_counts_only_robot_owned_fill_quantity(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                node_id="node-a",
+                trading_state="ACTIVE",
+                environment="live",
+            )
+        )
+        client_order_id = "B" + ("a" * 32) + "99"
+        tags = (
+            "user_directed=true",
+            "robot_owned_quantity=0.1",
+            "user_directed_quantity=0.1",
+        )
+        first = SimpleNamespace(
+            client_order_id=client_order_id,
+            tags=tags,
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            side="SELL",
+            last_qty="0.15",
+            last_px="100",
+        )
+        second = SimpleNamespace(
+            client_order_id=client_order_id,
+            tags=tags,
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            side="SELL",
+            last_qty="0.05",
+            last_px="100",
+        )
+
+        first_payload = strategy._live_canary_fill_payload(first)
+
+        self.assertIsInstance(first_payload, dict)
+        self.assertEqual(first_payload["quantity"], "0.1")
+        self.assertIs(
+            strategy._live_canary_fill_payload(second),
+            False,
         )
 
     def test_live_secondary_accounts_ignore_canary_only_permit_requirement(
@@ -1331,7 +1658,10 @@ class StrategyShellTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as state_dir:
             strategy = _LiveEntrySubmitStrategy(
-                inventory=(("BTCUSDT-PERP.BINANCE", "100000"),),
+                inventory=(
+                    ("BTCUSDT-PERP.BINANCE", "100000"),
+                    ("ETHUSDT-PERP.BINANCE", "100000"),
+                ),
                 release_id="release-a",
                 state_dir=Path(state_dir),
             )
@@ -1342,6 +1672,7 @@ class StrategyShellTest(unittest.TestCase):
             ladder = _live_zone_ladder_intent(
                 max_notional="150"
             )
+            ladder.instrument_id = "ETHUSDT-PERP.BINANCE"
             for intent in (single, ladder):
                 intent.order_plan["rollout_phase"] = "fleet_complete"
                 intent.order_plan["live_open_gate"] = (
@@ -1412,7 +1743,10 @@ class StrategyShellTest(unittest.TestCase):
                 self.assertEqual(len(strategy.submitted_orders), 4)
                 self.assertEqual(
                     set(strategy._entry_protection_stash),
-                    {str(ladder.intent_id)},
+                    {
+                        str(single.intent_id),
+                        str(ladder.intent_id),
+                    },
                 )
                 self.assertFalse(
                     strategy._durable_entry_prepare_active
@@ -2740,7 +3074,7 @@ class StrategyShellTest(unittest.TestCase):
         )
         self.assertEqual(strategy.denials, [])
 
-    def test_same_permit_direct_delivery_of_two_intents_submits_one_order(
+    def test_same_permit_after_terminal_confirmation_submits_one_order(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as state_dir:
@@ -2751,15 +3085,26 @@ class StrategyShellTest(unittest.TestCase):
 
             try:
                 strategy._on_intent_msg(first)
+                self.assertTrue(
+                    _pump_durable_until(
+                        strategy,
+                        lambda: len(strategy.submitted_orders) == 1,
+                        timeout=1.0,
+                    )
+                )
+                strategy._confirm_terminal_order_event(
+                    SimpleNamespace(
+                        client_order_id=encode_client_order_id(
+                            first.intent_id
+                        )
+                    )
+                )
                 strategy._on_intent_msg(second)
 
                 self.assertTrue(
                     _pump_durable_until(
                         strategy,
-                        lambda: (
-                            len(strategy.submitted_orders) == 1
-                            and bool(strategy.denials)
-                        ),
+                        lambda: bool(strategy.denials),
                         timeout=1.0,
                     )
                 )
@@ -4335,6 +4680,9 @@ class _TerminalExchangeStrategy(IntentExecutionStrategy):
         self.set_live_canary_portfolio_baseline_getter(
             lambda symbol: "4" * 64
         )
+        self.set_exchange_evidence_provider(
+            _MarginEvidence("100", "100")
+        )
 
     def _publish_terminal_command_result(
         self,
@@ -4347,9 +4695,18 @@ class _TerminalExchangeStrategy(IntentExecutionStrategy):
 
 
 class _ProtectionWatchdogStrategy(IntentExecutionStrategy):
-    def __init__(self) -> None:
-        self.scheduled: list[float | None] = []
+    def __init__(
+        self,
+        *,
+        repair_results: list[bool] | None = None,
+        evidence_rows: list[dict] | None = None,
+    ) -> None:
         self.reported_events: list[dict] = []
+        self.repair_results = list(repair_results or [False, False])
+        self.repair_attempts = 0
+        self.repair_keys: list[
+            tuple[tuple[str, str | None], ...]
+        ] = []
         super().__init__(
             IntentExecutionStrategyConfig(
                 account_id="account-a",
@@ -4359,6 +4716,9 @@ class _ProtectionWatchdogStrategy(IntentExecutionStrategy):
         )
         self.set_protection_event_reporter(
             lambda event: self.reported_events.append(event) is None or True
+        )
+        self.set_exchange_evidence_provider(
+            _MissingProtectionEvidence(evidence_rows)
         )
 
     def _cache_positions(self, instrument_id):
@@ -4373,16 +4733,16 @@ class _ProtectionWatchdogStrategy(IntentExecutionStrategy):
             ),
         )
 
-    def _cache_orders_all(self, instrument_id):
-        del instrument_id
-        return ()
-
-    def _schedule_protection_sync(
+    def _repair_missing_protection_orders(
         self,
         _intent_key: str,
-        delay_seconds: float | None = None,
-    ) -> None:
-        self.scheduled.append(delay_seconds)
+        _stash: dict,
+        _position: object,
+        missing_keys: tuple[tuple[str, str | None], ...],
+    ) -> bool:
+        self.repair_attempts += 1
+        self.repair_keys.append(missing_keys)
+        return self.repair_results.pop(0)
 
     def _queue_entry_protection_stash_persist(
         self,
@@ -4391,6 +4751,117 @@ class _ProtectionWatchdogStrategy(IntentExecutionStrategy):
     ) -> bool:
         del continuation
         return True
+
+
+class _MissingProtectionEvidence:
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self.rows = list(
+            rows
+            or [
+                {
+                    "symbol": "SOLUSDT",
+                    "client_order_id": "manual-stop",
+                }
+            ]
+        )
+
+    def snapshot(self, *, force_refresh: bool = False) -> dict:
+        assert force_refresh is True
+        return {
+            "regular_orders": list(self.rows),
+            "algo_orders": [],
+        }
+
+
+class _ActualProtectionWatchdogStrategy(IntentExecutionStrategy):
+    def __init__(self, *, evidence_rows: list[dict]) -> None:
+        self.submitted_plans: list[OrderPlan] = []
+        super().__init__(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                node_id="node-a",
+                trading_state="ACTIVE",
+            )
+        )
+        self.set_exchange_evidence_provider(
+            _MissingProtectionEvidence(evidence_rows)
+        )
+
+    def _cache_positions(self, instrument_id):
+        del instrument_id
+        return (
+            SimpleNamespace(
+                instrument_id="SOLUSDT-PERP.BINANCE",
+                side="LONG",
+                quantity="1",
+                position_id="SOLUSDT-PERP.BINANCE-LONG",
+                entry_price="100",
+            ),
+        )
+
+    def _instrument_spec(self, instrument_id: str) -> InstrumentSpec:
+        return InstrumentSpec(
+            instrument_id=instrument_id,
+            price_increment="0.01",
+            quantity_increment="0.001",
+        )
+
+    def _submit_order_plan(self, plan: OrderPlan, **_kwargs) -> bool:
+        self.submitted_plans.append(plan)
+        return True
+
+    def _queue_entry_protection_stash_persist(
+        self,
+        *,
+        continuation=False,
+    ) -> bool:
+        del continuation
+        return True
+
+
+class _MarginEvidence:
+    def __init__(
+        self,
+        available_balance: str,
+        total_margin_balance: str,
+    ) -> None:
+        self.available_balance = available_balance
+        self.total_margin_balance = total_margin_balance
+
+    def margin_snapshot(self) -> dict:
+        return {
+            "available_balance": self.available_balance,
+            "total_margin_balance": self.total_margin_balance,
+        }
+
+
+def _watchdog_stash(intent_id) -> dict:
+    return {
+        "stop_loss": "95",
+        "take_profits": (),
+        "instrument_id": "SOLUSDT-PERP.BINANCE",
+        "entry_side": "BUY",
+        "entry_tags": (f"intent_id={intent_id}",),
+        "stop_loss_parent_intent_id": str(intent_id),
+        "stop_loss_authorization": {
+            "parent_intent_id": str(intent_id),
+            "authorized_by_type": "user",
+            "authorized_by_id": "risk-admin",
+            "source_message_id": "watchdog-test",
+        },
+        "take_profit_parent_intent_id": str(intent_id),
+        "take_profit_authorization": {
+            "parent_intent_id": str(intent_id),
+            "authorized_by_type": "user",
+            "authorized_by_id": "risk-admin",
+            "source_message_id": "watchdog-test",
+        },
+        "entry_sequence_max": 1,
+        "protection_sequence_start": 11,
+        "protection_roles": {},
+        "tp_consumed": {},
+        "pending_cancel_ids": (),
+    }
 
 
 class _SlowTerminalMirror:
@@ -4472,6 +4943,9 @@ class _CanarySubmitStrategy(IntentExecutionStrategy):
         )
         self.set_live_canary_portfolio_baseline_getter(
             lambda symbol: "4" * 64
+        )
+        self.set_exchange_evidence_provider(
+            _MarginEvidence("100", "100")
         )
 
     @property
@@ -4705,6 +5179,9 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         )
         self.set_live_entry_mark_snapshot_getter(
             self._fallback_mark_snapshot
+        )
+        self.set_exchange_evidence_provider(
+            _MarginEvidence("100", "100")
         )
 
     def _cache_instrument(self, instrument_id: str):

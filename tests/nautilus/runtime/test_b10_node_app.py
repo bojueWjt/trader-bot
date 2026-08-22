@@ -2524,6 +2524,11 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
         def from_str(cls, value: str) -> str:
             return f"uuid4:{value}"
 
+    class _InstrumentId:
+        @classmethod
+        def from_str(cls, value: str) -> str:
+            return value
+
     class _TradingNode:
         def __init__(self, config: Any) -> None:
             events = assembled.get("events")
@@ -2612,6 +2617,7 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
             self.live_canary_risk_reporter: Any = None
             self.live_canary_halt_handler: Any = None
             self.exchange_cancel_dependencies: Any = None
+            self.exchange_evidence_provider: Any = None
 
         def set_durable_io_fatal_handler(
             self,
@@ -2666,6 +2672,9 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
 
         def set_exchange_cancel_adapter(self, adapter: Any, mirror: Any) -> None:
             self.exchange_cancel_dependencies = (adapter, mirror)
+
+        def set_exchange_evidence_provider(self, provider: Any) -> None:
+            self.exchange_evidence_provider = provider
 
     class _BoundedTaskWorker:
         def __init__(
@@ -2812,6 +2821,17 @@ def _fake_nautilus_modules() -> Iterator[dict[str, Any]]:
         types.ModuleType("nautilus_trader.core.uuid"),
     )
     sys.modules["nautilus_trader.core.uuid"].UUID4 = _UUID4
+    _install_module(
+        "nautilus_trader.model",
+        types.ModuleType("nautilus_trader.model"),
+    )
+    _install_module(
+        "nautilus_trader.model.identifiers",
+        types.ModuleType("nautilus_trader.model.identifiers"),
+    )
+    sys.modules[
+        "nautilus_trader.model.identifiers"
+    ].InstrumentId = _InstrumentId
     _install_module("nautilus_trader.live", types.ModuleType("nautilus_trader.live"))
     _install_module("nautilus_trader.live.node", types.ModuleType("nautilus_trader.live.node"))
     sys.modules["nautilus_trader.live.node"].TradingNode = _TradingNode

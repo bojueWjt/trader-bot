@@ -282,7 +282,7 @@ def test_session_lane_circuit_and_queue_pressure_force_readiness_503(
     assert "execution_event.queue_pressure=degraded" in issues
 
 
-def test_projection_stall_forces_readiness_503_but_keeps_liveness_healthy(
+def test_projection_stall_remains_monitoring_only_for_runtime_health(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _load_account_a(monkeypatch)
@@ -302,10 +302,9 @@ def test_projection_stall_forces_readiness_503_but_keeps_liveness_healthy(
     ready = health.readiness()
 
     assert live.status_code == 200
-    assert ready.status_code == 503
-    assert "stalled=true" in ready.body["health_provider_issues"][
-        "projection_progress"
-    ]
+    assert ready.status_code == 200
+    assert ready.body["providers"]["projection_progress"]["stalled"] is True
+    assert "projection_progress" not in ready.body["health_provider_issues"]
 
 
 def test_live_startup_ignores_active_environment_override(

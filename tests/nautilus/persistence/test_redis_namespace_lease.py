@@ -58,7 +58,7 @@ class _ServerTimeLeaseRedis:
             return self._remove(numkeys, keys_and_args)
         if "redis-namespace-lease:force-remove-stale-v1" in script:
             return self._force_remove(numkeys, keys_and_args)
-        if "redis-namespace-lease:acquire-v6" in script:
+        if "redis-namespace-lease:acquire-v7" in script:
             result = self._acquire(numkeys, keys_and_args)
             if self.fail_after_next_acquire:
                 self.fail_after_next_acquire = False
@@ -70,11 +70,11 @@ class _ServerTimeLeaseRedis:
                 self.fail_after_next_acquire = False
                 raise TimeoutError("response lost after acquire commit")
             return result
-        if "redis-namespace-lease:refresh-v4" in script:
+        if "redis-namespace-lease:refresh-v5" in script:
             return self._refresh(numkeys, keys_and_args)
         if "redis-namespace-lease:remove-v4" in script:
             return self._remove(numkeys, keys_and_args)
-        if "redis-namespace-lease:force-remove-stale-v2" in script:
+        if "redis-namespace-lease:force-remove-stale-v3" in script:
             return self._force_remove(numkeys, keys_and_args)
         raise AssertionError("unexpected Redis lease script")
 
@@ -170,7 +170,7 @@ class _ServerTimeLeaseRedis:
             )
             current_is_fresh = (
                 current_score is not None
-                and current_score >= fresh_after_epoch
+                and current_score > fresh_after_epoch
             )
             if same_identity and current_is_fresh:
                 current["refreshed_at_epoch"] = self.server_time
@@ -180,7 +180,7 @@ class _ServerTimeLeaseRedis:
                 return [0, current_token, "HELD"]
             if not _owner_matches_node_identity(current["owner"], owner):
                 return [0, current_token, "STALE_FOREIGN"]
-        elif current_score is not None and current_score >= fresh_after_epoch:
+        elif current_score is not None and current_score > fresh_after_epoch:
             return [0, 0, "HELD_LEGACY"]
 
         self.fencing_counter += 1
@@ -249,7 +249,7 @@ class _ServerTimeLeaseRedis:
         if score is None:
             return [0, "CORRUPT", self.server_time]
         max_age_seconds = int(raw_max_age_seconds)
-        if score < self.server_time - max_age_seconds:
+        if score <= self.server_time - max_age_seconds:
             return [0, "EXPIRED", self.server_time]
         expected_identity = (
             str(raw_owner),
@@ -374,7 +374,7 @@ class _ServerTimeLeaseRedis:
         if score is None:
             return [0, "CORRUPT", self.server_time]
         max_age_seconds = int(raw_max_age_seconds)
-        if score >= self.server_time - max_age_seconds:
+        if score > self.server_time - max_age_seconds:
             return [0, "FRESH", self.server_time]
         del self.records[namespace]
         del self.scores[namespace]
@@ -663,6 +663,36 @@ def test_fresh_same_owner_new_process_candidate_cannot_reuse_token() -> None:
     assert current.refreshed_at_epoch == 1000
 
     redis.server_time = 1301
+    replacement_record = replacement.acquire()
+
+    assert replacement_record.fencing_token == 2
+    assert replacement_record.persistence_instance_id == SECOND_INSTANCE_ID
+
+
+def test_same_node_restart_takes_over_at_two_minute_boundary() -> None:
+    redis = _ServerTimeLeaseRedis(server_time=1000)
+    RedisNamespaceLease(
+        redis,
+        namespace=ACCOUNT_A_NAMESPACE,
+        owner="node-a",
+        release_id="release-a",
+        max_age_seconds=120,
+        persistence_instance_id_factory=_CandidateFactory(FIRST_INSTANCE_ID),
+    ).acquire()
+    replacement = RedisNamespaceLease(
+        redis,
+        namespace=ACCOUNT_A_NAMESPACE,
+        owner="node-a",
+        release_id="release-a",
+        max_age_seconds=120,
+        persistence_instance_id_factory=_CandidateFactory(SECOND_INSTANCE_ID),
+    )
+
+    redis.server_time = 1119
+    with pytest.raises(RedisNamespaceLeaseLost, match="held"):
+        replacement.acquire()
+
+    redis.server_time = 1120
     replacement_record = replacement.acquire()
 
     assert replacement_record.fencing_token == 2
@@ -1304,11 +1334,11 @@ def test_lua_contract_reads_fixed_epoch_marker_inside_every_mutation() -> None:
         assert 'redis.call("GET", epoch_key)' in script
         assert "is_canonical_uuid4(redis_fencing_epoch)" in script
 
-    assert "-- redis-namespace-lease:acquire-v6" in lease_module._ACQUIRE_LUA
-    assert "-- redis-namespace-lease:refresh-v4" in lease_module._REFRESH_LUA
+    assert "-- redis-namespace-lease:acquire-v7" in lease_module._ACQUIRE_LUA
+    assert "-- redis-namespace-lease:refresh-v5" in lease_module._REFRESH_LUA
     assert "-- redis-namespace-lease:remove-v4" in lease_module._REMOVE_LUA
     assert (
-        "-- redis-namespace-lease:force-remove-stale-v2"
+        "-- redis-namespace-lease:force-remove-stale-v3"
         in lease_module._FORCE_REMOVE_STALE_LUA
     )
 

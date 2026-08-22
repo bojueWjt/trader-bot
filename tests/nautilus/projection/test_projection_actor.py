@@ -110,7 +110,7 @@ class ProjectionActorTests(unittest.TestCase):
         self.assertEqual(actor.spool.pending_count, 0)
 
     def test_ingest_event_returns_explicit_durability_outcome(self) -> None:
-        sink = _RecordingSink(fail=True)
+        sink = _RecordingSink()
         actor = _actor(self._tmp_spool(), sink=sink)
         event = _Event(
             "OrderAccepted",
@@ -198,8 +198,8 @@ class ProjectionActorTests(unittest.TestCase):
             ["OrderFilled", "OrderCanceled"],
         )
 
-    def test_projection_lag_updates_health_and_degrades_when_above_threshold(self) -> None:
-        sink = _RecordingSink(fail=True)
+    def test_projection_lag_updates_monitoring_without_blocking_health(self) -> None:
+        sink = _RecordingSink()
         health = _RecordingHealth()
         actor = _actor(
             self._tmp_spool(),
@@ -218,7 +218,7 @@ class ProjectionActorTests(unittest.TestCase):
         )
 
         self.assertEqual(health.progress[-1], (6, event_id))
-        self.assertIn("projection lag 6ms exceeds 5ms", health.failed)
+        self.assertEqual(health.failed, [])
 
     def test_live_scope_filters_foreign_symbols_and_unowned_orders(self) -> None:
         mapper = ProjectionEventMapper(

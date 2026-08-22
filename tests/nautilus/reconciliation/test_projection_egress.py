@@ -523,6 +523,68 @@ def test_projection_filtered_subscribed_event_keeps_durable_lane_running(
     actor.on_stop()
 
 
+def test_projection_silently_ignores_manual_and_out_of_scope_events(
+    tmp_path: Path,
+) -> None:
+    lifecycle = _ProjectionHeartbeatLifecycle()
+    projection = ProjectionActor(
+        ProjectionConfig(
+            node_id="node-a",
+            account_id="account-a",
+            allowed_instrument_ids=frozenset(
+                {"SOLUSDT-PERP.BINANCE"}
+            ),
+            require_robot_order_ownership=True,
+        ),
+        _BlockingSink(),
+        JsonExecutionSpool(tmp_path / "ownership-events.wal"),
+        health=LifecycleProjectionHealth(lifecycle),
+    )
+    fatal_reasons: list[str] = []
+    actor = ExecutionProjectionActor(
+        projection,
+        fatal_callback=fatal_reasons.append,
+    )
+    actor.on_start()
+
+    manual_submit = {
+        "event_type": "OrderSubmitted",
+        "client_order_id": "manual-sol-order",
+        "instrument_id": "SOLUSDT-PERP.BINANCE",
+        "ts_event": 1_786_000_000_000_000_000,
+    }
+    manual_cancel = {
+        "event_type": "OrderCanceled",
+        "client_order_id": "manual-sol-order",
+        "instrument_id": "SOLUSDT-PERP.BINANCE",
+        "ts_event": 1_786_000_000_000_000_000,
+    }
+    out_of_scope_robot_order = {
+        "event_type": "OrderFilled",
+        "client_order_id": "B" + ("a" * 32) + "01",
+        "instrument_id": "BTCUSDT-PERP.BINANCE",
+        "ts_event": 1_786_000_000_000_000_000,
+    }
+    manual_position = {
+        "event_type": "PositionClosed",
+        "position_id": "SOLUSDT-LONG-EXTERNAL",
+        "instrument_id": "SOLUSDT-PERP.BINANCE",
+        "ts_event": 1_786_000_000_000_000_000,
+    }
+
+    assert actor.on_event(manual_submit) is True
+    assert actor.on_event(manual_cancel) is True
+    assert actor.on_event(out_of_scope_robot_order) is True
+    assert actor.on_event(manual_position) is True
+    assert _wait_until(lambda: actor._event_queue.unfinished_tasks == 0)
+    assert projection.spool.pending_count == 0
+    assert projection.egress_degraded_reason == ""
+    assert lifecycle.heartbeat_health_degraded_reasons == ()
+    assert actor.halted_reason == ""
+    assert fatal_reasons == []
+    actor.on_stop()
+
+
 def test_projection_halted_core_is_sticky_fatal(
     tmp_path: Path,
 ) -> None:

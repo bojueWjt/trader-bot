@@ -137,8 +137,6 @@ def _provider_health_issues(
             ready_issues.append("running=false")
         if raw_snapshot.get("halted") is True:
             ready_issues.append("halted=true")
-        if raw_snapshot.get("stalled") is True:
-            ready_issues.append("stalled=true")
         lanes = raw_snapshot.get("lanes")
         if isinstance(lanes, Mapping):
             for lane_name, raw_lane in lanes.items():

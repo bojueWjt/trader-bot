@@ -81,6 +81,25 @@ def _risk_headers(request_id: str = "request-1") -> dict[str, str]:
     }
 
 
+def test_regular_resume_scope_allows_omitted_instruments() -> None:
+    assert read_api._resume_scope_symbol({}, required=False) is None
+
+
+def test_canary_resume_scope_requires_one_explicit_instrument() -> None:
+    with pytest.raises(
+        read_api.HTTPException,
+        match="canary RESUME requires exactly one target symbol",
+    ):
+        read_api._resume_scope_symbol({}, required=True)
+    assert (
+        read_api._resume_scope_symbol(
+            {"instruments": ["SOLUSDT"]},
+            required=True,
+        )
+        == "SOLUSDT"
+    )
+
+
 def _node_headers(
     node_id: str,
     account_id: str,
@@ -2245,7 +2264,7 @@ def test_resume_allows_robot_owned_target_position_round_trip_flat(
 
 
 @pytest.mark.parametrize("source", ("projection", "heartbeat"))
-def test_resume_rejects_robot_owned_non_terminal_orders(
+def test_resume_leaves_robot_owned_non_terminal_orders_to_symbol_guard(
     client: TestClient,
     migrated_db: str,
     source: str,
@@ -2287,11 +2306,10 @@ def test_resume_rejects_robot_owned_non_terminal_orders(
         json=_resume_body(permit_id),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "robot-owned orders are not terminal"
+    assert response.status_code == 200
 
 
-def test_resume_rejects_low_margin_ratio(
+def test_resume_leaves_low_margin_ratio_to_per_order_guard(
     client: TestClient,
     migrated_db: str,
 ) -> None:
@@ -2304,8 +2322,7 @@ def test_resume_rejects_low_margin_ratio(
         json=_resume_body(permit_id),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "account margin ratio is below threshold"
+    assert response.status_code == 200
 
 
 def test_resume_uses_payload_timestamp_for_reconciliation_health(

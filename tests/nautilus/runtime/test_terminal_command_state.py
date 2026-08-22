@@ -201,6 +201,37 @@ def test_close_all_fails_when_target_position_remains(
     actor.on_stop()
 
 
+def test_close_all_rejects_channel_authorization_before_reducing(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    control_plane = _ControlPlane()
+    lifecycle = _Lifecycle()
+    message_bus = _MessageBus()
+    actor = _Actor(
+        control_plane=control_plane,
+        lifecycle=lifecycle,
+        message_bus=message_bus,
+        evidence_provider=_EvidenceProvider([_snapshot(now)]),
+        journal_path=tmp_path / "commands.json",
+    )
+    command = _command(
+        "channel-close",
+        CommandType.CLOSE_ALL,
+        authorized_by_type="channel",
+    )
+    actor._pending_commands = (command,)
+
+    assert actor._apply_pending_commands() == 1
+    _flush_ack(actor)
+
+    assert lifecycle.states == []
+    assert message_bus.published == []
+    assert control_plane.acks[-1][1] is CommandAckStatus.FAILED
+    assert control_plane.acks[-1][3] == "user_authorization_required"
+    actor.on_stop()
+
+
 def test_running_terminal_command_replays_after_restart(
     tmp_path: Path,
 ) -> None:
@@ -239,14 +270,21 @@ def test_running_terminal_command_replays_after_restart(
     restarted.on_stop()
 
 
-def _command(command_id: str, command_type: CommandType) -> NodeCommand:
+def _command(
+    command_id: str,
+    command_type: CommandType,
+    *,
+    authorized_by_type: str = "user",
+) -> NodeCommand:
+    authorization = dict(AUTHORIZATION)
+    authorization["authorized_by_type"] = authorized_by_type
     return NodeCommand(
         command_id=command_id,
         type=command_type,
         args={
             "account_id": "account-a",
             "instrument_ids": ["SOLUSDT-PERP.BINANCE"],
-            "authorization": AUTHORIZATION,
+            "authorization": authorization,
         },
     )
 

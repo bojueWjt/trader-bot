@@ -1205,6 +1205,8 @@ class BinanceExchangeEvidenceProvider:
         self._refresh_generation = 0
         self._refresh_error: ExchangeCancelError | bool = False
         self._refresh_error_generation = 0
+        self._margin_cached: dict[str, Any] | None = None
+        self._margin_cached_at: float | None = None
 
     def snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
         deadline = self._monotonic() + self._total_deadline_seconds
@@ -1330,6 +1332,37 @@ class BinanceExchangeEvidenceProvider:
             if age_seconds > max_age_seconds:
                 return False
             return _copy_exchange_evidence(cached)
+
+    def margin_snapshot(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        current_monotonic = self._monotonic()
+        with self._lock:
+            cached = self._margin_cached
+            cached_at = self._margin_cached_at
+            if (
+                not force_refresh
+                and cached is not None
+                and cached_at is not None
+                and current_monotonic - cached_at
+                < self._refresh_interval_seconds
+            ):
+                return dict(cached)
+        deadline = current_monotonic + self._total_deadline_seconds
+        payload, fetched_at = self._fetch_endpoint(
+            "/fapi/v2/account",
+            deadline=deadline,
+        )
+        evidence = _account_margin_evidence(
+            payload,
+            fetched_at=fetched_at,
+        )
+        with self._lock:
+            self._margin_cached = evidence
+            self._margin_cached_at = self._monotonic()
+            return dict(evidence)
 
     def _fetch_endpoint(
         self,
@@ -1491,6 +1524,46 @@ def _position_evidence_rows(payload: Any) -> list[dict[str, Any]]:
             }
         )
     return evidence
+
+
+def _account_margin_evidence(
+    payload: Any,
+    *,
+    fetched_at: datetime,
+) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ExchangeCancelError(
+            "account endpoint returned an invalid object"
+        )
+    try:
+        available_balance = Decimal(
+            str(payload.get("availableBalance"))
+        )
+        total_margin_balance = Decimal(
+            str(payload.get("totalMarginBalance"))
+        )
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ExchangeCancelError(
+            "account endpoint returned invalid margin balances"
+        ) from exc
+    if (
+        not available_balance.is_finite()
+        or not total_margin_balance.is_finite()
+        or available_balance < 0
+        or total_margin_balance <= 0
+    ):
+        raise ExchangeCancelError(
+            "account endpoint returned invalid margin balances"
+        )
+    return {
+        "available_balance": format(available_balance, "f"),
+        "total_margin_balance": format(total_margin_balance, "f"),
+        "margin_ratio": format(
+            available_balance / total_margin_balance,
+            "f",
+        ),
+        "fetched_at": fetched_at,
+    }
 
 
 def _order_evidence_rows(
