@@ -166,6 +166,7 @@ class _ServerTimeLeaseRedis:
             same_identity = (
                 current["owner"] == owner
                 and current["release_id"] == release_id
+                and current["persistence_instance_id"] == candidate
             )
             current_is_fresh = (
                 current_score is not None
@@ -629,6 +630,43 @@ def test_replacement_start_before_old_stop_fences_resumed_old_runtime() -> None:
     )
     assert current == replacement_record
     assert replacement_record.fencing_token == 2
+
+
+def test_fresh_same_owner_new_process_candidate_cannot_reuse_token() -> None:
+    redis = _ServerTimeLeaseRedis(server_time=1000)
+    first = RedisNamespaceLease(
+        redis,
+        namespace=ACCOUNT_A_NAMESPACE,
+        owner="node-a",
+        release_id="release-a",
+        max_age_seconds=300,
+        persistence_instance_id_factory=_CandidateFactory(FIRST_INSTANCE_ID),
+    )
+    replacement = RedisNamespaceLease(
+        redis,
+        namespace=ACCOUNT_A_NAMESPACE,
+        owner="node-a",
+        release_id="release-a",
+        max_age_seconds=300,
+        persistence_instance_id_factory=_CandidateFactory(SECOND_INSTANCE_ID),
+    )
+    first_record = first.acquire()
+
+    with pytest.raises(RedisNamespaceLeaseLost, match="held"):
+        replacement.acquire()
+
+    current = lease_module.get_namespace_lease(
+        redis,
+        ACCOUNT_A_NAMESPACE,
+    )
+    assert current == first_record
+    assert current.refreshed_at_epoch == 1000
+
+    redis.server_time = 1301
+    replacement_record = replacement.acquire()
+
+    assert replacement_record.fencing_token == 2
+    assert replacement_record.persistence_instance_id == SECOND_INSTANCE_ID
 
 
 def test_stale_foreign_owner_cannot_acquire_namespace() -> None:

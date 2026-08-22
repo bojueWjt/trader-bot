@@ -235,6 +235,7 @@ if current_json then
     )
     if current["owner"] == owner
         and current["release_id"] == release_id
+        and candidate_instance_id == instance_id
         and current_is_fresh then
         current["fencing_token"] = persisted_fencing_token(fencing_token)
         current["redis_fencing_epoch"] = redis_fencing_epoch
