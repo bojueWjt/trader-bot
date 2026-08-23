@@ -62,6 +62,8 @@ class FakeCursor:
             return "watermark"
         if "FROM trade_outcomes" in sql:
             return "trade_outcomes"
+        if "FROM execution_events" in sql:
+            return "window_fills"
         if "FROM trade_intents" in sql:
             return "trade_intents"
         if "FROM exchange_state_mirror" in sql:
@@ -188,6 +190,7 @@ def test_fetch_report_data_requires_fixed_success_watermark(monkeypatch):
     assert watermark_queries[0][1] == ("trade_outcomes", "succeeded")
     assert dependencies["trade_outcomes"]["status"] == "ok"
     assert dependencies["trade_outcomes"]["freshness_threshold_seconds"] == 36 * 60 * 60
+    assert dependencies["trade_outcomes"]["window_slack_seconds"] == 300
     assert data["kpis"]["trade_count"] == 0
     assert connection.closed is True
 
@@ -229,6 +232,140 @@ def test_fetch_report_data_rejects_missing_watermark(monkeypatch):
     assert dependencies["trade_outcomes"]["status"] == "missing"
     assert all("FROM trade_outcomes " not in sql for sql, _params in cursor.executions)
     assert connection.closed is True
+
+
+def test_window_bounds_clamps_intraday_to_injected_now():
+    now = datetime(2026, 8, 18, 13, 32, tzinfo=timezone.utc)
+    start, end = report_service.window_bounds("daily", "2026-08-18", now=now)
+
+    assert end == now
+    assert start == now - timedelta(days=1)
+
+
+def test_window_bounds_keeps_finished_calendar_day():
+    now = datetime(2026, 8, 19, 13, 32, tzinfo=timezone.utc)
+    start, end = report_service.window_bounds("daily", "2026-08-18", now=now)
+
+    assert end == datetime(2026, 8, 19, tzinfo=timezone.utc)
+    assert start == datetime(2026, 8, 18, tzinfo=timezone.utc)
+
+
+def test_fetch_report_data_rejects_watermark_that_misses_window_tail(monkeypatch):
+    now = datetime(2026, 8, 18, 13, 32, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": datetime(2026, 8, 18, 0, 30, tzinfo=timezone.utc)}],
+    }
+    cursor, connection = install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    with pytest.raises(
+        report_service.ReportDependencyError,
+        match="window tail not materialized",
+    ):
+        report_service.fetch_report_data(
+            "daily",
+            "2026-08-18",
+            "postgres://example",
+            dependency_status=dependencies,
+            now=now,
+        )
+
+    outcomes = dependencies["trade_outcomes"]
+    assert outcomes["status"] == "incomplete"
+    assert "window tail not materialized" in outcomes["reason"]
+    assert outcomes["window_end"] == now.isoformat()
+    assert outcomes["window_slack_seconds"] == 300
+    assert all("FROM trade_outcomes " not in sql for sql, _params in cursor.executions)
+    assert connection.closed is True
+
+
+def test_require_fresh_outcome_watermark_records_unmaterialized_tail(monkeypatch):
+    now = datetime(2026, 8, 18, 13, 32, tzinfo=timezone.utc)
+    cursor, _connection = install_fake_database(
+        monkeypatch,
+        responses={
+            "watermark": [{"completed_at": datetime(2026, 8, 18, 0, 30, tzinfo=timezone.utc)}],
+        },
+    )
+    dependencies = report_service.empty_dependency_status()
+    missing = []
+
+    with pytest.raises(
+        report_service.ReportDependencyError,
+        match="window tail not materialized",
+    ):
+        report_service.require_fresh_outcome_watermark(
+            cursor,
+            dependencies,
+            now=now,
+            window_end=now,
+            missing_data=missing,
+        )
+
+    assert missing == [dependencies["trade_outcomes"]["reason"]]
+    assert "window tail not materialized" in missing[0]
+
+
+def test_fetch_report_data_accepts_watermark_within_window_slack(monkeypatch):
+    now = datetime(2026, 8, 18, 13, 32, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": datetime(2026, 8, 18, 13, 30, tzinfo=timezone.utc)}],
+    }
+    install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    data = report_service.fetch_report_data(
+        "daily",
+        "2026-08-18",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    assert dependencies["trade_outcomes"]["status"] == "ok"
+    assert dependencies["trade_outcomes"]["window_slack_seconds"] == 300
+    assert data["window"]["end"] == now.isoformat()
+    assert not any("window tail" in item for item in data["missing_data"])
+
+
+def test_fetch_report_data_flags_fill_drought_without_attributed_rounds(monkeypatch):
+    now = datetime(2026, 8, 18, 13, 32, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": datetime(2026, 8, 18, 13, 30, tzinfo=timezone.utc)}],
+        "window_fills": [{"fill_count": 12}],
+    }
+    install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    data = report_service.fetch_report_data(
+        "daily",
+        "2026-08-18",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    assert data["outcomes"]["activity"] == {
+        "window_robot_fills": 12,
+        "attributed_rounds": 0,
+    }
+    assert (
+        "outcome_activity: window_robot_fills=12 attributed_rounds=0"
+        in data["missing_data"]
+    )
+
+
+def test_outcome_window_coverage_slack_allows_zero(monkeypatch):
+    monkeypatch.setenv("REPORT_OUTCOME_WINDOW_SLACK_SECONDS", "0")
+    assert report_service.outcome_window_coverage_slack().total_seconds() == 0
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_outcome_window_coverage_slack_rejects_invalid_values(monkeypatch, value):
+    monkeypatch.setenv("REPORT_OUTCOME_WINDOW_SLACK_SECONDS", value)
+
+    with pytest.raises(report_service.ReportDependencyError, match="non-negative number"):
+        report_service.outcome_window_coverage_slack()
 
 
 def test_outcome_freshness_threshold_is_configurable(monkeypatch):
@@ -286,7 +423,7 @@ def test_exchange_state_mirror_error_enters_missing_data(monkeypatch):
 def test_empty_exchange_state_mirror_fails_closed(monkeypatch):
     now = datetime(2026, 7, 30, 2, tzinfo=timezone.utc)
     responses = {
-        "watermark": [{"completed_at": now - timedelta(hours=1)}],
+        "watermark": [{"completed_at": now}],
         "positions_projection": [
             {
                 "account_id": "account-a",

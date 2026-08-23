@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -38,8 +40,32 @@ except ModuleNotFoundError:
 
 OUTCOME_NAMESPACE = uuid.UUID("1f8080b4-16ed-4b25-bd41-8ce106a76f02")
 JOB_NAME = "trade_outcomes"
-ORDER_SIDE = {1: "buy", 2: "sell", "BUY": "buy", "SELL": "sell", "buy": "buy", "sell": "sell"}
+ROBOT_CLIENT_ORDER_ID_PATTERN = re.compile(r"^B[0-9a-f]{32}[0-9]{2}$")
+ORDER_SIDE = {
+    1: "buy",
+    2: "sell",
+    "1": "buy",
+    "2": "sell",
+    "BUY": "buy",
+    "SELL": "sell",
+    "buy": "buy",
+    "sell": "sell",
+}
 POSITION_SIDE = {2: "long", 3: "short", "LONG": "long", "SHORT": "short", "long": "long", "short": "short"}
+
+
+@dataclass
+class EpisodeBuildStats:
+    robot_fill_count: int = 0
+    dropped_fill_count: int = 0
+    skipped_non_robot_fill_count: int = 0
+
+
+def is_robot_client_order_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and ROBOT_CLIENT_ORDER_ID_PATTERN.fullmatch(value.strip()) is not None
+    )
 
 
 def build_trade_outcome(
@@ -109,7 +135,12 @@ def build_trade_outcome(
     }
 
 
-def load_closed_intents(conn: Any, *, intent_id: str | None = None) -> list[dict[str, Any]]:
+def load_closed_intents(
+    conn: Any,
+    *,
+    intent_id: str | None = None,
+    stats: EpisodeBuildStats | None = None,
+) -> list[dict[str, Any]]:
     sql = """
         SELECT
             ee.account_id,
@@ -118,7 +149,8 @@ def load_closed_intents(conn: Any, *, intent_id: str | None = None) -> list[dict
             ee.ts_event,
             ee.payload,
             ti.instrument_id,
-            ti.order_plan
+            ti.order_plan,
+            ee.client_order_id
         FROM execution_events ee
         LEFT JOIN trade_intents ti ON ti.intent_id = ee.intent_id
         WHERE ee.event_type IN ('OrderFilled', 'PositionClosed')
@@ -136,25 +168,53 @@ def load_closed_intents(conn: Any, *, intent_id: str | None = None) -> list[dict
             "payload": row[4] or {},
             "instrument_id": row[5],
             "order_plan": row[6] or {},
+            "client_order_id": row[7],
         }
         for row in rows
     ]
-    episodes = build_position_episodes(records)
+    episodes = build_position_episodes(records, stats=stats)
     if intent_id:
         episodes = [episode for episode in episodes if episode["intent_id"] == intent_id]
     return episodes
+
+
+def _normalize_order_side(value: Any) -> str | None:
+    mapped = ORDER_SIDE.get(value)
+    if mapped:
+        return mapped
+    if value is None:
+        return None
+    return ORDER_SIDE.get(str(value).strip())
 
 
 def _signed_fill_qty(payload: Mapping[str, Any]) -> Decimal | None:
     qty = _payload_decimal(payload, "last_qty", "quantity", "filled_qty")
     if qty is None:
         return None
-    order_side = ORDER_SIDE.get(payload.get("order_side"))
+    order_side = _normalize_order_side(payload.get("order_side"))
     if order_side == "buy":
         return qty
     if order_side == "sell":
         return -qty
     return None
+
+
+def _fill_client_order_id(record: Mapping[str, Any]) -> str:
+    raw = record.get("client_order_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    payload = record.get("payload") or {}
+    if isinstance(payload, Mapping):
+        for field_name in (
+            "client_order_id",
+            "clientOrderId",
+            "client_algo_id",
+            "clientAlgoId",
+        ):
+            value = payload.get(field_name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
 
 
 def _episode_instrument_key(record: Mapping[str, Any]) -> str | None:
@@ -167,16 +227,26 @@ def _episode_instrument_key(record: Mapping[str, Any]) -> str | None:
     return None
 
 
-def build_position_episodes(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Reconstruct position lifecycles from the raw fill stream.
+def build_position_episodes(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    stats: EpisodeBuildStats | None = None,
+) -> list[dict[str, Any]]:
+    """Reconstruct robot-owned position lifecycles from the fill stream.
 
     Live closes run through separate management intents (partial_close /
-    close_position), so a single intent never sees both legs. Group fills by
-    (account, instrument), track net quantity, and cut an episode each time the
-    position returns to flat. The episode is attributed to the first tagged
-    entry fill's intent; untagged PositionClosed events within the closing
-    window are attached so realized_pnl can come from the venue when available.
+    close_position), so a single intent never sees both legs. Group robot
+    fills by (account, instrument), track net quantity, and cut an episode
+    each time that robot-owned book returns to flat. Manual leftovers are
+    excluded: after ownership isolation they no longer appear in
+    execution_events, so mixing them in would pin net to a residual that
+    can never return to zero.
+
+    The episode is attributed to the first tagged entry fill's intent;
+    untagged PositionClosed events within the closing window are attached
+    so realized_pnl can come from the venue when available.
     """
+    counters = stats if stats is not None else EpisodeBuildStats()
     streams: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
     closes: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
     for record in records:
@@ -184,9 +254,14 @@ def build_position_episodes(records: Sequence[Mapping[str, Any]]) -> list[dict[s
         if key_symbol is None:
             continue
         key = (str(record.get("account_id")), key_symbol)
-        if record.get("event_type") == "OrderFilled":
+        event_type = record.get("event_type")
+        if event_type == "OrderFilled":
+            if not is_robot_client_order_id(_fill_client_order_id(record)):
+                counters.skipped_non_robot_fill_count += 1
+                continue
+            counters.robot_fill_count += 1
             streams.setdefault(key, []).append(record)
-        elif record.get("event_type") == "PositionClosed":
+        elif event_type == "PositionClosed":
             closes.setdefault(key, []).append(record)
 
     episodes: list[dict[str, Any]] = []
@@ -196,6 +271,7 @@ def build_position_episodes(records: Sequence[Mapping[str, Any]]) -> list[dict[s
         for fill in fills:
             signed = _signed_fill_qty(fill.get("payload") or {})
             if signed is None:
+                counters.dropped_fill_count += 1
                 continue
             current.append(fill)
             net += signed
@@ -204,7 +280,7 @@ def build_position_episodes(records: Sequence[Mapping[str, Any]]) -> list[dict[s
                 if episode is not None:
                     episodes.append(episode)
                 current = []
-        # non-flat trailing fills = still-open position; intentionally dropped
+        # non-flat trailing fills = still-open robot position; dropped
     return episodes
 
 
@@ -363,6 +439,42 @@ def upsert_trade_outcomes(conn: Any, outcomes: Sequence[Mapping[str, Any]]) -> i
     return len(outcomes)
 
 
+def delete_stale_trade_outcomes(
+    conn: Any,
+    keep_outcome_ids: Sequence[str],
+    *,
+    intent_id: str | None = None,
+) -> int:
+    keep = [str(outcome_id) for outcome_id in keep_outcome_ids]
+    with conn.cursor() as cur:
+        if intent_id:
+            if keep:
+                cur.execute(
+                    """
+                    DELETE FROM trade_outcomes
+                    WHERE intent_id = %s
+                      AND NOT (outcome_id::text = ANY(%s))
+                    """,
+                    (intent_id, keep),
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM trade_outcomes WHERE intent_id = %s",
+                    (intent_id,),
+                )
+        elif not keep:
+            cur.execute("DELETE FROM trade_outcomes")
+        else:
+            cur.execute(
+                """
+                DELETE FROM trade_outcomes
+                WHERE NOT (outcome_id::text = ANY(%s))
+                """,
+                (keep,),
+            )
+        return int(cur.rowcount or 0)
+
+
 def mark_job_running(conn: Any) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -434,14 +546,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         conn.commit()
 
         try:
-            intents = load_closed_intents(conn, intent_id=args.intent_id)
+            stats = EpisodeBuildStats()
+            intents = load_closed_intents(
+                conn,
+                intent_id=args.intent_id,
+                stats=stats,
+            )
             outcomes = compute_outcomes(intents, cache_dir=args.cache_dir, base_url=args.base_url, market=args.market)
             upserted_count = upsert_trade_outcomes(conn, outcomes)
+            deleted_stale_count = delete_stale_trade_outcomes(
+                conn,
+                [str(outcome.get("outcome_id") or "") for outcome in outcomes],
+                intent_id=args.intent_id,
+            )
 
             result = {
                 "closed_intent_count": len(intents),
                 "upserted_count": upserted_count,
                 "skipped_count": len(intents) - upserted_count,
+                "deleted_stale_count": deleted_stale_count,
+                "robot_fill_count": stats.robot_fill_count,
+                "dropped_fill_count": stats.dropped_fill_count,
+                "skipped_non_robot_fill_count": stats.skipped_non_robot_fill_count,
             }
             Path(args.output).write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
             mark_job_succeeded(conn, upserted_count)
@@ -457,7 +583,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         conn.close()
 
-    print(f"processed {len(intents)} closed intents; upserted {upserted_count}; wrote JSON result to {args.output}")
+    print(
+        f"processed {len(intents)} closed intents; upserted {upserted_count}; "
+        f"deleted {deleted_stale_count} stale; dropped_fills {stats.dropped_fill_count}; "
+        f"wrote JSON result to {args.output}"
+    )
     return 0
 
 
@@ -531,7 +661,7 @@ def _split_entry_exit_fills(
     exits: list[Mapping[str, Any]] = []
     for fill in fills:
         payload = fill.get("payload") or {}
-        order_side = ORDER_SIDE.get(payload.get("order_side"))
+        order_side = _normalize_order_side(payload.get("order_side"))
         if order_side == entry_order_side:
             entries.append(fill)
         elif order_side == exit_order_side:

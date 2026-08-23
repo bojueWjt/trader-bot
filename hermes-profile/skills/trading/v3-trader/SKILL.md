@@ -221,3 +221,4 @@ python3 $V3 positions
 - 禁止发 watcher 界面截图代替日报/周报。
 - 禁止跳过频道观点总结;`channel_views` 是用户明确要求的报告核心。
 - 脚本失败时只转述可读原因,不要把堆栈或原始 JSON 发给用户。
+- `trade_outcomes` watermark 必须覆盖报告窗口尾。hourly timer 是主路径；若 publish 返回 503 且原因含 `window tail not materialized`，先 `systemctl start trader-v3-trade-outcomes.service`（幂等 upsert），再重试发布。禁止在物化滞后时把 KPI 全 0 的报告发出去。

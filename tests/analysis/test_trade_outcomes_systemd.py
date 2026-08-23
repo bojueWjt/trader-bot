@@ -31,10 +31,11 @@ def test_trade_outcomes_service_uses_environment_secret_and_file_logs():
     )
 
 
-def test_trade_outcomes_timer_runs_daily_and_catches_missed_runs():
+def test_trade_outcomes_timer_runs_hourly_and_catches_missed_runs():
     text = TIMER.read_text(encoding="utf-8")
 
-    assert "OnCalendar=*-*-* 00:30:00 UTC" in text
+    assert "OnCalendar=*-*-* *:30:00 UTC" in text
+    assert "00:30:00 UTC" not in text
     assert "Persistent=true" in text
     assert "Unit=trader-v3-trade-outcomes.service" in text
     assert "WantedBy=timers.target" in text

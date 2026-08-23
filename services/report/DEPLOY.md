@@ -24,12 +24,15 @@ REPORT_DIR=/srv/trader-v3/reports
 PUBLIC_BASE=https://hk.balen.wang
 REPORT_TOKEN=<long random token>
 REPORT_OUTCOME_FRESHNESS_HOURS=36
+REPORT_OUTCOME_WINDOW_SLACK_SECONDS=300
 ```
 
 `python-multipart` is required for `POST /reports/assets`.
 `REPORT_OUTCOME_FRESHNESS_HOURS` controls the maximum age of the latest
-successful `trade_outcomes` job run. Report publication returns HTTP 503 when
-the watermark is missing or stale.
+successful `trade_outcomes` job run. Age alone is not enough: the watermark's
+`completed_at` must also cover the report window end (with
+`REPORT_OUTCOME_WINDOW_SLACK_SECONDS` slack, default 300). Publication returns
+HTTP 503 when the watermark is missing, stale, or lags the window tail.
 
 ## systemd
 

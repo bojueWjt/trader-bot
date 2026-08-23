@@ -53,6 +53,9 @@ OUTCOME_JOB_NAME = "trade_outcomes"
 OUTCOME_JOB_STATUS = "succeeded"
 OUTCOME_FRESHNESS_ENV = "REPORT_OUTCOME_FRESHNESS_HOURS"
 DEFAULT_OUTCOME_FRESHNESS_HOURS = 36.0
+ROBOT_CLIENT_ORDER_ID_SQL = r"^B[0-9a-f]{32}[0-9]{2}$"
+OUTCOME_WINDOW_SLACK_ENV = "REPORT_OUTCOME_WINDOW_SLACK_SECONDS"
+DEFAULT_OUTCOME_WINDOW_SLACK_SECONDS = 300.0
 EXCHANGE_MIRROR_FRESHNESS_ENV = "REPORT_EXCHANGE_MIRROR_FRESHNESS_SECONDS"
 DEFAULT_EXCHANGE_MIRROR_FRESHNESS_SECONDS = 180.0
 
@@ -83,7 +86,11 @@ def parse_report_date(value: str) -> date:
         raise ReportValidationError("date must be YYYY-MM-DD") from exc
 
 
-def window_bounds(report_type: str, report_date: str) -> tuple[datetime, datetime]:
+def window_bounds(
+    report_type: str,
+    report_date: str,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
     end_date = parse_report_date(report_date) + timedelta(days=1)
     days = 1 if report_type == "daily" else 7
     end = datetime.combine(end_date, time.min, tzinfo=timezone.utc)
@@ -91,9 +98,12 @@ def window_bounds(report_type: str, report_date: str) -> tuple[datetime, datetim
     # not the not-yet-finished calendar day: otherwise trades closing after
     # generation time never appear in any report (2026-07-13 weekly missed
     # 07-06 outcomes because "today+1" pushed the 7-day window forward).
-    now = datetime.now(timezone.utc)
-    if end > now:
-        end = now
+    current_time = now or utc_now()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    current_time = current_time.astimezone(timezone.utc)
+    if end > current_time:
+        end = current_time
     return end - timedelta(days=days), end
 
 
@@ -250,6 +260,10 @@ def empty_db_data() -> dict[str, Any]:
             "daily_pnl": [],
             "r_distribution": [],
             "symbol_pnl": [],
+            "activity": {
+                "window_robot_fills": 0,
+                "attributed_rounds": 0,
+            },
         },
         "intents": {"activity": []},
         "positions": [],
@@ -271,6 +285,8 @@ def empty_dependency_status() -> dict[str, dict[str, Any]]:
             "completed_at": "",
             "age_seconds": False,
             "freshness_threshold_seconds": False,
+            "window_end": "",
+            "window_slack_seconds": False,
         },
         "exchange_state_mirror": {
             "status": "unknown",
@@ -331,6 +347,22 @@ def outcome_freshness_threshold() -> timedelta:
         reason = f"{OUTCOME_FRESHNESS_ENV} must be a positive number"
         raise ReportDependencyError("trade_outcomes", reason)
     return timedelta(hours=hours)
+
+
+def outcome_window_coverage_slack() -> timedelta:
+    raw_value = os.getenv(
+        OUTCOME_WINDOW_SLACK_ENV,
+        str(DEFAULT_OUTCOME_WINDOW_SLACK_SECONDS),
+    )
+    try:
+        seconds = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        reason = f"{OUTCOME_WINDOW_SLACK_ENV} must be a non-negative number"
+        raise ReportDependencyError("trade_outcomes", reason) from exc
+    if not math.isfinite(seconds) or seconds < 0:
+        reason = f"{OUTCOME_WINDOW_SLACK_ENV} must be a non-negative number"
+        raise ReportDependencyError("trade_outcomes", reason)
+    return timedelta(seconds=seconds)
 
 
 def exchange_mirror_freshness_threshold() -> timedelta:
@@ -504,8 +536,13 @@ def require_fresh_outcome_watermark(
     cursor: Any,
     dependencies: dict[str, dict[str, Any]],
     now: datetime | None = None,
+    window_end: datetime | None = None,
+    missing_data: list[str] | None = None,
 ) -> datetime:
     current_time = now or utc_now()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    current_time = current_time.astimezone(timezone.utc)
     try:
         freshness = outcome_freshness_threshold()
     except ReportDependencyError as exc:
@@ -573,6 +610,41 @@ def require_fresh_outcome_watermark(
             }
         )
         raise ReportDependencyError("trade_outcomes", reason)
+    if window_end is not None:
+        try:
+            slack = outcome_window_coverage_slack()
+        except ReportDependencyError as exc:
+            dependencies["trade_outcomes"].update(
+                {
+                    "status": "error",
+                    "reason": exc.reason,
+                    "completed_at": completed_at.isoformat(),
+                    "age_seconds": age_seconds,
+                }
+            )
+            raise
+        coverage_end = normalize_utc_datetime(window_end)
+        slack_seconds = int(slack.total_seconds())
+        dependencies["trade_outcomes"]["window_end"] = coverage_end.isoformat()
+        dependencies["trade_outcomes"]["window_slack_seconds"] = slack_seconds
+        if completed_at + slack < coverage_end:
+            reason = (
+                "trade_outcomes window tail not materialized: "
+                f"completed_at={completed_at.isoformat()}, "
+                f"window_end={coverage_end.isoformat()}, "
+                f"slack_seconds={slack_seconds}"
+            )
+            if missing_data is not None:
+                missing_data.append(reason)
+            dependencies["trade_outcomes"].update(
+                {
+                    "status": "incomplete",
+                    "reason": reason,
+                    "completed_at": completed_at.isoformat(),
+                    "age_seconds": age_seconds,
+                }
+            )
+            raise ReportDependencyError("trade_outcomes", reason)
     dependencies["trade_outcomes"].update(
         {
             "status": "ok",
@@ -696,13 +768,20 @@ def fetch_report_data(
     dependencies = dependency_status
     if dependencies is None:
         dependencies = empty_dependency_status()
-    start, end = window_bounds(report_type, report_date)
+    current_time = now or utc_now()
+    start, end = window_bounds(report_type, report_date, now=current_time)
     data["window"] = {"start": start.isoformat(), "end": end.isoformat()}
     conn = connect_database(database_url, dependencies)
 
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            require_fresh_outcome_watermark(cur, dependencies, now=now)
+            require_fresh_outcome_watermark(
+                cur,
+                dependencies,
+                now=current_time,
+                window_end=end,
+                missing_data=data["missing_data"],
+            )
             try:
                 outcome_rows = fetch_all(
                     cur,
@@ -726,6 +805,35 @@ def fetch_report_data(
             computed = compute_outcomes(outcome_rows)
             data["kpis"].update(computed["kpis"])
             data["outcomes"].update(computed["outcomes"])
+            fill_rows = safe_query(
+                cur,
+                """
+                SELECT count(*)::int AS fill_count
+                FROM execution_events
+                WHERE event_type = 'OrderFilled'
+                  AND ts_event >= %s AND ts_event < %s
+                  AND client_order_id ~ %s
+                """,
+                (start, end, ROBOT_CLIENT_ORDER_ID_SQL),
+                data["missing_data"],
+                "window robot fills",
+            )
+            window_robot_fills = 0
+            if fill_rows:
+                try:
+                    window_robot_fills = int(fill_rows[0].get("fill_count") or 0)
+                except (TypeError, ValueError, AttributeError):
+                    window_robot_fills = 0
+            attributed_rounds = int(data["kpis"].get("trade_count") or 0)
+            data["outcomes"]["activity"] = {
+                "window_robot_fills": window_robot_fills,
+                "attributed_rounds": attributed_rounds,
+            }
+            if window_robot_fills > 0 and attributed_rounds == 0:
+                data["missing_data"].append(
+                    "outcome_activity: window_robot_fills="
+                    f"{window_robot_fills} attributed_rounds={attributed_rounds}"
+                )
 
             intent_rows = safe_query(
                 cur,
@@ -750,7 +858,7 @@ def fetch_report_data(
                 mirror_fresh = exchange_mirror_rows_are_fresh(
                     mirror_rows,
                     dependencies,
-                    now=now,
+                    now=current_time,
                 )
                 if not mirror_fresh:
                     data["missing_data"].append(dependencies["exchange_state_mirror"]["reason"])

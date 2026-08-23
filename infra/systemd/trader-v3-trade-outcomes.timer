@@ -1,8 +1,10 @@
 [Unit]
-Description=Trader v3: run trade outcome metrics daily
+Description=Trader v3: run trade outcome metrics hourly
 
 [Timer]
-OnCalendar=*-*-* 00:30:00 UTC
+# Hourly at :30 so a ~13:32 UTC daily report sees a watermark covering the window.
+# Daily 00:30 left a 00:30-13:32 UTC blind zone that no trailing-24h report could see.
+OnCalendar=*-*-* *:30:00 UTC
 Persistent=true
 Unit=trader-v3-trade-outcomes.service
 
