@@ -431,6 +431,25 @@ class IntentExecutionStrategy(Strategy):
     def _live_canary_loss_topic(self) -> str:
         return f"live-canary.loss.{self.config.account_id}"
 
+    def _live_canary_entry_context_required(self) -> bool:
+        """Whether live entries must carry a canary execution context.
+
+        Mirrors ``_live_canary_applies``: normal live-open-gate mode means
+        canary ceremony is off. Without a trusted gate we fail closed and
+        keep requiring the context.
+        """
+        if not self._requires_live_canary_runtime():
+            return False
+        if live_canary_permit_required(
+            getattr(self.config, "account_id", ""),
+            self._live_rollout_phase(),
+        ):
+            return True
+        trusted_gate = normalize_live_open_gate(self._live_open_gate())
+        if trusted_gate is False:
+            return True
+        return trusted_gate["mode"] == "canary_only"
+
     def publish_live_canary_loss_decision(
         self,
         decision: LiveCanaryLossDecision,
@@ -6854,10 +6873,8 @@ class IntentExecutionStrategy(Strategy):
         prepared_order: Any | bool = False,
     ) -> bool:
         requires_live_canary = (
-            str(getattr(self.config, "account_id", "")) == "account-a"
-            and str(getattr(self.config, "environment", "")).lower()
-            == "live"
-            and not plan.reduce_only
+            not plan.reduce_only
+            and self._live_canary_entry_context_required()
         )
         if requires_live_canary and not isinstance(
             live_canary_execution,
@@ -6961,10 +6978,8 @@ class IntentExecutionStrategy(Strategy):
         prepared_order: Any | bool = False,
     ) -> bool:
         requires_live_canary = (
-            str(getattr(self.config, "account_id", "")) == "account-a"
-            and str(getattr(self.config, "environment", "")).lower()
-            == "live"
-            and not plan.reduce_only
+            not plan.reduce_only
+            and self._live_canary_entry_context_required()
         )
         if requires_live_canary and not isinstance(
             live_canary_execution,

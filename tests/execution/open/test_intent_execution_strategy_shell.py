@@ -668,6 +668,73 @@ class StrategyShellTest(unittest.TestCase):
             strategy._live_shared_margin_denial(close_plan)
         )
 
+    def test_account_a_normal_gate_needs_no_canary_entry_context(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                node_id="node-a",
+                trading_state="ACTIVE",
+                environment="live",
+            )
+        )
+        strategy.set_live_open_gate_getter(
+            lambda: _normal_live_open_gate()
+        )
+
+        self.assertFalse(
+            strategy._live_canary_entry_context_required()
+        )
+
+    def test_account_a_missing_gate_fails_closed_to_canary_context(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                node_id="node-a",
+                trading_state="ACTIVE",
+                environment="live",
+            )
+        )
+        strategy.set_live_open_gate_getter(lambda: None)
+
+        self.assertTrue(
+            strategy._live_canary_entry_context_required()
+        )
+        plan = SimpleNamespace(
+            intent_id="intent-1",
+            instrument_id="BTCUSDT-PERP.BINANCE",
+            reduce_only=False,
+        )
+        denials: list = []
+        strategy._record_denial = denials.append  # type: ignore[method-assign]
+
+        submitted = strategy._submit_order_plan(plan)
+
+        self.assertFalse(submitted)
+        self.assertEqual(
+            denials[-1].reason,
+            "canary_execution_context_missing",
+        )
+
+    def test_account_b_never_requires_canary_entry_context(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-b",
+                node_id="node-b",
+                trading_state="ACTIVE",
+                environment="live",
+            )
+        )
+
+        self.assertFalse(
+            strategy._live_canary_entry_context_required()
+        )
+
     def test_pure_user_directed_close_fill_is_excluded_from_canary_loss(
         self,
     ) -> None:
