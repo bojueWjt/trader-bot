@@ -214,11 +214,12 @@ python3 $V3 positions
 3. 组装报告 JSON。`channel_views` 必填,每个活跃频道都要有 `{channel,trader,stance,summary,symbols}`；其中 `stance` 只能使用 `bearish`、`bullish`、`mixed`、`neutral` 四个英文枚举值之一。`sections.overview_md` 也必填(本期概览,3-6行);有拒单/裸仓/系统异常时 `sections.risk_md` 必填;周报建议再写 `market_md`(大盘走势与关键位)和 `actions_md`(下周计划)。
 4. 有值得展示的盘面图,先 `python3 v3_report.py upload <图片路径>` 上传,再把返回的 asset URL 写进 `images[].url`。
 5. 发布: `python3 v3_report.py publish --type daily --json report.json` 或 `--type weekly`。
-6. 把脚本返回的 `https://hk.balen.wang/reports/...html` 链接直接发给用户。
+6. 把 `v3_report.py` **返回的完整 URL 原样**发给用户（当前域是 `https://jp-bot.balen.wang/reports/...html`）。禁止改域名，尤其禁止改成 `hk.balen.wang`。
 
 铁律:
 
 - 禁止发 watcher 界面截图代替日报/周报。
 - 禁止跳过频道观点总结;`channel_views` 是用户明确要求的报告核心。
 - 脚本失败时只转述可读原因,不要把堆栈或原始 JSON 发给用户。
+- 发给用户的报告链接必须是 publish 脚本打印的那一行，禁止按记忆或示例域名改写。
 - `trade_outcomes` watermark 必须覆盖报告窗口尾。hourly timer 是主路径；若 publish 返回 503 且原因含 `window tail not materialized`，先 `systemctl start trader-v3-trade-outcomes.service`（幂等 upsert），再重试发布。禁止在物化滞后时把 KPI 全 0 的报告发出去。
