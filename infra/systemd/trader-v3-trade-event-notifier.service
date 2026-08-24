@@ -1,0 +1,15 @@
+[Unit]
+Description=Trader v3: read-only Telegram trade event notifier
+After=network-online.target docker.service hermes-gateway-trader.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/trader-v3/scripts
+Environment=HERMES_HOME=/srv/hermes/profiles/trader
+ExecStart=/usr/bin/python3 /srv/trader-v3/scripts/trade_event_notifier.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
