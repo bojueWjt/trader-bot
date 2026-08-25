@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg2
 import pytest
@@ -1083,6 +1083,101 @@ def _resume_body(
         "target_nodes": target_nodes or [node_id],
         "scope": scope,
     }
+
+
+def _seed_exchange_accepted_durable_entry_ladder(
+    client: TestClient,
+    migrated_db: str,
+) -> tuple[str, list[dict]]:
+    _seed_heartbeat(migrated_db, trading_state="ACTIVE")
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM live_canary_permits WHERE permit_id=%s",
+            (permit_id,),
+        )
+    open_response = client.post(
+        "/v1/operator/orders",
+        headers=_risk_headers(f"durable-ladder-{uuid4()}"),
+        json={
+            "action": "open_position",
+            "account_id": ACCOUNT_A,
+            "symbol": SYMBOL,
+            "side": "long",
+            "entry": {
+                "type": "zone",
+                "price_min": 99,
+                "price_max": 101,
+            },
+            "stop_loss": 95,
+            "quantity": 0.12,
+            "notional_usdt": 12,
+            "reason": "durable ladder resume gate test",
+            "client_ref": f"durable-ladder-{uuid4()}",
+        },
+    )
+    assert open_response.status_code == 200
+    payload = open_response.json()
+    preview = payload["execution_preview"]
+    assert preview["type"] == "zone_ladder"
+    intent_id = str(UUID(payload["intent_id"]))
+    intent_uuid = UUID(intent_id)
+    orders = []
+    for tranche in preview["tranches"]:
+        sequence = int(tranche["seq"])
+        client_order_id = f"B{intent_uuid.hex}{sequence:02d}"
+        order = {
+            "symbol": SYMBOL,
+            "client_order_id": client_order_id,
+            "order_type": "LIMIT",
+            "order_kind": "regular",
+            "side": "BUY",
+            "quantity": str(tranche["quantity"]),
+            "price": str(tranche["price"]),
+            "time_in_force": "GTC",
+            "reduce_only": False,
+        }
+        orders.append(order)
+        with _connect(migrated_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO orders_projection (
+                    order_projection_id,
+                    account_id,
+                    instrument_id,
+                    intent_id,
+                    client_order_id,
+                    status,
+                    side,
+                    order_type,
+                    quantity,
+                    price,
+                    reduce_only,
+                    updated_at,
+                    payload
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, 'working', 'long',
+                    'LIMIT', %s, %s, false, now(), %s
+                )
+                """,
+                (
+                    str(uuid4()),
+                    ACCOUNT_A,
+                    "BTCUSDT-PERP.BINANCE",
+                    intent_id,
+                    client_order_id,
+                    order["quantity"],
+                    order["price"],
+                    Json(
+                        {
+                            "side": "BUY",
+                            "reduce_only": False,
+                        }
+                    ),
+                ),
+            )
+    return intent_id, orders
 
 
 @pytest.mark.parametrize("command_type", ("HALT", "REDUCE", "RESUME"))
@@ -2584,6 +2679,203 @@ def test_resume_allows_robot_owned_reduce_only_protection_orders(
     )
 
     assert response.status_code == 200
+
+
+def test_resume_allows_exchange_accepted_unexpired_durable_entry_ladder(
+    client: TestClient,
+    migrated_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_binance_mark_price",
+        lambda _symbol: 102,
+    )
+    intent_id, orders = _seed_exchange_accepted_durable_entry_ladder(
+        client,
+        migrated_db,
+    )
+    _seed_heartbeat(migrated_db, regular_orders=orders)
+    _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(None),
+    )
+
+    assert response.status_code == 200
+    command_id = response.json()["command_id"]
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT scope FROM operator_commands WHERE command_id=%s",
+            (command_id,),
+        )
+        scope = cur.fetchone()[0]
+    preserved = scope["durable_entry_order_exemptions"]
+    assert [item["client_order_id"] for item in preserved] == [
+        order["client_order_id"] for order in orders
+    ]
+    assert {item["intent_id"] for item in preserved} == {intent_id}
+    assert [item["price"] for item in preserved] == [
+        order["price"] for order in orders
+    ]
+    assert [item["quantity"] for item in preserved] == [
+        order["quantity"] for order in orders
+    ]
+
+
+def test_resume_allows_durable_entry_reduce_only_from_projection_payload(
+    client: TestClient,
+    migrated_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_binance_mark_price",
+        lambda _symbol: 102,
+    )
+    intent_id, orders = _seed_exchange_accepted_durable_entry_ladder(
+        client,
+        migrated_db,
+    )
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE orders_projection
+            SET reduce_only=NULL
+            WHERE intent_id=%s
+            """,
+            (intent_id,),
+        )
+    _seed_heartbeat(migrated_db, regular_orders=orders)
+    _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(None),
+    )
+
+    assert response.status_code == 200
+    command_id = response.json()["command_id"]
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT scope FROM operator_commands WHERE command_id=%s",
+            (command_id,),
+        )
+        scope = cur.fetchone()[0]
+    assert len(scope["durable_entry_order_exemptions"]) == len(orders)
+
+
+@pytest.mark.parametrize(
+    "reduce_only_fields",
+    (
+        {"reduce_only": None},
+        {"reduce_only": "false"},
+        {"reduce_only": False, "reduceOnly": True},
+    ),
+)
+def test_resume_rejects_durable_entry_without_explicit_reduce_only_false(
+    client: TestClient,
+    migrated_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+    reduce_only_fields: dict,
+) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_binance_mark_price",
+        lambda _symbol: 102,
+    )
+    _intent_id, orders = _seed_exchange_accepted_durable_entry_ladder(
+        client,
+        migrated_db,
+    )
+    orders[0].pop("reduce_only")
+    orders[0].update(reduce_only_fields)
+    _seed_heartbeat(migrated_db, regular_orders=orders)
+    _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(None),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "robot-owned orders are not terminal"
+    )
+
+
+def test_resume_rejects_durable_entry_with_exchange_quantity_drift(
+    client: TestClient,
+    migrated_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_binance_mark_price",
+        lambda _symbol: 102,
+    )
+    _intent_id, orders = _seed_exchange_accepted_durable_entry_ladder(
+        client,
+        migrated_db,
+    )
+    orders[1]["quantity"] = "999"
+    _seed_heartbeat(migrated_db, regular_orders=orders)
+    _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(None),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "robot-owned orders are not terminal"
+    )
+
+
+def test_resume_rejects_durable_entry_with_intent_instrument_drift(
+    client: TestClient,
+    migrated_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_binance_mark_price",
+        lambda _symbol: 102,
+    )
+    _intent_id, orders = _seed_exchange_accepted_durable_entry_ladder(
+        client,
+        migrated_db,
+    )
+    drifted_client_order_id = orders[0]["client_order_id"]
+    orders[0]["symbol"] = "ETHUSDT"
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE orders_projection
+            SET instrument_id='ETHUSDT-PERP.BINANCE'
+            WHERE client_order_id=%s
+            """,
+            (drifted_client_order_id,),
+        )
+    _seed_heartbeat(migrated_db, regular_orders=orders)
+    _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(None),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "robot-owned orders are not terminal"
+    )
 
 
 def test_regular_resume_allows_owned_position_with_protection_in_place(

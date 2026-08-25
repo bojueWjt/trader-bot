@@ -1423,6 +1423,45 @@ class IntentExecutionStrategy(Strategy):
             return
 
         dispatched_at = datetime.now(timezone.utc)
+        durable_entry_preservations: dict[
+            str,
+            dict[str, Any],
+        ] = {}
+        if ctype == "cancel_all":
+            try:
+                durable_entry_preservations = (
+                    self._durable_entry_order_preservations()
+                )
+            except Exception as exc:
+                detail = (
+                    "durable entry preservation evidence unavailable: "
+                    f"{exc!r}"
+                )
+                self._record_denial(
+                    OrderDenied(
+                        "durable_entry_preservation_unavailable",
+                        repr(exc),
+                    )
+                )
+                payload = {
+                    "command_id": command_id,
+                    "command_type": ctype,
+                    "account_id": str(self.config.account_id),
+                    "instrument_ids": list(instrument_ids),
+                    "operations": [],
+                    "errors": [detail],
+                    "dispatched_at": dispatched_at.isoformat(),
+                    "completed_at": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                }
+                if command_id:
+                    self._remember_terminal_command_result(
+                        command_id,
+                        payload,
+                    )
+                    self._publish_terminal_command_result(payload)
+                return
         if command_id:
             completed = self._terminal_command_results.get(command_id)
             if completed is not None:
@@ -1437,6 +1476,9 @@ class IntentExecutionStrategy(Strategy):
                 instrument_ids=instrument_ids,
                 dispatched_at=dispatched_at,
                 authorization=authorization,
+                durable_entry_preservations=(
+                    durable_entry_preservations
+                ),
             )
             return
         operations: list[dict[str, Any]] = []
@@ -1445,6 +1487,10 @@ class IntentExecutionStrategy(Strategy):
             instrument_ids,
             operations,
             errors,
+            command_type=ctype,
+            durable_entry_preservations=(
+                durable_entry_preservations
+            ),
         )
         if ctype == "close_all":
             self._close_terminal_positions(
@@ -1479,6 +1525,7 @@ class IntentExecutionStrategy(Strategy):
         instrument_ids: tuple[str, ...],
         dispatched_at: datetime,
         authorization: dict[str, Any],
+        durable_entry_preservations: Mapping[str, dict[str, Any]],
     ) -> bool:
         if not command_id:
             self._record_denial(
@@ -1489,10 +1536,24 @@ class IntentExecutionStrategy(Strategy):
             )
             return False
         from runtime.exchange_cancel_adapter import (
+            DurableEntryOrderPreservation,
             TerminalExchangeRequest,
         )
 
         request_id = f"terminal-command:{command_id}"
+        preservation_specs = tuple(
+            DurableEntryOrderPreservation(
+                client_order_id=client_order_id,
+                instrument_id=str(
+                    preservation.get("instrument_id") or ""
+                ),
+                side=str(preservation.get("side") or ""),
+                quantity=str(preservation.get("quantity") or ""),
+                price=str(preservation.get("price") or ""),
+            )
+            for client_order_id, preservation
+            in durable_entry_preservations.items()
+        )
         request = TerminalExchangeRequest(
             request_id=request_id,
             account_id=str(self.config.account_id),
@@ -1502,6 +1563,7 @@ class IntentExecutionStrategy(Strategy):
                 self._terminal_exchange_worker.new_deadline()
             ),
             instrument_ids=instrument_ids,
+            durable_entry_preservations=preservation_specs,
         )
         self._pending_terminal_exchange[request_id] = {
             "kind": "terminal_command",
@@ -1510,6 +1572,9 @@ class IntentExecutionStrategy(Strategy):
             "instrument_ids": instrument_ids,
             "dispatched_at": dispatched_at,
             "authorization": authorization,
+            "durable_entry_preservations": dict(
+                durable_entry_preservations
+            ),
         }
         self._terminal_command_request_ids[command_id] = request_id
         if self._terminal_exchange_worker.submit(request):
@@ -1647,6 +1712,20 @@ class IntentExecutionStrategy(Strategy):
                 getattr(result, "cancel_outcomes", ()) or ()
             )
         ]
+        durable_entry_preservations = dict(
+            pending.get("durable_entry_preservations") or {}
+        )
+        for operation in operations:
+            if operation.get("outcome") != "durable_entry_preserved":
+                continue
+            client_order_id = str(
+                operation.get("client_order_id") or ""
+            )
+            preservation = durable_entry_preservations.get(
+                client_order_id
+            )
+            if isinstance(preservation, Mapping):
+                operation.update(dict(preservation))
         errors = [
             str(operation["error"])
             for operation in operations
@@ -1799,11 +1878,116 @@ class IntentExecutionStrategy(Strategy):
             )
         )
 
+    def _durable_entry_order_preservations(
+        self,
+    ) -> dict[str, dict[str, Any]]:
+        now = _aware_datetime(self._now())
+        preservations: dict[str, dict[str, Any]] = {}
+        account_id = str(self.config.account_id)
+        for record in self._intent_execution_inbox.records():
+            if record.account_id != account_id:
+                continue
+            if record.action not in {"open_position", "add_position"}:
+                continue
+            if record.state not in {
+                IntentExecutionState.DISPATCHED,
+                IntentExecutionState.EXCHANGE_CONFIRMED,
+            }:
+                continue
+            valid_until = _durable_entry_valid_until(
+                record.intent_payload
+            )
+            if valid_until is False or valid_until <= now:
+                continue
+            expected_orders = _durable_entry_expected_orders(record)
+            confirmed_client_order_ids = {
+                str(client_order_id)
+                for client_order_id in (
+                    record.exchange_confirmed_client_order_ids
+                    or ()
+                )
+            }
+            for client_order_id in confirmed_client_order_ids:
+                expected = expected_orders.get(client_order_id)
+                if expected is None:
+                    continue
+                preservations[client_order_id] = {
+                    "intent_id": record.intent_id,
+                    "instrument_id": record.instrument_id,
+                    "side": expected["side"],
+                    "price": expected["price"],
+                    "quantity": expected["quantity"],
+                    "valid_until": valid_until.isoformat(),
+                    "preservation_reason": (
+                        "exchange_confirmed_unexpired_durable_intent"
+                    ),
+                }
+        return preservations
+
+    def _terminal_order_preservation(
+        self,
+        order: Any,
+        *,
+        command_type: str,
+        durable_entry_preservations: Mapping[
+            str,
+            dict[str, Any],
+        ],
+    ) -> dict[str, Any] | bool:
+        if command_type != "cancel_all":
+            return False
+        client_order_id = object_client_order_id(order)
+        preservation = durable_entry_preservations.get(
+            client_order_id
+        )
+        outcome = ""
+        if (
+            isinstance(preservation, Mapping)
+            and _terminal_order_matches_durable_entry(
+                order,
+                preservation,
+            )
+        ):
+            outcome = "durable_entry_preserved"
+        elif _terminal_order_is_strict_protection(order):
+            outcome = "protective_order_preserved"
+        if not outcome:
+            return False
+        operation = {
+            "kind": "preserve_order",
+            "instrument_id": str(
+                getattr(order, "instrument_id", "") or ""
+            ),
+            "symbol": str(getattr(order, "symbol", "") or ""),
+            "position_side": str(
+                getattr(order, "position_side", "") or ""
+            ),
+            "order_kind": str(
+                getattr(order, "order_kind", "") or ""
+            ),
+            "venue_order_id": str(
+                getattr(order, "venue_order_id", "") or ""
+            ),
+            "client_order_id": client_order_id,
+            "status": "preserved",
+            "outcome": outcome,
+            "terminal_status": "WORKING",
+        }
+        if isinstance(preservation, Mapping):
+            operation.update(dict(preservation))
+        return operation
+
     def _cancel_terminal_orders(
         self,
         instrument_ids: tuple[str, ...],
         operations: list[dict[str, Any]],
         errors: list[str],
+        *,
+        command_type: str,
+        durable_entry_preservations: Mapping[
+            str,
+            dict[str, Any],
+        ],
     ) -> None:
         if self._exchange_cancel_adapter and self._exchange_state_mirror:
             try:
@@ -1825,6 +2009,16 @@ class IntentExecutionStrategy(Strategy):
                     instrument_id,
                     instrument_ids,
                 ):
+                    continue
+                preservation = self._terminal_order_preservation(
+                    order,
+                    command_type=command_type,
+                    durable_entry_preservations=(
+                        durable_entry_preservations
+                    ),
+                )
+                if preservation is not False:
+                    operations.append(preservation)
                     continue
                 operation = self._cancel_terminal_exchange_order(order)
                 operations.append(operation)
@@ -1848,6 +2042,16 @@ class IntentExecutionStrategy(Strategy):
                 instrument_id,
                 instrument_ids,
             ):
+                continue
+            preservation = self._terminal_order_preservation(
+                order,
+                command_type=command_type,
+                durable_entry_preservations=(
+                    durable_entry_preservations
+                ),
+            )
+            if preservation is not False:
+                operations.append(preservation)
                 continue
             client_order_id = str(
                 object_client_order_id(order)
@@ -9778,6 +9982,198 @@ def _node_command_is_user_authorized(cmd: Any) -> bool:
         str(authorization.get("authorized_by_type") or "").strip()
         == "user"
     )
+
+
+def _durable_entry_valid_until(
+    intent_payload: Mapping[str, Any],
+) -> datetime | bool:
+    raw_valid_until = intent_payload.get("valid_until")
+    if isinstance(raw_valid_until, datetime):
+        return _aware_datetime(raw_valid_until)
+    if not isinstance(raw_valid_until, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(
+            raw_valid_until.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    return _aware_datetime(parsed)
+
+
+def _durable_entry_expected_orders(
+    record: Any,
+) -> dict[str, dict[str, str]]:
+    payload = getattr(record, "intent_payload", {})
+    if not isinstance(payload, Mapping):
+        return {}
+    order_plan = payload.get("order_plan")
+    if not isinstance(order_plan, Mapping):
+        return {}
+    try:
+        intent_id = UUID(str(getattr(record, "intent_id", "")))
+    except (TypeError, ValueError):
+        return {}
+    client_order_ids = {
+        str(client_order_id)
+        for client_order_id in (
+            getattr(record, "client_order_ids", ()) or ()
+        )
+    }
+    plan_type = str(order_plan.get("type") or "").strip().lower()
+    candidates: list[tuple[int, Any, Any]] = []
+    if plan_type == "zone_ladder":
+        tranches = order_plan.get("tranches")
+        if not isinstance(tranches, (list, tuple)):
+            return {}
+        for tranche in tranches:
+            if not isinstance(tranche, Mapping):
+                return {}
+            try:
+                sequence = int(tranche.get("seq"))
+            except (TypeError, ValueError):
+                return {}
+            candidates.append(
+                (
+                    sequence,
+                    tranche.get("quantity"),
+                    tranche.get("price"),
+                )
+            )
+    elif plan_type in {"limit", "zone"}:
+        candidates.append(
+            (
+                1,
+                order_plan.get("quantity"),
+                order_plan.get("price"),
+            )
+        )
+    else:
+        return {}
+
+    expected: dict[str, dict[str, str]] = {}
+    side = _entry_order_side_name(order_plan.get("side"))
+    if not side:
+        return {}
+    for sequence, raw_quantity, raw_price in candidates:
+        if sequence < 1 or sequence > 9:
+            return {}
+        quantity = _positive_decimal_text(raw_quantity)
+        price = _positive_decimal_text(raw_price)
+        if quantity is False or price is False:
+            return {}
+        client_order_id = f"B{intent_id.hex}{sequence:02d}"
+        if client_order_id not in client_order_ids:
+            return {}
+        expected[client_order_id] = {
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+        }
+    return expected
+
+
+def _terminal_order_matches_durable_entry(
+    order: Any,
+    preservation: Mapping[str, Any],
+) -> bool:
+    order_kind = str(
+        getattr(order, "order_kind", "") or ""
+    ).strip().lower()
+    if order_kind != "regular":
+        return False
+    if getattr(order, "reduce_only", None) is not False:
+        return False
+    order_type = _enum_name(
+        getattr(order, "order_type", "")
+    ).upper()
+    if order_type != "LIMIT":
+        return False
+    time_in_force = _enum_name(
+        getattr(order, "time_in_force", "")
+    ).upper()
+    if time_in_force != "GTC":
+        return False
+    actual_instrument_id = str(
+        getattr(order, "instrument_id", "") or ""
+    )
+    expected_instrument_id = str(
+        preservation.get("instrument_id") or ""
+    )
+    if not _terminal_instrument_matches(
+        actual_instrument_id,
+        (expected_instrument_id,),
+    ):
+        return False
+    if _entry_order_side_name(
+        getattr(order, "side", "")
+    ) != _entry_order_side_name(preservation.get("side")):
+        return False
+    actual_quantity = _positive_decimal_text(
+        getattr(order, "quantity", None)
+    )
+    actual_price = _positive_decimal_text(
+        getattr(order, "price", None)
+    )
+    expected_quantity = _positive_decimal_text(
+        preservation.get("quantity")
+    )
+    expected_price = _positive_decimal_text(
+        preservation.get("price")
+    )
+    if (
+        actual_quantity is False
+        or actual_price is False
+        or expected_quantity is False
+        or expected_price is False
+    ):
+        return False
+    return (
+        Decimal(actual_quantity) == Decimal(expected_quantity)
+        and Decimal(actual_price) == Decimal(expected_price)
+    )
+
+
+def _entry_order_side_name(value: Any) -> str:
+    side = _enum_name(value).upper()
+    if side in {"BUY", "LONG"}:
+        return "BUY"
+    if side in {"SELL", "SHORT"}:
+        return "SELL"
+    return ""
+
+
+def _terminal_order_is_strict_protection(order: Any) -> bool:
+    order_kind = str(
+        getattr(order, "order_kind", "") or ""
+    ).strip().lower()
+    if order_kind != "algo":
+        return False
+    if getattr(order, "reduce_only", None) is not True:
+        return False
+    order_type = _enum_name(
+        getattr(order, "order_type", "")
+    ).upper()
+    return order_type in {
+        "STOP",
+        "STOP_MARKET",
+        "STOP_LOSS",
+        "STOP_LOSS_LIMIT",
+        "TAKE_PROFIT",
+        "TAKE_PROFIT_MARKET",
+        "TAKE_PROFIT_LIMIT",
+        "TRAILING_STOP_MARKET",
+    }
+
+
+def _positive_decimal_text(value: Any) -> str | bool:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if not number.is_finite() or number <= 0:
+        return False
+    return format(number, "f")
 
 
 def _terminal_command_instrument_ids(

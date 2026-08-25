@@ -44,6 +44,7 @@ from execution_domain.control_plane import (  # noqa: E402
     portfolio_baseline_sha256,
 )
 from execution_domain.order_ownership import (  # noqa: E402
+    client_order_id_from_row,
     row_is_robot_order,
 )
 from execution_domain.ownership_ledger import (  # noqa: E402
@@ -1193,7 +1194,7 @@ def _validate_and_arm_resume(
         require_reconciliation_health=False,
         require_portfolio_clear=False,
     )
-    _validate_owned_orders_terminal(
+    durable_entry_order_exemptions = _validate_owned_orders_terminal(
         cur,
         heartbeat=heartbeat,
         account_id=account_id,
@@ -1221,6 +1222,10 @@ def _validate_and_arm_resume(
         )
 
     scope["live_open_gate"] = live_open_gate
+    if durable_entry_order_exemptions:
+        scope["durable_entry_order_exemptions"] = (
+            durable_entry_order_exemptions
+        )
     if not canary_request:
         return
 
@@ -1827,7 +1832,8 @@ def _validate_owned_orders_terminal(
     *,
     heartbeat: dict,
     account_id: str,
-) -> None:
+) -> list[dict]:
+    durable_entry_order_exemptions: dict[str, dict] = {}
     for field_name in ("regular_orders", "algo_orders"):
         snapshot = heartbeat.get(field_name)
         if not isinstance(snapshot, list):
@@ -1844,6 +1850,21 @@ def _validate_owned_orders_terminal(
             if not row_is_robot_order(item):
                 continue
             if _robot_order_is_resume_exempt(item):
+                continue
+            durable_entry_exemption = (
+                _durable_entry_order_resume_exemption(
+                    cur,
+                    account_id=account_id,
+                    exchange_order=item,
+                )
+            )
+            if durable_entry_exemption is not False:
+                client_order_id = durable_entry_exemption[
+                    "client_order_id"
+                ]
+                durable_entry_order_exemptions[client_order_id] = (
+                    durable_entry_exemption
+                )
                 continue
             raise HTTPException(
                 status_code=409,
@@ -1884,10 +1905,222 @@ def _validate_owned_orders_terminal(
             projection_order["reduce_only"] = reduce_only
         if _robot_order_is_resume_exempt(projection_order):
             continue
+        if client_order_id in durable_entry_order_exemptions:
+            continue
         raise HTTPException(
             status_code=409,
             detail="robot-owned orders are not terminal",
         )
+    return list(durable_entry_order_exemptions.values())
+
+
+def _durable_entry_order_resume_exemption(
+    cur,
+    *,
+    account_id: str,
+    exchange_order: dict,
+) -> dict | bool:
+    client_order_id = client_order_id_from_row(exchange_order)
+    identity = _entry_order_identity(client_order_id)
+    if identity is False:
+        return False
+    intent_id, sequence = identity
+    if sequence < 1 or sequence > 9:
+        return False
+    if _durable_exchange_entry_shape(exchange_order) is False:
+        return False
+
+    cur.execute(
+        """
+        SELECT projection.intent_id::text,
+               projection.status,
+               projection.instrument_id,
+               projection.side::text,
+               projection.order_type,
+               projection.quantity,
+               projection.price,
+               projection.reduce_only,
+               projection.payload,
+               intent.status::text,
+               intent.action::text,
+               intent.instrument_id,
+               intent.valid_until,
+               clock_timestamp()
+        FROM orders_projection AS projection
+        JOIN trade_intents AS intent
+          ON intent.intent_id = projection.intent_id
+         AND intent.account_id = projection.account_id
+        WHERE projection.account_id=%s
+          AND projection.client_order_id=%s
+          AND projection.intent_id=%s
+        """,
+        (account_id, client_order_id, intent_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return False
+    (
+        projection_intent_id,
+        projection_status,
+        projection_instrument_id,
+        projection_side,
+        projection_order_type,
+        projection_quantity,
+        projection_price,
+        projection_reduce_only,
+        raw_projection_payload,
+        intent_status,
+        intent_action,
+        intent_instrument_id,
+        valid_until,
+        database_now,
+    ) = row
+    if str(projection_intent_id) != intent_id:
+        return False
+    if str(projection_status or "").strip().lower() in (
+        _TERMINAL_ORDER_STATES
+    ):
+        return False
+    if intent_status != "approved":
+        return False
+    if intent_action not in {"open_position", "add_position"}:
+        return False
+    if (
+        _canonical_symbol(intent_instrument_id)
+        != _canonical_symbol(projection_instrument_id)
+    ):
+        return False
+    if (
+        not isinstance(valid_until, datetime)
+        or not isinstance(database_now, datetime)
+        or valid_until <= database_now
+    ):
+        return False
+
+    projection_order = {}
+    if isinstance(raw_projection_payload, dict):
+        projection_order.update(raw_projection_payload)
+    projection_order.update(
+        {
+            "client_order_id": client_order_id,
+            "instrument_id": projection_instrument_id,
+            "side": projection_side,
+            "order_type": projection_order_type,
+            "quantity": projection_quantity,
+            "price": projection_price,
+        }
+    )
+    if projection_reduce_only is not None:
+        projection_order["reduce_only"] = projection_reduce_only
+    if _durable_projection_matches_exchange_order(
+        projection_order,
+        exchange_order,
+    ) is False:
+        return False
+    return {
+        "client_order_id": client_order_id,
+        "intent_id": intent_id,
+        "sequence": sequence,
+        "instrument_id": str(projection_instrument_id),
+        "price": _decimal_audit_text(projection_price),
+        "quantity": _decimal_audit_text(projection_quantity),
+        "valid_until": valid_until.isoformat(),
+    }
+
+
+def _entry_order_identity(
+    client_order_id: str,
+) -> tuple[str, int] | bool:
+    if re.fullmatch(r"B[0-9a-f]{32}[0-9]{2}", client_order_id) is None:
+        return False
+    try:
+        intent_id = str(UUID(hex=client_order_id[1:33]))
+        sequence = int(client_order_id[-2:])
+    except (TypeError, ValueError):
+        return False
+    return intent_id, sequence
+
+
+def _durable_exchange_entry_shape(order: dict) -> bool:
+    if _explicit_reduce_only(order) is not False:
+        return False
+    order_kind = str(
+        order.get("order_kind") or order.get("orderKind") or ""
+    ).strip().lower()
+    if order_kind != "regular":
+        return False
+    raw_order_type = order.get("order_type")
+    if raw_order_type is None:
+        raw_order_type = order.get("type")
+    if str(raw_order_type or "").strip().upper() != "LIMIT":
+        return False
+    raw_time_in_force = order.get("time_in_force")
+    if raw_time_in_force is None:
+        raw_time_in_force = order.get("timeInForce")
+    return str(raw_time_in_force or "").strip().upper() == "GTC"
+
+
+def _durable_projection_matches_exchange_order(
+    projection_order: dict,
+    exchange_order: dict,
+) -> bool:
+    if _explicit_reduce_only(projection_order) is not False:
+        return False
+    projection_order_type = str(
+        projection_order.get("order_type")
+        or projection_order.get("type")
+        or ""
+    ).strip().upper()
+    if projection_order_type != "LIMIT":
+        return False
+    if (
+        _snapshot_item_symbol(projection_order)
+        != _snapshot_item_symbol(exchange_order)
+    ):
+        return False
+    if (
+        _entry_order_side(projection_order)
+        != _entry_order_side(exchange_order)
+    ):
+        return False
+    for field_name in ("quantity", "price"):
+        projection_value = _positive_order_decimal(
+            projection_order.get(field_name)
+        )
+        exchange_value = _positive_order_decimal(
+            exchange_order.get(field_name)
+        )
+        if projection_value is False or exchange_value is False:
+            return False
+        if projection_value != exchange_value:
+            return False
+    return True
+
+
+def _entry_order_side(order: dict) -> str:
+    raw_side = str(order.get("side") or "").strip().upper()
+    if raw_side in {"BUY", "LONG"}:
+        return "BUY"
+    if raw_side in {"SELL", "SHORT"}:
+        return "SELL"
+    return ""
+
+
+def _positive_order_decimal(value) -> Decimal | bool:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if not number.is_finite() or number <= 0:
+        return False
+    return number
+
+
+def _decimal_audit_text(value) -> str:
+    number = _positive_order_decimal(value)
+    if number is False:
+        return ""
+    return format(number, "f")
 
 
 def _robot_order_is_resume_exempt(row: dict) -> bool:
@@ -1914,11 +2147,13 @@ def _explicit_reduce_only(row: dict) -> bool | None:
             values.append(row[field_name])
     if not values:
         return None
-    if any(value is False for value in values):
+    if any(not isinstance(value, bool) for value in values):
+        return None
+    if all(value is False for value in values):
         return False
     if all(value is True for value in values):
         return True
-    return False
+    return None
 
 
 def _validate_robot_owned_symbol_flat(

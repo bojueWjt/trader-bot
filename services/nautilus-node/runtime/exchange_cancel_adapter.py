@@ -28,7 +28,10 @@ from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from uuid import UUID
 
-from execution_domain.order_ownership import object_is_robot_order
+from execution_domain.order_ownership import (
+    object_client_order_id,
+    object_is_robot_order,
+)
 
 REGULAR_ORDER = "regular"
 ALGO_ORDER = "algo"
@@ -48,6 +51,18 @@ DEFAULT_TERMINAL_EXCHANGE_DEGRADED_RATIO = 0.8
 DEFAULT_TERMINAL_EXCHANGE_DEADLINE_SECONDS = 6.0
 _TERMINAL_EXCHANGE_OPERATIONS = frozenset(
     {"refresh", "cancel_batch", "terminal_command"}
+)
+_PROTECTIVE_ORDER_TYPES = frozenset(
+    {
+        "STOP",
+        "STOP_MARKET",
+        "STOP_LOSS",
+        "STOP_LOSS_LIMIT",
+        "TAKE_PROFIT",
+        "TAKE_PROFIT_MARKET",
+        "TAKE_PROFIT_LIMIT",
+        "TRAILING_STOP_MARKET",
+    }
 )
 
 
@@ -154,10 +169,52 @@ class ExchangeOrderRef:
     price: str | None
     trigger_price: str | None
     tags: tuple[str, ...]
+    time_in_force: str = ""
+    reduce_only: bool = False
 
     @property
     def instrument_id(self) -> str:
         return f"{self.symbol}-PERP.BINANCE"
+
+
+@dataclass(frozen=True)
+class DurableEntryOrderPreservation:
+    client_order_id: str
+    instrument_id: str
+    side: str
+    quantity: str
+    price: str
+
+    def __post_init__(self) -> None:
+        client_order_id = str(self.client_order_id).strip()
+        match = re.fullmatch(
+            r"B[0-9a-f]{32}(?P<sequence>[0-9]{2})",
+            client_order_id,
+        )
+        if match is None:
+            raise ValueError(
+                "durable entry preservation client_order_id is invalid"
+            )
+        sequence = int(match.group("sequence"))
+        if sequence < 1 or sequence > 9:
+            raise ValueError(
+                "durable entry preservation sequence must be 01..09"
+            )
+        if not _canonical_exchange_symbol(self.instrument_id):
+            raise ValueError(
+                "durable entry preservation instrument_id is required"
+            )
+        side = _exchange_order_side(self.side)
+        if side not in {"BUY", "SELL"}:
+            raise ValueError(
+                "durable entry preservation side is invalid"
+            )
+        for field_name in ("quantity", "price"):
+            value = getattr(self, field_name)
+            if _positive_exchange_decimal(value) is False:
+                raise ValueError(
+                    f"durable entry preservation {field_name} is invalid"
+                )
 
 
 @dataclass(frozen=True)
@@ -169,6 +226,10 @@ class TerminalExchangeRequest:
     deadline_monotonic: float
     instrument_ids: tuple[str, ...] = ()
     cancel_requests: tuple[CancelOrderRequest, ...] = ()
+    durable_entry_preservations: tuple[
+        DurableEntryOrderPreservation,
+        ...,
+    ] = ()
 
     def __post_init__(self) -> None:
         if not str(self.request_id).strip():
@@ -194,9 +255,35 @@ class TerminalExchangeRequest:
             raise TypeError(
                 "terminal exchange cancel_requests must be a tuple"
             )
+        if not isinstance(self.durable_entry_preservations, tuple):
+            raise TypeError(
+                "terminal exchange durable_entry_preservations must be a tuple"
+            )
         if self.operation != "cancel_batch" and self.cancel_requests:
             raise ValueError(
                 "cancel_requests require cancel_batch operation"
+            )
+        if (
+            self.operation != "terminal_command"
+            and self.durable_entry_preservations
+        ):
+            raise ValueError(
+                "durable_entry_preservations require terminal_command operation"
+            )
+        if any(
+            not isinstance(item, DurableEntryOrderPreservation)
+            for item in self.durable_entry_preservations
+        ):
+            raise TypeError(
+                "terminal exchange durable_entry_preservations are invalid"
+            )
+        preservation_ids = tuple(
+            item.client_order_id
+            for item in self.durable_entry_preservations
+        )
+        if len(set(preservation_ids)) != len(preservation_ids):
+            raise ValueError(
+                "durable_entry_preservations must be unique"
             )
 
 
@@ -515,19 +602,51 @@ class TerminalExchangeWorker:
         request: TerminalExchangeRequest,
     ) -> tuple[TerminalExchangeCancelOutcome, ...]:
         orders = self._refresh(request.deadline_monotonic)
-        cancel_requests = tuple(
-            _cancel_request_from_exchange_order(order)
-            for order in orders
-            if _terminal_exchange_instrument_matches(
-                str(getattr(order, "instrument_id", "") or ""),
-                request.instrument_ids,
+        durable_entry_preservations = {
+            item.client_order_id: item
+            for item in request.durable_entry_preservations
+        }
+        preserve_protection = request.purpose == "cancel_all"
+        outcomes: list[TerminalExchangeCancelOutcome] = []
+        cancel_requests: list[CancelOrderRequest] = []
+        for order in orders:
+            instrument_id = str(
+                getattr(order, "instrument_id", "") or ""
             )
-            and object_is_robot_order(order)
+            if not _terminal_exchange_instrument_matches(
+                instrument_id,
+                request.instrument_ids,
+            ):
+                continue
+            if not object_is_robot_order(order):
+                continue
+            cancel_request = _cancel_request_from_exchange_order(order)
+            client_order_id = object_client_order_id(order)
+            preservation_outcome = _terminal_order_preservation_outcome(
+                order,
+                durable_entry_preservation=(
+                    durable_entry_preservations.get(client_order_id)
+                ),
+                preserve_protection=preserve_protection,
+            )
+            if preservation_outcome:
+                outcomes.append(
+                    TerminalExchangeCancelOutcome(
+                        request=cancel_request,
+                        status="preserved",
+                        outcome=preservation_outcome,
+                        terminal_status="WORKING",
+                    )
+                )
+                continue
+            cancel_requests.append(cancel_request)
+        outcomes.extend(
+            self._cancel_batch(
+                tuple(cancel_requests),
+                request.deadline_monotonic,
+            )
         )
-        return self._cancel_batch(
-            cancel_requests,
-            request.deadline_monotonic,
-        )
+        return tuple(outcomes)
 
     def _refresh(self, deadline_monotonic: float) -> tuple[Any, ...]:
         self._check_deadline(deadline_monotonic)
@@ -2012,4 +2131,124 @@ def _parse_exchange_order(
         price=str(price) if price is not None else None,
         trigger_price=str(trigger_price) if trigger_price is not None else None,
         tags=tags,
+        time_in_force=str(
+            row.get("time_in_force") or row.get("timeInForce") or ""
+        ).upper(),
+        reduce_only=bool(
+            row.get("reduce_only") is True
+            or row.get("reduceOnly") is True
+        ),
     )
+
+
+def _terminal_order_preservation_outcome(
+    order: Any,
+    *,
+    durable_entry_preservation: DurableEntryOrderPreservation | None,
+    preserve_protection: bool,
+) -> str | bool:
+    if (
+        durable_entry_preservation is not None
+        and _terminal_order_matches_durable_entry_preservation(
+            order,
+            durable_entry_preservation,
+        )
+    ):
+        return "durable_entry_preserved"
+    if preserve_protection and _terminal_order_is_protection(order):
+        return "protective_order_preserved"
+    return False
+
+
+def _terminal_order_matches_durable_entry_preservation(
+    order: Any,
+    preservation: DurableEntryOrderPreservation,
+) -> bool:
+    order_kind = str(
+        getattr(order, "order_kind", "") or ""
+    ).strip().lower()
+    if order_kind != REGULAR_ORDER:
+        return False
+    if getattr(order, "reduce_only", None) is not False:
+        return False
+    order_type = str(
+        getattr(order, "order_type", "") or ""
+    ).strip().upper()
+    if order_type != "LIMIT":
+        return False
+    time_in_force = str(
+        getattr(order, "time_in_force", "") or ""
+    ).strip().upper()
+    if time_in_force != "GTC":
+        return False
+    actual_instrument_id = str(
+        getattr(order, "instrument_id", "") or ""
+    )
+    if (
+        _canonical_exchange_symbol(actual_instrument_id)
+        != _canonical_exchange_symbol(preservation.instrument_id)
+    ):
+        return False
+    if _exchange_order_side(order) != _exchange_order_side(
+        preservation.side
+    ):
+        return False
+    actual_quantity = _positive_exchange_decimal(
+        getattr(order, "quantity", None)
+    )
+    expected_quantity = _positive_exchange_decimal(
+        preservation.quantity
+    )
+    actual_price = _positive_exchange_decimal(
+        getattr(order, "price", None)
+    )
+    expected_price = _positive_exchange_decimal(preservation.price)
+    if (
+        actual_quantity is False
+        or expected_quantity is False
+        or actual_price is False
+        or expected_price is False
+    ):
+        return False
+    return (
+        actual_quantity == expected_quantity
+        and actual_price == expected_price
+    )
+
+
+def _terminal_order_is_protection(order: Any) -> bool:
+    order_kind = str(
+        getattr(order, "order_kind", "") or ""
+    ).strip().lower()
+    if order_kind != ALGO_ORDER:
+        return False
+    if getattr(order, "reduce_only", None) is not True:
+        return False
+    order_type = str(
+        getattr(order, "order_type", "") or ""
+    ).strip().upper()
+    return order_type in _PROTECTIVE_ORDER_TYPES
+
+
+def _exchange_order_side(value: Any) -> str:
+    raw = value
+    if not isinstance(value, str):
+        raw = getattr(value, "side", value)
+    side = str(getattr(raw, "value", raw) or "").strip().upper()
+    if "." in side:
+        side = side.rsplit(".", 1)[-1]
+    if side in {"BUY", "LONG"}:
+        return "BUY"
+    if side in {"SELL", "SHORT"}:
+        return "SELL"
+    return ""
+
+
+def _positive_exchange_decimal(value: Any) -> Decimal | bool:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if not number.is_finite() or number <= 0:
+        return False
+    return number

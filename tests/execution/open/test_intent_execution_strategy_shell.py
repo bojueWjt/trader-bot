@@ -5092,6 +5092,7 @@ class _LiveEntryMarkSubscriptionStrategy(IntentExecutionStrategy):
 class _TerminalExchangeStrategy(IntentExecutionStrategy):
     def __init__(self) -> None:
         self.command_results: list[dict[str, object]] = []
+        state_dir = Path(tempfile.mkdtemp())
         super().__init__(
             IntentExecutionStrategyConfig(
                 account_id="account-a",
@@ -5099,6 +5100,12 @@ class _TerminalExchangeStrategy(IntentExecutionStrategy):
                 trading_state="HALTED",
                 environment="live",
                 release_id="release-a",
+                intent_execution_inbox_path=str(
+                    state_dir / "intent-execution-inbox.json"
+                ),
+                live_canary_execution_path=str(
+                    state_dir / "live-canary-execution.json"
+                ),
             )
         )
         self.set_live_canary_portfolio_baseline_getter(

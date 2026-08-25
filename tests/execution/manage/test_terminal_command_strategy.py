@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -13,6 +16,10 @@ sys.path.insert(0, str(SERVICE_ROOT))
 sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 from execution_domain.control_plane import CommandType, NodeCommand  # noqa: E402
+from runtime.exchange_cancel_adapter import TerminalExchangeWorker  # noqa: E402
+from runtime.intent_execution_inbox import (  # noqa: E402
+    IntentExecutionIdentity,
+)
 from strategy.intent_execution_strategy import (  # noqa: E402
     IntentExecutionStrategy,
     IntentExecutionStrategyConfig,
@@ -38,12 +45,25 @@ class _MessageBus:
 
 
 class _Strategy(IntentExecutionStrategy):
-    def __init__(self, *, environment: str = "testnet") -> None:
+    def __init__(
+        self,
+        *,
+        environment: str = "testnet",
+        state_dir: Path | None = None,
+    ) -> None:
+        if state_dir is None:
+            state_dir = Path(tempfile.mkdtemp())
+        inbox_path = ""
+        canary_path = ""
+        inbox_path = str(state_dir / "intent-execution-inbox.json")
+        canary_path = str(state_dir / "live-canary-execution.json")
         super().__init__(
             IntentExecutionStrategyConfig(
                 account_id="account-b",
                 node_id="node-b",
                 environment=environment,
+                intent_execution_inbox_path=inbox_path,
+                live_canary_execution_path=canary_path,
             )
         )
         self.message_bus = _MessageBus()
@@ -132,6 +152,230 @@ def test_cancel_all_uses_exchange_refs_for_regular_and_algo_orders() -> None:
         "confirmed",
     ]
     assert payload["errors"] == []
+
+
+def test_cancel_all_preserves_durable_entries_and_protection_only() -> None:
+    with tempfile.TemporaryDirectory() as state_dir:
+        strategy = _Strategy(
+            environment="live",
+            state_dir=Path(state_dir),
+        )
+        intent_id = uuid4()
+        durable_order_ids = tuple(
+            f"B{intent_id.hex}{sequence:02d}"
+            for sequence in (1, 2, 3)
+        )
+        valid_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+        identity = IntentExecutionIdentity(
+            account_id="account-b",
+            intent_id=str(intent_id),
+            idempotency_key="a" * 64,
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            action="open_position",
+        )
+        strategy._intent_execution_inbox.register_received(
+            identity,
+            {
+                "schema_version": "1.0",
+                "intent_id": str(intent_id),
+                "idempotency_key": "a" * 64,
+                "account_id": "account-b",
+                "instrument_id": "SOLUSDT-PERP.BINANCE",
+                "action": "open_position",
+                "valid_until": valid_until.isoformat(),
+                "order_plan": {
+                    "type": "zone_ladder",
+                    "side": "buy",
+                    "tranches": [
+                        {"seq": 1, "quantity": "0.4", "price": "100"},
+                        {"seq": 2, "quantity": "0.3", "price": "99"},
+                        {"seq": 3, "quantity": "0.2", "price": "98"},
+                    ],
+                },
+            },
+        )
+        strategy._intent_execution_inbox.begin_dispatch(
+            identity,
+            durable_order_ids,
+        )
+        strategy._intent_execution_inbox.mark_exchange_confirmed(identity)
+        protection_id = f"B{intent_id.hex}11"
+        orphan_id = ROBOT_BTC_ORDER_ID
+        orders = [
+            _exchange_order(
+                "regular",
+                durable_order_ids[0],
+                "1001",
+                quantity="0.4",
+                price="100",
+            ),
+            _exchange_order(
+                "regular",
+                durable_order_ids[1],
+                "1002",
+                quantity="0.3",
+                price="99",
+            ),
+            _exchange_order(
+                "regular",
+                durable_order_ids[2],
+                "1003",
+                quantity="0.2",
+                price="98",
+            ),
+            _exchange_order(
+                "algo",
+                protection_id,
+                "2001",
+                order_type="STOP_MARKET",
+                reduce_only=True,
+            ),
+            _exchange_order(
+                "regular",
+                orphan_id,
+                "3001",
+                quantity="0.1",
+                price="97",
+            ),
+        ]
+        mirror = _Mirror(orders)
+        adapter = _Adapter()
+        worker = TerminalExchangeWorker(
+            account_id="account-b",
+            mirror=mirror,
+            adapter=adapter,
+            result_publisher=strategy.enqueue_terminal_exchange_result,
+            capacity=4,
+            total_deadline_seconds=1,
+        )
+        strategy.set_exchange_cancel_adapter(adapter, mirror)
+        strategy.set_terminal_exchange_worker(worker)
+        worker.start()
+        original_ladder = [
+            (order.client_order_id, order.quantity, order.price)
+            for order in orders[:3]
+        ]
+        try:
+            strategy._on_node_command(
+                _command("preserve-durable", CommandType.CANCEL_ALL)
+            )
+            assert worker.wait_empty(timeout_seconds=1)
+            strategy.drain_terminal_exchange_mailbox()
+        finally:
+            worker.stop()
+
+        assert [request.client_order_id for request in adapter.requests] == [
+            orphan_id
+        ]
+        assert [
+            (order.client_order_id, order.quantity, order.price)
+            for order in orders[:3]
+        ] == original_ladder
+        payload = strategy.message_bus.messages[0][1]
+        preserved = [
+            operation
+            for operation in payload["operations"]
+            if operation["status"] == "preserved"
+        ]
+        assert [item["client_order_id"] for item in preserved] == [
+            *durable_order_ids,
+            protection_id,
+        ]
+        assert [item["outcome"] for item in preserved] == [
+            "durable_entry_preserved",
+            "durable_entry_preserved",
+            "durable_entry_preserved",
+            "protective_order_preserved",
+        ]
+        assert [
+            (item["price"], item["quantity"])
+            for item in preserved[:3]
+        ] == [
+            ("100", "0.4"),
+            ("99", "0.3"),
+            ("98", "0.2"),
+        ]
+        assert payload["errors"] == []
+
+
+def test_cancel_all_cancels_durable_entry_with_exchange_quantity_drift() -> None:
+    with tempfile.TemporaryDirectory() as state_dir:
+        strategy = _Strategy(
+            environment="live",
+            state_dir=Path(state_dir),
+        )
+        intent_id = uuid4()
+        client_order_id = f"B{intent_id.hex}01"
+        identity = IntentExecutionIdentity(
+            account_id="account-b",
+            intent_id=str(intent_id),
+            idempotency_key="b" * 64,
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            action="open_position",
+        )
+        strategy._intent_execution_inbox.register_received(
+            identity,
+            {
+                "intent_id": str(intent_id),
+                "idempotency_key": "b" * 64,
+                "account_id": "account-b",
+                "instrument_id": "SOLUSDT-PERP.BINANCE",
+                "action": "open_position",
+                "valid_until": (
+                    datetime.now(timezone.utc) + timedelta(minutes=5)
+                ).isoformat(),
+                "order_plan": {
+                    "type": "limit",
+                    "side": "buy",
+                    "quantity": "0.4",
+                    "price": "100",
+                },
+            },
+        )
+        strategy._intent_execution_inbox.begin_dispatch(
+            identity,
+            (client_order_id,),
+        )
+        strategy._intent_execution_inbox.mark_exchange_confirmed(identity)
+        mirror = _Mirror(
+            [
+                _exchange_order(
+                    "regular",
+                    client_order_id,
+                    "1001",
+                    quantity="0.5",
+                    price="100",
+                )
+            ]
+        )
+        adapter = _Adapter()
+        worker = TerminalExchangeWorker(
+            account_id="account-b",
+            mirror=mirror,
+            adapter=adapter,
+            result_publisher=strategy.enqueue_terminal_exchange_result,
+            capacity=4,
+            total_deadline_seconds=1,
+        )
+        strategy.set_exchange_cancel_adapter(adapter, mirror)
+        strategy.set_terminal_exchange_worker(worker)
+        worker.start()
+        try:
+            strategy._on_node_command(
+                _command("cancel-drifted-durable", CommandType.CANCEL_ALL)
+            )
+            assert worker.wait_empty(timeout_seconds=1)
+            strategy.drain_terminal_exchange_mailbox()
+        finally:
+            worker.stop()
+
+        assert [request.client_order_id for request in adapter.requests] == [
+            client_order_id
+        ]
+        payload = strategy.message_bus.messages[0][1]
+        assert payload["operations"][0]["status"] == "confirmed"
+        assert payload["operations"][0]["outcome"] == "canceled"
+        assert payload["errors"] == []
 
 
 def test_close_all_filters_scope_and_records_reduce_only_requests() -> None:
@@ -238,6 +482,10 @@ def _exchange_order(
     venue_order_id: str,
     *,
     symbol: str = "SOLUSDT",
+    order_type: str = "LIMIT",
+    quantity: str = "0.1",
+    price: str = "100",
+    reduce_only: bool = False,
 ) -> Any:
     return SimpleNamespace(
         account_id="account-b",
@@ -247,4 +495,10 @@ def _exchange_order(
         order_kind=order_kind,
         venue_order_id=venue_order_id,
         client_order_id=client_order_id,
+        order_type=order_type,
+        side="BUY",
+        quantity=quantity,
+        price=price,
+        time_in_force="GTC",
+        reduce_only=reduce_only,
     )

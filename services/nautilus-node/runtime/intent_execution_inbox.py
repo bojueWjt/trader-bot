@@ -355,6 +355,19 @@ class JsonIntentExecutionInbox:
 
         return self._read_locked(read)
 
+    def records(self) -> tuple[IntentExecutionRecord, ...]:
+        def read(
+            payload: dict[str, Any],
+        ) -> tuple[IntentExecutionRecord, ...]:
+            records = [
+                self._record_from_raw(raw)
+                for raw in payload["records"].values()
+            ]
+            records.sort(key=lambda item: item.updated_at)
+            return tuple(records)
+
+        return self._read_locked(read)
+
     def _required_record(
         self,
         payload: dict[str, Any],
