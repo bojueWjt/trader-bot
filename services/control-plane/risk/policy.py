@@ -24,7 +24,7 @@ class RiskPolicy:
     price_precision: int = 2
     # per-trade caps
     max_risk_fraction: float = 0.02
-    default_risk_fraction: float = 0.01
+    default_risk_fraction: float = 0.015
     max_leverage: float = 10.0
     max_notional: float = 50_000.0
     # exposure caps

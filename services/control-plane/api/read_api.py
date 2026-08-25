@@ -1958,7 +1958,17 @@ def _durable_entry_order_resume_exemption(
     )
     row = cur.fetchone()
     if row is None:
-        return False
+        # Projection ingress may lag or filter the order out entirely; the
+        # client_order_id embeds the intent id, so fall back to the durable
+        # intent itself with the exchange snapshot supplying the shape.
+        return _intent_backed_entry_exemption(
+            cur,
+            account_id=account_id,
+            exchange_order=exchange_order,
+            client_order_id=client_order_id,
+            intent_id=intent_id,
+            sequence=sequence,
+        )
     (
         projection_intent_id,
         projection_status,
@@ -2025,6 +2035,66 @@ def _durable_entry_order_resume_exemption(
         "price": _decimal_audit_text(projection_price),
         "quantity": _decimal_audit_text(projection_quantity),
         "valid_until": valid_until.isoformat(),
+    }
+
+
+def _intent_backed_entry_exemption(
+    cur,
+    *,
+    account_id: str,
+    exchange_order: dict,
+    client_order_id: str,
+    intent_id: str,
+    sequence: int,
+) -> dict | bool:
+    cur.execute(
+        """
+        SELECT status::text, action::text, instrument_id, valid_until,
+               clock_timestamp()
+        FROM trade_intents
+        WHERE intent_id=%s AND account_id=%s
+        """,
+        (intent_id, account_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return False
+    (
+        intent_status,
+        intent_action,
+        intent_instrument_id,
+        valid_until,
+        database_now,
+    ) = row
+    if intent_status != "approved":
+        return False
+    if intent_action not in {"open_position", "add_position"}:
+        return False
+    order_symbol = str(
+        exchange_order.get("symbol")
+        or exchange_order.get("instrument_id")
+        or ""
+    )
+    if (
+        _canonical_symbol(intent_instrument_id)
+        != _canonical_symbol(order_symbol)
+    ):
+        return False
+    if (
+        not isinstance(valid_until, datetime)
+        or not isinstance(database_now, datetime)
+        or valid_until <= database_now
+    ):
+        return False
+    return {
+        "client_order_id": client_order_id,
+        "intent_id": intent_id,
+        "sequence": sequence,
+        "instrument_id": _canonical_symbol(order_symbol),
+        "price": _decimal_audit_text(exchange_order.get("price")),
+        "quantity": _decimal_audit_text(exchange_order.get("quantity")),
+        "valid_until": valid_until.isoformat(),
+        "backing": "intent_fallback",
     }
 
 

@@ -7,7 +7,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class RiskConfig:
-    risk_per_trade_pct: Decimal = Decimal("0.01")
+    risk_per_trade_pct: Decimal = Decimal("0.015")
     max_total_open_risk_pct: Decimal = Decimal("0.10")
     max_notional_per_order: Decimal = Decimal("50000")
     max_leverage: Decimal = Decimal("10")

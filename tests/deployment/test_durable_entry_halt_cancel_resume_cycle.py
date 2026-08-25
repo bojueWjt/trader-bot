@@ -161,6 +161,10 @@ class _ResumeCursor:
         self.params = params
 
     def fetchone(self) -> tuple[Any, ...] | None:
+        if "FROM trade_intents" in self.query and "JOIN" not in self.query:
+            # Intent-backed fallback for orders missing from the projection:
+            # an orphan has no intent row either.
+            return None
         if "JOIN trade_intents AS intent" not in self.query:
             raise AssertionError(f"unexpected fetchone query: {self.query}")
         if self.intent_id is None:
