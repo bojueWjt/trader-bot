@@ -189,6 +189,10 @@ RELEASE_FILES = (
         "host/execution_domain/order_ownership.py",
     ),
     (
+        "packages/execution-domain/execution_domain/ownership_ledger.py",
+        "host/execution_domain/ownership_ledger.py",
+    ),
+    (
         "packages/execution-domain/execution_domain/idempotency.py",
         "host/execution_domain/idempotency.py",
     ),
@@ -264,6 +268,11 @@ RELEASE_FILES = (
         "services/control-plane/order_management/outbox.py",
         "host/order_management/outbox.py",
     ),
+    (
+        "services/control-plane/order_management/protection_watchdog.py",
+        "host/order_management/protection_watchdog.py",
+    ),
+    ("scripts/ownership_ledger.py", "ownership_ledger.py"),
     (
         "services/nautilus-node/observability/__init__.py",
         "host/observability/__init__.py",

@@ -5,6 +5,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 import psycopg2
@@ -1001,6 +1002,65 @@ def _seed_execution_fill(
         )
 
 
+def _seed_ownership_rebaseline(
+    url: str,
+    *,
+    account_id: str = ACCOUNT_A,
+    node_id: str = NODE_A,
+    symbol: str = SYMBOL,
+    baseline_quantity: str,
+    exchange_quantity: str,
+    manual_quantity: str,
+    event_id: str | None = None,
+) -> None:
+    if event_id is None:
+        event_id = f"ownership-rebaseline:{uuid4()}"
+    with _connect(url) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO execution_events (
+                execution_event_row_id,
+                event_id,
+                node_id,
+                account_id,
+                event_type,
+                ts_event,
+                payload
+            )
+            VALUES (%s, %s, %s, %s, 'OwnershipRebaseline', now(), %s)
+            """,
+            (
+                str(uuid4()),
+                event_id,
+                node_id,
+                account_id,
+                Json(
+                    {
+                        "ownership_schema_version": (
+                            "ownership-rebaseline/v1"
+                        ),
+                        "symbol": symbol,
+                        "instrument_id": (
+                            f"{symbol}-PERP.BINANCE"
+                        ),
+                        "baseline_quantity": baseline_quantity,
+                        "exchange_quantity_at_baseline": (
+                            exchange_quantity
+                        ),
+                        "manual_quantity_at_baseline": manual_quantity,
+                        "reason": "test ownership adjudication",
+                        "adjudicated_by": "test-user",
+                        "request_id": str(uuid4()),
+                        "cutoff_semantics": (
+                            "fills strictly after marker "
+                            "(ts_event,created_at,event_id)"
+                        ),
+                    }
+                ),
+            ),
+        )
+
+
 def _resume_body(
     permit_id: str | None,
     *,
@@ -1694,7 +1754,7 @@ def test_resume_projection_reads_use_plain_selects() -> None:
 
     assert "orders_projection" in terminal_source
     assert "FOR SHARE" not in terminal_source
-    assert "execution_events" in footprint_source
+    assert "load_robot_owned_balance" in footprint_source
     assert "FOR SHARE" not in footprint_source
     assert "accounts_projection" in margin_source
     assert "FOR SHARE" not in margin_source
@@ -2346,6 +2406,73 @@ def test_resume_allows_robot_owned_target_position_round_trip_flat(
     )
 
     assert response.status_code == 200
+
+
+def test_resume_uses_latest_ownership_rebaseline(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db)
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+        side="BUY",
+        quantity="0.25",
+    )
+    _seed_ownership_rebaseline(
+        migrated_db,
+        baseline_quantity="0",
+        exchange_quantity="1.5",
+        manual_quantity="1.5",
+    )
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(permit_id),
+    )
+
+    assert response.status_code == 200
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        footprint = read_api._robot_owned_symbol_footprint(
+            cur,
+            account_id=ACCOUNT_A,
+            symbol=SYMBOL,
+        )
+    assert footprint == 0
+
+
+def test_ownership_rebaseline_counts_later_robot_fills(
+    migrated_db: str,
+) -> None:
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+        side="BUY",
+        quantity="0.25",
+    )
+    _seed_ownership_rebaseline(
+        migrated_db,
+        baseline_quantity="0",
+        exchange_quantity="1.5",
+        manual_quantity="1.5",
+    )
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02",
+        side="SELL",
+        quantity="0.1",
+    )
+
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        footprint = read_api._robot_owned_symbol_footprint(
+            cur,
+            account_id=ACCOUNT_A,
+            symbol=SYMBOL,
+        )
+
+    assert footprint == Decimal("-0.1")
 
 
 @pytest.mark.parametrize("source", ("projection", "heartbeat"))
@@ -3021,6 +3148,52 @@ def test_canary_open_rejects_robot_owned_target_position_footprint(
         response.json()["detail"]
         == "robot-owned target symbol position is not flat"
     )
+
+
+def test_canary_open_uses_latest_ownership_rebaseline(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    _seed_heartbeat(migrated_db, trading_state="ACTIVE")
+    _seed_execution_fill(
+        migrated_db,
+        client_order_id="Baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+        side="BUY",
+        quantity="0.25",
+    )
+    _seed_ownership_rebaseline(
+        migrated_db,
+        baseline_quantity="0",
+        exchange_quantity="1.5",
+        manual_quantity="1.5",
+    )
+    permit_id = _seed_reviewed_release_and_permit(
+        migrated_db,
+        permit_status="armed",
+    )
+
+    response = client.post(
+        "/v1/operator/orders",
+        headers=_risk_headers("canary-open-rebaseline"),
+        json={
+            "action": "open_position",
+            "account_id": ACCOUNT_A,
+            "symbol": SYMBOL,
+            "side": "long",
+            "entry": {
+                "type": "limit",
+                "price": 100,
+                "time_in_force": "IOC",
+            },
+            "quantity": 0.12,
+            "notional_usdt": 12,
+            "reason": "account-a canary",
+            "canary_permit_id": permit_id,
+            "client_ref": "canary-open-rebaseline",
+        },
+    )
+
+    assert response.status_code == 200
 
 
 def test_account_a_canary_rejects_invalid_supplied_intent_id(

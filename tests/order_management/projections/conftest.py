@@ -25,8 +25,18 @@ for _path in (NAUTILUS_NODE,):
 def projection_db_url():
     configured = os.environ.get("DATABASE_URL", "postgresql:///om_v3_om2")
     try:
-        with psycopg2.connect(configured):
-            pass
+        with psycopg2.connect(configured) as conn:
+            # Another test session's fixture may have exported DATABASE_URL
+            # (e.g. tests/control-plane/db); only adopt databases that
+            # actually carry the projection schema.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT to_regclass('public.protective_orders_projection')"
+                )
+                has_schema = cur.fetchone()[0] is not None
+        if not has_schema:
+            yield from _temporary_migrated_postgres()
+            return
     except psycopg2.OperationalError:
         yield from _temporary_migrated_postgres()
     else:

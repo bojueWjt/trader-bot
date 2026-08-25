@@ -65,10 +65,15 @@ def pg_cluster():
         capture_output=True,
     )
 
+    prior_database_url = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = DATABASE_URL
     try:
         yield {"url": DATABASE_URL, "pg_ctl": pg_ctl, "data_dir": data_dir}
     finally:
+        if prior_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = prior_database_url
         subprocess.run(
             [pg_ctl, "-D", str(data_dir), "-w", "stop"],
             text=True,

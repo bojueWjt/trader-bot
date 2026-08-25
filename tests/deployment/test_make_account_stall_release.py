@@ -114,8 +114,11 @@ REQUIRED_HOST_PATHS = {
     "host/execution_domain/control_plane.py",
     "host/execution_domain/portfolio_baseline.py",
     "host/execution_domain/order_ownership.py",
+    "host/execution_domain/ownership_ledger.py",
     "host/execution_domain/idempotency.py",
     "host/execution_domain/identifiers.py",
+    "host/order_management/protection_watchdog.py",
+    "ownership_ledger.py",
     "host/settings/__init__.py",
     "host/settings/apply_plan.py",
     "host/settings/import_export.py",
@@ -215,11 +218,18 @@ EXPECTED_RELEASE_FILE_MAP = {
         "packages/execution-domain/execution_domain/order_ownership.py"
     ): "host/execution_domain/order_ownership.py",
     (
+        "packages/execution-domain/execution_domain/ownership_ledger.py"
+    ): "host/execution_domain/ownership_ledger.py",
+    (
         "packages/execution-domain/execution_domain/idempotency.py"
     ): "host/execution_domain/idempotency.py",
     (
         "packages/execution-domain/execution_domain/identifiers.py"
     ): "host/execution_domain/identifiers.py",
+    (
+        "services/control-plane/order_management/protection_watchdog.py"
+    ): "host/order_management/protection_watchdog.py",
+    "scripts/ownership_ledger.py": "ownership_ledger.py",
     (
         "services/control-plane/settings/__init__.py"
     ): "host/settings/__init__.py",

@@ -44,8 +44,12 @@ from execution_domain.control_plane import (  # noqa: E402
     portfolio_baseline_sha256,
 )
 from execution_domain.order_ownership import (  # noqa: E402
-    is_robot_client_order_id,
     row_is_robot_order,
+)
+from execution_domain.ownership_ledger import (  # noqa: E402
+    OwnershipLedgerError,
+    load_robot_owned_balance,
+    select_flat_ownership_anchor,
 )
 
 from app_roles import (  # noqa: E402
@@ -1923,16 +1927,17 @@ def _validate_robot_owned_symbol_flat(
     account_id: str,
     symbol: str,
 ) -> None:
-    footprint = _robot_owned_symbol_footprint(
-        cur,
-        account_id=account_id,
-        symbol=symbol,
-    )
-    if footprint != Decimal("0"):
+    try:
+        select_flat_ownership_anchor(
+            cur,
+            account_id=account_id,
+            candidates=(symbol,),
+        )
+    except OwnershipLedgerError as exc:
         raise HTTPException(
             status_code=409,
             detail="robot-owned target symbol position is not flat",
-        )
+        ) from exc
 
 
 def _robot_owned_symbol_footprint(
@@ -1941,102 +1946,18 @@ def _robot_owned_symbol_footprint(
     account_id: str,
     symbol: str,
 ) -> Decimal:
-    # The fill footprint is historical read evidence. A row lock adds no
-    # consistency with exchange state and would force a read role to hold UPDATE.
-    cur.execute(
-        """
-        SELECT ee.client_order_id,
-               ee.event_type,
-               ee.payload,
-               op.instrument_id
-        FROM execution_events AS ee
-        LEFT JOIN orders_projection AS op
-          ON op.account_id=ee.account_id
-         AND op.client_order_id=ee.client_order_id
-        WHERE ee.account_id=%s
-          AND ee.client_order_id ~ '^B[0-9a-f]{32}[0-9]{2}$'
-          AND ee.event_type IN ('OrderFilled', 'OrderPartiallyFilled')
-        ORDER BY ee.ts_event, ee.created_at, ee.event_id
-        """,
-        (account_id,),
-    )
-    net_quantity = Decimal("0")
-    target_symbol = _canonical_symbol(symbol)
-    for client_order_id, event_type, raw_payload, projection_instrument in cur.fetchall():
-        if not is_robot_client_order_id(client_order_id):
-            continue
-        payload = raw_payload
-        if not isinstance(payload, dict):
-            raise HTTPException(
-                status_code=409,
-                detail="robot-owned fill evidence is invalid",
-            )
-        event_symbol = _robot_fill_symbol(
-            payload,
-            projection_instrument=projection_instrument,
-        )
-        if event_symbol != target_symbol:
-            continue
-        signed_quantity = _robot_fill_signed_quantity(
-            payload,
-            event_type=str(event_type or ""),
-        )
-        net_quantity += signed_quantity
-    return net_quantity
-
-
-def _robot_fill_symbol(
-    payload: dict,
-    *,
-    projection_instrument,
-) -> str:
-    for field_name in ("instrument_id", "symbol", "instrument"):
-        symbol = _canonical_symbol(payload.get(field_name))
-        if symbol:
-            return symbol
-    return _canonical_symbol(projection_instrument)
-
-
-def _robot_fill_signed_quantity(
-    payload: dict,
-    *,
-    event_type: str,
-) -> Decimal:
-    if event_type not in {"OrderFilled", "OrderPartiallyFilled"}:
-        return Decimal("0")
-    quantity = _robot_fill_quantity(payload)
-    side = _order_side(payload.get("side") or payload.get("order_side"))
-    if side is None:
-        raise HTTPException(
-            status_code=409,
-            detail="robot-owned fill evidence is invalid",
-        )
-    if side == "short":
-        return -quantity
-    return quantity
-
-
-def _robot_fill_quantity(payload: dict) -> Decimal:
-    raw_quantity = payload.get("last_qty")
-    if raw_quantity is None:
-        raw_quantity = payload.get("last_fill_qty")
-    if raw_quantity is None:
-        raw_quantity = payload.get("filled_qty")
-    if raw_quantity is None:
-        raw_quantity = payload.get("quantity")
     try:
-        quantity = Decimal(str(raw_quantity))
-    except (InvalidOperation, TypeError, ValueError) as exc:
+        balance = load_robot_owned_balance(
+            cur,
+            account_id=account_id,
+            symbol=symbol,
+        )
+    except OwnershipLedgerError as exc:
         raise HTTPException(
             status_code=409,
             detail="robot-owned fill evidence is invalid",
         ) from exc
-    if not quantity.is_finite() or quantity <= 0:
-        raise HTTPException(
-            status_code=409,
-            detail="robot-owned fill evidence is invalid",
-        )
-    return quantity
+    return balance.quantity
 
 
 def _validate_margin_ratio_guard(

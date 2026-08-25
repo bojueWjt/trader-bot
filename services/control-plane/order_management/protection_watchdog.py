@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 from db.connection import transaction
+from execution_domain.ownership_ledger import (
+    canonical_symbol,
+    load_robot_owned_balances,
+)
 
 from .db_helpers import record_reconciliation_finding
-
 
 WatchdogDispatcher = Callable[[str, dict[str, Any]], Any]
 
@@ -71,25 +75,50 @@ class ProtectionWatchdog:
 
 def _open_positions(conn, account_id: str) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
+        balances = load_robot_owned_balances(
+            cur,
+            account_id=account_id,
+        )
         cur.execute(
             """
-            SELECT position_id, instrument_id, quantity
+            SELECT position_id, instrument_id, side
             FROM positions_projection
             WHERE account_id=%s
               AND status IN ('open', 'reducing', 'external')
               AND quantity > 0
+            ORDER BY updated_at DESC, position_id
             """,
             (account_id,),
         )
         rows = cur.fetchall()
-    return [
-        {
-            "position_key": row[0],
-            "venue_symbol": str(row[1]).split(".", 1)[0].split("-", 1)[0].upper(),
-            "quantity": row[2],
-        }
-        for row in rows
-    ]
+    projection_keys: dict[tuple[str, str], str] = {}
+    for position_id, instrument_id, side in rows:
+        key = (
+            canonical_symbol(instrument_id),
+            str(side or "").strip().lower(),
+        )
+        if key not in projection_keys:
+            projection_keys[key] = str(position_id)
+
+    positions: list[dict[str, Any]] = []
+    for symbol, balance in balances.items():
+        quantity = balance.quantity
+        if quantity == 0:
+            continue
+        side = "long"
+        if quantity < 0:
+            side = "short"
+        position_key = projection_keys.get((symbol, side))
+        if not position_key:
+            position_key = f"{account_id}:{symbol}:{side}"
+        positions.append(
+            {
+                "position_key": position_key,
+                "venue_symbol": symbol,
+                "quantity": abs(quantity),
+            }
+        )
+    return positions
 
 
 def _expected_protection(conn, account_id: str, position_key: str) -> list[dict[str, Any]]:
