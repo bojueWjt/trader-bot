@@ -408,6 +408,216 @@ class StrategyShellTest(unittest.TestCase):
         )
         self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
 
+    def test_resting_accepted_order_allows_same_symbol_new_open(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _SynchronousAcceptedDurableIntentStrategy(
+                Path(state_dir)
+            )
+            first = _durable_entry_intent()
+            second = _durable_entry_intent()
+
+            with patch.object(
+                strategy,
+                "_confirm_durable_intent_order_event",
+            ), patch.object(
+                strategy,
+                "_confirm_live_canary_order_event",
+            ):
+                strategy._handle_intent(first)
+                self.assertNotIn(
+                    "SOLUSDT",
+                    strategy.symbol_open_freezes,
+                )
+
+                strategy._handle_intent(second)
+
+            self.assertEqual(
+                strategy.submitted_orders,
+                [
+                    encode_client_order_id(first.intent_id),
+                    encode_client_order_id(second.intent_id),
+                ],
+            )
+            self.assertNotIn(
+                "SOLUSDT",
+                strategy.symbol_open_freezes,
+            )
+
+    def test_missing_exchange_receipt_freezes_same_symbol_new_open(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _NoReceiptDurableIntentStrategy(
+                Path(state_dir)
+            )
+            first = _durable_entry_intent()
+            second = _durable_entry_intent()
+
+            strategy._handle_intent(first)
+
+            self.assertIn(
+                "SOLUSDT",
+                strategy.symbol_open_freezes,
+            )
+
+            strategy._handle_intent(second)
+
+            self.assertEqual(
+                strategy.submitted_orders,
+                [encode_client_order_id(first.intent_id)],
+            )
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "symbol_new_open_frozen",
+            )
+
+    def test_same_intent_replay_reports_duplicate_while_symbol_stays_frozen(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _NoReceiptDurableIntentStrategy(
+                Path(state_dir)
+            )
+            intent = _durable_entry_intent()
+
+            strategy._handle_intent(intent)
+            strategy._handle_intent(intent)
+
+            self.assertEqual(
+                strategy.submitted_orders,
+                [encode_client_order_id(intent.intent_id)],
+            )
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "duplicate_intent",
+            )
+            self.assertEqual(
+                strategy.symbol_open_freezes["SOLUSDT"],
+                str(intent.intent_id),
+            )
+
+    def test_exchange_truth_clears_prior_confirmation_freeze(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _NoReceiptDurableIntentStrategy(
+                Path(state_dir)
+            )
+            intent = _durable_entry_intent()
+            client_order_id = encode_client_order_id(
+                intent.intent_id
+            )
+
+            strategy._handle_intent(intent)
+            strategy._handle_intent(intent)
+            self.assertIn(
+                "SOLUSDT",
+                strategy.symbol_open_freezes,
+            )
+
+            strategy.exchange_order_ids.add(client_order_id)
+            strategy._handle_intent(intent)
+
+            self.assertNotIn(
+                client_order_id,
+                strategy._pending_order_confirmations,
+            )
+            self.assertNotIn(
+                "SOLUSDT",
+                strategy.symbol_open_freezes,
+            )
+            self.assertEqual(
+                strategy.denials[-1].reason,
+                "duplicate_intent",
+            )
+
+    def test_exchange_receipts_clear_only_matching_confirmation_freeze(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+            )
+        )
+        intent_id = uuid4()
+        first_client_order_id = encode_client_order_id(
+            intent_id,
+            sequence=1,
+        )
+        second_client_order_id = encode_client_order_id(
+            intent_id,
+            sequence=2,
+        )
+        record = SimpleNamespace(
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            client_order_ids=(
+                first_client_order_id,
+                second_client_order_id,
+            ),
+            exchange_confirmed_client_order_ids=(),
+        )
+        strategy._freeze_durable_intent_confirmation(
+            record,
+            str(intent_id),
+        )
+
+        with patch.object(
+            strategy,
+            "_confirm_durable_intent_order_event",
+        ), patch.object(
+            strategy,
+            "_confirm_live_canary_order_event",
+        ):
+            strategy.on_order_accepted(
+                SimpleNamespace(
+                    client_order_id=first_client_order_id,
+                )
+            )
+            self.assertEqual(
+                strategy.symbol_open_freezes["SOLUSDT"],
+                str(intent_id),
+            )
+
+            strategy.on_order_accepted(
+                SimpleNamespace(
+                    client_order_id=second_client_order_id,
+                )
+            )
+
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+
+        strategy._freeze_symbol_new_opens(
+            "SOLUSDT-PERP.BINANCE",
+            "protection order repair failed twice",
+        )
+        strategy._register_pending_order_confirmation(
+            SimpleNamespace(
+                client_order_id=first_client_order_id,
+                instrument_id="SOLUSDT-PERP.BINANCE",
+                reduce_only=False,
+            )
+        )
+        with patch.object(
+            strategy,
+            "_confirm_durable_intent_order_event",
+        ), patch.object(
+            strategy,
+            "_confirm_live_canary_order_event",
+        ):
+            strategy.on_order_accepted(
+                SimpleNamespace(
+                    client_order_id=first_client_order_id,
+                )
+            )
+
+        self.assertEqual(
+            strategy.symbol_open_freezes["SOLUSDT"],
+            "protection order repair failed twice",
+        )
+
     def test_reduce_only_plan_skips_pending_confirmation_freeze(
         self,
     ) -> None:
@@ -464,6 +674,53 @@ class StrategyShellTest(unittest.TestCase):
             SimpleNamespace(client_order_id=plan.client_order_id)
         )
 
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+
+    def test_fill_receipt_clears_confirmation_without_terminal_cache_status(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+            )
+        )
+        intent_id = uuid4()
+        plan = SimpleNamespace(
+            client_order_id=encode_client_order_id(intent_id),
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            reduce_only=False,
+        )
+        strategy._cache_orders = (  # type: ignore[method-assign]
+            lambda _instrument_id: (
+                SimpleNamespace(
+                    client_order_id=plan.client_order_id,
+                    status="PARTIALLY_FILLED",
+                ),
+            )
+        )
+        strategy._register_pending_order_confirmation(plan)
+
+        with patch.object(
+            strategy,
+            "_confirm_durable_intent_order_event",
+        ), patch.object(
+            strategy,
+            "_confirm_live_canary_order_event",
+        ), patch.object(
+            strategy,
+            "_queue_live_canary_fill",
+        ):
+            strategy.on_order_filled(
+                SimpleNamespace(
+                    client_order_id=plan.client_order_id,
+                )
+            )
+
+        self.assertNotIn(
+            plan.client_order_id,
+            strategy._pending_order_confirmations,
+        )
         self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
 
     def test_protection_watchdog_timer_runs_every_thirty_seconds(
@@ -3725,7 +3982,11 @@ class StrategyShellTest(unittest.TestCase):
             self.assertEqual(restarted.submitted_orders, [])
             self.assertEqual(
                 restarted.denials[-1].reason,
-                "intent_exchange_confirmation_required",
+                "duplicate_intent",
+            )
+            self.assertEqual(
+                restarted.symbol_open_freezes["SOLUSDT"],
+                str(intent.intent_id),
             )
             replayed = inbox.get(identity)
             self.assertTrue(replayed)
@@ -5260,6 +5521,25 @@ class _DurableIntentStrategy(IntentExecutionStrategy):
 
     def _now(self) -> datetime:
         return datetime(2026, 8, 8, 12, tzinfo=timezone.utc)
+
+
+class _SynchronousAcceptedDurableIntentStrategy(
+    _DurableIntentStrategy
+):
+    def submit_order(self, order, position_id=None) -> None:
+        super().submit_order(order, position_id=position_id)
+        self.on_order_accepted(
+            SimpleNamespace(
+                client_order_id=str(order.client_order_id),
+                instrument_id=str(order.instrument_id),
+            )
+        )
+
+
+class _NoReceiptDurableIntentStrategy(_DurableIntentStrategy):
+    def submit_order(self, order, position_id=None) -> None:
+        del position_id
+        self.submitted_orders.append(str(order.client_order_id))
 
 
 class _TinyDurableIntentStrategy(_DurableIntentStrategy):

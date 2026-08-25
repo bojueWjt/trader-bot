@@ -2276,17 +2276,26 @@ class IntentExecutionStrategy(Strategy):
             self._processed_intent_ids.add(
                 execution_identity.intent_id
             )
+            denial = OrderDenied(
+                "duplicate_intent",
+                execution_identity.intent_id,
+            )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
             return
         if durable_record.state is IntentExecutionState.REJECTED:
             denial = OrderDenied(
-                "durable_intent_rejected",
-                durable_record.rejection_reason,
+                "duplicate_intent",
+                execution_identity.intent_id,
             )
             self._record_denial(denial)
             self._report_denial(intent, denial)
             return
         if durable_record.state is IntentExecutionState.DISPATCHED:
             if self._durable_intent_orders_exist(durable_record):
+                self._clear_durable_intent_confirmation(
+                    durable_record
+                )
                 if durable_async:
                     self._submit_durable_io_task(
                         _DurableIoTask(
@@ -2307,14 +2316,24 @@ class IntentExecutionStrategy(Strategy):
                     self._processed_intent_ids.add(
                         execution_identity.intent_id
                     )
+                denial = OrderDenied(
+                    "duplicate_intent",
+                    execution_identity.intent_id,
+                )
+                self._record_denial(denial)
+                self._report_denial(intent, denial)
                 return
-            denial = OrderDenied(
+            confirmation_denial = OrderDenied(
                 "intent_exchange_confirmation_required",
                 execution_identity.intent_id,
             )
-            self._freeze_symbol_new_opens(
-                str(getattr(durable_record, "instrument_id", "")),
-                denial.detail,
+            self._freeze_durable_intent_confirmation(
+                durable_record,
+                confirmation_denial.detail,
+            )
+            denial = OrderDenied(
+                "duplicate_intent",
+                execution_identity.intent_id,
             )
             self._record_denial(denial)
             self._report_denial(intent, denial)
@@ -2439,28 +2458,40 @@ class IntentExecutionStrategy(Strategy):
         raw_action = getattr(intent, "action", "")
         action = str(getattr(raw_action, "value", raw_action))
         raw_order_plan = getattr(intent, "order_plan", {}) or {}
+        instrument_id = str(
+            getattr(intent, "instrument_id", "")
+        )
+        existing_intent_ids = frozenset(
+            self._processed_intent_ids
+            | self._active_intent_ids(instrument_id)
+        )
         freeze_denial = self._symbol_open_freeze_denial(
             action,
-            str(getattr(intent, "instrument_id", "")),
+            instrument_id,
         )
         if freeze_denial is not None:
-            self._record_denial(freeze_denial)
-            self._report_denial(intent, freeze_denial)
+            intent_id = str(getattr(intent, "intent_id", ""))
+            denial = freeze_denial
+            if intent_id in existing_intent_ids:
+                denial = OrderDenied(
+                    "duplicate_intent",
+                    intent_id,
+                )
+            self._record_denial(denial)
+            self._report_denial(intent, denial)
             return
         context = PlannerContext(
             account_id=self.config.account_id,
             trading_state=self._trading_state(),
             now=self._now(),
-            instrument=self._instrument_spec(str(intent.instrument_id)),
-            position=self._position_snapshot(str(intent.instrument_id)),
-            positions=self._position_snapshots(str(intent.instrument_id)),
+            instrument=self._instrument_spec(instrument_id),
+            position=self._position_snapshot(instrument_id),
+            positions=self._position_snapshots(instrument_id),
             existing_orders=self._order_snapshots(
-                str(intent.instrument_id),
+                instrument_id,
                 include_exchange_mirror=exchange_state_ready,
             ),
-            existing_intent_ids=frozenset(
-                self._processed_intent_ids | self._active_intent_ids(intent.instrument_id)
-            ),
+            existing_intent_ids=existing_intent_ids,
         )
         if str(raw_order_plan.get("type", "")).lower() == "zone_ladder":
             self._handle_zone_ladder(
@@ -3093,6 +3124,7 @@ class IntentExecutionStrategy(Strategy):
                 record is not False
                 and self._durable_intent_orders_exist(record)
             ):
+                self._clear_durable_intent_confirmation(record)
                 self._intent_execution_inbox.mark_exchange_confirmed(
                     intent_execution
                 )
@@ -3104,8 +3136,8 @@ class IntentExecutionStrategy(Strategy):
                 "intent_exchange_confirmation_required",
                 intent_execution.intent_id,
             )
-            self._freeze_symbol_new_opens(
-                str(getattr(record, "instrument_id", "")),
+            self._freeze_durable_intent_confirmation(
+                record,
                 denial.detail,
             )
             self._record_denial(denial)
@@ -3282,9 +3314,7 @@ class IntentExecutionStrategy(Strategy):
         del event
 
     def on_order_accepted(self, event: Any) -> None:
-        client_order_id = _event_client_order_id(event)
-        if client_order_id is not None:
-            self._pending_order_confirmations.pop(client_order_id, None)
+        self._confirm_terminal_order_event(event)
         self._confirm_durable_intent_order_event(event)
         self._confirm_live_canary_order_event(event)
 
@@ -3616,29 +3646,40 @@ class IntentExecutionStrategy(Strategy):
             return
         if not is_robot_client_order_id(client_order_id):
             return
-        self._pending_order_confirmations.pop(client_order_id, None)
-
-    def _confirm_filled_order_event(self, event: Any) -> None:
-        client_order_id = _event_client_order_id(event)
-        if client_order_id is None:
-            return
-        if not is_robot_client_order_id(client_order_id):
-            return
-        instrument_id = self._pending_order_confirmations.get(
-            client_order_id
+        instrument_id = self._pending_order_confirmations.pop(
+            client_order_id,
+            "",
         )
         if not instrument_id:
+            instrument_id = str(_event_instrument_id(event) or "")
+        if not instrument_id:
             return
-        for order in self._cache_orders(instrument_id):
-            order_client_order_id = str(
-                getattr(order, "client_order_id", "") or ""
+        try:
+            intent_id = str(
+                decode_client_order_id(client_order_id).intent_id
             )
-            if order_client_order_id != client_order_id:
+        except ValueError:
+            return
+        for pending_client_order_id in (
+            self._pending_order_confirmations
+        ):
+            try:
+                pending_intent_id = str(
+                    decode_client_order_id(
+                        pending_client_order_id
+                    ).intent_id
+                )
+            except ValueError:
                 continue
-            status = self._order_status_name(order)
-            if status not in self._PROTECTION_TERMINAL_STATUSES:
+            if pending_intent_id == intent_id:
                 return
-        self._pending_order_confirmations.pop(client_order_id, None)
+        self._clear_symbol_open_freeze(
+            instrument_id,
+            expected_reason=intent_id,
+        )
+
+    def _confirm_filled_order_event(self, event: Any) -> None:
+        self._confirm_terminal_order_event(event)
 
     def _submit_durable_io_task(
         self,
@@ -4104,12 +4145,17 @@ class IntentExecutionStrategy(Strategy):
                     record is not False
                     and self._durable_intent_orders_exist(record)
                 ):
+                    self._clear_durable_intent_confirmation(record)
                     self._commit_durable_entry_prepare()
                     self._queue_recovery_confirmation(task)
                     return
                 denial = OrderDenied(
                     "intent_exchange_confirmation_required",
                     intent_execution.intent_id,
+                )
+                self._freeze_durable_intent_confirmation(
+                    record,
+                    denial.detail,
                 )
                 self._record_denial(denial)
                 self._report_denial(intent, denial)
@@ -6672,10 +6718,97 @@ class IntentExecutionStrategy(Strategy):
             )
         )
 
-    def _clear_symbol_open_freeze(self, instrument_id: str) -> None:
+    def _freeze_durable_intent_confirmation(
+        self,
+        record: Any,
+        reason: str,
+    ) -> None:
+        instrument_id = str(
+            getattr(record, "instrument_id", "") or ""
+        )
+        if not instrument_id:
+            return
+        confirmed_ids = {
+            str(client_order_id)
+            for client_order_id in (
+                getattr(
+                    record,
+                    "exchange_confirmed_client_order_ids",
+                    (),
+                )
+                or ()
+            )
+        }
+        client_order_ids = tuple(
+            getattr(record, "client_order_ids", ()) or ()
+        )
+        for raw_client_order_id in client_order_ids:
+            client_order_id = str(raw_client_order_id)
+            if client_order_id in confirmed_ids:
+                continue
+            if not is_robot_client_order_id(client_order_id):
+                continue
+            self._pending_order_confirmations[
+                client_order_id
+            ] = instrument_id
+        self._freeze_symbol_new_opens(
+            instrument_id,
+            reason,
+        )
+
+    def _clear_durable_intent_confirmation(
+        self,
+        record: Any,
+    ) -> None:
+        instrument_id = str(
+            getattr(record, "instrument_id", "") or ""
+        )
+        if not instrument_id:
+            return
+        client_order_ids = tuple(
+            str(client_order_id)
+            for client_order_id in (
+                getattr(record, "client_order_ids", ()) or ()
+            )
+        )
+        for client_order_id in client_order_ids:
+            self._pending_order_confirmations.pop(
+                client_order_id,
+                None,
+            )
+        intent_id = str(
+            getattr(record, "intent_id", "") or ""
+        )
+        if not intent_id and client_order_ids:
+            try:
+                intent_id = str(
+                    decode_client_order_id(
+                        client_order_ids[0]
+                    ).intent_id
+                )
+            except ValueError:
+                return
+        if not intent_id:
+            return
+        self._clear_symbol_open_freeze(
+            instrument_id,
+            expected_reason=intent_id,
+        )
+
+    def _clear_symbol_open_freeze(
+        self,
+        instrument_id: str,
+        *,
+        expected_reason: str = "",
+    ) -> None:
         key = _canonical_symbol(instrument_id)
-        if key:
-            self._symbol_open_freezes.pop(key, None)
+        if not key:
+            return
+        if expected_reason:
+            current_reason = self._symbol_open_freezes.get(key)
+            if current_reason != expected_reason:
+                return
+        self._symbol_open_freezes.pop(key, None)
 
     def _now(self) -> datetime:
         clock = getattr(self, "clock", None)
@@ -6959,6 +7092,7 @@ class IntentExecutionStrategy(Strategy):
                     )
                     return False
                 self._durable_entry_submit_started = True
+                self._register_pending_order_confirmation(plan)
                 if position_id is not None:
                     self.submit_order(  # type: ignore[attr-defined]
                         order,
@@ -6966,7 +7100,6 @@ class IntentExecutionStrategy(Strategy):
                     )
                 else:
                     self.submit_order(order)  # type: ignore[attr-defined]
-                self._register_pending_order_confirmation(plan)
         except Exception as exc:
             self._record_denial(
                 OrderDenied("order_submit_failed", repr(exc))
@@ -7057,16 +7190,20 @@ class IntentExecutionStrategy(Strategy):
                     record is not False
                     and self._durable_intent_orders_exist(record)
                 ):
+                    self._clear_durable_intent_confirmation(record)
                     self._intent_execution_inbox.mark_exchange_confirmed(
                         intent_execution
                     )
                     return True
-                self._record_denial(
-                    OrderDenied(
-                        "intent_exchange_confirmation_required",
-                        intent_execution.intent_id,
-                    )
+                denial = OrderDenied(
+                    "intent_exchange_confirmation_required",
+                    intent_execution.intent_id,
                 )
+                self._freeze_durable_intent_confirmation(
+                    record,
+                    denial.detail,
+                )
+                self._record_denial(denial)
                 return False
 
         if isinstance(
@@ -7133,11 +7270,11 @@ class IntentExecutionStrategy(Strategy):
 
         try:
             position_id = self._hedge_position_id(order, plan)
+            self._register_pending_order_confirmation(plan)
             if position_id is not None:
                 self.submit_order(order, position_id=position_id)  # type: ignore[attr-defined]
             else:
                 self.submit_order(order)  # type: ignore[attr-defined]
-            self._register_pending_order_confirmation(plan)
         except Exception as exc:  # Fail closed: no silent drops on adapter/API mismatch.
             self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
             return False
