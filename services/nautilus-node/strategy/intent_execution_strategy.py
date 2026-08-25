@@ -3282,6 +3282,9 @@ class IntentExecutionStrategy(Strategy):
         del event
 
     def on_order_accepted(self, event: Any) -> None:
+        client_order_id = _event_client_order_id(event)
+        if client_order_id is not None:
+            self._pending_order_confirmations.pop(client_order_id, None)
         self._confirm_durable_intent_order_event(event)
         self._confirm_live_canary_order_event(event)
 
@@ -3597,6 +3600,8 @@ class IntentExecutionStrategy(Strategy):
         self,
         plan: OrderPlan,
     ) -> None:
+        if getattr(plan, "reduce_only", False):
+            return
         client_order_id = str(plan.client_order_id)
         if not is_robot_client_order_id(client_order_id):
             return

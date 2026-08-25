@@ -334,7 +334,102 @@ class StrategyShellTest(unittest.TestCase):
         self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
         self.assertIn("BTCUSDT", strategy.symbol_open_freezes)
 
-    def test_partial_fill_keeps_symbol_frozen_until_order_is_terminal(
+    def test_order_acceptance_clears_only_its_pending_confirmation(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+            )
+        )
+        intent_id = uuid4()
+        first = SimpleNamespace(
+            client_order_id=encode_client_order_id(
+                intent_id,
+                sequence=1,
+            ),
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            reduce_only=False,
+        )
+        second = SimpleNamespace(
+            client_order_id=encode_client_order_id(
+                intent_id,
+                sequence=2,
+            ),
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            reduce_only=False,
+        )
+        strategy._register_pending_order_confirmation(first)
+        strategy._register_pending_order_confirmation(second)
+
+        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertIn(
+            first.client_order_id,
+            strategy._pending_order_confirmations,
+        )
+        self.assertIn(
+            second.client_order_id,
+            strategy._pending_order_confirmations,
+        )
+
+        with patch.object(
+            strategy,
+            "_confirm_durable_intent_order_event",
+        ):
+            strategy.on_order_accepted(
+                SimpleNamespace(
+                    client_order_id=first.client_order_id,
+                )
+            )
+
+            self.assertNotIn(
+                first.client_order_id,
+                strategy._pending_order_confirmations,
+            )
+            self.assertIn(
+                second.client_order_id,
+                strategy._pending_order_confirmations,
+            )
+            self.assertIn(
+                "SOLUSDT",
+                strategy.symbol_open_freezes,
+            )
+
+            strategy.on_order_accepted(
+                SimpleNamespace(
+                    client_order_id=second.client_order_id,
+                )
+            )
+
+        self.assertNotIn(
+            second.client_order_id,
+            strategy._pending_order_confirmations,
+        )
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+
+    def test_reduce_only_plan_skips_pending_confirmation_freeze(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+            )
+        )
+        intent_id = uuid4()
+        plan = SimpleNamespace(
+            client_order_id=encode_client_order_id(intent_id),
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            reduce_only=True,
+        )
+
+        strategy._register_pending_order_confirmation(plan)
+
+        self.assertEqual(strategy._pending_order_confirmations, {})
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+
+    def test_partial_fill_does_not_restore_symbol_freeze_after_acceptance(
         self,
     ) -> None:
         strategy = IntentExecutionStrategy(
@@ -348,26 +443,27 @@ class StrategyShellTest(unittest.TestCase):
             client_order_id=encode_client_order_id(intent_id),
             instrument_id="SOLUSDT-PERP.BINANCE",
         )
-        open_orders = [
-            SimpleNamespace(
-                client_order_id=plan.client_order_id,
-                status="PARTIALLY_FILLED",
-            )
-        ]
-        strategy._cache_orders = (  # type: ignore[method-assign]
-            lambda _instrument_id: tuple(open_orders)
-        )
         strategy._register_pending_order_confirmation(plan)
 
-        strategy._confirm_filled_order_event(
-            SimpleNamespace(client_order_id=plan.client_order_id)
-        )
-        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+        with patch.object(
+            strategy,
+            "_confirm_durable_intent_order_event",
+        ):
+            strategy.on_order_accepted(
+                SimpleNamespace(
+                    client_order_id=plan.client_order_id,
+                )
+            )
 
-        open_orders.clear()
+        strategy._cache_orders = (  # type: ignore[method-assign]
+            lambda _instrument_id: self.fail(
+                "accepted orders must not poll cache for terminal status"
+            )
+        )
         strategy._confirm_filled_order_event(
             SimpleNamespace(client_order_id=plan.client_order_id)
         )
+
         self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
 
     def test_protection_watchdog_timer_runs_every_thirty_seconds(
