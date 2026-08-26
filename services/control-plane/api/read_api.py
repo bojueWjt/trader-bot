@@ -115,6 +115,19 @@ _PROTECTIVE_ORDER_TYPES = frozenset(
 _COMMAND_ACK_STATUSES = frozenset(
     {"accepted", "running", "completed", "failed"}
 )
+_NON_TERMINAL_INTENT_REJECTION_REASONS = frozenset(
+    {
+        "duplicate_intent",
+        "duplicate_idempotency_key",
+        "intent_exchange_confirmation_required",
+        "canary_exchange_confirmation_required",
+        "management_terminal_confirmation_required",
+    }
+)
+_INTENT_ACK_REJECTION_REASON_RE = re.compile(
+    r"^(?:denied:)?([a-z][a-z0-9_]*)(?::|$)",
+    re.IGNORECASE,
+)
 _INCIDENT_SEVERITIES = frozenset({"P0", "P1", "P2"})
 _INCIDENT_SEVERITY_RANK = {
     "P0": 0,
@@ -2484,6 +2497,25 @@ _NODE_COMMAND_TYPE_MAP = {
     "CANCEL_ALL": "cancel_all", "CLOSE_ALL": "close_all",
     "REFRESH_EVIDENCE": "refresh_evidence",
 }
+
+
+def _intent_ack_rejection_reason(detail) -> str:
+    raw_detail = str(detail or "").strip()
+    match = _INTENT_ACK_REJECTION_REASON_RE.match(raw_detail)
+    if match is None:
+        return ""
+    return match.group(1).lower()
+
+
+def _intent_ack_updates_intent_status(status: str, detail) -> bool:
+    if status == "expired":
+        return True
+    if status != "rejected":
+        return False
+    reason = _intent_ack_rejection_reason(detail)
+    return reason not in _NON_TERMINAL_INTENT_REJECTION_REASONS
+
+
 @app.post("/v1/nodes/{node_id}/intents/{intent_id}/ack")
 def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
                     authorization: str | None = Header(default=None),
@@ -2508,6 +2540,7 @@ def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
     from audit import record_audit_event
 
     status = str(getattr(body.get("status"), "value", body.get("status") or "received")).lower()
+    detail = body.get("detail")
     conn = _database_connection(database_url)
     try:
         intent_status = None
@@ -2522,13 +2555,15 @@ def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
             )
         if status in ("rejected", "expired"):
             with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE trade_intents SET status=%s "
-                    "WHERE intent_id=%s AND account_id=%s AND status='approved' "
-                    "RETURNING status::text",
-                    (status, intent_id, account_id),
-                )
-                row = cur.fetchone()
+                row = None
+                if _intent_ack_updates_intent_status(status, detail):
+                    cur.execute(
+                        "UPDATE trade_intents SET status=%s "
+                        "WHERE intent_id=%s AND account_id=%s AND status='approved' "
+                        "RETURNING status::text",
+                        (status, intent_id, account_id),
+                    )
+                    row = cur.fetchone()
                 if row is not None:
                     intent_status = row[0]
                 else:
@@ -2542,7 +2577,7 @@ def ack_node_intent(node_id: str, intent_id: str, body: dict = Body(default={}),
         record_audit_event(
             conn, event_type=f"intent_ack.{status}", aggregate_type="trade_intent",
             aggregate_id=intent_id, actor=f"node:{node_id}",
-            payload={"status": status, "detail": body.get("detail"), "account_id": body.get("account_id")},
+            payload={"status": status, "detail": detail, "account_id": body.get("account_id")},
         )
         conn.commit()
         result = {"ok": True}

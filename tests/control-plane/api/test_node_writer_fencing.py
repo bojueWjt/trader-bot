@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from queue import Queue
 from threading import Barrier
@@ -522,6 +523,137 @@ def test_intents_query_canceled_returns_503(
     assert response.json()["detail"] == "database statement canceled"
 
 
+@pytest.mark.parametrize(
+    "rejection_reason",
+    (
+        "duplicate_intent",
+        "intent_exchange_confirmation_required",
+    ),
+)
+def test_restart_replay_rejection_preserves_approved_intent(
+    client: TestClient,
+    migrated_db: str,
+    rejection_reason: str,
+) -> None:
+    intent_id, client_order_id = _insert_approved_intent_with_open_order(
+        migrated_db
+    )
+
+    response = client.post(
+        f"/v1/nodes/{NODE_ID}/intents/{intent_id}/ack",
+        headers=_writer_headers(),
+        json={
+            "account_id": ACCOUNT_ID,
+            "status": "rejected",
+            "detail": f"denied:{rejection_reason}:{intent_id}",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent_status"] == "approved"
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT status::text FROM trade_intents WHERE intent_id=%s",
+            (intent_id,),
+        )
+        intent_status = cur.fetchone()[0]
+        cur.execute(
+            """
+            SELECT status
+            FROM orders_projection
+            WHERE account_id=%s AND client_order_id=%s
+            """,
+            (ACCOUNT_ID, client_order_id),
+        )
+        order_status = cur.fetchone()[0]
+        cur.execute(
+            """
+            SELECT event_type, payload->>'detail'
+            FROM audit_events
+            WHERE aggregate_type='trade_intent'
+              AND aggregate_id=%s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (intent_id,),
+        )
+        audit_row = cur.fetchone()
+
+    assert intent_status == "approved"
+    assert order_status == "open"
+    assert audit_row == (
+        "intent_ack.rejected",
+        f"denied:{rejection_reason}:{intent_id}",
+    )
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "duplicate_intent",
+        "denied:duplicate_intent:intent-id",
+        "duplicate_idempotency_key",
+        "denied:intent_exchange_confirmation_required:intent-id",
+        "denied:canary_exchange_confirmation_required:client-order-id",
+        "denied:management_terminal_confirmation_required:intent-id",
+    ),
+)
+def test_replay_rejection_reason_is_non_terminal(detail: str) -> None:
+    assert read_api._intent_ack_updates_intent_status(
+        "rejected",
+        detail,
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "halted",
+        "denied:live_entry_instrument_not_allowed:ETHUSDT",
+        "denied:unsupported_order_spec:limit.price",
+        "schema_mismatch",
+        "wrong_account",
+    ),
+)
+def test_terminal_rejection_reason_updates_intent_status(detail: str) -> None:
+    assert read_api._intent_ack_updates_intent_status(
+        "rejected",
+        detail,
+    ) is True
+
+
+def test_terminal_risk_rejection_marks_approved_intent_rejected(
+    client: TestClient,
+    migrated_db: str,
+) -> None:
+    intent_id, _client_order_id = _insert_approved_intent_with_open_order(
+        migrated_db
+    )
+
+    response = client.post(
+        f"/v1/nodes/{NODE_ID}/intents/{intent_id}/ack",
+        headers=_writer_headers(),
+        json={
+            "account_id": ACCOUNT_ID,
+            "status": "rejected",
+            "detail": (
+                "denied:live_entry_instrument_not_allowed:ETHUSDT"
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent_status"] == "rejected"
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT status::text FROM trade_intents WHERE intent_id=%s",
+            (intent_id,),
+        )
+        intent_status = cur.fetchone()[0]
+
+    assert intent_status == "rejected"
+
+
 def test_rebaseline_epoch_accepts_restarted_token_and_rejects_old_node(
     client: TestClient,
     migrated_db: str,
@@ -908,6 +1040,189 @@ def _activate_redis_epoch(database_url: str) -> None:
                 "redis-volume-node-writer-fencing",
             ),
         )
+
+
+def _insert_approved_intent_with_open_order(
+    database_url: str,
+) -> tuple[str, str]:
+    now = datetime.now(timezone.utc)
+    raw_id, run_id, context_id, decision_id, risk_id, intent_id = (
+        uuid4() for _ in range(6)
+    )
+    idempotency_key = hashlib.sha256(
+        str(intent_id).encode()
+    ).hexdigest()
+    client_order_id = f"B{intent_id.hex}01"
+
+    with psycopg2.connect(database_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO raw_messages (
+                id,
+                source,
+                channel_id,
+                source_message_id,
+                source_version,
+                source_received_at,
+                content_hash
+            )
+            VALUES (%s, 'telegram', 'restart-replay', %s, 'v1', %s, %s)
+            """,
+            (
+                str(raw_id),
+                f"restart-replay-{raw_id}",
+                now,
+                hashlib.sha256(str(raw_id).encode()).hexdigest(),
+            ),
+        )
+        cur.execute(
+            """
+            INSERT INTO message_processing_runs (
+                processing_run_id,
+                raw_message_id,
+                status
+            )
+            VALUES (%s, %s, 'succeeded')
+            """,
+            (str(run_id), str(raw_id)),
+        )
+        cur.execute(
+            """
+            INSERT INTO context_snapshots (
+                context_snapshot_id,
+                raw_message_id,
+                snapshot_type,
+                context_version,
+                snapshot
+            )
+            VALUES (%s, %s, 'system', 'v1', '{}'::jsonb)
+            """,
+            (str(context_id), str(raw_id)),
+        )
+        cur.execute(
+            """
+            INSERT INTO hermes_decisions (
+                decision_id,
+                raw_message_id,
+                processing_run_id,
+                context_snapshot_id,
+                message_type,
+                action,
+                ambiguous,
+                account_scope,
+                entry_type,
+                model_version,
+                prompt_version,
+                context_version,
+                temperature,
+                created_at
+            )
+            VALUES (
+                %s, %s, %s, %s,
+                'new_signal', 'open_position', false, 'single', 'limit',
+                'restart-replay', 'restart-replay', 'v1', 0, %s
+            )
+            """,
+            (
+                str(decision_id),
+                str(raw_id),
+                str(run_id),
+                str(context_id),
+                now,
+            ),
+        )
+        cur.execute(
+            """
+            INSERT INTO risk_decisions (
+                risk_decision_id,
+                hermes_decision_id,
+                status,
+                account_id,
+                instrument_id,
+                decided_by
+            )
+            VALUES (%s, %s, 'approved', %s, 'ETHUSDT', 'restart-replay')
+            """,
+            (str(risk_id), str(decision_id), ACCOUNT_ID),
+        )
+        cur.execute(
+            """
+            INSERT INTO trade_intents (
+                intent_id,
+                hermes_decision_id,
+                risk_decision_id,
+                account_id,
+                instrument_id,
+                action,
+                status,
+                order_plan,
+                risk_budget,
+                valid_until,
+                idempotency_key,
+                approved_at
+            )
+            VALUES (
+                %s, %s, %s, %s, 'ETHUSDT', 'open_position', 'approved',
+                %s::jsonb, %s::jsonb, %s, %s, %s
+            )
+            """,
+            (
+                str(intent_id),
+                str(decision_id),
+                str(risk_id),
+                ACCOUNT_ID,
+                json.dumps(
+                    {
+                        "side": "long",
+                        "entry": {
+                            "type": "limit",
+                            "price": 3000,
+                        },
+                    }
+                ),
+                json.dumps({"max_notional": 60}),
+                now + timedelta(days=1),
+                idempotency_key,
+                now,
+            ),
+        )
+        cur.execute(
+            """
+            INSERT INTO orders_projection (
+                order_projection_id,
+                account_id,
+                instrument_id,
+                intent_id,
+                client_order_id,
+                venue_order_id,
+                status,
+                side,
+                order_type,
+                quantity,
+                price,
+                reduce_only,
+                payload
+            )
+            VALUES (
+                %s, %s, 'ETHUSDT', %s, %s, 'venue-restart-replay',
+                'open', 'long', 'LIMIT', 0.02, 3000, false, %s::jsonb
+            )
+            """,
+            (
+                str(uuid4()),
+                ACCOUNT_ID,
+                str(intent_id),
+                client_order_id,
+                json.dumps(
+                    {
+                        "order_kind": "regular",
+                        "time_in_force": "GTC",
+                    }
+                ),
+            ),
+        )
+
+    return str(intent_id), client_order_id
 
 
 def _rotate_redis_epoch(database_url: str) -> None:
