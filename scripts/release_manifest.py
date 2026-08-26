@@ -390,7 +390,6 @@ CONTROL_PLANE_SESSION_RESOURCE_DEFAULTS = {
     "circuit_reset_seconds": 5.0,
     "operation_timeout_seconds": 15.0,
     "shutdown_timeout_seconds": 1.0,
-    "stream_failure_halt_after_seconds": 30.0,
 }
 STRATEGY_DURABLE_IO_RESOURCE_DEFAULTS = {
     "queue_capacity": 128,
@@ -1456,7 +1455,6 @@ def _validated_control_plane_session_resources(
             "circuit_reset_seconds",
             "operation_timeout_seconds",
             "shutdown_timeout_seconds",
-            "stream_failure_halt_after_seconds",
         },
         ratio_fields={
             "queue_degraded_ratio",
