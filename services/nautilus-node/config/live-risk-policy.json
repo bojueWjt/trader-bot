@@ -33,7 +33,8 @@
       "retry_budget": 3,
       "retry_jitter_ratio": 0.2,
       "retry_max_delay_seconds": 1.0,
-      "shutdown_timeout_seconds": 1
+      "shutdown_timeout_seconds": 1,
+      "stream_failure_halt_after_seconds": 30
     },
     "redis": {
       "critical_window_seconds": 30,

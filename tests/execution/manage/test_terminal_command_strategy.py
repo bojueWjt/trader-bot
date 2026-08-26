@@ -298,6 +298,133 @@ def test_cancel_all_preserves_durable_entries_and_protection_only() -> None:
         assert payload["errors"] == []
 
 
+def test_cancel_all_preserves_expired_exchange_confirmed_durable_entries() -> None:
+    with tempfile.TemporaryDirectory() as state_dir:
+        strategy = _Strategy(
+            environment="live",
+            state_dir=Path(state_dir),
+        )
+        intent_id = uuid4()
+        durable_order_ids = tuple(
+            f"B{intent_id.hex}{sequence:02d}"
+            for sequence in (1, 2, 3)
+        )
+        valid_until = datetime.now(timezone.utc) - timedelta(minutes=5)
+        identity = IntentExecutionIdentity(
+            account_id="account-b",
+            intent_id=str(intent_id),
+            idempotency_key="a" * 64,
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            action="open_position",
+        )
+        strategy._intent_execution_inbox.register_received(
+            identity,
+            {
+                "schema_version": "1.0",
+                "intent_id": str(intent_id),
+                "idempotency_key": "a" * 64,
+                "account_id": "account-b",
+                "instrument_id": "SOLUSDT-PERP.BINANCE",
+                "action": "open_position",
+                "valid_until": valid_until.isoformat(),
+                "order_plan": {
+                    "type": "zone_ladder",
+                    "side": "buy",
+                    "tranches": [
+                        {"seq": 1, "quantity": "0.4", "price": "100"},
+                        {"seq": 2, "quantity": "0.3", "price": "99"},
+                        {"seq": 3, "quantity": "0.2", "price": "98"},
+                    ],
+                },
+            },
+        )
+        strategy._intent_execution_inbox.begin_dispatch(
+            identity,
+            durable_order_ids,
+        )
+        strategy._intent_execution_inbox.mark_exchange_confirmed(identity)
+        protection_id = f"B{intent_id.hex}11"
+        orphan_id = ROBOT_BTC_ORDER_ID
+        orders = [
+            _exchange_order(
+                "regular",
+                durable_order_ids[0],
+                "1001",
+                quantity="0.4",
+                price="100",
+            ),
+            _exchange_order(
+                "regular",
+                durable_order_ids[1],
+                "1002",
+                quantity="0.3",
+                price="99",
+            ),
+            _exchange_order(
+                "regular",
+                durable_order_ids[2],
+                "1003",
+                quantity="0.2",
+                price="98",
+            ),
+            _exchange_order(
+                "algo",
+                protection_id,
+                "2001",
+                order_type="STOP_MARKET",
+                reduce_only=True,
+            ),
+            _exchange_order(
+                "regular",
+                orphan_id,
+                "3001",
+                quantity="0.1",
+                price="97",
+            ),
+        ]
+        mirror = _Mirror(orders)
+        adapter = _Adapter()
+        worker = TerminalExchangeWorker(
+            account_id="account-b",
+            mirror=mirror,
+            adapter=adapter,
+            result_publisher=strategy.enqueue_terminal_exchange_result,
+            capacity=4,
+            total_deadline_seconds=1,
+        )
+        strategy.set_exchange_cancel_adapter(adapter, mirror)
+        strategy.set_terminal_exchange_worker(worker)
+        worker.start()
+        try:
+            strategy._on_node_command(
+                _command("preserve-expired-durable", CommandType.CANCEL_ALL)
+            )
+            assert worker.wait_empty(timeout_seconds=1)
+            strategy.drain_terminal_exchange_mailbox()
+        finally:
+            worker.stop()
+
+        assert [request.client_order_id for request in adapter.requests] == [
+            orphan_id
+        ]
+        payload = strategy.message_bus.messages[0][1]
+        preserved = [
+            operation
+            for operation in payload["operations"]
+            if operation["status"] == "preserved"
+        ]
+        assert [item["client_order_id"] for item in preserved] == [
+            *durable_order_ids,
+            protection_id,
+        ]
+        assert [item["outcome"] for item in preserved] == [
+            "durable_entry_preserved",
+            "durable_entry_preserved",
+            "durable_entry_preserved",
+            "protective_order_preserved",
+        ]
+
+
 def test_cancel_all_cancels_durable_entry_with_exchange_quantity_drift() -> None:
     with tempfile.TemporaryDirectory() as state_dir:
         strategy = _Strategy(

@@ -873,6 +873,9 @@ def _build_node_control_plane_session(
         operation_timeout_seconds=(
             session_config.operation_timeout_seconds
         ),
+        stream_failure_halt_after_seconds=(
+            session_config.stream_failure_halt_after_seconds
+        ),
         failure_callback=lambda lane, reason: (
             _mark_session_lane_failed(runtime, lane, reason)
         ),

@@ -515,7 +515,80 @@ def test_lane_retry_budget_uses_exponential_backoff_and_opens_circuit() -> None:
     assert lane.error_count == 3
     assert lane.circuit_open_count == 1
     assert lane.consecutive_failures == 3
-    assert failures == [("heartbeat", "heartbeat deadline exceeded")]
+    assert failures == []
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_transient_http_500_does_not_halt_before_stream_failure_budget() -> None:
+    failures: list[tuple[str, str]] = []
+    heartbeat_calls = 0
+    http_500 = RuntimeError(
+        "GET /v1/nodes/nautilus-node-account-a/intents"
+        "?account_id=account-a failed with HTTP 500: Internal Server Error"
+    )
+
+    def heartbeat() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        if heartbeat_calls == 1:
+            return
+        raise http_500
+
+    session = NodeControlPlaneSession(
+        heartbeat=heartbeat,
+        heartbeat_interval_seconds=1.0,
+        retry_budget=3,
+        retry_base_delay_seconds=0.001,
+        retry_max_delay_seconds=0.002,
+        retry_jitter_ratio=0.0,
+        circuit_reset_seconds=1.0,
+        stream_failure_halt_after_seconds=30.0,
+        failure_callback=lambda lane, reason: failures.append(
+            (lane, reason)
+        ),
+    )
+    session.start()
+
+    assert _wait_until(
+        lambda: session.snapshot().lanes["heartbeat"].circuit_state
+        == "open"
+    )
+    assert failures == []
+    assert session.stop(time.monotonic() + 1.0) is True
+
+
+def test_transient_http_500_halts_after_stream_failure_budget() -> None:
+    failures: list[tuple[str, str]] = []
+    heartbeat_calls = 0
+    http_500 = RuntimeError(
+        "GET /v1/nodes/nautilus-node-account-a/intents"
+        "?account_id=account-a failed with HTTP 500: Internal Server Error"
+    )
+
+    def heartbeat() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        if heartbeat_calls == 1:
+            return
+        raise http_500
+
+    session = NodeControlPlaneSession(
+        heartbeat=heartbeat,
+        heartbeat_interval_seconds=1.0,
+        retry_budget=1,
+        retry_base_delay_seconds=0.001,
+        retry_max_delay_seconds=0.001,
+        retry_jitter_ratio=0.0,
+        circuit_reset_seconds=1.0,
+        stream_failure_halt_after_seconds=0.0,
+        failure_callback=lambda lane, reason: failures.append(
+            (lane, reason)
+        ),
+    )
+    session.start()
+
+    assert _wait_until(lambda: bool(failures))
+    assert failures == [("heartbeat", str(http_500))]
     assert session.stop(time.monotonic() + 1.0) is True
 
 

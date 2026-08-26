@@ -1881,7 +1881,6 @@ class IntentExecutionStrategy(Strategy):
     def _durable_entry_order_preservations(
         self,
     ) -> dict[str, dict[str, Any]]:
-        now = _aware_datetime(self._now())
         preservations: dict[str, dict[str, Any]] = {}
         account_id = str(self.config.account_id)
         for record in self._intent_execution_inbox.records():
@@ -1897,7 +1896,7 @@ class IntentExecutionStrategy(Strategy):
             valid_until = _durable_entry_valid_until(
                 record.intent_payload
             )
-            if valid_until is False or valid_until <= now:
+            if valid_until is False:
                 continue
             expected_orders = _durable_entry_expected_orders(record)
             confirmed_client_order_ids = {
@@ -1919,7 +1918,7 @@ class IntentExecutionStrategy(Strategy):
                     "quantity": expected["quantity"],
                     "valid_until": valid_until.isoformat(),
                     "preservation_reason": (
-                        "exchange_confirmed_unexpired_durable_intent"
+                        "exchange_confirmed_durable_intent"
                     ),
                 }
         return preservations

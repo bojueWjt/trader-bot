@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -490,6 +491,35 @@ def test_require_node_writer_holds_active_epoch_lock_until_commit(
         if writer_conn.closed == 0:
             writer_conn.rollback()
             writer_conn.close()
+
+
+def test_require_node_writer_does_not_row_lock_heartbeat_identity() -> None:
+    source = inspect.getsource(read_api._require_node_writer)
+    start = source.index("FROM node_heartbeats")
+    end = source.index("row = cur.fetchone()", start)
+    assert "FOR SHARE" not in source[start:end]
+    epoch_source = inspect.getsource(read_api._active_redis_fencing_epoch)
+    assert "FROM redis_fencing_epochs" in epoch_source
+    assert "FOR SHARE" in epoch_source
+
+
+def test_intents_query_canceled_returns_503(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_args, **_kwargs):
+        raise psycopg2.errors.QueryCanceled(
+            "canceling statement due to statement timeout"
+        )
+
+    monkeypatch.setattr(read_api, "_require_node_writer", boom)
+    response = client.get(
+        f"/v1/nodes/{NODE_ID}/intents",
+        params={"account_id": ACCOUNT_ID},
+        headers=_writer_headers(),
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "database statement canceled"
 
 
 def test_rebaseline_epoch_accepts_restarted_token_and_rejects_old_node(

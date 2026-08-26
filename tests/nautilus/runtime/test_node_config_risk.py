@@ -229,6 +229,7 @@ def test_control_plane_session_resilience_loads_from_node_json(
     assert session.retry_jitter_ratio == 0.25
     assert session.circuit_reset_seconds == 10.0
     assert session.operation_timeout_seconds == 8.0
+    assert session.stream_failure_halt_after_seconds == 30.0
     assert (
         config.runtime_resources.control_plane_session
         == config.control_plane.session

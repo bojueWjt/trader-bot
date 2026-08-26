@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 import time
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ DEFAULT_RETRY_MAX_DELAY_SECONDS = 1.0
 DEFAULT_RETRY_JITTER_RATIO = 0.2
 DEFAULT_CIRCUIT_RESET_SECONDS = 5.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 15.0
+DEFAULT_STREAM_FAILURE_HALT_AFTER_SECONDS = 30.0
 DEFAULT_RETRY_DELAY_SECONDS = DEFAULT_RETRY_BASE_DELAY_SECONDS
 _POLL_TOKEN = object()
 
@@ -119,6 +121,8 @@ class _Lane:
         self.error_count = 0
         self.success_count = 0
         self.deadline_reported = False
+        self.consecutive_failure_started_at: float | bool = False
+        self.stream_halt_reported = False
 
     def begin(self) -> bool:
         now = time.monotonic()
@@ -138,6 +142,8 @@ class _Lane:
             self.circuit_state = CircuitState.CLOSED
             self.circuit_retry_at = False
             self.consecutive_failures = 0
+            self.consecutive_failure_started_at = False
+            self.stream_halt_reported = False
             self.success_count += 1
             self.deadline_reported = False
 
@@ -149,6 +155,8 @@ class _Lane:
                 return str(self.failure), True
             self.failure = detail
             self.consecutive_failures += 1
+            if self.consecutive_failure_started_at is False:
+                self.consecutive_failure_started_at = time.monotonic()
             self.error_count += 1
             if isinstance(exc, TimeoutError):
                 self.timeout_count += 1
@@ -333,6 +341,9 @@ class NodeControlPlaneSession:
         operation_timeout_seconds: float = (
             DEFAULT_OPERATION_TIMEOUT_SECONDS
         ),
+        stream_failure_halt_after_seconds: float = (
+            DEFAULT_STREAM_FAILURE_HALT_AFTER_SECONDS
+        ),
         retry_delay_seconds: float | None = None,
         failure_callback: Callable[[str, str], None] | None = None,
         success_callback: Callable[[str], None] | None = None,
@@ -370,6 +381,13 @@ class NodeControlPlaneSession:
             "operation_timeout_seconds",
             operation_timeout_seconds,
         )
+        if (
+            not math.isfinite(float(stream_failure_halt_after_seconds))
+            or float(stream_failure_halt_after_seconds) < 0
+        ):
+            raise ValueError(
+                "stream_failure_halt_after_seconds must be non-negative"
+            )
         if retry_max_delay_seconds < retry_base_delay_seconds:
             raise ValueError(
                 "retry_max_delay_seconds must be at least "
@@ -420,6 +438,9 @@ class NodeControlPlaneSession:
         self._circuit_reset_seconds = float(circuit_reset_seconds)
         self._operation_timeout_seconds = float(
             operation_timeout_seconds
+        )
+        self._stream_failure_halt_after_seconds = float(
+            stream_failure_halt_after_seconds
         )
         self._failure_callback = failure_callback
         self._success_callback = success_callback
@@ -599,6 +620,9 @@ class NodeControlPlaneSession:
                 "circuit_reset_seconds": self._circuit_reset_seconds,
                 "operation_timeout_seconds": (
                     self._operation_timeout_seconds
+                ),
+                "stream_failure_halt_after_seconds": (
+                    self._stream_failure_halt_after_seconds
                 ),
             }
         )
@@ -853,7 +877,13 @@ class NodeControlPlaneSession:
                 attempt += 1
                 if half_open or attempt >= lane.retry_budget:
                     opened = lane.open_circuit()
-                    if opened:
+                    # Transient 5xx/timeouts back off via the circuit; sticky
+                    # halt waits for stream_failure_halt_after_seconds.
+                    if self._should_report_lane_failure(
+                        lane,
+                        exc,
+                        circuit_just_opened=opened,
+                    ):
                         self._report_failure(lane.name, exc)
                     return False
                 lane.record_retry()
@@ -1062,6 +1092,28 @@ class NodeControlPlaneSession:
                 return False
         return True
 
+    def _should_report_lane_failure(
+        self,
+        lane: _Lane,
+        exc: BaseException,
+        *,
+        circuit_just_opened: bool,
+    ) -> bool:
+        if not _is_transient_stream_error(exc):
+            return circuit_just_opened
+        now = time.monotonic()
+        with lane.lock:
+            if lane.stream_halt_reported:
+                return False
+            started_at = lane.consecutive_failure_started_at
+            if started_at is False:
+                return False
+            elapsed = max(now - float(started_at), 0.0)
+            if elapsed < self._stream_failure_halt_after_seconds:
+                return False
+            lane.stream_halt_reported = True
+            return True
+
     def _report_failure(
         self,
         lane_name: str,
@@ -1120,6 +1172,49 @@ def _exception_detail(exc: BaseException) -> str:
     if detail:
         return detail
     return type(exc).__name__
+
+
+def _is_transient_stream_error(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        detail = str(exc)
+        if "operation exceeded" in detail and "deadline" in detail:
+            return False
+        return True
+    name = type(exc).__name__
+    if name in {
+        "ControlPlaneFencingError",
+        "ControlPlaneIdentityError",
+    }:
+        return False
+    if name in {
+        "ControlPlaneTransportError",
+        "ControlPlaneConnectTimeout",
+        "ControlPlaneReadTimeout",
+        "ControlPlaneTotalTimeout",
+        "URLError",
+        "ConnectionError",
+        "ConnectionResetError",
+        "BrokenPipeError",
+    }:
+        return True
+    detail = str(exc)
+    marker = "HTTP "
+    index = detail.find(marker)
+    if index >= 0:
+        status = detail[index + len(marker): index + len(marker) + 3]
+        if len(status) == 3 and status.isdigit():
+            if status.startswith("5") or status in {"429", "408"}:
+                return True
+    lowered = detail.lower()
+    if "statement timeout" in lowered:
+        return True
+    if "querycanceled" in lowered:
+        return True
+    if "transport failed" in lowered:
+        return True
+    if "database pool exhausted" in lowered:
+        return True
+    return False
 
 
 def _monotonic_age_ms(

@@ -87,6 +87,7 @@ RUNTIME_RESOURCES = {
         "circuit_reset_seconds": 5,
         "operation_timeout_seconds": 15,
         "shutdown_timeout_seconds": 1,
+        "stream_failure_halt_after_seconds": 30,
     },
     "strategy_durable_io": {
         "queue_capacity": 128,

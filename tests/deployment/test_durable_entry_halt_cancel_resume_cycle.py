@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -347,6 +347,34 @@ def test_halt_cancel_resume_preserves_durable_ladder_exactly() -> None:
             "durable_entry_preserved",
             "canceled",
         ]
+
+
+def test_resume_gate_allows_expired_exchange_accepted_durable_entry() -> None:
+    intent_id = str(uuid4())
+    order = _exchange_order(
+        f"B{UUID(intent_id).hex}01",
+        "7001",
+        "0.4",
+        "100",
+    )
+    cursor = _ResumeCursor(
+        [order],
+        intent_id=intent_id,
+        valid_until=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+
+    exemptions = read_api._validate_owned_orders_terminal(
+        cursor,
+        heartbeat={
+            "regular_orders": [_heartbeat_order(order)],
+            "algo_orders": [],
+        },
+        account_id=ACCOUNT_ID,
+    )
+
+    assert [item["client_order_id"] for item in exemptions] == [
+        order.client_order_id
+    ]
 
 
 def test_resume_gate_still_blocks_robot_orphan_order() -> None:

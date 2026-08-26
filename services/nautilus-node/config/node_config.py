@@ -96,6 +96,7 @@ class ControlPlaneSessionNodeConfig:
     circuit_reset_seconds: float = 5.0
     operation_timeout_seconds: float = 15.0
     shutdown_timeout_seconds: float = 1.0
+    stream_failure_halt_after_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -532,6 +533,11 @@ def _load_control_plane_session_config(
             "shutdown_timeout_seconds",
             1.0,
         ),
+        stream_failure_halt_after_seconds=_optional_positive_number(
+            raw,
+            "stream_failure_halt_after_seconds",
+            30.0,
+        ),
     )
 
 
@@ -656,6 +662,7 @@ def _load_runtime_resources_config(
                 "circuit_reset_seconds",
                 "operation_timeout_seconds",
                 "shutdown_timeout_seconds",
+                "stream_failure_halt_after_seconds",
             },
         )
     effective_session_raw = release_session_raw
@@ -745,6 +752,7 @@ def _session_overlap(
         session.circuit_reset_seconds,
         session.operation_timeout_seconds,
         session.shutdown_timeout_seconds,
+        session.stream_failure_halt_after_seconds,
     )
 
 

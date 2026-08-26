@@ -23,7 +23,7 @@ from uuid import UUID, uuid4
 import psycopg2
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from psycopg2.extras import RealDictCursor
 
 _PSYCOPG2_DRIVER = psycopg2
@@ -176,6 +176,35 @@ psycopg2 = _Psycopg2Facade()
 
 def _database_connection(database_url: str):
     return psycopg2.connect(database_url)
+
+
+_RETRYABLE_PGCODES = frozenset({"57014", "55P03"})
+
+
+def _is_retryable_db_error(exc: BaseException) -> bool:
+    pgcode = str(getattr(exc, "pgcode", "") or "")
+    if pgcode in _RETRYABLE_PGCODES:
+        return True
+    query_canceled = getattr(_PSYCOPG2_DRIVER.errors, "QueryCanceled", None)
+    if query_canceled is not None and isinstance(exc, query_canceled):
+        return True
+    return False
+
+
+def _install_retryable_db_error_handler(role_app: FastAPI) -> None:
+    query_canceled = getattr(_PSYCOPG2_DRIVER.errors, "QueryCanceled", None)
+    if query_canceled is None:
+        return
+
+    @role_app.exception_handler(query_canceled)
+    async def handle_query_canceled(_request, exc):
+        del _request
+        if not _is_retryable_db_error(exc):
+            raise exc
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "database statement canceled"},
+        )
 
 
 def _verify_database_session_contract(conn, role: AppRole) -> dict[str, str]:
@@ -2000,12 +2029,11 @@ def _durable_entry_order_resume_exemption(
         != _canonical_symbol(projection_instrument_id)
     ):
         return False
-    if (
-        not isinstance(valid_until, datetime)
-        or not isinstance(database_now, datetime)
-        or valid_until <= database_now
-    ):
+    # Working GTC entries were admitted at submit time; intent TTL must not
+    # revoke resume exemption after the order is already on the book.
+    if not isinstance(valid_until, datetime):
         return False
+    del database_now
 
     projection_order = {}
     if isinstance(raw_projection_payload, dict):
@@ -2080,12 +2108,9 @@ def _intent_backed_entry_exemption(
         != _canonical_symbol(order_symbol)
     ):
         return False
-    if (
-        not isinstance(valid_until, datetime)
-        or not isinstance(database_now, datetime)
-        or valid_until <= database_now
-    ):
+    if not isinstance(valid_until, datetime):
         return False
+    del database_now
     return {
         "client_order_id": client_order_id,
         "intent_id": intent_id,
@@ -4458,6 +4483,8 @@ def _require_node_writer(
     ) = identity
     if provided_epoch != active_epoch:
         _raise_writer_fence("redis fencing epoch mismatch")
+    # Plain SELECT: FOR SHARE here waits on heartbeat UPSERT RowExclusive and
+    # the 2s node-control statement timeout becomes HTTP 500 (2026-08-26 00:49).
     cur.execute(
         """
         SELECT redis_fencing_epoch::text,
@@ -4466,7 +4493,6 @@ def _require_node_writer(
         FROM node_heartbeats
         WHERE node_id=%s
           AND account_id=%s
-        FOR SHARE
         """,
         (node_id, account_id),
     )
@@ -8282,12 +8308,15 @@ def role_database_health():
     }
 
 
+_install_retryable_db_error_handler(app)
 all_role_app = app
 
 
 def create_app(role: AppRole | str | None = None) -> FastAPI:
     resolved = resolve_app_role(role)
     role_app = build_role_app(all_role_app, resolved)
+    if role_app is not all_role_app:
+        _install_retryable_db_error_handler(role_app)
     if resolved is not AppRole.ALL:
         role_app.router.on_startup.append(
             lambda: _verify_role_database_on_startup(role_app, resolved)

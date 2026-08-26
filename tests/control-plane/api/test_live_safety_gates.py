@@ -2725,6 +2725,53 @@ def test_resume_allows_exchange_accepted_unexpired_durable_entry_ladder(
     ]
 
 
+def test_resume_allows_exchange_accepted_expired_durable_entry_ladder(
+    client: TestClient,
+    migrated_db: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_binance_mark_price",
+        lambda _symbol: 102,
+    )
+    intent_id, orders = _seed_exchange_accepted_durable_entry_ladder(
+        client,
+        migrated_db,
+    )
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE trade_intents
+            SET valid_until=now() - interval '1 second'
+            WHERE intent_id=%s
+            """,
+            (intent_id,),
+        )
+    _seed_heartbeat(migrated_db, regular_orders=orders)
+    _seed_reviewed_release_and_permit(migrated_db)
+
+    response = client.post(
+        "/v1/commands",
+        headers=_risk_headers(str(uuid4())),
+        json=_resume_body(None),
+    )
+
+    assert response.status_code == 200
+    command_id = response.json()["command_id"]
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT scope FROM operator_commands WHERE command_id=%s",
+            (command_id,),
+        )
+        scope = cur.fetchone()[0]
+    preserved = scope["durable_entry_order_exemptions"]
+    assert [item["client_order_id"] for item in preserved] == [
+        order["client_order_id"] for order in orders
+    ]
+    assert {item["intent_id"] for item in preserved} == {intent_id}
+
+
 def test_resume_allows_durable_entry_reduce_only_from_projection_payload(
     client: TestClient,
     migrated_db: str,
