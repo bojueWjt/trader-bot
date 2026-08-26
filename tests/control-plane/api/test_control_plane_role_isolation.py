@@ -98,6 +98,7 @@ def test_role_apps_expose_only_their_owned_routes() -> None:
         "/v1/nodes/{node_id}/incidents/resolve",
         "/v1/nodes/{node_id}/intents",
         "/v1/nodes/{node_id}/intents/{intent_id}/ack",
+        "/v1/nodes/{node_id}/orders",
     }
     assert event_ingest == {
         "/health/role",

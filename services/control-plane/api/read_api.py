@@ -5003,6 +5003,83 @@ def node_exchange_state(
         conn.close()
 
 
+@app.get("/v1/nodes/{node_id}/orders")
+def node_orders(
+    node_id: str,
+    account_id: str,
+    status: str = "open",
+    authorization: str | None = Header(default=None),
+    x_node_id: str | None = Header(default=None),
+    x_account_id: str | None = Header(default=None),
+):
+    """Return one node's account-scoped robot order recovery candidates."""
+    bound_account_id = require_node(
+        authorization,
+        node_id=node_id,
+        account_id=account_id,
+        x_node_id=x_node_id,
+        x_account_id=x_account_id,
+    )
+    if status != "open":
+        raise HTTPException(
+            status_code=400,
+            detail="node order status filter must be open",
+        )
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise HTTPException(status_code=503, detail="store unavailable")
+    conn = _database_connection(database_url)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT client_order_id,
+                       venue_order_id,
+                       instrument_id,
+                       status,
+                       side,
+                       order_type,
+                       reduce_only,
+                       payload
+                FROM orders_projection
+                WHERE account_id=%s
+                  AND status NOT IN %s
+                  AND client_order_id
+                      ~ '^B[0-9a-f]{32}[0-9]{2}$'
+                ORDER BY updated_at, client_order_id
+                """,
+                (
+                    str(bound_account_id or account_id),
+                    _TERMINAL_ORDER_STATES,
+                ),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        orders = []
+        for row in rows:
+            raw_payload = row.pop("payload", {})
+            payload = raw_payload
+            if not isinstance(payload, dict):
+                payload = {}
+            orders.append(
+                {
+                    **row,
+                    "position_side": payload.get("position_side"),
+                    "time_in_force": payload.get("time_in_force"),
+                    "reduce_only": bool(
+                        row.get("reduce_only")
+                        or payload.get("reduce_only", False)
+                    ),
+                    "tags": payload.get("tags") or (),
+                }
+            )
+        return {
+            "account_id": str(bound_account_id or account_id),
+            "orders": orders,
+        }
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Operator read surface (/v1/*) consumed by the v3 dashboard.
 #

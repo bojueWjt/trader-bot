@@ -466,7 +466,7 @@ http://127.0.0.1:8080, http://$TAILSCALE_IP:8080, http://172.30.1.1:8080, http:/
 		reverse_proxy 127.0.0.1:8182
 	}
 
-	@node_control path_regexp node_control ^/v1/nodes/[^/]+/(heartbeat|incidents(/resolve)?|commands(/[^/]+/ack)?|intents(/[^/]+/ack)?|exchange-state)$
+	@node_control path_regexp node_control ^/v1/nodes/[^/]+/(heartbeat|incidents(/resolve)?|commands(/[^/]+/ack)?|intents(/[^/]+/ack)?|exchange-state|orders)$
 	handle @node_control {
 		reverse_proxy 127.0.0.1:8181
 	}

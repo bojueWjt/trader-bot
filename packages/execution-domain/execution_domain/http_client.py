@@ -379,6 +379,35 @@ class HttpControlPlaneClient(ControlPlaneClient):
         generated_at = payload.get("generated_at")
         return _parse_datetime(generated_at)
 
+    def fetch_open_orders(
+        self,
+        account_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        self._require_account_id(account_id)
+        query = urlencode(
+            {
+                "account_id": account_id,
+                "status": "open",
+            }
+        )
+        payload = self._request_json(
+            "GET",
+            f"/v1/nodes/{self._node_id}/orders?{query}",
+        )
+        raw_orders = payload.get("orders", [])
+        if not isinstance(raw_orders, list):
+            raise ControlPlaneHttpError(
+                "control-plane open orders response is invalid"
+            )
+        orders = []
+        for raw_order in raw_orders:
+            if not isinstance(raw_order, dict):
+                raise ControlPlaneHttpError(
+                    "control-plane open order is invalid"
+                )
+            orders.append(dict(raw_order))
+        return tuple(orders)
+
     def _require_node_id(self, node_id: str) -> None:
         candidate = _required_identity(node_id, "node_id")
         if candidate != self._node_id:

@@ -9501,6 +9501,16 @@ def _event_fee_usdt(event: Any) -> tuple[str, str]:
                 continue
             amount = _money_amount(value)
             currency = _money_currency(value)
+            if not currency:
+                currency = str(
+                    _event_text_field(
+                        event,
+                        "commission_asset",
+                        "commissionAsset",
+                        "fee_currency",
+                    )
+                    or ""
+                ).strip().upper()
             if amount is None:
                 return "0", "fill fee amount is unavailable"
             if currency and currency not in {"USDT", "USDC"}:

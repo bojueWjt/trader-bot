@@ -200,6 +200,77 @@ def test_client_rejects_cross_account_request_before_network(
         )
 
 
+def test_open_order_pull_is_account_scoped_and_preserves_projection_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = []
+
+    def urlopen(request, timeout):
+        del timeout
+        requests.append(request)
+        return _Response(
+            {
+                "account_id": "account-a",
+                "orders": [
+                    {
+                        "client_order_id": (
+                            "B3562ddc2a0e74f509dc34253ab80beef01"
+                        ),
+                        "venue_order_id": "25082516000001",
+                        "instrument_id": "PENGUUSDT-PERP.BINANCE",
+                        "status": "accepted",
+                        "side": "long",
+                        "order_type": "LIMIT",
+                        "position_side": "BOTH",
+                        "time_in_force": "GTC",
+                        "reduce_only": False,
+                        "tags": [
+                            "intent_id="
+                            "3562ddc2-a0e7-4f50-9dc3-4253ab80beef"
+                        ],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(http_client_module, "urlopen", urlopen)
+    client = _client()
+
+    orders = client.fetch_open_orders("account-a")
+
+    assert orders[0]["instrument_id"] == (
+        "PENGUUSDT-PERP.BINANCE"
+    )
+    query = parse_qs(urlparse(requests[0].full_url).query)
+    assert query == {
+        "account_id": ["account-a"],
+        "status": ["open"],
+    }
+    assert requests[0].get_header("X-node-id") == "node-a"
+    assert requests[0].get_header("X-account-id") == "account-a"
+
+
+def test_open_order_pull_rejects_cross_account_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_urlopen(request, timeout):
+        del request, timeout
+        raise AssertionError("network request must not be attempted")
+
+    monkeypatch.setattr(
+        http_client_module,
+        "urlopen",
+        unexpected_urlopen,
+    )
+    client = _client()
+
+    with pytest.raises(
+        ControlPlaneIdentityError,
+        match="account_id mismatch",
+    ):
+        client.fetch_open_orders("account-b")
+
+
 def test_heartbeat_rejects_empty_account_identity() -> None:
     with pytest.raises(ValueError, match="heartbeat account_id is required"):
         Heartbeat(

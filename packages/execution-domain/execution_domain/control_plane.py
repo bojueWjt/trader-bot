@@ -50,6 +50,7 @@ __all__ = [
     "ProductionIncidentSink",
     "ProductionIncidentResolutionSink",
     "NodeCommandChannel",
+    "ControlPlaneOrderSource",
     "ControlPlaneSnapshotSource",
     "ControlPlaneClient",
 ]
@@ -378,6 +379,16 @@ class NodeCommandChannel(Protocol):
 
 
 @runtime_checkable
+class ControlPlaneOrderSource(Protocol):
+    """Account-scoped non-terminal order projection used by reconciliation."""
+
+    def fetch_open_orders(
+        self,
+        account_id: str,
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+
+@runtime_checkable
 class ControlPlaneSnapshotSource(Protocol):
     """§4 read-model freshness used by node readiness/safety checks."""
 
@@ -389,6 +400,7 @@ class ControlPlaneClient(
     ControlPlaneIntentSource,
     ExecutionEventSink,
     NodeCommandChannel,
+    ControlPlaneOrderSource,
     ControlPlaneSnapshotSource,
     Protocol,
 ):

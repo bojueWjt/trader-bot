@@ -73,6 +73,174 @@ def test_registered_callback_uses_exec_engine_result_and_cache_for_proof(
     assert proof["completed_at"].tzinfo is timezone.utc
 
 
+def test_penguusdt_disconnect_fill_is_recovered_before_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADER_RELEASE_ID", "release-a")
+    client_order_id = "B3562ddc2a0e74f509dc34253ab80beef01"
+    order = RecoverableFakeOrder(
+        client_order_id=client_order_id,
+        venue_order_id="25082516000001",
+        instrument_id="PENGUUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+    )
+    recovered_fill = RecoveredFakeEvent(
+        event_type="OrderFilled",
+        client_order_id=client_order_id,
+        venue_order_id="25082516000001",
+        trade_id="925081600001",
+        instrument_id="PENGUUSDT-PERP.BINANCE",
+        last_qty="33300",
+        last_px="0.009009",
+        recovered=True,
+    )
+    engine = FakeExecEngine([True])
+    node = FakeNode(engine, orders=(order,))
+    recorder = ProofRecorder()
+    runtime = make_runtime(recorder)
+    runtime.exchange_order_reconciler = RecordingOrderReconciler(
+        (recovered_fill,)
+    )
+    runtime.execution_strategy = RecordingRecoveryStrategy()
+    runtime.projection_actor = RecordingRecoveryProjection()
+
+    _register_nautilus_reconciliation_callback(
+        node,
+        runtime,
+        schedule_refresh=False,
+    )
+
+    result = asyncio.run(engine.reconcile_execution_state(17.5))
+
+    assert result is True
+    assert runtime.exchange_order_reconciler.orders == [(order,)]
+    assert runtime.execution_strategy.fills == [recovered_fill]
+    assert runtime.execution_strategy.protection_repairs == [
+        "PENGUUSDT-PERP.BINANCE"
+    ]
+    assert runtime.projection_actor.events == [recovered_fill]
+    assert runtime.projection_actor.flush_calls == 1
+    assert recorder.calls[0]["state"] is ReconciliationState.HEALTHY
+
+
+def test_control_plane_open_projection_recovers_when_cache_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADER_RELEASE_ID", "release-a")
+    cache_order, recovered_fill = pengu_recovery_fixture()
+    cache_order.status = "FILLED"
+    projected_order = {
+        "client_order_id": cache_order.client_order_id,
+        "venue_order_id": cache_order.venue_order_id,
+        "instrument_id": cache_order.instrument_id,
+        "status": "accepted",
+        "side": "long",
+        "position_side": "BOTH",
+        "order_type": "LIMIT",
+        "time_in_force": "GTC",
+        "reduce_only": False,
+        "tags": (
+            "intent_id=3562ddc2-a0e7-4f50-9dc3-4253ab80beef",
+        ),
+    }
+    engine = FakeExecEngine([True])
+    node = FakeNode(engine, orders=(cache_order,))
+    recorder = ProofRecorder()
+    runtime = make_runtime(recorder)
+    runtime.control_plane = RecordingOpenOrderControlPlane(
+        (projected_order,)
+    )
+    runtime.exchange_order_reconciler = (
+        FilteringRecordingOrderReconciler((recovered_fill,))
+    )
+    runtime.execution_strategy = RecordingRecoveryStrategy()
+    runtime.projection_actor = RecordingRecoveryProjection()
+    _register_nautilus_reconciliation_callback(
+        node,
+        runtime,
+        schedule_refresh=False,
+    )
+
+    assert asyncio.run(engine.reconcile_execution_state(17.5)) is True
+
+    assert runtime.control_plane.account_ids == ["account-a"]
+    assert runtime.exchange_order_reconciler.orders == [
+        (projected_order,)
+    ]
+    assert runtime.execution_strategy.fills == [recovered_fill]
+    assert recorder.states == [ReconciliationState.HEALTHY]
+
+
+def test_reconnect_replay_does_not_repeat_recovered_strategy_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADER_RELEASE_ID", "release-a")
+    order, recovered_fill = pengu_recovery_fixture()
+    engine = FakeExecEngine([True, True])
+    node = FakeNode(engine, orders=(order,))
+    recorder = ProofRecorder()
+    runtime = make_runtime(recorder)
+    runtime.exchange_order_reconciler = RecordingOrderReconciler(
+        (recovered_fill,)
+    )
+    runtime.execution_strategy = RecordingRecoveryStrategy()
+    runtime.projection_actor = RecordingRecoveryProjection()
+    _register_nautilus_reconciliation_callback(
+        node,
+        runtime,
+        schedule_refresh=False,
+    )
+
+    assert asyncio.run(engine.reconcile_execution_state(17.5)) is True
+    assert asyncio.run(engine.reconcile_execution_state(17.5)) is True
+
+    assert runtime.execution_strategy.fills == [recovered_fill]
+    assert runtime.projection_actor.events == [
+        recovered_fill,
+        recovered_fill,
+    ]
+    assert runtime.projection_actor.flush_calls == 2
+    assert recorder.states == [
+        ReconciliationState.HEALTHY,
+        ReconciliationState.HEALTHY,
+    ]
+
+
+def test_recovered_strategy_failure_retries_after_projection_dedup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADER_RELEASE_ID", "release-a")
+    order, recovered_fill = pengu_recovery_fixture()
+    engine = FakeExecEngine([True, True])
+    node = FakeNode(engine, orders=(order,))
+    recorder = ProofRecorder()
+    runtime = make_runtime(recorder)
+    runtime.exchange_order_reconciler = RecordingOrderReconciler(
+        (recovered_fill,)
+    )
+    runtime.execution_strategy = FailOnceRecoveryStrategy()
+    runtime.projection_actor = RecordingRecoveryProjection()
+    _register_nautilus_reconciliation_callback(
+        node,
+        runtime,
+        schedule_refresh=False,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="strategy recovery failed",
+    ):
+        asyncio.run(engine.reconcile_execution_state(17.5))
+
+    assert asyncio.run(engine.reconcile_execution_state(17.5)) is True
+    assert runtime.execution_strategy.attempts == 2
+    assert runtime.execution_strategy.fills == [recovered_fill]
+    assert recorder.states == [
+        ReconciliationState.FAILED,
+        ReconciliationState.HEALTHY,
+    ]
+
+
 def test_false_exec_engine_result_cannot_be_replaced_by_truthy_risk_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -453,6 +621,155 @@ class FakeOrder:
 
     def to_dict(self) -> dict[str, str]:
         return {"client_order_id": self.client_order_id}
+
+
+class RecoverableFakeOrder:
+    def __init__(
+        self,
+        *,
+        client_order_id: str,
+        venue_order_id: str,
+        instrument_id: str,
+        status: str,
+    ) -> None:
+        self.client_order_id = client_order_id
+        self.venue_order_id = venue_order_id
+        self.instrument_id = instrument_id
+        self.status = status
+        self.events: tuple[Any, ...] = ()
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "client_order_id": self.client_order_id,
+            "venue_order_id": self.venue_order_id,
+            "instrument_id": self.instrument_id,
+            "status": self.status,
+        }
+
+
+class RecoveredFakeEvent:
+    def __init__(self, **payload: Any) -> None:
+        for key, value in payload.items():
+            setattr(self, key, value)
+
+
+class RecordingOrderReconciler:
+    def __init__(self, events: tuple[Any, ...]) -> None:
+        self._events = events
+        self.captured_orders: list[tuple[Any, ...]] = []
+        self.orders: list[tuple[Any, ...]] = []
+
+    def capture(self, orders: tuple[Any, ...]) -> tuple[Any, ...]:
+        self.captured_orders.append(tuple(orders))
+        return tuple(orders)
+
+    def recover(
+        self,
+        orders: tuple[Any, ...],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[Any, ...]:
+        assert deadline_monotonic is not None
+        self.orders.append(tuple(orders))
+        return self._events
+
+
+class FilteringRecordingOrderReconciler(
+    RecordingOrderReconciler
+):
+    def capture(self, orders: tuple[Any, ...]) -> tuple[Any, ...]:
+        self.captured_orders.append(tuple(orders))
+        candidates = []
+        for order in orders:
+            status = getattr(order, "status", None)
+            if isinstance(order, dict):
+                status = order.get("status")
+            if str(status or "").upper() == "FILLED":
+                continue
+            candidates.append(order)
+        return tuple(candidates)
+
+
+class RecordingOpenOrderControlPlane:
+    def __init__(self, orders: tuple[Any, ...]) -> None:
+        self._orders = orders
+        self.account_ids: list[str] = []
+
+    def fetch_open_orders(
+        self,
+        account_id: str,
+    ) -> tuple[Any, ...]:
+        self.account_ids.append(account_id)
+        return self._orders
+
+
+class RecordingRecoveryStrategy:
+    def __init__(self) -> None:
+        self.fills: list[Any] = []
+        self.protection_repairs: list[str] = []
+
+    def on_order_filled(self, event: Any) -> None:
+        self.fills.append(event)
+        self.protection_repairs.append(str(event.instrument_id))
+
+
+class FailOnceRecoveryStrategy(RecordingRecoveryStrategy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def on_order_filled(self, event: Any) -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("strategy recovery failed")
+        super().on_order_filled(event)
+
+
+class RecordingRecoveryProjection:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+        self.flush_calls = 0
+        self._seen = False
+
+    def ingest_event(self, event: Any) -> Any:
+        self.events.append(event)
+        outcome = "DURABLE"
+        if self._seen:
+            outcome = "DEDUPED"
+        self._seen = True
+        return SimpleNamespace(
+            outcome=outcome,
+            event_id="recovered-fill-1",
+        )
+
+    def flush(self) -> list[str]:
+        self.flush_calls += 1
+        return []
+
+
+def pengu_recovery_fixture() -> tuple[
+    RecoverableFakeOrder,
+    RecoveredFakeEvent,
+]:
+    client_order_id = "B3562ddc2a0e74f509dc34253ab80beef01"
+    return (
+        RecoverableFakeOrder(
+            client_order_id=client_order_id,
+            venue_order_id="25082516000001",
+            instrument_id="PENGUUSDT-PERP.BINANCE",
+            status="ACCEPTED",
+        ),
+        RecoveredFakeEvent(
+            event_type="OrderFilled",
+            client_order_id=client_order_id,
+            venue_order_id="25082516000001",
+            trade_id="925081600001",
+            instrument_id="PENGUUSDT-PERP.BINANCE",
+            last_qty="33300",
+            last_px="0.009009",
+            recovered=True,
+        ),
+    )
 
 
 class OrderFilled:

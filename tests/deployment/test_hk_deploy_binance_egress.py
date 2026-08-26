@@ -845,6 +845,7 @@ def test_jp24_prepare_exposes_internal_services_on_account_networks() -> None:
     assert "connect_redis_networks() {" in text
     assert "--alias trader-v3-redis" in text
     assert "allow_account_network_control_plane() {" in text
+    assert "exchange-state|orders" in text
     assert 'ufw status | grep -Fxq \'Status: active\'' in text
     assert 'ufw allow in \\\n      on "$bridge"' in text
     assert (

@@ -12,7 +12,7 @@ from hashlib import sha256
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import UUID
@@ -83,12 +83,17 @@ class AccountRuntime:
     projection_actor: ProjectionActor
     exchange_state_mirror: Any
     exchange_cancel_adapter: Any
+    exchange_order_reconciler: Any
     exchange_evidence_provider: Any
     live_canary_portfolio_baseline_provider: Any
     live_entry_mark_snapshot_provider: Any
     strategy_config: Any
     trading_node_config_kwargs: dict[str, Any]
     trading_node: Any = None
+    execution_strategy: Any = None
+    recovered_strategy_event_ids: set[str] = field(
+        default_factory=set
+    )
     namespace_lease_guard: Any = None
     redis_runtime_safety_guard: Any = None
     redis_runtime_safety_client: Any = None
@@ -139,6 +144,7 @@ def build_account_runtime(
     (
         exchange_state_mirror,
         exchange_cancel_adapter,
+        exchange_order_reconciler,
         exchange_evidence_provider,
     ) = _build_exchange_cancel_dependencies(config)
     live_canary_portfolio_baseline_provider = (
@@ -187,6 +193,7 @@ def build_account_runtime(
         projection_actor=projection_actor,
         exchange_state_mirror=exchange_state_mirror,
         exchange_cancel_adapter=exchange_cancel_adapter,
+        exchange_order_reconciler=exchange_order_reconciler,
         exchange_evidence_provider=exchange_evidence_provider,
         live_canary_portfolio_baseline_provider=(
             live_canary_portfolio_baseline_provider
@@ -333,6 +340,7 @@ def build_nautilus_trading_node(
             runtime,
             fatal_callback=fatal_callback,
         )
+        runtime.execution_strategy = strategy
         node.trader.add_strategy(strategy)
         actor_refs: dict[str, Any] = {}
         control_plane_session = _build_node_control_plane_session(
@@ -1208,18 +1216,46 @@ async def _execute_nautilus_reconciliation(
 ) -> bool:
     async with lock:
         generation = _begin_reconciliation(runtime)
+        recovered_events: tuple[Any, ...] = ()
         try:
+            orders = tuple(node.cache.orders())
+            timeout_seconds = _reconciliation_timeout_seconds(
+                args,
+                kwargs,
+            )
+            deadline_monotonic = time.monotonic() + timeout_seconds
+            recovery_candidates = (
+                await _collect_owned_order_candidates(
+                    runtime,
+                    orders,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            )
             healthy = await _reconcile_with_total_deadline(
                 reconcile,
                 args,
                 kwargs,
+                timeout_seconds=_remaining_reconciliation_seconds(
+                    deadline_monotonic
+                ),
             )
+            if healthy:
+                recovered_events = await _recover_owned_order_events(
+                    runtime,
+                    recovery_candidates,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                _dispatch_recovered_order_events(
+                    runtime,
+                    recovered_events,
+                )
         except Exception:
             _record_nautilus_reconciliation_proof(
                 node,
                 runtime,
                 healthy=False,
                 generation=generation,
+                recovered_events=recovered_events,
             )
             raise
         _record_nautilus_reconciliation_proof(
@@ -1227,6 +1263,7 @@ async def _execute_nautilus_reconciliation(
             runtime,
             healthy=healthy,
             generation=generation,
+            recovered_events=recovered_events,
         )
         return healthy
 
@@ -1235,15 +1272,219 @@ async def _reconcile_with_total_deadline(
     reconcile: Callable[..., Any],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
+    *,
+    timeout_seconds: float | None = None,
 ) -> bool:
-    timeout_seconds = _reconciliation_timeout_seconds(args, kwargs)
+    selected_timeout = timeout_seconds
+    if selected_timeout is None:
+        selected_timeout = _reconciliation_timeout_seconds(
+            args,
+            kwargs,
+        )
     result = reconcile(*args, **kwargs)
     return bool(
         await asyncio.wait_for(
             result,
-            timeout=timeout_seconds,
+            timeout=selected_timeout,
         )
     )
+
+
+def _remaining_reconciliation_seconds(
+    deadline_monotonic: float,
+) -> float:
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("reconciliation total deadline exceeded")
+    return remaining
+
+
+def _capture_owned_order_candidates(
+    runtime: AccountRuntime,
+    orders: tuple[Any, ...],
+) -> tuple[Any, ...]:
+    reconciler = getattr(
+        runtime,
+        "exchange_order_reconciler",
+        None,
+    )
+    if reconciler is None:
+        return ()
+    capture = getattr(reconciler, "capture", None)
+    if callable(capture):
+        return tuple(capture(orders))
+    return orders
+
+
+async def _collect_owned_order_candidates(
+    runtime: AccountRuntime,
+    cached_orders: tuple[Any, ...],
+    *,
+    deadline_monotonic: float,
+) -> tuple[Any, ...]:
+    cached_candidates = _capture_owned_order_candidates(
+        runtime,
+        cached_orders,
+    )
+    control_plane = getattr(runtime, "control_plane", None)
+    fetch_open_orders = getattr(
+        control_plane,
+        "fetch_open_orders",
+        None,
+    )
+    if not callable(fetch_open_orders):
+        return cached_candidates
+    remaining = _remaining_reconciliation_seconds(
+        deadline_monotonic
+    )
+    projected_orders = await asyncio.wait_for(
+        asyncio.to_thread(
+            fetch_open_orders,
+            runtime.config.account_id,
+        ),
+        timeout=remaining,
+    )
+    projected_candidates = _capture_owned_order_candidates(
+        runtime,
+        tuple(projected_orders),
+    )
+    candidates_by_client_order_id: dict[str, Any] = {}
+    for candidate in (
+        *cached_candidates,
+        *projected_candidates,
+    ):
+        raw_client_order_id = getattr(
+            candidate,
+            "client_order_id",
+            "",
+        )
+        if isinstance(candidate, Mapping):
+            raw_client_order_id = candidate.get(
+                "client_order_id",
+                "",
+            )
+        client_order_id = str(
+            raw_client_order_id or ""
+        ).strip()
+        if not client_order_id:
+            raise RuntimeError(
+                "owned order recovery candidate omitted client_order_id"
+            )
+        candidates_by_client_order_id.setdefault(
+            client_order_id,
+            candidate,
+        )
+    return tuple(candidates_by_client_order_id.values())
+
+
+async def _recover_owned_order_events(
+    runtime: AccountRuntime,
+    candidates: tuple[Any, ...],
+    *,
+    deadline_monotonic: float,
+) -> tuple[Any, ...]:
+    if not candidates:
+        return ()
+    reconciler = getattr(
+        runtime,
+        "exchange_order_reconciler",
+        None,
+    )
+    recover = getattr(reconciler, "recover", None)
+    if not callable(recover):
+        raise RuntimeError(
+            "owned order reconciliation API is unavailable"
+        )
+    remaining = _remaining_reconciliation_seconds(
+        deadline_monotonic
+    )
+    recovery_deadline = time.monotonic() + remaining
+    events = await asyncio.wait_for(
+        asyncio.to_thread(
+            recover,
+            candidates,
+            deadline_monotonic=recovery_deadline,
+        ),
+        timeout=remaining,
+    )
+    return tuple(events)
+
+
+def _dispatch_recovered_order_events(
+    runtime: AccountRuntime,
+    events: tuple[Any, ...],
+) -> None:
+    if not events:
+        return
+    projection_actor = getattr(runtime, "projection_actor", None)
+    ingest = getattr(projection_actor, "ingest_event", None)
+    if not callable(ingest):
+        raise RuntimeError(
+            "execution projection recovery ingress is unavailable"
+        )
+    strategy = getattr(runtime, "execution_strategy", None)
+    delivered_event_ids = getattr(
+        runtime,
+        "recovered_strategy_event_ids",
+        None,
+    )
+    if delivered_event_ids is None:
+        delivered_event_ids = set()
+        runtime.recovered_strategy_event_ids = delivered_event_ids
+    for event in events:
+        result = ingest(event)
+        outcome = getattr(result, "outcome", result)
+        outcome_value = str(
+            getattr(outcome, "value", outcome)
+        ).upper()
+        if outcome_value not in {"DURABLE", "DEDUPED"}:
+            raise RuntimeError(
+                "recovered order event was not durably projected: "
+                f"{outcome_value or 'missing'}"
+            )
+        event_id = str(getattr(result, "event_id", "") or "")
+        if not event_id:
+            raise RuntimeError(
+                "recovered order projection omitted event_id"
+            )
+        if event_id in delivered_event_ids:
+            continue
+        _dispatch_recovered_event_to_strategy(
+            strategy,
+            event,
+        )
+        delivered_event_ids.add(event_id)
+    flush = getattr(projection_actor, "flush", None)
+    if callable(flush):
+        flush()
+
+
+def _dispatch_recovered_event_to_strategy(
+    strategy: Any,
+    event: Any,
+) -> None:
+    if strategy is None:
+        raise RuntimeError(
+            "execution strategy recovery ingress is unavailable"
+        )
+    event_type = str(getattr(event, "event_type", ""))
+    handlers = {
+        "OrderFilled": "on_order_filled",
+        "OrderCanceled": "on_order_canceled",
+        "OrderExpired": "on_order_expired",
+        "OrderRejected": "on_order_rejected",
+    }
+    handler_name = handlers.get(event_type)
+    if handler_name is None:
+        raise RuntimeError(
+            f"unsupported recovered order event type: {event_type}"
+        )
+    handler = getattr(strategy, handler_name, None)
+    if not callable(handler):
+        raise RuntimeError(
+            f"execution strategy lacks {handler_name} recovery hook"
+        )
+    handler(event)
 
 
 def _reconciliation_timeout_seconds(
@@ -1292,6 +1533,7 @@ def _record_nautilus_reconciliation_proof(
     *,
     healthy: bool,
     generation: int,
+    recovered_events: tuple[Any, ...] = (),
 ) -> None:
     release_id = os.environ.get("TRADER_RELEASE_ID", "").strip()
     if not release_id:
@@ -1300,7 +1542,15 @@ def _record_nautilus_reconciliation_proof(
         )
     orders = tuple(node.cache.orders())
     positions = tuple(node.cache.positions())
-    fills = _order_fill_events(orders)
+    fills = (
+        *_order_fill_events(orders),
+        *(
+            event
+            for event in recovered_events
+            if str(getattr(event, "event_type", ""))
+            == "OrderFilled"
+        ),
+    )
     state = ReconciliationState.FAILED
     if healthy:
         state = ReconciliationState.HEALTHY
@@ -1563,12 +1813,15 @@ def _build_projection_actor(
 
 def _build_exchange_cancel_dependencies(
     config: NodeConfig,
-) -> tuple[Any, Any, Any]:
+) -> tuple[Any, Any, Any, Any]:
     from runtime.exchange_cancel_adapter import (
         BinanceExchangeEvidenceProvider,
         BinanceExchangeCancelAdapter,
         ControlPlaneExchangeStateMirror,
         SignedBinanceTransport,
+    )
+    from runtime.owned_order_recovery import (
+        BinanceOwnedOrderReconciler,
     )
 
     mirror = ControlPlaneExchangeStateMirror(
@@ -1588,12 +1841,15 @@ def _build_exchange_cancel_dependencies(
         account_id=config.account_id,
         transport=transport,
     )
+    order_reconciler = BinanceOwnedOrderReconciler(
+        transport=transport,
+    )
     evidence_provider = None
     if config.binance.environment == "live":
         evidence_provider = BinanceExchangeEvidenceProvider(
             transport=transport,
         )
-    return mirror, adapter, evidence_provider
+    return mirror, adapter, order_reconciler, evidence_provider
 
 
 def _binance_http_base_url(config: NodeConfig) -> str:
@@ -2488,6 +2744,9 @@ class _UnavailableControlPlaneClient:
 
     def latest_snapshot_generated_at(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("control-plane client dependencies are unavailable")
+
+    def fetch_open_orders(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
+        return ()
 
 
 @dataclass(frozen=True)

@@ -30,6 +30,7 @@ _NODE_CONTROL_ROUTES = frozenset(
         "node_exchange_state",
         "node_heartbeat",
         "node_intents",
+        "node_orders",
         "report_node_incident",
         "resolve_node_incident",
     }

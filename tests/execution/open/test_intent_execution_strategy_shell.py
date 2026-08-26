@@ -810,6 +810,45 @@ class StrategyShellTest(unittest.TestCase):
         self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
         self.assertEqual(strategy.reported_events, [])
 
+    def test_recovered_penguusdt_fill_triggers_protection_watchdog_repair(
+        self,
+    ) -> None:
+        intent_id = uuid4()
+        client_order_id = encode_client_order_id(intent_id)
+        strategy = _RecoveredFillProtectionStrategy()
+        stash = _watchdog_stash(intent_id)
+        stash["instrument_id"] = "PENGUUSDT-PERP.BINANCE"
+        stash["stop_loss"] = "0.0085"
+        strategy._entry_protection_stash[str(intent_id)] = stash
+
+        with patch.object(
+            strategy,
+            "_confirm_durable_intent_order_event",
+        ), patch.object(
+            strategy,
+            "_confirm_live_canary_order_event",
+        ), patch.object(
+            strategy,
+            "_queue_live_canary_fill",
+        ):
+            strategy.on_order_filled(
+                SimpleNamespace(
+                    client_order_id=client_order_id,
+                    venue_order_id="25082516000001",
+                    trade_id="925081600001",
+                    instrument_id="PENGUUSDT-PERP.BINANCE",
+                    last_qty="33300",
+                    last_px="0.009009",
+                    recovered=True,
+                )
+            )
+
+        self.assertEqual(strategy.repair_attempts, 1)
+        self.assertEqual(
+            strategy.repair_instruments,
+            ["PENGUUSDT-PERP.BINANCE"],
+        )
+
     def test_protection_watchdog_repairs_missing_take_profit_without_freezing_symbol(
         self,
     ) -> None:
@@ -1158,6 +1197,48 @@ class StrategyShellTest(unittest.TestCase):
             strategy._live_canary_fill_payload(second),
             False,
         )
+
+    def test_recovered_fill_preserves_fee_identity_for_loss_accounting(
+        self,
+    ) -> None:
+        strategy = IntentExecutionStrategy(
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                node_id="node-a",
+                trading_state="ACTIVE",
+                environment="live",
+            )
+        )
+        strategy._cache_mark_price = lambda instrument_id: (  # type: ignore[method-assign]
+            SimpleNamespace(
+                value="0.009",
+                ts_event=1787644801000000000,
+            )
+        )
+        event = SimpleNamespace(
+            client_order_id="B" + ("a" * 32) + "01",
+            venue_order_id="25082516000001",
+            trade_id="925081600001",
+            instrument_id="PENGUUSDT-PERP.BINANCE",
+            side="BUY",
+            last_qty="33300",
+            last_px="0.009009",
+            commission="0.11999988",
+            commission_asset="USDT",
+            reduce_only=False,
+            ts_event=1787644801000000000,
+            recovered=True,
+        )
+
+        payload = strategy._live_canary_fill_payload(event)
+
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["fill_id"], "925081600001")
+        self.assertEqual(payload["quantity"], "33300")
+        self.assertEqual(payload["price_usdt"], "0.009009")
+        self.assertEqual(payload["fee_usdt"], "0.11999988")
+        self.assertEqual(payload["mark_price_usdt"], "0.009")
+        self.assertEqual(payload["accounting_error"], "")
 
     def test_live_secondary_accounts_ignore_canary_only_permit_requirement(
         self,
@@ -5182,6 +5263,46 @@ class _ProtectionWatchdogStrategy(IntentExecutionStrategy):
     ) -> bool:
         del continuation
         return True
+
+
+class _RecoveredFillProtectionStrategy(_ProtectionWatchdogStrategy):
+    def __init__(self) -> None:
+        self.repair_instruments: list[str] = []
+        super().__init__(repair_results=[True])
+
+    def _cache_positions(self, instrument_id):
+        return (
+            SimpleNamespace(
+                instrument_id=instrument_id,
+                side="LONG",
+                quantity="33300",
+                position_id=f"{instrument_id}-LONG",
+                entry_price="0.009009",
+            ),
+        )
+
+    def _schedule_protection_sync(
+        self,
+        intent_key: str,
+        delay_seconds: float | None = None,
+    ) -> None:
+        del delay_seconds
+        self._check_protection_watchdog(intent_key)
+
+    def _repair_missing_protection_orders(
+        self,
+        intent_key: str,
+        stash: dict,
+        position: object,
+        missing_keys: tuple[tuple[str, str | None], ...],
+    ) -> bool:
+        self.repair_instruments.append(str(stash["instrument_id"]))
+        return super()._repair_missing_protection_orders(
+            intent_key,
+            stash,
+            position,
+            missing_keys,
+        )
 
 
 class _MissingProtectionEvidence:

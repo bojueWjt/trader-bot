@@ -1134,7 +1134,7 @@ http://127.0.0.1:$ROUTER_PORT {
 		reverse_proxy 127.0.0.1:$EVENT_PORT
 	}
 
-	@node_control path_regexp node_control ^/v1/nodes/[^/]+/(heartbeat|incidents(/resolve)?|commands(/[^/]+/ack)?|intents(/[^/]+/ack)?|exchange-state)$
+	@node_control path_regexp node_control ^/v1/nodes/[^/]+/(heartbeat|incidents(/resolve)?|commands(/[^/]+/ack)?|intents(/[^/]+/ack)?|exchange-state|orders)$
 	handle @node_control {
 		reverse_proxy 127.0.0.1:$NODE_PORT
 	}

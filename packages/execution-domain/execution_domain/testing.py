@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 from uuid import UUID
 
 from .contracts import ExecutionEventEnvelopeV1
@@ -31,6 +31,10 @@ class InMemoryControlPlane(ControlPlaneClient):
             tuple[str, str, CommandAckStatus, Optional[dict[str, object]], Optional[str]]
         ] = []
         self._snapshots_by_account: dict[str, datetime] = {}
+        self._open_orders_by_account: dict[
+            str,
+            tuple[dict[str, Any], ...],
+        ] = {}
 
     def add_intent(self, account_id: str, item: IntentItem) -> None:
         self._intents[account_id].append(item)
@@ -103,3 +107,19 @@ class InMemoryControlPlane(ControlPlaneClient):
 
     def latest_snapshot_generated_at(self, account_id: str) -> Optional[datetime]:
         return self._snapshots_by_account.get(account_id)
+
+    def record_open_orders(
+        self,
+        account_id: str,
+        orders: Sequence[Mapping[str, Any]],
+    ) -> None:
+        self._open_orders_by_account[account_id] = tuple(
+            dict(order)
+            for order in orders
+        )
+
+    def fetch_open_orders(
+        self,
+        account_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        return self._open_orders_by_account.get(account_id, ())

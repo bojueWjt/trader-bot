@@ -64,6 +64,8 @@ class ProjectionActorTests(unittest.TestCase):
             quantity="0.25",
             price="65000",
             id="nautilus-emission-b",
+            recovered=True,
+            source="exchange_reconciliation",
         )
 
         envelope = mapper.to_envelope(event)
@@ -80,6 +82,11 @@ class ProjectionActorTests(unittest.TestCase):
         self.assertEqual(envelope.event_type, "OrderFilled")
         self.assertEqual(envelope.ts_ingest, NOW)
         self.assertEqual(envelope.payload["instrument_id"], "BTCUSDT-PERP.BINANCE")
+        self.assertTrue(replay_envelope.payload["recovered"])
+        self.assertEqual(
+            replay_envelope.payload["source"],
+            "exchange_reconciliation",
+        )
         self.assertNotIn("nautilus-emission", envelope.event_id)
 
     def test_duplicate_business_event_is_spooled_and_posted_once(self) -> None:
@@ -334,6 +341,8 @@ class _Event:
     position_id: str | None = None
     quantity: str | None = None
     price: str | None = None
+    recovered: bool | None = None
+    source: str | None = None
     id: str = "ignored-nautilus-id"
 
     @property
