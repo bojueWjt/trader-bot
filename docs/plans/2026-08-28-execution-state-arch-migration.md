@@ -158,3 +158,14 @@ def semantic_operation_id(account_id: str, source_message_id: str,
 - P1-11 `_OPERATOR_ACTIONS` 无 add_position（端点历史上就不支持，非本次回归）；并发同价去重竞态（现为纯提醒，漏警告无资损面）。
 - P2-1 SHORT quantity 取绝对值与契约"净量"措辞不一致（对齐文档措辞即可）。
 - P2-3 测试未覆盖生产装配/并发模型（P0-1 修复自带角色级测试，其余记债）。
+
+## 部署后新增债务（2026-08-28/29 部署与恢复实战产出，按危害排序）
+
+1. **引擎层缓存失明（批次 2 置顶）**：Nautilus RiskEngine 的 reduce-only 校验只看本地缓存——缓存失明时止损"先撤后挂"替换 = 撤旧成功+挂新被引擎拒 → 保护空窗（SNDK 空单 1.12 张裸奔实案 2026-08-28T17:02，planner 层证据回退无法覆盖）。修复方向：引擎层校验数据源统一，或保护替换改先挂后撤（7 月 BTC 裸奔同族课题）。
+2. **intent 状态覆写循环 bug（必修）**：节点消费循环把 approved 的 durable 埋伏单 intent 反复打回 rejected（account-b/c RESUME 双双复现）；57a984d 只修了 replay ack 路径，消费侧路径未修。当前过闸依赖竞速（UPDATE→亚秒 RESUME）。
+3. **部署流水线结构债**：maintenance fence 心跳窗 DB 硬限 1-60s 与"节点已停"恢复态自相矛盾（bootstrap_stopped 分支 fence acquire 必死且不 die，读状态文件才炸）；同 release 重跑走 replay 模式要求从未产出的签名 manifest（cp 空变量崩）；rollout abort 记录失败留下三代混杂状态需手工归位 RELEASE_MANIFEST.json。
+4. **宿主配置漂移无同步机制**：/etc/caddy/Caddyfile 与仓库源漂移（orders 路由缺失=owned_order_recovery 404 根因）；/srv/trader-v3/packages/contracts/v1/ 缺 order_state.v1.json（event-ingest 派生 100% 失败,新可观测层首案抓获）；合约 JSON 在部署体系中无载体。
+5. **恢复物料缺陷**：post-migration-recovery 的 recreate.sh 从现容器继承 env（首代缺陷自续）且漏 NAUTILUS_HEALTH_PORT；payload 登记表两次漏 import 闭包成员（idempotency、owned_order_recovery），需要把"镜像深度 import 验证"（import app.node）固化为 execute 硬门。
+6. **caddy reload 缺陷**：reload 触发主进程退出（admin EOF），运维一律用 restart。
+
+已完成的修复性事实（同窗口）：orders_projection 全量重放修复已 apply（951→1492 行,542 缺失/746 状态/205 成交量矫正,watermark 五路就位）；16 条 projection_failures（order_state.v1.json 缺失所致）已 resolved；ATOM 四档止盈经证据回退在生产成功挂出（原始事故闭环）。
