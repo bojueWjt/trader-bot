@@ -69,6 +69,8 @@ MIGRATION_FILES = (
     "db/migrations/0016_control_plane_lock_privileges.down.sql",
     "db/migrations/0017_operator_query_projection_reads.up.sql",
     "db/migrations/0017_operator_query_projection_reads.down.sql",
+    "db/migrations/0018_projection_reliability.up.sql",
+    "db/migrations/0018_projection_reliability.down.sql",
 )
 SYSTEMD_RESOURCE_FILES = (
     "infra/systemd/account-stall-account-node.conf",
@@ -185,6 +187,13 @@ RELEASE_FILES = (
         "host/execution_domain/portfolio_baseline.py",
     ),
     (
+        (
+            "packages/execution-domain/execution_domain/"
+            "account_execution_ledger.py"
+        ),
+        "host/execution_domain/account_execution_ledger.py",
+    ),
+    (
         "packages/execution-domain/execution_domain/order_ownership.py",
         "host/execution_domain/order_ownership.py",
     ),
@@ -257,6 +266,10 @@ RELEASE_FILES = (
         "host/order_management/db_helpers.py",
     ),
     (
+        "services/control-plane/order_management/order_reducer.py",
+        "host/order_management/order_reducer.py",
+    ),
+    (
         "services/control-plane/order_management/identifiers.py",
         "host/order_management/identifiers.py",
     ),
@@ -300,6 +313,14 @@ RELEASE_FILES = (
     (
         "services/control-plane/db/pools.py",
         "host/pools.py",
+    ),
+    (
+        "services/control-plane/db/repository.py",
+        "host/repository.py",
+    ),
+    (
+        "scripts/rebuild_orders_projection.py",
+        "scripts/rebuild_orders_projection.py",
     ),
     (
         "services/control-plane/db/migrate.py",
@@ -434,6 +455,12 @@ MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP = (
 MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN = (
     "db/migrations/0017_operator_query_projection_reads.down.sql"
 )
+MIGRATION_PROJECTION_RELIABILITY_UP = (
+    "db/migrations/0018_projection_reliability.up.sql"
+)
+MIGRATION_PROJECTION_RELIABILITY_DOWN = (
+    "db/migrations/0018_projection_reliability.down.sql"
+)
 MIGRATION_PREREQUISITES = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -496,6 +523,13 @@ MIGRATION_STEPS = (
         "up": MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP,
         "down": MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN,
         "prerequisites": [MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP],
+    },
+    {
+        "version": "0018",
+        "name": "projection_reliability",
+        "up": MIGRATION_PROJECTION_RELIABILITY_UP,
+        "down": MIGRATION_PROJECTION_RELIABILITY_DOWN,
+        "prerequisites": [MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP],
     },
 )
 MIGRATION_PYTHON_DEPENDENCIES = ("psycopg2",)

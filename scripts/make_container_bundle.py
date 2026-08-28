@@ -18,6 +18,19 @@ BUNDLE_FILES = (
         "/app/strategy/intent_execution_planner.py",
     ),
     (
+        "execution_domain_init.py",
+        "packages/execution-domain/execution_domain/__init__.py",
+        "/app/execution_domain/__init__.py",
+    ),
+    (
+        "account_execution_ledger.py",
+        (
+            "packages/execution-domain/execution_domain/"
+            "account_execution_ledger.py"
+        ),
+        "/app/execution_domain/account_execution_ledger.py",
+    ),
+    (
         "contracts.py",
         "services/nautilus-node/projection/contracts.py",
         "/app/execution_domain/contracts.py",
@@ -218,6 +231,8 @@ REQUIRED_RUNTIME_BUNDLE_TARGETS = {
     "/app/risk/__init__.py",
     "/app/projection/spool.py",
     "/app/data_client/approved_intent_client.py",
+    "/app/execution_domain/__init__.py",
+    "/app/execution_domain/account_execution_ledger.py",
     "/app/persistence/nautilus_config.py",
     "/app/persistence/__init__.py",
     "/app/persistence/redis_namespace_lease.py",
@@ -226,7 +241,7 @@ REQUIRED_RUNTIME_BUNDLE_TARGETS = {
 BUNDLE_SCHEMA_VERSION = "trader-v3-container-bundle/v2"
 SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0017_operator_query_projection_reads",
+    "db": "0018_projection_reliability",
     "redis": "fenced-generation-namespace/v2",
 }
 MANIFEST_NAME = "bundle-manifest.json"

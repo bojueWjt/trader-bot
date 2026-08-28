@@ -72,6 +72,8 @@ MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP="$STAGING/db/migrations/0016_control_
 MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN="$STAGING/db/migrations/0016_control_plane_lock_privileges.down.sql"
 MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP="$STAGING/db/migrations/0017_operator_query_projection_reads.up.sql"
 MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN="$STAGING/db/migrations/0017_operator_query_projection_reads.down.sql"
+MIGRATION_PROJECTION_RELIABILITY_UP="$STAGING/db/migrations/0018_projection_reliability.up.sql"
+MIGRATION_PROJECTION_RELIABILITY_DOWN="$STAGING/db/migrations/0018_projection_reliability.down.sql"
 JP24_REDIS_DEAD_INSTANCE_JANITOR="$STAGING/jp24_redis_dead_instance_janitor.py"
 CONTROL_PLANE_ISOLATION_SCRIPT="$STAGING/hk-control-plane-isolation.sh"
 CONTROL_PLANE_ISOLATION_MODE="${CONTROL_PLANE_ISOLATION_MODE:-require}"
@@ -221,7 +223,7 @@ LEGACY_RECREATE_BOOTSTRAP_EVIDENCE="$BACKUP_ROOT/legacy-recreate-bootstrap.json"
 LEGACY_RECREATE_GENERATED_LIST="$BACKUP_ROOT/legacy-recreate-generated.tsv"
 LEGACY_RECREATE_RECORDS="$BACKUP_ROOT/legacy-recreate-records.tsv"
 LEGACY_RECREATE_SNAPSHOT_ROOT="$BACKUP_ROOT/legacy-recreate-snapshots"
-MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0017-migration-committed.json"
+MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0018-migration-committed.json"
 MAINTENANCE_FENCE_STATE="$BACKUP_ROOT/maintenance-fence.json"
 MAINTENANCE_FENCE_ID=""
 MAINTENANCE_FENCE_ACQUIRED=0
@@ -4611,7 +4613,7 @@ try:
     UUID(redis_fencing_epoch)
 except ValueError as exc:
     raise SystemExit("post-migration Redis fencing epoch is invalid") from exc
-if database_schema_epoch != "0017_operator_query_projection_reads":
+if database_schema_epoch != "0018_projection_reliability":
     raise SystemExit("post-migration database schema epoch is invalid")
 if redis_schema_epoch != "fenced-generation-namespace/v2":
     raise SystemExit("post-migration Redis schema epoch is invalid")
@@ -6683,6 +6685,10 @@ require_staging_artifact \
   || die "0017 up migration missing"
 [ -f "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN" ] \
   || die "0017 down migration missing"
+[ -f "$MIGRATION_PROJECTION_RELIABILITY_UP" ] \
+  || die "0018 up migration missing"
+[ -f "$MIGRATION_PROJECTION_RELIABILITY_DOWN" ] \
+  || die "0018 down migration missing"
 case "$DELIVERY_MODE" in
   immutable_image|transition_bind_mount) ;;
   *) die "invalid DELIVERY_MODE: $DELIVERY_MODE" ;;
@@ -6792,6 +6798,8 @@ for required in \
   db/migrations/0016_control_plane_lock_privileges.down.sql \
   db/migrations/0017_operator_query_projection_reads.up.sql \
   db/migrations/0017_operator_query_projection_reads.down.sql \
+  db/migrations/0018_projection_reliability.up.sql \
+  db/migrations/0018_projection_reliability.down.sql \
   "$(basename "$DEPENDENCY_LOCK")"; do
   require_checksum_artifact "$required"
 done
@@ -6972,6 +6980,18 @@ expected_steps = [
             ),
         ],
     },
+    {
+        "version": "0018",
+        "name": "projection_reliability",
+        "up": "db/migrations/0018_projection_reliability.up.sql",
+        "down": "db/migrations/0018_projection_reliability.down.sql",
+        "prerequisites": [
+            (
+                "db/migrations/"
+                "0017_operator_query_projection_reads.up.sql"
+            ),
+        ],
+    },
 ]
 if migration.get("steps") != expected_steps:
     raise SystemExit("release migration metadata mismatch: steps")
@@ -6992,6 +7012,8 @@ required_migration_files = {
     "db/migrations/0016_control_plane_lock_privileges.down.sql",
     "db/migrations/0017_operator_query_projection_reads.up.sql",
     "db/migrations/0017_operator_query_projection_reads.down.sql",
+    "db/migrations/0018_projection_reliability.up.sql",
+    "db/migrations/0018_projection_reliability.down.sql",
 }
 migration_files = migration.get("migration_files")
 if not isinstance(migration_files, list):
@@ -7001,8 +7023,8 @@ if not required_migration_files.issubset(set(migration_files)):
 print(epochs["app"], epochs["db"], epochs["redis"])
 PY
 )
-[ "$DATABASE_SCHEMA_EPOCH" = "0017_operator_query_projection_reads" ] \
-  || die "reviewed database schema epoch must be 0017_operator_query_projection_reads"
+[ "$DATABASE_SCHEMA_EPOCH" = "0018_projection_reliability" ] \
+  || die "reviewed database schema epoch must be 0018_projection_reliability"
 [ "$REDIS_SCHEMA_EPOCH" = "fenced-generation-namespace/v2" ] \
   || die "reviewed Redis schema epoch mismatch"
 
@@ -8052,6 +8074,7 @@ EXECUTION_DOMAIN_INIT_TGT="$EXECUTION_DOMAIN_TGT/__init__.py"
 EXECUTION_DOMAIN_CONTRACTS_TGT="$EXECUTION_DOMAIN_TGT/contracts.py"
 EXECUTION_DOMAIN_CONTROL_PLANE_TGT="$EXECUTION_DOMAIN_TGT/control_plane.py"
 EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT="$EXECUTION_DOMAIN_TGT/portfolio_baseline.py"
+EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT="$EXECUTION_DOMAIN_TGT/account_execution_ledger.py"
 EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT="$EXECUTION_DOMAIN_TGT/order_ownership.py"
 EXECUTION_DOMAIN_IDEMPOTENCY_TGT="$EXECUTION_DOMAIN_TGT/idempotency.py"
 EXECUTION_DOMAIN_IDENTIFIERS_TGT="$EXECUTION_DOMAIN_TGT/identifiers.py"
@@ -8060,11 +8083,13 @@ SETTINGS_PACKAGE_FILES=(__init__.py apply_plan.py import_export.py permissions.p
 AUDIT_PACKAGE_TGT="$T/services/control-plane/audit"
 AUDIT_PACKAGE_FILES=(__init__.py settings_audit.py)
 ORDER_MANAGEMENT_PACKAGE_TGT="$T/services/control-plane/order_management"
-ORDER_MANAGEMENT_PACKAGE_FILES=(__init__.py db_helpers.py identifiers.py metrics.py outbox.py)
+ORDER_MANAGEMENT_PACKAGE_FILES=(__init__.py db_helpers.py identifiers.py metrics.py order_reducer.py outbox.py)
 OBSERVABILITY_PACKAGE_TGT="$T/services/nautilus-node/observability"
 OBSERVABILITY_PACKAGE_FILES=(__init__.py _shared.py logs.py metrics.py tracing.py)
 APP_ROLES_TGT="$T/services/control-plane/api/app_roles.py"
 DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
+DB_REPOSITORY_TGT="$T/services/control-plane/db/repository.py"
+REBUILD_ORDERS_PROJECTION_TGT="$T/scripts/rebuild_orders_projection.py"
 [ -f host/read_api.py ] || die "staging missing host/read_api.py"
 [ -f host/snapshot.py ] || die "staging missing host/snapshot.py"
 [ -f host/decision_gateway/gateway.py ] \
@@ -8086,6 +8111,8 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
   || die "staging missing host/execution_domain/control_plane.py"
 [ -f host/execution_domain/portfolio_baseline.py ] \
   || die "staging missing host/execution_domain/portfolio_baseline.py"
+[ -f host/execution_domain/account_execution_ledger.py ] \
+  || die "staging missing host/execution_domain/account_execution_ledger.py"
 [ -f host/execution_domain/order_ownership.py ] \
   || die "staging missing host/execution_domain/order_ownership.py"
 [ -f host/execution_domain/idempotency.py ] \
@@ -8110,6 +8137,9 @@ for obs_file in "${OBSERVABILITY_PACKAGE_FILES[@]}"; do
 done
 [ -f host/app_roles.py ] || die "staging missing host/app_roles.py"
 [ -f host/pools.py ] || die "staging missing host/pools.py"
+[ -f host/repository.py ] || die "staging missing host/repository.py"
+[ -f scripts/rebuild_orders_projection.py ] \
+  || die "staging missing scripts/rebuild_orders_projection.py"
 [ -f "$API_TGT" ] || die "live read_api not found at $API_TGT"
 [ -f "$SNAPSHOT_TGT" ] || die "live snapshot not found at $SNAPSHOT_TGT"
 [ -f "$DECISION_GATEWAY_TGT" ] \
@@ -8126,6 +8156,8 @@ done
   || die "live SystemSnapshot schema not found at $SYSTEM_SNAPSHOT_SCHEMA_TGT"
 verify_optional_host_python_module_target "$APP_ROLES_TGT"
 verify_optional_host_python_module_target "$DB_POOLS_TGT"
+verify_optional_host_python_module_target "$DB_REPOSITORY_TGT"
+verify_optional_host_python_module_target "$REBUILD_ORDERS_PROJECTION_TGT"
 [ -d "$WATCHER_ROOT" ] \
   || die "telegram-watcher root missing: $WATCHER_ROOT"
 [ -f "$WATCHER_COMPOSE_FILE" ] \
@@ -8160,6 +8192,7 @@ apply_and_verify_database_migration() {
     "$MIGRATION_REFRESH_EVIDENCE_COMMAND_UP" \
     "$MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP" \
     "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP" \
+    "$MIGRATION_PROJECTION_RELIABILITY_UP" \
     "$DATABASE_SCHEMA_EPOCH" \
     "$MIGRATION_COMMIT_MARKER" \
     "$MAINTENANCE_FENCE_ID" \
@@ -8209,15 +8242,16 @@ cancel_order_contract_path = Path(sys.argv[7])
 refresh_evidence_command_path = Path(sys.argv[8])
 control_plane_lock_privileges_path = Path(sys.argv[9])
 operator_query_projection_reads_path = Path(sys.argv[10])
-expected_epoch = sys.argv[11]
-migration_commit_marker = Path(sys.argv[12])
-maintenance_fence_id_raw = sys.argv[13]
-maintenance_owner_token = sys.argv[14]
-maintenance_actor = sys.argv[15]
-maintenance_fence_state = Path(sys.argv[16])
-maintenance_lease_seconds = int(sys.argv[17])
-heartbeat_max_age_seconds = int(sys.argv[18])
-deploy_gate_mode = sys.argv[19]
+projection_reliability_path = Path(sys.argv[11])
+expected_epoch = sys.argv[12]
+migration_commit_marker = Path(sys.argv[13])
+maintenance_fence_id_raw = sys.argv[14]
+maintenance_owner_token = sys.argv[15]
+maintenance_actor = sys.argv[16]
+maintenance_fence_state = Path(sys.argv[17])
+maintenance_lease_seconds = int(sys.argv[18])
+heartbeat_max_age_seconds = int(sys.argv[19])
+deploy_gate_mode = sys.argv[20]
 if deploy_gate_mode not in {
     "bootstrap_stopped",
     "bootstrap_resume_stopped",
@@ -8233,7 +8267,7 @@ elif maintenance_fence_id_raw:
 database_url = env.get("DATABASE_URL", "")
 if not database_url:
     raise SystemExit("DATABASE_URL is required for migration")
-if expected_epoch != "0017_operator_query_projection_reads":
+if expected_epoch != "0018_projection_reliability":
     raise SystemExit("unexpected database schema epoch")
 migration_specs = (
     ("0005", "order_management", order_management_path),
@@ -8272,6 +8306,11 @@ migration_specs = (
         "0017",
         "operator_query_projection_reads",
         operator_query_projection_reads_path,
+    ),
+    (
+        "0018",
+        "projection_reliability",
+        projection_reliability_path,
     ),
 )
 migrations = []
@@ -8317,6 +8356,8 @@ required_tables = {
     "reviewed_release_rollouts",
     "live_canary_permits",
     "production_incidents",
+    "projection_failures",
+    "projection_watermarks",
     "control_plane_maintenance_fences",
     "control_plane_maintenance_fence_events",
 }
@@ -8364,6 +8405,8 @@ required_indexes = {
     "uq_reviewed_release_rollouts_active",
     "uq_control_plane_maintenance_fence_active",
     "idx_control_plane_maintenance_fence_events_fence",
+    "idx_projection_failures_account_created",
+    "idx_projection_failures_unresolved",
 }
 required_order_management_columns = {
     "orders_projection": {
@@ -8801,7 +8844,7 @@ try:
                 )
 finally:
     conn.close()
-print("database_schema_epoch=0017_operator_query_projection_reads")
+print("database_schema_epoch=0018_projection_reliability")
 PY
   if [ "$DEPLOY_GATE_MODE" = "maintenance_fence" ]; then
     load_maintenance_fence_state
@@ -9281,7 +9324,7 @@ if [ "$DELIVERY_MODE" = "transition_bind_mount" ]; then
     live="$T/container-patches/$bundle_path"
     if [ ! -f "$live" ]; then
       case "$bundle_path" in
-        approved_intent_client.py|bounded_task_worker.py|control_plane_session.py|health.py|health_server.py|run_node.py|reconciliation.py|redis_safety.py|live_canary_execution.py|node_config.py|risk_config.py|risk_init.py|projection_spool.py|nautilus_config.py|persistence_init.py|redis_namespace_lease.py|redis_resp_client.py)
+        account_execution_ledger.py|execution_domain_init.py|approved_intent_client.py|bounded_task_worker.py|control_plane_session.py|health.py|health_server.py|run_node.py|reconciliation.py|redis_safety.py|live_canary_execution.py|node_config.py|risk_config.py|risk_init.py|projection_spool.py|nautilus_config.py|persistence_init.py|redis_namespace_lease.py|redis_resp_client.py)
           NEW_CONTAINER+=("$bundle_path")
           CHANGED_CONTAINER+=("$bundle_path")
           continue
@@ -9319,6 +9362,9 @@ cmp -s host/execution_domain/contracts.py "$EXECUTION_DOMAIN_CONTRACTS_TGT" \
 cmp -s host/execution_domain/portfolio_baseline.py \
   "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT" \
   || CHANGED_HOST+=("execution_domain_portfolio_baseline")
+cmp -s host/execution_domain/account_execution_ledger.py \
+  "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT" \
+  || CHANGED_HOST+=("execution_domain_account_execution_ledger")
 cmp -s host/execution_domain/order_ownership.py \
   "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
   || CHANGED_HOST+=("execution_domain_order_ownership")
@@ -9362,6 +9408,11 @@ cmp -s host/execution_domain/control_plane.py \
 cmp -s host/app_roles.py "$APP_ROLES_TGT" \
   || CHANGED_HOST+=("app_roles")
 cmp -s host/pools.py "$DB_POOLS_TGT" || CHANGED_HOST+=("pools")
+cmp -s host/repository.py "$DB_REPOSITORY_TGT" \
+  || CHANGED_HOST+=("repository")
+cmp -s scripts/rebuild_orders_projection.py \
+  "$REBUILD_ORDERS_PROJECTION_TGT" \
+  || CHANGED_HOST+=("rebuild_orders_projection")
 CHANGED_WATCHER_COUNT="$(watcher_runtime_change_count)"
 [[ "$CHANGED_WATCHER_COUNT" =~ ^[0-9]+$ ]] \
   || die "watcher runtime change count is invalid"
@@ -10445,6 +10496,15 @@ for h in "${CHANGED_HOST[@]:-}"; do
           >> "$BACKUP_ROOT/new-files.txt"
       fi
       ;;
+    execution_domain_account_execution_ledger)
+      if [ -f "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT" ]; then
+        bk "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT" \
+          "host__execution_domain_account_execution_ledger.py"
+      else
+        printf '%s\n' "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
     execution_domain_order_ownership)
       if [ -f "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" ]; then
         bk "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
@@ -10529,6 +10589,23 @@ for h in "${CHANGED_HOST[@]:-}"; do
         bk "$DB_POOLS_TGT" "host__pools.py"
       else
         printf '%s\n' "$DB_POOLS_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
+    repository)
+      if [ -f "$DB_REPOSITORY_TGT" ]; then
+        bk "$DB_REPOSITORY_TGT" "host__repository.py"
+      else
+        printf '%s\n' "$DB_REPOSITORY_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
+    rebuild_orders_projection)
+      if [ -f "$REBUILD_ORDERS_PROJECTION_TGT" ]; then
+        bk "$REBUILD_ORDERS_PROJECTION_TGT" \
+          "host__rebuild_orders_projection.py"
+      else
+        printf '%s\n' "$REBUILD_ORDERS_PROJECTION_TGT" \
           >> "$BACKUP_ROOT/new-files.txt"
       fi
       ;;
@@ -10750,6 +10827,12 @@ for h in "${CHANGED_HOST[@]:-}"; do
           "$EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT"
       fi
       ;;
+    execution_domain_account_execution_ledger)
+      mkdir -p "$EXECUTION_DOMAIN_TGT"
+      install_payload_atomically \
+        host/execution_domain/account_execution_ledger.py \
+        "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT"
+      ;;
     execution_domain_order_ownership)
       mkdir -p "$EXECUTION_DOMAIN_TGT"
       if [ -f "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" ]; then
@@ -10840,6 +10923,14 @@ for h in "${CHANGED_HOST[@]:-}"; do
 	    pools)
 	      install_host_python_module host/pools.py "$DB_POOLS_TGT"
 	      ;;
+    repository)
+      install_host_python_module host/repository.py "$DB_REPOSITORY_TGT"
+      ;;
+    rebuild_orders_projection)
+      install_host_python_module \
+        scripts/rebuild_orders_projection.py \
+        "$REBUILD_ORDERS_PROJECTION_TGT"
+      ;;
 	  esac
 	done
   if [ "$CHANGED_WATCHER_COUNT" -gt 0 ]; then
@@ -10860,10 +10951,18 @@ for h in "${CHANGED_HOST[@]:-}"; do
 	cmp -s host/execution_domain/order_ownership.py \
 	  "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
 	  || die "post-install mismatch: host/execution_domain/order_ownership.py"
+	cmp -s host/execution_domain/account_execution_ledger.py \
+	  "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT" \
+	  || die "post-install mismatch: host/execution_domain/account_execution_ledger.py"
 	cmp -s host/app_roles.py "$APP_ROLES_TGT" \
 	  || die "post-install mismatch: host/app_roles.py"
 	cmp -s host/pools.py "$DB_POOLS_TGT" \
 	  || die "post-install mismatch: host/pools.py"
+	cmp -s host/repository.py "$DB_REPOSITORY_TGT" \
+	  || die "post-install mismatch: host/repository.py"
+	cmp -s scripts/rebuild_orders_projection.py \
+	  "$REBUILD_ORDERS_PROJECTION_TGT" \
+	  || die "post-install mismatch: scripts/rebuild_orders_projection.py"
 	cat "$RELEASE_MANIFEST" > "$T/RELEASE_MANIFEST.json"
 	printf '%s release_id=%s deployed_at=%s\n' \
 	  "$RELEASE_COMMIT" "$RELEASE_ID" "$STAMP" > "$T/DEPLOYED_COMMIT.txt"

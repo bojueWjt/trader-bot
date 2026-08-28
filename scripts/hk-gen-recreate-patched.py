@@ -48,6 +48,11 @@ LABEL_RELEASE_DATABASE_SCHEMA = "io.trader.release.database-schema-epoch"
 
 PATCH_MOUNT_TARGETS = (
     ("intent_execution_planner.py", "/app/strategy/intent_execution_planner.py"),
+    ("execution_domain_init.py", "/app/execution_domain/__init__.py"),
+    (
+        "account_execution_ledger.py",
+        "/app/execution_domain/account_execution_ledger.py",
+    ),
     ("contracts.py", "/app/execution_domain/contracts.py"),
     ("control_plane.py", "/app/execution_domain/control_plane.py"),
     (

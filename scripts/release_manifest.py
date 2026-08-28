@@ -38,7 +38,7 @@ NODE_CONFIG_SCHEMA_VERSIONS = {
 }
 SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0017_operator_query_projection_reads",
+    "db": "0018_projection_reliability",
     "redis": "fenced-generation-namespace/v2",
 }
 DEFAULT_CONTAINERS = (
@@ -189,6 +189,12 @@ MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH = (
 MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH = (
     "db/migrations/0017_operator_query_projection_reads.down.sql"
 )
+MIGRATION_PROJECTION_RELIABILITY_UP_PATH = (
+    "db/migrations/0018_projection_reliability.up.sql"
+)
+MIGRATION_PROJECTION_RELIABILITY_DOWN_PATH = (
+    "db/migrations/0018_projection_reliability.down.sql"
+)
 MIGRATION_PREREQUISITE_PATHS = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -227,6 +233,8 @@ CANONICAL_MIGRATION_PATHS = (
     MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN_PATH,
     MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH,
     MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH,
+    MIGRATION_PROJECTION_RELIABILITY_UP_PATH,
+    MIGRATION_PROJECTION_RELIABILITY_DOWN_PATH,
 )
 CANONICAL_MIGRATION_STEPS = (
     {
@@ -287,6 +295,15 @@ CANONICAL_MIGRATION_STEPS = (
         "up": MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH,
         "down": MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH,
         "prerequisites": [MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP_PATH],
+    },
+    {
+        "version": "0018",
+        "name": "projection_reliability",
+        "up": MIGRATION_PROJECTION_RELIABILITY_UP_PATH,
+        "down": MIGRATION_PROJECTION_RELIABILITY_DOWN_PATH,
+        "prerequisites": [
+            MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH
+        ],
     },
 )
 STRICT_V3_REQUIRED_FIELDS = {
@@ -444,6 +461,19 @@ ACCOUNT_NETWORK_CONTROL_PLANE_BASE_URLS = {
     "account-d": "http://172.30.4.1:8080",
 }
 TRANSITION_RUNTIME_FILES = (
+    (
+        "execution_domain_init.py",
+        "packages/execution-domain/execution_domain/__init__.py",
+        "/app/execution_domain/__init__.py",
+    ),
+    (
+        "account_execution_ledger.py",
+        (
+            "packages/execution-domain/execution_domain/"
+            "account_execution_ledger.py"
+        ),
+        "/app/execution_domain/account_execution_ledger.py",
+    ),
     (
         "health_server.py",
         "services/nautilus-node/app/health_server.py",
@@ -1071,6 +1101,8 @@ def validate_migration_manifest(
         MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN_PATH,
         MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH,
         MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH,
+        MIGRATION_PROJECTION_RELIABILITY_UP_PATH,
+        MIGRATION_PROJECTION_RELIABILITY_DOWN_PATH,
         *prerequisite_paths,
     }
     if not required_paths.issubset(migration_paths):
