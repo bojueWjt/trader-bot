@@ -31,6 +31,16 @@ BUNDLE_FILES = (
         "/app/execution_domain/account_execution_ledger.py",
     ),
     (
+        "idempotency.py",
+        "packages/execution-domain/execution_domain/idempotency.py",
+        "/app/execution_domain/idempotency.py",
+    ),
+    (
+        "identifiers.py",
+        "packages/execution-domain/execution_domain/identifiers.py",
+        "/app/execution_domain/identifiers.py",
+    ),
+    (
         "contracts.py",
         "services/nautilus-node/projection/contracts.py",
         "/app/execution_domain/contracts.py",
@@ -233,6 +243,8 @@ REQUIRED_RUNTIME_BUNDLE_TARGETS = {
     "/app/data_client/approved_intent_client.py",
     "/app/execution_domain/__init__.py",
     "/app/execution_domain/account_execution_ledger.py",
+    "/app/execution_domain/idempotency.py",
+    "/app/execution_domain/identifiers.py",
     "/app/persistence/nautilus_config.py",
     "/app/persistence/__init__.py",
     "/app/persistence/redis_namespace_lease.py",

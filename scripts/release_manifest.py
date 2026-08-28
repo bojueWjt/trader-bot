@@ -475,6 +475,16 @@ TRANSITION_RUNTIME_FILES = (
         "/app/execution_domain/account_execution_ledger.py",
     ),
     (
+        "idempotency.py",
+        "packages/execution-domain/execution_domain/idempotency.py",
+        "/app/execution_domain/idempotency.py",
+    ),
+    (
+        "identifiers.py",
+        "packages/execution-domain/execution_domain/identifiers.py",
+        "/app/execution_domain/identifiers.py",
+    ),
+    (
         "health_server.py",
         "services/nautilus-node/app/health_server.py",
         "/app/app/health_server.py",

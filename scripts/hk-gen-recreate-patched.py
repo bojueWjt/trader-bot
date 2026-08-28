@@ -53,6 +53,8 @@ PATCH_MOUNT_TARGETS = (
         "account_execution_ledger.py",
         "/app/execution_domain/account_execution_ledger.py",
     ),
+    ("idempotency.py", "/app/execution_domain/idempotency.py"),
+    ("identifiers.py", "/app/execution_domain/identifiers.py"),
     ("contracts.py", "/app/execution_domain/contracts.py"),
     ("control_plane.py", "/app/execution_domain/control_plane.py"),
     (
