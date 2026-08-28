@@ -113,13 +113,16 @@ class OrderProjectionReducer:
                         anomaly=finding,
                     )
 
-            order_projection_id = (
+            candidate_projection_id = (
                 current["order_projection_id"] if current else str(uuid4())
             )
-            _upsert_order_projection(
+            # The upsert RETURNS the persisted row id: on a concurrent-first-
+            # event conflict the existing row keeps its UUID, and using our
+            # candidate UUID for order_events would break the FK.
+            order_projection_id = _upsert_order_projection(
                 conn,
                 normalized,
-                order_projection_id=order_projection_id,
+                order_projection_id=candidate_projection_id,
                 status=target,
                 current=current,
             )
@@ -191,7 +194,7 @@ def _upsert_order_projection(
     order_projection_id: str,
     status: str,
     current: dict[str, Any] | None,
-) -> None:
+) -> str:
     payload = event["payload"]
     instrument_id = str(payload.get("instrument_id") or "UNKNOWN")
     venue_symbol = canonical_instrument_key(instrument_id)
@@ -227,6 +230,7 @@ def _upsert_order_projection(
                 ts_event=EXCLUDED.ts_event,
                 updated_at=now(),
                 payload=orders_projection.payload || EXCLUDED.payload
+            RETURNING order_projection_id::text
             """,
             (
                 order_projection_id,
@@ -249,6 +253,7 @@ def _upsert_order_projection(
                 Json(payload),
             ),
         )
+        return str(cur.fetchone()[0])
 
 
 def _insert_order_event(

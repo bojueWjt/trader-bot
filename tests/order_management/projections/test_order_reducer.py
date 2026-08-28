@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import order_management.order_reducer as order_reducer
 from order_management.order_reducer import OrderProjectionReducer
 
 
@@ -90,6 +91,50 @@ def test_order_reducer_records_illegal_backward_transition_without_overwrite(db_
     assert severity == "error"
     assert from_status == "accepted"
     assert to_status == "submitted"
+
+
+def test_order_reducer_concurrent_first_event_reuses_existing_projection_uuid(
+    db_conn, monkeypatch
+) -> None:
+    """P0-2 (batch 1.1): two concurrent first events for the same
+    (account_id, client_order_id) both see current=None; the ON CONFLICT
+    loser must adopt the winner's order_projection_id for order_events
+    instead of its own candidate UUID (which broke the FK)."""
+    reducer = OrderProjectionReducer()
+    # The "winner" creates the projection row with its UUID.
+    reducer.apply_event(db_conn, _order_event("evt-winner", "OrderSubmitted", 0))
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT order_projection_id::text FROM orders_projection "
+            "WHERE account_id='acct-om2' AND client_order_id='coid-1'"
+        )
+        existing_uuid = cur.fetchone()[0]
+
+    # Simulate the race: the "loser" fetched before the winner committed,
+    # so it sees no current row and generates its own candidate UUID.
+    monkeypatch.setattr(order_reducer, "_fetch_order", lambda *a, **k: None)
+    result = reducer.apply_event(
+        db_conn, _order_event("evt-loser", "OrderSubmitted", 1)
+    )
+
+    assert result.applied is True
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT order_projection_id::text FROM order_events "
+            "WHERE event_id='evt-loser'"
+        )
+        loser_projection_id = cur.fetchone()[0]
+        cur.execute(
+            "SELECT count(*) FROM orders_projection "
+            "WHERE account_id='acct-om2' AND client_order_id='coid-1'"
+        )
+        row_count = cur.fetchone()[0]
+
+    assert row_count == 1
+    assert loser_projection_id == existing_uuid, (
+        "conflicting first event must reuse the existing projection UUID "
+        "(candidate UUID would violate the order_events FK)"
+    )
 
 
 def _order_event(

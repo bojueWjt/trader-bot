@@ -9,6 +9,7 @@ on stdout, --db-url / DATABASE_URL, --apply flag).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import psycopg2
 import pytest
 from psycopg2.extras import Json
 
@@ -133,6 +135,154 @@ def test_apply_is_idempotent(
     rows_after_second = _projection_rows(db_conn, ACCOUNT_A)
 
     assert rows_after_first == rows_after_second
+
+
+def test_apply_aborts_on_backfilled_event_between_build_and_apply(
+    db_conn,
+    projection_db_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P0-3: an Order% event inserted between the shadow build and --apply
+    with a *backfilled* (older) ts_event does not move the ts_event high
+    watermark; the count/created_at fingerprint must still catch it."""
+    _seed_events(db_conn)
+    db_conn.commit()
+
+    module = _load_script_module()
+    original_apply = module._apply_shadow
+
+    def _inject_backfill_then_apply(conn, high_watermark, **kwargs):
+        # ts_event strictly older than every seeded event: the legacy
+        # max(ts_event, event_id) watermark stays unchanged.
+        _insert_execution_event(
+            db_conn,
+            event_type="OrderAccepted",
+            account_id=ACCOUNT_A,
+            client_order_id=_client_order_id(),
+            ts_event=datetime(2026, 8, 28, 8, 59, 0, tzinfo=timezone.utc),
+            payload=_order_payload("backfill"),
+        )
+        db_conn.commit()
+        return original_apply(conn, high_watermark, **kwargs)
+
+    monkeypatch.setattr(module, "_apply_shadow", _inject_backfill_then_apply)
+
+    script_conn = psycopg2.connect(projection_db_url)
+    try:
+        with pytest.raises(RuntimeError, match="fingerprint"):
+            module.rebuild(script_conn, apply=True, accounts=None)
+    finally:
+        script_conn.close()
+
+    db_conn.rollback()
+    assert _projection_rows(db_conn, ACCOUNT_A) == {}, (
+        "an aborted apply must leave orders_projection untouched"
+    )
+
+
+def test_apply_preserves_projection_uuid_referenced_by_order_events(
+    db_conn,
+    projection_db_url: str,
+) -> None:
+    """P1-1: rows referenced by order_events must keep their UUID across
+    --apply (upsert in place, no DELETE+INSERT with a fresh UUID)."""
+    filled_cid, _ = _seed_events(db_conn)
+    stale_projection_id = _insert_stale_projection_row(db_conn, filled_cid)
+    referencing_event_id = _insert_order_event_row(
+        db_conn,
+        account_id=ACCOUNT_A,
+        order_projection_id=stale_projection_id,
+        client_order_id=filled_cid,
+    )
+    db_conn.commit()
+
+    result = _run_script(projection_db_url, "--apply")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    db_conn.rollback()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT order_projection_id::text, status, filled_quantity
+            FROM orders_projection
+            WHERE account_id=%s AND client_order_id=%s
+            """,
+            (ACCOUNT_A, filled_cid),
+        )
+        projection_row = cur.fetchone()
+        cur.execute(
+            """
+            SELECT order_projection_id::text FROM order_events
+            WHERE order_event_row_id=%s
+            """,
+            (referencing_event_id,),
+        )
+        (event_projection_id,) = cur.fetchone()
+
+    assert projection_row is not None
+    assert projection_row[0] == stale_projection_id, (
+        "apply must reuse the existing order_projection_id for rows joined "
+        "on (account_id, client_order_id)"
+    )
+    assert projection_row[1] == "filled"
+    assert projection_row[2] == Decimal("5")
+    assert event_projection_id == stale_projection_id, (
+        "the order_events FK must still point at the surviving row"
+    )
+
+
+def test_apply_keeps_referenced_leftovers_and_deletes_unreferenced(
+    db_conn,
+    projection_db_url: str,
+) -> None:
+    """P1-1: leftover rows (absent from the rebuild) are deleted only when no
+    dependent table references them; referenced rows survive with a WARNING.
+    The referenced leftover has client_order_id NULL, so it can only be
+    matched by order_projection_id (never by the join key) — per the
+    coordinator's note it is treated as a leftover row."""
+    _seed_events(db_conn)
+    referenced_leftover_id = _insert_projection_row(
+        db_conn, client_order_id=None
+    )
+    _insert_order_event_row(
+        db_conn,
+        account_id=ACCOUNT_A,
+        order_projection_id=referenced_leftover_id,
+        client_order_id=None,
+    )
+    unreferenced_leftover_id = _insert_projection_row(
+        db_conn, client_order_id=_client_order_id()
+    )
+    db_conn.commit()
+
+    result = _run_script(projection_db_url, "--apply")
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = _parse_report(result.stdout)
+
+    retained = report.get("retained_referenced_rows")
+    assert isinstance(retained, list) and len(retained) == 1, report
+    assert retained[0]["order_projection_id"] == referenced_leftover_id
+    assert retained[0]["referenced_by"] == ["order_events"]
+    assert "WARNING" in result.stderr
+    assert referenced_leftover_id in result.stderr
+
+    db_conn.rollback()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT order_projection_id::text FROM orders_projection
+            WHERE order_projection_id = ANY(%s::uuid[])
+            """,
+            ([referenced_leftover_id, unreferenced_leftover_id],),
+        )
+        surviving = {row[0] for row in cur.fetchall()}
+
+    assert referenced_leftover_id in surviving, (
+        "a leftover row referenced by order_events must be kept"
+    )
+    assert unreferenced_leftover_id not in surviving, (
+        "an unreferenced leftover row must be deleted"
+    )
 
 
 # --- helpers ---------------------------------------------------------------
@@ -261,6 +411,70 @@ def _insert_stale_projection_row(conn, client_order_id: str) -> str:
             ),
         )
     return order_projection_id
+
+
+def _load_script_module():
+    spec = importlib.util.spec_from_file_location(
+        "rebuild_orders_projection_under_test", SCRIPT
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _insert_projection_row(conn, *, client_order_id: str | None) -> str:
+    """A projection row with no backing execution event (a leftover)."""
+    order_projection_id = str(uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO orders_projection (
+                order_projection_id, account_id, instrument_id,
+                client_order_id, status, side, order_type,
+                quantity, filled_quantity, price, payload
+            )
+            VALUES (%s,%s,%s,%s,'submitted','long','LIMIT',5,0,4.5,%s)
+            """,
+            (
+                order_projection_id,
+                ACCOUNT_A,
+                INSTRUMENT_ID,
+                client_order_id,
+                Json({"order_kind": "regular"}),
+            ),
+        )
+    return order_projection_id
+
+
+def _insert_order_event_row(
+    conn,
+    *,
+    account_id: str,
+    order_projection_id: str,
+    client_order_id: str | None,
+) -> str:
+    order_event_row_id = str(uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO order_events (
+                order_event_row_id, event_id, account_id, order_projection_id,
+                client_order_id, event_type, ts_event, payload
+            )
+            VALUES (%s,%s,%s,%s,%s,'OrderFilled',%s,%s)
+            """,
+            (
+                order_event_row_id,
+                str(uuid4()),
+                account_id,
+                order_projection_id,
+                client_order_id,
+                T2,
+                Json({}),
+            ),
+        )
+    return order_event_row_id
 
 
 def _projection_rows(conn, account_id: str) -> dict[str, dict[str, Any]]:

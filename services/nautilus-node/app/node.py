@@ -458,11 +458,15 @@ def _startup_venue_instrument_ids(
 ) -> list[str] | None:
     """Collect venue instrument ids to widen the startup reconciliation scope.
 
-    Uses any available exchange snapshot source (evidence provider first, the
-    control-plane exchange-state mirror as a fallback) and returns instrument
-    ids in ``SYMBOL-PERP.BINANCE`` form for every instrument that carries a
-    non-zero position, an open order, or an algo order. Returns ``None`` when
-    no snapshot can be obtained; startup must never fail because of this.
+    Uses the exchange evidence provider snapshot (the only source that covers
+    positions, open orders, and algo orders) and returns instrument ids in
+    ``SYMBOL-PERP.BINANCE`` form for every instrument that carries a non-zero
+    position, an open order, or an algo order. Returns ``None`` when no
+    snapshot can be obtained; startup must never fail because of this. The
+    control-plane exchange-state mirror is deliberately NOT used as a
+    fallback: ``mirror.refresh()`` can trigger the fatal fence on a 409
+    (process exit that no local try/except can contain) and only surfaces
+    orders, not positions.
     """
 
     if runtime.config.binance.environment != "live":
@@ -501,23 +505,6 @@ def _startup_venue_instrument_ids(
                 f"exchange evidence provider failed: {exc!r}",
                 flush=True,
             )
-    mirror = getattr(runtime, "exchange_state_mirror", None)
-    if mirror:
-        refresh = getattr(mirror, "refresh", None)
-        if callable(refresh):
-            try:
-                instrument_ids = {
-                    str(getattr(order, "instrument_id", "") or "")
-                    for order in tuple(refresh())
-                }
-                instrument_ids.discard("")
-                return sorted(instrument_ids)
-            except Exception as exc:
-                print(
-                    "[NodeRuntime] WARNING: startup venue snapshot via "
-                    f"exchange state mirror failed: {exc!r}",
-                    flush=True,
-                )
     print(
         "[NodeRuntime] WARNING: no startup venue snapshot available; "
         "reconciliation scope falls back to risk-configured instruments",

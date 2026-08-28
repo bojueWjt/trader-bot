@@ -531,6 +531,7 @@ _EXECUTION_ORDER_PLAN_METADATA = (
     "disable_take_profits",
     "equity",
     "live_open_gate",
+    "protection_policy",
     "request_semantics",
     "rollout_phase",
 )

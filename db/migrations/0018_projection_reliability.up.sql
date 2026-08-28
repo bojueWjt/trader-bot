@@ -43,3 +43,19 @@ GRANT UPDATE (resolved_at) ON projection_failures
 
 GRANT SELECT ON projection_failures, projection_watermarks
     TO trader_v3_node_control;
+
+-- P0-1 (batch 1.1): the ingest-path order reducer runs under
+-- trader_v3_event_ingest but 0012 never granted it the reducer's full table
+-- surface. OrderProjectionReducer.apply_event needs:
+--   * order_events: SELECT (event_id dedupe) + INSERT (append-only log);
+--   * reconciliation_findings: SELECT + INSERT (record_reconciliation_finding
+--     on illegal transitions);
+--   * reconciliation_runs: INSERT (record_reconciliation_finding creates a
+--     run row when none is supplied).
+-- execution_events and the *_projection tables were already granted in 0012.
+GRANT SELECT, INSERT ON order_events
+    TO trader_v3_event_ingest;
+GRANT SELECT, INSERT ON reconciliation_findings
+    TO trader_v3_event_ingest;
+GRANT INSERT ON reconciliation_runs
+    TO trader_v3_event_ingest;

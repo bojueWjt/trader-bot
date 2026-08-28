@@ -128,3 +128,33 @@ def semantic_operation_id(account_id: str, source_message_id: str,
 
 1. 实现与测试都落盘；对应包测试全绿（存量 4 失败除外）。
 2. 输出：changed files 清单、跑过的命令与结果、偏离契约之处及理由、遗留风险。
+
+## 批次 1.1 修复清单（2026-08-28 Codex 交付对抗 review 后，逐条已由协调者核实）
+
+裁定记录：P0-4（证据失明时开仓放行）为 2026-08-28 操作者指令的既定产品决策，维持现状不修。以下按代码域分三组：
+
+### 组 CP（控制面）
+1. **P0-1 生产角色授权缺口**：`trader_v3_event_ingest` 对 `order_events` 零授权（0012 只给了 operator_query），reducer 却要 `SELECT 1 FROM order_events`（order_reducer.py:156）和 `INSERT INTO order_events`（:264），`record_reconciliation_finding` 还要写 `reconciliation_findings`。修 0018 迁移（up 补 `GRANT SELECT, INSERT ON order_events TO trader_v3_event_ingest` 与 `GRANT SELECT, INSERT ON reconciliation_findings TO trader_v3_event_ingest`，down 对应 REVOKE；先核对 reducer 全部表访问面再定授权清单）。**必交测试**：以生产角色 `trader_v3_event_ingest` 连接（参照 tests/control-plane/api/test_control_plane_role_isolation.py 的角色连接方式）走 post_node_events 投递订单事件 → orders_projection 出行、projection_failures 零记录。
+2. **P0-2 并发首事件 UUID 竞态**：`_upsert_order_projection` 的 ON CONFLICT DO UPDATE 不回传已存在行的 order_projection_id，冲突方随后用自己生成的 UUID 写 order_events → FK 失败。修法：upsert 加 `RETURNING order_projection_id`，reducer 后续 `_insert_order_event` 与返回值一律用回传的 id。**测试**：预插一行不同 UUID 的投影行，构造 current=None 路径调用，断言 order_events 用的是已存在行的 UUID 且无 FK 异常。
+3. **P1-2 watermark 可回退**：repository.py 的 watermark upsert 无单调守卫。修：ON CONFLICT DO UPDATE 加 `WHERE (EXCLUDED.last_event_ts, EXCLUDED.last_event_id) >= (projection_watermarks.last_event_ts, projection_watermarks.last_event_id)`。**测试**：先进后退两次 upsert，断言不回退。
+4. **P2-2 protection_policy 节点下行被剥离**：read_api.py 节点拉取转换器的元数据白名单（约 :527-552）缺 `protection_policy`，补入。**测试**：含该字段的 intent 经节点拉取路径后字段保留。
+
+### 组 RT（重放工具 scripts/rebuild_orders_projection.py）
+5. **P0-3 高水位检查对回填事件失明**：shadow 构建后 commit、apply 只比对全局 max(ts_event,event_id)——窗口期插入 ts_event 更旧的事件不改变 max，检查通过后该事件的投影效果被覆盖擦除。修：shadow 构建时记录 Order% 事件的 `(COUNT(*), max(created_at, event_id))`，apply 在 SHARE 锁下重查并比对全部三项，不一致即 abort。**测试**：build 与 apply 之间插入 ts_event 回填事件 → RuntimeError。
+6. **P1-1 apply 在真实历史库上被 FK 阻断**：DELETE+INSERT 换新 UUID，而 order_events/order_links/protective_orders_projection/reconciliation_findings 都引用旧 projection UUID。修：shadow 行按 (account_id, client_order_id) 与现存 orders_projection JOIN 复用已有 UUID；apply 改为逐行 upsert + 只删除 shadow 中不存在且无引用的残留行（有引用的残留行保留并 WARNING 列出）。**测试**：被 order_events 引用的行经重建后 UUID 不变、FK 不断。
+
+### 组 NP（节点/planner/prompt）
+7. **P0-5 target_position_id 跨 instrument 命中**：`_target_position_id_side` 只看 -LONG/-SHORT 后缀，`_reconciled_target_position` 用 intent 自身 instrument 评估——ATOM intent 带 `BTCUSDT-PERP.BINANCE-LONG` 会操作 ATOM 仓。修：剥后缀后的前缀非空且 != instrument_id → 返回 `OrderDenied("position_required", str(target_position_id))`（与 legacy 无匹配语义一致）。**测试**：跨 instrument target id → position_required，绝不合成仓位。
+8. **P1-4 hedge 单侧缓存跳过回退**：`_select_target_position` 只在 instrument 级 positions 为空时启用回退；cache 只有 LONG、管理 SHORT 时直接 position_required。修：请求 book（requested_side 或 target id side）在 cache 无匹配且 reconciled_state 存在时，对该 book 走回退评估。**测试**：cache LONG + venue SHORT + 管理 SHORT intent → 按 venue 合成继续。
+9. **P1-7 启动路径可致命**：node.py `_startup_venue_instrument_ids` 的 mirror 回退会调 `mirror.refresh()`，其 409 处理直接 `_trigger_fatal_fence`（进程退出，外层 try/except 无效），且该回退只取订单漏仓位。修：整段删除 mirror 回退，仅保留 evidence-provider 主路径 + WARNING 降级。**测试**：mirror 存在但 provider 不可用时返回 None 且不触发 refresh。
+10. **P1-9 prompt 把提醒升级为阻断**：prompt.py 新增行指示无 SL/TP 的 open 置 `ambiguous=true`（→ governor needs_review 阻断），违反操作者指令。改写为：记录缺口进 ambiguity_reasons，明示"仅注记，不因此单独置 ambiguous/needs_review"。同步相关 prompt 内容测试。
+
+### 批次 2 债务（本轮不修，记录在案）
+- P1-3 批内后续异常回滚先前 raw event（节点 spool 整批重试可自愈，at-least-once 兜底）。
+- P1-5 move_stop_to_entry 在回退路径缺 entry_price（现状：明确拒因 position_entry_price_required，无静默危害）。
+- P1-6 管理 gate（mirror）与 ledger（provider cache）双状态源不一致（最坏回到旧 position_required，不劣化；统一状态源属批次 2 架构项）。
+- P1-8 venue 并集未进 instrument provider / scoped reconciliation 仍以 cache 为种子（WP-D 只扩了对账配置面；真正的恢复重做属批次 2 第三大项）。
+- P1-10 replay 响应与 hermes CLI/canary 适配器丢 warnings（hermes-profile/ 属禁区未动；控制面主响应已带）。
+- P1-11 `_OPERATOR_ACTIONS` 无 add_position（端点历史上就不支持，非本次回归）；并发同价去重竞态（现为纯提醒，漏警告无资损面）。
+- P2-1 SHORT quantity 取绝对值与契约"净量"措辞不一致（对齐文档措辞即可）。
+- P2-3 测试未覆盖生产装配/并发模型（P0-1 修复自带角色级测试，其余记债）。

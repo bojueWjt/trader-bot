@@ -86,6 +86,42 @@ def test_open_position_downlink_preserves_live_open_gate() -> None:
     assert plan["live_open_gate"] == LIVE_OPEN_GATE
 
 
+def test_open_position_downlink_preserves_protection_policy() -> None:
+    """P2-2 (batch 1.1): protection_policy is part of the metadata whitelist;
+    the node pull converter must not strip it from the execution order plan."""
+    plan = read_api._execution_order_plan(
+        {
+            "side": "long",
+            "entry": {"type": "limit", "price": 100.0},
+            "quantity": "2",
+            "stop_loss": 90.0,
+            "authorization": AUTHORIZATION,
+            "protection_policy": "stop_only",
+        },
+        {"max_notional": 200.0},
+        "BTCUSDT",
+        action="open_position",
+    )
+
+    assert plan["protection_policy"] == "stop_only"
+
+
+def test_management_downlink_preserves_protection_policy() -> None:
+    plan = read_api._execution_order_plan(
+        {
+            "stop_loss": 95.0,
+            "position_side": "long",
+            "authorization": AUTHORIZATION,
+            "protection_policy": "deferred",
+        },
+        {"max_notional": 0.0},
+        "BTCUSDT",
+        action="move_stop_loss",
+    )
+
+    assert plan["protection_policy"] == "deferred"
+
+
 def test_open_position_downlink_preserves_canary_permit_metadata() -> None:
     permit = {
         "permit_id": "a7695a69-af4f-475d-a768-6f51e38067f7",

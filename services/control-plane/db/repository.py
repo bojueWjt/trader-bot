@@ -160,6 +160,9 @@ class ProjectionWriter:
                     last_event_id=EXCLUDED.last_event_id,
                     last_event_ts=EXCLUDED.last_event_ts,
                     updated_at=now()
+                WHERE (EXCLUDED.last_event_ts, EXCLUDED.last_event_id)
+                      >= (projection_watermarks.last_event_ts,
+                          projection_watermarks.last_event_id)
                 """,
                 (account_id, projector, event_id, ts_event),
             )

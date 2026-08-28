@@ -655,21 +655,27 @@ def _select_target_position(
         if position.instrument_id == instrument_id and Decimal(str(position.quantity)) != Decimal("0")
     )
     target_position_id = getattr(intent, "target_position_id", None)
-    if not positions:
-        # Cache view is empty: fall back to fresh venue evidence (when
-        # provided) so management intents survive cache blindness. The
-        # cached fast path below is untouched when positions exist.
-        fallback = _reconciled_target_position(
+
+    def _venue_fallback() -> PositionSnapshot | OrderDenied | None:
+        # Requested book has no cache match: fall back to fresh venue
+        # evidence (when provided) so management intents survive cache
+        # blindness — including hedge-mode caches that only hold the other
+        # side. Cached fast paths above/below are untouched when the
+        # requested book matches, and reconciled_state=None returns None
+        # to keep the legacy denial strings byte-identical.
+        return _reconciled_target_position(
             context,
             instrument_id,
             requested_side=requested_side,
             target_position_id=target_position_id,
         )
-        if fallback is not None:
-            return fallback
+
     if target_position_id:
         matches = tuple(position for position in positions if position.position_id == target_position_id)
         if len(matches) == 0:
+            fallback = _venue_fallback()
+            if fallback is not None:
+                return fallback
             return OrderDenied("position_required", str(target_position_id))
         if len(matches) > 1:
             return OrderDenied("position_not_unique", str(target_position_id))
@@ -684,6 +690,9 @@ def _select_target_position(
         return selected
     if not requested_side:
         if len(positions) == 0:
+            fallback = _venue_fallback()
+            if fallback is not None:
+                return fallback
             return OrderDenied("position_required", instrument_id)
         if len(positions) > 1:
             return OrderDenied("position_not_unique", instrument_id)
@@ -695,6 +704,9 @@ def _select_target_position(
     )
     side_detail = f"{instrument_id}:{requested_side}"
     if len(side_matches) == 0:
+        fallback = _venue_fallback()
+        if fallback is not None:
+            return fallback
         return OrderDenied("position_required", side_detail)
     if len(side_matches) > 1:
         return OrderDenied("position_not_unique", side_detail)
@@ -747,16 +759,25 @@ def _reconciled_target_position(
     requested_side: str,
     target_position_id: Any,
 ) -> PositionSnapshot | OrderDenied | None:
-    """Venue-evidence fallback for management intents with an empty cache.
-
-    Only called when the cache holds no non-zero position for the
-    instrument. Returns ``None`` to keep the legacy denial path when no
+    """Venue-evidence fallback for management intents whose requested book
+    (target_position_id / requested side / whole instrument) has no cache
+    match. Returns ``None`` to keep the legacy denial path when no
     reconciled state is available.
     """
 
     if context.reconciled_state is None:
         return None
     id_side = _target_position_id_side(target_position_id)
+    if id_side:
+        # A side-suffixed target id carries an instrument prefix. A prefix
+        # naming a different instrument must never be resolved against this
+        # intent's instrument books (an ATOM intent holding a
+        # BTCUSDT-PERP.BINANCE-LONG id must not touch the ATOM position):
+        # deny exactly like the legacy no-match path.
+        text = str(target_position_id or "").strip()
+        prefix = text[: -(len(id_side) + 1)].strip()
+        if prefix and prefix.upper() != str(instrument_id).strip().upper():
+            return OrderDenied("position_required", str(target_position_id))
     if requested_side and id_side and requested_side != id_side:
         return OrderDenied(
             "position_side_mismatch",

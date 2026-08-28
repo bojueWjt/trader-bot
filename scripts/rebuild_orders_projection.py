@@ -3,8 +3,13 @@
 
 Dry-run (default) folds every Order* execution event through the same
 transition rules as order_management.order_reducer and reports the diff
-against the live orders_projection rows; --apply atomically replaces the
-projection (and advances the 'orders' projection watermarks) under locks.
+against the live orders_projection rows; --apply atomically upserts the
+projection rows in place (reusing existing order_projection_id values so
+FK references from order_events/order_links/protective_orders_projection/
+reconciliation_findings stay intact) and advances the 'orders' projection
+watermarks under locks. Rows absent from the rebuild are deleted only when
+nothing references them; referenced leftovers are kept and listed as
+WARNINGs.
 
 Structure mirrors scripts/rebuild_positions_projection.py.
 """
@@ -202,7 +207,11 @@ def build_difference_report(
         (row["account_id"], row["client_order_id"]): row for row in existing_rows
     }
     differences: list[dict[str, Any]] = []
-    for key in sorted(set(rebuilt) | set(existing)):
+    # client_order_id can be NULL on existing rows; sort Nones first.
+    for key in sorted(
+        set(rebuilt) | set(existing),
+        key=lambda k: (k[0], k[1] is not None, k[1] or ""),
+    ):
         new = rebuilt.get(key)
         old = existing.get(key)
         account_id, client_order_id = key
@@ -267,6 +276,9 @@ def rebuild(
     accounts: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     events, high_watermark = _load_order_events(conn)
+    fingerprint = _order_events_fingerprint(
+        (event["created_at"], str(event["event_id"])) for event in events
+    )
     rebuilt_rows, fold_info = rebuild_order_rows(events, accounts=accounts)
     scope_accounts = (
         sorted(accounts) if accounts is not None else fold_info["stats"]["accounts"]
@@ -284,13 +296,25 @@ def rebuild(
     if not apply:
         return report
 
-    _apply_shadow(
+    retained_rows = _apply_shadow(
         conn,
         high_watermark,
+        fingerprint=fingerprint,
         accounts=accounts,
         account_watermarks=fold_info["account_watermarks"],
     )
     report["applied"] = True
+    report["retained_referenced_rows"] = retained_rows
+    for row in retained_rows:
+        print(
+            "WARNING: kept orders_projection row "
+            f"{row['order_projection_id']} "
+            f"(account_id={row['account_id']}, "
+            f"client_order_id={row['client_order_id']}): absent from the "
+            "rebuild but still referenced by "
+            f"{', '.join(row['referenced_by'])}",
+            file=sys.stderr,
+        )
     return report
 
 
@@ -301,7 +325,8 @@ def _load_order_events(
         cur.execute(
             """
             SELECT event_id, event_type, node_id, account_id, intent_id,
-                   client_order_id, venue_order_id, trade_id, ts_event, payload
+                   client_order_id, venue_order_id, trade_id, ts_event, payload,
+                   created_at
             FROM execution_events
             WHERE event_type LIKE 'Order%'
             ORDER BY ts_event, event_id
@@ -319,6 +344,7 @@ def _load_order_events(
                 "trade_id": row[7],
                 "ts_event": row[8],
                 "payload": row[9] or {},
+                "created_at": row[10],
             }
             for row in cur.fetchall()
         ]
@@ -387,13 +413,79 @@ def _build_shadow(conn, rows: Iterable[dict[str, Any]]) -> None:
             )
 
 
+def _order_events_fingerprint(
+    pairs: Iterable[tuple[datetime, str]],
+) -> tuple[int, datetime | None, str | None]:
+    """(count, max created_at, event_id at that max) over Order% events.
+
+    ts_event alone is blind to backfilled events (an event inserted with an
+    older ts_event never moves the ts_event high watermark); created_at is
+    assigned at insert time, so together with the row count it detects any
+    Order% event landing between the shadow build and --apply.
+    """
+    normalized = [
+        (ensure_aware(created_at), str(event_id)) for created_at, event_id in pairs
+    ]
+    if not normalized:
+        return (0, None, None)
+    top_created_at, top_event_id = max(normalized)
+    return (len(normalized), top_created_at, top_event_id)
+
+
+_REFERENCE_CHECKS: tuple[tuple[str, str, int], ...] = (
+    (
+        "order_events",
+        "SELECT 1 FROM order_events WHERE order_projection_id = %s LIMIT 1",
+        1,
+    ),
+    (
+        "order_links",
+        """
+        SELECT 1 FROM order_links
+        WHERE parent_order_projection_id = %s OR child_order_projection_id = %s
+        LIMIT 1
+        """,
+        2,
+    ),
+    (
+        "protective_orders_projection",
+        """
+        SELECT 1 FROM protective_orders_projection
+        WHERE order_projection_id = %s
+        LIMIT 1
+        """,
+        1,
+    ),
+    (
+        "reconciliation_findings",
+        """
+        SELECT 1 FROM reconciliation_findings
+        WHERE order_projection_id = %s
+        LIMIT 1
+        """,
+        1,
+    ),
+)
+
+
+def _projection_references(cur, order_projection_id: str) -> list[str]:
+    referenced_by: list[str] = []
+    for table, query, arity in _REFERENCE_CHECKS:
+        cur.execute(query, (order_projection_id,) * arity)
+        if cur.fetchone():
+            referenced_by.append(table)
+    return referenced_by
+
+
 def _apply_shadow(
     conn,
     high_watermark: tuple[str, str] | None,
     *,
+    fingerprint: tuple[int, datetime | None, str | None],
     accounts: frozenset[str] | None,
     account_watermarks: dict[str, tuple[str, datetime]],
-) -> None:
+) -> list[dict[str, Any]]:
+    retained_rows: list[dict[str, Any]] = []
     try:
         with conn.cursor() as cur:
             cur.execute("LOCK TABLE execution_events IN SHARE MODE")
@@ -417,20 +509,88 @@ def _apply_shadow(
                 raise RuntimeError(
                     "order events changed after shadow build; rerun the rebuild"
                 )
-            cur.execute("LOCK TABLE orders_projection IN ACCESS EXCLUSIVE MODE")
-            if accounts is not None:
-                cur.execute(
-                    "DELETE FROM orders_projection WHERE account_id = ANY(%s)",
-                    (sorted(accounts),),
-                )
-            else:
-                cur.execute("DELETE FROM orders_projection")
             cur.execute(
-                f"""
-                INSERT INTO orders_projection
-                SELECT * FROM {SHADOW_TABLE}
+                """
+                SELECT created_at, event_id
+                FROM execution_events
+                WHERE event_type LIKE 'Order%'
                 """
             )
+            current_fingerprint = _order_events_fingerprint(cur.fetchall())
+            if current_fingerprint != fingerprint:
+                raise RuntimeError(
+                    "order events changed after shadow build "
+                    "(count/created_at fingerprint mismatch, possibly a "
+                    "backfilled ts_event); rerun the rebuild"
+                )
+            cur.execute("LOCK TABLE orders_projection IN ACCESS EXCLUSIVE MODE")
+            # Reuse existing projection UUIDs so FK references
+            # (order_events, order_links, protective_orders_projection,
+            # reconciliation_findings) survive the rebuild.
+            cur.execute(
+                f"""
+                UPDATE {SHADOW_TABLE} AS shadow
+                SET order_projection_id = existing.order_projection_id
+                FROM orders_projection AS existing
+                WHERE shadow.client_order_id IS NOT NULL
+                  AND existing.client_order_id IS NOT NULL
+                  AND existing.account_id = shadow.account_id
+                  AND existing.client_order_id = shadow.client_order_id
+                  AND existing.order_projection_id <> shadow.order_projection_id
+                """
+            )
+            column_list = ", ".join(SHADOW_COLUMNS)
+            update_assignments = ", ".join(
+                f"{column} = EXCLUDED.{column}"
+                for column in SHADOW_COLUMNS
+                if column != "order_projection_id"
+            )
+            cur.execute(
+                f"""
+                INSERT INTO orders_projection ({column_list}, updated_at)
+                SELECT {column_list}, now() FROM {SHADOW_TABLE}
+                ON CONFLICT (order_projection_id) DO UPDATE SET
+                    {update_assignments},
+                    updated_at = now()
+                """
+            )
+            # Leftover rows: in orders_projection (within scope) but absent
+            # from the rebuild. Delete only the unreferenced ones; keep and
+            # report any row still referenced by dependent tables.
+            leftover_query = f"""
+                SELECT existing.order_projection_id::text,
+                       existing.account_id,
+                       existing.client_order_id
+                FROM orders_projection AS existing
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {SHADOW_TABLE} AS shadow
+                    WHERE shadow.order_projection_id
+                          = existing.order_projection_id
+                )
+            """
+            leftover_params: tuple[Any, ...] = ()
+            if accounts is not None:
+                leftover_query += " AND existing.account_id = ANY(%s)"
+                leftover_params = (sorted(accounts),)
+            leftover_query += " ORDER BY existing.account_id, existing.client_order_id"
+            cur.execute(leftover_query, leftover_params)
+            leftovers = cur.fetchall()
+            for order_projection_id, account_id, client_order_id in leftovers:
+                referenced_by = _projection_references(cur, order_projection_id)
+                if referenced_by:
+                    retained_rows.append(
+                        {
+                            "order_projection_id": order_projection_id,
+                            "account_id": account_id,
+                            "client_order_id": client_order_id,
+                            "referenced_by": referenced_by,
+                        }
+                    )
+                    continue
+                cur.execute(
+                    "DELETE FROM orders_projection WHERE order_projection_id = %s",
+                    (order_projection_id,),
+                )
             for account_id in sorted(account_watermarks):
                 event_id, ts_event = account_watermarks[account_id]
                 cur.execute(
@@ -449,6 +609,7 @@ def _apply_shadow(
     except Exception:
         conn.rollback()
         raise
+    return retained_rows
 
 
 def _event_sort_key(event: dict[str, Any]) -> tuple[datetime, str]:

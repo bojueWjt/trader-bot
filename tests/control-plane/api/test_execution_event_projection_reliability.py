@@ -26,8 +26,10 @@ from uuid import uuid4
 import psycopg2
 import pytest
 from fastapi.testclient import TestClient
+from psycopg2.extensions import make_dsn
 
 import read_api
+from app_roles import AppRole
 
 
 ACCOUNT_ID = "account-a"
@@ -307,6 +309,98 @@ def test_position_hint_success_updates_positions_watermark_and_projection(
     assert watermark is not None
     assert watermark[0] == event["event_id"]
     assert watermark[1] == T1
+
+
+def test_event_ingest_role_projects_order_event_without_failures(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    migrated_db: str,
+) -> None:
+    """P0-1 regression (batch 1.1): the production ingest role
+    trader_v3_event_ingest must hold the reducer's full table surface
+    (order_events SELECT/INSERT, reconciliation_findings/_runs INSERT).
+    Before 0018 the role had zero privileges on order_events, so every order
+    event failed inside the savepoint under the real deployment role."""
+    client_order_id = _client_order_id()
+    event = _order_accepted_event(client_order_id, ts_event=T1)
+
+    # The heartbeat above ran on the owner connection; the event push itself
+    # must go through a real trader_v3_event_ingest database connection.
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        make_dsn(migrated_db, user="trader_v3_event_ingest"),
+    )
+    with TestClient(read_api.create_app(AppRole.EVENT_INGEST)) as ingest_client:
+        response = ingest_client.post(
+            f"/v1/nodes/{NODE_ID}/execution-events",
+            headers=_writer_headers(),
+            json={"account_id": ACCOUNT_ID, "events": [event]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["acked_event_ids"] == [event["event_id"]]
+
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status FROM orders_projection
+            WHERE account_id=%s AND client_order_id=%s
+            """,
+            (ACCOUNT_ID, client_order_id),
+        )
+        projection = cur.fetchone()
+        cur.execute("SELECT COUNT(*) FROM projection_failures")
+        failure_count = cur.fetchone()[0]
+        cur.execute(
+            """
+            SELECT order_projection_id FROM order_events
+            WHERE event_id=%s
+            """,
+            (event["event_id"],),
+        )
+        order_event = cur.fetchone()
+
+    assert projection == ("accepted",), (
+        "order event pushed under trader_v3_event_ingest must derive the "
+        "projection row (role privilege gap)"
+    )
+    assert failure_count == 0, (
+        "a privilege failure under the production role must not occur"
+    )
+    assert order_event is not None and order_event[0] is not None
+
+
+def test_watermark_upsert_is_monotonic(
+    migrated_db: str,
+) -> None:
+    """P1-2 (batch 1.1): a late replay/out-of-order upsert must not move the
+    watermark backwards."""
+    from repository import ProjectionWriter
+
+    newer = (str(uuid4()), T2)
+    older = (str(uuid4()), T1)
+
+    with psycopg2.connect(migrated_db) as conn:
+        writer = ProjectionWriter(conn)
+        writer.upsert_projection_watermark(
+            account_id=ACCOUNT_ID,
+            projector="orders",
+            event_id=newer[0],
+            ts_event=newer[1],
+        )
+        writer.upsert_projection_watermark(
+            account_id=ACCOUNT_ID,
+            projector="orders",
+            event_id=older[0],
+            ts_event=older[1],
+        )
+        conn.commit()
+
+    watermark = _watermark(migrated_db, projector="orders")
+    assert watermark is not None
+    assert watermark == (newer[0], newer[1]), (
+        "watermark must not regress on an older upsert"
+    )
 
 
 # --- helpers ---------------------------------------------------------------

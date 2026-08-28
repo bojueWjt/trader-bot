@@ -239,6 +239,152 @@ class ReconciledStateManagementPlannerTest(unittest.TestCase):
         self.assertEqual(result.orders[0].side, "SELL")
         self.assertEqual(result.orders[0].quantity, VENUE_QUANTITY)
 
+    def test_cross_instrument_target_id_denies_and_never_synthesizes(self) -> None:
+        """P0-5: an ATOM intent carrying a BTC-prefixed target id must be
+        denied position_required even though the venue holds an open ATOM
+        LONG the side-suffix alone would have matched."""
+        foreign_target_id = "BTCUSDT-PERP.BINANCE-LONG"
+        intent = _close_intent(target_position_id=foreign_target_id)
+
+        result = plan_intent_execution(
+            intent,
+            _empty_cache_context(
+                reconciled_state=_reconciled(venue_snapshot=_venue_long_snapshot()),
+            ),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="position_required", detail=foreign_target_id),
+        )
+
+    def test_cross_instrument_target_id_denies_on_hedge_fallback_path(self) -> None:
+        """P0-5 x P1-4: cache holds LONG, target id names another instrument's
+        SHORT book -> denied, never resolved against this instrument."""
+        foreign_target_id = "BTCUSDT-PERP.BINANCE-SHORT"
+        cached_long = PositionSnapshot(
+            instrument_id=INSTRUMENT_ID,
+            side="LONG",
+            quantity=VENUE_QUANTITY,
+            position_id="P-1",
+        )
+        intent = _close_intent(target_position_id=foreign_target_id)
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                position=cached_long,
+                positions=(cached_long,),
+                reconciled_state=_reconciled(
+                    venue_snapshot=_venue_hedge_short_snapshot(),
+                    cache_positions=(_cached_long_row(),),
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="position_required", detail=foreign_target_id),
+        )
+
+    def test_hedge_cache_long_venue_short_requested_short_uses_venue_fallback(
+        self,
+    ) -> None:
+        """P1-4: cache only holds the LONG book; managing the SHORT book must
+        fall back to fresh venue evidence instead of position_required."""
+        cached_long = PositionSnapshot(
+            instrument_id=INSTRUMENT_ID,
+            side="LONG",
+            quantity=VENUE_QUANTITY,
+            position_id="P-1",
+        )
+        intent = _intent(
+            action="close_position",
+            order_plan={"type": "market", "position_side": "short"},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                position=cached_long,
+                positions=(cached_long,),
+                reconciled_state=_reconciled(
+                    venue_snapshot=_venue_hedge_short_snapshot(),
+                    cache_positions=(_cached_long_row(),),
+                ),
+            ),
+        )
+
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.target_position_side, "SHORT")
+        self.assertEqual(result.orders[0].side, "BUY")
+        self.assertEqual(
+            Decimal(result.orders[0].quantity),
+            Decimal(VENUE_SHORT_QUANTITY),
+        )
+
+    def test_hedge_cache_long_target_short_id_uses_venue_fallback(self) -> None:
+        """P1-4: same hedge shape addressed by the synthesized SHORT id."""
+        cached_long = PositionSnapshot(
+            instrument_id=INSTRUMENT_ID,
+            side="LONG",
+            quantity=VENUE_QUANTITY,
+            position_id="P-1",
+        )
+        intent = _close_intent(
+            target_position_id=f"{INSTRUMENT_ID}-SHORT",
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                position=cached_long,
+                positions=(cached_long,),
+                reconciled_state=_reconciled(
+                    venue_snapshot=_venue_hedge_short_snapshot(),
+                    cache_positions=(_cached_long_row(),),
+                ),
+            ),
+        )
+
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.target_position_id, f"{INSTRUMENT_ID}-SHORT")
+        self.assertEqual(result.target_position_side, "SHORT")
+        self.assertEqual(result.orders[0].side, "BUY")
+
+    def test_hedge_side_miss_with_reconciled_none_keeps_legacy_denial(self) -> None:
+        """P1-4 guard: reconciled_state=None keeps the exact legacy denial
+        when the cache lacks the requested side."""
+        cached_long = PositionSnapshot(
+            instrument_id=INSTRUMENT_ID,
+            side="LONG",
+            quantity=VENUE_QUANTITY,
+            position_id="P-1",
+        )
+        intent = _intent(
+            action="close_position",
+            order_plan={"type": "market", "position_side": "short"},
+        )
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                position=cached_long,
+                positions=(cached_long,),
+                reconciled_state=None,
+            ),
+        )
+
+        self.assertEqual(
+            result,
+            OrderDenied(
+                reason="position_required",
+                detail=f"{INSTRUMENT_ID}:SHORT",
+            ),
+        )
+
     def test_position_id_variant_matches_known_open_book_with_consistent_side(
         self,
     ) -> None:
@@ -282,6 +428,39 @@ def _venue_long_snapshot() -> dict[str, Any]:
 
 def _venue_flat_snapshot() -> dict[str, Any]:
     return {"positions": [], "open_orders": [], "algo_orders": []}
+
+
+VENUE_SHORT_QUANTITY = "300"
+
+
+def _venue_hedge_short_snapshot() -> dict[str, Any]:
+    """Hedge-mode venue truth: the LONG the cache knows plus a SHORT the
+    cache is blind to."""
+    return {
+        "positions": [
+            {
+                "symbol": VENUE_SYMBOL,
+                "position_amt": VENUE_QUANTITY,
+                "position_side": "LONG",
+            },
+            {
+                "symbol": VENUE_SYMBOL,
+                "position_amt": f"-{VENUE_SHORT_QUANTITY}",
+                "position_side": "SHORT",
+            },
+        ],
+        "open_orders": [],
+        "algo_orders": [],
+    }
+
+
+def _cached_long_row() -> dict[str, Any]:
+    return {
+        "instrument_id": INSTRUMENT_ID,
+        "side": "LONG",
+        "quantity": VENUE_QUANTITY,
+        "position_id": "P-1",
+    }
 
 
 def _reconciled(
