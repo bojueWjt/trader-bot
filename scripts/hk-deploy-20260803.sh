@@ -9324,7 +9324,7 @@ if [ "$DELIVERY_MODE" = "transition_bind_mount" ]; then
     live="$T/container-patches/$bundle_path"
     if [ ! -f "$live" ]; then
       case "$bundle_path" in
-        account_execution_ledger.py|idempotency.py|identifiers.py|execution_domain_init.py|approved_intent_client.py|bounded_task_worker.py|control_plane_session.py|health.py|health_server.py|run_node.py|reconciliation.py|redis_safety.py|live_canary_execution.py|node_config.py|risk_config.py|risk_init.py|projection_spool.py|nautilus_config.py|persistence_init.py|redis_namespace_lease.py|redis_resp_client.py)
+        account_execution_ledger.py|idempotency.py|identifiers.py|owned_order_recovery.py|execution_domain_init.py|approved_intent_client.py|bounded_task_worker.py|control_plane_session.py|health.py|health_server.py|run_node.py|reconciliation.py|redis_safety.py|live_canary_execution.py|node_config.py|risk_config.py|risk_init.py|projection_spool.py|nautilus_config.py|persistence_init.py|redis_namespace_lease.py|redis_resp_client.py)
           NEW_CONTAINER+=("$bundle_path")
           CHANGED_CONTAINER+=("$bundle_path")
           continue

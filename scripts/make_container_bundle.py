@@ -111,6 +111,11 @@ BUNDLE_FILES = (
         "/app/runtime/control_plane_session.py",
     ),
     (
+        "owned_order_recovery.py",
+        "services/nautilus-node/runtime/owned_order_recovery.py",
+        "/app/runtime/owned_order_recovery.py",
+    ),
+    (
         "intent_execution_inbox.py",
         "services/nautilus-node/runtime/intent_execution_inbox.py",
         "/app/runtime/intent_execution_inbox.py",
@@ -229,6 +234,7 @@ REQUIRED_RUNTIME_BUNDLE_TARGETS = {
     "/app/runtime/health.py",
     "/app/runtime/bounded_task_worker.py",
     "/app/runtime/control_plane_session.py",
+    "/app/runtime/owned_order_recovery.py",
     "/app/runtime/intent_execution_inbox.py",
     "/app/runtime/redis_safety.py",
     "/app/runtime/reconciliation.py",

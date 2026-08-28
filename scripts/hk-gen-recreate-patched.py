@@ -79,6 +79,10 @@ PATCH_MOUNT_TARGETS = (
         "/app/runtime/control_plane_session.py",
     ),
     (
+        "owned_order_recovery.py",
+        "/app/runtime/owned_order_recovery.py",
+    ),
+    (
         "intent_execution_inbox.py",
         "/app/runtime/intent_execution_inbox.py",
     ),
