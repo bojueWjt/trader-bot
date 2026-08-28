@@ -75,6 +75,7 @@ class PlannerContext:
     existing_orders: tuple[OrderSnapshot, ...] = ()
     existing_intent_ids: frozenset[str] = frozenset()
     effective_settings: Mapping[str, Any] | None = None
+    reconciled_state: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -191,7 +192,7 @@ def plan_intent_execution(intent: Any, context: PlannerContext) -> OrderPlan | M
         return side_result
     side = side_result
 
-    position_denial = _validate_position(action, side, context.position, instrument_id)
+    position_denial = _validate_position(action, side, context, instrument_id)
     if position_denial is not None:
         return position_denial
 
@@ -654,6 +655,18 @@ def _select_target_position(
         if position.instrument_id == instrument_id and Decimal(str(position.quantity)) != Decimal("0")
     )
     target_position_id = getattr(intent, "target_position_id", None)
+    if not positions:
+        # Cache view is empty: fall back to fresh venue evidence (when
+        # provided) so management intents survive cache blindness. The
+        # cached fast path below is untouched when positions exist.
+        fallback = _reconciled_target_position(
+            context,
+            instrument_id,
+            requested_side=requested_side,
+            target_position_id=target_position_id,
+        )
+        if fallback is not None:
+            return fallback
     if target_position_id:
         matches = tuple(position for position in positions if position.position_id == target_position_id)
         if len(matches) == 0:
@@ -686,6 +699,106 @@ def _select_target_position(
     if len(side_matches) > 1:
         return OrderDenied("position_not_unique", side_detail)
     return side_matches[0]
+
+
+def _reconciled_assessment(
+    context: PlannerContext,
+    instrument_id: str,
+    position_side: str,
+) -> Any | None:
+    """Assess one (instrument, side) book against the reconciled venue state.
+
+    Returns ``None`` when no reconciled state was provided (legacy behavior)
+    or when the execution-domain package is unavailable.
+    """
+
+    reconciled_state = context.reconciled_state
+    if reconciled_state is None:
+        return None
+    try:
+        from execution_domain.account_execution_ledger import BookKey
+    except ImportError:
+        return None
+    try:
+        return reconciled_state.assess(
+            BookKey(
+                account_id=context.account_id,
+                instrument_id=instrument_id,
+                position_side=position_side,
+            )
+        )
+    except Exception:
+        return None
+
+
+def _target_position_id_side(target_position_id: Any) -> str:
+    text = str(target_position_id or "").strip().upper()
+    if text.endswith("-LONG"):
+        return "LONG"
+    if text.endswith("-SHORT"):
+        return "SHORT"
+    return ""
+
+
+def _reconciled_target_position(
+    context: PlannerContext,
+    instrument_id: str,
+    *,
+    requested_side: str,
+    target_position_id: Any,
+) -> PositionSnapshot | OrderDenied | None:
+    """Venue-evidence fallback for management intents with an empty cache.
+
+    Only called when the cache holds no non-zero position for the
+    instrument. Returns ``None`` to keep the legacy denial path when no
+    reconciled state is available.
+    """
+
+    if context.reconciled_state is None:
+        return None
+    id_side = _target_position_id_side(target_position_id)
+    if requested_side and id_side and requested_side != id_side:
+        return OrderDenied(
+            "position_side_mismatch",
+            f"requested={requested_side},target_position_id={target_position_id}",
+        )
+    book_side = requested_side or id_side
+    sides = (book_side,) if book_side else ("LONG", "SHORT")
+    assessments: list[tuple[str, Any]] = []
+    for side in sides:
+        assessment = _reconciled_assessment(context, instrument_id, side)
+        if assessment is None:
+            return None
+        assessments.append((side, assessment))
+    for _, assessment in assessments:
+        if assessment.state == "unknown":
+            return OrderDenied("position_state_unknown", assessment.detail)
+    for _, assessment in assessments:
+        if assessment.state == "conflicted":
+            return OrderDenied("position_state_conflicted", assessment.detail)
+    open_books = [
+        (side, assessment)
+        for side, assessment in assessments
+        if assessment.state == "known_open"
+    ]
+    if len(open_books) > 1:
+        return OrderDenied("position_not_unique", instrument_id)
+    if len(open_books) == 1:
+        side, assessment = open_books[0]
+        return PositionSnapshot(
+            instrument_id=instrument_id,
+            side=side,
+            quantity=format(assessment.quantity, "f"),
+            position_id=f"{instrument_id}-{side}",
+        )
+    # Every assessed book is KNOWN_FLAT: the original denial semantics apply.
+    if target_position_id:
+        detail = str(target_position_id)
+    elif book_side:
+        detail = f"{instrument_id}:{book_side}"
+    else:
+        detail = instrument_id
+    return OrderDenied("position_required", detail)
 
 
 def _context_positions(context: PlannerContext) -> tuple[PositionSnapshot, ...]:
@@ -793,9 +906,25 @@ def _zone_boundary_price(order_plan: dict[str, Any], instrument: InstrumentSpec)
 def _validate_position(
     action: str,
     side: str,
-    position: Optional[PositionSnapshot],
+    context: PlannerContext,
     instrument_id: str,
 ) -> Optional[OrderDenied]:
+    position = context.position
+    cache_empty = position is None or Decimal(str(position.quantity)) == Decimal("0")
+    if (
+        cache_empty
+        and action == OPEN_POSITION
+        and context.reconciled_state is not None
+    ):
+        # Cache blindness on an open: venue evidence restores the legacy
+        # position_exists guard the empty cache lost. Advisory-only beyond
+        # that (owner-operated account, 2026-08-28 operator directive):
+        # UNKNOWN/CONFLICTED fall through to legacy behavior instead of
+        # blocking the owner's order.
+        expected_side = "LONG" if side == "BUY" else "SHORT"
+        assessment = _reconciled_assessment(context, instrument_id, expected_side)
+        if assessment is not None and assessment.state == "known_open":
+            return OrderDenied("position_exists", assessment.detail)
     if action == OPEN_POSITION:
         if position is not None and Decimal(str(position.quantity)) != Decimal("0"):
             return OrderDenied("position_exists", instrument_id)

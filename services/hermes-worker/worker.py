@@ -299,6 +299,16 @@ def _enforce_action_safety(decision: dict) -> None:
         to_review(f"update message_type {message_type} cannot open a position")
     if action in update_actions and not intent.get("target_position_id"):
         to_review(f"{action} requires a target_position_id")
+    # Protection completeness note (2026-08-28 WP-E, advisory per operator
+    # directive — owner-operated account, never block): an open decision with
+    # neither take profits nor a stop loss proceeds, but the gap is recorded
+    # on the decision so reports and operators can see it.
+    if action in {"open_position", "add_position"}:
+        take_profits = intent.get("take_profits") or []
+        if not take_profits and intent.get("stop_loss") is None:
+            reason = f"{action} has neither take_profits nor stop_loss (protection incomplete; advisory)"
+            if reason not in reasons:
+                reasons.append(reason)
 
 
 def _assemble_decision(

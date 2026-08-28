@@ -16,6 +16,7 @@ from threading import Lock, RLock
 from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID, uuid4
 
+from execution_domain.account_execution_ledger import ReconciledExecutionState
 from execution_domain.order_ownership import (
     is_robot_client_order_id,
     object_client_order_id,
@@ -1058,6 +1059,66 @@ class IntentExecutionStrategy(Strategy):
         except Exception as exc:
             self._record_denial(OrderDenied("exchange_state_refresh_failed", repr(exc)))
             return False
+
+    _RECONCILED_EVIDENCE_MAX_AGE_SECONDS = 30.0
+
+    def _build_reconciled_state(self, instrument_id: str) -> Any | None:
+        """Build a per-book reconciled state from fresh venue evidence.
+
+        Reuses the exchange evidence snapshot the heartbeat gate already
+        fetches; never triggers new I/O. Returns ``None`` when no fresh
+        snapshot is available, which keeps planner behavior identical to
+        the pre-reconciliation path.
+        """
+
+        provider = self._exchange_evidence_provider
+        if not provider:
+            return None
+        cached_snapshot = getattr(provider, "cached_snapshot", None)
+        if not callable(cached_snapshot):
+            return None
+        try:
+            snapshot = cached_snapshot(
+                max_age_seconds=self._RECONCILED_EVIDENCE_MAX_AGE_SECONDS,
+            )
+        except Exception:
+            return None
+        if not isinstance(snapshot, Mapping):
+            return None
+        fetched_at = snapshot.get("fetched_at")
+        if not isinstance(fetched_at, datetime):
+            return None
+        venue_snapshot = {
+            "positions": [
+                {
+                    "symbol": row.get("symbol"),
+                    "position_amt": row.get("quantity"),
+                    "position_side": row.get("position_side"),
+                }
+                for row in (snapshot.get("positions") or ())
+                if isinstance(row, Mapping)
+            ],
+            "open_orders": [
+                dict(row)
+                for row in (snapshot.get("regular_orders") or ())
+                if isinstance(row, Mapping)
+            ],
+            "algo_orders": [
+                dict(row)
+                for row in (snapshot.get("algo_orders") or ())
+                if isinstance(row, Mapping)
+            ],
+        }
+        try:
+            return ReconciledExecutionState.build(
+                account_id=self.config.account_id,
+                venue_snapshot=venue_snapshot,
+                venue_fetched_at=fetched_at,
+                cache_positions=self._position_snapshots(instrument_id),
+                now=self._now(),
+            )
+        except Exception:
+            return None
 
     _PROTECTION_STASH_FILENAME = "protection_stash.json"
     _PROTECTION_TERMINAL_EVENT_LIMIT = 32
@@ -2695,6 +2756,7 @@ class IntentExecutionStrategy(Strategy):
                 include_exchange_mirror=exchange_state_ready,
             ),
             existing_intent_ids=existing_intent_ids,
+            reconciled_state=self._build_reconciled_state(instrument_id),
         )
         if str(raw_order_plan.get("type", "")).lower() == "zone_ladder":
             self._handle_zone_ladder(

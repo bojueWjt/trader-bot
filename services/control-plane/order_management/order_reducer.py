@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -30,9 +31,23 @@ class OrderApplyResult:
 
 
 class OrderProjectionReducer:
-    def apply_event(self, conn, event: dict[str, Any]) -> OrderApplyResult:
+    def apply_event(
+        self,
+        conn,
+        event: dict[str, Any],
+        *,
+        manage_transaction: bool = True,
+    ) -> OrderApplyResult:
+        """Apply one order event to the projection.
+
+        manage_transaction=True (default) keeps the historical behavior of
+        committing/rolling back the connection itself. manage_transaction=False
+        runs entirely inside the caller's transaction (e.g. the node event
+        ingest savepoint) without committing or rolling back.
+        """
         normalized = _normalize_event(event)
-        with transaction(conn):
+        tx_scope = transaction(conn) if manage_transaction else nullcontext(conn)
+        with tx_scope:
             if _order_event_seen(conn, normalized["event_id"]):
                 status = _current_status(
                     conn, normalized["account_id"], normalized["client_order_id"]

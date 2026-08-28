@@ -305,7 +305,10 @@ def build_nautilus_trading_node(
                 persistence_instance_id,
             ),
             "risk_engine": build_live_risk_engine_config(runtime.risk_config),
-            "exec_engine": build_live_exec_engine_config(runtime.config),
+            "exec_engine": build_live_exec_engine_config(
+                runtime.config,
+                venue_instrument_ids=_startup_venue_instrument_ids(runtime),
+            ),
             "data_clients": {"BINANCE": data_client_config},
             "exec_clients": {"BINANCE": exec_client_config},
         }
@@ -445,6 +448,82 @@ def build_nautilus_trading_node(
             _stop_background_workers(runtime)
             runtime.namespace_lease_guard = None
             _release_startup_namespace_lease(namespace_lease_guard)
+
+
+_STARTUP_VENUE_SNAPSHOT_MAX_AGE_SECONDS = 30.0
+
+
+def _startup_venue_instrument_ids(
+    runtime: AccountRuntime,
+) -> list[str] | None:
+    """Collect venue instrument ids to widen the startup reconciliation scope.
+
+    Uses any available exchange snapshot source (evidence provider first, the
+    control-plane exchange-state mirror as a fallback) and returns instrument
+    ids in ``SYMBOL-PERP.BINANCE`` form for every instrument that carries a
+    non-zero position, an open order, or an algo order. Returns ``None`` when
+    no snapshot can be obtained; startup must never fail because of this.
+    """
+
+    if runtime.config.binance.environment != "live":
+        return None
+    provider = getattr(runtime, "exchange_evidence_provider", None)
+    if provider is not None:
+        try:
+            snapshot: Any = None
+            cached_snapshot = getattr(provider, "cached_snapshot", None)
+            if callable(cached_snapshot):
+                cached = cached_snapshot(
+                    max_age_seconds=_STARTUP_VENUE_SNAPSHOT_MAX_AGE_SECONDS,
+                )
+                if isinstance(cached, Mapping):
+                    snapshot = cached
+            if snapshot is None:
+                snapshot = provider.snapshot(force_refresh=True)
+            if isinstance(snapshot, Mapping):
+                symbols: set[str] = set()
+                for section in ("positions", "regular_orders", "algo_orders"):
+                    rows = snapshot.get(section)
+                    if not isinstance(rows, (list, tuple)):
+                        continue
+                    for row in rows:
+                        if not isinstance(row, Mapping):
+                            continue
+                        symbol = str(row.get("symbol") or "").strip().upper()
+                        if symbol:
+                            symbols.add(symbol)
+                return sorted(
+                    f"{symbol}-PERP.BINANCE" for symbol in symbols
+                )
+        except Exception as exc:
+            print(
+                "[NodeRuntime] WARNING: startup venue snapshot via "
+                f"exchange evidence provider failed: {exc!r}",
+                flush=True,
+            )
+    mirror = getattr(runtime, "exchange_state_mirror", None)
+    if mirror:
+        refresh = getattr(mirror, "refresh", None)
+        if callable(refresh):
+            try:
+                instrument_ids = {
+                    str(getattr(order, "instrument_id", "") or "")
+                    for order in tuple(refresh())
+                }
+                instrument_ids.discard("")
+                return sorted(instrument_ids)
+            except Exception as exc:
+                print(
+                    "[NodeRuntime] WARNING: startup venue snapshot via "
+                    f"exchange state mirror failed: {exc!r}",
+                    flush=True,
+                )
+    print(
+        "[NodeRuntime] WARNING: no startup venue snapshot available; "
+        "reconciliation scope falls back to risk-configured instruments",
+        flush=True,
+    )
+    return None
 
 
 def _build_actor_restart_required_callback(

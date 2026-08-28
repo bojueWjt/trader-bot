@@ -48,6 +48,7 @@ Rules:
 - ALWAYS include the full "intent" object with every field above; use null / [] / "unassigned" / "none" when not applicable.
 - For non-actionable messages (analysis, noise, commentary, or updates with no executable change), set classification.action to "ignore" (or "hold"), and set intent to account_scope "unassigned", side null, entry.type "none", take_profits [], all prices/levels null.
 - If the message is ambiguous, a required image is missing/unreadable, or a target position cannot be uniquely identified: classification.action="needs_review", classification.ambiguous=true, with ambiguity_reasons.
+- An open signal that provides neither stop_loss nor take_profits is incomplete: set classification.ambiguous=true and record the missing protection in ambiguity_reasons.
 - Update messages (position_update/close_update) must NOT produce "open_position".
 - close_position/partial_close/move_stop_* must reference a real target_position_id; otherwise "needs_review".
 - Never invent prices/levels not supported by the message or images. Put the message/image basis in "evidence".

@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "intent_id": "77777777-7777-4777-8777-777777777777",
+  "decision_id": "88888888-8888-4888-8888-888888888888",
+  "risk_decision_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "account_id": "acct-main",
+  "instrument_id": "BTCUSDT-PERP.BINANCE",
+  "action": "open_position",
+  "order_plan": {
+    "side": "buy",
+    "type": "limit",
+    "time_in_force": "GTC",
+    "quantity": "0.002",
+    "price": 62300.0,
+    "stop_loss": 61000.0,
+    "take_profits": [],
+    "protection_policy": "stop_only",
+    "leverage": 3.0
+  },
+  "risk_budget": {
+    "risk_fraction": 0.01,
+    "max_notional": 2500,
+    "max_leverage": 3
+  },
+  "target_position_id": null,
+  "valid_until": "2026-06-19T13:00:00Z",
+  "idempotency_key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "approved_at": "2026-06-19T12:03:00Z"
+}

@@ -117,6 +117,16 @@
             "type": "number"
           }
         },
+        "protection_policy": {
+          "type": "string",
+          "description": "Explicit protection completeness declaration for open/add plans. Optional for backward compatibility.",
+          "enum": [
+            "complete",
+            "stop_only",
+            "deferred",
+            "waived"
+          ]
+        },
         "plan_version": {
           "type": "string",
           "enum": [

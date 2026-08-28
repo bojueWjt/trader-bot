@@ -3352,6 +3352,7 @@ def test_account_a_canary_permit_is_atomic_single_use_and_capped(
         "quantity": 0.12,
         "notional_usdt": 12,
         "reason": "account-a canary",
+        "protection_policy": "waived",
         "canary_permit_id": permit_id,
     }
 
@@ -3478,6 +3479,7 @@ def test_canary_open_rejects_robot_owned_target_position_footprint(
             "notional_usdt": 12,
             "reason": "account-a canary",
             "canary_permit_id": permit_id,
+            "protection_policy": "waived",
             "client_ref": "canary-open-owned-position",
         },
     )
@@ -3528,6 +3530,7 @@ def test_canary_open_uses_latest_ownership_rebaseline(
             "notional_usdt": 12,
             "reason": "account-a canary",
             "canary_permit_id": permit_id,
+            "protection_policy": "waived",
             "client_ref": "canary-open-rebaseline",
         },
     )
@@ -3563,6 +3566,7 @@ def test_account_a_canary_rejects_invalid_supplied_intent_id(
             "notional_usdt": 12,
             "reason": "account-a invalid canary intent",
             "client_ref": "canary-invalid-intent-id",
+            "protection_policy": "waived",
             "canary_permit_id": permit_id,
         },
     )
@@ -3608,6 +3612,7 @@ def test_canary_open_replay_preserves_first_gate_and_budget(
         "notional_usdt": 12,
         "reason": "stable replay proof",
         "client_ref": "stable-canary-replay",
+        "protection_policy": "waived",
         "canary_permit_id": permit_id,
     }
     first = client.post(
@@ -3699,6 +3704,7 @@ def test_rollout_accounts_accept_regular_zone_open(
             "quantity": 0.12,
             "notional_usdt": 12,
             "reason": f"{account_id} regular zone signal",
+            "protection_policy": "waived",
             "client_ref": f"{account_id}-regular-zone",
         },
     )
@@ -3738,6 +3744,7 @@ def test_account_a_canary_rejects_notional_above_permit(
             "notional_usdt": 12.01,
             "reason": "account-a canary",
             "client_ref": "canary-over-limit",
+            "protection_policy": "waived",
             "canary_permit_id": permit_id,
         },
     )
@@ -3773,6 +3780,7 @@ def test_account_a_canary_rejects_decimal_notional_that_float_rounds_to_cap(
             "notional_usdt": "12.0000000000000001",
             "reason": "account-a decimal canary",
             "client_ref": "canary-decimal-over-limit",
+            "protection_policy": "waived",
             "canary_permit_id": permit_id,
         },
     )
@@ -3822,6 +3830,7 @@ def test_account_a_canary_permit_has_one_concurrent_open_winner(
                     "quantity": 0.12,
                     "notional_usdt": 12,
                     "reason": "concurrent account-a canary",
+                    "protection_policy": "waived",
                     "client_ref": client_ref,
                     "canary_permit_id": permit_id,
                 },
@@ -4366,6 +4375,7 @@ def test_permit_consumption_allows_non_owned_baseline_change(
             "quantity": 0.12,
             "notional_usdt": 12,
             "reason": "baseline changed",
+            "protection_policy": "waived",
             "client_ref": "baseline-changed",
             "canary_permit_id": permit_id,
         },

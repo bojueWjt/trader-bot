@@ -17,9 +17,12 @@ def decimal_or_none(value: Any) -> Decimal | None:
         return None
 
 
-def ensure_aware(value: datetime | None) -> datetime:
+def ensure_aware(value: datetime | str | None) -> datetime:
     if value is None:
         return datetime.now(timezone.utc)
+    if isinstance(value, str):
+        # Node event envelopes arrive over JSON with ISO-8601 ts_event strings.
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -203,7 +203,10 @@ def resolve_message_bus_autotrim_mins() -> int:
     return int(raw)
 
 
-def build_live_exec_engine_kwargs(config: NodeConfig) -> dict[str, Any]:
+def build_live_exec_engine_kwargs(
+    config: NodeConfig,
+    venue_instrument_ids: Iterable[str] | None = None,
+) -> dict[str, Any]:
     """Return engine-level reconciliation kwargs for Nautilus live config.
 
     B-00 established reconciliation belongs on the engine layer, not the Binance
@@ -227,10 +230,18 @@ def build_live_exec_engine_kwargs(config: NodeConfig) -> dict[str, Any]:
         raise RuntimeError(
             "live reconciliation requires owned instruments"
         )
+    reconciliation_instrument_ids = (
+        {
+            str(instrument_id)
+            for instrument_id in risk.max_notional_per_order
+        }
+        | {
+            str(instrument_id)
+            for instrument_id in (venue_instrument_ids or ())
+        }
+    ) - {DEFAULT_LIVE_ENTRY_NOTIONAL_KEY}
     kwargs["reconciliation_instrument_ids"] = sorted(
-        str(instrument_id)
-        for instrument_id in risk.max_notional_per_order
-        if instrument_id != DEFAULT_LIVE_ENTRY_NOTIONAL_KEY
+        reconciliation_instrument_ids
     )
     if not kwargs["reconciliation_instrument_ids"]:
         raise RuntimeError(
@@ -349,7 +360,10 @@ def build_message_bus_config(
     )
 
 
-def build_live_exec_engine_config(config: NodeConfig) -> Any:
+def build_live_exec_engine_config(
+    config: NodeConfig,
+    venue_instrument_ids: Iterable[str] | None = None,
+) -> Any:
     """Build Nautilus ``LiveExecEngineConfig`` with startup/continuous reconcile."""
 
     from nautilus_trader.config import (
@@ -359,7 +373,10 @@ def build_live_exec_engine_config(config: NodeConfig) -> Any:
         InstrumentId,
     )
 
-    kwargs = build_live_exec_engine_kwargs(config)
+    kwargs = build_live_exec_engine_kwargs(
+        config,
+        venue_instrument_ids=venue_instrument_ids,
+    )
     raw_instrument_ids = kwargs.get("reconciliation_instrument_ids")
     if raw_instrument_ids:
         kwargs["reconciliation_instrument_ids"] = [

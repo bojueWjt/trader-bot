@@ -123,6 +123,47 @@ class ProjectionWriter:
                  payload.get("event_id"), payload.get("ts_event"), Json(payload.get("payload") or {})),
             )
 
+    def record_projection_failure(
+        self,
+        *,
+        event_id: str,
+        account_id: str,
+        projector: str,
+        error: str,
+    ) -> None:
+        """Durable record of one failed projection derivation (0018)."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO projection_failures (event_id, account_id, projector, error)
+                VALUES (%s,%s,%s,%s)
+                """,
+                (event_id, account_id, projector, error[:4000]),
+            )
+
+    def upsert_projection_watermark(
+        self,
+        *,
+        account_id: str,
+        projector: str,
+        event_id: str,
+        ts_event,
+    ) -> None:
+        """Advance the per-account projector watermark after a successful derivation."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO projection_watermarks
+                    (account_id, projector, last_event_id, last_event_ts, updated_at)
+                VALUES (%s,%s,%s,COALESCE(%s::timestamptz, now()), now())
+                ON CONFLICT (account_id, projector) DO UPDATE SET
+                    last_event_id=EXCLUDED.last_event_id,
+                    last_event_ts=EXCLUDED.last_event_ts,
+                    updated_at=now()
+                """,
+                (account_id, projector, event_id, ts_event),
+            )
+
     def upsert_order_projection(self, payload: dict) -> None:
         with self.conn.cursor() as cur:
             cur.execute(

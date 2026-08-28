@@ -242,7 +242,10 @@ def test_missing_media_fails_closed(db_conn):
     assert _count(db_conn, "SELECT count(*) FROM hermes_decisions WHERE raw_message_id = %s", (raw_id,)) == 0
 
 
-def test_stale_snapshot_fails_closed(db_conn):
+def test_stale_snapshot_still_classifies_signal(db_conn):
+    # Contract since 2a7fe13: a stale-but-present projection must NEVER drop the
+    # user's signal. Hermes still classifies it (recorded + visible); §2.2 staleness
+    # only gates auto-approval downstream in the Decision Gateway.
     raw_id = seed_message(db_conn)
     stale = fresh_snapshot()
     stale["stale"] = True
@@ -250,8 +253,24 @@ def test_stale_snapshot_fails_closed(db_conn):
 
     result = run_worker(db_conn, client, snapshot=stale)
 
-    assert result.status == "context_stale"
+    assert result.status == "succeeded"
+    assert client.calls == 1
+    assert _count(db_conn, "SELECT count(*) FROM hermes_decisions WHERE raw_message_id = %s", (raw_id,)) == 1
+
+
+def test_unusable_snapshot_fails_closed(db_conn):
+    # Only a structurally unusable snapshot (no PostgreSQL projection at all)
+    # remains a hard fail: no model call, no decision.
+    raw_id = seed_message(db_conn)
+    unusable = fresh_snapshot()
+    unusable["data_source"] = "none"
+    client = MockHermesClient(candidate=valid_candidate())
+
+    result = run_worker(db_conn, client, snapshot=unusable)
+
+    assert result.status == "context_unavailable"
     assert client.calls == 0
+    assert _run_status(db_conn, result.processing_run_id) == "hermes_failed"
     assert _count(db_conn, "SELECT count(*) FROM hermes_decisions WHERE raw_message_id = %s", (raw_id,)) == 0
 
 

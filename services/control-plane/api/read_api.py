@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -2749,18 +2750,40 @@ def _order_projection_from_event(ev: dict) -> dict | None:
     return _normalize_order_hint(hint)
 
 
-def _derive_projection_from_event(writer, ev: dict) -> None:
-    """Derive guarded read-model projections from one raw execution event."""
+_projection_log = logging.getLogger("control_plane.projection")
+
+
+def _intended_projectors(ev: dict) -> tuple[str, ...]:
+    """Best-effort mapping from one event to the projectors it feeds."""
+    et = str(ev.get("event_type") or "")
+    payload = ev.get("payload") or {}
+    projectors: list[str] = []
+    if isinstance(payload.get("position"), dict) or et.startswith("Position"):
+        projectors.append("positions")
+    if et.startswith("Order"):
+        projectors.append("orders")
+    return tuple(projectors) or ("unknown",)
+
+
+def _derive_projection_from_event(writer, ev: dict) -> set[str]:
+    """Derive guarded read-model projections from one raw execution event.
+
+    Returns the set of projector names that successfully derived, and advances
+    the matching projection_watermarks rows in the caller's transaction.
+    """
+    derived: set[str] = set()
     et = str(ev.get("event_type") or "")
     payload = ev.get("payload") or {}
     if not ev.get("account_id"):
-        return
+        return derived
     position_hint = _position_projection_from_event(ev)
     if position_hint is not None:
         writer.upsert_position_projection(position_hint)
-        return
+        derived.add("positions")
+        _advance_projection_watermarks(writer, ev, derived)
+        return derived
     if not et.startswith("Order"):
-        return
+        return derived
 
     order_payload = dict(payload)
     nested_order = payload.get("order")
@@ -2769,7 +2792,7 @@ def _derive_projection_from_event(writer, ev: dict) -> None:
     client_order_id = ev.get("client_order_id") or order_payload.get("client_order_id")
     venue_order_id = ev.get("venue_order_id") or order_payload.get("venue_order_id")
     if not client_order_id and not venue_order_id:
-        return
+        return derived
 
     side = _order_side(order_payload.get("side") or order_payload.get("order_side"))
     if side is not None:
@@ -2792,6 +2815,23 @@ def _derive_projection_from_event(writer, ev: dict) -> None:
         reducer_event,
         manage_transaction=False,
     )
+    derived.add("orders")
+    _advance_projection_watermarks(writer, ev, derived)
+    return derived
+
+
+def _advance_projection_watermarks(writer, ev: dict, projectors: set[str]) -> None:
+    account_id = str(ev.get("account_id") or "")
+    event_id = str(ev.get("event_id") or "")
+    if not account_id or not event_id:
+        return
+    for projector in sorted(projectors):
+        writer.upsert_projection_watermark(
+            account_id=account_id,
+            projector=projector,
+            event_id=event_id,
+            ts_event=ev.get("ts_event"),
+        )
 
 
 @app.post("/v1/nodes/{node_id}/execution-events")
@@ -2860,14 +2900,34 @@ def post_node_events(node_id: str, body: dict = Body(default={}),
                     )
                     if pos_hint is not None:
                         writer.upsert_position_projection(pos_hint)
+                        _advance_projection_watermarks(writer, event, {"positions"})
                 _derive_projection_from_event(writer, event)
                 with conn.cursor() as sp:
                     sp.execute("RELEASE SAVEPOINT proj")
-            except Exception:
+            except Exception as exc:
                 # One bad payload must not abort the batch: roll back just this
                 # event's projection writes; the raw event above stays committed.
                 with conn.cursor() as sp:
                     sp.execute("ROLLBACK TO SAVEPOINT proj")
+                # Never swallow silently (the pre-0018 bug): record the failure
+                # durably in the outer transaction and emit a structured log.
+                error_text = f"{type(exc).__name__}: {exc}"
+                for projector in _intended_projectors(event):
+                    writer.record_projection_failure(
+                        event_id=str(ev_id),
+                        account_id=account_id,
+                        projector=projector,
+                        error=error_text,
+                    )
+                _projection_log.error(
+                    "projection_derivation_failed event_id=%s account_id=%s "
+                    "event_type=%s projectors=%s error=%s",
+                    ev_id,
+                    account_id,
+                    event.get("event_type"),
+                    ",".join(_intended_projectors(event)),
+                    error_text,
+                )
             acked.append(str(ev["event_id"]))
         conn.commit()
         return {"acked_event_ids": acked}
@@ -5669,6 +5729,10 @@ _OPERATOR_ACTIONS = (
 # Protection management: no new exposure (node places reduce-only orders sized to
 # the live position), so these skip notional sizing entirely.
 _OPERATOR_PROTECT_ACTIONS = ("move_stop_loss", "replace_take_profits")
+# Protection completeness gate (2026-08-28 execution-state migration WP-E):
+# an open/add plan without take profits must either carry a stop_loss or an
+# explicit protection_policy so "no protection" is always a stated decision.
+_OPERATOR_PROTECTION_POLICIES = ("complete", "stop_only", "deferred", "waived")
 _OPERATOR_MANAGEMENT_ACTIONS = (
     "close_position",
     "partial_close",
@@ -7167,6 +7231,33 @@ def _op_decimal(value, field: str, required: bool = False) -> Decimal | None:
     return number
 
 
+def _operator_entry_price_key(order_plan) -> tuple:
+    """Decimal-normalized entry price triple used for semantic open dedup.
+
+    Two open intents count as the "same entry" only when price, price_min and
+    price_max are all Decimal-equal (None matches None): the 2026-08-25 pair at
+    1.55 vs 1.459 must NOT collide."""
+    entry = {}
+    if isinstance(order_plan, dict):
+        raw_entry = order_plan.get("entry")
+        if isinstance(raw_entry, dict):
+            entry = raw_entry
+
+    def _as_decimal(value):
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+
+    return (
+        _as_decimal(entry.get("price")),
+        _as_decimal(entry.get("price_min")),
+        _as_decimal(entry.get("price_max")),
+    )
+
+
 def _lock_canary_permit(
     cur,
     *,
@@ -7703,6 +7794,35 @@ def operator_order(
     notional = None
     quantity = None
     canary_actual_notional = None
+    protection_policy = None
+    operator_warnings: list[str] = []
+    if action in ("open_position", "add_position"):
+        raw_protection_policy = body.get("protection_policy")
+        if raw_protection_policy is not None:
+            protection_policy = str(raw_protection_policy).strip().lower()
+            if protection_policy not in _OPERATOR_PROTECTION_POLICIES:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "protection_policy must be one of "
+                        f"{list(_OPERATOR_PROTECTION_POLICIES)}"
+                    ),
+                )
+        if not take_profits:
+            # Owner-operated account (2026-08-28 operator directive): protection
+            # completeness is advisory, never blocking. Record the factual
+            # policy and surface a warning instead of rejecting.
+            if stop_loss is None and protection_policy is None:
+                protection_policy = "deferred"
+                operator_warnings.append(
+                    f"{action} carries neither take_profits nor stop_loss; "
+                    "protection_policy recorded as 'deferred' — attach "
+                    "protection or declare a policy when convenient"
+                )
+            if stop_loss is not None and protection_policy is None:
+                # Stop present but nothing declared: record the factual policy
+                # instead of rejecting (operational continuity).
+                protection_policy = "stop_only"
     if action == "open_position":
         if side not in ("long", "short"):
             raise HTTPException(status_code=400, detail="side must be long|short for open_position")
@@ -7781,6 +7901,8 @@ def operator_order(
             "take_profits": take_profits,
             "leverage": leverage,
         }
+        if protection_policy is not None:
+            order_plan["protection_policy"] = protection_policy
         if expire_hours and entry_type in ("limit", "zone"):
             order_plan["expire_hours"] = expire_hours
         if quantity is not None:
@@ -8129,6 +8251,10 @@ def operator_order(
                     replay_response["attribution"] = attribution
                 replay_response["authorization"] = persisted_authorization
                 replay_response["target_position_id"] = target_position_id
+                if existing_plan.get("protection_policy") is not None:
+                    replay_response["protection_policy"] = existing_plan[
+                        "protection_policy"
+                    ]
                 return replay_response
             if action == "open_position":
                 rollout = _current_reviewed_rollout_state(
@@ -8176,6 +8302,36 @@ def operator_order(
                     notional=canary_actual_notional,
                 )
                 order_plan["canary_permit"] = canary_evidence
+            if (
+                action in ("open_position", "add_position")
+                and body.get("allow_duplicate") is not True
+            ):
+                # Semantic dedup (2026-08-25 double-entry incident): a second
+                # open at the SAME entry price while an approved intent is still
+                # active is almost certainly a duplicated signal, not a new one.
+                # Different prices (1.55 vs 1.459) must keep flowing.
+                cur.execute(
+                    "SELECT intent_id::text, order_plan FROM trade_intents "
+                    "WHERE account_id=%s AND instrument_id=%s AND action=%s "
+                    "AND status='approved' AND valid_until > now()",
+                    (account_id, symbol, action),
+                )
+                requested_entry_key = _operator_entry_price_key(order_plan)
+                for duplicate_intent_id, duplicate_plan in cur.fetchall():
+                    if (
+                        _operator_entry_price_key(duplicate_plan)
+                        == requested_entry_key
+                    ):
+                        # Owner-operated account (2026-08-28 operator
+                        # directive): advisory only — warn, never block.
+                        operator_warnings.append(
+                            "duplicate_open_intent: an approved intent with "
+                            "the same entry price is still active "
+                            f"({duplicate_intent_id}) for "
+                            f"{account_id}/{symbol}; proceeding — pass "
+                            "allow_duplicate=true to silence this warning"
+                        )
+                        break
             cur.execute(
                 "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version, "
                 "source_received_at, author_id, content_hash, message_text, raw_payload) "
@@ -8333,6 +8489,10 @@ def operator_order(
         "authorization": authorization_evidence,
         "target_position_id": target_position_id or False,
     }
+    if protection_policy is not None:
+        response["protection_policy"] = protection_policy
+    if operator_warnings:
+        response["warnings"] = operator_warnings
     if attribution:
         response["attribution"] = attribution
     return response
