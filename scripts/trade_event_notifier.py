@@ -311,6 +311,58 @@ def rejection_reason(detail: Any) -> str:
     return raw
 
 
+NODE_EVENT_TYPES = {"node.halted", "node.resumed"}
+
+
+def _node_observed_at(payload: dict[str, Any]) -> str:
+    raw = str(payload.get("observed_at") or "").strip()
+    if len(raw) >= 19 and raw[10] == "T":
+        return f"{raw[:10]} {raw[11:19]} UTC"
+    return raw or "—"
+
+
+def format_node_message(row: dict[str, Any]) -> str:
+    """Render a control-plane node.halted / node.resumed audit row.
+
+    Rows come from read_api's heartbeat transition handler (audit_events,
+    aggregate_type='node'); payload carries node_id / account_id / halt_reason /
+    previous_status / new_status / observed_at. Plain text, same conventions as
+    the intent messages.
+    """
+    payload = _mapping(row.get("payload"))
+    event_type = str(row.get("event_type") or "")
+    node_id = str(payload.get("node_id") or row.get("intent_id") or "?")
+    account_id = str(payload.get("account_id") or row.get("account_id") or "?")
+    previous = str(payload.get("previous_status") or "?").upper()
+    current = str(payload.get("new_status") or "?").upper()
+    when = _node_observed_at(payload)
+    if event_type == "node.halted":
+        reason = str(payload.get("halt_reason") or "").strip() or "—"
+        lines = [
+            "🛑 节点 HALTED（fail-closed）",
+            f"账户 {account_id}｜{node_id}",
+            f"原因 {reason}",
+            f"{previous} → {current}｜{when}",
+            "处置：核实原因后 resume_race.py 恢复",
+        ]
+    else:
+        lines = [
+            "✅ 节点已恢复 ACTIVE",
+            f"账户 {account_id}｜{node_id}",
+            f"{previous} → {current}｜{when}",
+        ]
+    return "\n".join(lines)
+
+
+def node_dedupe_key(row: dict[str, Any]) -> str:
+    """One notification per audit row: a new transition is always a new row."""
+    payload = _mapping(row.get("payload"))
+    node_id = str(payload.get("node_id") or row.get("intent_id") or "?")
+    event_type = str(row.get("event_type") or "")
+    source_id = str(row.get("source_id") or "?")
+    return f"node:{node_id}:{event_type}:{source_id}"
+
+
 def format_intent_message(row: dict[str, Any]) -> str:
     accepted = row.get("event_type") == "intent_ack.accepted"
     title = "✅ Intent 已批准"
@@ -862,7 +914,8 @@ def fetch_audit_rows(cursor: float) -> list[dict[str, Any]]:
         "LEFT JOIN trade_intents ti ON ti.intent_id::text = "
         "COALESCE(ae.intent_id::text, ae.aggregate_id) "
         f"WHERE ae.created_at >= to_timestamp({cursor:.6f}) "
-        "AND ae.event_type IN ('intent_ack.accepted','intent_ack.rejected') "
+        "AND ae.event_type IN ('intent_ack.accepted','intent_ack.rejected',"
+        "'node.halted','node.resumed') "
         "ORDER BY ae.created_at, ae.audit_event_id "
         "LIMIT 500"
     )
@@ -918,14 +971,16 @@ def _process_audit_rows(
             continue
         seen.add(source_id)
         _append_seen(state, "seen_audit_ids", source_id)
-        dedupe_key = intent_dedupe_key(row)
-        if enqueue_message(
-            state,
-            "intent",
-            dedupe_key,
-            format_intent_message(row),
-            now_ts,
-        ):
+        event_type = str(row.get("event_type") or "")
+        if event_type in NODE_EVENT_TYPES:
+            message_class = "node"
+            dedupe_key = node_dedupe_key(row)
+            text = format_node_message(row)
+        else:
+            message_class = "intent"
+            dedupe_key = intent_dedupe_key(row)
+            text = format_intent_message(row)
+        if enqueue_message(state, message_class, dedupe_key, text, now_ts):
             count += 1
     state["audit_cursor"] = cursor
     return count

@@ -304,5 +304,82 @@ class TradeEventNotifierTests(unittest.TestCase):
         self.assertIn("安全模拟事件", sent[0])
 
 
+    # ---- node.halted / node.resumed forwarding (2026-09-02) ----
+    def _node_row(self, event_type="node.halted", source_id="audit-node-1",
+                  halt_reason="control_plane failed: heartbeat 502"):
+        # Exact shape produced by fetch_audit_rows for read_api's transition
+        # handler rows: aggregate_id is the node_id, trade_intents join is NULL.
+        return {
+            "source_id": source_id,
+            "cursor": 1_800_000_000.0,
+            "event_type": event_type,
+            "intent_id": "nautilus-node-account-a",
+            "account_id": "account-a",
+            "instrument_id": None,
+            "action": None,
+            "order_plan": None,
+            "risk_budget": None,
+            "payload": {
+                "node_id": "nautilus-node-account-a",
+                "account_id": "account-a",
+                "halt_reason": halt_reason if event_type == "node.halted" else None,
+                "previous_status": "ACTIVE" if event_type == "node.halted" else "HALTED",
+                "new_status": "HALTED" if event_type == "node.halted" else "ACTIVE",
+                "observed_at": "2026-09-02T09:10:45.123456+00:00",
+            },
+        }
+
+    def test_node_halted_message_contains_required_fields(self):
+        text = notifier.format_node_message(self._node_row())
+        self.assertIn("HALTED", text)
+        self.assertIn("account-a", text)
+        self.assertIn("nautilus-node-account-a", text)
+        self.assertIn("heartbeat 502", text)
+        self.assertIn("ACTIVE → HALTED", text)
+        self.assertIn("09:10:45 UTC", text)
+
+    def test_node_resumed_message(self):
+        text = notifier.format_node_message(self._node_row("node.resumed"))
+        self.assertIn("恢复 ACTIVE", text)
+        self.assertIn("HALTED → ACTIVE", text)
+        self.assertNotIn("原因", text)
+
+    def test_audit_sql_includes_node_event_types(self):
+        captured = []
+        def fake_sql(sql):
+            captured.append(sql)
+            return []
+        with patch.object(notifier, "run_sql_json", fake_sql):
+            notifier.fetch_audit_rows(0.0)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("'node.halted'", captured[0])
+        self.assertIn("'node.resumed'", captured[0])
+        self.assertIn("'intent_ack.rejected'", captured[0])
+
+    def test_node_rows_flow_to_sender_and_replays_are_dropped(self):
+        state = _state()
+        rows = [
+            self._node_row("node.halted", "audit-node-1"),
+            self._node_row("node.halted", "audit-node-1"),      # replay of same row
+            self._node_row("node.halted", "audit-node-2",       # distinct transition
+                           halt_reason="resume_command_rejected"),
+            self._node_row("node.resumed", "audit-node-3"),
+        ]
+        queued = notifier._process_audit_rows(state, rows, 100.0)
+        self.assertEqual(queued, 3)
+        self.assertTrue(all(item["class"] == "node" for item in state["pending"]))
+
+        sent = []
+        def sender(text):
+            sent.append(text)
+            return True, {"message_id": len(sent), "text": text}
+        notifier.process_pending(state, sender=sender, now_ts=100.0)
+        self.assertEqual(len(sent), 3)
+        self.assertIn("heartbeat 502", sent[0])
+        self.assertIn("resume_command_rejected", sent[1])
+        self.assertIn("恢复 ACTIVE", sent[2])
+        self.assertEqual(state["pending"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
