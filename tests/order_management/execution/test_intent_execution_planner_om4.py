@@ -32,7 +32,9 @@ def test_execution_market_uses_sizing_quantity_and_explicit_tif() -> None:
 
     assert isinstance(result, OrderPlan)
     assert result.order_type == "MARKET"
-    assert result.quantity == "0.124"
+    # Quantity snaps to quantity_increment with ROUND_DOWN (85620ed): a buy must
+    # never exceed the sizing-approved 0.1236, so 0.1236 -> 0.123, not 0.124.
+    assert result.quantity == "0.123"
     assert result.time_in_force == "FOK"
     assert result.max_slippage_bps == "10"
     assert result.guard_price == "100.01"
@@ -135,6 +137,9 @@ class _Intent:
     idempotency_key: str
     approved_at: datetime
     target_position_id: str | None = None
+    # Planner gate (85620ed): an approved intent must carry a finite positive
+    # risk_budget.max_notional or it is denied with approved_max_notional_invalid.
+    risk_budget: Any = None
 
 
 def _intent(**overrides: Any) -> _Intent:
@@ -151,6 +156,7 @@ def _intent(**overrides: Any) -> _Intent:
         "execution": None,
         "sizing": None,
         "target_position_id": None,
+        "risk_budget": {"max_notional": "1000000"},
         "valid_until": NOW + timedelta(minutes=5),
         "idempotency_key": sha256(str(intent_id).encode("ascii")).hexdigest(),
         "approved_at": NOW - timedelta(seconds=5),

@@ -63,8 +63,11 @@ def test_fixed_risk_sizing_uses_smallest_notional_cap() -> None:
     result = fixed_risk_size(budget, request, config=RiskConfig())
 
     assert result.status == "approved"
-    assert result.risk_amount == Decimal("100.00")
-    assert result.raw_notional == Decimal("1000")
+    # RiskConfig.risk_per_trade_pct defaults to 1.5% (db59bba, user directive);
+    # 10000 equity * 1.5% = 150 risk, / 10% stop distance = 1500 raw notional.
+    # A change to that default SHOULD break this test so sizing gets re-reviewed.
+    assert result.risk_amount == Decimal("150")
+    assert result.raw_notional == Decimal("1500")
     assert result.allowed_notional == Decimal("750")
     assert result.quantity == Decimal("7.5")
 
