@@ -61,13 +61,15 @@ CREATE TABLE IF NOT EXISTS account_configs (
     account_type        TEXT NOT NULL DEFAULT 'main',
     parent_account_id   TEXT NOT NULL DEFAULT '',
     execution_account_id TEXT NOT NULL DEFAULT '',
-    risk_capital_multiplier REAL NOT NULL,
+    risk_capital_multiplier REAL NOT NULL DEFAULT 1,
+    risk_capital_addon REAL NOT NULL DEFAULT 0,
     is_enabled          INTEGER NOT NULL DEFAULT 1,
     CHECK (account_type IN ('main', 'subaccount')),
     CHECK (
       risk_capital_multiplier IS NULL
       OR risk_capital_multiplier > 0
     ),
+    CHECK (risk_capital_addon >= 0),
     CHECK (is_enabled IN (0, 1))
 );
 
@@ -141,6 +143,7 @@ function migrateAccountSchema(db) {
     })
   );
   const multiplierColumnWasMissing = !columns.has("risk_capital_multiplier");
+  const addonColumnWasMissing = !columns.has("risk_capital_addon");
 
   if (!columns.has("account_type")) {
     db.exec("ALTER TABLE account_configs ADD COLUMN account_type TEXT NOT NULL DEFAULT 'main'");
@@ -151,7 +154,13 @@ function migrateAccountSchema(db) {
   if (multiplierColumnWasMissing) {
     db.exec(
       "ALTER TABLE account_configs "
-      + "ADD COLUMN risk_capital_multiplier REAL"
+      + "ADD COLUMN risk_capital_multiplier REAL NOT NULL DEFAULT 1"
+    );
+  }
+  if (addonColumnWasMissing) {
+    db.exec(
+      "ALTER TABLE account_configs "
+      + "ADD COLUMN risk_capital_addon REAL NOT NULL DEFAULT 0"
     );
   }
   if (!columns.has("execution_account_id")) {
@@ -191,10 +200,8 @@ function migrateAccountSchema(db) {
     ON account_configs (execution_account_id);
   `);
 
-  if (multiplierColumnWasMissing) {
-    db.exec("UPDATE account_configs SET is_enabled = 0");
-  }
   disableAccountsWithInvalidMultiplier(db);
+  disableAccountsWithInvalidAddon(db);
   migrateChannelRoutingSchema(db);
 }
 
@@ -232,6 +239,32 @@ function disableAccountsWithInvalidMultiplier(db) {
         account.risk_capital_multiplier === null
         || !Number.isFinite(multiplier)
         || multiplier <= 0
+      ) {
+        disableAccount.run(account.account_id);
+      }
+    }
+  });
+  disableInvalidAccounts(rows);
+}
+
+function disableAccountsWithInvalidAddon(db) {
+  const rows = db.prepare(`
+    SELECT account_id, risk_capital_addon
+    FROM account_configs
+  `).all();
+  const disableAccount = db.prepare(`
+    UPDATE account_configs
+    SET is_enabled = 0
+    WHERE account_id = ?
+  `);
+  const disableInvalidAccounts = db.transaction((accounts) => {
+    for (const account of accounts) {
+      const addon = Number(account.risk_capital_addon);
+      if (
+        account.risk_capital_addon === null
+        || account.risk_capital_addon === ""
+        || !Number.isFinite(addon)
+        || addon < 0
       ) {
         disableAccount.run(account.account_id);
       }
@@ -362,7 +395,11 @@ function registerAccountRoutes(app) {
       const testnetResult = normalizeTestnet(body.is_testnet, false);
       const riskResult = normalizeRiskRatio(body.default_risk_ratio, 0.01);
       const multiplierResult = normalizeRiskCapitalMultiplier(
-        body.risk_capital_multiplier
+        body.risk_capital_multiplier,
+        1
+      );
+      const addonResult = normalizeRiskCapitalAddon(
+        body.risk_capital_addon
       );
       const enabledResult = normalizeEnabled(body.is_enabled, true);
 
@@ -386,7 +423,12 @@ function registerAccountRoutes(app) {
       }
       if (!multiplierResult.ok) {
         return res.status(400).json({
-          error: "risk_capital_multiplier is required and must be greater than 0",
+          error: "risk_capital_multiplier must be greater than 0",
+        });
+      }
+      if (!addonResult.ok) {
+        return res.status(400).json({
+          error: "risk_capital_addon is required and must be >= 0",
         });
       }
       if (!enabledResult.ok) {
@@ -423,9 +465,10 @@ function registerAccountRoutes(app) {
           parent_account_id,
           execution_account_id,
           risk_capital_multiplier,
+          risk_capital_addon,
           is_enabled
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         accountId,
         apiKey,
@@ -436,6 +479,7 @@ function registerAccountRoutes(app) {
         parentAccountId,
         executionAccountId,
         multiplierResult.value,
+        addonResult.value,
         enabledResult.value
       );
       res.json({ ok: true, account_id: accountId });
@@ -502,19 +546,17 @@ function registerAccountRoutes(app) {
       if (!riskResult.ok) {
         return res.status(400).json({ error: "default_risk_ratio must be a non-negative number" });
       }
-      let multiplierCandidate = current.risk_capital_multiplier;
-      const multiplierWasProvided = (
-        body.risk_capital_multiplier !== undefined
-      );
-      if (multiplierWasProvided) {
-        multiplierCandidate = body.risk_capital_multiplier;
-      }
       const multiplierResult = normalizeRiskCapitalMultiplier(
-        multiplierCandidate
+        body.risk_capital_multiplier,
+        current.risk_capital_multiplier
       );
       if (!multiplierResult.ok) {
         return res.status(400).json({ error: "risk_capital_multiplier must be greater than 0" });
       }
+      const addonResult = normalizeRiskCapitalAddon(
+        body.risk_capital_addon,
+        current.risk_capital_addon
+      );
       const enabledResult = normalizeEnabled(
         body.is_enabled,
         Number(current.is_enabled) === 1
@@ -526,11 +568,14 @@ function registerAccountRoutes(app) {
       if (
         Number(current.is_enabled) !== 1
         && isEnabled === 1
-        && !multiplierWasProvided
+        && !addonResult.ok
       ) {
         return res.status(400).json({
-          error: "enabling an account requires an explicit risk_capital_multiplier",
+          error: "enabling an account requires risk_capital_addon to be >= 0",
         });
+      }
+      if (!addonResult.ok) {
+        return res.status(400).json({ error: "risk_capital_addon must be >= 0" });
       }
 
       let apiKey = current.api_key;
@@ -582,6 +627,7 @@ function registerAccountRoutes(app) {
             parent_account_id = ?,
             execution_account_id = ?,
             risk_capital_multiplier = ?,
+            risk_capital_addon = ?,
             is_enabled = ?
         WHERE account_id = ?
       `).run(
@@ -593,6 +639,7 @@ function registerAccountRoutes(app) {
         parentAccountId,
         executionAccountId,
         multiplierResult.value,
+        addonResult.value,
         isEnabled,
         accountId
       );
@@ -1011,17 +1058,41 @@ function normalizeRiskRatio(value, fallback) {
   return { ok: true, value: numeric };
 }
 
-function normalizeRiskCapitalMultiplier(value) {
+function normalizeRiskCapitalMultiplier(value, fallback) {
+  let candidate = value;
+  if (candidate === undefined) {
+    candidate = fallback;
+  }
   if (
-    value === undefined
-    || value === null
-    || value === ""
-    || typeof value === "boolean"
+    candidate === undefined
+    || candidate === null
+    || candidate === ""
+    || typeof candidate === "boolean"
   ) {
     return { ok: false };
   }
-  const numeric = Number(value);
+  const numeric = Number(candidate);
   if (!Number.isFinite(numeric) || numeric <= 0) {
+    return { ok: false };
+  }
+  return { ok: true, value: numeric };
+}
+
+function normalizeRiskCapitalAddon(value, fallback) {
+  let candidate = value;
+  if (candidate === undefined) {
+    candidate = fallback;
+  }
+  if (
+    candidate === undefined
+    || candidate === null
+    || candidate === ""
+    || typeof candidate === "boolean"
+  ) {
+    return { ok: false };
+  }
+  const numeric = Number(candidate);
+  if (!Number.isFinite(numeric) || numeric < 0) {
     return { ok: false };
   }
   return { ok: true, value: numeric };
@@ -1039,6 +1110,7 @@ function getAccount(db, accountId) {
       parent_account_id,
       execution_account_id,
       risk_capital_multiplier,
+      risk_capital_addon,
       is_enabled
     FROM account_configs
     WHERE account_id = ?
@@ -1151,6 +1223,7 @@ module.exports = {
     migrateAccountSchema,
     normalizeAccountType,
     normalizeEnabled,
+    normalizeRiskCapitalAddon,
     normalizeRiskCapitalMultiplier,
     normalizeRiskRatio,
     normalizeTestnet,

@@ -133,7 +133,7 @@ class ChannelAccountRoute:
     channel_id: str
     target_account_id: str
     execution_account_id: str
-    risk_capital_multiplier: float
+    risk_capital_addon: float
 
 
 class ChannelRouteError(RuntimeError):
@@ -159,7 +159,7 @@ PROMPT_TEMPLATE = """收到新的交易频道消息,你是交易决策者,请处
 频道: {channel_name} ({channel_id})
 路由凭据账号(审计): {target_account_id}
 固定执行账号: {execution_account_id}
-风险资金系数(审计): {risk_capital_multiplier}
+风险资金加权额(审计): +{risk_capital_addon} USDT
 批次消息ID: {message_ids}
 时间范围: {time_range}
 
@@ -351,13 +351,13 @@ def resolve_channel_account(channel_id: Any) -> ChannelAccountRoute:
         required_account_columns = {
             "account_id",
             "execution_account_id",
-            "risk_capital_multiplier",
+            "risk_capital_addon",
         }
         required_route_columns = {"channel_id", "target_account_id"}
         if not required_account_columns <= account_columns:
             raise ChannelRouteError(
                 "account_configs requires account_id, execution_account_id, "
-                "and risk_capital_multiplier"
+                "and risk_capital_addon"
             )
         if not required_route_columns <= route_columns:
             raise ChannelRouteError(
@@ -393,7 +393,7 @@ def resolve_channel_account(channel_id: Any) -> ChannelAccountRoute:
         else:
             fields.append("0 AS parent_main_account_count")
         fields.append(
-            "account.risk_capital_multiplier AS risk_capital_multiplier"
+            "account.risk_capital_addon AS risk_capital_addon"
         )
         for field_name in ("is_enabled", "enabled", "status"):
             if field_name in account_columns:
@@ -452,18 +452,18 @@ def resolve_channel_account(channel_id: Any) -> ChannelAccountRoute:
                 "subaccount parent must resolve to one main account"
             )
     try:
-        multiplier = float(row["risk_capital_multiplier"])
+        addon = float(row["risk_capital_addon"])
     except (TypeError, ValueError):
-        raise ChannelRouteError("route target risk_capital_multiplier is invalid")
-    if not math.isfinite(multiplier) or multiplier <= 0:
-        raise ChannelRouteError("route target risk_capital_multiplier is invalid")
+        raise ChannelRouteError("route target risk_capital_addon is invalid")
+    if not math.isfinite(addon) or addon < 0:
+        raise ChannelRouteError("route target risk_capital_addon is invalid")
     if not _account_is_enabled(row, account_columns):
         raise ChannelRouteError("route target account is disabled")
     return ChannelAccountRoute(
         channel_id=normalized_channel_id,
         target_account_id=target_account_id,
         execution_account_id=execution_account_id,
-        risk_capital_multiplier=multiplier,
+        risk_capital_addon=addon,
     )
 
 
@@ -918,7 +918,7 @@ def build_prompt(sig_or_batch: Any) -> str:
         channel_id=channel_id,
         target_account_id=route.target_account_id,
         execution_account_id=route.execution_account_id,
-        risk_capital_multiplier=format(route.risk_capital_multiplier, ".8g"),
+        risk_capital_addon=format(route.risk_capital_addon, ".8g"),
         message_ids=message_ids,
         time_range=time_range,
         channel_context=context,

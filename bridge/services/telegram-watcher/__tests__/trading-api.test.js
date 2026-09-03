@@ -171,8 +171,9 @@ test("migrates legacy accounts and preserves channel routing", async () => {
     account_type: "main",
     parent_account_id: "",
     execution_account_id: "legacy-main",
-    risk_capital_multiplier: null,
-    is_enabled: 0,
+    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
+    is_enabled: 1,
     channel_count: 1,
     subaccount_count: 0,
   });
@@ -187,44 +188,39 @@ test("migrates legacy accounts and preserves channel routing", async () => {
       target_account_type: "main",
       parent_account_id: "",
       execution_account_id: "legacy-main",
-      target_is_enabled: 0,
+      target_is_enabled: 1,
     },
   ]);
 });
 
-test("requires explicit configuration before a migrated account is tradable", async () => {
-  const disabledRoute = await request("POST", "/api/trading/channels", {
-    channel_id: "disabled-legacy-channel",
+test("migrated accounts use a zero addon and retain it across updates", async () => {
+  const routed = await request("POST", "/api/trading/channels", {
+    channel_id: "migrated-legacy-channel",
     target_account_id: "legacy-main",
   });
-  assert.equal(disabledRoute.status, 400);
-  assert.equal(disabledRoute.body.error, "Target account is disabled");
+  assert.equal(routed.status, 200);
 
-  const configuredOnly = await request("PUT", "/api/trading/accounts/legacy-main", {
-    risk_capital_multiplier: 1,
+  const configured = await request("PUT", "/api/trading/accounts/legacy-main", {
+    risk_capital_addon: 6000,
   });
-  assert.equal(configuredOnly.status, 200);
+  assert.equal(configured.status, 200);
 
   const accounts = await request("GET", "/api/trading/accounts");
   const legacyAccount = accounts.body.find((account) => {
     return account.account_id === "legacy-main";
   });
   assert.equal(legacyAccount.risk_capital_multiplier, 1);
-  assert.equal(legacyAccount.is_enabled, 0);
+  assert.equal(legacyAccount.risk_capital_addon, 6000);
+  assert.equal(legacyAccount.is_enabled, 1);
 
-  const enabledWithoutMultiplier = await request(
+  const disabled = await request(
     "PUT",
     "/api/trading/accounts/legacy-main",
-    { is_enabled: true }
+    { is_enabled: false }
   );
-  assert.equal(enabledWithoutMultiplier.status, 400);
-  assert.equal(
-    enabledWithoutMultiplier.body.error,
-    "enabling an account requires an explicit risk_capital_multiplier"
-  );
+  assert.equal(disabled.status, 200);
 
   const enabled = await request("PUT", "/api/trading/accounts/legacy-main", {
-    risk_capital_multiplier: 1,
     is_enabled: true,
   });
   assert.equal(enabled.status, 200);
@@ -234,10 +230,11 @@ test("requires explicit configuration before a migrated account is tradable", as
     return account.account_id === "legacy-main";
   });
   assert.equal(enabledLegacyAccount.risk_capital_multiplier, 1);
+  assert.equal(enabledLegacyAccount.risk_capital_addon, 6000);
   assert.equal(enabledLegacyAccount.is_enabled, 1);
 });
 
-test("preserves legal multipliers and disables invalid stored values", () => {
+test("preserves rollback multipliers and disables invalid stored values", () => {
   const migrationDbPath = path.join(tempDir, "multiplier-migration.db");
   const db = new Database(migrationDbPath);
   db.exec(`
@@ -251,6 +248,7 @@ test("preserves legal multipliers and disables invalid stored values", () => {
       parent_account_id TEXT NOT NULL DEFAULT '',
       execution_account_id TEXT NOT NULL DEFAULT '',
       risk_capital_multiplier REAL,
+      risk_capital_addon REAL,
       is_enabled INTEGER NOT NULL DEFAULT 1
     );
   `);
@@ -261,19 +259,26 @@ test("preserves legal multipliers and disables invalid stored values", () => {
       api_secret,
       execution_account_id,
       risk_capital_multiplier,
+      risk_capital_addon,
       is_enabled
     )
-    VALUES (?, 'key', 'secret', ?, ?, ?)
+    VALUES (?, 'key', 'secret', ?, ?, ?, ?)
   `);
-  insertAccount.run("legal-one", "execution-legal", 1, 1);
-  insertAccount.run("disabled-one", "execution-disabled", 1, 0);
-  insertAccount.run("invalid-zero", "execution-zero", 0, 1);
-  insertAccount.run("invalid-null", "execution-null", null, 1);
+  insertAccount.run("legal-one", "execution-legal", 1, 0, 1);
+  insertAccount.run("disabled-one", "execution-disabled", 1, 6000, 0);
+  insertAccount.run("invalid-zero", "execution-zero", 0, 0, 1);
+  insertAccount.run("invalid-null", "execution-null", null, 0, 1);
+  insertAccount.run("invalid-addon", "execution-addon", 1, -1, 1);
+  insertAccount.run("missing-addon", "execution-missing-addon", 1, "", 1);
 
   require("../lib/trading-api").__test.migrateAccountSchema(db);
 
   const rows = db.prepare(`
-    SELECT account_id, risk_capital_multiplier, is_enabled
+    SELECT
+      account_id,
+      risk_capital_multiplier,
+      risk_capital_addon,
+      is_enabled
     FROM account_configs
     ORDER BY account_id
   `).all();
@@ -283,22 +288,38 @@ test("preserves legal multipliers and disables invalid stored values", () => {
     {
       account_id: "disabled-one",
       risk_capital_multiplier: 1,
+      risk_capital_addon: 6000,
+      is_enabled: 0,
+    },
+    {
+      account_id: "invalid-addon",
+      risk_capital_multiplier: 1,
+      risk_capital_addon: -1,
       is_enabled: 0,
     },
     {
       account_id: "invalid-null",
       risk_capital_multiplier: null,
+      risk_capital_addon: 0,
       is_enabled: 0,
     },
     {
       account_id: "invalid-zero",
       risk_capital_multiplier: 0,
+      risk_capital_addon: 0,
       is_enabled: 0,
     },
     {
       account_id: "legal-one",
       risk_capital_multiplier: 1,
+      risk_capital_addon: 0,
       is_enabled: 1,
+    },
+    {
+      account_id: "missing-addon",
+      risk_capital_multiplier: 1,
+      risk_capital_addon: "",
+      is_enabled: 0,
     },
   ]);
 });
@@ -311,7 +332,7 @@ test("creates tradable main and subaccounts with independent credentials", async
     default_risk_ratio: 0.01,
     is_testnet: false,
     execution_account_id: "account-main",
-    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
     is_enabled: true,
   });
   assert.equal(main.status, 200);
@@ -326,7 +347,7 @@ test("creates tradable main and subaccounts with independent credentials", async
     account_type: "subaccount",
     parent_account_id: "main-live",
     execution_account_id: "account-sub",
-    risk_capital_multiplier: 2,
+    risk_capital_addon: 6000,
     is_enabled: true,
   });
   assert.equal(subaccount.status, 200);
@@ -341,7 +362,8 @@ test("creates tradable main and subaccounts with independent credentials", async
       account_type,
       parent_account_id,
       execution_account_id,
-      risk_capital_multiplier
+      risk_capital_multiplier,
+      risk_capital_addon
     FROM account_configs
     WHERE account_id IN ('main-live', 'channel-sub')
     ORDER BY account_id
@@ -355,7 +377,8 @@ test("creates tradable main and subaccounts with independent credentials", async
       account_type: "subaccount",
       parent_account_id: "main-live",
       execution_account_id: "account-sub",
-      risk_capital_multiplier: 2,
+      risk_capital_multiplier: 1,
+      risk_capital_addon: 6000,
     },
     {
       account_id: "main-live",
@@ -365,6 +388,7 @@ test("creates tradable main and subaccounts with independent credentials", async
       parent_account_id: "",
       execution_account_id: "account-main",
       risk_capital_multiplier: 1,
+      risk_capital_addon: 0,
     },
   ]);
 
@@ -372,7 +396,7 @@ test("creates tradable main and subaccounts with independent credentials", async
     account_id: "main-live",
     api_key: "duplicate-key",
     api_secret: "duplicate-secret",
-    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
   });
   assert.equal(duplicate.status, 409);
 });
@@ -384,7 +408,7 @@ test("accepts existing unicode credential aliases with fixed execution ids", asy
     api_secret: "main-unicode-secret",
     is_testnet: false,
     execution_account_id: "account-a",
-    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
   });
   assert.equal(main.status, 200);
 
@@ -396,7 +420,7 @@ test("accepts existing unicode credential aliases with fixed execution ids", asy
     account_type: "subaccount",
     parent_account_id: "jiataotx@gmail.com",
     execution_account_id: "account-c",
-    risk_capital_multiplier: 2,
+    risk_capital_addon: 6000,
   });
   assert.equal(subaccount.status, 200);
 
@@ -409,16 +433,28 @@ test("accepts existing unicode credential aliases with fixed execution ids", asy
   assert.equal(byId.get("泰山").execution_account_id, "account-c");
 });
 
-test("validates subaccount parent and environment", async () => {
-  const missingMultiplier = await request("POST", "/api/trading/accounts", {
-    account_id: "missing-multiplier",
+test("validates addon, subaccount parent, and environment", async () => {
+  const missingAddon = await request("POST", "/api/trading/accounts", {
+    account_id: "missing-addon",
     api_key: "key",
     api_secret: "secret",
   });
-  assert.equal(missingMultiplier.status, 400);
+  assert.equal(missingAddon.status, 400);
   assert.equal(
-    missingMultiplier.body.error,
-    "risk_capital_multiplier is required and must be greater than 0"
+    missingAddon.body.error,
+    "risk_capital_addon is required and must be >= 0"
+  );
+
+  const invalidAddon = await request("POST", "/api/trading/accounts", {
+    account_id: "invalid-addon",
+    api_key: "key",
+    api_secret: "secret",
+    risk_capital_addon: -1,
+  });
+  assert.equal(invalidAddon.status, 400);
+  assert.equal(
+    invalidAddon.body.error,
+    "risk_capital_addon is required and must be >= 0"
   );
 
   const invalidMultiplier = await request("POST", "/api/trading/accounts", {
@@ -426,6 +462,7 @@ test("validates subaccount parent and environment", async () => {
     api_key: "key",
     api_secret: "secret",
     risk_capital_multiplier: 0,
+    risk_capital_addon: 0,
   });
   assert.equal(invalidMultiplier.status, 400);
 
@@ -434,7 +471,7 @@ test("validates subaccount parent and environment", async () => {
     api_key: "key",
     api_secret: "secret",
     is_testnet: "yes",
-    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
   });
   assert.equal(invalidEnvironment.status, 400);
 
@@ -444,7 +481,7 @@ test("validates subaccount parent and environment", async () => {
     api_secret: "secret",
     account_type: "subaccount",
     is_testnet: false,
-    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
   });
   assert.equal(missingParent.status, 400);
 
@@ -455,7 +492,7 @@ test("validates subaccount parent and environment", async () => {
     account_type: "subaccount",
     parent_account_id: "unknown",
     is_testnet: false,
-    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
   });
   assert.equal(unknownParent.status, 400);
 
@@ -466,7 +503,7 @@ test("validates subaccount parent and environment", async () => {
     account_type: "subaccount",
     parent_account_id: "channel-sub",
     is_testnet: false,
-    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
   });
   assert.equal(nestedParent.status, 400);
 
@@ -477,7 +514,7 @@ test("validates subaccount parent and environment", async () => {
     account_type: "subaccount",
     parent_account_id: "main-live",
     is_testnet: true,
-    risk_capital_multiplier: 1,
+    risk_capital_addon: 0,
   });
   assert.equal(environmentMismatch.status, 400);
 });
@@ -522,11 +559,18 @@ test("updates account settings while blank credentials retain current values", a
   });
   assert.equal(invalidEnvironment.status, 400);
 
+  const invalidAddon = await request("PUT", "/api/trading/accounts/channel-sub", {
+    risk_capital_addon: -1,
+  });
+  assert.equal(invalidAddon.status, 400);
+  assert.equal(invalidAddon.body.error, "risk_capital_addon must be >= 0");
+
   const updated = await request("PUT", "/api/trading/accounts/channel-sub", {
     api_key: "",
     api_secret: "",
     default_risk_ratio: 0.035,
     risk_capital_multiplier: 2.5,
+    risk_capital_addon: 6500,
     execution_account_id: "account-sub-v2",
     is_testnet: false,
     account_type: "subaccount",
@@ -543,7 +587,8 @@ test("updates account settings while blank credentials retain current values", a
       account_type,
       parent_account_id,
       execution_account_id,
-      risk_capital_multiplier
+      risk_capital_multiplier,
+      risk_capital_addon
     FROM account_configs
     WHERE account_id = 'channel-sub'
   `).get();
@@ -556,6 +601,7 @@ test("updates account settings while blank credentials retain current values", a
     parent_account_id: "main-live",
     execution_account_id: "account-sub-v2",
     risk_capital_multiplier: 2.5,
+    risk_capital_addon: 6500,
   });
 
   const protectedMain = await request("PUT", "/api/trading/accounts/main-live", {
@@ -566,7 +612,7 @@ test("updates account settings while blank credentials retain current values", a
   assert.equal(protectedMain.status, 409);
 });
 
-test("retains the configured multiplier when unrelated settings change", async () => {
+test("retains configured addon and rollback multiplier on unrelated updates", async () => {
   const updated = await request("PUT", "/api/trading/accounts/channel-sub", {
     api_key: "",
     api_secret: "",
@@ -576,7 +622,10 @@ test("retains the configured multiplier when unrelated settings change", async (
 
   const db = new Database(dbPath, { readonly: true });
   const account = db.prepare(`
-    SELECT default_risk_ratio, risk_capital_multiplier
+    SELECT
+      default_risk_ratio,
+      risk_capital_multiplier,
+      risk_capital_addon
     FROM account_configs
     WHERE account_id = 'channel-sub'
   `).get();
@@ -585,6 +634,7 @@ test("retains the configured multiplier when unrelated settings change", async (
   assert.deepEqual(account, {
     default_risk_ratio: 0.04,
     risk_capital_multiplier: 2.5,
+    risk_capital_addon: 6500,
   });
 });
 

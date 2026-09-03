@@ -64,8 +64,8 @@ def client(monkeypatch: pytest.MonkeyPatch, migrated_db: str) -> TestClient:
     )
     monkeypatch.setattr(
         read_api,
-        "_account_risk_capital_multiplier",
-        lambda _account_id: 1.0,
+        "_account_risk_capital_addon",
+        lambda _account_id: 0.0,
     )
     _activate_redis_epoch(migrated_db, REDIS_FENCING_EPOCH)
     test_client = TestClient(read_api.app)
@@ -3415,6 +3415,7 @@ def test_account_a_canary_permit_is_atomic_single_use_and_capped(
     assert equity == {
         "real_equity": 100.0,
         "available_balance": 100.0,
+        "risk_capital_addon": 0.0,
         "risk_capital_multiplier": 1.0,
         "effective_equity": 100.0,
     }

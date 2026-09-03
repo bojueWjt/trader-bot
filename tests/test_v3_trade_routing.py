@@ -27,7 +27,7 @@ FOUR_CHANNEL_ROUTES = (
         "account-a",
         "main",
         "",
-        1.2557,
+        0.0,
     ),
     (
         "-1002198013097",
@@ -35,7 +35,7 @@ FOUR_CHANNEL_ROUTES = (
         "account-b",
         "main",
         "",
-        1.0,
+        0.0,
     ),
     (
         "-1002189417451",
@@ -43,7 +43,7 @@ FOUR_CHANNEL_ROUTES = (
         "account-c",
         "subaccount",
         "jiataotx@gmail.com",
-        2.96902319,
+        6000.0,
     ),
     (
         "-1002193304023",
@@ -51,7 +51,7 @@ FOUR_CHANNEL_ROUTES = (
         "account-d",
         "subaccount",
         "balenwong3@gmail.com",
-        3.0,
+        6000.0,
     ),
 )
 
@@ -152,7 +152,7 @@ def _create_routing_db(path: Path) -> None:
                 account_id TEXT PRIMARY KEY,
                 account_type TEXT NOT NULL,
                 parent_account_id TEXT NOT NULL,
-                risk_capital_multiplier REAL NOT NULL,
+                risk_capital_addon REAL NOT NULL,
                 execution_account_id TEXT NOT NULL,
                 is_enabled INTEGER NOT NULL DEFAULT 1
             );
@@ -168,7 +168,7 @@ def _create_routing_db(path: Path) -> None:
             execution_account,
             account_type,
             parent_account,
-            multiplier,
+            addon,
         ) in FOUR_CHANNEL_ROUTES:
             conn.execute(
                 """
@@ -176,7 +176,7 @@ def _create_routing_db(path: Path) -> None:
                     account_id,
                     account_type,
                     parent_account_id,
-                    risk_capital_multiplier,
+                    risk_capital_addon,
                     execution_account_id
                 )
                 VALUES (?, ?, ?, ?, ?)
@@ -185,7 +185,7 @@ def _create_routing_db(path: Path) -> None:
                     credential_account,
                     account_type,
                     parent_account,
-                    multiplier,
+                    addon,
                     execution_account,
                 ),
             )
@@ -272,7 +272,7 @@ def _successful_call(calls):
         "execution_account",
         "_account_type",
         "_parent_account",
-        "multiplier",
+        "addon",
     ),
     FOUR_CHANNEL_ROUTES,
 )
@@ -284,7 +284,7 @@ def test_watcher_route_reaches_matching_hermes_open_payload(
     execution_account: str,
     _account_type: str,
     _parent_account: str,
-    multiplier: float,
+    addon: float,
 ) -> None:
     routing_db = tmp_path / "watcher-trading.db"
     _create_routing_db(routing_db)
@@ -304,7 +304,7 @@ def test_watcher_route_reaches_matching_hermes_open_payload(
 
     assert f"路由凭据账号(审计): {credential_account}" in prompt
     assert f"固定执行账号: {execution_account}" in prompt
-    assert f"风险资金系数(审计): {multiplier:g}" in prompt
+    assert f"风险资金加权额(审计): +{addon:g} USDT" in prompt
     assert f"必须使用 --account {execution_account}" in prompt
     assert f"交易ref: {client_ref}" in prompt
 
@@ -367,7 +367,7 @@ def test_watcher_route_reaches_matching_hermes_open_payload(
         "execution_account",
         "_account_type",
         "_parent_account",
-        "_multiplier",
+        "_addon",
     ),
     FOUR_CHANNEL_ROUTES,
 )
@@ -380,7 +380,7 @@ def test_four_channel_management_payload_keeps_execution_account(
     execution_account: str,
     _account_type: str,
     _parent_account: str,
-    _multiplier: float,
+    _addon: float,
     command: list[str],
     expected_action: str,
 ) -> None:

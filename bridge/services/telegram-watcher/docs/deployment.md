@@ -11,13 +11,13 @@ The file has been removed from the Git index with `git rm --cached`, so future c
 Watcher startup migrates `account_configs` in place:
 
 - Existing rows receive `account_type=main` and an empty `parent_account_id`.
-- Existing rows without a valid `risk_capital_multiplier` remain disabled until
-  an operator configures a positive multiplier.
+- Existing rows receive `risk_capital_addon=0`; the rollback-only
+  `risk_capital_multiplier` column defaults to `1`.
 - Existing `channel_routing.target_account_id` values remain unchanged.
 - A subaccount stores its own API key and secret, sets `account_type=subaccount`, and references an existing main account through `parent_account_id`.
 - Main accounts and subaccounts are both execution accounts and can be selected as channel routing targets.
 
-The Web console supports creating and editing both account types and their risk capital multiplier. Its initialization helper calculates `target_effective_equity / initial_actual_equity` and stores only the resulting multiplier. Runtime sizing reads current `totalMarginBalance` for every new position and calculates `effective_equity = current_actual_equity * risk_capital_multiplier`, so profit and loss change the effective equity while the configured multiplier remains stable. This is the inverse-Martingale sizing basis: profitable accounts receive a larger position budget and losing accounts receive a smaller position budget. A target such as `9000` is an initialization input or test example; runtime sizing always derives effective equity from the current actual equity and the saved multiplier. The CLI accepts `add-account --type subaccount --parent-account <main-account-id> --capital-multiplier <value>`.
+The Web console supports creating and editing both account types and their fixed risk capital addon in USDT. Its initialization helper calculates `risk_capital_addon = target_effective_equity - initial_actual_equity`; the result may be zero and must remain non-negative. Runtime sizing reads current `totalMarginBalance` for every new position and calculates `effective_equity = current_actual_equity + risk_capital_addon`. An account with `3000` USDT actual equity and a `6000` USDT addon therefore uses `9000` USDT effective equity. If actual equity later rises to `4000` USDT, effective equity rises to `10000` USDT, so profit and loss enter the sizing basis at 1:1 while the configured addon remains fixed.
 
 ## Binance API proxy
 

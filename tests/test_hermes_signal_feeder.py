@@ -81,7 +81,7 @@ def _create_trading_db(
             account_id TEXT PRIMARY KEY,
             account_type TEXT NOT NULL DEFAULT 'main',
             parent_account_id TEXT NOT NULL DEFAULT '',
-            risk_capital_multiplier REAL NOT NULL DEFAULT 1.0,
+            risk_capital_addon REAL NOT NULL DEFAULT 0,
             execution_account_id TEXT NOT NULL
             {enabled_column}
         );
@@ -101,7 +101,7 @@ def _insert_account(
     *,
     account_type: str = "main",
     parent_account_id: str = "",
-    multiplier: float = 1.0,
+    addon: float = 0.0,
     execution_account_id: str | None = None,
     enabled: int | None = None,
 ) -> None:
@@ -111,14 +111,14 @@ def _insert_account(
         "account_id",
         "account_type",
         "parent_account_id",
-        "risk_capital_multiplier",
+        "risk_capital_addon",
         "execution_account_id",
     ]
     values: list[object] = [
         account_id,
         account_type,
         parent_account_id,
-        multiplier,
+        addon,
         execution_account_id,
     ]
     if enabled is not None:
@@ -583,7 +583,7 @@ def test_four_channel_routes_bind_distinct_accounts_in_hermes_prompt(
         "泰山",
         account_type="subaccount",
         parent_account_id="jiataotx@gmail.com",
-        multiplier=2.0,
+        addon=6000.0,
         execution_account_id="account-c",
     )
     _insert_account(
@@ -591,7 +591,7 @@ def test_four_channel_routes_bind_distinct_accounts_in_hermes_prompt(
         "黄山",
         account_type="subaccount",
         parent_account_id="jiataotx@gmail.com",
-        multiplier=2.0,
+        addon=6000.0,
         execution_account_id="account-d",
     )
     for channel_id, (target_account_id, _) in routes.items():
@@ -619,8 +619,8 @@ def test_four_channel_routes_bind_distinct_accounts_in_hermes_prompt(
         assert f"交易ref: {expected_ref}" in prompt
         assert "对应正文块的“交易ref”原样传给 --source-message-id" in prompt
         assert "Hermes 无权选择或改写" in prompt
-        expected_multiplier = "2" if target_account_id in {"泰山", "黄山"} else "1"
-        assert f"风险资金系数(审计): {expected_multiplier}" in prompt
+        expected_addon = "6000" if target_account_id in {"泰山", "黄山"} else "0"
+        assert f"风险资金加权额(审计): +{expected_addon} USDT" in prompt
 
 
 def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
@@ -1344,6 +1344,43 @@ def test_disabled_or_duplicate_channel_route_is_rejected(
     assert entry["reason_code"] == "route_not_unique"
 
 
+def test_route_addon_accepts_zero_and_rejects_negative(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_feeder()
+    db_path = tmp_path / "addon-validation.db"
+    conn = _create_trading_db(db_path)
+    _insert_account(
+        conn,
+        "credential-a",
+        addon=0.0,
+        execution_account_id="account-a",
+    )
+    _insert_account(
+        conn,
+        "credential-b",
+        addon=-1.0,
+        execution_account_id="account-b",
+    )
+    conn.execute(
+        "INSERT INTO channel_routing (channel_id, target_account_id) VALUES (?, ?)",
+        ("-10006", "credential-a"),
+    )
+    conn.execute(
+        "INSERT INTO channel_routing (channel_id, target_account_id) VALUES (?, ?)",
+        ("-10007", "credential-b"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
+
+    route = module.resolve_channel_account("-10006")
+    assert route.risk_capital_addon == 0.0
+    with pytest.raises(module.ChannelRouteError, match="risk_capital_addon"):
+        module.resolve_channel_account("-10007")
+
+
 def test_legacy_schema_or_duplicate_execution_identity_is_rejected(
     monkeypatch,
     tmp_path: Path,
@@ -1399,12 +1436,12 @@ def test_legacy_schema_or_duplicate_execution_identity_is_rejected(
         module.resolve_channel_account("-10004")
 
 
-def test_route_schema_requires_dynamic_risk_capital_multiplier(
+def test_route_schema_requires_dynamic_risk_capital_addon(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     module = _load_feeder()
-    db_path = tmp_path / "missing-multiplier.db"
+    db_path = tmp_path / "missing-addon.db"
     conn = sqlite3.connect(db_path)
     conn.executescript(
         """
@@ -1427,6 +1464,6 @@ def test_route_schema_requires_dynamic_risk_capital_multiplier(
 
     with pytest.raises(
         module.ChannelRouteError,
-        match="risk_capital_multiplier",
+        match="risk_capital_addon",
     ):
         module.resolve_channel_account("-10005")

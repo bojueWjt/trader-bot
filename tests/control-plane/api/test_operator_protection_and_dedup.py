@@ -202,8 +202,8 @@ def client(monkeypatch: pytest.MonkeyPatch, migrated_db: str) -> TestClient:
     monkeypatch.setenv("RISK_ADMIN_TOKEN", RISK_TOKEN)
     monkeypatch.setattr(
         read_api,
-        "_account_risk_capital_multiplier",
-        lambda _account_id: 1.0,
+        "_account_risk_capital_addon",
+        lambda _account_id: 0.0,
     )
     # Deterministic sizing: never read the operator's watcher sqlite config.
     monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)

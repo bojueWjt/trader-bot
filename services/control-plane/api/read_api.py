@@ -5837,7 +5837,7 @@ def _operator_account_registry() -> dict[str, dict]:
                 status_code=503,
                 detail=(
                     f"operator account registry {account_id}.effective_equity "
-                    "is unsupported; configure risk_capital_multiplier in the "
+                    "is unsupported; configure risk_capital_addon in the "
                     "watcher account registry"
                 ),
             )
@@ -5862,7 +5862,7 @@ def _watcher_account_is_enabled(row, account_columns: set[str]) -> bool:
     return not status or status in {"1", "active", "enabled", "true"}
 
 
-def _channel_risk_capital_multiplier(
+def _channel_risk_capital_addon(
     channel_id: str,
     account_id: str,
 ) -> float:
@@ -5898,7 +5898,7 @@ def _channel_risk_capital_multiplier(
                 "account_type",
                 "parent_account_id",
                 "execution_account_id",
-                "risk_capital_multiplier",
+                "risk_capital_addon",
             }
             if not required_account_columns <= account_columns:
                 raise HTTPException(
@@ -5923,8 +5923,8 @@ def _channel_risk_capital_multiplier(
                 "WHERE parent.account_id = account.parent_account_id "
                 "AND lower(trim(parent.account_type)) = 'main') "
                 "AS parent_main_account_count",
-                "account.risk_capital_multiplier "
-                "AS risk_capital_multiplier",
+                "account.risk_capital_addon "
+                "AS risk_capital_addon",
             ]
             for field_name in ("is_enabled", "enabled", "status"):
                 if field_name in account_columns:
@@ -6019,21 +6019,21 @@ def _channel_risk_capital_multiplier(
             detail="watcher channel route target account is disabled",
         )
     try:
-        multiplier = float(row["risk_capital_multiplier"])
+        addon = float(row["risk_capital_addon"])
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=503,
-            detail="watcher channel risk capital multiplier is invalid",
+            detail="watcher channel risk capital addon is invalid",
         ) from exc
-    if not math.isfinite(multiplier) or multiplier <= 0:
+    if not math.isfinite(addon) or addon < 0:
         raise HTTPException(
             status_code=503,
-            detail="watcher channel risk capital multiplier is invalid",
+            detail="watcher channel risk capital addon is invalid",
         )
-    return multiplier
+    return addon
 
 
-def _account_risk_capital_multiplier(account_id: str) -> float:
+def _account_risk_capital_addon(account_id: str) -> float:
     import sqlite3
 
     try:
@@ -6054,12 +6054,12 @@ def _account_risk_capital_multiplier(account_id: str) -> float:
                 "account_type",
                 "parent_account_id",
                 "execution_account_id",
-                "risk_capital_multiplier",
+                "risk_capital_addon",
             }
             if not required_account_columns <= account_columns:
                 raise HTTPException(
                     status_code=503,
-                    detail="watcher account risk schema is unavailable",
+                    detail="watcher account routing schema is unavailable",
                 )
             fields = [
                 "account.account_id AS account_id",
@@ -6070,8 +6070,8 @@ def _account_risk_capital_multiplier(account_id: str) -> float:
                 "AND lower(trim(parent.account_type)) = 'main') "
                 "AS parent_main_account_count",
                 "account.execution_account_id AS execution_account_id",
-                "account.risk_capital_multiplier "
-                "AS risk_capital_multiplier",
+                "account.risk_capital_addon "
+                "AS risk_capital_addon",
             ]
             for field_name in ("is_enabled", "enabled", "status"):
                 if field_name in account_columns:
@@ -6137,18 +6137,18 @@ def _account_risk_capital_multiplier(account_id: str) -> float:
             detail="watcher account risk configuration is disabled",
         )
     try:
-        multiplier = float(row["risk_capital_multiplier"])
+        addon = float(row["risk_capital_addon"])
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=503,
-            detail="watcher account risk capital multiplier is invalid",
+            detail="watcher account risk capital addon is invalid",
         ) from exc
-    if not math.isfinite(multiplier) or multiplier <= 0:
+    if not math.isfinite(addon) or addon < 0:
         raise HTTPException(
             status_code=503,
-            detail="watcher account risk capital multiplier is invalid",
+            detail="watcher account risk capital addon is invalid",
         )
-    return multiplier
+    return addon
 
 
 def _channel_from_signal_ref(value) -> str | bool:
@@ -6948,7 +6948,7 @@ def _symbol_risk_ratio(symbol: str) -> float:
 def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
                      entry_price, entry_price_min, entry_price_max,
                      stop_loss, leverage, caps, checks,
-                     risk_capital_multiplier=False) -> float:
+                     risk_capital_addon=False) -> float:
     """Risk-based sizing: notional = equity * risk_ratio / stop_distance.
     Hard cap (fail closed): loss at stop <= max_risk_fraction of equity.
     Without a stop loss the order cannot be risk-checked, so an explicit
@@ -6961,19 +6961,32 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
         )
     real_equity = state["real_equity"]
     available_balance = state["available_balance"]
+    if isinstance(risk_capital_addon, bool):
+        raise HTTPException(
+            status_code=503,
+            detail="account risk capital addon is invalid",
+        )
     try:
-        multiplier = float(risk_capital_multiplier)
+        addon = float(risk_capital_addon)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=503,
-            detail="account risk capital multiplier is unavailable",
+            detail="account risk capital addon is unavailable",
         ) from exc
-    if not math.isfinite(multiplier) or multiplier <= 0:
+    if not math.isfinite(addon) or addon < 0:
         raise HTTPException(
             status_code=503,
-            detail="account risk capital multiplier is invalid",
+            detail="account risk capital addon is invalid",
         )
-    effective_equity = real_equity * multiplier
+    effective_equity = real_equity + addon
+    if effective_equity <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail="account effective equity is not positive",
+        )
+    multiplier = None
+    if real_equity > 0:
+        multiplier = effective_equity / real_equity
     checks.append(
         {
             "name": "account_equity_basis",
@@ -6981,6 +6994,7 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
             "real_equity": real_equity,
             "available_balance": available_balance,
             "effective_equity": effective_equity,
+            "risk_capital_addon": addon,
             "risk_capital_multiplier": multiplier,
         }
     )
@@ -7507,22 +7521,22 @@ def operator_order(
     client_ref = str(body.get("client_ref") or "").strip()
     open_raw_channel = "hermes-operator"
     open_has_provenance = False
-    open_risk_capital_multiplier: float | bool = False
+    open_risk_capital_addon: float | bool = False
     if action == "open_position":
         open_raw_channel, open_has_provenance = _open_source_channel(
             body,
             client_ref,
         )
         if open_raw_channel not in ("hermes-operator", "operator"):
-            open_risk_capital_multiplier = (
-                _channel_risk_capital_multiplier(
+            open_risk_capital_addon = (
+                _channel_risk_capital_addon(
                     open_raw_channel,
                     account_id,
                 )
             )
         else:
-            open_risk_capital_multiplier = (
-                _account_risk_capital_multiplier(account_id)
+            open_risk_capital_addon = (
+                _account_risk_capital_addon(account_id)
             )
     authorization_evidence: dict | None = None
     open_request_semantics: dict | bool = False
@@ -7865,7 +7879,7 @@ def operator_order(
             symbol, account_id, side, entry_type,
             entry_price, entry_price_min, entry_price_max,
             stop_loss, leverage, sizing_caps, checks,
-            open_risk_capital_multiplier,
+            open_risk_capital_addon,
         )
     elif action == "partial_close":
         quantity = _op_num(body.get("quantity"), "quantity", required=True)
@@ -8126,6 +8140,7 @@ def operator_order(
         order_plan["equity"] = {
             "real_equity": equity_evidence["real_equity"],
             "available_balance": equity_evidence["available_balance"],
+            "risk_capital_addon": equity_evidence["risk_capital_addon"],
             "risk_capital_multiplier": (
                 equity_evidence["risk_capital_multiplier"]
             ),
@@ -8448,6 +8463,11 @@ def operator_order(
                             ),
                             "effective_equity": (
                                 equity_evidence["effective_equity"]
+                                if equity_evidence
+                                else False
+                            ),
+                            "risk_capital_addon": (
+                                equity_evidence["risk_capital_addon"]
                                 if equity_evidence
                                 else False
                             ),

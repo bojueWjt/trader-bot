@@ -58,7 +58,7 @@ def _create_watcher_risk_db(path) -> None:
             CREATE TABLE account_configs (
                 account_id TEXT PRIMARY KEY,
                 execution_account_id TEXT NOT NULL,
-                risk_capital_multiplier REAL NOT NULL,
+                risk_capital_addon REAL NOT NULL,
                 account_type TEXT NOT NULL,
                 parent_account_id TEXT NOT NULL,
                 is_enabled INTEGER NOT NULL
@@ -70,14 +70,14 @@ def _create_watcher_risk_db(path) -> None:
             INSERT INTO account_configs (
                 account_id,
                 execution_account_id,
-                risk_capital_multiplier,
+                risk_capital_addon,
                 account_type,
                 parent_account_id,
                 is_enabled
             ) VALUES (
                 'credential-sub-c',
                 'account-c',
-                1.8,
+                6000.0,
                 'subaccount',
                 'credential-main-a',
                 1
@@ -85,14 +85,14 @@ def _create_watcher_risk_db(path) -> None:
             INSERT INTO account_configs (
                 account_id,
                 execution_account_id,
-                risk_capital_multiplier,
+                risk_capital_addon,
                 account_type,
                 parent_account_id,
                 is_enabled
             ) VALUES (
                 'credential-main-a',
                 'account-a',
-                1.0,
+                0.0,
                 'main',
                 '',
                 1
@@ -203,7 +203,7 @@ def test_watcher_trading_db_path_rejects_conflicting_aliases() -> None:
         read_api._resolve_watcher_trading_db_path(env)
 
 
-def test_watcher_multiplier_resolves_by_channel_and_execution_account(
+def test_watcher_addon_resolves_by_channel_and_execution_account(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -211,16 +211,16 @@ def test_watcher_multiplier_resolves_by_channel_and_execution_account(
     _create_watcher_risk_db(db_path)
     monkeypatch.setattr(read_api, "_WATCHER_TRADING_DB", str(db_path))
 
-    assert read_api._channel_risk_capital_multiplier(
+    assert read_api._channel_risk_capital_addon(
         "-1002189417451",
         "account-c",
-    ) == pytest.approx(1.8)
-    assert read_api._account_risk_capital_multiplier(
+    ) == pytest.approx(6000.0)
+    assert read_api._account_risk_capital_addon(
         "account-c",
-    ) == pytest.approx(1.8)
+    ) == pytest.approx(6000.0)
 
     with pytest.raises(HTTPException) as exc:
-        read_api._channel_risk_capital_multiplier(
+        read_api._channel_risk_capital_addon(
             "-1002189417451",
             "account-d",
         )
@@ -235,10 +235,10 @@ def test_watcher_multiplier_resolves_by_channel_and_execution_account(
         "account_type",
         "parent_account_id",
         "execution_account_id",
-        "risk_capital_multiplier",
+        "risk_capital_addon",
     ],
 )
-def test_watcher_multiplier_requires_complete_dynamic_schema(
+def test_watcher_addon_requires_complete_dynamic_schema(
     monkeypatch,
     tmp_path,
     missing_column,
@@ -251,8 +251,8 @@ def test_watcher_multiplier_requires_complete_dynamic_schema(
         columns.append("parent_account_id TEXT NOT NULL")
     if missing_column != "execution_account_id":
         columns.append("execution_account_id TEXT NOT NULL")
-    if missing_column != "risk_capital_multiplier":
-        columns.append("risk_capital_multiplier REAL NOT NULL")
+    if missing_column != "risk_capital_addon":
+        columns.append("risk_capital_addon REAL NOT NULL")
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(
@@ -277,9 +277,9 @@ def test_watcher_multiplier_requires_complete_dynamic_schema(
         if missing_column != "execution_account_id":
             insert_columns.append("execution_account_id")
             insert_values.append("account-a")
-        if missing_column != "risk_capital_multiplier":
-            insert_columns.append("risk_capital_multiplier")
-            insert_values.append(1.8)
+        if missing_column != "risk_capital_addon":
+            insert_columns.append("risk_capital_addon")
+            insert_values.append(6000.0)
         placeholders = ", ".join("?" for _ in insert_values)
         conn.execute(
             "INSERT INTO account_configs "
@@ -297,12 +297,12 @@ def test_watcher_multiplier_requires_complete_dynamic_schema(
     monkeypatch.setattr(read_api, "_WATCHER_TRADING_DB", str(db_path))
 
     with pytest.raises(HTTPException) as channel_exc:
-        read_api._channel_risk_capital_multiplier(
+        read_api._channel_risk_capital_addon(
             "-1002136478186",
             "account-a",
         )
     with pytest.raises(HTTPException) as account_exc:
-        read_api._account_risk_capital_multiplier("account-a")
+        read_api._account_risk_capital_addon("account-a")
 
     assert channel_exc.value.status_code == 503
     assert "schema is unavailable" in channel_exc.value.detail
@@ -310,7 +310,7 @@ def test_watcher_multiplier_requires_complete_dynamic_schema(
     assert "schema is unavailable" in account_exc.value.detail
 
 
-def test_watcher_multiplier_rejects_duplicate_execution_identity(
+def test_watcher_addon_rejects_duplicate_execution_identity(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -324,7 +324,7 @@ def test_watcher_multiplier_rejects_duplicate_execution_identity(
                 account_type TEXT NOT NULL,
                 parent_account_id TEXT NOT NULL,
                 execution_account_id TEXT NOT NULL,
-                risk_capital_multiplier REAL NOT NULL
+                risk_capital_addon REAL NOT NULL
             );
             CREATE TABLE channel_routing (
                 channel_id TEXT PRIMARY KEY,
@@ -335,14 +335,14 @@ def test_watcher_multiplier_rejects_duplicate_execution_identity(
                 'main',
                 '',
                 'account-a',
-                1.8
+                6000.0
             );
             INSERT INTO account_configs VALUES (
                 'credential-b',
                 'main',
                 '',
                 'account-a',
-                2.0
+                5000.0
             );
             INSERT INTO channel_routing VALUES (
                 '-1002136478186',
@@ -356,12 +356,12 @@ def test_watcher_multiplier_rejects_duplicate_execution_identity(
     monkeypatch.setattr(read_api, "_WATCHER_TRADING_DB", str(db_path))
 
     with pytest.raises(HTTPException) as channel_exc:
-        read_api._channel_risk_capital_multiplier(
+        read_api._channel_risk_capital_addon(
             "-1002136478186",
             "account-a",
         )
     with pytest.raises(HTTPException) as account_exc:
-        read_api._account_risk_capital_multiplier("account-a")
+        read_api._account_risk_capital_addon("account-a")
 
     assert channel_exc.value.status_code == 503
     assert "must be unique" in channel_exc.value.detail
@@ -369,7 +369,7 @@ def test_watcher_multiplier_rejects_duplicate_execution_identity(
     assert "exactly one risk configuration" in account_exc.value.detail
 
 
-def test_watcher_multiplier_rejects_orphan_subaccount(
+def test_watcher_addon_rejects_orphan_subaccount(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -386,12 +386,12 @@ def test_watcher_multiplier_rejects_orphan_subaccount(
     monkeypatch.setattr(read_api, "_WATCHER_TRADING_DB", str(db_path))
 
     with pytest.raises(HTTPException) as channel_exc:
-        read_api._channel_risk_capital_multiplier(
+        read_api._channel_risk_capital_addon(
             "-1002189417451",
             "account-c",
         )
     with pytest.raises(HTTPException) as account_exc:
-        read_api._account_risk_capital_multiplier("account-c")
+        read_api._account_risk_capital_addon("account-c")
 
     assert channel_exc.value.status_code == 503
     assert "parent must resolve" in channel_exc.value.detail
@@ -400,27 +400,27 @@ def test_watcher_multiplier_rejects_orphan_subaccount(
 
 
 @pytest.mark.parametrize(
-    ("multiplier", "enabled", "detail"),
+    ("addon", "enabled", "detail"),
     [
-        (0.0, 1, "multiplier is invalid"),
-        (1.8, 0, "disabled"),
+        (-1.0, 1, "addon is invalid"),
+        (6000.0, 0, "disabled"),
     ],
 )
-def test_watcher_multiplier_rejects_invalid_or_disabled_config(
+def test_watcher_addon_rejects_invalid_or_disabled_config(
     monkeypatch,
     tmp_path,
-    multiplier,
+    addon,
     enabled,
     detail,
 ) -> None:
-    db_path = tmp_path / f"invalid-{multiplier}-{enabled}.db"
+    db_path = tmp_path / f"invalid-{addon}-{enabled}.db"
     _create_watcher_risk_db(db_path)
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             "UPDATE account_configs "
-            "SET risk_capital_multiplier=?, is_enabled=?",
-            (multiplier, enabled),
+            "SET risk_capital_addon=?, is_enabled=?",
+            (addon, enabled),
         )
         conn.commit()
     finally:
@@ -428,12 +428,12 @@ def test_watcher_multiplier_rejects_invalid_or_disabled_config(
     monkeypatch.setattr(read_api, "_WATCHER_TRADING_DB", str(db_path))
 
     with pytest.raises(HTTPException) as channel_exc:
-        read_api._channel_risk_capital_multiplier(
+        read_api._channel_risk_capital_addon(
             "-1002189417451",
             "account-c",
         )
     with pytest.raises(HTTPException) as account_exc:
-        read_api._account_risk_capital_multiplier("account-c")
+        read_api._account_risk_capital_addon("account-c")
 
     assert channel_exc.value.status_code == 503
     assert detail in channel_exc.value.detail
@@ -544,23 +544,23 @@ def test_financial_state_requires_fresh_binance_account_snapshot(
     assert read_api._account_financial_state("account-c") is False
 
 
-def test_sizing_tracks_live_equity_with_configured_multiplier(
+def test_sizing_adds_fixed_risk_capital_addon(
     monkeypatch,
 ) -> None:
-    current_equity = {"value": 5000.0}
+    current_equity = {"value": 3000.0}
 
     def financial_state(_account_id: str) -> dict[str, float]:
         return {
             "real_equity": current_equity["value"],
-            "available_balance": 1000.0,
+            "available_balance": 3000.0,
         }
 
     monkeypatch.setattr(read_api, "_account_financial_state", financial_state)
     monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
-    multiplier = 1.8
+    addon = 6000.0
 
     results = []
-    for real_equity in (5000.0, 4500.0, 5500.0):
+    for real_equity in (3000.0, 4000.0):
         current_equity["value"] = real_equity
         checks = []
         notional = read_api._size_open_order(
@@ -576,29 +576,23 @@ def test_sizing_tracks_live_equity_with_configured_multiplier(
             10.0,
             _caps(),
             checks,
-            multiplier,
+            addon,
         )
         results.append((notional, checks[0]))
 
-    initial, after_loss, after_profit = results
+    initial, after_profit = results
     assert initial[0] == pytest.approx(900.0)
-    assert after_loss[0] == pytest.approx(810.0)
-    assert after_profit[0] == pytest.approx(990.0)
-    assert initial[1]["real_equity"] == 5000.0
-    assert initial[1]["effective_equity"] == pytest.approx(
-        initial[1]["real_equity"] * multiplier
-    )
-    assert after_loss[1]["effective_equity"] == pytest.approx(
-        after_loss[1]["real_equity"] * multiplier
-    )
-    assert after_profit[1]["effective_equity"] == pytest.approx(
-        after_profit[1]["real_equity"] * multiplier
-    )
-    assert after_loss[0] < initial[0] < after_profit[0]
+    assert after_profit[0] == pytest.approx(1000.0)
+    assert initial[1]["real_equity"] == 3000.0
+    assert initial[1]["effective_equity"] == pytest.approx(9000.0)
+    assert after_profit[1]["real_equity"] == 4000.0
+    assert after_profit[1]["effective_equity"] == pytest.approx(10000.0)
     assert {
-        check["risk_capital_multiplier"]
+        check["risk_capital_addon"]
         for _, check in results
-    } == {multiplier}
+    } == {addon}
+    assert initial[1]["risk_capital_multiplier"] == pytest.approx(3.0)
+    assert after_profit[1]["risk_capital_multiplier"] == pytest.approx(2.5)
 
     sizing_source = inspect.getsource(read_api._size_open_order)
     assert "9000" not in sizing_source
@@ -635,7 +629,7 @@ def test_market_stop_loss_sizing_fails_closed_without_live_mark_price(
             10.0,
             _caps(),
             [],
-            1.8,
+            4000.0,
         )
 
     assert exc.value.status_code == 503
@@ -643,18 +637,18 @@ def test_market_stop_loss_sizing_fails_closed_without_live_mark_price(
 
 
 @pytest.mark.parametrize(
-    ("multiplier", "detail"),
+    ("addon", "detail"),
     [
-        (None, "multiplier is unavailable"),
-        (False, "multiplier is invalid"),
-        (0.0, "multiplier is invalid"),
-        (float("nan"), "multiplier is invalid"),
-        (float("inf"), "multiplier is invalid"),
+        (None, "addon is unavailable"),
+        (False, "addon is invalid"),
+        (-1.0, "addon is invalid"),
+        (float("nan"), "addon is invalid"),
+        (float("inf"), "addon is invalid"),
     ],
 )
-def test_sizing_fails_closed_without_valid_configured_multiplier(
+def test_sizing_fails_closed_without_valid_configured_addon(
     monkeypatch,
-    multiplier,
+    addon,
     detail,
 ) -> None:
     monkeypatch.setattr(
@@ -680,11 +674,75 @@ def test_sizing_fails_closed_without_valid_configured_multiplier(
             10.0,
             _caps(),
             [],
-            multiplier,
+            addon,
         )
 
     assert exc.value.status_code == 503
     assert detail in exc.value.detail
+
+
+def test_sizing_accepts_zero_risk_capital_addon(monkeypatch) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_account_financial_state",
+        lambda _account_id: {
+            "real_equity": 3000.0,
+            "available_balance": 3000.0,
+        },
+    )
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    checks = []
+
+    notional = read_api._size_open_order(
+        None,
+        "BTCUSDT",
+        "account-c",
+        "long",
+        "limit",
+        100.0,
+        None,
+        None,
+        90.0,
+        10.0,
+        _caps(),
+        checks,
+        0.0,
+    )
+
+    assert notional == pytest.approx(300.0)
+    assert checks[0]["risk_capital_addon"] == 0.0
+    assert checks[0]["risk_capital_multiplier"] == pytest.approx(1.0)
+
+
+def test_sizing_rejects_non_positive_effective_equity(monkeypatch) -> None:
+    monkeypatch.setattr(
+        read_api,
+        "_account_financial_state",
+        lambda _account_id: {
+            "real_equity": -100.0,
+            "available_balance": 100.0,
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        read_api._size_open_order(
+            None,
+            "BTCUSDT",
+            "account-c",
+            "long",
+            "limit",
+            100.0,
+            None,
+            None,
+            90.0,
+            10.0,
+            _caps(),
+            [],
+            0.0,
+        )
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "account effective equity is not positive"
 
 
 def test_sizing_rejects_explicit_notional_above_dynamic_auto(
@@ -714,7 +772,7 @@ def test_sizing_rejects_explicit_notional_above_dynamic_auto(
             10.0,
             _caps(),
             [],
-            1.8,
+            4000.0,
         )
 
     assert exc.value.status_code == 400
@@ -748,7 +806,7 @@ def test_sizing_allows_explicit_notional_below_dynamic_auto(
         10.0,
         _caps(),
         checks,
-        1.8,
+        4000.0,
     )
 
     assert notional == 450.0
@@ -771,7 +829,7 @@ def test_explicit_notional_limit_tracks_profit_and_loss(
 
     def size_explicit() -> float:
         return read_api._size_open_order(
-            850.0,
+            875.0,
             "BTCUSDT",
             "account-c",
             "long",
@@ -783,18 +841,18 @@ def test_explicit_notional_limit_tracks_profit_and_loss(
             10.0,
             _caps(),
             [],
-            1.8,
+            4000.0,
         )
 
-    assert size_explicit() == 850.0
+    assert size_explicit() == 875.0
 
     current_equity["value"] = 4500.0
     with pytest.raises(HTTPException) as loss_exc:
         size_explicit()
-    assert "dynamic auto sizing 810.0U" in loss_exc.value.detail
+    assert "dynamic auto sizing 850.0U" in loss_exc.value.detail
 
     current_equity["value"] = 5500.0
-    assert size_explicit() == 850.0
+    assert size_explicit() == 875.0
 
 
 def test_canary_explicit_notional_override_keeps_real_funds_gate(
@@ -826,7 +884,7 @@ def test_canary_explicit_notional_override_keeps_real_funds_gate(
             10.0,
             caps,
             [],
-            1.0,
+            0.0,
         )
 
     assert exc.value.status_code == 400
@@ -858,7 +916,7 @@ def test_sizing_keeps_real_available_balance_as_hard_gate(monkeypatch) -> None:
             10.0,
             _caps(),
             [],
-            1.8,
+            4000.0,
         )
 
     assert exc.value.status_code == 400

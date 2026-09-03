@@ -764,19 +764,21 @@
               <input id="acc-risk" type="number" min="0" step="0.001" value="0.01">
             </div>
             <div class="form-field">
-              <label for="acc-capital-multiplier">风险资金系数</label>
-              <input id="acc-capital-multiplier" type="number" min="0.01" step="0.1" placeholder="必须显式配置">
-              <span class="field-help">有效权益 = 当前实时实际权益 × 系数。系数保存后保持不变，仓位随盈亏动态变化。</span>
+              <label for="acc-capital-addon">风险资金加权额 (USDT)</label>
+              <input id="acc-capital-addon" type="number" min="0" step="0.01" placeholder="必须显式配置">
+              <span class="field-help">有效权益 = 当前实时实际权益 + 固定加权额。账户盈亏按 1:1 进入有效权益。</span>
+              <!-- 已移除的乘法设计：有效权益 = 当前实时实际权益 × 系数。系数保存后保持不变，仓位随盈亏动态变化。 -->
             </div>
             <div class="form-field">
               <label for="acc-initial-equity">初始化实际权益</label>
-              <input id="acc-initial-equity" type="number" min="0.01" step="0.01" placeholder="当前账号实际权益">
+              <input id="acc-initial-equity" type="number" min="0" step="0.01" placeholder="当前账号实际权益">
             </div>
             <div class="form-field">
               <label for="acc-target-equity">初始化目标有效权益</label>
-              <input id="acc-target-equity" type="number" min="0.01" step="0.01" placeholder="目标仓位计算基准">
-              <span class="field-help">初始化系数 = 目标有效权益 ÷ 初始化实际权益。两个初始化值只用于计算系数。</span>
-              <button class="btn btn-ghost btn-sm" type="button" onclick="calculateInitialCapitalMultiplier()">计算系数</button>
+              <input id="acc-target-equity" type="number" min="0" step="0.01" placeholder="目标仓位计算基准">
+              <span class="field-help">加权额 = 目标有效权益 − 初始化实际权益，结果允许为 0。</span>
+              <!-- 已移除的初始化公式：初始化系数 = 目标有效权益 ÷ 初始化实际权益。两个初始化值只用于计算系数。 -->
+              <button class="btn btn-ghost btn-sm" type="button" onclick="calculateInitialCapitalAddon()">计算加权额</button>
             </div>
           </div>
           <div class="form-error" id="accountFormError" role="alert"></div>
@@ -1199,7 +1201,7 @@
           return;
         }
 
-        let html = '<div class="table-wrap"><table class="tbl account-table"><thead><tr><th>执行账号</th><th>类型</th><th>API 凭据</th><th>风险</th><th>资金系数</th><th>环境</th><th>使用情况</th><th></th></tr></thead><tbody>';
+        let html = '<div class="table-wrap"><table class="tbl account-table"><thead><tr><th>执行账号</th><th>类型</th><th>API 凭据</th><th>风险</th><th>资金加权额</th><th>环境</th><th>使用情况</th><th></th></tr></thead><tbody>';
         for (let index = 0; index < rows.length; index += 1) {
           const account = rows[index];
           let modeBadge = '<span class="badge badge-live">Live</span>';
@@ -1217,25 +1219,25 @@
             parentMeta = `所属 ${esc(account.parent_account_id)}`;
           }
           const routeCount = Number(account.channel_count || 0);
-          const multiplier = Number(account.risk_capital_multiplier);
-          const multiplierConfigured = (
-            Number.isFinite(multiplier)
-            && multiplier > 0
+          const rawAddon = account.risk_capital_addon;
+          const addon = Number(rawAddon);
+          const addonConfigured = (
+            rawAddon !== null
+            && rawAddon !== ''
+            && typeof rawAddon !== 'boolean'
+            && Number.isFinite(addon)
+            && addon >= 0
           );
           const accountEnabled = Number(account.is_enabled) === 1;
-          let effectiveRisk = '<span class="badge badge-pending">待配置</span>';
-          let multiplierDisplay = '<span class="badge badge-pending">待配置</span>';
-          if (multiplierConfigured) {
-            effectiveRisk = (
-              Number(account.default_risk_ratio)
-              * multiplier
-              * 100
-            ).toFixed(1) + '%';
-            multiplierDisplay = `<strong>${multiplier.toFixed(2)}×</strong>`;
+          let equityBasis = '<span class="badge badge-pending">待配置</span>';
+          let addonDisplay = '<span class="badge badge-pending">待配置</span>';
+          if (addonConfigured) {
+            const addonText = String(addon);
+            equityBasis = `有效权益 = 实际权益 + ${addonText} USDT`;
+            addonDisplay = `<strong>+${addonText} USDT</strong>`;
           }
           if (!accountEnabled) {
-            effectiveRisk = '<span class="badge badge-pending">未启用</span>';
-            multiplierDisplay += '<div class="account-meta">账号已禁用</div>';
+            addonDisplay += '<div class="account-meta">账号已禁用</div>';
           }
           html += `<tr>
             <td>
@@ -1250,9 +1252,9 @@
             </td>
             <td>
               <strong>${(Number(account.default_risk_ratio) * 100).toFixed(1)}%</strong>
-              <div class="account-meta">占实际权益 ${effectiveRisk}</div>
+              <div class="account-meta">${equityBasis}</div>
             </td>
-            <td>${multiplierDisplay}</td>
+            <td>${addonDisplay}</td>
             <td>${modeBadge}</td>
             <td>${routeCount} 个频道</td>
             <td>
@@ -1350,7 +1352,7 @@
       document.getElementById('acc-key').value = '';
       document.getElementById('acc-secret').value = '';
       document.getElementById('acc-risk').value = '0.01';
-      document.getElementById('acc-capital-multiplier').value = '';
+      document.getElementById('acc-capital-addon').value = '';
       document.getElementById('acc-initial-equity').value = '';
       document.getElementById('acc-target-equity').value = '';
       document.getElementById('acc-testnet').checked = true;
@@ -1381,12 +1383,19 @@
       document.getElementById('acc-key').value = '';
       document.getElementById('acc-secret').value = '';
       document.getElementById('acc-risk').value = String(account.default_risk_ratio);
-      const multiplier = Number(account.risk_capital_multiplier);
-      let multiplierValue = '';
-      if (Number.isFinite(multiplier) && multiplier > 0) {
-        multiplierValue = String(multiplier);
+      const rawAddon = account.risk_capital_addon;
+      const addon = Number(rawAddon);
+      let addonValue = '';
+      if (
+        rawAddon !== null
+        && rawAddon !== ''
+        && typeof rawAddon !== 'boolean'
+        && Number.isFinite(addon)
+        && addon >= 0
+      ) {
+        addonValue = String(addon);
       }
-      document.getElementById('acc-capital-multiplier').value = multiplierValue;
+      document.getElementById('acc-capital-addon').value = addonValue;
       document.getElementById('acc-initial-equity').value = '';
       document.getElementById('acc-target-equity').value = '';
       document.getElementById('acc-testnet').checked = Boolean(account.is_testnet);
@@ -1405,28 +1414,42 @@
       document.getElementById('acc-risk').focus();
     }
 
-    function calculateInitialCapitalMultiplier() {
-      const initialActualEquity = Number(
-        document.getElementById('acc-initial-equity').value
-      );
-      const targetEffectiveEquity = Number(
-        document.getElementById('acc-target-equity').value
-      );
-      if (!Number.isFinite(initialActualEquity) || initialActualEquity <= 0) {
-        showAccountFormError('初始化实际权益需要填写大于 0 的数字。');
-        document.getElementById('acc-initial-equity').focus();
+    function calculateInitialCapitalAddon() {
+      const initialActualEquityInput = document.getElementById('acc-initial-equity');
+      const targetEffectiveEquityInput = document.getElementById('acc-target-equity');
+      const initialActualEquityRaw = initialActualEquityInput.value.trim();
+      const targetEffectiveEquityRaw = targetEffectiveEquityInput.value.trim();
+      const initialActualEquity = Number(initialActualEquityRaw);
+      const targetEffectiveEquity = Number(targetEffectiveEquityRaw);
+      if (
+        !initialActualEquityRaw
+        || !Number.isFinite(initialActualEquity)
+        || initialActualEquity < 0
+      ) {
+        showAccountFormError('初始化实际权益需要填写非负数字。');
+        initialActualEquityInput.focus();
         return;
       }
-      if (!Number.isFinite(targetEffectiveEquity) || targetEffectiveEquity <= 0) {
-        showAccountFormError('初始化目标有效权益需要填写大于 0 的数字。');
-        document.getElementById('acc-target-equity').focus();
+      if (
+        !targetEffectiveEquityRaw
+        || !Number.isFinite(targetEffectiveEquity)
+        || targetEffectiveEquity < 0
+      ) {
+        showAccountFormError('初始化目标有效权益需要填写非负数字。');
+        targetEffectiveEquityInput.focus();
         return;
       }
 
-      const multiplier = targetEffectiveEquity / initialActualEquity;
-      const roundedMultiplier = Number(multiplier.toFixed(8));
-      document.getElementById('acc-capital-multiplier').value = String(
-        roundedMultiplier
+      // 已移除的公式：const multiplier = targetEffectiveEquity / initialActualEquity;
+      const addon = targetEffectiveEquity - initialActualEquity;
+      if (addon < 0) {
+        showAccountFormError('目标有效权益不能低于初始化实际权益。');
+        targetEffectiveEquityInput.focus();
+        return;
+      }
+      const roundedAddon = Number(addon.toFixed(8));
+      document.getElementById('acc-capital-addon').value = String(
+        roundedAddon
       );
       showAccountFormError('');
     }
@@ -1437,9 +1460,9 @@
       const api_key = document.getElementById('acc-key').value.trim();
       const api_secret = document.getElementById('acc-secret').value.trim();
       const default_risk_ratio = Number(document.getElementById('acc-risk').value);
-      const risk_capital_multiplier = Number(
-        document.getElementById('acc-capital-multiplier').value
-      );
+      const riskCapitalAddonInput = document.getElementById('acc-capital-addon');
+      const riskCapitalAddonRaw = riskCapitalAddonInput.value.trim();
+      const risk_capital_addon = Number(riskCapitalAddonRaw);
       const is_testnet = document.getElementById('acc-testnet').checked;
       const is_enabled = document.getElementById('acc-enabled').checked;
       let parent_account_id = '';
@@ -1472,9 +1495,13 @@
         document.getElementById('acc-risk').focus();
         return;
       }
-      if (!Number.isFinite(risk_capital_multiplier) || risk_capital_multiplier <= 0) {
-        showAccountFormError('风险资金系数需要填写大于 0 的数字。');
-        document.getElementById('acc-capital-multiplier').focus();
+      if (
+        !riskCapitalAddonRaw
+        || !Number.isFinite(risk_capital_addon)
+        || risk_capital_addon < 0
+      ) {
+        showAccountFormError('风险资金加权额需要填写非负数字。');
+        riskCapitalAddonInput.focus();
         return;
       }
       if (selectedAccountType === 'subaccount' && !parent_account_id) {
@@ -1489,7 +1516,7 @@
         api_key,
         api_secret,
         default_risk_ratio,
-        risk_capital_multiplier,
+        risk_capital_addon,
         is_testnet,
         is_enabled,
         account_type: selectedAccountType,

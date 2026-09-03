@@ -18,25 +18,25 @@ ROUTES = (
         "-1002136478186",
         "jiataotx@gmail.com",
         "account-a",
-        1.30521817,
+        6000.0,
     ),
     (
         "-1002198013097",
         "balenwong3@gmail.com",
         "account-b",
-        1.0,
+        0.0,
     ),
     (
         "-1002189417451",
         "泰山",
         "account-c",
-        2.96902319,
+        6000.0,
     ),
     (
         "-1002193304023",
         "黄山",
         "account-d",
-        3.0,
+        6000.0,
     ),
 )
 
@@ -63,7 +63,8 @@ def _create_database(
                 api_secret TEXT NOT NULL,
                 is_testnet INTEGER NOT NULL,
                 execution_account_id TEXT NOT NULL,
-                risk_capital_multiplier REAL NOT NULL
+                risk_capital_multiplier REAL NOT NULL,
+                risk_capital_addon REAL NOT NULL
         """
         if include_enabled:
             account_schema += ",\n                is_enabled INTEGER NOT NULL"
@@ -75,18 +76,19 @@ def _create_database(
             );
         """
         connection.executescript(account_schema)
-        for channel_id, credential_id, execution_id, multiplier in routes:
+        for channel_id, credential_id, execution_id, addon in routes:
             columns = (
                 "account_id, api_key, api_secret, is_testnet, "
-                "execution_account_id, risk_capital_multiplier"
+                "execution_account_id, risk_capital_multiplier, "
+                "risk_capital_addon"
             )
-            values = "?, ?, ?, 0, ?, ?"
+            values = "?, ?, ?, 0, ?, 1.0, ?"
             parameters: tuple[object, ...] = (
                 credential_id,
                 f"private-key-{execution_id}",
                 f"private-secret-{execution_id}",
                 execution_id,
-                multiplier,
+                addon,
             )
             if include_enabled:
                 columns += ", is_enabled"
@@ -145,6 +147,7 @@ def _update_account(
     allowed_columns = {
         "execution_account_id",
         "risk_capital_multiplier",
+        "risk_capital_addon",
         "is_enabled",
         "is_testnet",
     }
@@ -174,8 +177,9 @@ def _insert_route(
         connection.execute(
             "INSERT INTO account_configs ("
             "account_id, api_key, api_secret, is_testnet, "
-            "execution_account_id, risk_capital_multiplier, is_enabled"
-            ") VALUES (?, 'extra-key', 'extra-secret', ?, ?, 1.0, ?)",
+            "execution_account_id, risk_capital_multiplier, "
+            "risk_capital_addon, is_enabled"
+            ") VALUES (?, 'extra-key', 'extra-secret', ?, ?, 1.0, 0, ?)",
             (
                 credential_account_id,
                 is_testnet,
@@ -233,6 +237,20 @@ def test_valid_mapping_writes_durable_redacted_evidence(
     assert "private-secret-" not in evidence_text
     assert "api_key" not in evidence_text
     assert "api_secret" not in evidence_text
+    connection = sqlite3.connect(database_path)
+    try:
+        stored_addons = dict(
+            connection.execute(
+                "SELECT execution_account_id, risk_capital_addon "
+                "FROM account_configs"
+            ).fetchall()
+        )
+    finally:
+        connection.close()
+    assert stored_addons == {
+        execution_id: addon
+        for _, _, execution_id, addon in ROUTES
+    }
 
 
 def test_wal_and_shm_metadata_are_recorded(tmp_path: Path) -> None:
@@ -246,7 +264,7 @@ def test_wal_and_shm_metadata_are_recorded(tmp_path: Path) -> None:
         assert journal_mode[0].lower() == "wal"
         writer.execute(
             "UPDATE account_configs "
-            "SET risk_capital_multiplier = 1.125 "
+            "SET risk_capital_addon = 6125 "
             "WHERE execution_account_id = 'account-b'"
         )
         writer.commit()
@@ -267,7 +285,7 @@ def test_wal_and_shm_metadata_are_recorded(tmp_path: Path) -> None:
     )
 
 
-def test_positive_runtime_multiplier_is_preserved_without_fixed_value(
+def test_rollback_multiplier_is_preserved_with_addon_schema(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "watcher-trading.db"
@@ -351,6 +369,7 @@ def test_pre_restart_gate_requires_dynamic_routing_columns(
         "is_testnet": "INTEGER NOT NULL",
         "execution_account_id": "TEXT NOT NULL",
         "risk_capital_multiplier": "REAL NOT NULL",
+        "risk_capital_addon": "REAL NOT NULL",
     }
     account_columns.pop(missing_column)
     schema = ",\n".join(
@@ -450,12 +469,12 @@ def test_duplicate_execution_account_fails_closed(tmp_path: Path) -> None:
 def test_wrong_channel_fails_closed(tmp_path: Path) -> None:
     database_path = tmp_path / "watcher-trading.db"
     routes = list(ROUTES)
-    channel_id, credential_id, execution_id, multiplier = routes[3]
+    channel_id, credential_id, execution_id, addon = routes[3]
     routes[3] = (
         "-1000000000000",
         credential_id,
         execution_id,
-        multiplier,
+        addon,
     )
     assert channel_id == "-1002193304023"
     _create_database(database_path, routes=tuple(routes))
