@@ -10,5 +10,5 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/srv/trader-v3/state/operator-query-risk
+ReadWritePaths=/srv/trader-v3/state/operator-query-risk /var/lib/docker/volumes/trader_signal-data/_data
 TimeoutStartSec=2min
