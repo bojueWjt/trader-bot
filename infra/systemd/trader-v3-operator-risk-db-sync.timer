@@ -1,0 +1,12 @@
+[Unit]
+Description=Synchronize the Trader v3 operator risk database every 30 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=false
+Unit=trader-v3-operator-risk-db-sync.service
+
+[Install]
+WantedBy=timers.target

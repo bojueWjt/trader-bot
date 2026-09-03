@@ -1,0 +1,14 @@
+[Unit]
+Description=Trader v3 control-plane risk database synchronization (watcher main DB -> operator-query copy, non-secret columns only)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /srv/trader-v3/scripts/sync_operator_risk_db.py
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/trader-v3/state/operator-query-risk
+TimeoutStartSec=2min
