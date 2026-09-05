@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping, Protocol
 
 from execution_domain.order_ownership import is_robot_client_order_id
+from runtime.exchange_cancel_adapter import BinanceApiError
 
 
 TERMINAL_LOCAL_ORDER_STATUSES = frozenset(
@@ -142,10 +143,21 @@ class BinanceOwnedOrderReconciler:
 
         events = []
         for candidate in candidates:
-            order_snapshot = self._query_order(
-                candidate,
-                deadline_monotonic=deadline_monotonic,
-            )
+            try:
+                order_snapshot = self._query_order(
+                    candidate,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except BinanceApiError as exc:
+                if exc.code != -2013:
+                    raise
+                events.extend(
+                    self._recover_missing_order(
+                        candidate,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                )
+                continue
             trades = self._query_trades(
                 candidate,
                 order_snapshot,
@@ -159,6 +171,24 @@ class BinanceOwnedOrderReconciler:
                 )
             )
         return tuple(events)
+
+    def _recover_missing_order(
+        self,
+        candidate: OwnedOrderCandidate,
+        *,
+        deadline_monotonic: float | None,
+    ) -> tuple[RecoveredOrderEvent, ...]:
+        trades = ()
+        if candidate.venue_order_id:
+            trades = self._query_trades_by_venue_order_id(
+                candidate,
+                candidate.venue_order_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+        return _recovered_missing_order_events(
+            candidate,
+            trades,
+        )
 
     def _query_order(
         self,
@@ -194,6 +224,19 @@ class BinanceOwnedOrderReconciler:
             order_snapshot.get("orderId"),
             "Binance order query orderId",
         )
+        return self._query_trades_by_venue_order_id(
+            candidate,
+            venue_order_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def _query_trades_by_venue_order_id(
+        self,
+        candidate: OwnedOrderCandidate,
+        venue_order_id: str,
+        *,
+        deadline_monotonic: float | None,
+    ) -> tuple[Mapping[str, Any], ...]:
         payload = self._request(
             "/fapi/v1/userTrades",
             {
@@ -561,6 +604,110 @@ def _recovered_events(
             )
         )
     return tuple(events)
+
+
+def _recovered_missing_order_events(
+    candidate: OwnedOrderCandidate,
+    trades: tuple[Mapping[str, Any], ...],
+) -> tuple[RecoveredOrderEvent, ...]:
+    tags = _order_vanished_tags(candidate.tags)
+    tagged_candidate = replace(candidate, tags=tags)
+    events = []
+    filled_quantity = ""
+    reason = "venue_order_missing(-2013)"
+
+    if candidate.venue_order_id:
+        reason = (
+            f"{reason}; user_trades_checked; "
+            f"attributed_trade_count={len(trades)}"
+        )
+        if trades:
+            trade_quantities = [
+                _positive_decimal(
+                    trade.get("qty"),
+                    "Binance userTrades qty",
+                )
+                for trade in trades
+            ]
+            recovered_quantity = sum(
+                trade_quantities,
+                Decimal("0"),
+            )
+            filled_quantity = _format_decimal(recovered_quantity)
+            reason = (
+                f"{reason}; "
+                f"attributed_filled_qty={filled_quantity}"
+            )
+            synthetic_snapshot = {
+                "orderId": candidate.venue_order_id,
+                "status": "PARTIALLY_FILLED",
+                "origQty": filled_quantity,
+                "executedQty": filled_quantity,
+                "side": candidate.side,
+                "positionSide": candidate.position_side,
+                "type": candidate.order_type,
+                "timeInForce": candidate.time_in_force,
+                "reduceOnly": candidate.reduce_only,
+            }
+            recovered_fills = _recovered_events(
+                tagged_candidate,
+                synthetic_snapshot,
+                trades,
+            )
+            for fill in recovered_fills:
+                events.append(
+                    replace(
+                        fill,
+                        quantity="",
+                        leaves_qty="",
+                        reason=reason,
+                    )
+                )
+    else:
+        reason = (
+            f"{reason}; "
+            "fill_attribution_unverifiable_without_venue_order_id"
+        )
+
+    events.append(
+        RecoveredOrderEvent(
+            event_type="OrderCanceled",
+            ts_event=_missing_order_event_time(trades),
+            client_order_id=candidate.client_order_id,
+            venue_order_id=candidate.venue_order_id,
+            instrument_id=candidate.instrument_id,
+            order_side=candidate.side,
+            side=candidate.side,
+            position_side=candidate.position_side,
+            order_type=candidate.order_type,
+            time_in_force=candidate.time_in_force,
+            filled_qty=filled_quantity,
+            reduce_only=candidate.reduce_only,
+            status="CANCELED",
+            reason=reason,
+            recovered=True,
+            source=RECOVERY_SOURCE,
+            tags=tags,
+        )
+    )
+    return tuple(events)
+
+
+def _order_vanished_tags(tags: tuple[str, ...]) -> tuple[str, ...]:
+    if "order_vanished" in tags:
+        return tags
+    return (*tags, "order_vanished")
+
+
+def _missing_order_event_time(
+    trades: tuple[Mapping[str, Any], ...],
+) -> int:
+    if not trades:
+        return 0
+    return _binance_time_ns(
+        trades[-1].get("time"),
+        "Binance userTrades time",
+    )
 
 
 def _trade_sort_key(payload: Mapping[str, Any]) -> tuple[int, int]:

@@ -18,9 +18,11 @@ from runtime.owned_order_recovery import (  # noqa: E402
     BinanceOwnedOrderReconciler,
     OwnedOrderRecoveryError,
 )
+from runtime.exchange_cancel_adapter import BinanceApiError  # noqa: E402
 
 
 CLIENT_ORDER_ID = "B3562ddc2a0e74f509dc34253ab80beef01"
+SECOND_CLIENT_ORDER_ID = "B3562ddc2a0e74f509dc34253ab80beef02"
 
 
 def test_penguusdt_fill_is_recovered_from_exact_order_and_user_trades() -> None:
@@ -218,6 +220,268 @@ def test_canceled_partial_fill_recovers_fill_before_terminal_event() -> None:
     assert events[1].recovered is True
 
 
+def test_missing_venue_order_without_order_id_recovers_canceled_event() -> None:
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="",
+        instrument_id="PENGUUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="BUY",
+        position_side="BOTH",
+        order_type="LIMIT",
+        time_in_force="GTC",
+        tags=("intent_id=3562ddc2-a0e7-4f50-9dc3-4253ab80beef",),
+    )
+
+    events = reconciler.recover(reconciler.capture((order,)))
+
+    assert len(events) == 1
+    canceled = events[0]
+    assert canceled.event_type == "OrderCanceled"
+    assert canceled.status == "CANCELED"
+    assert canceled.venue_order_id == ""
+    assert "venue_order_missing(-2013)" in canceled.reason
+    assert "fill_attribution_unverifiable" in canceled.reason
+    assert canceled.recovered is True
+    assert canceled.source == "exchange_reconciliation"
+    assert "order_vanished" in canceled.tags
+    assert [call[1] for call in transport.calls] == [
+        "/fapi/v1/order",
+    ]
+
+
+def test_missing_venue_order_with_trades_recovers_fills_then_canceled() -> None:
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/userTrades"): [
+                {
+                    "symbol": "SNDKUSDT",
+                    "orderId": 82901,
+                    "id": 501,
+                    "price": "198.10",
+                    "qty": "0.40",
+                    "quoteQty": "79.24",
+                    "commission": "0.031696",
+                    "commissionAsset": "USDT",
+                    "realizedPnl": "0",
+                    "side": "SELL",
+                    "positionSide": "BOTH",
+                    "buyer": False,
+                    "maker": True,
+                    "time": 1787990401000,
+                },
+                {
+                    "symbol": "SNDKUSDT",
+                    "orderId": 82901,
+                    "id": 502,
+                    "price": "198.00",
+                    "qty": "0.59",
+                    "quoteQty": "116.82",
+                    "commission": "0.046728",
+                    "commissionAsset": "USDT",
+                    "realizedPnl": "0",
+                    "side": "SELL",
+                    "positionSide": "BOTH",
+                    "buyer": False,
+                    "maker": True,
+                    "time": 1787990402000,
+                },
+            ],
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="82901",
+        instrument_id="SNDKUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+        position_side="BOTH",
+        order_type="LIMIT",
+        time_in_force="GTC",
+        reduce_only=False,
+    )
+
+    events = reconciler.recover(reconciler.capture((order,)))
+
+    assert [event.event_type for event in events] == [
+        "OrderFilled",
+        "OrderFilled",
+        "OrderCanceled",
+    ]
+    fills = events[:2]
+    assert [fill.last_qty for fill in fills] == ["0.40", "0.59"]
+    assert [fill.filled_qty for fill in fills] == ["0.40", "0.99"]
+    assert all(fill.quantity == "" for fill in fills)
+    assert all(fill.leaves_qty == "" for fill in fills)
+    assert all("order_vanished" in fill.tags for fill in fills)
+    canceled = events[2]
+    assert canceled.status == "CANCELED"
+    assert canceled.filled_qty == "0.99"
+    assert "venue_order_missing(-2013)" in canceled.reason
+    assert "attributed_trade_count=2" in canceled.reason
+    assert "attributed_filled_qty=0.99" in canceled.reason
+    assert "order_vanished" in canceled.tags
+    assert [call[1] for call in transport.calls] == [
+        "/fapi/v1/order",
+        "/fapi/v1/userTrades",
+    ]
+    assert transport.calls[1][2] == {
+        "symbol": "SNDKUSDT",
+        "orderId": "82901",
+        "limit": 1000,
+    }
+
+
+def test_missing_venue_order_without_trades_recovers_canceled_event() -> None:
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/userTrades"): [],
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="82902",
+        instrument_id="SNDKUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+
+    events = reconciler.recover(reconciler.capture((order,)))
+
+    assert len(events) == 1
+    canceled = events[0]
+    assert canceled.event_type == "OrderCanceled"
+    assert canceled.status == "CANCELED"
+    assert canceled.venue_order_id == "82902"
+    assert canceled.filled_qty == ""
+    assert "venue_order_missing(-2013)" in canceled.reason
+    assert "attributed_trade_count=0" in canceled.reason
+    assert "order_vanished" in canceled.tags
+    assert [call[1] for call in transport.calls] == [
+        "/fapi/v1/order",
+        "/fapi/v1/userTrades",
+    ]
+
+
+def test_non_missing_binance_order_error_is_raised_unchanged() -> None:
+    error = BinanceApiError(-1021, "Timestamp outside recvWindow.")
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): error,
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="82903",
+        instrument_id="SNDKUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+    )
+
+    with pytest.raises(BinanceApiError) as raised:
+        reconciler.recover(reconciler.capture((order,)))
+
+    assert raised.value is error
+
+
+def test_missing_venue_order_does_not_block_later_candidate_recovery() -> None:
+    missing_key = (
+        "GET",
+        "/fapi/v1/order",
+        (
+            ("orderId", "82904"),
+            ("symbol", "SNDKUSDT"),
+        ),
+    )
+    recovered_key = (
+        "GET",
+        "/fapi/v1/order",
+        (
+            ("orderId", "82905"),
+            ("symbol", "PENGUUSDT"),
+        ),
+    )
+    transport = RecordingTransport(
+        {
+            missing_key: BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            recovered_key: {
+                "symbol": "PENGUUSDT",
+                "orderId": 82905,
+                "clientOrderId": SECOND_CLIENT_ORDER_ID,
+                "status": "CANCELED",
+                "side": "BUY",
+                "positionSide": "BOTH",
+                "type": "LIMIT",
+                "timeInForce": "GTC",
+                "origQty": "10",
+                "executedQty": "0",
+                "price": "0.009",
+                "avgPrice": "0",
+                "reduceOnly": False,
+                "updateTime": 1787990403000,
+            },
+            ("GET", "/fapi/v1/userTrades"): [],
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    missing = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="82904",
+        instrument_id="SNDKUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+    recoverable = SimpleNamespace(
+        client_order_id=SECOND_CLIENT_ORDER_ID,
+        venue_order_id="82905",
+        instrument_id="PENGUUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="BUY",
+        position_side="BOTH",
+    )
+
+    events = reconciler.recover(
+        reconciler.capture((missing, recoverable))
+    )
+
+    assert [event.client_order_id for event in events] == [
+        CLIENT_ORDER_ID,
+        SECOND_CLIENT_ORDER_ID,
+    ]
+    assert [event.event_type for event in events] == [
+        "OrderCanceled",
+        "OrderCanceled",
+    ]
+    assert [call[2]["orderId"] for call in transport.calls] == [
+        "82904",
+        "82904",
+        "82905",
+        "82905",
+    ]
+
+
 def test_manual_and_terminal_local_orders_are_excluded() -> None:
     reconciler = BinanceOwnedOrderReconciler(
         transport=RecordingTransport({})
@@ -400,7 +664,7 @@ def test_duplicate_venue_trade_id_fails_closed() -> None:
 class RecordingTransport:
     def __init__(
         self,
-        responses: dict[tuple[str, str], Any],
+        responses: dict[tuple[Any, ...], Any],
     ) -> None:
         self._responses = dict(responses)
         self.calls: list[
@@ -423,4 +687,14 @@ class RecordingTransport:
                 timeout_seconds,
             )
         )
-        return self._responses[(method, path)]
+        request_key = (
+            method,
+            path,
+            tuple(sorted(params.items())),
+        )
+        response = self._responses.get(request_key)
+        if request_key not in self._responses:
+            response = self._responses[(method, path)]
+        if isinstance(response, Exception):
+            raise response
+        return response
