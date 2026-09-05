@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -610,6 +611,13 @@ def test_four_channel_routes_bind_distinct_accounts_in_hermes_prompt(
             _signal(channel_id, f"{channel_id}:{index}", str(index))
         )
 
+        assert "当前时间(UTC):" in prompt
+        timestamp = prompt.split("当前时间(UTC): ", 1)[1].splitlines()[0]
+        datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
+        assert "开仓时效:" in prompt
+        assert "超过 30 分钟" in prompt
+        assert "无法确认发布时间时，开仓类一律只汇报" in prompt
+        assert "第一腿已成交则跳过后续腿并说明「已有仓、不加仓」" in prompt
         assert f"路由凭据账号(审计): {target_account_id}" in prompt
         assert f"固定执行账号: {execution_account_id}" in prompt
         assert f"必须使用 --account {execution_account_id}" in prompt
