@@ -10,6 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock, patch
 from uuid import UUID, uuid4
 
 
@@ -22,11 +23,15 @@ sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 from strategy.intent_execution_planner import (  # noqa: E402
     InstrumentSpec,
     ManagementPlan,
+    encode_client_order_id,
 )
 from strategy.intent_execution_strategy import (  # noqa: E402
     IntentExecutionStrategy,
     IntentExecutionStrategyConfig,
+    _intent_execution_identity,
+    _intent_execution_payload,
 )
+from runtime.exchange_cancel_adapter import CancelStateError, OrderAlreadyFilledError
 from runtime.intent_execution_inbox import (  # noqa: E402
     IntentExecutionIdentity,
     IntentExecutionState,
@@ -42,6 +47,154 @@ ROBOT_OLD_TP_ID = "Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02"
 
 
 class StrategyManageShellTest(unittest.TestCase):
+    def test_post_dispatch_missing_cancel_target_is_rejected(self) -> None:
+        for action in ("cancel_order", "move_stop_loss", "replace_take_profits"):
+            with self.subTest(action=action):
+                strategy = _HarnessStrategy()
+                intent, identity, plan = _dispatched_management(strategy, action)
+                try:
+                    strategy._continue_management_after_persist({
+                        "plan": plan,
+                        "source_intent": intent,
+                        "cancel_order_ids": plan.cancel_order_ids,
+                    })
+                    _pump_durable(strategy)
+
+                    record = strategy._intent_execution_inbox.get(identity)
+                    self.assertEqual(record.state, IntentExecutionState.REJECTED)
+                    self.assertEqual(record.rejection_reason, "order_cancel_not_found")
+                    self.assertEqual(record.exchange_confirmed_client_order_ids, ())
+                    self.assertEqual(strategy._intent_execution_inbox.pending(), ())
+                    strategy._handle_intent(intent)
+                    self.assertEqual(strategy.denials[-1].reason, "duplicate_intent")
+                    self.assertEqual(strategy.symbol_open_freezes, {})
+                finally:
+                    strategy.on_stop()
+
+    def test_post_dispatch_cancel_batch_failures_are_rejected(self) -> None:
+        cases = (
+            ("", "OrderAlreadyFilledError('already FILLED')", "order_already_filled"),
+            ("FILLED", "", "order_already_filled"),
+            ("EXPIRED", "", "order_already_terminal"),
+            ("REJECTED", "", "order_already_terminal"),
+            ("", "CancelStateError('terminal status EXPIRED: account=a')", "order_already_terminal"),
+            ("", "CancelStateError('order disappeared from open endpoint with terminal status NEW: account=a')", "order_already_terminal"),
+            ("NEW", "", "order_already_terminal"),
+            ("", "CancelStateError('unknown state')", "order_cancel_failed"),
+            ("", "TimeoutError('timeout')", "order_cancel_failed"),
+        )
+        for terminal_status, error, reason in cases:
+            with self.subTest(terminal_status=terminal_status, error=error):
+                strategy = _HarnessStrategy()
+                intent, identity, plan = _dispatched_management(strategy)
+                outcome = SimpleNamespace(
+                    request=SimpleNamespace(client_order_id=ROBOT_OLD_STOP_ID),
+                    status="confirmed", terminal_status=terminal_status, error=error,
+                )
+                try:
+                    strategy._complete_management_cancels(
+                        SimpleNamespace(error="", cancel_outcomes=(outcome,)),
+                        {
+                            "intent": intent, "plan": plan,
+                            "expected_cancel_ids": plan.cancel_order_ids,
+                            "finalize_take_profit_disable": False,
+                        },
+                    )
+                    _pump_durable(strategy)
+                    record = strategy._intent_execution_inbox.get(identity)
+                    expected_state = IntentExecutionState.REJECTED
+                    expected_reason = reason
+                    if reason == "order_cancel_failed":
+                        expected_state = IntentExecutionState.DISPATCHED
+                        expected_reason = ""
+                    self.assertEqual(record.state, expected_state)
+                    self.assertEqual(record.rejection_reason, expected_reason)
+                    self.assertEqual(record.exchange_confirmed_client_order_ids, ())
+                finally:
+                    strategy.on_stop()
+
+    def test_post_dispatch_adapter_failure_rejects_cancel(self) -> None:
+        cases = (
+            (OrderAlreadyFilledError("filled"), "order_already_filled"),
+            (CancelStateError("unknown state"), "order_cancel_failed"),
+            (CancelStateError("terminal status EXPIRED: account=a"), "order_already_terminal"),
+            (SimpleNamespace(terminal_status="FILLED"), "order_already_filled"),
+            (SimpleNamespace(terminal_status="EXPIRED"), "order_already_terminal"),
+            (SimpleNamespace(terminal_status="CANCELED", outcome="already_canceled"), "order_already_terminal"),
+        )
+        for result, reason in cases:
+            with self.subTest(result=result):
+                strategy = _HarnessStrategy()
+                intent, identity, plan = _dispatched_management(strategy)
+                adapter = Mock()
+                if isinstance(result, Exception):
+                    adapter.cancel.side_effect = result
+                else:
+                    adapter.cancel.return_value = result
+                order = SimpleNamespace(
+                    account_id=ACCOUNT_ID, symbol="BTCUSDT", position_side="LONG",
+                    order_kind="regular", venue_order_id="venue-old-stop",
+                )
+                strategy.set_exchange_cancel_adapter(adapter, Mock(find_order=Mock(return_value=order)))
+                try:
+                    self.assertFalse(strategy._queue_management_plan_after_persist(plan, source_intent=intent))
+                    _pump_durable(strategy)
+                    record = strategy._intent_execution_inbox.get(identity)
+                    expected_state = IntentExecutionState.REJECTED
+                    expected_reason = reason
+                    if reason == "order_cancel_failed":
+                        expected_state = IntentExecutionState.DISPATCHED
+                        expected_reason = ""
+                    self.assertEqual(record.state, expected_state)
+                    self.assertEqual(record.rejection_reason, expected_reason)
+                    self.assertEqual(record.exchange_confirmed_client_order_ids, ())
+                finally:
+                    strategy.on_stop()
+
+    def test_cancel_batch_distinguishes_already_canceled_from_success(self) -> None:
+        for outcome_name, expected_state in (
+            ("already_canceled", IntentExecutionState.REJECTED),
+            ("canceled", IntentExecutionState.EXCHANGE_CONFIRMED),
+        ):
+            with self.subTest(outcome=outcome_name):
+                strategy = _HarnessStrategy()
+                intent, identity, plan = _dispatched_management(strategy)
+                outcome = SimpleNamespace(
+                    request=SimpleNamespace(client_order_id=ROBOT_OLD_STOP_ID),
+                    status="confirmed", terminal_status="CANCELED", outcome=outcome_name,
+                )
+                try:
+                    strategy._complete_management_cancels(
+                        SimpleNamespace(error="", cancel_outcomes=(outcome,)),
+                        {
+                            "intent": intent, "plan": plan,
+                            "expected_cancel_ids": plan.cancel_order_ids,
+                            "finalize_take_profit_disable": False,
+                        },
+                    )
+                    _pump_durable(strategy)
+                    record = strategy._intent_execution_inbox.get(identity)
+                    self.assertEqual(record.state, expected_state)
+                    if outcome_name == "already_canceled":
+                        self.assertEqual(record.rejection_reason, "order_already_terminal")
+                finally:
+                    strategy.on_stop()
+
+    def test_management_rejection_persistence_failure_halts_durable_lane(self) -> None:
+        strategy = _HarnessStrategy()
+        intent, identity, plan = _dispatched_management(strategy)
+        try:
+            with patch.object(strategy._intent_execution_inbox, "mark_rejected", side_effect=OSError("disk full")):
+                strategy._continue_management_after_persist({
+                    "plan": plan, "source_intent": intent,
+                    "cancel_order_ids": plan.cancel_order_ids,
+                })
+                _pump_durable(strategy)
+            self.assertTrue(strategy._durable_io_halted_reason)
+            self.assertEqual(strategy._intent_execution_inbox.get(identity).state, IntentExecutionState.DISPATCHED)
+        finally:
+            strategy.on_stop()
+
     def test_async_management_persists_terminal_state_and_replay_is_inert(
         self,
     ) -> None:
@@ -622,6 +775,22 @@ def _intent(**overrides):
     )
     values["order_plan"] = order_plan
     return _Intent(**values)
+
+
+def _dispatched_management(strategy: IntentExecutionStrategy, action: str = "cancel_order"):
+    intent = _intent(action=action)
+    identity = _intent_execution_identity(intent)
+    inbox = strategy._intent_execution_inbox
+    inbox.register_received(identity, _intent_execution_payload(intent))
+    inbox.begin_dispatch(identity, (encode_client_order_id(intent.intent_id, sequence=99),))
+    authorization = dict(intent.order_plan["authorization"])
+    authorization["parent_intent_id"] = str(intent.intent_id)
+    plan = ManagementPlan(
+        intent_id=intent.intent_id, action=action, instrument_id=INSTRUMENT_ID,
+        target_position_id=POSITION_ID, target_position_side="LONG",
+        cancel_order_ids=(ROBOT_OLD_STOP_ID,), orders=(), authorization=authorization,
+    )
+    return intent, identity, plan
 
 
 def _pump_durable(strategy: IntentExecutionStrategy) -> None:

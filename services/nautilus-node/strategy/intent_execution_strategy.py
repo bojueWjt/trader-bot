@@ -42,6 +42,7 @@ from runtime.intent_execution_inbox import (
     IntentExecutionState,
     IntentRegisterResult,
     JsonIntentExecutionInbox,
+    expired_dispatched_management,
 )
 from strategy.intent_execution_planner import (
     CANCEL_ORDER,
@@ -72,6 +73,7 @@ class _DurableIoTaskKind(str, Enum):
     PREPARE_ROLLBACK = "prepare_rollback"
     MANAGEMENT_PREPARE = "management_prepare"
     MANAGEMENT_COMPLETE = "management_complete"
+    MANAGEMENT_REJECT = "management_reject"
     RECOVERY_CONFIRMED = "recovery_confirmed"
     CANARY_MARK_DISPATCHED = "canary_mark_dispatched"
     PROTECTION_STASH_PERSIST = "protection_stash_persist"
@@ -2533,6 +2535,14 @@ class IntentExecutionStrategy(Strategy):
             self._record_denial(denial)
             self._report_denial(intent, denial)
             return
+        if expired_dispatched_management(durable_record, self._now()):
+            self.log.warning(
+                "expired_management_replay_skipped "
+                f"account_id={durable_record.account_id} "
+                f"intent_id={durable_record.intent_id} "
+                f"action={durable_record.action}"
+            )
+            return
         if (
             durable_record.state
             is IntentExecutionState.EXCHANGE_CONFIRMED
@@ -2788,6 +2798,10 @@ class IntentExecutionStrategy(Strategy):
             )
             if submitted is _TERMINAL_EXCHANGE_PENDING:
                 return
+            if not submitted and self.denials:
+                self._reject_management_intent(
+                    intent, self.denials[-1], durable_async=False,
+                )
         else:
             live_canary_execution = self._live_canary_execution_identity(
                 intent,
@@ -3996,6 +4010,20 @@ class IntentExecutionStrategy(Strategy):
         elif task.kind is _DurableIoTaskKind.MANAGEMENT_COMPLETE:
             self._process_management_complete_task(task)
             outcome = True
+        elif task.kind is _DurableIoTaskKind.MANAGEMENT_REJECT:
+            identity = task.intent_execution
+            if not isinstance(identity, IntentExecutionIdentity):
+                raise ValueError(
+                    "management rejection requires intent identity"
+                )
+            if identity.action in {"open_position", "add_position"}:
+                raise ValueError(
+                    "management rejection requires non-entry action"
+                )
+            self._intent_execution_inbox.mark_rejected(
+                identity, task.continuation["rejection_reason"],
+            )
+            outcome = True
         elif task.kind is _DurableIoTaskKind.RECOVERY_CONFIRMED:
             self._process_recovery_confirmed_task(task)
             outcome = True
@@ -4158,7 +4186,7 @@ class IntentExecutionStrategy(Strategy):
         if kind == "management_prepared":
             self._on_management_prepared_result(result)
             return
-        if kind == "management_completed":
+        if kind in {"management_completed", "management_rejected"}:
             identity = result.task.intent_execution
             if isinstance(identity, IntentExecutionIdentity):
                 self._processed_intent_ids.add(identity.intent_id)
@@ -6988,6 +7016,10 @@ class IntentExecutionStrategy(Strategy):
         record: Any,
         reason: str,
     ) -> None:
+        if getattr(record, "action", "") not in {
+            "open_position", "add_position",
+        }:
+            return
         instrument_id = str(
             getattr(record, "instrument_id", "") or ""
         )
@@ -8240,6 +8272,7 @@ class IntentExecutionStrategy(Strategy):
                     "management_submit_failed",
                     str(plan.intent_id),
                 )
+                self._reject_management_intent(source_intent, denial)
                 self._report_denial(source_intent, denial)
             return bool(submitted)
 
@@ -8250,6 +8283,7 @@ class IntentExecutionStrategy(Strategy):
             )
             if requests is False:
                 denial = self.denials[-1]
+                self._reject_management_intent(source_intent, denial)
                 self._report_denial(source_intent, denial)
                 return False
             return self._queue_management_dispatch_task(
@@ -8396,9 +8430,10 @@ class IntentExecutionStrategy(Strategy):
             )
             if requests is False:
                 denial = self.denials[-1]
+                self._reject_management_intent(source_intent, denial)
                 self._report_denial(source_intent, denial)
                 return
-            self._queue_management_cancel_batch(
+            queued = self._queue_management_cancel_batch(
                 plan=plan,
                 source_intent=source_intent,
                 requests=requests,
@@ -8406,6 +8441,9 @@ class IntentExecutionStrategy(Strategy):
                     disabling_take_profits
                 ),
             )
+            if not queued:
+                denial = self.denials[-1]
+                self._report_denial(source_intent, denial)
             return
         if disabling_take_profits:
             if not self._finalize_take_profit_disable(
@@ -8427,6 +8465,54 @@ class IntentExecutionStrategy(Strategy):
             plan,
             source_intent=source_intent,
         )
+
+    def _reject_management_intent(
+        self,
+        intent: Any,
+        denial: OrderDenied,
+        *,
+        durable_async: bool = True,
+    ) -> None:
+        if denial.reason not in {
+            "order_cancel_not_found",
+            "order_already_filled",
+            "order_already_terminal",
+        }:
+            return
+        if intent is None:
+            return
+        try:
+            identity = _intent_execution_identity(intent)
+        except Exception as exc:
+            self._halt_durable_io(
+                f"management rejection identity invalid: {exc!r}"
+            )
+            return
+        if identity.action in {"open_position", "add_position"}:
+            return
+        if not durable_async:
+            try:
+                self._intent_execution_inbox.mark_rejected(
+                    identity, denial.reason,
+                )
+            except (RuntimeError, OSError) as exc:
+                self._halt_durable_io(f"management rejection failed: {exc!r}")
+                return
+            self._processed_intent_ids.add(identity.intent_id)
+            return
+        queued = self._submit_durable_io_task(
+            _DurableIoTask(
+                kind=_DurableIoTaskKind.MANAGEMENT_REJECT,
+                intent=intent,
+                intent_execution=identity,
+                continuation={
+                    "kind": "management_rejected",
+                    "rejection_reason": denial.reason,
+                },
+            )
+        )
+        if not queued:
+            self._halt_durable_io("management rejection queue rejected")
 
     def _queue_management_complete_task(
         self,
@@ -8710,6 +8796,7 @@ class IntentExecutionStrategy(Strategy):
         intent = pending["intent"]
         plan = pending["plan"]
         failure = str(getattr(result, "error", "") or "")
+        failure_reason = _management_cancel_failure_reason("", failure)
         observed_cancel_ids: set[str] = set()
         if not failure:
             for outcome in tuple(
@@ -8726,13 +8813,28 @@ class IntentExecutionStrategy(Strategy):
                         or ""
                     )
                 )
-                if str(getattr(outcome, "status", "")) == "confirmed":
-                    continue
-                failure = str(
+                terminal_status = str(
+                    getattr(outcome, "terminal_status", "") or ""
+                ).upper()
+                outcome_error = str(
                     getattr(outcome, "error", "") or ""
                 )
+                if str(getattr(outcome, "outcome", "")) == "already_canceled":
+                    failure = "order was already canceled"
+                    failure_reason = "order_already_terminal"
+                    break
+                if (
+                    str(getattr(outcome, "status", "")) == "confirmed"
+                    and terminal_status in {"", "CANCELED", "CANCELLED"}
+                    and not outcome_error
+                ):
+                    continue
+                failure = outcome_error
                 if not failure:
                     failure = "order cancellation was not confirmed"
+                failure_reason = _management_cancel_failure_reason(
+                    terminal_status, failure,
+                )
                 break
         expected_cancel_ids = {
             str(client_order_id)
@@ -8745,8 +8847,9 @@ class IntentExecutionStrategy(Strategy):
                 f"observed={sorted(observed_cancel_ids)}"
             )
         if failure:
-            denial = OrderDenied("order_cancel_failed", failure)
+            denial = OrderDenied(failure_reason, failure)
             self._record_denial(denial)
+            self._reject_management_intent(intent, denial)
             self._report_denial(intent, denial)
             return
         if pending["finalize_take_profit_disable"]:
@@ -8892,10 +8995,20 @@ class IntentExecutionStrategy(Strategy):
             terminal_status = str(
                 getattr(result, "terminal_status", "")
             ).upper()
+            if str(getattr(result, "outcome", "")) == "already_canceled":
+                self._record_denial(
+                    OrderDenied("order_already_terminal", client_order_id)
+                )
+                return False
             if terminal_status not in {"CANCELED", "CANCELLED"}:
+                reason = _management_cancel_failure_reason(
+                    terminal_status, "",
+                )
+                if reason == "order_cancel_failed":
+                    reason = "order_cancel_unconfirmed"
                 self._record_denial(
                     OrderDenied(
-                        "order_cancel_unconfirmed",
+                        reason,
                         f"{client_order_id}:{terminal_status or 'UNKNOWN'}",
                     )
                 )
@@ -8905,7 +9018,8 @@ class IntentExecutionStrategy(Strategy):
             self._record_denial(OrderDenied("order_already_filled", str(exc)))
             return False
         except Exception as exc:
-            self._record_denial(OrderDenied("order_cancel_failed", repr(exc)))
+            reason = _management_cancel_failure_reason("", repr(exc))
+            self._record_denial(OrderDenied(reason, repr(exc)))
             return False
 
     def _absorb_management_plan(
@@ -10053,6 +10167,28 @@ def _node_command_is_user_authorized(cmd: Any) -> bool:
         str(authorization.get("authorized_by_type") or "").strip()
         == "user"
     )
+
+
+def _management_cancel_failure_reason(
+    terminal_status: str,
+    error: str,
+) -> str:
+    if (
+        terminal_status in {"FILLED", "EXECUTED", "TRIGGERED"}
+        or "OrderAlreadyFilledError" in error
+    ):
+        return "order_already_filled"
+    if terminal_status in {
+        "EXPIRED",
+        "EXPIRED_IN_MATCH",
+        "REJECTED",
+        "NEW",
+    } or re.search(
+        r"terminal status (?:EXPIRED_IN_MATCH|EXPIRED|REJECTED|NEW)\b",
+        error,
+    ):
+        return "order_already_terminal"
+    return "order_cancel_failed"
 
 
 def _durable_entry_valid_until(
