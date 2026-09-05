@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -39,6 +40,7 @@ from runtime.intent_execution_inbox import (
     IntentExecutionState,
     IntentRegisterResult,
     JsonIntentExecutionInbox,
+    expired_dispatched_management,
 )
 
 
@@ -202,6 +204,16 @@ class ApprovedIntentDataClient:
         self._startup_replayed_intent_ids.clear()
         for record in self._intent_execution_inbox.pending():
             if record.account_id != self._account_id:
+                continue
+            if expired_dispatched_management(record, self._now_aware()):
+                logging.getLogger(__name__).warning(
+                    "expired_management_replay_skipped "
+                    "account_id=%s intent_id=%s action=%s",
+                    record.account_id,
+                    record.intent_id,
+                    record.action,
+                )
+                self._startup_replayed_intent_ids.add(record.intent_id)
                 continue
             try:
                 intent = ApprovedTradeIntentV1.model_validate(

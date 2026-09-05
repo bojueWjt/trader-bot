@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import tempfile
 import time
@@ -10,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import UUID, uuid4
 
 
@@ -473,6 +474,128 @@ class StrategyShellTest(unittest.TestCase):
                 "symbol_new_open_frozen",
             )
 
+    def test_dispatched_management_replay_keeps_symbol_open(self) -> None:
+        for action in (
+            "cancel_order", "move_stop_loss", "move_stop_to_entry",
+            "replace_take_profits", "close_position", "partial_close",
+        ):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as state_dir:
+                strategy = _SynchronousAcceptedDurableIntentStrategy(Path(state_dir))
+                intent = _durable_entry_intent()
+                intent.action = action
+                identity = _durable_identity(intent)
+                inbox = strategy._intent_execution_inbox
+                cancel_id = encode_client_order_id(intent.intent_id, sequence=99)
+                inbox.register_received(identity, _durable_payload(intent))
+                inbox.begin_dispatch(identity, (cancel_id,))
+
+                strategy._handle_intent(intent)
+
+                self.assertNotIn(cancel_id, strategy._pending_order_confirmations)
+                self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+                following = _durable_entry_intent()
+                strategy._handle_intent(following)
+                self.assertIn(encode_client_order_id(following.intent_id), strategy.submitted_orders)
+                self.assertNotIn("symbol_new_open_frozen", [denial.reason for denial in strategy.denials])
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+                strategy.on_stop()
+
+    def test_dispatched_entry_replay_preserves_freeze_even_after_expiry(self) -> None:
+        for action in ("open_position", "add_position"):
+            for expired in (False, True):
+                with self.subTest(action=action, expired=expired), tempfile.TemporaryDirectory() as state_dir:
+                    strategy = _NoReceiptDurableIntentStrategy(Path(state_dir))
+                    intent = _durable_entry_intent()
+                    intent.action = action
+                    if expired:
+                        intent.valid_until = strategy._now() - timedelta(hours=25)
+                    identity = _durable_identity(intent)
+                    inbox = strategy._intent_execution_inbox
+                    client_order_id = encode_client_order_id(intent.intent_id)
+                    inbox.register_received(identity, _durable_payload(intent))
+                    inbox.begin_dispatch(identity, (client_order_id,))
+
+                    strategy._handle_intent(intent)
+                    strategy._handle_intent(_durable_entry_intent())
+
+                    self.assertIn(client_order_id, strategy._pending_order_confirmations)
+                    self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+                    self.assertEqual(strategy.denials[-1].reason, "symbol_new_open_frozen")
+                    self.assertEqual(strategy.submitted_orders, [])
+
+    def test_expired_dispatched_cancel_recovery_warns_and_skips(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            strategy = _NoReceiptDurableIntentStrategy(Path(state_dir))
+            intent = _durable_entry_intent()
+            intent.action = "cancel_order"
+            intent.valid_until = strategy._now() - timedelta(hours=25)
+            identity = _durable_identity(intent)
+            inbox = strategy._intent_execution_inbox
+            cancel_id = encode_client_order_id(intent.intent_id, sequence=99)
+            inbox.register_received(identity, _durable_payload(intent))
+            inbox.begin_dispatch(identity, (cancel_id,))
+
+            with self.assertLogs("strategy.intent_execution_strategy", level="WARNING") as logs:
+                strategy._handle_intent(intent)
+
+            self.assertIn("expired_management_replay_skipped", logs.output[0])
+            self.assertNotIn(cancel_id, strategy._pending_order_confirmations)
+            self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+            self.assertEqual(strategy.denials, [])
+            self.assertEqual(inbox.get(identity).state, IntentExecutionState.DISPATCHED)
+
+    def test_data_client_replay_skips_only_expired_dispatched_management(self) -> None:
+        from data_client.approved_intent_client import ApprovedIntentDataClient, JsonIntentOffsetStore
+        from execution_domain.contracts import ApprovedTradeIntentV1
+        from execution_domain.control_plane import IntentItem
+        from execution_domain.testing import InMemoryControlPlane
+
+        for action in ("cancel_order", "open_position", "add_position"):
+            for hours_expired in (-1, 24, 25):
+                with self.subTest(action=action, hours_expired=hours_expired), tempfile.TemporaryDirectory() as state_dir:
+                    state_path = Path(state_dir)
+                    strategy = _NoReceiptDurableIntentStrategy(state_path)
+                    intent = _durable_entry_intent()
+                    intent.action = action
+                    intent.idempotency_key = intent.intent_id.hex * 2
+                    intent.valid_until = strategy._now() - timedelta(hours=hours_expired)
+                    payload = _durable_payload(intent)
+                    payload["approved_at"] = strategy._now().isoformat()
+                    payload["risk_budget"] = {"risk_fraction": 0.01, "max_notional": 12, "max_leverage": 2}
+                    approved = ApprovedTradeIntentV1.model_validate(payload)
+                    identity = _durable_identity(intent)
+                    client_order_id = encode_client_order_id(intent.intent_id, sequence=99)
+                    inbox = strategy._intent_execution_inbox
+                    inbox.register_received(identity, approved.model_dump(mode="json"))
+                    inbox.begin_dispatch(identity, (client_order_id,))
+                    source = InMemoryControlPlane(now=strategy._now)
+                    source.add_intent("account-b", IntentItem(cursor="c1", intent=approved))
+                    publisher = Mock()
+                    publisher.publish.side_effect = strategy._handle_intent
+                    client = ApprovedIntentDataClient(
+                        account_id="account-b", node_id="node-b", source=source,
+                        publisher=publisher, now=strategy._now,
+                        offset_store=JsonIntentOffsetStore(state_path / "offsets.json"),
+                        intent_execution_inbox_path=state_path / "intent-execution-inbox.json",
+                    )
+
+                    if action == "cancel_order" and hours_expired > 24:
+                        with self.assertLogs("data_client.approved_intent_client", level="WARNING") as logs:
+                            client.poll_once()
+                        self.assertIn("expired_management_replay_skipped", logs.output[0])
+                        publisher.publish.assert_not_called()
+                    else:
+                        client.poll_once()
+                        publisher.publish.assert_called_once()
+                    self.assertEqual(client.state.last_cursor, "c1")
+                    self.assertEqual(inbox.get(identity).state, IntentExecutionState.DISPATCHED)
+                    if action == "cancel_order":
+                        self.assertNotIn(client_order_id, strategy._pending_order_confirmations)
+                        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+                    else:
+                        self.assertIn(client_order_id, strategy._pending_order_confirmations)
+                        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+
     def test_same_intent_replay_reports_duplicate_while_symbol_stays_frozen(
         self,
     ) -> None:
@@ -552,6 +675,7 @@ class StrategyShellTest(unittest.TestCase):
             sequence=2,
         )
         record = SimpleNamespace(
+            action="open_position",
             instrument_id="SOLUSDT-PERP.BINANCE",
             client_order_ids=(
                 first_client_order_id,
@@ -5596,6 +5720,7 @@ class _DurableIntentStrategy(IntentExecutionStrategy):
                 ),
             )
         )
+        self.log = logging.getLogger("strategy.intent_execution_strategy")
 
     def _instrument_spec(self, instrument_id: str) -> InstrumentSpec:
         return InstrumentSpec(

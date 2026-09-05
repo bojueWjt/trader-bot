@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from threading import Lock, RLock
@@ -103,6 +103,30 @@ class IntentExecutionRecord:
             instrument_id=self.instrument_id,
             action=self.action,
         )
+
+
+def expired_dispatched_management(
+    record: IntentExecutionRecord,
+    now: datetime,
+) -> bool:
+    if record.state is not IntentExecutionState.DISPATCHED:
+        return False
+    if record.action in {"open_position", "add_position"}:
+        return False
+    raw_valid_until = record.intent_payload.get("valid_until")
+    if not isinstance(raw_valid_until, str):
+        return False
+    try:
+        valid_until = datetime.fromisoformat(
+            raw_valid_until.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    if valid_until.tzinfo is None:
+        valid_until = valid_until.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now - valid_until > timedelta(hours=24)
 
 
 class JsonIntentExecutionInbox:
@@ -368,6 +392,54 @@ class JsonIntentExecutionInbox:
 
         return self._read_locked(read)
 
+    def repair_dispatched_management(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[tuple[IntentExecutionRecord, ...], Path | Literal[False]]:
+        repair_time = now or datetime.now(timezone.utc)
+
+        def mutate(payload: dict[str, Any]) -> tuple[Any, bool]:
+            candidates = tuple(
+                record
+                for record in (
+                    self._record_from_raw(raw)
+                    for raw in payload["records"].values()
+                )
+                if management_repair_eligible(record, repair_time)
+            )
+            if not candidates:
+                return ((), False), False
+            timestamp = datetime.now(timezone.utc).strftime(
+                "%Y%m%dT%H%M%S%fZ"
+            )
+            backup = self._path.with_name(
+                f"{self._path.name}.bak-{timestamp}"
+            )
+            backup_fd = os.open(
+                backup,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(backup_fd, "wb") as backup_file:
+                backup_file.write(self._path.read_bytes())
+                backup_file.flush()
+                os.fsync(backup_file.fileno())
+            _fsync_directory(self._path.parent)
+            for record in candidates:
+                updated = replace(
+                    record,
+                    state=IntentExecutionState.REJECTED,
+                    rejection_reason="inbox_repair_stale_management",
+                    updated_at=repair_time.isoformat(),
+                )
+                payload["records"][_record_key(record.identity())] = (
+                    _serialize_record(updated)
+                )
+            return (candidates, backup), True
+
+        return self._mutate(mutate)
+
     def _required_record(
         self,
         payload: dict[str, Any],
@@ -554,6 +626,21 @@ class JsonIntentExecutionInbox:
             "intent execution inbox payload exceeds max_bytes: "
             f"{payload_bytes} bytes exceeds {self._max_bytes} bytes"
         )
+
+
+def management_repair_eligible(
+    record: IntentExecutionRecord,
+    now: datetime,
+) -> bool:
+    if record.state is not IntentExecutionState.DISPATCHED:
+        return False
+    if record.action in {"open_position", "add_position"}:
+        return False
+    if record.intent_payload.get("action") in {"open_position", "add_position"}:
+        return False
+    return record.action == "cancel_order" or expired_dispatched_management(
+        record, now,
+    )
 
 
 def _stable_client_order_ids(

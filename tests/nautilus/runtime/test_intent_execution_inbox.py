@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import sys
+import json
+import subprocess
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -19,6 +24,7 @@ from runtime.intent_execution_inbox import (  # noqa: E402
     IntentExecutionState,
     IntentRegisterResult,
     JsonIntentExecutionInbox,
+    expired_dispatched_management,
 )
 
 
@@ -231,6 +237,115 @@ def test_max_bytes_must_be_a_positive_integer(
             tmp_path / "intent-execution-inbox.json",
             max_bytes=max_bytes,  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize("action", ["cancel_order", "move_stop_loss", "open_position", "add_position"])
+@pytest.mark.parametrize("state", list(IntentExecutionState))
+@pytest.mark.parametrize("age_hours", [23, 24, 25])
+def test_expired_management_requires_dispatched_non_entry_and_24h_grace(
+    tmp_path: Path, action: str, state: IntentExecutionState, age_hours: int,
+) -> None:
+    now = datetime(2026, 9, 4, tzinfo=timezone.utc)
+    inbox = JsonIntentExecutionInbox(tmp_path / "intent_execution_inbox.json")
+    identity = replace(_identity(), action=action)
+    payload = _payload(identity)
+    payload["valid_until"] = (now - timedelta(hours=age_hours)).isoformat()
+    inbox.register_received(identity, payload)
+    record = replace(inbox.get(identity), state=state)
+    expected = state is IntentExecutionState.DISPATCHED and action in {"cancel_order", "move_stop_loss"} and age_hours > 24
+    assert expired_dispatched_management(record, now) is expected
+
+
+@pytest.mark.parametrize("valid_until", ["invalid", "", None, 123, "2026-09-03T00:00:00Z", "2026-09-03T08:00:00+08:00", "2026-09-03T00:00:00"])
+def test_expired_management_timestamp_parsing(tmp_path: Path, valid_until) -> None:
+    inbox = JsonIntentExecutionInbox(tmp_path / "intent_execution_inbox.json")
+    identity = replace(_identity(), action="cancel_order")
+    payload = _payload(identity)
+    payload["valid_until"] = valid_until
+    inbox.register_received(identity, payload)
+    inbox.begin_dispatch(identity, (_client_order_id(identity.intent_id),))
+    expected = isinstance(valid_until, str) and valid_until.startswith("2026-")
+    assert expired_dispatched_management(inbox.get(identity), datetime(2026, 9, 4, 1, tzinfo=timezone.utc)) is expected
+
+
+def test_repair_cli_dry_run_backup_and_non_entry_guard(tmp_path: Path) -> None:
+    path = tmp_path / "intent_execution_inbox.json"
+    inbox = JsonIntentExecutionInbox(path)
+    now = datetime.now(timezone.utc)
+    eligible = []
+    preserved = []
+    for action in ("cancel_order", "move_stop_loss", "open_position", "add_position"):
+        for state in IntentExecutionState:
+            for expired in (False, True):
+                identity = replace(_identity(), action=action)
+                payload = _payload(identity)
+                valid_until = now + timedelta(hours=1)
+                if expired:
+                    valid_until = now - timedelta(hours=25)
+                payload["valid_until"] = valid_until.isoformat()
+                inbox.register_received(identity, payload)
+                if state is not IntentExecutionState.RECEIVED:
+                    inbox.begin_dispatch(identity, (_client_order_id(identity.intent_id),))
+                if state is IntentExecutionState.REJECTED:
+                    inbox.mark_rejected(identity, "prior_rejection")
+                if state is IntentExecutionState.EXCHANGE_CONFIRMED:
+                    inbox.mark_exchange_confirmed(identity)
+                if state is IntentExecutionState.DISPATCHED and (
+                    action == "cancel_order" or (action == "move_stop_loss" and expired)
+                ):
+                    eligible.append(identity)
+                else:
+                    preserved.append(inbox.get(identity))
+    mismatch = replace(_identity(), action="cancel_order")
+    payload = _payload(mismatch)
+    payload["action"] = "open_position"
+    inbox.register_received(mismatch, payload)
+    inbox.begin_dispatch(mismatch, (_client_order_id(mismatch.intent_id),))
+    preserved.append(inbox.get(mismatch))
+    before = path.read_bytes()
+    command = [sys.executable, str(SERVICE_ROOT / "tools" / "inbox_repair.py"), str(path)]
+
+    preview = subprocess.run(command, capture_output=True, text=True, check=True)
+    assert "dry_run=true" in preview.stdout
+    assert "action=cancel_order" in preview.stdout
+    assert path.read_bytes() == before
+    assert list(tmp_path.glob("*.bak-*")) == []
+
+    applied = subprocess.run([*command, "--apply"], capture_output=True, text=True, check=True)
+    assert f"rejected={len(eligible)}" in applied.stdout
+    backups = list(tmp_path.glob("intent_execution_inbox.json.bak-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == before
+    assert json.loads(path.read_bytes())["version"] == 1
+    for identity in eligible:
+        record = inbox.get(identity)
+        assert record.state is IntentExecutionState.REJECTED
+        assert record.rejection_reason == "inbox_repair_stale_management"
+        assert record.exchange_confirmed_client_order_ids == ()
+    for record in preserved:
+        assert inbox.get(record.identity()) == record
+    assert inbox.repair_dispatched_management(now=now) == ((), False)
+    assert len(list(tmp_path.glob("*.bak-*"))) == 1
+
+
+@pytest.mark.parametrize("failure_point", ["backup", "replace"])
+def test_repair_io_failure_preserves_original(tmp_path: Path, failure_point: str) -> None:
+    path = tmp_path / "intent_execution_inbox.json"
+    inbox = JsonIntentExecutionInbox(path)
+    identity = replace(_identity(), action="cancel_order")
+    inbox.register_received(identity, _payload(identity))
+    inbox.begin_dispatch(identity, (_client_order_id(identity.intent_id),))
+    before = path.read_bytes()
+    target = "runtime.intent_execution_inbox.os.open"
+    if failure_point == "replace":
+        target = "runtime.intent_execution_inbox.os.replace"
+    with patch(target, side_effect=OSError("disk full")), pytest.raises(OSError, match="disk full"):
+        inbox.repair_dispatched_management()
+    assert path.read_bytes() == before
+    if failure_point == "replace":
+        backups = list(tmp_path.glob("*.bak-*"))
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == before
 
 
 def _identity() -> IntentExecutionIdentity:
