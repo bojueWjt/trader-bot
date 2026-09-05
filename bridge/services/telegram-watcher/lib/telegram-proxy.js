@@ -1,4 +1,24 @@
 const { isEnabledByDefault, isExplicitlyEnabled } = require("./env-flags");
+const RECONNECT_DELAY_MS = 10000;
+const backoffInstalled = new WeakSet();
+
+function installTelegramReconnectBackoff(Sender) {
+  if (backoffInstalled.has(Sender)) {
+    return;
+  }
+  const originalReconnect = Sender.prototype._reconnect;
+  if (typeof originalReconnect !== "function") {
+    throw new Error("Unsupported GramJS reconnect hook");
+  }
+  Sender.prototype._reconnect = async function reconnectWithBackoff(...args) {
+    await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS));
+    if (this.userDisconnected) {
+      return;
+    }
+    return originalReconnect.apply(this, args);
+  };
+  backoffInstalled.add(Sender);
+}
 
 function parsePositiveInteger(rawValue, fallback) {
   const value = Number.parseInt(rawValue, 10);
@@ -14,6 +34,8 @@ function parsePositiveInteger(rawValue, fallback) {
 function buildTelegramClientOptions(env = process.env) {
   const options = {
     connectionRetries: parsePositiveInteger(env.TELEGRAM_CONNECTION_RETRIES, 5),
+    reconnectRetries: 5,
+    retryDelay: RECONNECT_DELAY_MS,
   };
 
   // WSS rides TLS on 443; needed where plain MTProto TCP gets DPI-killed
@@ -48,4 +70,5 @@ function describeTelegramProxy(options) {
 module.exports = {
   buildTelegramClientOptions,
   describeTelegramProxy,
+  installTelegramReconnectBackoff,
 };

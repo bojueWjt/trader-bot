@@ -150,11 +150,30 @@ services:
       # freqtrade is the only execution engine
       HERMES_TRADER_CRON_ENABLED: "0"
       IMPORTER_AUDIT_LOG: /data/importer-audit.jsonl
-      WATCHER_ALERT_BOT_TOKEN: ""
-      WATCHER_ALERT_CHAT_ID: ""
+      # Reuse trade-event-notifier's bot (TELEGRAM_BOT_TOKEN / TELEGRAM_HOME_CHANNEL).
+      # Empty default keeps local/dev silent; jp-24 injects these via /srv/trader/.env.
+      WATCHER_ALERT_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      WATCHER_ALERT_CHAT_ID: ${TELEGRAM_HOME_CHANNEL:-}
       WATCHER_HOST: 0.0.0.0
       WATCHER_MEDIA_DIR: /data/media
     restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          fetch('http://127.0.0.1:9100/healthz', {signal: AbortSignal.timeout(5000)})
+            .then(response => {
+              if (response.ok) {
+                process.exit(0);
+              }
+              process.exit(1);
+            })
+            .catch(() => process.exit(1));
+      interval: 60s
+      timeout: 10s
+      retries: 3
     ports:
       - "127.0.0.1:9090:9100"
     expose:
