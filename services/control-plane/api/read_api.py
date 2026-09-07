@@ -75,6 +75,7 @@ from snapshot import (  # noqa: E402
     build_system_snapshot,
     validate_snapshot,
 )
+from position_protection import protection_status  # noqa: E402
 
 READER_TOKEN_ENV = {
     "SYSTEM_OBSERVER_TOKEN": "system_observer",
@@ -5261,6 +5262,7 @@ def v1_nodes(authorization: str | None = Header(default=None)):
             cur.execute(
                 """
                 SELECT nh.node_id, nh.account_id, nh.status, nh.version, nh.payload, nh.last_seen_at,
+                       nh.release_id,
                        (SELECT count(*) FROM positions_projection p
                           WHERE p.account_id = nh.account_id AND p.status = 'open') AS open_position_count,
                        (SELECT count(DISTINCT p.instrument_id) FROM positions_projection p
@@ -5289,6 +5291,8 @@ def v1_nodes(authorization: str | None = Header(default=None)):
                     [],
                 ),
                 "version": r["version"],
+                "release_id": r.get("release_id"),
+                "halt_reason": payload.get("halt_reason"),
             })
         return {**env, "nodes": nodes}
     finally:
@@ -5336,6 +5340,7 @@ def v1_orders(status: str | None = None, authorization: str | None = Header(defa
                 "remaining": max(0.0, qty - filled),
                 "created_at": _iso(r.get("ts_event") or r.get("updated_at")),
                 "trade_id": str(r["intent_id"]) if r.get("intent_id") else None,
+                "account_id": r.get("account_id"),
             })
         return {**env, "orders": orders}
     finally:
@@ -5354,6 +5359,11 @@ def v1_positions(authorization: str | None = Header(default=None)):
                 "ORDER BY updated_at DESC LIMIT 200"
             )
             rows = [dict(r) for r in cur.fetchall()]
+            cur.execute("SELECT account_id, payload FROM exchange_state_mirror")
+            mirrors = {
+                row["account_id"]: (row["payload"] or {})
+                for row in cur.fetchall()
+            }
         positions = []
         for r in rows:
             payload = r.get("payload") or {}
@@ -5362,6 +5372,15 @@ def v1_positions(authorization: str | None = Header(default=None)):
             notional = _f(payload.get("notional"))
             if notional is None and qty is not None and entry is not None:
                 notional = qty * entry
+            account_id = r.get("account_id")
+            mirror = mirrors.get(account_id) or {}
+            protection = protection_status(
+                symbol=_symbol(r.get("instrument_id")),
+                position_side=r.get("side"),
+                quantity=r.get("quantity"),
+                open_orders=mirror.get("open_orders") or [],
+                algo_orders=mirror.get("algo_orders") or [],
+            )
             positions.append({
                 "position_id": r.get("position_id"),
                 "instrument_symbol": _symbol(r.get("instrument_id")),
@@ -5381,6 +5400,8 @@ def v1_positions(authorization: str | None = Header(default=None)):
                 "signal_id": payload.get("signal_id") or payload.get("intent_id"),
                 "intent_id": payload.get("intent_id"),
                 "raw_signal": payload.get("raw_signal"),
+                "account_id": account_id,
+                "protection": protection,
             })
         return {**env, "positions": positions}
     finally:
@@ -5416,6 +5437,7 @@ def v1_trades(authorization: str | None = Header(default=None)):
                 "realized_pnl": _f(payload.get("realized_pnl") or r.get("unrealized_pnl")),
                 "opened_at": _iso(payload.get("opened_at")),
                 "closed_at": _iso(r.get("updated_at")),
+                "account_id": r.get("account_id"),
             })
         return {**env, "trades": trades}
     finally:
@@ -8600,6 +8622,10 @@ def role_database_health():
         "rollback_only_permission_probe": "pass",
     }
 
+
+from v1_mirror import router as v1_mirror_router  # noqa: E402
+
+app.include_router(v1_mirror_router)
 
 _install_retryable_db_error_handler(app)
 all_role_app = app
