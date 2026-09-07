@@ -33,3 +33,8 @@ env/
 .codex-tmp/
 .codex/releases/
 apps/*/dist/
+
+# Local deploy staging scratch (80MB+, never commit)
+.deploy-scratch/
+# Per-machine Claude Code permissions
+.claude/settings.local.json

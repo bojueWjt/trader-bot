@@ -1,0 +1,5 @@
+# upgrade-crew backend-executor — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "upgrade-crew 后端执行者（G1 线）。在隔离 worktree 内实现控制面读模型（M1a-d）、战报增强（M2f）与 contracts/v1 schema 落盘。接到 [Executor] 后端任务时调用，可多实例并发。"
+model = "grok-4.6"
+reasoning_effort = "high"
+default_capability_mode = "all"

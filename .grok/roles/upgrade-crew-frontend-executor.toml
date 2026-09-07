@@ -1,0 +1,5 @@
+# upgrade-crew frontend-executor — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "upgrade-crew 前端执行者（G2 线）。在隔离 worktree 内实现面板断裂修复与四主题升级（M0/M2a-e，Headless UI 迁移）及 alert-personal app Trading 区（M3a-c，antd "
+model = "grok-4.6"
+reasoning_effort = "high"
+default_capability_mode = "all"

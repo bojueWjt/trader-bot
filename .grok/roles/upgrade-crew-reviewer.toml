@@ -1,0 +1,5 @@
+# upgrade-crew reviewer — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "upgrade-crew 代码质量门。审查 Executor 的 worktree diff，对照记账红线与契约一致性，PASS 则 merge 进 main，FAIL 则销毁分支并回报 Planner。接到 [Reviewer] 任务时调"
+model = "grok-4.6"
+reasoning_effort = "xhigh"
+default_capability_mode = "execute"

@@ -1,277 +1,97 @@
 {
-  "team": "account-stall-hardening",
-  "goal": "完成节点发布、Redis、控制面、健康恢复与事故模型改造，并通过故障注入和一次受限真实小额交易闭环验证。",
+  "team": "upgrade-crew",
+  "goal": "执行 panel-and-app-upgrade-v1：按 docs/plans/2026-08-30-panel-and-app-upgrade-v1.md 与 goals/GOAL-1/GOAL-2 完成 M0-M3 全部模块，记账红线零触碰",
   "form": "pipeline",
   "platforms": [
-    "codex"
+    "claude",
+    "grok"
   ],
-  "selectionMode": "delegated-auto-selection",
   "roles": [
     {
       "id": "planner",
-      "title": "总控与变更负责人",
-      "duty": "拆解里程碑、派发原子任务、维护依赖和风险台账，并主持每个生产变更门。",
-      "required": true,
+      "title": "Planner / 窗口统筹",
+      "duty": "读 taskList.json 看板与 GOAL 文件，两层规划派发原子任务，处理失败回流，验收把关",
       "modelTier": "brain",
       "models": {
-        "codex": "gpt-5.6-sol (high)"
+        "claude": "opus",
+        "codex": "",
+        "opencode": "",
+        "grok": "grok-4.6 (xhigh)"
       },
-      "candidates": [
-        {
-          "file": "specialized/agents-orchestrator.md",
-          "name": "Agents Orchestrator",
-          "emoji": "🎛️",
-          "vibe": "The conductor who runs the entire dev pipeline from spec to ship.",
-          "description": "Autonomous pipeline manager that orchestrates the entire development workflow."
-        }
-      ],
-      "selectedCandidate": 0
+      "chosen": {
+        "file": "project-management/project-manager-senior.md",
+        "name": "Senior Project Manager"
+      },
+      "custom": false
     },
     {
-      "id": "architect",
-      "title": "交易运行时架构师",
-      "duty": "冻结目标架构、ADR、状态机和模块边界。",
-      "required": true,
-      "modelTier": "brain",
-      "models": {
-        "codex": "gpt-5.6-sol (high)"
-      },
-      "candidates": [
-        {
-          "file": "engineering/engineering-software-architect.md",
-          "name": "Software Architect",
-          "emoji": "🏛️",
-          "vibe": "Designs systems that survive the team that built them.",
-          "description": "Software architecture, domain modeling, patterns, trade-offs, and ADR specialist."
-        }
-      ],
-      "selectedCandidate": 0
-    },
-    {
-      "id": "node-runtime-executor",
-      "title": "节点并发与生命周期工程师",
-      "duty": "实现独立网络 lanes、actor 结果队列、状态机、tick watchdog 和幂等恢复。",
-      "required": true,
+      "id": "backend-executor",
+      "title": "Backend Executor (G1)",
+      "duty": "worktree 隔离实现 M1a-d/M2f：控制面新端点、mobile_operator 角色、战报增强；契约逐字段一致",
       "modelTier": "labor",
       "models": {
-        "codex": "gpt-5.6-luna (medium)"
+        "claude": "sonnet",
+        "codex": "",
+        "opencode": "",
+        "grok": "grok-4.6 (high)"
       },
-      "candidates": [
-        {
-          "file": "engineering/engineering-backend-architect.md",
-          "name": "Backend Architect",
-          "emoji": "🏗️",
-          "vibe": "Designs the systems that hold everything up.",
-          "description": "Scalable backend, database, API, reliability, and cloud architecture specialist."
-        }
-      ],
-      "selectedCandidate": 0
+      "chosen": {
+        "file": "engineering/engineering-backend-architect.md",
+        "name": "Backend Architect"
+      },
+      "custom": false
     },
     {
-      "id": "control-plane-executor",
-      "title": "控制面与 PostgreSQL 工程师",
-      "duty": "拆分关键 API 并落地连接池、超时和容量隔离。",
-      "required": true,
+      "id": "frontend-executor",
+      "title": "Frontend Executor (G2)",
+      "duty": "worktree 隔离实现 M0/M2a-e 面板升级（Headless UI 迁移）与 M3a-c app Trading 区（antd RN）",
       "modelTier": "labor",
       "models": {
-        "codex": "gpt-5.6-luna (medium)"
+        "claude": "sonnet",
+        "codex": "",
+        "opencode": "",
+        "grok": "grok-4.6 (high)"
       },
-      "candidates": [
-        {
-          "file": "engineering/engineering-api-platform-engineer.md",
-          "name": "API Platform Engineer",
-          "emoji": "🔌",
-          "vibe": "A public API is a promise you cannot take back.",
-          "description": "Contract-first APIs, compatibility, idempotency, quotas, and gateway specialist."
-        }
-      ],
-      "selectedCandidate": 0
-    },
-    {
-      "id": "redis-release-executor",
-      "title": "Redis 与不可变发布工程师",
-      "duty": "实现稳定 namespace、容量限制、不可变镜像和 A/B digest 发布门。",
-      "required": true,
-      "modelTier": "labor",
-      "models": {
-        "codex": "gpt-5.6-luna (medium)"
+      "chosen": {
+        "file": "engineering/engineering-frontend-developer.md",
+        "name": "Frontend Developer"
       },
-      "candidates": [
-        {
-          "file": "engineering/engineering-sre.md",
-          "name": "SRE (Site Reliability Engineer)",
-          "emoji": "🛡️",
-          "vibe": "Reliability is a feature.",
-          "description": "SLO, observability, chaos, capacity, and progressive rollout specialist."
-        }
-      ],
-      "selectedCandidate": 0
+      "custom": false
     },
     {
       "id": "reviewer",
-      "title": "高风险代码审查员",
-      "duty": "审查正确性、线程安全、幂等、账户隔离、发布可回滚性和测试充分性。",
-      "required": true,
+      "title": "Reviewer / 质量门",
+      "duty": "审查 worktree diff：记账红线、幂等、hedge 归属、契约一致性、只增不改；PASS 才 merge",
       "modelTier": "gate",
       "models": {
-        "codex": "gpt-5.6-terra (high)"
+        "claude": "sonnet",
+        "codex": "",
+        "opencode": "",
+        "grok": "grok-4.6 (xhigh)"
       },
-      "candidates": [
-        {
-          "file": "engineering/engineering-code-reviewer.md",
-          "name": "Code Reviewer",
-          "emoji": "👁️",
-          "vibe": "Reviews code like a mentor.",
-          "description": "Correctness, maintainability, security, performance, and testing reviewer."
-        }
-      ],
-      "selectedCandidate": 0
+      "chosen": {
+        "file": "engineering/engineering-code-reviewer.md",
+        "name": "Code Reviewer"
+      },
+      "custom": false
     },
     {
-      "id": "chaos-tester",
-      "title": "故障注入与恢复验收工程师",
-      "duty": "验证控制面、PostgreSQL、Redis、actor freeze 和重启恢复。",
-      "required": true,
+      "id": "tester",
+      "title": "Tester / 验收门",
+      "duty": "跑 T0-T3 具名用例：pytest/vitest/Playwright/jest+a11y，证据式验收，静默为空=失败",
       "modelTier": "gate",
       "models": {
-        "codex": "gpt-5.6-terra (medium)"
+        "claude": "sonnet",
+        "codex": "",
+        "opencode": "",
+        "grok": "grok-4.6 (high)"
       },
-      "candidates": [
-        {
-          "file": "testing/testing-performance-benchmarker.md",
-          "name": "Performance Benchmarker",
-          "emoji": "⏱️",
-          "vibe": "Measures everything and proves the improvement.",
-          "description": "Performance, stress, endurance, capacity, and regression testing specialist."
-        }
-      ],
-      "selectedCandidate": 0
-    },
-    {
-      "id": "live-trade-verifier",
-      "title": "真实小额交易安全验证官",
-      "duty": "执行 account-a 单次微型交易闭环并强制资金和安全红线。",
-      "required": true,
-      "modelTier": "gate",
-      "models": {
-        "codex": "gpt-5.6-sol (high)"
+      "chosen": {
+        "file": "testing/testing-test-automation-engineer.md",
+        "name": "Test Automation Engineer"
       },
-      "candidates": [
-        {
-          "file": "engineering/engineering-autonomous-optimization-architect.md",
-          "name": "Autonomous Optimization Architect",
-          "emoji": "⚡",
-          "vibe": "The system governor that makes things faster without bankrupting you.",
-          "description": "Autonomous validation with strict financial, timeout, retry, and circuit-breaker guardrails."
-        }
-      ],
-      "selectedCandidate": 0
-    },
-    {
-      "id": "evidence-auditor",
-      "title": "证据与发布审计员",
-      "duty": "核验 commit、digest、测试输出和交易所/节点/PG 四层证据。",
-      "required": true,
-      "modelTier": "gate",
-      "models": {
-        "codex": "gpt-5.6-terra (medium)"
-      },
-      "candidates": [
-        {
-          "file": "testing/testing-evidence-collector.md",
-          "name": "Evidence Collector",
-          "emoji": "📸",
-          "vibe": "Will not approve anything without proof.",
-          "description": "Evidence-first QA and reality-check specialist."
-        }
-      ],
-      "selectedCandidate": 0
-    },
-    {
-      "id": "documenter",
-      "title": "运行手册与 ADR 文档员",
-      "duty": "维护 ADR、runbook、事故状态机、发布步骤和验证报告。",
-      "required": true,
-      "modelTier": "labor",
-      "models": {
-        "codex": "gpt-5.6-luna (low)"
-      },
-      "candidates": [
-        {
-          "file": "engineering/engineering-technical-writer.md",
-          "name": "Technical Writer",
-          "emoji": "📚",
-          "vibe": "Writes the docs that developers actually read and use.",
-          "description": "Developer documentation, API references, README, runbook, and docs-as-code specialist."
-        }
-      ],
-      "selectedCandidate": 0
+      "custom": false
     }
   ],
-  "bench": [],
-  "selectedRoles": [
-    {
-      "id": "planner",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "architect",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "node-runtime-executor",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "control-plane-executor",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "redis-release-executor",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "reviewer",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "chaos-tester",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "live-trade-verifier",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "evidence-auditor",
-      "selectedCandidate": 0
-    },
-    {
-      "id": "documenter",
-      "selectedCandidate": 0
-    }
-  ],
-  "liveTradePolicy": {
-    "accountId": "account-a",
-    "maxOpeningNotionalUsdt": 12,
-    "maxCumulativeNetLossUsdt": 1.5,
-    "maxRoundTrips": 1,
-    "allowLeverageChange": false,
-    "allowMarginModeChange": false,
-    "requireNoExistingPosition": true,
-    "requireNoExistingOpenOrders": true,
-    "requireMatchingImageDigest": true,
-    "requireHealthyActorTick": true,
-    "requireFreshProjection": true,
-    "requireCompletedReconciliation": true,
-    "stopOnAnyUnexpectedState": true,
-    "validationSequence": [
-      "place_and_cancel_small_non_marketable_order",
-      "open_one_micro_market_position",
-      "confirm_exchange_node_and_postgres_evidence",
-      "close_exact_filled_quantity_reduce_only",
-      "confirm_flat_and_close_incident"
-    ]
-  },
-  "notes": "用户授权自主定编并要求只生成 Codex。HTML 挑人阶段由默认首选候选自动确认。真实交易权限仅授予 live-trade-verifier，全部离线门和故障注入门通过后方可执行。"
+  "notes": ""
 }

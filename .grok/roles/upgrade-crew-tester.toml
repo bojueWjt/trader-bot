@@ -1,0 +1,5 @@
+# upgrade-crew tester — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "upgrade-crew 验收门。在模块/里程碑边界跑设计文档 T0-T3 具名用例与 e2e/a11y 套件，证据式验收出 PASS/FAIL 报告。接到 [Tester] 任务或里程碑验收时调用。只验不改。"
+model = "grok-4.6"
+reasoning_effort = "high"
+default_capability_mode = "execute"
