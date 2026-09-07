@@ -1,0 +1,118 @@
+{
+  "original": {
+    "gpt-5.6-sol": {
+      "n": 30,
+      "action_acc": 0.9,
+      "strict_acc": 0.8333,
+      "action_correct": 27,
+      "strict_correct": 25,
+      "http_fail": 0,
+      "latency_s": {
+        "p50": 7.176,
+        "mean": 7.635,
+        "max": 15.768,
+        "total": 229.044
+      }
+    },
+    "spark-medium": {
+      "n": 30,
+      "action_acc": 0.8667,
+      "strict_acc": 0.7,
+      "action_correct": 26,
+      "strict_correct": 21,
+      "http_fail": 0,
+      "latency_s": {
+        "p50": 2.312,
+        "mean": 2.48,
+        "max": 5.363,
+        "total": 74.385
+      }
+    },
+    "spark-high": {
+      "n": 30,
+      "action_acc": 0.9,
+      "strict_acc": 0.8333,
+      "action_correct": 27,
+      "strict_correct": 25,
+      "http_fail": 0,
+      "latency_s": {
+        "p50": 2.945,
+        "mean": 3.364,
+        "max": 8.246,
+        "total": 100.931
+      }
+    },
+    "spark-xhigh": {
+      "n": 30,
+      "action_acc": 0.9333,
+      "strict_acc": 0.8667,
+      "action_correct": 28,
+      "strict_correct": 26,
+      "http_fail": 0,
+      "latency_s": {
+        "p50": 2.775,
+        "mean": 3.398,
+        "max": 7.15,
+        "total": 101.926
+      }
+    }
+  },
+  "relaxed": {
+    "gpt-5.6-sol": {
+      "n": 30,
+      "action_acc": 0.9333,
+      "strict_acc": 0.8667,
+      "action_correct": 28,
+      "strict_correct": 26,
+      "http_fail": 0,
+      "latency_s": {
+        "p50": 7.176,
+        "mean": 7.635,
+        "max": 15.768,
+        "total": 229.044
+      }
+    },
+    "spark-medium": {
+      "n": 30,
+      "action_acc": 0.9667,
+      "strict_acc": 0.8333,
+      "action_correct": 29,
+      "strict_correct": 25,
+      "http_fail": 0,
+      "latency_s": {
+        "p50": 2.312,
+        "mean": 2.48,
+        "max": 5.363,
+        "total": 74.385
+      }
+    },
+    "spark-high": {
+      "n": 30,
+      "action_acc": 0.9667,
+      "strict_acc": 0.9333,
+      "action_correct": 29,
+      "strict_correct": 28,
+      "http_fail": 0,
+      "latency_s": {
+        "p50": 2.945,
+        "mean": 3.364,
+        "max": 8.246,
+        "total": 100.931
+      }
+    },
+    "spark-xhigh": {
+      "n": 30,
+      "action_acc": 1.0,
+      "strict_acc": 0.9667,
+      "action_correct": 30,
+      "strict_correct": 29,
+      "http_fail": 0,
+      "latency_s": {
+        "p50": 2.775,
+        "mean": 3.398,
+        "max": 7.15,
+        "total": 101.926
+      }
+    }
+  }
+}

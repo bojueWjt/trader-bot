@@ -1,0 +1,785 @@
+{
+  "title": "v3-trader real channel signal bench",
+  "n": 30,
+  "channels": [
+    "B01-02Titan",
+    "B01-03Gauls",
+    "C02-舒琴",
+    "TraderCash",
+    "坚果TV"
+  ],
+  "families": {
+    "open_zone_offset_slight": 3,
+    "open_limit_plus_be": 1,
+    "skip_noise": 1,
+    "skip_wait": 1,
+    "skip_missing": 4,
+    "skip_analysis": 2,
+    "skip_review": 3,
+    "open_market_with_sl": 1,
+    "skip_tips": 1,
+    "open_equity_zone": 2,
+    "open_batch": 3,
+    "skip_do_not_trade": 1,
+    "set_sl": 2,
+    "open_batch_no_sl": 1,
+    "skip_non_actionable": 1,
+    "open_equity_market": 1,
+    "partial_lock": 1,
+    "close": 1
+  },
+  "items": [
+    {
+      "id": "S01",
+      "source_index": 1,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4085",
+      "received_at": "2026-08-23T06:22:17+00:00",
+      "text": "ETH\n方向：做多\n入场：2295-2315附近\n信心度：中\n倍数：10倍\n仓位：10%\n止盈：点位1：2360附近（求稳） 点位2：2430附近  点位3：2530\n止损：小幅跌破2268一点。\n理由：2290上方是支撑位，可以在支撑位上方做反弹。\n注：挂单不要挂整数位，难以成交。挂在支撑位上方一点或者阻力区下方一点更容易成交。",
+      "gold": {
+        "id": "S01",
+        "family": "open_zone_offset_slight",
+        "action": "open",
+        "symbol": "ETHUSDT",
+        "side": "long",
+        "entry_type": "zone",
+        "price_min": 2295,
+        "price_max": 2315,
+        "entry_offset": true,
+        "sl": 2258.93,
+        "sl_accept": [
+          2268,
+          2258.93,
+          2261.2
+        ],
+        "tps": [
+          2360,
+          2430,
+          2530
+        ],
+        "notional_mode": "auto_with_sl",
+        "note": "区间+附近必须 zone+entry-offset；小幅跌破2268 按0.3%外扩再0.1%放宽≈2258.93"
+      }
+    },
+    {
+      "id": "S02",
+      "source_index": 2,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4084",
+      "received_at": "2026-08-23T06:22:01+00:00",
+      "text": "比特币\n方向：做多\n入场：7.36-7.42万附近\n信心度：中\n倍数：10倍\n仓位：10%\n止盈：点位1：7.56附近（求稳） 点位2：7.7附近  点位3：7.91\n止损：小幅跌破7.28万一点。\n理由：比特币7.3万上方是支撑位，可以在支撑位上方做反弹。\n注：挂单不要挂整数位，难以成交。挂在支撑位上方一点或者阻力区下方一点更容易成交。",
+      "gold": {
+        "id": "S02",
+        "family": "open_zone_offset_slight",
+        "action": "open",
+        "symbol": "BTCUSDT",
+        "side": "long",
+        "entry_type": "zone",
+        "price_min": 73600,
+        "price_max": 74200,
+        "entry_offset": true,
+        "sl": 72509,
+        "sl_accept": [
+          72800,
+          72509,
+          72581
+        ],
+        "tps": [
+          75600,
+          77000,
+          79100
+        ],
+        "notional_mode": "auto_with_sl",
+        "note": "7.36-7.42万=73600-74200；止损小幅跌破7.28万"
+      }
+    },
+    {
+      "id": "S03",
+      "source_index": 3,
+      "channel_id": "-1002189417451",
+      "channel_name": "坚果TV",
+      "source_message_id": "6806",
+      "received_at": "2026-08-23T06:03:21+00:00",
+      "text": "大饼今天如果测试747（四小时均线结构，如果走简单回调这里就是生命带）小仓位试一个多单 防守727 这个多单和之前空单不冲突 也就是之前空单可以不止盈 推一个保本防守即可 还是往下拿以防跳水画门v反等突发情况 多单小仓位先建立头寸如果被打掉空单也能弥补 到时候7.1 6.7两个位置上常规仓位 如果看不懂等我喊",
+      "gold": {
+        "id": "S03",
+        "family": "open_limit_plus_be",
+        "action": "open",
+        "symbol": "BTCUSDT",
+        "side": "long",
+        "entry_type": "limit",
+        "price": 74700,
+        "entry_offset": false,
+        "sl": 72700,
+        "sl_accept": [
+          72700,
+          727
+        ],
+        "notional_mode": "auto_with_sl",
+        "also_accept_actions": [
+          "open"
+        ],
+        "note": "747/727 按万档=74700/72700；另提旧空单保本，本评测主分只看新开多"
+      }
+    },
+    {
+      "id": "S04",
+      "source_index": 4,
+      "channel_id": "-1002189417451",
+      "channel_name": "坚果TV",
+      "source_message_id": "6805",
+      "received_at": "2026-08-23T04:02:39+00:00",
+      "text": "发300u 在dc 爱你们",
+      "gold": {
+        "id": "S04",
+        "family": "skip_noise",
+        "action": "skip",
+        "skip_reason": "noise",
+        "skip_accept": [
+          "noise",
+          "non_actionable"
+        ],
+        "note": "发钱/DC 社群噪音"
+      }
+    },
+    {
+      "id": "S05",
+      "source_index": 5,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4083",
+      "received_at": "2026-08-22T10:56:14+00:00",
+      "text": "高倍合约的话，再观察下，等临近支撑位我就会发单了，目前还没到，不要急，多观察。",
+      "gold": {
+        "id": "S05",
+        "family": "skip_wait",
+        "action": "skip",
+        "skip_reason": "wait",
+        "skip_accept": [
+          "wait",
+          "analysis",
+          "missing_params"
+        ],
+        "note": "明确还没到、等临近再发单"
+      }
+    },
+    {
+      "id": "S06",
+      "source_index": 12,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4079",
+      "received_at": "2026-08-22T06:52:29+00:00",
+      "text": "现在合约稳定的、能做的，就是原油了，逢高布局即可。",
+      "gold": {
+        "id": "S06",
+        "family": "skip_missing",
+        "action": "skip",
+        "skip_reason": "missing_params",
+        "skip_accept": [
+          "missing_params",
+          "analysis",
+          "wait"
+        ],
+        "note": "原油逢高但无点位/止损，禁止猜测"
+      }
+    },
+    {
+      "id": "S07",
+      "source_index": 14,
+      "channel_id": "-1002198013097",
+      "channel_name": "B01-02Titan",
+      "source_message_id": "4442",
+      "received_at": "2026-08-22T06:51:36+00:00",
+      "text": "亲爱的AREAN成员，🦅❤️‍🔥\n\n如果您已经投资或持有任何其他加密货币，我希望您记住最重要的一点：\n\n保护我们的资金。\n\n当您的投资已经获得良好收益时，请根据您的交易计划考虑保护您的仓位——无论是将止损点更靠近您的买入价，还是锁定一部分收益。\n\n我知道市场在上涨时会对人的心理产生影响，贪婪开始占据主导。我们可能已经获得了80%或90%的收益，但仍然在等待100%。然后，市场反转，一个盈利的仓位可能会迅速变成亏损的仓位。\n不要让我们的贪婪夺走纪律带来的成果。\n\n各位成员，请保持理智。市场不会消失。它会在明天、下周、下个月以及全年都存在。总会有新的机会。\n\n我们不需要抓住每一次波动。\n最重要的是：\n\n🔥 风险管理\n🔥 纪律\n🔥 耐心\n🔥 持续性\n\n无论您跟随我还是其他交易员，请永远记住，保护您的资金与增加资金同样重要。",
+      "gold": {
+        "id": "S07",
+        "family": "skip_analysis",
+        "action": "skip",
+        "skip_reason": "analysis",
+        "skip_accept": [
+          "analysis",
+          "review",
+          "noise"
+        ],
+        "note": "风控说教，没有带点位的新指令"
+      }
+    },
+    {
+      "id": "S08",
+      "source_index": 15,
+      "channel_id": "-1002198013097",
+      "channel_name": "B01-02Titan",
+      "source_message_id": "4439",
+      "received_at": "2026-08-22T06:51:08+00:00",
+      "text": "亲爱的AREAN成员们，大家好！🦅❤️‍🔥\n\n我的Titan团队在合适的时机为你们带来了BTC、ETH和ONDO。很多人都在想，为什么我如此看好BTC和ETH，却不积极推荐更多的其他加密货币？\n\n原因就在眼前。\n\n一种其他加密货币可能需要一周的时间才能上涨30%，但在短短半小时内，许多其他加密货币可能会下跌20%到40%。这就是我没有积极追逐其他加密货币的原因。相反，我选择专注于最强的项目：BTC、ETH和ONDO。\n看看我们取得了什么成就：\n\n🔥 BTC — 达到了所有止盈点，从我们的买入区域上涨了27%。\n🔥 ETH — 达到了3个止盈点，上涨了34%。\n🔥 ONDO — 几乎达到了4个止盈点，上涨了37%。\n\n这就是纪律和精准的真正力量。\n\n我们不追逐每一只垃圾币。我们专注于实力。当市场下跌时，BTC和ETH可能只会回调几个百分点，而许多其他加密货币可能会下跌20%、30%甚至更多。\n现在，各位成员，我想分享我下一步的计划。\n\n在我告诉大家的时候，ETH的价格在1500-1600美元左右，我使用了大约20%的净资产购买了ETH和一些其他加密货币。我现在计划出售其中50%的持仓，锁定利润。\n\n几天前，当很多人都在考虑做空BTC时，我正在谈论我持有的BTC和ETH。\n区别很简单：Titan团队不会盲目跟从大众。\n\n我们的思维方式不同。\n我们的行动方式不同。\n因为哥斯拉不会随波逐流。🐲🔥\n\n精准胜过追逐，纪律胜过恐惧。🦅❤️‍🔥\n\n⚠️ 声明\n\n本内容仅供教育和参考，不构成任何财务建议。我不是持牌的财务顾问。加密货币市场波动性极高，存在很高的亏损风险。您可能会损失所有投资的资金，并且此活动可能不受任何金融保护或补偿计划的覆盖。在做出任何财务决策之前，请务必进行自己的研究（DYOR），并咨询持牌专业人士。\n\n我们是这个市场的哥斯拉！🔥🐲\n\n#TraderTitan 🦅❤️‍🔥🦅",
+      "gold": {
+        "id": "S08",
+        "family": "skip_review",
+        "action": "skip",
+        "skip_reason": "review",
+        "skip_accept": [
+          "review",
+          "analysis"
+        ],
+        "note": "已实现涨幅27%/34%/37%战绩复盘。出售50%是现货持仓回顾，无合约执行点位"
+      }
+    },
+    {
+      "id": "S09",
+      "source_index": 18,
+      "channel_id": "-1002189417451",
+      "channel_name": "坚果TV",
+      "source_message_id": "6792",
+      "received_at": "2026-08-22T05:03:41+00:00",
+      "text": "刚起 大饼被套200点 空个sol吧一直不喜欢sol 108止损",
+      "gold": {
+        "id": "S09",
+        "family": "open_market_with_sl",
+        "action": "open",
+        "symbol": "SOLUSDT",
+        "side": "short",
+        "entry_type": "market",
+        "entry_offset": false,
+        "sl": 108,
+        "sl_accept": [
+          108
+        ],
+        "notional_mode": "auto_with_sl",
+        "note": "空个sol + 108止损，无入场价=市价"
+      }
+    },
+    {
+      "id": "S10",
+      "source_index": 19,
+      "channel_id": "-1002189417451",
+      "channel_name": "坚果TV",
+      "source_message_id": "6791",
+      "received_at": "2026-08-22T03:54:29+00:00",
+      "text": "TRUMPUSDT.P 穿过 2.641\n------来自nuts坚果\n---\n转发规则: 坚果tips",
+      "gold": {
+        "id": "S10",
+        "family": "skip_tips",
+        "action": "skip",
+        "skip_reason": "non_actionable",
+        "skip_accept": [
+          "non_actionable",
+          "noise",
+          "analysis"
+        ],
+        "note": "坚果tips 穿过价格提醒，不是下单指令"
+      }
+    },
+    {
+      "id": "S11",
+      "source_index": 22,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4074",
+      "received_at": "2026-08-21T10:11:31+00:00",
+      "text": "我的老天爷啊！我不敢相信，我炒币暴富了！一晚赚到￥10,000,000了，还能继续涨吗？！\n\n1. 如图所示，由于币圈暴涨，本琴两晚过去，资产飙升了50万美金，币圈总资产也来到了1000万。我算了下，15块钱一个汉堡，本琴能买60万个，可以吃600年！炒币短短1年已经财富自由！但是，也许我们可以赚更多？\n\n2. 咱们来看下比特币走势，其实我还挺担心的，短期可能要见顶了。因为从6万4到7.95万，两天已经上涨25%！但是8.2万这里大家要留意，这里是前高颈线，阻力很大，如果临近这里回调一下，我丝毫不会意外，下跌就是最好的买入机会！还能涨！\n\n3. 如果一切正常，比特币遇阻后可能回调个5-10%，那会是非常好的补仓机会。现货不要急，现在比特币还没到2028年产量减半呢，那时候会涨的更猛，我预计这轮牛市周期的顶部会涨到20万美金，中间走走停停要两三年才会彻底走完牛市。\n\n4. 所以之前6万没抄底的也不用灰心，比特币会涨到20万，所以6.5万买和7.5万买也没什么区别，长线来看，都是很好的价格。没买的可以每天定投，已经买了的，那就拿好你的现货，而合约的话则可以跟我短线操作操作。\n\n5. 另外主流币涨这么猛，山寨季也其实也在路上了，如图所示，舒琴是让大家买小企鹅Pengu做补涨，我发的时候才0.006几，一晚上过去，这都快0.008了，暴涨15%，赚钱非常的快。优质土狗币如果有较大回调大家也可以配置点，但是最多只能10-20%仓位，咱们主要持仓依然是BTC、ETH、SOL等主流币。\n\n6. 常言说，守币比守寡难，炒币最赚钱的反而是去坐牢的，这样才能拿的住币，拿到大结果。咱们如今能赚钱 全靠拿住了6、7月抄底的币，坚定持有，熬过波动、穿越周期，再给时间一点耐心，两年之后，我们一起，站上财富自由的领奖台！",
+      "gold": {
+        "id": "S11",
+        "family": "skip_review",
+        "action": "skip",
+        "skip_reason": "review",
+        "skip_accept": [
+          "review",
+          "analysis"
+        ],
+        "note": "暴富/资产回顾，无新的带点位开平仓指令"
+      }
+    },
+    {
+      "id": "S12",
+      "source_index": 67,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4060",
+      "received_at": "2026-08-19T15:18:18+00:00",
+      "text": "SNDK\n方向：做多\n入场：1510-1525附近\n信心度：中\n倍数：5倍\n仓位：10%\n止盈：点位1：1580附近（求稳） 点位2：1625附近   点位3：1700附近（求稳）\n止损：小幅跌破1485一点。\n理由：SNDK在1500附近有一定支撑，可以尝试在支撑位上方做个反弹\n注：挂单不要挂整数位，难以成交。挂在支撑位上方一点或者阻力区下方一点更容易成交。",
+      "gold": {
+        "id": "S12",
+        "family": "open_equity_zone",
+        "action": "open",
+        "symbol": "SNDKUSDT",
+        "side": "long",
+        "entry_type": "zone",
+        "price_min": 1510,
+        "price_max": 1525,
+        "entry_offset": true,
+        "sl": 1479.04,
+        "sl_accept": [
+          1485,
+          1479.04,
+          1480.55
+        ],
+        "tps": [
+          1580,
+          1625,
+          1700
+        ],
+        "notional_mode": "auto_with_sl",
+        "note": "美股代码SNDK映射SNDKUSDT，禁止判非加密不可交易"
+      }
+    },
+    {
+      "id": "S13",
+      "source_index": 71,
+      "channel_id": "-1002189417451",
+      "channel_name": "坚果TV",
+      "source_message_id": "6768",
+      "received_at": "2026-08-19T14:30:16+00:00",
+      "text": "小火箭这个空单这里止盈一半，剩下不管了。这里收的结构不好看",
+      "gold": {
+        "id": "S13",
+        "family": "skip_missing",
+        "action": "skip",
+        "skip_reason": "missing_params",
+        "skip_accept": [
+          "missing_params"
+        ],
+        "note": "小火箭未给可映射合约代码，禁止猜品种"
+      }
+    },
+    {
+      "id": "S14",
+      "source_index": 79,
+      "channel_id": "-1002198013097",
+      "channel_name": "B01-02Titan",
+      "source_message_id": "4433",
+      "received_at": "2026-08-19T04:02:22+00:00",
+      "text": "我的 #ZRO 止损买入区域\n\n👉 首次入场价：> (0.7102)\n👉 第二次入场价：> (0.688)\n\n🚨 我的止损价：(0.6666) 美元 区域 (严格的风险管理)。\n\n👉 如在图表上所示，我将在每次止盈 (TP) 时锁定 25% 的利润。我希望从这个区域获得 100% 到 200% 的收益。\n\n⚠️免责声明\n\n“本内容仅供教育和参考，不构成任何财务建议。我不是持牌的财务顾问。加密货币波动性极高，存在很高的亏损风险：您可能会损失所有投资的本金，并且此活动不受任何金融保护或补偿计划的覆盖。在做出任何财务决策之前，请务必进行自己的研究 (DYOR) 并咨询持牌专业人士。”\n\n我们是这个市场的霸主。🔥🐲\n\n#TraderTitan 🦅❤️‍🔥🦅",
+      "gold": {
+        "id": "S14",
+        "family": "open_batch",
+        "action": "open_batch",
+        "symbol": "ZROUSDT",
+        "side": "long",
+        "entry_type": "limit",
+        "entry_offset": false,
+        "batch_entries": [
+          0.7102,
+          0.688
+        ],
+        "sl": 0.6666,
+        "sl_accept": [
+          0.6666
+        ],
+        "notional_mode": "auto_with_sl",
+        "also_accept_actions": [
+          "open"
+        ],
+        "note": "两档入场必须拆成 -e1/-e2，不得合成一笔"
+      }
+    },
+    {
+      "id": "S15",
+      "source_index": 80,
+      "channel_id": "-1002198013097",
+      "channel_name": "B01-02Titan",
+      "source_message_id": "4432",
+      "received_at": "2026-08-19T04:02:04+00:00",
+      "text": "我的 #FIL 交易策略\n\n👉 首次建仓：> (0.6328) (当前价格)\n👉 第二次建仓：> (0.6156)\n\n🚨 我的止损位：(0.5998) 美元，严格控制风险。\n\n👉 如在图表上所示，我将在每次止盈 (TP) 时锁定 25% 的利润。\n\n⚠️免责声明\n\n“本内容仅供教育和参考，不构成任何财务建议。我不是持牌的财务顾问。加密货币波动性极高，存在很高的亏损风险：您可能会损失所有投资的资金，并且此活动不受任何金融保护或补偿计划的覆盖。在做出任何财务决策之前，请务必进行自己的研究 (DYOR) 并咨询持牌专业人士。”\n\n我们是这个市场的霸主。🔥🐲\n\n#TraderTitan 🦅❤️‍🔥🦅\n百哥备注 fil币已经归零死了，不要玩",
+      "gold": {
+        "id": "S15",
+        "family": "skip_do_not_trade",
+        "action": "skip",
+        "skip_reason": "non_actionable",
+        "skip_accept": [
+          "non_actionable",
+          "analysis"
+        ],
+        "note": "消息含百哥备注 fil已经归零不要玩，禁止开FIL"
+      }
+    },
+    {
+      "id": "S16",
+      "source_index": 81,
+      "channel_id": "-1002198013097",
+      "channel_name": "B01-02Titan",
+      "source_message_id": "4429",
+      "received_at": "2026-08-19T01:22:24+00:00",
+      "text": "🔥 #LONG（做多）交易计划更新 🔥\n\n大家好，我亲爱的 AREAN 成员们！❤️‍🔥\n\n首先，由于一些家庭事务，我之前暂时离开了 AREAN，但正如大家所见，我的图表分析依然非常给力！📈🔥\n\nBTC 和 ETH 都实现了 2.5%–3.5% 的出色上涨。🚀\n\nBTC 从我之前提到的支撑区完美反弹，并成功触及了第一个止盈（TP）区。🎯\n\n我的 ONDO 做多单目前浮亏约 1.8%，但请记住：之前我从该区域提示做空时，ONDO 几乎暴跌了 25%。📉🔥\n\n这就是逐级交易和保持耐心的威力。💪\n\n👉 我将先平仓 20% 锁定利润，同时让剩余仓位继续持有，向后续的止盈目标推进。\n\n👉 对于 ETH，我将把止损位上移至 $1,875 的保本（BE）区（略低于入场区），以确保仓位安全，其他币种同理。\n\n⚠️ 免责声明：\n本内容仅供教育和信息参考，不构成任何财务建议。我不是持牌财务顾问。加密货币市场具有高度波动性，存在巨大的亏损风险。您可能会损失全部投资本金，且加密货币投资不受任何金融补偿或保险计划的保护。在做出任何投资决策前，请务必自行研究（DYOR）并咨询持牌金融专业人士。\n\nWE ARE THE GODZILLAS OF THIS MARKET! 🔥🐲\n\nTraderTitan 🦅❤️‍🔥🦅\n8月19号周三",
+      "gold": {
+        "id": "S16",
+        "family": "set_sl",
+        "action": "set_sl",
+        "symbol": "ETHUSDT",
+        "side": "long",
+        "sl": 1875,
+        "sl_accept": [
+          1875,
+          1875.0
+        ],
+        "also_accept_actions": [
+          "set_sl",
+          "partial"
+        ],
+        "note": "明确把ETH止损上移到1875保本；平仓20%未标明品种，主分看ETH set-sl"
+      }
+    },
+    {
+      "id": "S17",
+      "source_index": 86,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4053",
+      "received_at": "2026-08-18T15:11:48+00:00",
+      "text": "BTC\n方向：做空\n入场：6.48-6.53附近\n信心度：中\n倍数：10倍\n仓位：10%\n止盈：点位1：6.41附近（求稳） 点位2：6.36附近  点位3：6.27\n止损：小幅涨破6.57一点\n理由：6.52万附近颈线阻力还可以，可以吃个回踩。\n注：挂单不要挂整数位，难以成交。挂在阻力区下方一点更容易成交。现在由于假跌破和假突破很多，所以为了预防这种情况，咱们止损挂高一点，调低盈亏比，大幅增加胜率来做单。",
+      "gold": {
+        "id": "S17",
+        "family": "open_zone_offset_slight",
+        "action": "open",
+        "symbol": "BTCUSDT",
+        "side": "short",
+        "entry_type": "zone",
+        "price_min": 64800,
+        "price_max": 65300,
+        "entry_offset": true,
+        "sl": 65963.7,
+        "sl_accept": [
+          65700,
+          65963.7,
+          65897.1
+        ],
+        "tps": [
+          64100,
+          63600,
+          62700
+        ],
+        "notional_mode": "auto_with_sl",
+        "note": "6.48-6.53附近=64800-65300；小幅涨破6.57"
+      }
+    },
+    {
+      "id": "S18",
+      "source_index": 89,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4051",
+      "received_at": "2026-08-18T14:16:10+00:00",
+      "text": "谷歌\n方向：做多\n入场：当前341-342附近\n信心度：中\n倍数：10倍\n仓位：10%\n止盈：点位1：348附近（求稳） 点位2：357附近 点位3：365\n止损：小幅跌破337一点。\n理由：谷歌340二次探底，可以尝试。\n注：挂单不要挂整数位，难以成交。挂在支撑位上方一点或者阻力区下方一点更容易成交。",
+      "gold": {
+        "id": "S18",
+        "family": "open_equity_zone",
+        "action": "open",
+        "symbol": "GOOGLUSDT",
+        "side": "long",
+        "entry_type": "zone",
+        "price_min": 341,
+        "price_max": 342,
+        "entry_offset": true,
+        "sl": 335.66,
+        "sl_accept": [
+          337,
+          335.66,
+          335.99
+        ],
+        "tps": [
+          348,
+          357,
+          365
+        ],
+        "notional_mode": "auto_with_sl",
+        "note": "谷歌->GOOGLUSDT"
+      }
+    },
+    {
+      "id": "S19",
+      "source_index": 90,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4050",
+      "received_at": "2026-08-18T14:15:59+00:00",
+      "text": "来了！现在操作原油，逢高布局空单。CL和BZ都可以空，走势是一致的，哪个资金费率低就空哪个。\n\n美油CL：当前84.5做空第一笔，然后89、94补空，每次10%仓位，1到2倍，长线拿着。低倍不会爆仓，不用设止损。然后每单止盈每空下4点就止盈，比如84.5止盈就是80.5，89做空止盈就是85。\n\n布伦特原油BZ：跟美油一样，不过价格BZ要高一点，所以是89、94、99做空，止盈也是每空4点止盈。",
+      "gold": {
+        "id": "S19",
+        "family": "open_batch_no_sl",
+        "action": "open_batch",
+        "symbol": "CLUSDT",
+        "side": "short",
+        "entry_type": "limit",
+        "entry_offset": false,
+        "batch_entries": [
+          84.5,
+          89,
+          94
+        ],
+        "notional_mode": "small_fixed_no_sl",
+        "also_accept_actions": [
+          "open"
+        ],
+        "note": "明确不用设止损，必须小额--notional；CLUSDT。BZ是同类，主分看CL"
+      }
+    },
+    {
+      "id": "S20",
+      "source_index": 97,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "990817001",
+      "received_at": "2026-08-17T14:30:45+00:00",
+      "text": "MIGRATION TEST 2026-08-17. This is a non-trading connectivity check. Do not call trading tools and do not place, cancel, or close orders. Reply only with HERMES_MIGRATION_OK.",
+      "gold": {
+        "id": "S20",
+        "family": "skip_non_actionable",
+        "action": "skip",
+        "skip_reason": "non_actionable",
+        "skip_accept": [
+          "non_actionable",
+          "noise"
+        ],
+        "note": "连通性测试，禁止任何交易工具"
+      }
+    },
+    {
+      "id": "S21",
+      "source_index": 104,
+      "channel_id": "-1002189417451",
+      "channel_name": "坚果TV",
+      "source_message_id": "6744",
+      "received_at": "2026-08-12T17:40:54.69288+00:00",
+      "text": "没睡的小火箭这里收下来进一个 带157防守 仓位小一点 比较妖",
+      "gold": {
+        "id": "S21",
+        "family": "skip_missing",
+        "action": "skip",
+        "skip_reason": "missing_params",
+        "skip_accept": [
+          "missing_params"
+        ],
+        "note": "小火箭+157防守，品种不可映射"
+      }
+    },
+    {
+      "id": "S22",
+      "source_index": 106,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4022",
+      "received_at": "2026-08-12T14:44:55.471937+00:00",
+      "text": "SPCX\n方向：做空-低倍\n入场：144附近建仓，然后在148附近补空\n信心度：中\n倍数：2倍\n仓位：10%每次\n止盈：1：135附近（求稳） 点位2：123附近   \n止损：小幅涨破155止损。\n理由：150附近强阻力。\n注：挂单不要挂整数位，难以成交。挂在阻力区下方一点更容易成交。现在由于假跌破和假突破很多，所以为了预防这种情况，咱们止损挂高一点，调低盈亏比，大幅增加胜率来做单。",
+      "gold": {
+        "id": "S22",
+        "family": "open_batch",
+        "action": "open_batch",
+        "symbol": "SPCXUSDT",
+        "side": "short",
+        "entry_type": "limit",
+        "entry_offset": true,
+        "batch_entries": [
+          144,
+          148
+        ],
+        "sl": 155.62,
+        "sl_accept": [
+          155,
+          155.62,
+          155.47
+        ],
+        "tps": [
+          135,
+          123
+        ],
+        "notional_mode": "auto_with_sl",
+        "also_accept_actions": [
+          "open"
+        ],
+        "note": "144建仓+148补空必须两笔；附近=entry-offset"
+      }
+    },
+    {
+      "id": "S23",
+      "source_index": 107,
+      "channel_id": "-1002189417451",
+      "channel_name": "坚果TV",
+      "source_message_id": "6743",
+      "received_at": "2026-08-12T14:16:19.035625+00:00",
+      "text": "美光这里进个空单\n止损在1011\n止盈看781",
+      "gold": {
+        "id": "S23",
+        "family": "open_equity_market",
+        "action": "open",
+        "symbol": "MUUSDT",
+        "side": "short",
+        "entry_type": "market",
+        "entry_offset": false,
+        "sl": 1011,
+        "sl_accept": [
+          1011
+        ],
+        "tps": [
+          781
+        ],
+        "notional_mode": "auto_with_sl",
+        "note": "美光->MUUSDT，这里进空=市价"
+      }
+    },
+    {
+      "id": "S24",
+      "source_index": 122,
+      "channel_id": "-1002198013097",
+      "channel_name": "B01-02Titan",
+      "source_message_id": "4423",
+      "received_at": "2026-08-11T14:21:00.027133+00:00",
+      "text": "我的 $BTC 交易更新 🔥\n\n我之前在 64,570-64,900 区间的 $BTC 做空操作，结果正如预期。价格在该区间受到阻力，并下跌了近 1.6%。✅\n\n👉 现在锁定 10% 的利润，并将我的止损位调整到盈亏平衡点（入场价）或略高于 65,000 美元。目前，我的资金已经完全得到保护。\n\n如果我的止损位被触发，我会立即分享下一步的计划。\n\n📌 关键阻力位：67,257 美元\n📌 关键支撑区间：61,770 美元\n\n请记住这些价位。👀\n\n⚠️ 声明：\n\n本内容仅供教育和参考，不构成任何财务建议。我不是持牌的财务顾问。加密货币市场波动性很高，存在很大的亏损风险。您可能会损失所有投资的资金，并且加密货币投资不受任何财务补偿或保险计划的保护。在做出任何投资决策之前，请务必进行自己的研究（DYOR），并咨询持牌的财务专业人士。\n\n我们是这个市场的“哥斯拉”！🔥🐲\n\n#TraderTitan 🦅❤️‍🔥🦅",
+      "gold": {
+        "id": "S24",
+        "family": "partial_lock",
+        "action": "partial",
+        "symbol": "BTCUSDT",
+        "side": "short",
+        "partial_pct": 10,
+        "sl": 65000,
+        "sl_accept": [
+          65000,
+          64570,
+          64900
+        ],
+        "also_accept_actions": [
+          "partial",
+          "set_sl"
+        ],
+        "note": "锁定10%利润=减仓当前仓位10%；同时止损移到保本/略高于65000"
+      }
+    },
+    {
+      "id": "S25",
+      "source_index": 126,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4014",
+      "received_at": "2026-08-11T11:33:17.647936+00:00",
+      "text": "原油带单平仓了，等反弹起来再空吧。恭喜止盈",
+      "gold": {
+        "id": "S25",
+        "family": "skip_review",
+        "action": "skip",
+        "skip_reason": "review",
+        "skip_accept": [
+          "review",
+          "analysis"
+        ],
+        "note": "原油带单平仓了是已完成后回顾，不是新的平仓指令"
+      }
+    },
+    {
+      "id": "S26",
+      "source_index": 136,
+      "channel_id": "-1002228497993",
+      "channel_name": "B01-03Gauls",
+      "source_message_id": "5077",
+      "received_at": "2026-08-11T05:03:48.599674+00:00",
+      "text": "$TIA 交易更新：\n\n👉 在止损位附近平仓，尽量减少损失。\n👉 亏损 -3%，止损比例为 0.5 倍。\n👉 昨天我坚持我的计划，因为该币种具有一定的上涨潜力，并且对 VAL（价值区域）有良好的反应，但现在它正在失去上涨动力，所以最好以小额亏损平仓。\n\n未来还有更好的机会。\n\n免责声明：本内容仅供教育和参考，不构成任何财务建议。我不是持牌的财务顾问。 交易和加密货币存在很高的亏损风险，包括可能损失全部本金。 在做出任何财务决策之前，请务必进行自己的研究（DYOR），并咨询持牌专业人士。\n\n#TraderGauls 🎭",
+      "gold": {
+        "id": "S26",
+        "family": "close",
+        "action": "close",
+        "symbol": "TIAUSDT",
+        "side": "long",
+        "note": "在止损位附近平仓"
+      }
+    },
+    {
+      "id": "S27",
+      "source_index": 137,
+      "channel_id": "-1002228497993",
+      "channel_name": "B01-03Gauls",
+      "source_message_id": "5076",
+      "received_at": "2026-08-10T12:43:21.323326+00:00",
+      "text": "$ETHFI  三天前的多单 交易更新：\n\n👉 价格上涨了 7%，目前表现良好。\n👉 此时继续锁定利润，并将止损位调整到 0.3788。\n\n祝好，希望大家多多支持，我正在积攒大家的能量 ❤️🔥🔥\n\n#TraderGauls🎭",
+      "gold": {
+        "id": "S27",
+        "family": "set_sl",
+        "action": "set_sl",
+        "symbol": "ETHFIUSDT",
+        "side": "long",
+        "sl": 0.3788,
+        "sl_accept": [
+          0.3788
+        ],
+        "note": "锁定利润但没有X%，主动作是止损调到0.3788"
+      }
+    },
+    {
+      "id": "S28",
+      "source_index": 150,
+      "channel_id": "-1002228497993",
+      "channel_name": "B01-03Gauls",
+      "source_message_id": "5071",
+      "received_at": "2026-08-07T11:10:18.617901+00:00",
+      "text": "$ETHFI 购买策略\n\n入场价：当前价格和 3612\n目标价：4542\n止损价：3446\n\n我认为前景很好，但由于今天有重要的经济数据（NFP）发布，我这次的风险控制比平时更严格。\n\n免责声明：本内容仅供教育和参考，不构成任何财务建议。我不是持牌的财务顾问。交易和加密货币存在很高的亏损风险，包括可能损失全部本金。请务必自行研究（DYOR），并在做出任何财务决策前咨询持牌专业人士。\n\n#TraderGauls🎭\n8月7号，周五下午",
+      "gold": {
+        "id": "S28",
+        "family": "open_batch",
+        "action": "open_batch",
+        "symbol": "ETHFIUSDT",
+        "side": "long",
+        "entry_type": "limit",
+        "entry_offset": false,
+        "batch_entries": [
+          0.3612
+        ],
+        "sl": 0.3446,
+        "sl_accept": [
+          0.3446,
+          3446,
+          0.3612
+        ],
+        "tps": [
+          0.4542,
+          4542
+        ],
+        "notional_mode": "auto_with_sl",
+        "also_accept_actions": [
+          "open"
+        ],
+        "note": "当前价+3612分批；ETHFI量级按0.36，3612应理解为0.3612。若模型标needs_review也算部分合理但不给满分"
+      }
+    },
+    {
+      "id": "S29",
+      "source_index": 0,
+      "channel_id": "-1002136478186",
+      "channel_name": "C02-舒琴",
+      "source_message_id": "4086",
+      "received_at": "2026-08-23T06:22:30+00:00",
+      "text": "Sol则是跟着BTC走的，BTC回调到位，sol也可以入。看BTC的支撑做SOL。\n之前都讲过，前高附近离场，然后等待回调入场，这下回调也来了，求稳入点现货也行。",
+      "gold": {
+        "id": "S29",
+        "family": "skip_analysis",
+        "action": "skip",
+        "skip_reason": "analysis",
+        "skip_accept": [
+          "analysis",
+          "missing_params",
+          "wait"
+        ],
+        "note": "看BTC支撑做SOL/现货也行，无SOL精确入场和止损"
+      }
+    },
+    {
+      "id": "S30",
+      "source_index": 11,
+      "channel_id": "-1002193304023",
+      "channel_name": "TraderCash",
+      "source_message_id": "1982",
+      "received_at": "2026-08-22T07:33:31+00:00",
+      "text": "#JTO 交易更新\n\n目标 1 已正式达成。价格如计划般，精准地支撑在 0.5872 附近，并顺利突破至我们的第一个反应区域 0.6766。\n\n这次交易策略的风险回报比表现良好，买家从入场区域开始积极参与，推动了价格的上涨。\n\n现在，我们将观察价格在当前水平上的表现，同时密切关注下一个目标区域。\n\n如果价格下跌速度过快，在触及 TP1 目标价后，必须设置止损。\n\n祝好！\n#TraderCash 💰\n\n免责声明：本内容仅供教育和参考，不构成任何财务建议。我不是持牌的财务顾问。交易和加密货币存在很高的亏损风险，包括可能损失全部本金。在做出任何财务决策之前，请务必进行自己的研究（DYOR），并咨询持牌专业人士。",
+      "gold": {
+        "id": "S30",
+        "family": "skip_missing",
+        "action": "skip",
+        "skip_reason": "missing_params",
+        "skip_accept": [
+          "missing_params",
+          "analysis"
+        ],
+        "note": "JTO TP1后必须设止损，但没给止损价，禁止猜"
+      }
+    }
+  ]
+}
