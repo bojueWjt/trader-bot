@@ -38,3 +38,4 @@ apps/*/dist/
 .deploy-scratch/
 # Per-machine Claude Code permissions
 .claude/settings.local.json
+eval/v3_trader_signal_bench/run.log
