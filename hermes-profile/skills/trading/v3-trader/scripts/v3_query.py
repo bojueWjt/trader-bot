@@ -36,7 +36,10 @@ PSQL = ["docker", "exec", "trader-v3-postgres", "psql", "-U", "postgres", "-d", 
 NODE_HEALTH = {
     "nautilus-node-account-a": "http://127.0.0.1:8081/ready",
     "nautilus-node-account-b": "http://127.0.0.1:8082/ready",
+    "nautilus-node-account-c": "http://127.0.0.1:8083/ready",
+    "nautilus-node-account-d": "http://127.0.0.1:8084/ready",
 }
+REPORT_ACCOUNT_IDS = ("account-a", "account-b", "account-c", "account-d")
 TEXT_TRUNCATE = 600
 
 # Known signal channels (watcher whitelist). Alias matching is
@@ -404,6 +407,14 @@ def cmd_report(args) -> None:
         "SELECT COALESCE(sum(realized_pnl),0) AS pnl, count(*) AS closed FROM trade_outcomes "
         f"WHERE closed_at > now() - interval '{hours} hours'"
     )[0]
+    by_account = {
+        row["account_id"]: row
+        for row in q_json(
+            "SELECT account_id, COALESCE(sum(realized_pnl),0) AS pnl, count(*) AS closed "
+            "FROM trade_outcomes "
+            f"WHERE closed_at > now() - interval '{hours} hours' GROUP BY account_id"
+        )
+    }
     beats = q_json("SELECT node_id, status FROM node_heartbeats")
     mirror_summary = {}
     for row in _mirror():
@@ -413,12 +424,27 @@ def cmd_report(args) -> None:
             "open_orders": len(p.get("open_orders") or []),
             "protections_SL_TP": len(p.get("algo_orders") or []),
         }
+    closeouts = []
+    for account_id in REPORT_ACCOUNT_IDS:
+        snap = mirror_summary.get(account_id) or {
+            "positions": 0,
+            "open_orders": 0,
+            "protections_SL_TP": 0,
+        }
+        pnl = by_account.get(account_id) or {"pnl": 0, "closed": 0}
+        closeouts.append({
+            "account_id": account_id,
+            "period_pnl": pnl.get("pnl") or 0,
+            "closed": pnl.get("closed") or 0,
+            **snap,
+        })
     emit({
         "window_hours": hours,
         "nodes": {b["node_id"]: b["status"] for b in beats},
         "exchange": mirror_summary,
         "fills": fills, "intents_by_status": intents,
         "closed_pnl": outcomes,
+        "account_closeouts": closeouts,
         "note": "细节用 fills/outcomes/orders/positions/intents 子命令查",
     })
 

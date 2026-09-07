@@ -44,6 +44,7 @@ SECTION_TITLES = {
     "risk_md": "风险",
     "actions_md": "操作",
 }
+REPORT_ACCOUNT_IDS = ("account-a", "account-b", "account-c", "account-d")
 ASSET_TYPES = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -267,6 +268,7 @@ def empty_db_data() -> dict[str, Any]:
         },
         "intents": {"activity": []},
         "positions": [],
+        "accounts": [],
         "missing_data": [],
     }
 
@@ -707,6 +709,7 @@ def compute_outcomes(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "side": row.get("side") or "",
                 "pnl": pnl,
                 "r": None if row.get("r_multiple") is None else float(row["r_multiple"]),
+                "account_id": str(row.get("account_id") or ""),
             }
         )
     trade_count = len(sorted_rows)
@@ -728,6 +731,103 @@ def compute_outcomes(rows: list[dict[str, Any]]) -> dict[str, Any]:
             ],
         },
     }
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def empty_account_closeout(account_id: str) -> dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "equity": None,
+        "available_balance": None,
+        "period_pnl": 0,
+        "win_rate": None,
+        "trade_count": 0,
+        "avg_r": None,
+        "unrealized_pnl": 0,
+        "position_count": 0,
+        "open_order_count": 0,
+        "positions": [],
+        "closed_trades": [],
+    }
+
+
+def open_order_counts_from_mirror(mirror_rows: list[dict[str, Any]] | None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in mirror_rows or []:
+        account_id = str(row.get("account_id") or "").strip()
+        if not account_id:
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        counts[account_id] = len(payload.get("open_orders") or []) + len(payload.get("algo_orders") or [])
+    return counts
+
+
+def compute_account_closeouts(
+    outcome_rows: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+    balances: list[dict[str, Any]] | None = None,
+    open_order_counts: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    outcomes_by: dict[str, list[dict[str, Any]]] = {}
+    for row in outcome_rows:
+        account_id = str(row.get("account_id") or "").strip()
+        if not account_id:
+            continue
+        outcomes_by.setdefault(account_id, []).append(row)
+
+    positions_by: dict[str, list[dict[str, Any]]] = {}
+    for position in positions:
+        account_id = str(position.get("account_id") or "").strip()
+        if not account_id:
+            continue
+        positions_by.setdefault(account_id, []).append(position)
+
+    balances_by: dict[str, dict[str, Any]] = {}
+    for row in balances or []:
+        account_id = str(row.get("account_id") or "").strip()
+        if account_id:
+            balances_by[account_id] = row
+
+    order_counts = open_order_counts or {}
+    extra = sorted(
+        (set(outcomes_by) | set(positions_by) | set(balances_by) | set(order_counts))
+        - set(REPORT_ACCOUNT_IDS)
+    )
+    closeouts = []
+    for account_id in list(REPORT_ACCOUNT_IDS) + extra:
+        closeout = empty_account_closeout(account_id)
+        rows = outcomes_by.get(account_id, [])
+        closeout.update(compute_outcomes(rows)["kpis"])
+        account_positions = positions_by.get(account_id, [])
+        closeout["positions"] = account_positions
+        closeout["position_count"] = len(account_positions)
+        closeout["unrealized_pnl"] = round(
+            sum(_as_float(item.get("unrealized_pnl")) for item in account_positions), 6
+        )
+        closeout["open_order_count"] = int(order_counts.get(account_id, 0) or 0)
+        closeout["closed_trades"] = [
+            {
+                "symbol": row.get("instrument_id") or row.get("symbol") or "",
+                "side": row.get("side") or "",
+                "pnl": _as_float(row.get("realized_pnl")),
+            }
+            for row in rows
+        ]
+        balance = balances_by.get(account_id) or {}
+        if balance.get("equity") is not None:
+            closeout["equity"] = _as_float(balance.get("equity"))
+        if balance.get("available_balance") is not None:
+            closeout["available_balance"] = _as_float(balance.get("available_balance"))
+        closeouts.append(closeout)
+    return closeouts
 
 
 def normalize_position_payload(payload: Any, account_id: str, updated_at: Any) -> list[dict[str, Any]]:
@@ -786,7 +886,7 @@ def fetch_report_data(
                 outcome_rows = fetch_all(
                     cur,
                     """
-                    SELECT closed_at, instrument_id, side, realized_pnl, r_multiple
+                    SELECT account_id, closed_at, instrument_id, side, realized_pnl, r_multiple
                     FROM trade_outcomes
                     WHERE closed_at >= %s AND closed_at < %s
                     ORDER BY closed_at ASC
@@ -876,6 +976,19 @@ def fetch_report_data(
                 for row in mirror_rows:
                     positions.extend(normalize_position_payload(row.get("payload"), row.get("account_id"), row.get("updated_at")))
             data["positions"] = positions
+            balance_rows = safe_query(
+                cur,
+                "SELECT account_id, equity, available_balance FROM accounts_projection ORDER BY account_id",
+                (),
+                data["missing_data"],
+                "accounts_projection",
+            )
+            data["accounts"] = compute_account_closeouts(
+                outcome_rows,
+                positions,
+                balance_rows,
+                open_order_counts_from_mirror(mirror_rows if mirror_fresh else []),
+            )
     finally:
         conn.close()
     return data
@@ -992,9 +1105,9 @@ def sample_db_data() -> dict[str, Any]:
     data = empty_db_data()
     now = datetime.now(timezone.utc)
     trades = [
-        {"closed_at": now - timedelta(hours=18), "instrument_id": "BTCUSDT", "side": "long", "realized_pnl": Decimal("26.4"), "r_multiple": Decimal("1.2")},
-        {"closed_at": now - timedelta(hours=10), "instrument_id": "ETHUSDT", "side": "short", "realized_pnl": Decimal("-9.1"), "r_multiple": Decimal("-0.7")},
-        {"closed_at": now - timedelta(hours=3), "instrument_id": "SOLUSDT", "side": "long", "realized_pnl": Decimal("14.8"), "r_multiple": Decimal("0.9")},
+        {"account_id": "account-a", "closed_at": now - timedelta(hours=18), "instrument_id": "BTCUSDT", "side": "long", "realized_pnl": Decimal("26.4"), "r_multiple": Decimal("1.2")},
+        {"account_id": "account-a", "closed_at": now - timedelta(hours=10), "instrument_id": "ETHUSDT", "side": "short", "realized_pnl": Decimal("-9.1"), "r_multiple": Decimal("-0.7")},
+        {"account_id": "account-b", "closed_at": now - timedelta(hours=3), "instrument_id": "SOLUSDT", "side": "long", "realized_pnl": Decimal("14.8"), "r_multiple": Decimal("0.9")},
     ]
     computed = compute_outcomes(trades)
     data["window"] = {"start": (now - timedelta(days=1)).isoformat(), "end": now.isoformat()}
@@ -1016,8 +1129,30 @@ def sample_db_data() -> dict[str, Any]:
             "unrealized_pnl": "11.84",
             "updated_at": now.isoformat(),
             "source": "sample",
-        }
+        },
+        {
+            "account_id": "account-b",
+            "symbol": "SOLUSDT",
+            "side": "short",
+            "quantity": "12",
+            "entry_price": "145.2",
+            "mark_price": "142.8",
+            "unrealized_pnl": "28.8",
+            "updated_at": now.isoformat(),
+            "source": "sample",
+        },
     ]
+    data["accounts"] = compute_account_closeouts(
+        trades,
+        data["positions"],
+        [
+            {"account_id": "account-a", "equity": "5120.4", "available_balance": "1800.1"},
+            {"account_id": "account-b", "equity": "4988.0", "available_balance": "2100.0"},
+            {"account_id": "account-c", "equity": "2500.0", "available_balance": "2500.0"},
+            {"account_id": "account-d", "equity": "2500.0", "available_balance": "2500.0"},
+        ],
+        {"account-a": 3, "account-b": 1},
+    )
     data["missing_data"] = ["sample mode: database was not queried"]
     return data
 

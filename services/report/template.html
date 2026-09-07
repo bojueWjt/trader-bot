@@ -68,6 +68,11 @@
     .pos-rows .label { color: var(--muted); flex-shrink: 0; }
     .pos-rows .val { overflow-wrap: anywhere; text-align: right; }
     .pos-foot { margin-top: 8px; }
+    .accounts-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    .account-card { background: var(--panel-2); }
+    .account-line { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; border-bottom: 1px dashed var(--line); padding: 5px 0; min-width: 0; }
+    .account-line .val { overflow-wrap: anywhere; text-align: right; }
+    .account-sub { margin: 12px 0 6px; font-size: 13px; color: var(--muted); }
     .positive { color: var(--green); }
     .negative { color: var(--red); }
     .badge { display: inline-flex; align-items: center; min-height: 24px; padding: 0 9px; border-radius: 999px; font-size: 12px; font-weight: 700; text-transform: uppercase; }
@@ -91,6 +96,7 @@
       .span-2 { grid-column: span 2; }
       .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .pos-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .accounts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
@@ -107,6 +113,11 @@
       const n = Number(value || 0);
       const sign = n > 0 ? '+' : '';
       return `${sign}${n.toFixed(2)} USDT`;
+    };
+    const usdt = value => {
+      if (value === null || value === undefined || value === '') return '—';
+      const n = Number(value);
+      return Number.isFinite(n) ? `${n.toFixed(2)} USDT` : '—';
     };
     const pct = value => value === null || value === undefined ? 'N/A' : `${Number(value).toFixed(1)}%`;
     const cls = value => Number(value || 0) >= 0 ? 'positive' : 'negative';
@@ -162,7 +173,7 @@
           ${chartCard('胜率', 'winRateChart', '', 'small-chart')}
           ${chartCard('R 分布', 'rDistributionChart')}
           ${chartCard('分币种盈亏', 'symbolPnlChart')}
-          ${card('持仓敞口', '<div id="positionsTable"></div>', 'span-2')}
+          ${card('四账户收盘', '<div id="accountCloseouts"></div>', 'span-2')}
           ${chartCard('意向活动', 'intentActivityChart', 'span-2')}
           ${card('频道观点', '<div id="channelViews"></div>', 'span-2')}
           ${card('图片', '<div id="gallery"></div>', 'span-2')}
@@ -248,29 +259,47 @@
         series: [{type: 'bar', data: intents.map(x => x.count), itemStyle: {color: '#67b7ff'}}]
       }, intents, '暂无意向活动数据');
     }
-    function renderPositions() {
-      const rows = db.positions || [];
-      const el = document.getElementById('positionsTable');
+    function renderAccountCloseouts() {
+      const rows = db.accounts || [];
+      const el = document.getElementById('accountCloseouts');
+      if (!el) return;
       if (!hasRows(rows)) {
-        el.innerHTML = placeholder('暂无持仓敞口数据');
+        el.innerHTML = placeholder('暂无账户收盘数据');
         return;
       }
-      el.innerHTML = `<div class="pos-grid">${rows.map(r => {
-        const side = String(r.side || '').toLowerCase();
-        const upnl = r.unrealized_pnl === null || r.unrealized_pnl === undefined ? null : Number(r.unrealized_pnl);
+      el.innerHTML = `<div class="accounts-grid">${rows.map(account => {
+        const pnl = Number(account.period_pnl || 0);
+        const upnl = Number(account.unrealized_pnl || 0);
+        const positions = account.positions || [];
+        const trades = account.closed_trades || [];
+        const sideLabel = side => String(side || '').toLowerCase() === 'long' ? '多' : '空';
+        const posHtml = positions.length
+          ? positions.map(r => {
+              const u = r.unrealized_pnl === null || r.unrealized_pnl === undefined ? null : Number(r.unrealized_pnl);
+              return `<div class="account-line"><span>${escapeHtml(r.symbol)} ${sideLabel(r.side)} ${escapeHtml(fmtQty(r.quantity))}</span><span class="val ${u === null ? '' : cls(u)}">${u === null ? '—' : money(u)}</span></div>`;
+            }).join('')
+          : '<div class="muted">当前空仓</div>';
+        const tradeHtml = trades.length
+          ? trades.map(t => `<div class="account-line"><span>${escapeHtml(t.symbol)} ${sideLabel(t.side)}</span><span class="val ${cls(t.pnl)}">${money(t.pnl)}</span></div>`).join('')
+          : '<div class="muted">今日无平仓</div>';
         return `
-        <article class="card pos-card">
+        <article class="card account-card">
           <div class="pos-head">
-            <h3>${escapeHtml(r.symbol)}</h3>
-            <span class="badge ${side === 'long' ? 'bullish' : 'bearish'}">${side === 'long' ? '多' : '空'} ${escapeHtml(side)}</span>
+            <h3>${escapeHtml(account.account_id)}</h3>
+            <span class="badge ${pnl > 0 ? 'bullish' : pnl < 0 ? 'bearish' : 'neutral'}">${escapeHtml(money(pnl))}</span>
           </div>
           <div class="pos-rows">
-            <div><span class="label">数量</span><span class="val">${escapeHtml(fmtQty(r.quantity))}</span></div>
-            <div><span class="label">入场价</span><span class="val">${escapeHtml(fmtPrice(r.entry_price))}</span></div>
-            <div><span class="label">标记价</span><span class="val">${escapeHtml(fmtPrice(r.mark_price))}</span></div>
-            <div><span class="label">浮动盈亏</span><span class="val ${upnl === null ? '' : cls(upnl)}">${upnl === null ? '—' : money(upnl)}</span></div>
+            <div><span class="label">权益</span><span class="val">${escapeHtml(usdt(account.equity))}</span></div>
+            <div><span class="label">可用</span><span class="val">${escapeHtml(usdt(account.available_balance))}</span></div>
+            <div><span class="label">浮动盈亏</span><span class="val ${cls(upnl)}">${escapeHtml(money(upnl))}</span></div>
+            <div><span class="label">平仓笔数</span><span class="val">${escapeHtml(String(account.trade_count || 0))}</span></div>
+            <div><span class="label">在场仓数</span><span class="val">${escapeHtml(String(account.position_count || 0))}</span></div>
+            <div><span class="label">挂单</span><span class="val">${escapeHtml(String(account.open_order_count || 0))}</span></div>
           </div>
-          <div class="muted pos-foot">${escapeHtml(r.account_id || '')}</div>
+          <div class="account-sub">在场持仓</div>
+          ${posHtml}
+          <div class="account-sub">本期平仓</div>
+          ${tradeHtml}
         </article>`;
       }).join('')}</div>`;
     }
@@ -320,7 +349,7 @@
     }
     renderShell();
     renderCharts();
-    renderPositions();
+    renderAccountCloseouts();
     renderChannelViews();
     renderGallery();
     renderNarrative();

@@ -68,6 +68,8 @@ class FakeCursor:
             return "trade_intents"
         if "FROM exchange_state_mirror" in sql:
             return "exchange_state_mirror"
+        if "FROM accounts_projection" in sql:
+            return "accounts_projection"
         if "FROM positions_projection" in sql:
             return "positions_projection"
         raise AssertionError(f"unexpected query: {sql}")
@@ -690,6 +692,145 @@ def test_report_api_returns_500_and_records_write_failure(monkeypatch):
     assert health["status"] == "degraded"
     assert health["last_publication"]["error_code"] == "report_publication_failed"
     assert "read-only" in health["last_publication"]["reason"]
+
+
+def test_compute_account_closeouts_always_emits_four_canonical_accounts():
+    closeouts = report_service.compute_account_closeouts([], [], [], {})
+
+    assert [row["account_id"] for row in closeouts] == list(report_service.REPORT_ACCOUNT_IDS)
+    assert all(row["trade_count"] == 0 and row["position_count"] == 0 for row in closeouts)
+    assert all(row["period_pnl"] == 0 and row["unrealized_pnl"] == 0 for row in closeouts)
+
+
+def test_compute_account_closeouts_splits_pnl_and_keeps_empty_accounts():
+    closeouts = report_service.compute_account_closeouts(
+        [
+            {"account_id": "account-a", "closed_at": "2026-08-26T10:00:00+00:00", "instrument_id": "BTCUSDT", "side": "long", "realized_pnl": 12.5, "r_multiple": 1.0},
+            {"account_id": "account-c", "closed_at": "2026-08-26T11:00:00+00:00", "instrument_id": "ETHUSDT", "side": "short", "realized_pnl": -3.0, "r_multiple": -0.5},
+        ],
+        [
+            {
+                "account_id": "account-b",
+                "symbol": "SOLUSDT",
+                "side": "long",
+                "quantity": "2",
+                "unrealized_pnl": "4.2",
+            }
+        ],
+        [
+            {"account_id": "account-a", "equity": "1000", "available_balance": "200"},
+            {"account_id": "account-d", "equity": "2500", "available_balance": "2500"},
+        ],
+        {"account-a": 5, "account-b": 1},
+    )
+    by_id = {row["account_id"]: row for row in closeouts}
+
+    assert list(by_id) == list(report_service.REPORT_ACCOUNT_IDS)
+    assert by_id["account-a"]["period_pnl"] == 12.5
+    assert by_id["account-a"]["trade_count"] == 1
+    assert by_id["account-a"]["open_order_count"] == 5
+    assert by_id["account-a"]["equity"] == 1000.0
+    assert by_id["account-b"]["position_count"] == 1
+    assert by_id["account-b"]["unrealized_pnl"] == 4.2
+    assert by_id["account-b"]["trade_count"] == 0
+    assert by_id["account-c"]["period_pnl"] == -3.0
+    assert by_id["account-c"]["position_count"] == 0
+    assert by_id["account-d"]["equity"] == 2500.0
+    assert by_id["account-d"]["trade_count"] == 0
+    assert by_id["account-d"]["position_count"] == 0
+
+
+def test_fetch_report_data_builds_four_account_closeouts(monkeypatch):
+    now = datetime(2026, 8, 26, 13, 30, tzinfo=timezone.utc)
+    responses = {
+        "watermark": [{"completed_at": now - timedelta(minutes=5)}],
+        "trade_outcomes": [
+            {
+                "account_id": "account-a",
+                "closed_at": now - timedelta(hours=2),
+                "instrument_id": "BTCUSDT",
+                "side": "long",
+                "realized_pnl": 8.0,
+                "r_multiple": 0.8,
+            }
+        ],
+        "exchange_state_mirror": [
+            {
+                "account_id": "account-a",
+                "payload": {
+                    "positions": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "position_side": "LONG",
+                            "position_amt": "0.1",
+                            "entry_price": "110000",
+                            "mark_price": "111000",
+                            "unrealized_pnl": "10",
+                        }
+                    ],
+                    "open_orders": [{"symbol": "BTCUSDT"}],
+                    "algo_orders": [{"symbol": "BTCUSDT"}],
+                },
+                "updated_at": now - timedelta(seconds=20),
+            },
+            {
+                "account_id": "account-b",
+                "payload": {"positions": [], "open_orders": [], "algo_orders": []},
+                "updated_at": now - timedelta(seconds=20),
+            },
+            {
+                "account_id": "account-c",
+                "payload": {"positions": [], "open_orders": [], "algo_orders": []},
+                "updated_at": now - timedelta(seconds=20),
+            },
+            {
+                "account_id": "account-d",
+                "payload": {"positions": [], "open_orders": [], "algo_orders": []},
+                "updated_at": now - timedelta(seconds=20),
+            },
+        ],
+        "accounts_projection": [
+            {"account_id": "account-a", "equity": "5200", "available_balance": "1000"},
+            {"account_id": "account-b", "equity": "4800", "available_balance": "4800"},
+            {"account_id": "account-c", "equity": "2500", "available_balance": "2500"},
+            {"account_id": "account-d", "equity": "2500", "available_balance": "2500"},
+        ],
+    }
+    install_fake_database(monkeypatch, responses=responses)
+    dependencies = report_service.empty_dependency_status()
+
+    data = report_service.fetch_report_data(
+        "daily",
+        "2026-08-26",
+        "postgres://example",
+        dependency_status=dependencies,
+        now=now,
+    )
+
+    assert [row["account_id"] for row in data["accounts"]] == list(report_service.REPORT_ACCOUNT_IDS)
+    by_id = {row["account_id"]: row for row in data["accounts"]}
+    assert by_id["account-a"]["period_pnl"] == 8.0
+    assert by_id["account-a"]["position_count"] == 1
+    assert by_id["account-a"]["open_order_count"] == 2
+    assert by_id["account-a"]["equity"] == 5200.0
+    assert by_id["account-b"]["trade_count"] == 0
+    assert by_id["account-c"]["position_count"] == 0
+    assert by_id["account-d"]["equity"] == 2500.0
+
+
+def test_html_renders_four_account_closeouts():
+    html = report_service.render_report_html(
+        base_payload(),
+        report_service.sample_db_data(),
+    )
+
+    assert "四账户收盘" in html
+    assert "account-a" in html
+    assert "account-b" in html
+    assert "account-c" in html
+    assert "account-d" in html
+    assert "今日无平仓" in html
+    assert "持仓敞口" not in html
 
 
 def test_html_injection_escapes_script_end():
