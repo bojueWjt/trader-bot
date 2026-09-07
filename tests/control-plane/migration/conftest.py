@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import getpass
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import psycopg2
@@ -16,34 +13,15 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DDL = REPO_ROOT / "services" / "control-plane" / "migration" / "legacy_ddl.sql"
 IMPORTER = REPO_ROOT / "scripts" / "migrate_legacy_sqlite.py"
-PG_PORT = "55435"
-DEFAULT_SOCKET_DIR = Path("/tmp")
-DATABASE_URL = f"postgresql://localhost/postgres?host={DEFAULT_SOCKET_DIR}&port={PG_PORT}"
 LEGACY_TABLES = (
     "legacy_signal_events",
     "legacy_signal_operations",
     "legacy_signals",
 )
-
-
-def _find_pg_tool(name: str) -> str:
-    candidates = [
-        f"/opt/homebrew/opt/postgresql@16/bin/{name}",
-        f"/usr/local/opt/postgresql@16/bin/{name}",
-        shutil.which(name),
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).exists():
-            return candidate
-    raise RuntimeError(f"{name} not found; install Homebrew postgresql@16")
-
-
-def _can_connect(dsn: str) -> bool:
-    try:
-        with psycopg2.connect(dsn):
-            return True
-    except psycopg2.OperationalError:
-        return False
+_CP_TESTS = Path(__file__).resolve().parent.parent
+if str(_CP_TESTS) not in sys.path:
+    sys.path.insert(0, str(_CP_TESTS))
+from ephemeral_pg import start_ephemeral_postgres  # noqa: E402
 
 
 def _reset_legacy_tables(dsn: str) -> None:
@@ -61,50 +39,11 @@ def _reset_legacy_tables(dsn: str) -> None:
 
 @pytest.fixture(scope="session")
 def pg_cluster():
-    if _can_connect(DATABASE_URL):
-        yield {"url": DATABASE_URL, "started": False}
-        return
-
-    initdb = _find_pg_tool("initdb")
-    pg_ctl = _find_pg_tool("pg_ctl")
-    data_dir = Path(tempfile.mkdtemp(prefix="pg-a10-data-"))
-    socket_dir = Path(tempfile.mkdtemp(prefix="pg-a10-", dir="/tmp"))
-    log_file = data_dir / "postgres.log"
-
-    subprocess.run(
-        [initdb, "-D", str(data_dir), "-A", "trust", "-U", getpass.getuser()],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            pg_ctl,
-            "-D",
-            str(data_dir),
-            "-l",
-            str(log_file),
-            "-o",
-            f"-p {PG_PORT} -k {socket_dir}",
-            "-w",
-            "start",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    dsn = f"postgresql://localhost/postgres?host={socket_dir}&port={PG_PORT}"
+    cluster = start_ephemeral_postgres(prefix="pg-mig")
     try:
-        yield {"url": dsn, "started": True, "pg_ctl": pg_ctl, "data_dir": data_dir}
+        yield {"url": cluster.url, "started": True, "pg_ctl": cluster.pg_ctl, "data_dir": cluster.data_dir}
     finally:
-        subprocess.run(
-            [pg_ctl, "-D", str(data_dir), "-w", "stop"],
-            text=True,
-            capture_output=True,
-        )
-        shutil.rmtree(data_dir, ignore_errors=True)
-        shutil.rmtree(socket_dir, ignore_errors=True)
+        cluster.stop()
 
 
 @pytest.fixture()

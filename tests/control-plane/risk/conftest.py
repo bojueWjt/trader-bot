@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import getpass
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
-import uuid
 from pathlib import Path
 
 import psycopg2
@@ -17,45 +13,23 @@ DB_DIR = REPO_ROOT / "services" / "control-plane" / "db"
 RISK_DIR = REPO_ROOT / "services" / "control-plane" / "risk"
 GATEWAY_DIR = REPO_ROOT / "services" / "control-plane" / "decision_gateway"
 MIGRATE = DB_DIR / "migrate.py"
-PG_PORT = "55438"
+_CP_TESTS = Path(__file__).resolve().parent.parent
+if str(_CP_TESTS) not in sys.path:
+    sys.path.insert(0, str(_CP_TESTS))
+from ephemeral_pg import start_ephemeral_postgres  # noqa: E402
 
 for _p in (str(GATEWAY_DIR), str(RISK_DIR), str(DB_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 
-def _find_pg_tool(name: str) -> str:
-    for candidate in (
-        shutil.which(name),
-        f"/opt/homebrew/opt/postgresql@16/bin/{name}",
-        f"/usr/local/opt/postgresql@16/bin/{name}",
-    ):
-        if candidate and Path(candidate).exists():
-            return candidate
-    raise RuntimeError(f"{name} not found; install Homebrew postgresql@16")
-
-
 @pytest.fixture(scope="session")
 def pg_cluster():
-    initdb = _find_pg_tool("initdb")
-    pg_ctl = _find_pg_tool("pg_ctl")
-    data_dir = Path(tempfile.mkdtemp(prefix="pg-a06-data-"))
-    socket_dir = Path(f"/tmp/pg-a06-{uuid.uuid4()}")
-    socket_dir.mkdir(parents=True)
-    subprocess.run([initdb, "-D", str(data_dir), "-A", "trust", "-U", getpass.getuser()],
-                   check=True, text=True, capture_output=True)
-    subprocess.run(
-        [pg_ctl, "-D", str(data_dir), "-l", str(data_dir / "postgres.log"),
-         "-o", f"-p {PG_PORT} -k {socket_dir} -c timezone=UTC", "-w", "start"],
-        check=True, text=True, capture_output=True,
-    )
-    url = f"postgresql://localhost/postgres?host={socket_dir}&port={PG_PORT}"
+    cluster = start_ephemeral_postgres(prefix="pg-risk")
     try:
-        yield url
+        yield cluster.url
     finally:
-        subprocess.run([pg_ctl, "-D", str(data_dir), "-w", "stop"], text=True, capture_output=True)
-        shutil.rmtree(data_dir, ignore_errors=True)
-        shutil.rmtree(socket_dir, ignore_errors=True)
+        cluster.stop()
 
 
 def _migrate(url: str, direction: str) -> None:
