@@ -3,6 +3,7 @@
 > 日期：2026-09-07 · 汇总：Claude Code
 > 输入：[Claude 方案](2026-09-06-channel-seed-to-quant-claude-proposal.md)、[Codex 方案](2026-09-06-channel-seed-to-quant-codex-proposal.md)（Codex 任务在文件落盘后网络流断开报 failed，文档完整 532 行，其"最没把握的三点"在 §12 已写）
 > 核验：Codex 引用的关键 file:line 由 Claude 逐条复核（见 §2）；Claude 的生产库数字来自 2026-09-06 只读查询
+> 2026-09-08：按 gpt-6-astra 对本文的对抗 review（docs/reviews/2026-09-08-gpt6-review-of-merged-review.md，6 必修 5 应改）完成正文同步：§2 C3、§5 路线表、§6 授权、§8.1 T1、§9/§9.1 终裁、§10 派发闸门。
 
 ## 1. 两份方案的共识（不再争论）
 
@@ -18,7 +19,7 @@
 |---|---|---|---|
 | C1 | **两套 ladder 实现**。线上 `_execution_order_plan` 调的是 `read_api.py:701 _zone_ladder_order_plan`（输出 `type=zone_ladder, side=buy/sell`，仅在现价未入区时展开，异常回退单档）；`decision_gateway/zone_ladder.py:67 expand_zone_to_plan`（v1.1，含追入/stale/窄区/风险配量）**没有任何线上调用方** | `grep expand_zone_to_plan` 全仓仅定义处与测试；`read_api.py:635` 调的是自己那套 | Claude 方案 §2.2"回测器直接复用线上展开函数"**不成立**。必须先冻结"H-live 实际语义"与"v1.1 目标语义"两个版本，回测分别跑 |
 | C2 | **线上 wire 不在契约内**。`approved_trade_intent.v1.json` 的 `order_plan.type` 枚举只有 market/limit/zone，线上却发 `type=zone_ladder`；节点按 `type=zone_ladder` 识别（`intent_execution_strategy.py:2771`） | python 加载契约确认枚举为 `['market','limit','zone']` | 任何"改配置灰度"之前要先做执行一致性（Codex M2），否则回测的是设计稿 |
-| C3 | **两条入口时钟不同**。Python collector 用 Telegram `message.date`（`collector.py:64`），但生产 feeder 路径固定 `source_version=v1`、`source_received_at=received_at`（watcher 收到时间，`hermes_signal_feeder.py:707-748`）；operator 通路的 raw 用提交时 now | 已读代码 | `published_at` 无法从库里追回。可行补救：用 watcher 的 GramJS 会话按 channel+message id **重新拉取**原消息拿 `date`，作为 M0 第一项探查 |
+| C3 | **两条入口时钟不同**。Python collector 用 Telegram `message.date`（`collector.py:64`），但生产 feeder 路径固定 `source_version=v1`、`source_received_at=received_at`（watcher 收到时间，`hermes_signal_feeder.py:707-748`）；operator 通路的 raw 用提交时 now | 已读代码 | `published_at` 无法从库里追回。**M0 仅探查可恢复性，不承诺补齐**：先查 watcher sqlite/备份，再用隔离会话对 20 个已执行 + 10 个失败样本做只读查询，按 `A_content_and_time` / `A_time_only` / `B_watcher_archive` / `C_ingest_only` / `D_unavailable` 分级；只有 `A_content_and_time` 可进入严格 M3-R，其余只进敏感性分析或缺口账本（见 §8） |
 | C4 | `scripts/analysis/trade_outcomes.py` 的 `main` 会 **upsert 并删除**不再匹配的结果，不是只读分析；episode 分组键无 side/position_id，多频道混仓、对冲簿会串 | `trade_outcomes.py:442/527` | 研究一律走独立只读导出，不"顺手跑一下"该脚本 |
 | C5 | `zone_penetration_stats.py` 的 ATR 回退用全窗口 K 线（含信号后），触价分类不截断 TP1/SL | `:421`、`:119`、`:167` | 现有统计只能做诊断，不能直接当策略输入；回测器要重写这两处 |
 | C6 | 网关 `process_one_decision` 拒绝非 Hermes 来源，且库约束 `model_provider='hermes'`（`0001_canonical_schema.up.sql:197`） | 已读 | 量化输出**近期只能作为 Hermes 的建议**，由 Hermes 独立决定采不采纳；Claude 方案 §6.3 步骤 2"仓位乘子直接进 risk_budget"需要另立契约评审，不是配置改动 |
@@ -53,21 +54,23 @@
 
 ## 5. 统一路线
 
-| 里程碑 | 产出 | 判据 | 路由 | 预估 |
+| 里程碑 | 产出 | 判据 | 路由 | 预估 · capability_status |
 |---|---|---|---|---|
 | **M0 证据盘点** | 只读导出 JSONL + manifest；字段覆盖矩阵；两条时钟对照；**Telegram 重拉发布时间可行性探查**；当前路由/所有权快照；H-live vs v1.1 执行版本清单 | 抽 20 个已执行计划逐层追到原消息/批准/订单/退出，断链全部有类型；进入 cohort 的样本 100% 有可证发布时间 | Grok 实现（导出脚本、K 线预热）；Claude 判读 | 1 周 |
 | **M1 标注与 gold** | ≥300 条连续消息三层标注；episode 关系图；原 30 条 bench 兼容报告；**交易员方法自述抽取**（从分析帖与信号理由抽假设清单，用户勾选） | 危险样本全部人工签字；观察帖误开仓/跨频道误管理/数量级猜测为 0；≥30 条管理事件归属人工核验 | AI 出草稿；用户签字（约 4 小时）；Claude 组织 | 1–2 周 |
 | **M2 确定性内核与执行一致性** | `evaluate_plan` / `compile_candidate` 无副作用内核；两套 ladder 差异清单；契约 v1.1 与线上 wire 收编方案；≥60 边界夹具 | 同输入同版本轨迹哈希一致；每个输出过 schema 与节点语义；不满足现网 wire 的功能标 blocked | **Codex** | 2 周 |
-| **M3 无前视配对回测** | 模拟器（`plan_replay`）；H-live/H-replay/Q-matched/Q-full 四基线；执行政策网格 walk-forward；**L3a 风格画像**（信号时刻指标分布 + SL/TP 相对结构回归）；舒琴触发模型两关试跑 | 保真度对账过阈值；晋级候选需保守成交与成本压力下净期望为正且簇 bootstrap 95% CI 下界 > 0；样本不足只交工程验证 | Codex 写模拟器；Grok 跑网格与出图；Claude 判读 | 2–3 周 |
-| **M4 在线只读影子** | 零凭据影子进程、独立存储、配对轨迹面板 | ≥4 周且 ≥50 新鲜候选；误配置也不能产生 outbox/订单；候选 100% 可重放 | Codex 设计、Grok 实现、部署需用户授权 | 4 周墙钟 |
-| **M5 单账户 canary** | 用户授权记录；d 账户准入核验；逐笔对照 | M0–M4 全过 + 用户明示；≥4 周 30 个完整周期无重复开仓/跨归属/保护缺失 | 用户开闸 | 按步 |
+| **M3-E 工程门** | 模拟器（自研主 + Nautilus 审计）轨迹重放、撮合一致性、费用桥、拒因、回放哈希 | ≥20 个唯一可归属纯机器人 episode，覆盖 long/short、market、limit/zone、未成交、右删失；**禁止收益优越性主张** | Codex 写模拟器；Claude 判读 | 2 周 · `research_only` |
+| **M3-R 探索门** | H-live/H-replay/Q-matched/Q-full 四基线；分层描述；**L3a 风格画像**；舒琴触发模型试跑 | ≥120 个 `A_content_and_time` 且结构完整的计划、45 自然日、20 独立事件簇；报 `N_plan/N_episode/N_cluster`、逐层损耗、宽 CI、证据等级；只能写探索性方向估计 / 无优势 / 不可判断 | Grok 跑网格与出图；Claude 判读 | 1–2 周 · `research_only` |
+| **M3-P 晋级门** | 执行政策候选的有限晋级申请 | ≥200 个可评估新鲜计划、60 自然日、30 事件簇、三段 walk-forward、保守成交、成本压力、簇 bootstrap 95% CI、最终 holdout 只跑一次；**不等于生产上线** | Claude 提交，用户裁定 | 按样本到达 · `research_only` |
+| **M4 在线只读影子** | 零凭据影子进程、独立存储、配对轨迹面板 | ≥4 周且 ≥50 新鲜候选；误配置也不能产生 outbox/订单；候选 100% 可重放 | Codex 设计、Grok 实现、部署需用户授权 | 4 周墙钟 · `shadow_only` |
+| **M5 单账户 canary** | 用户授权记录；d 账户准入核验；逐笔对照 | M0–M4 全过 + 用户明示；≥4 周 30 个完整周期无重复开仓/跨归属/保护缺失 | 用户开闸 | 按步 · 用户授权且门禁通过后方为 `production_allowed` |
 | **后续** | L2 乘子/否决权契约、L3b 自主决策主体 | 各需独立契约评审与用户签署授权 | — | 2026 Q4 后 |
 
 ## 6. 用户需要提供的（更新版）
 
 - **不需要**描述交易员的方法。M1 由模型从频道分析帖抽"他自述的依据"，你在假设清单上勾选即可。
 - **标注签字**：M1 约 4 小时，AI 出草稿，你逐条确认危险样本。
-- **三个授权**：生产库只读导出到本机；用 watcher 会话重拉历史消息的发布时间（只读 Telegram API，不发消息）；影子进程部署到 jp-24（M4 时再问）。
+- **三个授权（分别、明确、执行前取得）**：① 生产库只读导出到本机（M0-T1）；② 复制经明确授权的 watcher 会话材料到隔离的只读运行目录，**不直接使用生产 watcher 活跃 session**——探查进程仅允许按 channel+message id 读取消息/实体与 `date`，禁止发送、转发、处理 ingress、调用 Hermes/operator API 或任何写路径，遇 FloodWait 立即停批，session 不入 repo/shadow/普通日志，探查进程不得持有生产 operator token（M0-T2）；③ 影子进程部署到 jp-24（M4 时再问）。
 - **一个决策**：canary 账户默认 d，M5 前确认。
 - 数据不用买。
 
@@ -80,7 +83,7 @@
 
 ## 8. 第二轮收口（Codex v2，2026-09-07）
 
-Codex 第二轮方案：[codex-proposal-v2](2026-09-07-channel-seed-to-quant-codex-proposal-v2.md)（446 行，gpt-5.6-sol 跑出；gpt-6-astra 因网关 ch47 禁用后 ch43 并发不足连续四次"满载"失败）。它逐项答复了 §4 十项裁决：九项接受或附条件接受，一项（收益门槛）保留异议。以下为最终裁决，**覆盖 §4/§5 中冲突之处**。
+Codex 第二轮方案：[codex-proposal-v2](2026-09-07-channel-seed-to-quant-codex-proposal-v2.md)（446 行，gpt-5.6-sol 跑出；gpt-6-astra 因网关 ch47 禁用后 ch43 并发不足连续四次"满载"失败）。它逐项答复了 §4 十项裁决：九项接受或附条件接受，一项（收益门槛）保留异议。以下为最终裁决，**覆盖 §4/§5 中冲突之处**（§5 路线表已于 2026-09-08 改写为 M3-E/R/P 三行并加 capability_status）。
 
 | 议题 | v2 立场 | 最终裁决 |
 |---|---|---|
@@ -97,7 +100,7 @@ v2 §6 给出四个六段式原子任务，互斥输出，全部只读：
 
 | 任务 | 内容 | 路由 |
 |---|---|---|
-| M0-T1 生产证据只读导出 | JSONL + manifest + 字段覆盖矩阵 + 断链分类；禁止跑 `trade_outcomes.py` 的 main | Grok（需用户授权只读导出到本机） |
+| M0-T1 生产证据只读导出 | JSONL + manifest + 字段覆盖矩阵 + 信号/decision/intent/order/position/episode 断链分类；禁止运行 `trade_outcomes.py` 的 main；**新增订单生命周期审计表**：按机器人 clientOrderId、intent、账户、symbol、position side、事件时间串联，报告各状态覆盖率、重复事件、孤儿事件、join failure、未观测状态与右删失；覆盖率未达预注册阈值时 M3-E 只允许工程描述，不得出保真度或收益结论；手动单（clientOrderId 不匹配 `^B[0-9a-f]{32}[0-9]{2}$`）不读不动 | Grok（需用户授权只读导出到本机） |
 | M0-T2 双时钟与 GramJS 可行性探查 | 20 已执行 + 10 失败样本；先查 watcher sqlite/备份有无 date，再隔离会话只读查询 | Codex 写探查脚本，Grok 跑；**需用户授权会话材料复制** |
 | M0-T3 执行版本/契约/所有权快照 | H-live vs v1.1 逐字段差异、wire 枚举、节点识别、≥60 边界夹具候选、`blocked` 列 | Codex |
 | M0-T4 K 线覆盖与前视风险清单 | 44 品种 UM 1m 覆盖/缺口/上市起点；ATR 只用信号前闭合 bar；同 bar 歧义上下界配置 | Grok |
@@ -136,18 +139,18 @@ ch47 仍禁用时在 ch43 上与 review 任务并发跑通。与 gpt-5.6-sol 版
 | 必修-04 | 两关判据（60%/3 倍/CI>0）无统计意义 | 成立 | 采纳。v2 §4 已降为预注册判据；再加 precision/coverage、按日/episode block bootstrap、最终 holdout、"不可判定"出口 |
 | 必修-05 | episode 归属不能以 nullable 的 `target_position_id` 为主链 | 成立 | 采纳。主事实 = 机器人 fill stream + 账户/品种/**position side** 账本 + entry/management intent 链；`target_position_id` 只作校验过的 hint；歧义返回 unresolved |
 | 必修-06 | OHLC 撮合不能声称复现 Binance 执行（mark/last、IOC 余量、post-only 拒单、filter） | 成立 | 采纳。模拟器定名"OHLC 反事实模型"；记录订单状态机、触发基准、tick/step/min-notional、post-only reject、IOC residual；同柱多触发给上下界 |
-| 必修-07 | 保真度阈值不可验证（"只有 10 条结局"） | **前提有误，结论部分成立** | 生产 `execution_events` 机器人订单：411 OrderFilled / 118 intent / 657 reject+cancel，校准底子够。但只看成交子集的选择偏差成立：改为对 accepted/rejected/working/partial/filled/canceled 全状态做校准，报告 fill probability calibration、误差分位数、block CI |
+| 必修-07 | 保真度阈值不可验证（"只有 10 条结局"） | **前提有误，结论部分成立** | 生产 `execution_events` 机器人订单：411 OrderFilled / 118 intent / 657 reject+cancel，说明校准**事件存在**，但不构成校准样本（见 §9.1 收回）：须先做订单生命周期 join 审计，再对 accepted/rejected/working/partial/filled/canceled 全状态做校准，报告 fill probability calibration、误差分位数、block CI |
 | 必修-08 | 网格搜索后普通 OOS CI 有多重检验 | 成立 | 采纳。外层时间 walk-forward + 内层调参 + 完全未触碰最终 holdout；候选结果表全量公开；达不到就只出描述报告 |
 | 必修-09 | 灰度不全是加法，写 `risk_budget` 越过授权边界 | 成立 | §4 已裁决走 Codex 路径；补充：第 1 步"改配置"因 C1 也不成立；回滚定义 = 停新意向 + 撤自有挂单 + 单独处理在途 |
 | 必修-10 | CUSUM 无参数定义、多频道误报、"降乘子"是隐性自动风控 | 成立 | 采纳。第一阶段 alert-only，预设基线/阈值/warm-up/cooldown，误报率按 block 重采样校准；乘子变更只能走人工授权 |
 | 应改-01~08 | 宽表粒度、gold 覆盖率推断、合约生命周期、模拟/实盘字段隔离、保护单账本、四账户非 A/B、50 条触发无有效样本量、工期排除人工与门禁 | 全部成立 | 全部采纳。里程碑改为证据闸门（M0a provenance / M0b episode+gold / M1a 交易所语义合同 / M1b 模拟器单测 / M1c 实盘事件校准 / M2 研究协议 / M3 shadow / M4 canary），墙钟估时保留为非约束参考 |
 | 建议-01~04 | L0/L1 价值是待证假设；特征 as_of；shadow 漏斗按原因拆；上线前冻结 execution semantics contract | 成立 | 采纳。execution semantics contract 并入 M0-T3 产出 |
 
-**终裁**：接受 review 的裁定。Claude 方案作为路线输入保留，**不作为开工依据**；开工依据是 Codex v2 §6 的 M0-T1~T4 四份任务书（全部只读、零生产改动），恰好落在 review 六项前提允许的范围内。M1 之前必须冻结 execution semantics contract（M0-T3 产出）。
+**终裁**：接受 review 的裁定。Claude 方案作为路线输入保留，**不作为开工依据**；M0-T1~T4 四份任务书（全部只读、零生产改动）**只覆盖 M0 阶段允许的 provenance、时间证据、执行契约候选、K 线/前视风险**；episode+gold、research protocol、shadow boundary 仍分别由 M1/M2/M4 闸门验收。**M0 派发不等于六项前提全部满足，且不得据此启动 M1 研究、M3 政策选择、M4 shadow 或 M5 canary。** M1 之前必须冻结 execution semantics contract（M0-T3 产出）。
 
 ### 9.1 gpt-6 版对抗 review 对照（[codex-review-of-claude-proposal-gpt6](../reviews/2026-09-07-codex-review-of-claude-proposal-gpt6.md)，211 行）
 
-独立审查后对前一份十条必修：九条确认，必修-07 部分确认。**它反驳了本文 §9 表中对必修-07 的反驳，反驳成立**：411 fills / 118 intent / 657 reject+cancel 横跨不同实体与状态，只证明"事件存在"，不证明 `clientOrderId→intent→episode` 的 join 完整性、状态分母与孤儿率；"校准底子够"是过度声明，收回。处置：M0-T1 增加**订单生命周期审计表**（按机器人 clientOrderId/intent/账户/symbol/position side/事件时间串联，报告各状态覆盖率、重复率、孤儿事件、join failure），覆盖率未达预设值前保真度只出描述报告。
+独立审查后对前一份十条必修：九条确认，必修-07 部分确认。**它反驳了本文 §9 表中对必修-07 的反驳，反驳成立**：411 fills / 118 intent / 657 reject+cancel 横跨不同实体与状态，只证明"事件存在"，不证明 `clientOrderId→intent→episode` 的 join 完整性、状态分母与孤儿率；"校准底子够"是过度声明，收回。处置：M0-T1 增加**订单生命周期审计表**（已写入 §8.1 T1 任务书，2026-09-08）（按机器人 clientOrderId/intent/账户/symbol/position side/事件时间串联，报告各状态覆盖率、重复率、孤儿事件、join failure），覆盖率未达预设值前保真度只出描述报告。
 
 新增四点及处置：
 
@@ -158,7 +161,7 @@ ch47 仍禁用时在 ch43 上与 review 任务并发跑通。与 gpt-5.6-sol 版
 | 宽表折叠一对多为伪确定性 | 与应改-01 一致，已采纳事件分层 |
 | L0/L1"立即有产品价值"无证伪条件 | **已改**：Claude 方案 §0/§2 改为待证假设，证伪条件 = shadow 漏斗中执行政策可改善部分须占可观测损失多数 |
 
-两份 review 的 M0 裁定一致：方案为路线输入，开工须先过六项只读证据闸门（provenance / episode+gold / execution contract / event calibration / research protocol / shadow boundary）。这六项与 v2 的 M0-T1~T4 一一对应，T1 加生命周期审计后完全覆盖。
+两份 review 的 M0 裁定一致：方案为路线输入，开工须先过六项只读证据闸门（provenance / episode+gold / execution contract / event calibration / research protocol / shadow boundary）。**分阶段对照**：provenance → M0-T1/T2；event calibration（部分）→ M0-T1 生命周期审计；execution contract（候选冻结）→ M0-T3；K 线/前视 → M0-T4；**episode+gold → M1；research protocol → M2；shadow boundary → M4**。M0-T1~T4 不覆盖后三项，M0 完成只允许进入对应的 M1/M2 闸门。
 
 ## 10. 最终状态与下一步
 
@@ -174,6 +177,6 @@ ch47 仍禁用时在 ch43 上与 review 任务并发跑通。与 gpt-5.6-sol 版
 | `docs/plans/2026-09-07-channel-seed-to-quant-codex-proposal-v2-gpt6.md` | Codex 第二轮（gpt-6-astra 版） |
 | 本文 | 合并 review + 终裁 |
 
-**可立即派发**（需用户点头）：M0-T1（Grok，需授权只读导出；含订单生命周期审计表）、M0-T4（Grok）、M0-T3（Codex）。M0-T2 需用户先授权复制 watcher 会话材料到隔离只读目录。
+**派发闸门（按敏感动作分别授权，不是一次性批准整组）**：T3（Codex）/T4（Grok）可先做本地静态与离线工作；**T1 只有在用户明确授权生产库只读导出后派发**；**T2 只有在用户另行明确授权复制会话材料后派发**，复制失败、FloodWait、权限不足或内容同一性不足时立即停止，不改用生产 session、不绕过分级。本次派发仅授权只读证据盘点；不表示六项前提已通过，不得把任务输出解释为研究、shadow 或交易授权。任何部署、重启、RESUME、风险预算/乘子变更均不属于 M0 授权；所有失败只停在证据缺口，不触发任何生产写路径。
 
 **用户待决**：① 三项授权（只读导出 / 会话材料复制 / 后续影子部署）；② ch47 是否恢复启用；③ M1 标注约 4 小时的时间。
