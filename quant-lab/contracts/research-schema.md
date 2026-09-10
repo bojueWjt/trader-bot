@@ -141,3 +141,15 @@ M-08 要求候选 B（Nautilus `SimulationModule`）与候选 A 逐 episode 对�
 ### 9.5 待 G1 回执（下轮 verify 点）
 
 `quant_lab.data.codes.ReasonCode` 补 `EDIT_ORIGINAL_UNAVAILABLE`；`instrument_id` 全部改用 `BTCUSDT-PERP.BINANCE-UM`；`gold/episode` 落 `t_dec` 实列。G0 下轮实跑核对。
+
+### 9.6 裁定 A4：G1 D-07 三处偏离的仲裁（OR-02 R2，2026-09-11，规范性）
+
+G1 在 D-07 看板 note 中主动申报三处与 §9.1 的偏离。G0 已实跑核对产物（`data/lake/telegram/_loss/tg-3146396a4422.parquet` 六层齐全、`load_episodes('fixture-v1')` 49 列），逐项裁定如下，**均为增量修订，不推翻 v1 既有约束**：
+
+1. **损耗表 `layer` 由 `int 1..5` 扩为 `int 1..6`**，`layer_name enum{normalize, dedup, extract, canonicalize, market_check, **link**}`。理由：链接/生命周期是真实发生损耗的一层（episode 归并会丢事件），压进 `market_check` 会让第 5 层的口径失真。**约束**：(a) 1..5 的层号与语义**不得重编号**，`link` 只能取 6；(b) `layer=5` 仍必须独立成行且 `output_n` 可 >0——D-11 的 verify（`layer=5.*output_n=[1-9]`）与 OR-04 的"损耗表 ≥5 层"断言据此保持有效；(c) `quant_lab.data.codes.Layer` 的 value（`1_normalize`…`6_link_lifecycle`）是内部键，落表的 `layer_name` 必须是本条枚举的短名，二者不得互串。
+
+2. **版本链 amend 的 `link_method` 记 `plan_ref`，准；`LinkMethod` 枚举不新增 `same_source`。** 细分依据一律落 `payload.basis`（本例 `same_source_version_chain`）。理由：`link_method` 是给 G3 做强/弱边分档用的**粗粒度**枚举，冻结后只增不改的代价高于收益；细分基属于证据，归 payload。**约束**：任何消费方（G3 特征、G0 冒烟）不得把 `plan_ref` 直接等同于"跨消息计划引用"，需要区分时读 `payload.basis`。
+
+3. **`episode_event` 增列 `plan_id string?`**，准（增量列，与 §9.1 的 `channel_id` 同性质）。
+
+**未申报即视为漂移**：`gold/episode` 的 `migration_reason string?`（§9.1 明列）在 `load_episodes('fixture-v1')` 输出中缺失（只有 `is_tombstone`/`tombstoned_at`）。G1 须在 D-09 前补列或在看板 note 申报删列理由由 G0 裁定，不得静默省略。

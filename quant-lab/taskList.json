@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-10T18:24:07Z",
+  "updatedAt": "2026-09-10T18:58:38Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -78,6 +78,12 @@
         "file": "taskList.json",
         "change": "contracts.frozen: false → true（OR-01 定稿）。D-01 与 M-01 的字段/签名修订均已到齐并裁定，README §8 四项接缝全闭合。此后改接缝唯一路径：窗口 block → G0 仲裁 → 改 contracts/ + changeLog → 看板广播",
         "requestedBy": "G0 (OR-01)"
+      },
+      {
+        "date": "2026-09-11",
+        "file": "contracts/research-schema.md",
+        "change": "新增 §9.6 裁定 A4（OR-02 R2）：(1) 损耗表 layer 扩为 1..6，layer_name 增 link，明确 1..5 不得重编号且 layer=5 仍须独立成行（保 D-11 verify 与 OR-04 ≥5 层断言）；(2) 版本链 amend 用 plan_ref + payload.basis，LinkMethod 不新增 same_source；(3) episode_event 增 plan_id string?；另指出 gold/episode 的 migration_reason 未落列属未申报漂移，须补列或申报",
+        "requestedBy": "G1 (D-07 note 申报三处偏离) → G0 裁定"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
@@ -87,7 +93,7 @@
     "data": {
       "owner": "G1",
       "status": "in_progress",
-      "progress": 0.27,
+      "progress": 0.85,
       "blockers": [],
       "provides": [
         "data/lake/telegram/{bronze,silver,gold}",
@@ -101,11 +107,11 @@
       ],
       "artifacts": [],
       "review": {
-        "verdict": "pass",
-        "note": "OR-02 R1 终审 @03:22（覆盖 03:12 那条 issues）。D-01 三项交付物全部实跑核实：[1] .venv-g1/bin/python -m pytest tests/data --co -q | grep -Eq '[1-9][0-9]* tests? collected' && import quant_lab.data → PASS（原 verify 的 grep 'collected [1-9]' 是坏的，你已自查发现，与 G2 独立发现同一缺陷，规范写法已入 contracts/README §2.5）；[2] pytest tests/data -q → 2 passed；[3] ReasonCode 对 research-schema §4 逐字 28/28 一致，FATAL_REASONS 与六个枚举全部一致。[4] 契约修订已收到并裁定 → **contracts.frozen=true, version=v1**（changeLog 11 条）。你的 7 组提案基本全采纳，三处 G0 改动请注意：(a) instrument_id 不用你契约里的 BINANCE-PERP:BTCUSDT，改 BTCUSDT-PERP.BINANCE-UM——实测 nautilus 1.227 对旧格式 InstrumentId.from_str 直接 ValueError（缺 . 分隔符），M-08 的 A/B 对拍不能在被对拍接缝上插有损转换；(b) t_dec 采纳为 gold/episode 实列，decision_eligible_at 降为诊断列，下游禁止拿它当 t_dec（research-schema §9.3）；(c) QUANT_LAB_DATA_ROOT 采纳并扩大到全仓三模块，默认 <repo>/quant-lab/data，OR-04 冒烟会指向 tmp，湖路径写死相对 data/ 会让冒烟失败。**下轮 G0 会实跑核对的三个回执点**（research-schema §9.5）：ReasonCode 补 EDIT_ORIGINAL_UNAVAILABLE 到 29；D-03 起 instrument_id 全用新格式（合成夹具一并改）；gold/episode 落 t_dec 实列。另：ExecutionRequest 的 order_plan 由你在 gold/episode 落快照，结构以 execution-interface §3.1（G2 报告 R5）为准，别自创。D-02 ADR 仍在 Codex 侧（docs/adr/ 只有 G2 的 M-01 报告，ADR-G1 未落盘），下轮复查。",
-        "at": "2026-09-10T18:18:21Z"
+        "verdict": "issues",
+        "note": "OR-02 R2 实跑证据（G0 前台，非自报）@18:5xZ：[D-01] pytest tests/data --co -q → '75 tests collected' + import quant_lab.data OK（原 verify 的坏 grep 已按 contracts/README §2.5 等价改写为 grep -Eq '[1-9][0-9]* tests? collected' 后跑）→ PASS。[D-02] ADR-G1-episode-engine.md 511 行 ≥150，invalid_transition/tombstone 均命中 → PASS。[D-03] test_normalize 14 passed；normalize CLI 产出 /tmp/ql-norm，message_version rows=191 → PASS。[D-04] test_dedup 10 passed → PASS。[D-05] test_extract 13 passed；extract --bench 报告 n_items=30 n_actionable=16 parser_recall=1.0 strict_recall=0.75 skip_precision=1.0 → PASS，但报告里自带 bench_warning：看板 verify 写的 ../eval/hermes/v3-trader-signal-bench 不存在，实际回退到 /Users/balen/projects/trader-bot/eval/v3_trader_signal_bench/dataset.json。请把 D-01..D-11 里这条路径改成实际路径，verify 命令不得依赖静默回退（回退一旦被移除该 verify 就假绿）。[D-06] test_normalize_validate 7 passed → PASS。[D-07] 第一次跑 2 failed（test_fixture_links assert(0>=1)、test_ce5_early_management_left_truncated），30 秒后重跑 16 passed，全套 98 passed；判定为你正在写盘的读写竞态，不计失败，但提醒：你 done 一个任务时请确保 fixture 与代码同一批落盘。load_episodes('fixture-v1') → 27 行决策视图，episode_id/author_plan_state/author_claim_state 齐。=== 契约 §9.5 三个回执点实跑核对：(1) instrument_id 新格式 PASS（运行时样本 ETHUSDT-PERP.BINANCE-UM）；(2) gold/episode 落 t_dec 实列 PASS（t_dec 非空、样本 2024-03-04T08:31:01Z；且 execution_state 正确地未入 gold，49 列）；(3) **ReasonCode 29 项 FAIL** —— quant_lab.data.codes.ReasonCode 仍是 28 项、缺 EDIT_ORIGINAL_UNAVAILABLE；29 项的那份在 quant_lab.data.reasons.Reason 里（only-in-reasons={EDIT_ORIGINAL_UNAVAILABLE}，only-in-codes=空）。**双原因码地基仍未收敛**：extract.py/dedup.py import .reasons.Reason，loss.py/quarantine.py/clocks.py import .codes.ReasonCode，同一批产物里跑着两套枚举，且契约 §9.5 点名的就是 codes.ReasonCode。这是上一轮遗留项，本轮仍未闭合，列为本轮唯一必修：把两者收敛成一套（保留 codes.ReasonCode 作对外名，reasons.Reason 若要留只能是别名），并给一个断言 len(ReasonCode)==29 的测试防回归。=== 契约仲裁回执：你在 D-07 note 申报的三处偏离，G0 已裁定并写进 contracts/research-schema.md §9.6（changeLog 第 12 条）：(1) 损耗表 layer 扩为 1..6、layer_name 增 link —— **准**，但 1..5 不得重编号、layer=5 必须独立成行且 output_n 可>0（实跑已确认 6 层齐全、layer=5 有 7 行 output_n>0，D-11 verify 与 OR-04 断言不受影响）；(2) 版本链 amend 用 plan_ref + payload.basis=same_source_version_chain —— **准**，LinkMethod 不新增 same_source；(3) episode_event 增 plan_id string? —— **准**。=== 另有一处你没申报的漂移：§9.1 明列 gold/episode 要有 migration_reason string?，实跑 load_episodes 列里只有 is_tombstone/tombstoned_at，migration_reason 缺失。D-09 done 之前补列，或在看板 note 申报删列理由由 G0 裁定，不许静默省略。=== 闸门提醒：D-08/D-11 受 G-ACCOUNT-SCOPE + G-RETENTION-CLOUD 双 pending 约束，你跳过 D-08 去做 D-09 是对的；D-09 的放行工具可以做，真实批次放行受 G-OC-200-3 pending 约束，人工标注排产受 G-BUDGET-LABOR pending 约束，工具做完即停，不得实跑真实放行。",
+        "at": "2026-09-10T18:55:54Z"
       },
-      "lastUpdate": "2026-09-10T18:22:05Z",
+      "lastUpdate": "2026-09-10T18:58:15Z",
       "tasks": [
         {
           "id": "D-01",
@@ -128,26 +134,26 @@
         {
           "id": "D-04",
           "title": "层 2 去重与跨频道复制组（simhash 近重复、转发指针、duplicate_group）",
-          "status": "doing",
+          "status": "done",
           "verify": ".venv-g1/bin/python -m pytest tests/data/test_dedup.py -q"
         },
         {
           "id": "D-05",
           "title": "层 3 抽取：确定性解析器 + LLM 抽取接口（录制夹具，真实调用 gated）+ span 定位校验 + 字段级共错率报告",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g1/bin/python -m pytest tests/data/test_extract.py -q && .venv-g1/bin/python -m quant_lab.data.extract --bench ../eval/hermes/v3-trader-signal-bench --report /tmp/ql-extract.json && .venv-g1/bin/python -c \"import json;r=json.load(open('/tmp/ql-extract.json'));assert r['n_items']>=30 and r['parser_recall']>0;print(r)\"",
           "gated": "真实 LLM 调用等 API 预算与云上传范围拍板"
         },
         {
           "id": "D-06",
           "title": "层 4/5 规范化 + 行情校验（品种当时身份、方向/价格/档位、数量级门 δ≥ln3、合理性带 T_plaus、MARK_STALE；G2 as-of 未就绪前用桩）",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g1/bin/python -m pytest tests/data/test_normalize_validate.py -q"
         },
         {
           "id": "D-07",
           "title": "规则链接器 + 双轨状态机 + 决策图/描述图（按 ADR-G1）；五反例夹具：编辑SL不回填 / 未成交触TP不闭仓 / 超时只过期 / 同向双单不误并 / 提前管理留缺入口",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g1/bin/python -m pytest tests/data/test_linker.py tests/data/test_lifecycle.py -q && .venv-g1/bin/python -c \"from quant_lab.data.api import load_episodes;d=load_episodes('fixture-v1');assert d.height>=5;print(d.select('episode_id','author_plan_state','author_claim_state'))\""
         },
         {
@@ -160,13 +166,13 @@
         {
           "id": "D-09",
           "title": "标注与分级放行工具：Label Studio episode 模板（Repeater）、全窗口抽样框（6h 窗、π 加权召回）、AQL 200/3 放行计算器与 OC 表、Wilson、金标分歧率报告、数据集元数据",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g1/bin/python -m pytest tests/data/test_audit.py -q && .venv-g1/bin/python -m quant_lab.data.audit --oc 200 3 --oc 400 0 | grep -E '0\\.5%.*98\\.1|0\\.5%.*13\\.4'"
         },
         {
           "id": "D-10",
           "title": "[Codex review] P1 里程碑 review（D-03..D-09 合成数据链路），必修项闭合",
-          "status": "todo",
+          "status": "doing",
           "verify": "test -f docs/adr/review-G1-P1.md && ! grep -q '必修.*未闭合' docs/adr/review-G1-P1.md"
         },
         {
@@ -253,13 +259,49 @@
         {
           "t": "03:22",
           "n": "[G1/6caf9e18 · 并发分工提议] 已直接发消息给 session 427ed064。事实：ADR-G1 现文件=task-mtvue22w-qsi1a8 产出（另一 job 已 cancelled）；D-03 由 6caf9e18 完成（lake/reasons/sources/normalize + test_normalize 14 passed + tdesktop_sample 夹具）。提议按文件互斥：6caf9e18 做 D-04 dedup / D-06 validate / D-07 linker+lifecycle+graph+api（含 t_dec、order_plan、decision_snapshot_hash 实列）；427ed064 做 D-05 extract+llm+bench / D-09 audit，并在 codes.ReasonCode 补 EDIT_ORIGINAL_UNAVAILABLE。双方不改写对方文件；接缝=message_version.parquet（normalize.MESSAGE_VERSION_SCHEMA）与 silver/extracted_event.parquet（契约 §2 列）。D-10 由先完成方声明后派，不重复。10 分钟无异议即按此开工 D-04。"
+        },
+        {
+          "t": "03:29",
+          "n": "[G1/6caf9e18] D-04 done：dedup.py（精确折叠只在同频道 72h 内=重发不增种子；跨频道同文只建候选组，转发指针命中湖内 origin 才方向已知，否则 COPY_LINK_AMBIGUOUS；近重复 simhash 预筛+数字 token 集合必须相同+ratio≥80，只弱边，阈值 calibrated=false）。test_dedup 10 passed，全套 55 passed；CLI 实跑：186 版本→182 canonical，exact_same_channel 4 / exact_cross_channel 6 / forward 2 / near 1，独立同向双单未并。夹具语料改为每频道独立（避免语料同文造成假复制组）。层 1 现把同版本重复观察计入 n_dup_ref(DUPLICATE_EXACT)；source_version_id 已按契约去掉 raw_hash 成分。reasons.FATAL 已对齐契约三项；EDIT_ORIGINAL_UNAVAILABLE 已入 reasons.Reason（29）。另一 G1 实例(427ed064)已收笔，后续由本实例独做 D-05..D-10；codes.py/schemas.py 等双地基合并列入 D-10 前收敛。开工 D-05。"
+        },
+        {
+          "t": "03:39",
+          "n": "[G1/6caf9e18] D-05 done：extract.py 确定性解析器（舒琴/Titan/Gauls/坚果四类模板 + 管理类 + 负类，每个数字带 span，万/k 单位只按证据转换并在消息内传播，无单位缩写不猜）+ llm.py（Protocol、NoNetworkClient 默认 gated、RecordedClient 录制回放、证据 span 校验拒收）+ bench 报告。verify 实跑：test_extract 13 passed（全套 68）；bench 30 条 parser_recall=1.0、strict=0.75、skip_precision=1.0（symbol 1.0/side 0.94/entry 0.81/sl 1.0/tps 1.0；entry 缺口=坚果'747'与 ETHFI '3612' 无单位缩写，按铁律不猜倍数留层 5 数量级门）；字段级共错率与 eval/v3_trader_signal_bench/results.json 里已录制的 4 组真实模型输出对比（零新调用）。⚠ 看板 verify 的 bench 路径 ../eval/hermes/v3-trader-signal-bench 不存在，代码回退到 eval/v3_trader_signal_bench 并在报告 bench_warning 记录，请 G0 改 verify 路径。真实 LLM 调用未做（gated）。开工 D-06。"
+        },
+        {
+          "t": "03:43",
+          "n": "[G1/6caf9e18] D-06 done：validate.py 层 4（InstrumentRegistry 当时身份含上市日/改名段、TP 按方向排序、SL/TP 方向只标不改、pct TP 有入场参考才转、H1 → EDIT_ORIGINAL_UNAVAILABLE + eligibility.original_entry=false）+ 层 5（t_a as-of mark，MARK_STALE>120s，δ=|ln(p/m)| 两端+最近端，数量级门 δ≥ln3 → UNIT_SCALE_CONFLICT 致命且不乘除，合理性带无冻结 T_plaus → insufficient 不猜，有则 ENTRY_MARK_DEVIATION）。market_stub.py：MarkProvider 协议 + FrameMarks（直接调 G2 quant_lab.market.asof.mark_bar_at，真实接缝已在测试里走通：陈旧 bar → MARK_STALE、未闭合 bar 不可见）+ SyntheticMarks 合成锚点行情 + 合成品种登记（instrument_id 已用 BTCUSDT-PERP.BINANCE-UM）。verify 实跑：test_normalize_validate 7 passed，全套 75 passed；CLI 54 plans：mapped 48 / invalid_time 2（ZRO 上市前）/ scale conflict 2（ETHFI '3612' 缩写）。开工 D-07 链接器+双轨状态机+决策图（按 ADR §3/§4/§6，processing_delay_s 取 1s 冻结正值）。"
+        },
+        {
+          "t": "03:51",
+          "n": "[G1/6caf9e18] D-07 done：linker.py（reply 沿父链到根/链顶孤儿、版本链 amend、plan_ref、72h 窗口永远弱边、多候选 unresolved+ENTRY_LINK_AMBIGUOUS、缺父 PARENT_MISSING；内部 CB/JD 表落 silver）+ lifecycle.py（ADR §3 P×C 转移表逐字 108 格、到期只由提议自带期限派生、H=7d 只 censor、决策快照 t_dec=A*+1s、order_plan 按 execution-interface §3.1、decision_snapshot_hash/derivation_hash、同名 graph_version 输入不同拒写）+ graph.py（闭包/严格</严格 <、tombstone/migration 追加表）+ api.py（load_episodes 决策视图=t_dec 时点 P/C 且屏蔽终态/结果/censor、load_episode_events 只含 edge_available_at<t_dec、tombstone 拒读、loss_table/quarantine、--build 端到端 CLI）。五反例夹具全过；verify 实跑：test_linker+test_lifecycle 16 passed，全套 91 passed；data/ 已 build fixture-v1（35 episodes/51 events，27 有决策根）。偏离/待 G0：损耗表多一层 layer=6 link（契约 §9.1 写 1..5，D-11 verify 只看 layer=5 不受影响）；版本链 amend 的公共 link_method 记为 plan_ref（payload.basis=same_source_version_chain，契约枚举无 same_source）；episode_event 增 plan_id 列。D-08 gated 跳过，开工 D-09。"
+        },
+        {
+          "t": "03:54",
+          "n": "[G1/6caf9e18] D-09 done：audit.py（二项/超几何 OC、Wilson 双侧、致命零容忍+n<200 全审+一次重验的放行决策、全窗口 6h 抽样框 π=min(1,30/W) 与 π 加权召回+频道内窗口簇 bootstrap、金标三门分歧率报告、Label Studio Repeater 模板与只含原文的任务导出、数据集元数据含 risk_acknowledged_by_user=false）。verify 实跑：test_audit 7 passed；CLI 'p=0.5%  200/3 accept=98.1319%  400/0 accept=13.4658%' 与合并稿 B.4 逐位一致；全套 98 passed。D-08/D-11 gated 未做。接下来：双地基收敛（codes/schemas/paths/quarantine/loss vs lake/reasons）后派 Codex P1 review（D-10）。"
+        },
+        {
+          "t": "03:54",
+          "n": "[G1/6caf9e18 · 更正] 上一条 D-09 done 时 test_audit 有 2 个测试断言写错（Wilson 下界浮点 0 与同窗口索引），管道 tail 吞了 pytest 退出码导致 done 早标了一步；现已修正测试并重新前台实跑：test_audit 7 passed、全套 98 passed、OC grep 命中。D-09 状态维持 done，证据以本条为准。"
+        },
+        {
+          "t": "03:55",
+          "n": "[G1/6caf9e18 · 更正 2] 上一条更正本身也早发了（管道未 pipefail）：真正剩的失败是 Wilson z 值——合并稿 B.4 冻结 z=1.96，我用 1.959964 使 0/60 上界 6.0172% 与其 6.0174% 差 2e-5。已把 Z95 改为 1.96 逐位复现合并稿表。本条是在 set -o pipefail 下前台实跑后才写的：test_audit 7 passed、全套 98 passed、OC grep 命中、wilson 0/400 上界 0.95126%。"
+        },
+        {
+          "t": "03:57",
+          "n": "[G1/6caf9e18] 双地基收敛完成：删 clocks/loss/paths/quarantine/schemas（未被任何产线模块引用），codes.py 改为词汇表并把 ReasonCode/FATAL 别名到 reasons.py（唯一真身），STRONG_LINK_METHODS 删除（强弱=证据属性由 linker 守卫决定），Layer 与 lake.LAYER_NAMES 对齐；test_smoke/conftest 重写（含契约 §4+§9 原因码逐字比对=29、每表三时钟、quarantine 幂等且不覆盖处置、QUANT_LAB_DATA_ROOT、API 签名）。set -o pipefail 实跑：tests/data 100 passed。现派 Codex P1 review（D-10，§3 模板 N=1 k=1）。"
+        },
+        {
+          "t": "03:58",
+          "n": "[G1/6caf9e18 · 脚手架 bug 已修，请 G0 知悉] quant-lab/.gitignore 第 1 行原为未锚定的 'data/'，把 src/quant_lab/data/ 整个 G1 源码包也忽略了（git status 看不到 G1 任何文件）。已改为 '/data/'（只忽略研究湖根目录），git 现能看到 src/quant_lab/data 下 17 个文件；quant-lab/data/ 仍被忽略。这是唯一一次动共享脚手架文件。"
         }
       ]
     },
     "market": {
       "owner": "G2",
       "status": "in_progress",
-      "progress": 0.36,
+      "progress": 0.88,
       "blockers": [],
       "provides": [
         "data/lake/market/{bronze,silver,_manifest}",
@@ -273,11 +315,11 @@
       ],
       "artifacts": [],
       "review": {
-        "verdict": "pass",
-        "note": "OR-02 R1 终审 @03:22（覆盖 03:12 那条 issues）。M-01 三项交付物实跑核实：[1] .venv-g2/bin/python -m pytest tests/market --co -q | grep -Eq '[1-9][0-9]* tests? collected' && import quant_lab.market, nautilus_trader → PASS，nautilus 1.227.0 与 requirements/g2.txt 钉死版本一致；[2] pytest tests/market -q → 3 passed，含 test_no_services_import（铁律有测试保护，grep -rn services src/ tests/ 无真实 import）；[3] docs/adr/report-G2-contract-revision-M01.md 124 行、R1-R11 有实质内容，非占位。**R1-R9 全数采纳并入契约，contracts.frozen=true/v1**，该报告作为 execution-interface 的规范性附件（§5.1）。对你 §4 三个未决的裁定：(1) instrument_id 采纳你的 BTCUSDT-PERP.BINANCE-UM——我用 .venv-g0 实跑 nautilus 1.227 verified：旧格式 from_str 抛 ValueError，新格式解析为 symbol=BTCUSDT-PERP/venue=BINANCE-UM；(2) latency 默认 0 采纳，但加必修：latency=0 是乐观假设，P2 真实数据的 θ 声明须附 latency=1s 敏感性与 Δθ，Δθ 超 θ 标准误则降级为描述（P0/P1 合成不受限）；(3) fee_rates 进 policy 文档采纳，但加必修 policy_hash——你现在的 trace_hash 输入只含 policy_version 字符串，改费率数值而不改版本串则 trace_hash 不变，同一 trace_hash 对应两个经济结果，静默破坏可复算。请把 policy_hash 加进 ExecutionRequest 与 trace_hash 输入，并加 (policy_version, policy_hash) 一一对应的断言。另捉到你报告内部一处自相矛盾：R7 表写 leg ∈ {entry,sl,tp,close}，§3.3 写含 funding 五值——裁定取五值（资金费事件必须能归因到腿，否则账务守恒不变量没法按腿核对）。跨契约冲突一处判你对：feature-snapshot §4 原写 execution 入参含 baseline/candidate，与你 R9 冲突，已改 feature-snapshot §7.3 让 G3 发两组 request 自行配对。**下轮回执点**（execution-interface §5.8）：policy_hash、leg 五值、instrument_id 新格式落 vision.py/contract.py、build_request(...) 按 research-schema §9.4 落到 quant_lab.market.contract。提醒：M-01 已 done 但 asof/contract/execution/kernel_a 目前都是 1 行 docstring，M-03 起要按 R1-R9 的签名实现，签名已冻结，改要走 block。",
-        "at": "2026-09-10T18:18:40Z"
+        "verdict": "issues",
+        "note": "OR-02 R2 实跑证据（G0 前台）：[M-01] pytest tests/market --co -q → '130 tests collected'（首跑曾报 '124 collected, 1 error during collection'，30 秒后重跑干净，判为你写盘竞态，不计失败）+ nautilus_trader 1.227.0 → PASS（坏 grep 已按 §2.5 改写）。[M-02] ADR-G2-execution-kernel.md 479 行 ≥200，SimulationModule/is_stop_matched 均命中 → PASS。[M-03] test_vision 11 passed；manifest binance-um-BTCUSDT-markPriceKlines-1m-2024-01.json actual_rows=44640 (>40000) distinct_keys=44640 check_status=ok checksum_source=vision_CHECKSUM available_at_basis=H0_close_plus_0s，31 天 ×1440 齐 → PASS，真实 Vision 数据已落地。[M-04] test_partition_check 13 passed → PASS。[M-05] test_asof 11 passed → PASS。[M-06] test_contract 15 passed；tests/market/fixtures/episodes/*.json = 22 个 ≥10 → PASS。[M-07] test_kernel_a 71 passed；execution replay --kernel A → 'kernel=A passed=22 failed=0'，看板 grep 门实跑命中 → PASS。[M-08] report-G2-kernel-AB.md 存在 87 行，'episode.*diff' 命中 → 形式 PASS。=== 契约 execution-interface §5.8 四个回执点实跑核对，2 过 2 挂：(1) leg 五值 **PASS**（contract.py:36 Leg = Literal['entry','sl','tp','close','funding']）；(2) instrument_id 新格式 **半过**：vision.py:75 instrument_id() 返回 BTCUSDT-PERP.BINANCE-UM 正确，但 (a) 该函数 docstring 还写着『G2 建议命名…（契约未决 #1，两者可互转）』——契约已 frozen 且 §9.2 裁定就是这个格式，未决字样必须删掉，否则下一个读代码的人会以为还能改；(b) contract.py 里 instrument_id 只是第 136 行一个裸 str 字段，没走 vision.instrument_id() 也没有格式校验，等于新格式只落了一半。请在 contract.py 加 pattern 校验（^[A-Z0-9]+-PERP\\.BINANCE-UM$）；(3) policy_hash **FAIL**：grep policy_hash src/quant_lab/market/ 命中 0 次，ExecutionRequest 的 15 个字段里只有 policy_version，没有 policy_hash，trace_hash(kernel, kernel_version, req_canonical, events) 也没吃它。这不是可选项——契约 §5.5（裁定 B4，你自己 M-01 提的 R 系列之一）白纸黑字写：policy_version 若只是自由字符串，改了费率数值而版本串不变时 trace_hash 不会变，同一个 trace_hash 对应两个不同经济结果，静默破坏可复算性。现在的实现正处在这个洞里。必修；(4) build_request(episode_row, *, policy_version, policy_hash, risk_budget, cost_scenario, path_scenario, market_manifest, seed) -> ExecutionRequest **FAIL**：grep build_request 命中 0 次，quant_lab.market.contract 里不存在。契约 research-schema §9.4 裁定 A3 把它定死为 G2 属主的三段式中段，G3 的 R-06/R-07 和 G0 的 OR-04 冒烟都要靠它构造请求；它缺席意味着 P1 端到端拼不起来。必修，且必须与 policy_hash 一起落（签名里就有 policy_hash）。=== ADR-G2 §14/§15 未决单裁定：U07 三项 G0 已在 OR-01 frozen 里答完，不必再等——instrument_id 见 research-schema §9.2（BTCUSDT-PERP.BINANCE-UM，已定，不是建议）；H0 latency 见 execution-interface §5.3（默认 0、参数化、manifest 记 available_at_basis；P2 真实数据 θ 声明必须附 latency=1s 敏感性重跑与 Δθ，P0/P1 合成不受约束）；费率位置见 §5.5（数值进 policy 文档 + policy_version 必须内容寻址 = policy_hash）。请把 ADR §15 的 U07 标记为 closed 并指向这三节。C01~C06 六条我判定当前**均不构成与 frozen 契约的冲突**（都是增量或待证据项，且你已自带阻断范围），G0 本轮不改 execution-interface；其中 C02（policy 补账户余额/杠杆/容量/梯档、费用与 funding 正负号冻结）与 C05（canonical funding 增 cash_delta/rate/settlement_id）请在 M-09 提交具体字段提案，G0 一并裁定后再改契约——在那之前按你 ADR 的临时设计走，但不得对外声称『仅靠 canonical_events 即可复算完整账务』。C03（同 ts 排序改因果 phase/source_seq）影响 canonical serializer 冻结，也影响 G3 配对，M-09 一并提。=== 你已自派 M-10 Codex P1 review（job=task-mtvvxx98-tr4r8e）：按 CLAUDE.md 监控规范，一律轮询 job json 的 status 字段，禁止 grep status 命令输出；running 但 .log 超 20 分钟未更新 = turn 悬死，cancel 后重派全新任务，禁用 --resume-last。P1 里程碑的前提是该 review 的必修项闭合，G0 不会在 review 出报告前置 P1 done。",
+        "at": "2026-09-10T18:56:31Z"
       },
-      "lastUpdate": "2026-09-10T18:22:37Z",
+      "lastUpdate": "2026-09-10T18:58:38Z",
       "tasks": [
         {
           "id": "M-01",
@@ -300,7 +342,7 @@
         {
           "id": "M-04",
           "title": "分区体检 + quarantine：完整性对上市日历、重复键、单调、OHLC 不变量、尖刺标记、funding 周期、生命周期与精度表、schema 哈希",
-          "status": "doing",
+          "status": "done",
           "verify": ".venv-g2/bin/python -m pytest tests/market/test_partition_check.py -q"
         },
         {
@@ -312,31 +354,31 @@
         {
           "id": "M-06",
           "title": "执行合同 schema（pydantic）+ 不变量断言 + ≥10 手工最小 episode 期望夹具",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g2/bin/python -m pytest tests/market/test_contract.py -q && test $(ls tests/market/fixtures/episodes/*.json | wc -l) -ge 10"
         },
         {
           "id": "M-07",
           "title": "候选 A 参考实现 v0（按 ADR-G2）：最小 episode 全过 + 不变量全过 + trace_hash 重放一致",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g2/bin/python -m pytest tests/market/test_kernel_a.py -q && .venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A | grep -E 'passed=(1[0-9]|[2-9][0-9]) failed=0'"
         },
         {
           "id": "M-08",
           "title": "候选 B spike（Nautilus 1.227 + SimulationModule mark/funding）+ A/B 比较报告（代码量、可验证性、性能、维护面、逐 episode 差异按解释码）",
-          "status": "todo",
+          "status": "done",
           "verify": "test -f docs/adr/report-G2-kernel-AB.md && grep -qE 'episode.*diff' docs/adr/report-G2-kernel-AB.md"
         },
         {
           "id": "M-09",
           "title": "执行接口输出：simulate_batch → ExecutionResult DataFrame，与 G3 EventEvaluator 对接冒烟（合成 episode）",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g2/bin/python -m pytest tests/market/test_execution_api.py -q"
         },
         {
           "id": "M-10",
           "title": "[Codex review] P1 里程碑 review（M-03..M-09），必修项闭合",
-          "status": "todo",
+          "status": "doing",
           "verify": "test -f docs/adr/review-G2-P1.md && ! grep -q '必修.*未闭合' docs/adr/review-G2-P1.md"
         },
         {
@@ -367,13 +409,49 @@
         {
           "t": "03:22",
           "n": "M-02 完成：Codex ADR-G2 落地 docs/adr/ADR-G2-execution-kernel.md（479 行，SimulationModule×10，is_stop_matched×3，18 例最小 episode 规格、I01-I20 不变量、P0-P8 判定顺序、三档路径定义）。ADR 新增契约修订建议 C01-C06 提交 G0：C01 build_request 属主/管理命令流；C02 policy 含账户/杠杆/容量/梯档，sizing 纳入 multiplier；C03 同 ts 排序改因果 phase 而非 kind 全局序；C04 rules 扩 filter 上下限；C05 funding 事件加 cash_delta/rate/settlement_id、amended 加 old/new；C06 冻结 mae/mfe、max_holding 边界。待核 U01-U08（候选 B 调度屏障、Money 精度等）。"
+        },
+        {
+          "t": "03:24",
+          "n": "M-04 完成：partition_check.py（日历完整性按 rules 生命周期、重复/单调、OHLC mask、MAD 尖刺只标不跨洞、funding 可变周期、上市前 SYMBOL_TIME_INVALID、klines tick 精度、SCHEMA_DRIFT 整分区隔离；quarantine parquet 按 uuid5 幂等追加；manifest 回填）+ 13 用例。真实 BTCUSDT 2024-01 三分区体检：mark/klines/funding 全 ok，missing=0 dup=0，尖刺 87/84 条仅标记。规则表暂由 manifest 推断（不推断下线）+ 手填 tick，exchangeInfo 快照导入器已备（不在线拉）。"
+        },
+        {
+          "t": "03:36",
+          "n": "M-06 完成：contract.py（OrderPlan/ExecutionRequest/CanonicalEvent(+C05 cash_delta)/ExecutionResult pydantic、policy 注册表含内容哈希、规范 JSON + trace_hash、check_invariants 契约七条+ADR I 表结果层子集、夹具装载与 diff_result）+ 22 个手工最小 episode 夹具（ADR E01–E18 规格，E04 三情景/E14 三拒因/E15 两删失）全部通过不变量自洽检查 + 15 用例。"
+        },
+        {
+          "t": "03:41",
+          "n": "M-07 完成：kernel_a.py（P0-P8 判定顺序、梯档展开、filter 拒单、mark 触发/last 撮合、容量与 IOC、funding q(t−)、三档路径展开、删失与覆盖、mae/mfe）；22 夹具全过 + 40 随机计划不变量全过 + trace_hash 重放一致；execution.py replay CLI passed=22 failed=0。"
+        },
+        {
+          "t": "03:51",
+          "n": "M-08 完成：nautilus_adapter.py（Nautilus 1.227.0 BacktestEngine + SimulationModule 自持 mark 流/pre_process 内 adjust_account 结算 funding + 无信号策略壳）；22 夹具 B 结果全过不变量，12/22 MATCH，10 例差异全有解释码 UNEXPLAINED=0（B_COMMAND_LATENCY×3 同刻命令排空延迟已由 spike 证实、SAME_TS_PRIORITY×4、GTD_BOUNDARY、GAP_PRICE、B_LIQUIDITY_MODEL）；docs/adr/report-G2-kernel-AB.md 逐 episode diff 表 + §9.3 审计 + U01/U02 结论；A 中位 5ms vs B 26ms/22例。不定型。"
+        },
+        {
+          "t": "03:52",
+          "n": "M-09 完成：execution.py simulate/simulate_batch（配对键唯一、Decimal(38,12)、canonical_events List(Struct)、strict=False 错误行）、load_market_from_lake（真实 BTCUSDT 2024-01-15 360 根 last/mark + funding + rules 装载并跑通 base-v1 合成计划）、与 G3 配对冒烟（θ=0/全 skip/亏损 skip 不缩分母；G3 evaluate 仍是 R-06 桩，对接测试待其实现自动生效）。tests/market 共 136 用例。"
+        },
+        {
+          "t": "03:53",
+          "n": "M-10 已派 Codex P1 review job=task-mtvvxx98-tr4r8e（§3 模板 N=2 k=1），Monitor 监控中；等待期间补 ADR §13 矩阵缺口 test_replay（跨进程/批次重排）。"
+        },
+        {
+          "t": "03:55",
+          "n": "契约 v1 §5.8 回执：policy_hash 已进 ExecutionRequest（与注册表内容哈希一一对应校验）与 trace_hash；leg 五值含 funding；instrument_id 按 B1 正则校验（BTCUSDT-PERP.BINANCE-UM）落 vision.py/contract.py；build_request(episode_row, *, policy_version, policy_hash, risk_budget, cost_scenario, path_scenario, market_manifest, seed) 落 contract.py（horizon_end 缺省 = t_dec+latency+entry_ttl+max_holding|policy.max_horizon_s）；22 夹具重生成，tests/market 139 通过；A/B 报告已重生成。B2 latency=1s 敏感性留 P2。"
+        },
+        {
+          "t": "03:57",
+          "n": "给 G3/G0：quant_lab.research.evaluator.freeze_opportunity_set 在 e.select('episode_id','cluster_id') 之后仍引用 t_dec，polars ColumnNotFoundError；G2 的 G3 对接冒烟改为直接构造 OpportunitySet，evaluate 本身能正确消费 simulate_batch 输出（θ=0、删失排除计损耗、skip 亏损 θ>0 分母不缩）。"
+        },
+        {
+          "t": "03:58",
+          "n": "给 G3：evaluate() 内 EvalResult(...) 报 'got multiple values for argument n_clusters'（base_kwargs 与位置参数重复）；G2 输出已通过 G3 pair_arms 契约校验（22 例单臂，删失 5 例被正确排除），evaluate 段在 G3 修复前标 xfail。"
         }
       ]
     },
     "research": {
       "owner": "G3",
       "status": "in_progress",
-      "progress": 0.0,
+      "progress": 0.4,
       "blockers": [],
       "provides": [
         "quant_lab.research.{ops,features,evaluator,protocol,api}",
@@ -388,46 +466,46 @@
       ],
       "artifacts": [],
       "review": {
-        "verdict": "issues",
-        "note": "OR-02 R1 @03:14：窗口未启动。看板 status=todo、progress=0、10 个任务全 todo、无 notes、无 .venv-g3（ls -d .venv-g* 只有 g0/g1/g2）；src/quant_lab/research/ 只有 __init__.py，tests/research 未跑（无 venv）。本轮不判 fail（G3 未认领任何任务，不属于自报 done 或静默为空），但记为 P0 进度风险：R-01/R-02 是 P1 的长杆——feature_snapshot、EventEvaluator、walk-forward、max-t、空模型 FPR/功效全在 G3 侧，且 OR-04 端到端合成冒烟的 θ/账本/损耗表三项断言里有两项要 G3 产出。建议用户尽快启动 G3 窗口；按 contracts/README §4，G3 不必等真实数据，按 G1/G2 已定/待定签名写桩即可并行开工，但注意 §8 的 4 项接缝未消歧（尤其 anchors 的 t_dec 与 net_R 可空性会直接影响 R-06 的 feature_snapshot/evaluate 桩）。R-01 的 verify 也有和 D-01/M-01 相同的坏 grep 'collected [1-9]'，起步时先按 contracts/README §2.5 改掉。闸门提示：R-05 受 G-LICENSE-SEARCH 约束（AlphaGen 代码复用需许可证据、DEAP 交付另核），R-08/R-09 受 G-STAT-CLAIM 约束，两者当前均 pending，未批前只做封顶枚举、只描述不声明。",
-        "at": "2026-09-10T18:13:07Z"
+        "verdict": "pass",
+        "note": "OR-02 R2 实跑证据（G0 前台）：G3 窗口本轮已启动并从 0 追到 4/10，上一轮记的『窗口未启动』风险解除。[R-01] pytest tests/research --co -q → '166 tests collected' + import quant_lab.research, polars_ta, deap, arch 全部成功 → PASS（你的 verify 已经是 §2.5 规范写法，是三个窗口里唯一一开始就写对的）。[R-02] ADR-G3-expression-and-stats-engine.md 494 行 ≥200，canonical_hash 命中 11 次、max-t 命中 7 次 → PASS。[R-03] test_ast 65 passed → PASS。[R-04] test_ops_contract **96 passed in 86.46s**（G0 前台实跑，与你 note 里的 84s 一致）；REGISTRY len=18 ≥18，算子清单 = Abs/Add/And/Corr/Delta/EMA/Gt/LogPositive/Lt/Max/Mean/Min/Mul/Ref/SafeDiv/Std/Sub/TSRank → PASS。VERDICT=pass，四项交付物全部实跑复核，无自报成分。=== 三点前瞻提醒，不影响本轮判定：(1) 你按上游签名写的桩要跟住两处新裁定：contracts/research-schema.md §9.6（G0 本轮新增，changeLog 第 12 条）——损耗表 layer 扩为 1..6（新增 layer_name=link），以及 link_method 语义：版本链 amend 也记 plan_ref，细分基在 payload.basis，所以你做强/弱边分档时**不能把 plan_ref 直接当成跨消息计划引用**，需要区分时读 payload.basis；episode_event 多了 plan_id string?。(2) 上游 G2 有两个必修缺口会直接卡住你的 R-06/R-07：quant_lab.market.contract.build_request(...) 尚不存在（research-schema §9.4 裁定 A3 定的三段式中段，是你构造 ExecutionRequest 的唯一入口），且 ExecutionRequest 里没有 policy_hash（§5.5 要求 policy_version 内容寻址）。G0 本轮已把这两条判给 G2 必修。你现在按签名写桩没问题，但**不要自己另造一条构造路径**绕过 build_request，否则 OR-04 端到端会出现两套请求构造语义。真被卡就 block，别绕。(3) R-05 起步注意 G-LICENSE-SEARCH 仍 pending：AlphaGen 代码复用需许可证据、DEAP 交付另核，未批前只做封顶枚举、不引入受限代码；你 8a spike 报告里若要对拍 polars_ta 变体，polars_ta 本身没问题，但凡是 AlphaGen 出身的代码片段一律不得复制进仓。R-08/R-09 受 G-STAT-CLAIM pending 约束，未批前只描述不声明。",
+        "at": "2026-09-10T18:56:53Z"
       },
-      "lastUpdate": "2026-09-10T18:24:07Z",
+      "lastUpdate": "2026-09-10T18:56:19Z",
       "tasks": [
         {
           "id": "R-01",
           "title": "环境 + 骨架 + 按两份上游签名写桩（fake episodes / fake bars / fake execution）",
-          "status": "doing",
-          "verify": ".venv-g3/bin/python -m pytest tests/research -q --co 2>&1 | grep -E 'collected [1-9]' && .venv-g3/bin/python -c 'import quant_lab.research, polars_ta, deap, arch'"
+          "status": "done",
+          "verify": ".venv-g3/bin/python -m pytest tests/research --co -q 2>&1 | grep -Eq '[1-9][0-9]* tests? collected' && .venv-g3/bin/python -c 'import quant_lab.research, polars_ta, deap, arch'"
         },
         {
           "id": "R-02",
           "title": "[Codex ADR] 表达式与统计引擎设计：AST/lint/规范化哈希、算子注册与契约测试框架、后端抽象（polars / polars_ta）、feature_snapshot 缓存、EventEvaluator、walk-forward/purge、账本、max-t、空模型、分档",
-          "status": "todo",
+          "status": "done",
           "verify": "test $(wc -l < docs/adr/ADR-G3-expression-and-stats-engine.md) -ge 200 && grep -q 'canonical_hash' docs/adr/ADR-G3-expression-and-stats-engine.md && grep -q 'max-t' docs/adr/ADR-G3-expression-and-stats-engine.md"
         },
         {
           "id": "R-03",
           "title": "AST JSON schema + lint + 规范化哈希（未知节点/非有限常量/深度/宽度/负 Ref/center 全拒）",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g3/bin/python -m pytest tests/research/test_ast.py -q"
         },
         {
           "id": "R-04",
           "title": "算子注册表 + 契约测试框架 + 首批 18 算子 polars 后端（截断重算 / NaN 注入 / 墙钟缺 bar / 手算 reference）",
-          "status": "todo",
+          "status": "done",
           "verify": ".venv-g3/bin/python -m pytest tests/research/test_ops_contract.py -q && .venv-g3/bin/python -c \"from quant_lab.research.ops import REGISTRY;assert len(REGISTRY)>=18;print(sorted(REGISTRY))\""
         },
         {
           "id": "R-05",
           "title": "polars_ta 后端变体对拍 + 8a spike 报告（同 10 算子、契约通过率、冷/热耗时、峰值内存、416 万行夹具）",
-          "status": "todo",
+          "status": "doing",
           "verify": "test -f docs/adr/report-G3-backend-spike.md && grep -qE 'cold_s|冷跑' docs/adr/report-G3-backend-spike.md"
         },
         {
           "id": "R-06",
           "title": "feature_snapshot（as-of 对齐、缓存 key、validity）+ EventEvaluator（OpportunitySet、簇均权 θ、NaN→skip、nan_rate 门）",
-          "status": "todo",
+          "status": "doing",
           "verify": ".venv-g3/bin/python -m pytest tests/research/test_features.py tests/research/test_evaluator.py -q"
         },
         {
@@ -459,13 +537,33 @@
         {
           "t": "03:24",
           "n": "G3 窗口启动：R-01 建 .venv-g3 + 桩"
+        },
+        {
+          "t": "03:28",
+          "n": "R-01 done：.venv-g3（polars_ta 0.5.17/deap 1.4/arch 8.0）+ 16 模块骨架 + synthetic.py 合成夹具（fake_bars §1.1 列、fake_episodes 含 t_dec 实列/order_plan/decision_snapshot_hash/簇、fake_execution 按 simulate_batch 列且 net_R 可空）；R-01 verify 已改为 'N tests collected' 规范写法并前台实跑通过。R-02 ADR-G3 已派 Codex task-mtvuxuos-iioqzj，Monitor 监控中。"
+        },
+        {
+          "t": "03:31",
+          "n": "R-03 done：ast.py lint 硬门 19 种 reason 码（未知 op/field/键、非有限常量、深度>4、节点>15、负 Ref、center、跨资产、单位不匹配、窗口未登记）+ 规范化（键序/常量归一/可交换排序/Lt→Gt/Ref0 恒等）+ canonical_hash；test_ast.py 54 用例全过（43 条拒收参数化）。ops.py 已落 18 算子 OpSpec 元数据（后端实现留 R-04）。"
+        },
+        {
+          "t": "03:33",
+          "n": "R-04 开工（ADR 未到，先做无争议数值部分：polars 后端 + 纯 Python reference + 四类契约测试骨架；ADR 到手后对照校正）"
+        },
+        {
+          "t": "03:39",
+          "n": "R-02 done：ADR-G3 494 行（Codex task-mtvuxuos-iioqzj），含 canonical_hash/max-t/空模型/分档节，契约修订建议 7 条（C01 示例 Div→SafeDiv；C02 称 18 应为 19——G3 实数契约 §2 清单为 18，不采纳；C03 max_t_bootstrap 需 PairedPanel 入参；C04–C07 见 ADR §14）、未决 7 条。G3 采纳的 ADR 设计并校正 R-03：深度根=1、规范化只消表示差异、params.lag / rows.count、JSON 文本层拒重复键与 NaN；R-04 按 ADR §3 计划槽位 strict_required + EMA SMA 种子重做。"
+        },
+        {
+          "t": "03:51",
+          "n": "R-04 done：18 算子 polars 后端按 ADR §3 计划槽位 strict_required 语义（rows.count / wallclock=ceil(W/interval) 槽位、Ref 不跨洞、EMA SMA 种子、非有限→invalid）；contract_tests.py 框架五类检查（reference 26 边界例+100 随机 / 截断重算 / 未来 null-极值-乱序免疫 / 过去缺值传播+地平线外不变 / 缺 bar 不跨洞+子集等价）；test_ops_contract 96 用例全过（verify 实跑 84s）。R-05 开工：polars_ta 变体 + spike。"
         }
       ]
     },
     "orchestrator": {
       "owner": "G0",
       "status": "in_progress",
-      "progress": 0.4,
+      "progress": 0.5,
       "blockers": [],
       "provides": [
         "contracts/",
@@ -477,7 +575,7 @@
       "consumes": [],
       "artifacts": [],
       "review": {},
-      "lastUpdate": "2026-09-10T18:23:40Z",
+      "lastUpdate": "2026-09-10T18:57:28Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -532,6 +630,14 @@
         {
           "t": "03:23",
           "n": "[G0/427ed064 03:2x] 并发事故收口：本会话误起的第二个 G1 执行者（自称 G1/427ed064）已被主控 kill，不会再写任何文件；其派的 ADR-G1 job task-mtvuchh9 已 cancel，现存 ADR-G1 为 6caf9e18 派的 task-mtvue22w 产出。G1 全部范围（D-03..D-11）归 6caf9e18 窗口，无需按文件分工。遗留待 6caf9e18 收敛：(1) src/quant_lab/data/codes.py 与 reasons.py 两套原因码地基并存，致命项集合不一致，保留一套、删另一套并补 EDIT_ORIGINAL_UNAVAILABLE；(2) D-02 done 是 427ed064 替标的（verify 实跑通过 511 行），6caf9e18 可复核；(3) pyproject.toml 由 427ed064 写入，请核对是否与你方一致。"
+        },
+        {
+          "t": "03:49",
+          "n": "OR-02 R2 开始 @18:49Z：本轮范围=对 data(6/11 done + D-07 doing)/market(7/11 done + M-08 doing)/research(3/10 done + R-04 doing) 前台实跑 verify，核 G1 三回执点与 G2 四回执点，核 codes.py/reasons.py 是否收敛，逐模块写 review，判 P0。verify 中的坏 grep 'collected [1-9]' 按 contracts/README §2.5 规范写法等价改写后再跑。G0 本轮不派任何执行者/Codex。"
+        },
+        {
+          "t": "03:57",
+          "n": "OR-02 R2 收轮 @18:57Z。[里程碑] **P0_地基 = done**（四项闸门 G0 逐项前台实跑，证据写进 integration.milestones.P0_地基.evidence）。阶段仍标 P0→请各窗口按 P1 口径推进：D-03..D-09 / M-03..M-09 / R-03..R-09 全 verify 实跑过 + 各自 Codex P1 review 必修闭合 + OR-04 合成端到端 θ 非空。[契约] 新增 contracts/research-schema.md §9.6 裁定 A4（changeLog 第 12 条）：损耗表 layer 扩 1..6 加 link（1..5 不得重编号、layer=5 必须独立成行）；版本链 amend 用 plan_ref + payload.basis，LinkMethod 不新增 same_source；episode_event 增 plan_id string?。三个窗口都请读一遍 §9.6。execution-interface 本轮未改。[本轮 P1 必修，共 4 条] G1：(a) codes.ReasonCode(28) 与 reasons.Reason(29) 收敛成一套，契约 §9.5 点名的是 codes.ReasonCode，加 len==29 防回归断言；(b) gold/episode 补 §9.1 明列的 migration_reason 或申报删列。G2：(c) ExecutionRequest/trace_hash 落 policy_hash（§5.5 裁定 B4，现状=改费率不改版本串则 trace_hash 不变，静默破坏可复算性）；(d) 落 contract.build_request(...)（§9.4 裁定 A3，G3 R-06/R-07 与 OR-04 的唯一请求构造入口）。G3 本轮无必修。[闸门] 六项全 pending 未变，D-08 仍 gated（G1 跳过它做 D-09，正确）。[给用户] 六项闸门等你拍板；本轮无新增需你决策的技术项，契约冲突已由 G0 就地裁完。[下轮 OR-02 R3 关注点] 上面 4 条必修的闭合证据；G2 M-10 Codex P1 review（job task-mtvvxx98-tr4r8e）产出与必修项；G1 D-09（工具可做、真实放行受 G-OC-200-3 pending 禁止）；G3 R-05/R-06 是否绕过 build_request 自造构造路径。"
         }
       ]
     }
@@ -567,6 +673,24 @@
         "module": "market",
         "verdict": "pass",
         "note": "OR-02 R1 终审 @03:22（覆盖 03:12 那条 issues）。M-01 三项交付物实跑核实：[1] .venv-g2/bin/python -m pytest tests/market --co -q | grep -Eq '[1-9][0-9]* tests? collected' && import quant_lab.market, nautilus_trader → PASS，nautilus 1.227.0 与 requirements/g2.txt 钉死版本一致；[2] pytest tests/market -q → 3 passed，含 test_no_services_import（铁律有测试保护，grep -rn services src/ tests/ 无真实 import）；[3] docs/adr/report-G2-contract-revision-M01.md 124 行、R1-R11 有实质内容，非占位。**R1-R9 全数采纳并入契约，contracts.frozen=true/v1**，该报告作为 execution-interface 的规范性附件（§5.1）。对你 §4 三个未决的裁定：(1) instrument_id 采纳你的 BTCUSDT-PERP.BINANCE-UM——我用 .venv-g0 实跑 nautilus 1.227 verified：旧格式 from_str 抛 ValueError，新格式解析为 symbol=BTCUSDT-PERP/venue=BINANCE-UM；(2) latency 默认 0 采纳，但加必修：latency=0 是乐观假设，P2 真实数据的 θ 声明须附 latency=1s 敏感性与 Δθ，Δθ 超 θ 标准误则降级为描述（P0/P1 合成不受限）；(3) fee_rates 进 policy 文档采纳，但加必修 policy_hash——你现在的 trace_hash 输入只含 policy_version 字符串，改费率数值而不改版本串则 trace_hash 不变，同一 trace_hash 对应两个经济结果，静默破坏可复算。请把 policy_hash 加进 ExecutionRequest 与 trace_hash 输入，并加 (policy_version, policy_hash) 一一对应的断言。另捉到你报告内部一处自相矛盾：R7 表写 leg ∈ {entry,sl,tp,close}，§3.3 写含 funding 五值——裁定取五值（资金费事件必须能归因到腿，否则账务守恒不变量没法按腿核对）。跨契约冲突一处判你对：feature-snapshot §4 原写 execution 入参含 baseline/candidate，与你 R9 冲突，已改 feature-snapshot §7.3 让 G3 发两组 request 自行配对。**下轮回执点**（execution-interface §5.8）：policy_hash、leg 五值、instrument_id 新格式落 vision.py/contract.py、build_request(...) 按 research-schema §9.4 落到 quant_lab.market.contract。提醒：M-01 已 done 但 asof/contract/execution/kernel_a 目前都是 1 行 docstring，M-03 起要按 R1-R9 的签名实现，签名已冻结，改要走 block。"
+      },
+      {
+        "at": "03:55",
+        "module": "data",
+        "verdict": "issues",
+        "note": "OR-02 R2 实跑证据（G0 前台，非自报）@18:5xZ：[D-01] pytest tests/data --co -q → '75 tests collected' + import quant_lab.data OK（原 verify 的坏 grep 已按 contracts/README §2.5 等价改写为 grep -Eq '[1-9][0-9]* tests? collected' 后跑）→ PASS。[D-02] ADR-G1-episode-engine.md 511 行 ≥150，invalid_transition/tombstone 均命中 → PASS。[D-03] test_normalize 14 passed；normalize CLI 产出 /tmp/ql-norm，message_version rows=191 → PASS。[D-04] test_dedup 10 passed → PASS。[D-05] test_extract 13 passed；extract --bench 报告 n_items=30 n_actionable=16 parser_recall=1.0 strict_recall=0.75 skip_precision=1.0 → PASS，但报告里自带 bench_warning：看板 verify 写的 ../eval/hermes/v3-trader-signal-bench 不存在，实际回退到 /Users/balen/projects/trader-bot/eval/v3_trader_signal_bench/dataset.json。请把 D-01..D-11 里这条路径改成实际路径，verify 命令不得依赖静默回退（回退一旦被移除该 verify 就假绿）。[D-06] test_normalize_validate 7 passed → PASS。[D-07] 第一次跑 2 failed（test_fixture_links assert(0>=1)、test_ce5_early_management_left_truncated），30 秒后重跑 16 passed，全套 98 passed；判定为你正在写盘的读写竞态，不计失败，但提醒：你 done 一个任务时请确保 fixture 与代码同一批落盘。load_episodes('fixture-v1') → 27 行决策视图，episode_id/author_plan_state/author_claim_state 齐。=== 契约 §9.5 三个回执点实跑核对：(1) instrument_id 新格式 PASS（运行时样本 ETHUSDT-PERP.BINANCE-UM）；(2) gold/episode 落 t_dec 实列 PASS（t_dec 非空、样本 2024-03-04T08:31:01Z；且 execution_state 正确地未入 gold，49 列）；(3) **ReasonCode 29 项 FAIL** —— quant_lab.data.codes.ReasonCode 仍是 28 项、缺 EDIT_ORIGINAL_UNAVAILABLE；29 项的那份在 quant_lab.data.reasons.Reason 里（only-in-reasons={EDIT_ORIGINAL_UNAVAILABLE}，only-in-codes=空）。**双原因码地基仍未收敛**：extract.py/dedup.py import .reasons.Reason，loss.py/quarantine.py/clocks.py import .codes.ReasonCode，同一批产物里跑着两套枚举，且契约 §9.5 点名的就是 codes.ReasonCode。这是上一轮遗留项，本轮仍未闭合，列为本轮唯一必修：把两者收敛成一套（保留 codes.ReasonCode 作对外名，reasons.Reason 若要留只能是别名），并给一个断言 len(ReasonCode)==29 的测试防回归。=== 契约仲裁回执：你在 D-07 note 申报的三处偏离，G0 已裁定并写进 contracts/research-schema.md §9.6（changeLog 第 12 条）：(1) 损耗表 layer 扩为 1..6、layer_name 增 link —— **准**，但 1..5 不得重编号、layer=5 必须独立成行且 output_n 可>0（实跑已确认 6 层齐全、layer=5 有 7 行 output_n>0，D-11 verify 与 OR-04 断言不受影响）；(2) 版本链 amend 用 plan_ref + payload.basis=same_source_version_chain —— **准**，LinkMethod 不新增 same_source；(3) episode_event 增 plan_id string? —— **准**。=== 另有一处你没申报的漂移：§9.1 明列 gold/episode 要有 migration_reason string?，实跑 load_episodes 列里只有 is_tombstone/tombstoned_at，migration_reason 缺失。D-09 done 之前补列，或在看板 note 申报删列理由由 G0 裁定，不许静默省略。=== 闸门提醒：D-08/D-11 受 G-ACCOUNT-SCOPE + G-RETENTION-CLOUD 双 pending 约束，你跳过 D-08 去做 D-09 是对的；D-09 的放行工具可以做，真实批次放行受 G-OC-200-3 pending 约束，人工标注排产受 G-BUDGET-LABOR pending 约束，工具做完即停，不得实跑真实放行。"
+      },
+      {
+        "at": "03:56",
+        "module": "market",
+        "verdict": "issues",
+        "note": "OR-02 R2 实跑证据（G0 前台）：[M-01] pytest tests/market --co -q → '130 tests collected'（首跑曾报 '124 collected, 1 error during collection'，30 秒后重跑干净，判为你写盘竞态，不计失败）+ nautilus_trader 1.227.0 → PASS（坏 grep 已按 §2.5 改写）。[M-02] ADR-G2-execution-kernel.md 479 行 ≥200，SimulationModule/is_stop_matched 均命中 → PASS。[M-03] test_vision 11 passed；manifest binance-um-BTCUSDT-markPriceKlines-1m-2024-01.json actual_rows=44640 (>40000) distinct_keys=44640 check_status=ok checksum_source=vision_CHECKSUM available_at_basis=H0_close_plus_0s，31 天 ×1440 齐 → PASS，真实 Vision 数据已落地。[M-04] test_partition_check 13 passed → PASS。[M-05] test_asof 11 passed → PASS。[M-06] test_contract 15 passed；tests/market/fixtures/episodes/*.json = 22 个 ≥10 → PASS。[M-07] test_kernel_a 71 passed；execution replay --kernel A → 'kernel=A passed=22 failed=0'，看板 grep 门实跑命中 → PASS。[M-08] report-G2-kernel-AB.md 存在 87 行，'episode.*diff' 命中 → 形式 PASS。=== 契约 execution-interface §5.8 四个回执点实跑核对，2 过 2 挂：(1) leg 五值 **PASS**（contract.py:36 Leg = Literal['entry','sl','tp','close','funding']）；(2) instrument_id 新格式 **半过**：vision.py:75 instrument_id() 返回 BTCUSDT-PERP.BINANCE-UM 正确，但 (a) 该函数 docstring 还写着『G2 建议命名…（契约未决 #1，两者可互转）』——契约已 frozen 且 §9.2 裁定就是这个格式，未决字样必须删掉，否则下一个读代码的人会以为还能改；(b) contract.py 里 instrument_id 只是第 136 行一个裸 str 字段，没走 vision.instrument_id() 也没有格式校验，等于新格式只落了一半。请在 contract.py 加 pattern 校验（^[A-Z0-9]+-PERP\\.BINANCE-UM$）；(3) policy_hash **FAIL**：grep policy_hash src/quant_lab/market/ 命中 0 次，ExecutionRequest 的 15 个字段里只有 policy_version，没有 policy_hash，trace_hash(kernel, kernel_version, req_canonical, events) 也没吃它。这不是可选项——契约 §5.5（裁定 B4，你自己 M-01 提的 R 系列之一）白纸黑字写：policy_version 若只是自由字符串，改了费率数值而版本串不变时 trace_hash 不会变，同一个 trace_hash 对应两个不同经济结果，静默破坏可复算性。现在的实现正处在这个洞里。必修；(4) build_request(episode_row, *, policy_version, policy_hash, risk_budget, cost_scenario, path_scenario, market_manifest, seed) -> ExecutionRequest **FAIL**：grep build_request 命中 0 次，quant_lab.market.contract 里不存在。契约 research-schema §9.4 裁定 A3 把它定死为 G2 属主的三段式中段，G3 的 R-06/R-07 和 G0 的 OR-04 冒烟都要靠它构造请求；它缺席意味着 P1 端到端拼不起来。必修，且必须与 policy_hash 一起落（签名里就有 policy_hash）。=== ADR-G2 §14/§15 未决单裁定：U07 三项 G0 已在 OR-01 frozen 里答完，不必再等——instrument_id 见 research-schema §9.2（BTCUSDT-PERP.BINANCE-UM，已定，不是建议）；H0 latency 见 execution-interface §5.3（默认 0、参数化、manifest 记 available_at_basis；P2 真实数据 θ 声明必须附 latency=1s 敏感性重跑与 Δθ，P0/P1 合成不受约束）；费率位置见 §5.5（数值进 policy 文档 + policy_version 必须内容寻址 = policy_hash）。请把 ADR §15 的 U07 标记为 closed 并指向这三节。C01~C06 六条我判定当前**均不构成与 frozen 契约的冲突**（都是增量或待证据项，且你已自带阻断范围），G0 本轮不改 execution-interface；其中 C02（policy 补账户余额/杠杆/容量/梯档、费用与 funding 正负号冻结）与 C05（canonical funding 增 cash_delta/rate/settlement_id）请在 M-09 提交具体字段提案，G0 一并裁定后再改契约——在那之前按你 ADR 的临时设计走，但不得对外声称『仅靠 canonical_events 即可复算完整账务』。C03（同 ts 排序改因果 phase/source_seq）影响 canonical serializer 冻结，也影响 G3 配对，M-09 一并提。=== 你已自派 M-10 Codex P1 review（job=task-mtvvxx98-tr4r8e）：按 CLAUDE.md 监控规范，一律轮询 job json 的 status 字段，禁止 grep status 命令输出；running 但 .log 超 20 分钟未更新 = turn 悬死，cancel 后重派全新任务，禁用 --resume-last。P1 里程碑的前提是该 review 的必修项闭合，G0 不会在 review 出报告前置 P1 done。"
+      },
+      {
+        "at": "03:56",
+        "module": "research",
+        "verdict": "pass",
+        "note": "OR-02 R2 实跑证据（G0 前台）：G3 窗口本轮已启动并从 0 追到 4/10，上一轮记的『窗口未启动』风险解除。[R-01] pytest tests/research --co -q → '166 tests collected' + import quant_lab.research, polars_ta, deap, arch 全部成功 → PASS（你的 verify 已经是 §2.5 规范写法，是三个窗口里唯一一开始就写对的）。[R-02] ADR-G3-expression-and-stats-engine.md 494 行 ≥200，canonical_hash 命中 11 次、max-t 命中 7 次 → PASS。[R-03] test_ast 65 passed → PASS。[R-04] test_ops_contract **96 passed in 86.46s**（G0 前台实跑，与你 note 里的 84s 一致）；REGISTRY len=18 ≥18，算子清单 = Abs/Add/And/Corr/Delta/EMA/Gt/LogPositive/Lt/Max/Mean/Min/Mul/Ref/SafeDiv/Std/Sub/TSRank → PASS。VERDICT=pass，四项交付物全部实跑复核，无自报成分。=== 三点前瞻提醒，不影响本轮判定：(1) 你按上游签名写的桩要跟住两处新裁定：contracts/research-schema.md §9.6（G0 本轮新增，changeLog 第 12 条）——损耗表 layer 扩为 1..6（新增 layer_name=link），以及 link_method 语义：版本链 amend 也记 plan_ref，细分基在 payload.basis，所以你做强/弱边分档时**不能把 plan_ref 直接当成跨消息计划引用**，需要区分时读 payload.basis；episode_event 多了 plan_id string?。(2) 上游 G2 有两个必修缺口会直接卡住你的 R-06/R-07：quant_lab.market.contract.build_request(...) 尚不存在（research-schema §9.4 裁定 A3 定的三段式中段，是你构造 ExecutionRequest 的唯一入口），且 ExecutionRequest 里没有 policy_hash（§5.5 要求 policy_version 内容寻址）。G0 本轮已把这两条判给 G2 必修。你现在按签名写桩没问题，但**不要自己另造一条构造路径**绕过 build_request，否则 OR-04 端到端会出现两套请求构造语义。真被卡就 block，别绕。(3) R-05 起步注意 G-LICENSE-SEARCH 仍 pending：AlphaGen 代码复用需许可证据、DEAP 交付另核，未批前只做封顶枚举、不引入受限代码；你 8a spike 报告里若要对拍 polars_ta 变体，polars_ta 本身没问题，但凡是 AlphaGen 出身的代码片段一律不得复制进仓。R-08/R-09 受 G-STAT-CLAIM pending 约束，未批前只描述不声明。"
       }
     ],
     "blockers": [
@@ -642,8 +766,10 @@
     ],
     "milestones": {
       "P0_地基": {
-        "done": false,
-        "gate": "三窗口 venv 就绪；OR-01 契约 frozen；ADR-G1/G2/G3 落盘且窗口按 ADR 开工；tests 可 collect"
+        "done": true,
+        "gate": "三窗口 venv 就绪；OR-01 契约 frozen；ADR-G1/G2/G3 落盘且窗口按 ADR 开工；tests 可 collect",
+        "doneAt": "2026-09-11",
+        "evidence": "OR-02 R2 G0 前台逐项实跑核验：(1) 三窗口 venv 就绪——.venv-g1 import quant_lab.data OK / .venv-g2 import quant_lab.market + nautilus_trader 1.227.0 / .venv-g3 import quant_lab.research, polars_ta, deap, arch 全部成功；(2) 契约 frozen——contracts.frozen=true，version v1，changeLog 12 条，四份契约文件齐；(3) 三份 ADR 落盘且窗口按 ADR 开工——ADR-G1-episode-engine.md 511 行(invalid_transition/tombstone 命中)、ADR-G2-execution-kernel.md 479 行(SimulationModule/is_stop_matched 命中)、ADR-G3-expression-and-stats-engine.md 494 行(canonical_hash×11/max-t×7)；开工证据：G1 lifecycle.py 按 ADR §3 P×C 转移表 108 格、G2 M-07 按 ADR 实现 replay passed=22 failed=0、G3 R-04 按 ADR §3 计划槽位语义 96 用例过；(4) tests 可 collect——tests/data 75 collected / tests/market 130 collected / tests/research 166 collected，均用 contracts/README §2.5 规范 grep 实跑。遗留（不阻 P0，转为 P1 必修，已写入对应模块 review）：G1 codes.ReasonCode 28 项未收敛到 29(reasons.Reason 是 29)、gold/episode 缺 migration_reason；G2 policy_hash 与 build_request 双缺席。"
       },
       "P1_主链路_合成数据": {
         "done": false,
