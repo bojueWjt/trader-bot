@@ -1,0 +1,22 @@
+{
+  "team": "quant-lab",
+  "goal": "把五个 Telegram 信号频道 2024 年起的全历史整理成可评估的 episode，在自有表达式引擎与事件级评估器上做可复算研究；research_only，上线另需用户明示",
+  "form": "pipeline",
+  "platforms": ["claude"],
+  "codex": {"role": "engine-design-and-review", "model": "gpt-6-astra", "effort": "medium", "dispatch": "codex-dispatch per window; G0 dispatches integration adversarial review"},
+  "roles": [
+    {"id": "orchestrator", "title": "G0 协调者", "duty": "契约、20 分钟评审、闸门跟踪、集成与报告", "required": true, "modelTier": "brain",
+     "models": {"claude": "opus"}, "candidates": [{"file": "specialized/specialized-model-qa.md", "name": "Model QA Specialist", "emoji": "🔬", "vibe": "Audits models end-to-end", "description": "独立审计、复现、delta 报告"}], "selectedCandidate": 0},
+    {"id": "data-executor", "title": "G1 数据执行者", "duty": "Telegram → episode 六级产线、标注与分级放行", "required": true, "modelTier": "brain",
+     "models": {"claude": "opus"}, "candidates": [{"file": "engineering/engineering-data-engineer.md", "name": "Data Engineer", "emoji": "🔧", "vibe": "Builds pipelines that turn raw data into trusted assets", "description": "Bronze/Silver/Gold、幂等、契约、血缘"}], "selectedCandidate": 0},
+    {"id": "kernel-executor", "title": "G2 内核执行者", "duty": "行情湖、三时钟 as-of、执行内核 A/B", "required": true, "modelTier": "brain",
+     "models": {"claude": "opus"}, "candidates": [{"file": "engineering/engineering-backend-architect.md", "name": "Backend Architect", "emoji": "🏗️", "vibe": "Designs the systems that hold everything up", "description": "状态机、幂等、超时与重试语义"}], "selectedCandidate": 0},
+    {"id": "research-executor", "title": "G3 研究执行者", "duty": "AST/算子契约、评估器、walk-forward、max-t、分档", "required": true, "modelTier": "brain",
+     "models": {"claude": "opus"}, "candidates": [{"file": "academic/academic-statistician.md", "name": "Statistician", "emoji": "📊", "vibe": "A p-value is not a proof — show me the design", "description": "设计先于数据、多重比较、区间"}], "selectedCandidate": 0}
+  ],
+  "bench": [
+    {"file": "engineering/engineering-ai-engineer.md", "name": "AI Engineer", "emoji": "🤖", "division": "engineering", "vibe": "", "description": "LLM 抽取接口与录制夹具设计时可加选"},
+    {"file": "testing/testing-evidence-collector.md", "name": "Evidence Collector", "emoji": "📸", "division": "testing", "vibe": "", "description": "G0 验收取证风格参考"}
+  ],
+  "notes": "用户 2026-09-11 拍板：Claude 侧一律 opus；跳过 HTML 挑人页；Codex 各窗口自派、G0 管集成 review；app 路径 quant-lab/（仓库根）。"
+}

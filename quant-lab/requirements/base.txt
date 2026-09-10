@@ -1,0 +1,7 @@
+# 共用底座（2026-09-11 PyPI 核定版本，改版本走 G0 契约变更）
+polars==1.44.2
+pyarrow==25.0.1
+duckdb==1.5.5
+pydantic==2.13.5
+pytest==9.1.1
+numpy>=2.2,<3

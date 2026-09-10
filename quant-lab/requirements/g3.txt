@@ -1,0 +1,6 @@
+-r base.txt
+polars_ta==0.5.17
+TA-Lib==0.7.1
+arch==8.0.0
+deap==1.4.4
+scikit-learn>=1.6

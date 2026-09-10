@@ -1,0 +1,4 @@
+-r base.txt
+# 1.227.0 是选型报告核过源码的版本；升级到 1.231.0 需重新核 SimulatedExchange/mark/funding 路径后走 G0 契约变更
+nautilus_trader==1.227.0
+httpx>=0.27

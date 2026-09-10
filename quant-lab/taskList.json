@@ -1,0 +1,353 @@
+{
+  "project": "quant-lab",
+  "createdAt": "2026-09-11",
+  "updatedAt": "2026-09-10T17:59:03Z",
+  "phase": "P0",
+  "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
+  "contracts": {
+    "frozen": false,
+    "files": [
+      "contracts/README.md",
+      "contracts/research-schema.md",
+      "contracts/execution-interface.md",
+      "contracts/feature-snapshot.md"
+    ],
+    "changeLog": []
+  },
+  "modules": {
+    "data": {
+      "owner": "G1",
+      "status": "todo",
+      "progress": 0,
+      "blockers": [],
+      "provides": [
+        "data/lake/telegram/{bronze,silver,gold}",
+        "data/quarantine/telegram.parquet",
+        "quant_lab.data.api",
+        "docs/adr/ADR-G1-episode-engine.md"
+      ],
+      "consumes": [
+        "quant_lab.market.asof",
+        "data/lake/market/silver 1m markPriceKlines"
+      ],
+      "artifacts": [],
+      "review": {},
+      "lastUpdate": "",
+      "tasks": [
+        {
+          "id": "D-01",
+          "title": "环境 + 骨架 + research-schema 字段定稿提交 G0",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m pytest tests/data -q --co 2>&1 | grep -E 'collected [1-9]' && .venv-g1/bin/python -c 'import quant_lab.data'"
+        },
+        {
+          "id": "D-02",
+          "title": "[Codex ADR] episode 引擎设计：六级产线、双轨状态机、决策图闭包、merge/split 失效",
+          "status": "todo",
+          "verify": "test $(wc -l < docs/adr/ADR-G1-episode-engine.md) -ge 150 && grep -q 'invalid_transition' docs/adr/ADR-G1-episode-engine.md && grep -q 'tombstone' docs/adr/ADR-G1-episode-engine.md"
+        },
+        {
+          "id": "D-03",
+          "title": "层 1 归一：TDesktop JSON/Telethon 夹具 → message_version（三时钟、版本表、相册、媒体清单、quarantine、损耗表）",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m pytest tests/data/test_normalize.py -q && .venv-g1/bin/python -m quant_lab.data.normalize --fixture tests/data/fixtures/tdesktop_sample --out /tmp/ql-norm && .venv-g1/bin/python -c \"import polars as pl;d=pl.read_parquet('/tmp/ql-norm/message_version.parquet');assert d.height>0;print(d.height)\""
+        },
+        {
+          "id": "D-04",
+          "title": "层 2 去重与跨频道复制组（simhash 近重复、转发指针、duplicate_group）",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m pytest tests/data/test_dedup.py -q"
+        },
+        {
+          "id": "D-05",
+          "title": "层 3 抽取：确定性解析器 + LLM 抽取接口（录制夹具，真实调用 gated）+ span 定位校验 + 字段级共错率报告",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m pytest tests/data/test_extract.py -q && .venv-g1/bin/python -m quant_lab.data.extract --bench ../eval/hermes/v3-trader-signal-bench --report /tmp/ql-extract.json && .venv-g1/bin/python -c \"import json;r=json.load(open('/tmp/ql-extract.json'));assert r['n_items']>=30 and r['parser_recall']>0;print(r)\"",
+          "gated": "真实 LLM 调用等 API 预算与云上传范围拍板"
+        },
+        {
+          "id": "D-06",
+          "title": "层 4/5 规范化 + 行情校验（品种当时身份、方向/价格/档位、数量级门 δ≥ln3、合理性带 T_plaus、MARK_STALE；G2 as-of 未就绪前用桩）",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m pytest tests/data/test_normalize_validate.py -q"
+        },
+        {
+          "id": "D-07",
+          "title": "规则链接器 + 双轨状态机 + 决策图/描述图（按 ADR-G1）；五反例夹具：编辑SL不回填 / 未成交触TP不闭仓 / 超时只过期 / 同向双单不误并 / 提前管理留缺入口",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m pytest tests/data/test_linker.py tests/data/test_lifecycle.py -q && .venv-g1/bin/python -c \"from quant_lab.data.api import load_episodes;d=load_episodes('fixture-v1');assert d.height>=5;print(d.select('episode_id','author_plan_state','author_claim_state'))\""
+        },
+        {
+          "id": "D-08",
+          "title": "PoC 1a 导出接入：TDesktop JSON + 媒体归档 + Telethon 次号对照拉取 + A.1 必测清单报告（消息数/信号率抽样/编辑比例/图片比例/回复比例/跨年分布）",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m quant_lab.data.harvest --report /tmp/ql-1a.json && .venv-g1/bin/python -c \"import json;r=json.load(open('/tmp/ql-1a.json'));assert r['n_messages']>0 and 'edit_ratio' in r;print(r)\"",
+          "gated": "Telegram 独立研究账号 / 导出授权与频道范围"
+        },
+        {
+          "id": "D-09",
+          "title": "标注与分级放行工具：Label Studio episode 模板（Repeater）、全窗口抽样框（6h 窗、π 加权召回）、AQL 200/3 放行计算器与 OC 表、Wilson、金标分歧率报告、数据集元数据",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m pytest tests/data/test_audit.py -q && .venv-g1/bin/python -m quant_lab.data.audit --oc 200 3 --oc 400 0 | grep -E '0\\.5%.*98\\.1|0\\.5%.*13\\.4'"
+        },
+        {
+          "id": "D-10",
+          "title": "[Codex review] P1 里程碑 review（D-03..D-09 合成数据链路），必修项闭合",
+          "status": "todo",
+          "verify": "test -f docs/adr/review-G1-P1.md && ! grep -q '必修.*未闭合' docs/adr/review-G1-P1.md"
+        },
+        {
+          "id": "D-11",
+          "title": "PoC 1b 五频道扩量：全清洗 + 产线 + 损耗表 + 200/3 批验收 + 最终集全审计划",
+          "status": "todo",
+          "verify": ".venv-g1/bin/python -m quant_lab.data.api --loss latest | grep -E 'layer=5.*output_n=[1-9]'",
+          "gated": "1a 过门 + 预算 + 数据保留合同"
+        }
+      ]
+    },
+    "market": {
+      "owner": "G2",
+      "status": "todo",
+      "progress": 0,
+      "blockers": [],
+      "provides": [
+        "data/lake/market/{bronze,silver,_manifest}",
+        "quant_lab.market.asof",
+        "quant_lab.market.execution (simulate/simulate_batch)",
+        "docs/adr/ADR-G2-execution-kernel.md",
+        "docs/adr/report-G2-kernel-AB.md"
+      ],
+      "consumes": [
+        "data 的历史种子品种清单（2b）"
+      ],
+      "artifacts": [],
+      "review": {},
+      "lastUpdate": "",
+      "tasks": [
+        {
+          "id": "M-01",
+          "title": "环境 + 骨架 + execution-interface 签名定稿提交 G0（as-of 签名、ExecutionRequest/Result）",
+          "status": "todo",
+          "verify": ".venv-g2/bin/python -m pytest tests/market -q --co 2>&1 | grep -E 'collected [1-9]' && .venv-g2/bin/python -c 'import quant_lab.market, nautilus_trader;print(nautilus_trader.__version__)'"
+        },
+        {
+          "id": "M-02",
+          "title": "[Codex ADR] 执行内核设计：候选 A 参考实现架构（挂单队列/部分成交/撤改/组合单/账户约束/mark 触发/funding 账务/路径情景）、不变量集、最小 episode 集规格、Nautilus 适配器审计与候选 B SimulationModule 方案、A/B 比较表模板",
+          "status": "todo",
+          "verify": "test $(wc -l < docs/adr/ADR-G2-execution-kernel.md) -ge 200 && grep -q 'SimulationModule' docs/adr/ADR-G2-execution-kernel.md && grep -q 'is_stop_matched' docs/adr/ADR-G2-execution-kernel.md"
+        },
+        {
+          "id": "M-03",
+          "title": "PoC 2a：Binance Vision 下载器（klines/markPriceKlines/indexPriceKlines/premiumIndexKlines 1m+15m、fundingRate、metrics）+ per-partition manifest + 原子改名幂等 + sha256；先现有 44 品种 2024-01 起",
+          "status": "todo",
+          "verify": ".venv-g2/bin/python -m pytest tests/market/test_vision.py -q && .venv-g2/bin/python -m quant_lab.market.vision fetch --symbol BTCUSDT --type markPriceKlines --interval 1m --month 2024-01 && .venv-g2/bin/python -c \"import json,glob;m=json.load(open(sorted(glob.glob('data/lake/market/_manifest/*BTCUSDT*markPriceKlines*1m*2024-01*'))[0]));assert m['actual_rows']>40000;print(m)\""
+        },
+        {
+          "id": "M-04",
+          "title": "分区体检 + quarantine：完整性对上市日历、重复键、单调、OHLC 不变量、尖刺标记、funding 周期、生命周期与精度表、schema 哈希",
+          "status": "todo",
+          "verify": ".venv-g2/bin/python -m pytest tests/market/test_partition_check.py -q"
+        },
+        {
+          "id": "M-05",
+          "title": "三时钟 as-of 库：asof_join / last_closed_bar / mark_price_at；性质测试等号、晚到、同秒歧义、未收盘不可见、MARK_STALE",
+          "status": "todo",
+          "verify": ".venv-g2/bin/python -m pytest tests/market/test_asof.py -q"
+        },
+        {
+          "id": "M-06",
+          "title": "执行合同 schema（pydantic）+ 不变量断言 + ≥10 手工最小 episode 期望夹具",
+          "status": "todo",
+          "verify": ".venv-g2/bin/python -m pytest tests/market/test_contract.py -q && test $(ls tests/market/fixtures/episodes/*.json | wc -l) -ge 10"
+        },
+        {
+          "id": "M-07",
+          "title": "候选 A 参考实现 v0（按 ADR-G2）：最小 episode 全过 + 不变量全过 + trace_hash 重放一致",
+          "status": "todo",
+          "verify": ".venv-g2/bin/python -m pytest tests/market/test_kernel_a.py -q && .venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A | grep -E 'passed=(1[0-9]|[2-9][0-9]) failed=0'"
+        },
+        {
+          "id": "M-08",
+          "title": "候选 B spike（Nautilus 1.227 + SimulationModule mark/funding）+ A/B 比较报告（代码量、可验证性、性能、维护面、逐 episode 差异按解释码）",
+          "status": "todo",
+          "verify": "test -f docs/adr/report-G2-kernel-AB.md && grep -qE 'episode.*diff' docs/adr/report-G2-kernel-AB.md"
+        },
+        {
+          "id": "M-09",
+          "title": "执行接口输出：simulate_batch → ExecutionResult DataFrame，与 G3 EventEvaluator 对接冒烟（合成 episode）",
+          "status": "todo",
+          "verify": ".venv-g2/bin/python -m pytest tests/market/test_execution_api.py -q"
+        },
+        {
+          "id": "M-10",
+          "title": "[Codex review] P1 里程碑 review（M-03..M-09），必修项闭合",
+          "status": "todo",
+          "verify": "test -f docs/adr/review-G2-P1.md && ! grep -q '必修.*未闭合' docs/adr/review-G2-P1.md"
+        },
+        {
+          "id": "M-11",
+          "title": "PoC 2b：按 G1 历史种子扩品种全集 + 同样体检；T_plaus 校准产物",
+          "status": "todo",
+          "verify": ".venv-g2/bin/python -m quant_lab.market.vision coverage --from-seeds ../quant-lab/data/lake/telegram/gold | grep -E 'instruments=[1-9]'",
+          "gated": "依赖 D-11 种子清单"
+        }
+      ]
+    },
+    "research": {
+      "owner": "G3",
+      "status": "todo",
+      "progress": 0,
+      "blockers": [],
+      "provides": [
+        "quant_lab.research.{ops,features,evaluator,protocol,api}",
+        "data/lockbox/ledger.parquet",
+        "docs/adr/ADR-G3-expression-and-stats-engine.md",
+        "docs/adr/report-G3-null-model.md",
+        "docs/adr/report-G3-backend-spike.md"
+      ],
+      "consumes": [
+        "data gold/episode 决策图",
+        "market asof + simulate_batch"
+      ],
+      "artifacts": [],
+      "review": {},
+      "lastUpdate": "",
+      "tasks": [
+        {
+          "id": "R-01",
+          "title": "环境 + 骨架 + 按两份上游签名写桩（fake episodes / fake bars / fake execution）",
+          "status": "todo",
+          "verify": ".venv-g3/bin/python -m pytest tests/research -q --co 2>&1 | grep -E 'collected [1-9]' && .venv-g3/bin/python -c 'import quant_lab.research, polars_ta, deap, arch'"
+        },
+        {
+          "id": "R-02",
+          "title": "[Codex ADR] 表达式与统计引擎设计：AST/lint/规范化哈希、算子注册与契约测试框架、后端抽象（polars / polars_ta）、feature_snapshot 缓存、EventEvaluator、walk-forward/purge、账本、max-t、空模型、分档",
+          "status": "todo",
+          "verify": "test $(wc -l < docs/adr/ADR-G3-expression-and-stats-engine.md) -ge 200 && grep -q 'canonical_hash' docs/adr/ADR-G3-expression-and-stats-engine.md && grep -q 'max-t' docs/adr/ADR-G3-expression-and-stats-engine.md"
+        },
+        {
+          "id": "R-03",
+          "title": "AST JSON schema + lint + 规范化哈希（未知节点/非有限常量/深度/宽度/负 Ref/center 全拒）",
+          "status": "todo",
+          "verify": ".venv-g3/bin/python -m pytest tests/research/test_ast.py -q"
+        },
+        {
+          "id": "R-04",
+          "title": "算子注册表 + 契约测试框架 + 首批 18 算子 polars 后端（截断重算 / NaN 注入 / 墙钟缺 bar / 手算 reference）",
+          "status": "todo",
+          "verify": ".venv-g3/bin/python -m pytest tests/research/test_ops_contract.py -q && .venv-g3/bin/python -c \"from quant_lab.research.ops import REGISTRY;assert len(REGISTRY)>=18;print(sorted(REGISTRY))\""
+        },
+        {
+          "id": "R-05",
+          "title": "polars_ta 后端变体对拍 + 8a spike 报告（同 10 算子、契约通过率、冷/热耗时、峰值内存、416 万行夹具）",
+          "status": "todo",
+          "verify": "test -f docs/adr/report-G3-backend-spike.md && grep -qE 'cold_s|冷跑' docs/adr/report-G3-backend-spike.md"
+        },
+        {
+          "id": "R-06",
+          "title": "feature_snapshot（as-of 对齐、缓存 key、validity）+ EventEvaluator（OpportunitySet、簇均权 θ、NaN→skip、nan_rate 门）",
+          "status": "todo",
+          "verify": ".venv-g3/bin/python -m pytest tests/research/test_features.py tests/research/test_evaluator.py -q"
+        },
+        {
+          "id": "R-07",
+          "title": "walk-forward + PurgedKFold(t1) 参考实现 + purge/embargo 性质测试 + 尝试账本",
+          "status": "todo",
+          "verify": ".venv-g3/bin/python -m pytest tests/research/test_protocol.py -q && .venv-g3/bin/python -c \"import polars as pl;d=pl.read_parquet('data/lockbox/ledger.parquet');assert d.height>0;print(d.height)\""
+        },
+        {
+          "id": "R-08",
+          "title": "共同日历块 max-t bootstrap + 空模型（整块残差重采样）+ FPR/功效验收（合成 T1 规模 1000 次全流程）",
+          "status": "todo",
+          "verify": ".venv-g3/bin/python -m pytest tests/research/test_maxt.py -q && test -f docs/adr/report-G3-null-model.md && grep -qE 'FPR.*(CI|区间)' docs/adr/report-G3-null-model.md"
+        },
+        {
+          "id": "R-09",
+          "title": "分档报告（每折 K、DEFF、档位、p 硬顶）+ 封顶小语法枚举生成器 + run_protocol 端到端（合成）",
+          "status": "todo",
+          "verify": ".venv-g3/bin/python -m quant_lab.research.api run --config tests/research/fixtures/protocol_synthetic.yaml --out /tmp/ql-proto && .venv-g3/bin/python -c \"import json;r=json.load(open('/tmp/ql-proto/report.json'));assert r['tier'] and r['n_attempts']>0 and r['theta'] is not None;print(r)\""
+        },
+        {
+          "id": "R-10",
+          "title": "[Codex review] P1 里程碑 review（R-03..R-09），必修项闭合",
+          "status": "todo",
+          "verify": "test -f docs/adr/review-G3-P1.md && ! grep -q '必修.*未闭合' docs/adr/review-G3-P1.md"
+        }
+      ]
+    },
+    "orchestrator": {
+      "owner": "G0",
+      "status": "todo",
+      "progress": 0,
+      "blockers": [],
+      "provides": [
+        "contracts/",
+        "tests/integration/test_e2e_synthetic.py",
+        "INTEGRATION_REPORT.md",
+        "docs/adr/review-G0-integration.md",
+        "用户决策闸门跟踪"
+      ],
+      "consumes": [],
+      "artifacts": [],
+      "review": {},
+      "lastUpdate": "",
+      "tasks": [
+        {
+          "id": "OR-01",
+          "title": "契约定稿：三份子契约与 G1/G2 提交的签名合并，置 frozen",
+          "status": "todo",
+          "verify": "python scripts/task.py show | grep -q 'frozen' ; test -f contracts/research-schema.md && test -f contracts/execution-interface.md && test -f contracts/feature-snapshot.md"
+        },
+        {
+          "id": "OR-02",
+          "title": "评审循环（/loop 20m）：跑各模块 verify、核接缝、写 review、推进里程碑",
+          "status": "todo",
+          "verify": "python scripts/task.py show"
+        },
+        {
+          "id": "OR-03",
+          "title": "阻塞协调 + 用户决策闸门跟踪（合并稿 H.2 六项，状态写 integration.blockers）",
+          "status": "todo",
+          "verify": "python scripts/task.py show | grep -E 'blockers'"
+        },
+        {
+          "id": "OR-04",
+          "title": "端到端合成冒烟：合成 Telegram 夹具 → G1 episode → G2 as-of + simulate_batch → G3 feature_snapshot + EventEvaluator → θ 非空、账本非空、损耗表非空",
+          "status": "todo",
+          "verify": ".venv-g0/bin/python -m pytest tests/integration/test_e2e_synthetic.py -q"
+        },
+        {
+          "id": "OR-05",
+          "title": "[Codex adversarial review] 集成 review：前视、幸存偏差、契约漂移、凭据边界、AGENTS.md 铁律",
+          "status": "todo",
+          "verify": "test -f docs/adr/review-G0-integration.md && ! grep -q '必修.*未闭合' docs/adr/review-G0-integration.md"
+        },
+        {
+          "id": "OR-06",
+          "title": "INTEGRATION_REPORT.md + readyForStitch",
+          "status": "todo",
+          "verify": "test -f INTEGRATION_REPORT.md && grep -q 'readyForStitch' INTEGRATION_REPORT.md"
+        }
+      ]
+    }
+  },
+  "integration": {
+    "reviews": [],
+    "blockers": [],
+    "milestones": {
+      "P0_地基": {
+        "done": false,
+        "gate": "三窗口 venv 就绪；OR-01 契约 frozen；ADR-G1/G2/G3 落盘且窗口按 ADR 开工；tests 可 collect"
+      },
+      "P1_主链路_合成数据": {
+        "done": false,
+        "gate": "D-03..D-09 / M-03..M-09 / R-03..R-09 全部 verify 实跑通过；OR-04 合成端到端 θ 非空；每窗口 Codex P1 review 必修闭合"
+      },
+      "P2_硬化_真实数据": {
+        "done": false,
+        "gate": "用户闸门拍板后 D-08 1a 实测报告、M-03 真实分区、R-08 FPR/功效达标；A/B 内核定型；OR-05 adversarial review 必修闭合；INTEGRATION_REPORT 交付。仍为 research_only"
+      }
+    },
+    "readyForStitch": false
+  }
+}

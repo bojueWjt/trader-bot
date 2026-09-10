@@ -1,0 +1,4 @@
+# 环境仲裁：每个窗口只建自己的 venv（.venv-g1 / .venv-g2 / .venv-g3 / .venv-g0），绝不共用 .venv
+# 安装失败先重试再换镜像，不换环境
+index-url = "https://pypi.org/simple"
+extra-index-url = ["https://pypi.tuna.tsinghua.edu.cn/simple"]
