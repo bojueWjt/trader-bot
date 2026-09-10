@@ -166,3 +166,29 @@ G1 在 D-07 看板 note 中主动申报三处与 §9.1 的偏离。G0 已实跑�
 4. **G0（OR-04）**：端到端冒烟对 `n_clusters > 0` 与 `weights.height == len(ids)` 双断言，作为回归闸。
 
 **验收**：G1 侧 `load_episodes('fixture-v1')` 三列 null_count 全 0；G3 侧对 cluster_id 含 null 的输入有一条断言测试；OR-04 上述两个断言绿。
+
+### 9.8 裁定 A6：`gold` 发布门与"改门必须同步发布"义务（2026-09-11 OR-02 R4，规范性）
+
+**触发**：G1 于 04:22/04:29 在 `quant_lab.data.graph.verify_manifest` / `api.load_episodes` 上线了发布门（要求 manifest `status == "published"` 且逐文件 sha256 与 `files` 一致、未 tombstone），但 `gold/_manifest/fixture-v1.json` 仍是 04:04 的旧格式（无 `status`、无 `files`）。后果：`load_episodes("fixture-v1")` 抛 `LookupError: graph_version=fixture-v1 状态 None，不可消费`，OR-04 六条集成测试**全部 ERROR at setup**，G1→G2/G3 接缝在 R4 全时段黑屏。
+
+**裁定**：
+
+1. **发布门本身合规并纳入契约**（属 G1，D-07/D-09 属主）：研究侧读取入口（`load_episodes` 及一切默认返回决策视图的 API）**必须**在读前校验单一发布指针，缺 manifest / `status != "published"` / 文件 hash 不符 / 已 tombstone 一律抛 `LookupError`，禁止降级为空表返回。"静默为空"在这里等价于伪造数据集。
+2. **manifest 必备字段**：`graph_version`、`input_hash`、`rule_versions`、`assumptions`、`files{文件名 → sha256}`、`counts`、`graph_kind`、`status`、`built_at`。旧格式（缺 `status`/`files`）视为**未发布**。
+3. **改门即同步发布（本条为本裁定的核心义务）**：任何窗口收紧上游读取前置条件时，**同一次交付内**必须一并重建并发布满足新门的制品，或提供一条幂等的重建命令并把它写进该任务的 `verify`。上游改门而不发布 = 单方面切断下游，等同契约漂移，G0 一律判 fail。
+4. **G3 侧**：不得为绕开发布门直接 `pl.read_parquet` gold 制品（审计/取证入口除外，且须显式命名为 audit 路径）。G3 遇 `LookupError` 应原样冒泡，不得 try/except 退回合成桩 —— 否则 R-09 会变成"因为用了桩所以永远绿"。
+5. **G0 侧**：OR-04 对 `load_episodes` 的 `LookupError` 不做兜底，直接暴露为集成失败。
+
+**验收**：G1 提供并跑通一条重建发布命令，`load_episodes("fixture-v1")` 返回非空 DataFrame 且 §9.7 A5 三列 null_count 全 0；OR-04 六条不再 ERROR at setup。
+
+### 9.9 裁定 A7：review 类任务的 verify 必须判读终裁行（2026-09-11 OR-02 R4，规范性）
+
+**触发**：D-10 的 verify `test -f docs/adr/review-G1-P1.md && ! grep -q '必修.*未闭合' docs/adr/review-G1-P1.md` 实测 **rc=0（绿）**，而该文档第 3 行写的是「终裁：**fail**。必修共 **16 条（S01–S16）**」，第 338 行写的是「未关闭任何完整 S 项……终裁保持 fail」。负向 grep 依赖对方措辞，是**结构性假绿**。
+
+**裁定**：D-10 / M-10 / R-10 及后续一切 `[Codex review] … 必修项闭合` 型任务，其 `verify` 必须**正向**判读终裁行，例如：
+
+```
+docs/adr/review-G<N>-P1.md 中最后一条「终裁」/「二审终裁」行的取值必须为 pass
+```
+
+参考实现（口径，不强制字面）：`tail -40 <file> | grep -E '^(二审)?终裁[：:] *\*{0,2}pass'`。同时：(a) 终裁行在文档中**唯一可判读**（多轮 review 用「二审终裁」「三审终裁」区分，且以最后一条为准）；(b) 仅有必修条目清单而无终裁行 = 未通过；(c) **任何窗口不得凭负向 grep 的 rc=0 把 review 任务置 done**，G0 不认，发现即回退。M-10 现行 verify 恰好 rc=1（真实反映 fail），可暂留但同样应改为正向判读。
