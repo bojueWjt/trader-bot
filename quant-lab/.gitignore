@@ -1,4 +1,4 @@
-data/
+/data/
 .venv-g*/
 *.tmp
 taskList.lock/
