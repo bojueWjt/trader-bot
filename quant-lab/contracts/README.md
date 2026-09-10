@@ -61,6 +61,23 @@ python3 scripts/task.py block research --on "契约: feature-snapshot §3 缺 we
 4. 长驻服务（Label Studio、DuckDB 查询服务）用 `nohup` 起，端口固定：Label Studio 8081、任何 dev server 8090+，不抢生产端口。
 5. 研究湖 `data/` 是共享目录：**bronze 只读带 sha256，只有 G1（telegram）和 G2（market）各写自己的分区**，G3 只读。
 
+   **5.1 分区归属（2026-09-11 OR-02 R5 加严，规范性）**——每个窗口**只准**删改自己名下的路径：
+
+   | 窗口 | 可写/可删路径 | 其余路径 |
+   |---|---|---|
+   | G1 data | `data/lake/telegram/**`、`data/quarantine/telegram.parquet` | 只读 |
+   | G2 market | `data/lake/market/**`、`data/quarantine/market.parquet` | 只读 |
+   | G3 research | `data/lockbox/**`（尝试账本）、`data/cache/research/**`（自建）；`data/lake/**` 一律**只读** | 只读 |
+   | G0 orchestrator | 不写 `data/`（集成冒烟用 `tmp_path` 或 `data/tmp/e2e-*`） | 只读 |
+
+   **5.2 禁止对研究湖根做删除。** 任何窗口的源码、脚本、任务 `verify`、临时命令中**不得**出现对 `data/`、`data/lake/`、`data/quarantine/`（目录本身）的 `rm -rf` / 递归删除 / 重建。清理只能精确到本窗口分区（例：`rm -rf data/lake/telegram data/quarantine/telegram.parquet`），且必须是**幂等重建**流程的一部分。
+
+   **5.3 违规判定**：删改他人分区 = **契约漂移，G0 一律判 `fail`**，该窗口当轮里程碑不得推进，并须(a) 看板 note 立案，(b) 协助被害窗口重建，(c) 把致害命令从源码与 `verify` 中移除后由 G0 复核命令全文。
+
+   **5.4 判例**：2026-09-11 04:38 / 04:44 G1 两次 `rm -rf data` 清空 G2 真实行情湖（`data/lake/market`）。已由 G1 立案、致歉、整改（D-07 `verify` 收敛为 telegram 子树），G2 重新入湖。本条即由该事故生成。
+
+   **5.5 G0 复核义务**：任何含删除动作的 `verify`，G0 在实跑前必须先打印其全文并确认删除范围不触及 §5.2 的根路径；不满足即**不跑并判 fail**。
+
 ## 4. 模块接缝表
 
 | 模块 | 窗口 | provides | consumes | 契约文件 |

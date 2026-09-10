@@ -192,3 +192,95 @@ docs/adr/review-G<N>-P1.md 中最后一条「终裁」/「二审终裁」行的�
 ```
 
 参考实现（口径，不强制字面）：`tail -40 <file> | grep -E '^(二审)?终裁[：:] *\*{0,2}pass'`。同时：(a) 终裁行在文档中**唯一可判读**（多轮 review 用「二审终裁」「三审终裁」区分，且以最后一条为准）；(b) 仅有必修条目清单而无终裁行 = 未通过；(c) **任何窗口不得凭负向 grep 的 rc=0 把 review 任务置 done**，G0 不认，发现即回退。M-10 现行 verify 恰好 rc=1（真实反映 fail），可暂留但同样应改为正向判读。
+
+### 9.10 裁定 A8–A12：G1 五项裁决请求的逐条答复（2026-09-11 OR-02 R5，规范性）
+
+来源：G1 于 04:40 看板 note「需 G0 裁决（不算 G1 自决）」提交五项。G0 已读 `contracts/` 全文与 G1 note 原文，并在 `.venv-g0`（polars 1.44.2）实跑取证后裁定如下。
+
+#### 9.10.1 裁定 A8（答 CR-01）：全链 `Decimal(38,12)`，struct 固定键**准**且键集入契约
+
+**取证**：`load_episodes('fixture-v1')` 的 `order_plan` 现为 `entries[].{price_lo, price_hi, fraction}`、`stop.price`、`tps[].{level, fraction}`、`sizing.qty` 全部 `Float64`；G2 `contract.py` 对同名字段用 `Decimal` + `check_decimal`（标度 12）。G0 实跑 polars 1.44.2：`pl.Decimal(38,12)` 在**列、Struct 内嵌、Parquet 往返**三种场景均正常（`Decimal('1.234567890123')` 原值回读，Struct 内可空）。**故"polars 不支持"不成立，Float64 不是被迫选择。**
+
+**裁定（数值精度全链一致）**：
+
+1. **凡进入 `build_request` / `trace_hash` / `derivation_hash` / `decision_snapshot_hash` 输入的数值，全链使用 `Decimal`，落盘编码为 `pl.Decimal(38,12)`，禁止 `Float64`。** 覆盖列：`gold/episode.order_plan` 的 `entries[].{price_lo, price_hi, fraction}`、`stop.price`、`tps[].level`、`tps[].fraction`、`sizing.qty`；`silver/extracted_event` 的 `size_hint{qty, fraction, notional}` 与 `tps[].level`（§9.1 原文即写 `decimal?`，Float64 属**未申报漂移**，本条是执行而非新增要求）。
+2. **理由不是洁癖，是两处可复现的破坏**：(a) `Decimal(float)` 在接缝处产生 `0.1 → 0.1000000000000000055511151231257827` 这类不可复算尾数，`trace_hash` 随平台/版本漂移；(b) 3 腿浮点等分 `1/3` 之和 `!= 1`，直接触发 G2 `sum(entries.fraction) != 1` 的 `ContractError`——即"随机在某些 episode 上报错"。
+3. **哈希序列化口径**：Decimal 进哈希前一律规范化为**定标度 12 的十进制字符串**（不去尾零、不用科学计数法、负号在前），使哈希与存储编码解耦。G1 须在 `derivation_hash` 的实现里落这条，并加一条测试：同一逻辑值以 `Decimal("6")` / `Decimal("6.000000000000")` 构造，哈希相同。
+4. **时间戳与非哈希路径**：`Datetime(us, UTC)` 维持不变；纯展示/统计列（如 `sampling_probability`、`link_confidence`）可保留 `Float64`，但**不得**进任何哈希输入。
+5. **struct 固定键：准。** 固定键优于 `map`（schema 稳定、polars 可下推、缺键即 schema 漂移可查）。§2 的 `eligibility_by_estimand: map[string,bool]` 按本条改为 **struct 固定键**。以下键集**即刻冻结**，增删键 = 契约变更，须 `block` 并由 G0 走 changeLog：
+   - `claimed_outcome` / `reconstructed_outcome`: `{kind, at, source_version_id, execution_contract_version}`（`at: Datetime(us, UTC)`；`reconstructed_outcome` 由 G2 结果回填）。
+   - `eligibility_by_estimand`: `{description, entry_decision, execution, original_entry, price_check, outcome}`（全部 `Boolean`，**不可空**——null 会让"不合格"与"没算"不可分）。
+   - `order_plan`: `{instrument_id, side, entries[], stop, tps[], sizing, expiry, reduce_only_exit}`，子结构键按 execution-interface §3.1 / R5。
+6. **G1 待补（下轮 verify 点）**：`claimed_outcome.kind` / `reconstructed_outcome.kind` 的**枚举取值域**尚未在任何契约里定义。G1 须在下轮 note 申报取值全集（连同 `kind` 与 `author_claim_state` 的映射关系），由 G0 并入本节冻结。未申报前，G3 不得对 `kind` 做字面量分支。
+7. **G3 义务**：读 Decimal 列后不得为图方便统一 `.cast(pl.Float64)` 再回填任何哈希输入；特征值本身可用 float（特征不进 `trace_hash`）。
+
+**属主**：G1（D-07/D-09）。**验收**：`load_episodes('fixture-v1').schema` 中上述列全为 `Decimal(precision=38, scale=12)`；`Decimal("6")` vs `Decimal("6.000000000000")` 哈希一致的测试通过；G0 OR-04 的 `build_request` 不再因 fraction/price 类型报错。
+
+#### 9.10.2 裁定 A9（答 CR-07）：只立 **G1 → 下游** 的最小失效协议；跨模块 ack 与备份恢复**不在 P1**
+
+**裁定**：CR-07 的"跨模块回执"若按全量做，等于要求 G2/G3 实现分布式缓存失效与确认通道，P1 阶段成本远大于收益。G0 只立**最小充分协议**，其余显式推迟：
+
+1. **单一发布指针 + 读前校验**：已由 §9.8 A6 立契（manifest `status=published` + 逐文件 sha256 + tombstone 拒读，缺失一律 `LookupError` 不降级为空表），**这就是失效信号本身**——下游读到 `LookupError` 即知上游制品已失效。本节不重复。
+2. **published 版本不可原地变更**：任何内容变化必须发新 `graph_version`；旧版只能置 tombstone（带 `tombstoned_at`、`reason`、可选 `successor_graph_version`），**不得**保留同名但内容不同的制品。（§9.6/S10 已有"同名 graph_version 输入不同拒写"，本条把它提升为跨模块义务。）
+3. **新增：可发现的版本索引** `gold/_manifest/index.json` —— `[{graph_version, status, built_at, tombstoned_at?, successor_graph_version?, input_hash}]`，按 `built_at` 升序。下游（G2/G3/G0）由此发现"当前可消费版本"，不得靠猜文件名或扫目录。属主 G1，随发布原子更新。
+4. **消费方的"回执"就是缓存键**：G3 的 `feature_snapshot` 缓存键**必须**包含 `graph_version` 与 `derivation_hash`；G2 的 `ExecutionRequest` 已含 `graph_version` 且进 `trace_hash`。上游换版 ⇒ 键变 ⇒ 旧结果自然不被复用。**P1 不引入任何 ack 通道**，因为内容寻址已覆盖同一语义且无状态。
+5. **禁止绕门**：见 §9.8 A6 第 4 条；本节补一句——G2/G3 缓存中若存在指向已 tombstone `graph_version` 的条目，**读到即丢弃**，不得回退使用。
+
+**不在 P1（列为需用户决定/P2）**：制品备份与恢复协议、`retention_deadline` 的实际清理动作、跨机复制。三者都牵扯保留期与 `consent_id`（用户闸门"数据保留与撤回"），G0 不单方裁定，见 §9.10.6。
+
+#### 9.10.3 裁定 A10（答 A04）：远端数量级规则维持 G1 的**更严**口径，但必须可追溯归因
+
+**G1 实现**：区间入场的**任一端** `|ln(x/ref)| ≥ ln3` 即判 `UNIT_SCALE_CONFLICT`（比"两端都超才算"更严）。
+
+**裁定：准，维持更严。** 理由是**错误代价不对称**：单位/数量级错判会把方向与价位整体搬走，污染的是 θ 本身且**静默**；而误隔离只是少一条种子，且在损耗表里**显式可见、可回收**。P1 合成阶段宁严勿松。
+
+**约束（本条为准入条件，不是建议）**：
+
+1. 隔离记录必须能区分触发分支：`quarantine.field_path` 指到具体端（`order_plan.entries[i].price_lo` / `price_hi`），并在 `observed_value_ref` 或 payload 记 `basis ∈ {far_end_only, near_end_only, both_ends}`。
+2. 损耗表第 5 层（`market_check`）的 `primary_reason_dist` 须能分出 `far_end_only` 分支的条数，使"更严口径多筛掉了几条"可被计数。
+3. **复议条件**：P2 真实数据上若 `far_end_only` 分支的排除量占 `market_check` 层排除量 >20%，G1 须回报 G0 复议，届时可能降级为"告警不隔离"。P1 不复议。
+
+#### 9.10.4 裁定 A11（答 codes.py）：**确认**纯别名，`reasons.py` 为唯一真身
+
+**取证**：`.venv-g0` 实跑 `quant_lab.data.codes.ReasonCode is quant_lab.data.reasons.Reason` → **True**；`Reason` 成员 29 项 = §4 的 28 项 + §9.5 追加的 `EDIT_ORIGINAL_UNAVAILABLE`，无缺无多。
+
+**裁定**：
+
+1. `reasons.py` 是原因码与严重度的**唯一真身**；`codes.py` 只做**纯别名再导出**，不得有独立定义、不得有分支逻辑。这与 §9.5「`quant_lab.data.codes.ReasonCode` 补 `EDIT_ORIGINAL_UNAVAILABLE`」一致。**G0 此前"删除 codes.py"的口头指令到此作废**，以本条为准（已记 changeLog，避免两条相反指令悬空）。
+2. 别名的**规范名**：`codes.ReasonCode`（= `reasons.Reason`）、`codes.FATAL_REASONS`（= `reasons.FATAL`）、`codes.Layer`。G0 实跑发现 `codes.FATAL` 不存在而 `codes.FATAL_REASONS` 存在——**以 `FATAL_REASONS` 为规范名**，`reasons.FATAL` 为真身名，两名指同一 frozenset。
+3. **必须有身份测试**（G1 侧，D-07 或 smoke）：断言 `codes.ReasonCode is reasons.Reason` 且 `codes.FATAL_REASONS is reasons.FATAL`，并对 §4 的 29 项做逐字集合比较。别名一旦退化成拷贝，两处枚举会静默分叉。
+
+#### 9.10.5 裁定 A12（答层 2 同频道同文折叠）：**不自动折叠**，但**必须同簇**
+
+**冲突**：合并稿 A.1「重发不增种子」 vs review-G1-P1 S05「折叠需身份证据」。
+
+**裁定：采纳 review S05——层 2 不自动折叠，只建 `repost_same_channel` 候选待人工/审计确认。** 理由同样是代价不对称：错误折叠**不可逆地**销毁 episode（两个真实机会被并成一个，损失无法从下游恢复）；不折叠只是种子数偏多，是**可测量、可在下游吸收**的偏差。
+
+**但 A.1 的目标不被放弃——它在正确的层被满足：**
+
+1. **同簇约束（新增，规范性）**：未确认的 `repost_same_channel` 候选，其成员**必须**被赋予**同一个 `cluster_id`**（与 `duplicate_group_id` 一致）。理由：`cluster_id` 是 G3 折内簇计数、块 bootstrap 与权重的单位；同簇 ⇒ 即使它们仍是两个 episode，**有效样本量不膨胀**，θ 的置信区间不会被重复计数虚假收窄。这是"重发不增种子"在统计层的等价实现，且是**保守**方向（宁可低估有效 n）。
+2. **审计吸收**：偏多的种子数由 D-09 抽审吸收——`repost_same_channel` 候选进入独立的 `audit_stratum`，抽审给出该层的确认折叠率，写进损耗表映射账（一入多出/多入一出走 `mapping_hash`）。
+3. **报告义务**：D-11 的损耗表报告须单列"未确认重发候选数"与"抽审确认折叠率"，使 P2 能据证据决定是否放开自动折叠。
+4. **不得**以"反正会同簇"为由放松层 2 的证据要求，也不得反过来以"没有身份证据"为由让候选散落到不同簇。
+
+#### 9.10.6 `order_plan` 快照结构的 fraction 同步（对齐 execution-interface §5.10 B8）
+
+`gold/episode.order_plan` 快照中 `entries[].fraction` 与 `tps[].fraction` 为 **`decimal?`（可空）**：原文未给分配比例时 G1 **保持 null，不得均分猜值**（与 review-G1-P1 S06 一致），由 G2 的 `ExecutionPolicy` 按 `entry_fraction_rule` / `tp_fraction_rule` 兜底并在 `ExecutionResult.fraction_source` 标记来源。类型仍受 §9.10.1 A8 约束（`Decimal(38,12)` 可空，不得 `Float64`）。详见 `execution-interface.md` §5.10。
+
+#### 9.10.7 本轮标记为「需用户决定」的事项（G0 不硬裁）
+
+1. **制品备份/恢复与保留期清理协议**（CR-07 剩余部分）：牵涉 `retention_deadline` 的真实删除动作与 `consent_id` 撤回语义，属用户闸门"数据保留与撤回"范畴，P1 不实现，P2 前需用户拍板。
+2. **`risk_acknowledged_by_user`**：D-09 产出的数据集元数据现固定为 `false`；何时、由谁翻为 `true` 是用户决定，任何窗口不得自行翻转。
+
+#### 9.10.8 裁定 A8 附则：`estimand` 词汇表冻结，`"main"` 不是合法 estimand（OR-04 取证）
+
+**取证**：OR-04 上轮的 `StructFieldNotFoundError: 'main'` 归属已定位——`quant_lab/research/evaluator.py:69` 的 `freeze_opportunity_set(episodes, *, estimand: str = "main")` 去读 `eligibility_by_estimand` 的 `"main"` 字段，而 G1 真实 `gold/episode` 的该 struct 键集为 `{description, entry_decision, execution, original_entry, price_check, outcome}`，**没有 `main`**。它在 G3 单测里不报错，只因 `quant_lab/research/synthetic.py:172` 的桩自造了 `{"main": True}`——**桩与真实上游不同构，正是 §9.8 A6 第 4 条警告的"因为用了桩所以永远绿"**。
+
+**裁定**：
+
+1. `estimand` 的合法取值域 = §9.10.1 A8 第 5 条冻结的六个键，**`"main"` 不在其中，即刻废止**。
+2. **G3（R-06 属主）**：`freeze_opportunity_set` 的默认 `estimand` 改为 **`"entry_decision"`**（机会集的语义是"当时存在可判定的入场决策"），并对不在六值域内的 `estimand` 抛 `EvalProtocolError`，不得让 `StructFieldNotFoundError` 冒泡。
+3. **G3**：`synthetic.fake_episodes` 的 `eligibility_by_estimand` 必须产出**完整六键** struct，与 G1 真实 gold 同构；桩与真实上游的 schema 差异一律视为 G3 侧缺陷。
+4. **G0（OR-04）**：端到端冒烟必须用 G1 真实 `load_episodes` 输出而非 G3 桩来驱动 `freeze_opportunity_set`，本条已在本轮实跑中生效。
+
+**验收**：`freeze_opportunity_set(load_episodes('fixture-v1'))` 不再抛 `StructFieldNotFoundError`；非法 estimand 有一条断言测试；`fake_episodes` 与 `load_episodes` 的 `eligibility_by_estimand` schema 逐键相同。

@@ -115,8 +115,9 @@ def test_seam_g3_feature_snapshot_respects_t_dec(episodes):
     insts = tuple(anchors["instrument_id"].unique().sort().to_list())
     t0 = anchors["t_dec"].min() - dt.timedelta(days=30)
     bars = synthetic.fake_bars(insts, start=t0, n_bars=4000, interval="15m", seed=7)
-    ast = {"op": "Ref", "args": [{"op": "field", "name": "close"}, {"const": 1}]}
-    snap = feature_snapshot(anchors, bars, [ast], interval="15m")
+    ast = {"op": "Ref", "args": [{"field": "close"}], "params": {"lag": 1}}
+    # contracts/feature-snapshot.md §3 签名：feature_snapshot(asts, anchors, *, bars, ...)；无 interval 参数
+    snap = feature_snapshot([ast], anchors, bars=bars)
     assert snap.height == anchors.height, "feature_snapshot 行数与 anchors 不一致"
     h = canonical_hash(ast)
     assert f"validity_{h}" in snap.columns or any(c.startswith("validity_") for c in snap.columns)

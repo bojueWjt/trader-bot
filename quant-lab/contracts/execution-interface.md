@@ -124,3 +124,28 @@ G2 的 R9 明确"输出不含 candidate 概念"，而 `feature-snapshot.md` §4 
 4. `ExecutionResult` 的 `entry_ttl_source ∈ {plan, policy}` 作为诊断列输出，损耗归因时可区分"作者给了 TTL" 与 "policy 兜底"。
 
 **属主**：G2（M-06/M-09）。**验收**：`build_request` 对 `entry_ttl_s=None` 的真实 G1 行成功构造；两条 policy 只差 `entry_ttl_s` 时 `policy_hash` 与 `trace_hash` 均不同；`entry_ttl_source` 覆盖两种取值各 ≥1 例。
+
+### 5.10 裁定 B8：`order_plan` 的 `entries[].fraction` / `tps[].fraction` 可空，缺失由 policy 分配（2026-09-11 OR-02 R5，规范性）
+
+> **标号勘误**：§5.9 的标题误写为「裁定 B5」（B5 已用于 §5.6），其规范标号应为 **B7**。引用时一律**以节号为准**（§5.9 = entry_ttl；§5.10 = fraction）。
+
+**触发**：G0 OR-04 以 `build_request` 消费真实 G1 `gold/episode` 行，26 个有 `order_plan` 的 episode 中 **25 个** `entries[].fraction` / `tps[].fraction` 为 null（G1 按 review-G1-P1 S06「不得均分猜值」主动留空），而 G2 `Entry.fraction: Decimal = Decimal(1)` / `Tp.fraction: Decimal`（必填）+ 校验 `sum(entries.fraction) == 1`、`sum(tps.fraction) <= 1` 直接抛 `ValidationError`/`ContractError`，端到端在同一个接缝上第二次断裂。
+
+**裁定**：与 §5.9 **同型**处置——原文未给分配比例时 G1 **不得**猜值（`gold` 不得冒充作者事实），由 G2 用 policy 兜底并把解析结果显式化、可复算。
+
+1. **契约类型**：`order_plan.entries[].fraction` 与 `order_plan.tps[].fraction` 改为 **`decimal?`（可空，默认 None）**。§3 表的 `tps[{level, fraction}]` 与 `report-G2-contract-revision-M01.md` R5 的 `order_plan` 结构按本条修订。`Entry.fraction` 的现有默认值 `Decimal(1)` **必须去掉**（默认 1 会让"作者未给"与"作者明写全仓"不可区分，直接污染 `fraction_source` 的诊断价值）。
+
+2. **`ExecutionPolicy` 增分配规则**（进 `content_hash` ⇒ 改规则必然改 `policy_hash` 与 `trace_hash`）：
+   - `entry_fraction_rule: Literal["equal"] = "equal"` —— 单腿 ⇒ `[1]`；n 腿 ⇒ 每腿 `quantize(1/n, 12)`，**余量并入末腿**使和恰为 `1`。
+   - `tp_fraction_rule: Literal["equal"] = "equal"`、`tp_total_fraction: Decimal = Decimal(1)` —— m 个 TP ⇒ 每档 `quantize(tp_total_fraction/m, 12)`，**余量并入末档**使和恰为 `tp_total_fraction`（≤1）。
+   - 量化标度固定 `12`（与 §9/CR-01 的 `Decimal(38,12)` 全链一致），舍入 `ROUND_DOWN` 后补余量，**禁止**用二进制浮点做等分。
+
+3. **全有或全无**：同一列表内 `fraction` 必须要么全部给出、要么全部为 null。**部分给出 ⇒ `ContractError`**，不得对缺失项做 policy 兜底后再与作者值混合求和——混合会产生"作者给了 0.6，policy 补 0.5"这类和不为 1 且无人负责的分配。
+
+4. **显式化进 `trace_hash`**：`build_request` 解析后必须把结果写进 `ExecutionRequest` 的显式字段 `entry_fractions: tuple[decimal, ...]` 与 `tp_fractions: tuple[decimal, ...]`（不得只在内部展开），并加入 `REQUEST_ID_COLS` ⇒ 进 `trace_hash`。
+
+5. **诊断列**：`ExecutionResult` 增 `fraction_source ∈ {plan, policy}`（与 `entry_ttl_source` 同性质，进 `RESULT_SCALAR_COLS`）。entries 与 tps 若来源不同，取值规则：两者都来自 plan ⇒ `plan`，否则 `policy`（保守，宁可标 policy）。
+
+6. **G1 义务**：保持留空，**不得**均分猜值；`gold` 的 `fraction` 列类型按 §9.10 A8 为 `Decimal(38,12)`（可空），不得为 `Float64`——`1/3` 的浮点等分会让 `sum != 1` 在 G2 侧随机报错。
+
+**属主**：G2（M-06/M-09）主改，G1（D-07）只改 dtype。**验收**：(a) `build_request` 对 25 行 `fraction=null` 的真实 G1 行全部成功构造；(b) 两条只差 `tp_total_fraction` 的 policy 产出不同 `policy_hash` 与 `trace_hash`；(c) `fraction_source` 两种取值各 ≥1 例；(d) 3 腿等分用例 `sum(entry_fractions) == Decimal(1)` 精确成立；(e) 部分给出的用例抛 `ContractError`。
