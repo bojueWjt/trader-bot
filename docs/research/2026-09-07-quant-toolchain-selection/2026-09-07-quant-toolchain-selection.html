@@ -44,9 +44,9 @@ footer{color:#9a958a;font-size:12px;text-align:center;margin-top:20px}
 <h1>频道种子→量化算法：研究工具链技术选型报告</h1>
 <div class="meta">
 <div><b>用途</b>：为 monorepo 内新建的独立量化研究 app（上架前与生产完全分开）选定 M0–M3 工具栈</div>
-<div><b>结论一句话</b>：数据全部免费；回测"永续语义参考实现出主数字、Nautilus 只审兼容性、两者不互证"；样本管道的风险在账号与 LLM 相关错误，不在工具</div>
+<div><b>结论一句话</b>：数据全部免费；回测"Nautilus 有三处永续缺口，补缺口的两条路线（自研参考实现 / Nautilus SimulationModule 扩展）用同一最小 episode 集比较后定型，不互证"；样本管道的风险在账号与 LLM 相关错误，不在工具</div>
 <div><b>口径</b>：深度档三轮（广度 → 验证 → 对抗 + 定量），8 个并行调研 agent + 3 项本机实测；评分 = 能力 30 / 成熟 25 / TCO 20 / 上架对接 15 / 退出 10</div>
-<div><b>日期</b>：分析期 2025-01-01 → 2026-09-07 ｜ 调研截止 2026-09-07 ｜ 2026-09-08 按三份 gpt-6-astra 独立审稿修订（17 条必修全部采纳） ｜ 决策人 Balen</div>
+<div><b>日期</b>：分析期 2025-01-01 → 2026-09-07 ｜ 调研截止 2026-09-07 ｜ 2026-09-08 按三份 gpt-6-astra 审稿修订；2026-09-10 不沿用既有 review、由 gpt-6-astra 从零独立审稿（12 必修）再修订：修正源码核验错误、撤回"主数字只能来自自研"、评分脚本重算 ｜ 决策人 Balen</div>
 </div>
 </header>
 
@@ -59,25 +59,25 @@ footer{color:#9a958a;font-size:12px;text-align:center;margin-top:20px}
 <tr><td>Q1 Telegram 全量历史</td><td><b>Telegram Desktop 官方导出</b>作一次性规范快照（JSON 与媒体分开归档）；<b>Telethon 1.44</b>（次号、独立 session）按 <code>peer_id/message_id</code> 补拉与对照；编辑过且无原版证据的信号隔离</td><td>80</td><td><span class="tag mid">方向性高，待 PoC</span></td></tr>
 <tr><td>Q2 抽取与确认</td><td><b>LLM Batch + 直读原文的确定性解析器</b>作异质校验路径（共错率按字段实测），分歧交第二家 LLM，一致集分层抽审（最小样本 + Wilson 区间）；<b>Label Studio 1.23.0</b>；锁箱 JSONL + sha256 + OpenTimestamps + 重建校验脚本</td><td>82</td><td><span class="tag mid">方向性高，待 PoC</span></td></tr>
 <tr><td>Q3 行情与存储</td><td><b>data.binance.vision 全免费</b>（含 markPriceKlines / fundingRate / metrics）+ 入湖闸门；<b>Parquet 真身 + DuckDB 1.5.5 缓存</b></td><td>89</td><td><span class="tag hi">实测</span></td></tr>
-<tr><td>Q4 回测引擎</td><td>共享 <b>order_plan → 规范执行事件</b> 领域模型；永续三要素（mark 触发 / funding 账务 / 双界）作独立模块，自研参考模型出主数字；<b>Nautilus 1.227.0 经适配器只审 FSM / filter / OrderList / GTD</b>；三层验收：不变量测试、手工最小 episode 期望、Nautilus 差异审计</td><td>78</td><td><span class="tag hi">源码</span></td></tr>
-<tr><td>Q5 特征与统计</td><td><b>TA-Lib 0.7.1</b> + "Alpha158 变体"（窗按墙钟；N/10 只是预注册起点，维数由折内嵌套选择定）；自写 <code>PurgedKFold(t1)</code> 主 CV（参考实现 + 性质测试 + 簇隔离）；arch + 事件簇 bootstrap；imodels</td><td>76–85</td><td><span class="tag hi">高</span>/<span class="tag mid">中</span></td></tr>
+<tr><td>Q4 回测引擎</td><td>共享 <b>order_plan → 规范执行事件</b> 领域模型（只共享 schema/单位/事件封装）；永续三要素作独立模块；<b>主内核未定型</b>：候选 A 自研永续参考实现 + Nautilus 适配器审计，候选 B 单 Nautilus 内核 + SimulationModule 外部 mark 控制器 + 同时序 funding 模块，同一最小 episode 集比较后定；三层验收：不变量、手工最小 episode、差异审计</td><td>78.5</td><td><span class="tag hi">源码</span>/<span class="tag mid">架构待比较</span></td></tr>
+<tr><td>Q5 特征与统计</td><td><b>TA-Lib 0.7.1</b> + "Alpha158 变体"（新实现，逐算子验收）；先冻结 estimand 与分母表，首轮只做 ≤10 个预先指定特征 + 固定规则基线；<b>主评估 = walk-forward</b>，自写 <code>PurgedKFold(t1)</code> 只答稳定性；共同日历块簇 bootstrap；LLM 尝试记账 + 预留最终时序测试；imodels</td><td>76–85</td><td><span class="tag hi">高</span>/<span class="tag mid">中</span></td></tr>
 </table></div>
 <div class="kgrid">
 <div class="kcard"><div class="kn">$0</div><div class="kl">付费行情数据；mark price 1m 与资金费率归档自 2020-01 免费</div></div>
-<div class="kcard"><div class="kn">3 项</div><div class="kl">永续要素在 Nautilus 回测外：mark 触发、funding、同 bar 双界（源码核）</div></div>
+<div class="kcard"><div class="kn">3 项</div><div class="kl">Nautilus 默认回测缺永续要素：mark 触发、funding 结算器、同 bar 路径（源码核；可扩展补齐）</div></div>
 <div class="kcard"><div class="kn">≈60%</div><div class="kl">ICML 2025 榜单/简历任务上两模型同错时同答的比例；交易信号的共错率须自测</div></div>
 <div class="kcard"><div class="kn">&lt;$30</div><div class="kl">5000 条信号双模型 Batch 抽取成本</div></div>
 </div>
 <div class="callout"><div class="ct">三条贯穿结论</div>
 1. 数据全部免费，不买任何付费源；唯一缺的是清算（Coinglass $29/月起），本期不需要。<br>
-2. 回测主数字来自含永续三要素的自研参考模型；Nautilus 只审订单状态机与 filter；两者一致不等于都对，独立真值来自不变量测试与手工最小 episode。<br>
+2. Nautilus 默认实现有三处永续缺口，但缺口不推出唯一架构；自研参考实现与 Nautilus SimulationModule 扩展两条路线比较后定型；独立真值来自不变量测试与手工最小 episode。<br>
 3. 2025-05 起 Telegram 冻结 = 账号连同 session 作废；"两家 LLM 一致"不是正确性证书，共错率按字段实测。</div>
 </section>
 
 <section>
 <h2><span class="no">01</span>方法与局限</h2>
 <p>评分模型：技术选型预设一，<code>总分 = 能力匹配 30% + 生产成熟度 25% + TCO 20% + 上架对接迁移成本 15% + 退出成本 10%</code>。第四维按用户裁定（研究 app 上架前与生产分开）由"生态与集成"改释为"策略上架时与生产 NautilusTrader 节点 / order_plan 契约对接的迁移成本"。置信度反映证据质量，不反映吸引力。</p>
-<div class="callout gold"><div class="ct">局限</div>OpenAI 价格页 403（沿用第三方聚合页）；FloodWait 2025 后无公开实测值；tdl JSON 字段与 TDesktop 导出 <code>edited</code>/<code>reply_to_message_id</code> 未实跑；Label Studio <code>&lt;Repeater&gt;</code> 未实跑；截图价格 OCR 无公开基准；已闭合正事件数 N、事件簇数、特征有效秩尚未数出。Q1/Q2 证据强度已由"高"改为"方向性高、可执行性待 PoC"；总分由脚本复算（TDesktop 75.0、Label Studio 82.8）；本报告各表为唯一权威，research/round3-findings.md 旧分数不再引用。</div>
+<div class="callout gold"><div class="ct">局限</div>OpenAI 价格页 403（沿用第三方聚合页）；FloodWait 2025 后无公开实测值；tdl JSON 字段与 TDesktop 导出 <code>edited</code>/<code>reply_to_message_id</code> 未实跑；Label Studio <code>&lt;Repeater&gt;</code> 未实跑；截图价格 OCR 无公开基准；已闭合正事件数 N、事件簇数、特征有效秩尚未数出。Q1/Q2 证据强度已由"高"改为"方向性高、可执行性待 PoC"；总分由脚本按公布权重重算（2026-09-10，保留两位；09-08 手工复算有误已替换）；权重未反映永续语义、时点正确性、账号可见性等硬约束；本报告各表为唯一权威。</div>
 </section>
 
 <section>
@@ -94,14 +94,14 @@ footer{color:#9a958a;font-size:12px;text-align:center;margin-top:20px}
 <text x="190" y="268" text-anchor="end">Q5 主 CV</text>
 </g>
 <g>
-<rect x="200" y="30" width="482" height="14" fill="#2e6da8"/><text x="688" y="41" fill="#1c1c1e">89.3 Parquet+DuckDB</text>
-<rect x="200" y="47" width="412" height="10" fill="#7fa3cd"/><text x="618" y="56" fill="#5f5f66">76.3 ClickHouse</text>
-<rect x="200" y="85" width="447" height="14" fill="#2e6da8"/><text x="653" y="96" fill="#1c1c1e">82.8 Label Studio</text>
-<rect x="200" y="102" width="394" height="10" fill="#7fa3cd"/><text x="600" y="111" fill="#5f5f66">73 Prodigy</text>
-<rect x="200" y="140" width="432" height="14" fill="#2e6da8"/><text x="638" y="151" fill="#1c1c1e">80 Telethon 补拉</text>
-<rect x="200" y="157" width="405" height="10" fill="#7fa3cd"/><text x="611" y="166" fill="#5f5f66">75 TDesktop 导出</text>
-<rect x="200" y="195" width="420" height="14" fill="#2e6da8"/><text x="626" y="206" fill="#1c1c1e">77.8 参考实现+Nautilus 审计</text>
-<rect x="200" y="212" width="381" height="10" fill="#7fa3cd"/><text x="587" y="221" fill="#5f5f66">70.5 纯自研</text>
+<rect x="200" y="30" width="482" height="14" fill="#2e6da8"/><text x="688" y="41" fill="#1c1c1e">88.75 Parquet+DuckDB</text>
+<rect x="200" y="47" width="412" height="10" fill="#7fa3cd"/><text x="618" y="56" fill="#5f5f66">78.0 ClickHouse</text>
+<rect x="200" y="85" width="441" height="14" fill="#2e6da8"/><text x="647" y="96" fill="#1c1c1e">81.75 Label Studio</text>
+<rect x="200" y="102" width="394" height="10" fill="#7fa3cd"/><text x="600" y="111" fill="#5f5f66">74.25 Prodigy</text>
+<rect x="200" y="140" width="432" height="14" fill="#2e6da8"/><text x="638" y="151" fill="#1c1c1e">79.75 Telethon 补拉</text>
+<rect x="200" y="157" width="405" height="10" fill="#7fa3cd"/><text x="611" y="166" fill="#5f5f66">75.0 TDesktop 导出</text>
+<rect x="200" y="195" width="424" height="14" fill="#2e6da8"/><text x="630" y="206" fill="#1c1c1e">78.5 共享模型+A/B 候选</text>
+<rect x="200" y="212" width="392" height="10" fill="#7fa3cd"/><text x="598" y="221" fill="#5f5f66">72.5 纯 Nautilus（无扩展）</text>
 <rect x="200" y="250" width="400" height="14" fill="#2e6da8"/><text x="606" y="261" fill="#1c1c1e">74 自写 PurgedKFold+旁证</text>
 <rect x="200" y="267" width="0" height="10" fill="#7fa3cd"/><text x="206" y="276" fill="#5f5f66">（skfolio CPCV 仅定长标签备选，未单独打分）</text>
 </g>
@@ -114,22 +114,22 @@ footer{color:#9a958a;font-size:12px;text-align:center;margin-top:20px}
 <div class="tablewrap"><table>
 <tr><th>审稿要求</th><th>源码事实</th><th>裁定</th></tr>
 <tr><td>订单状态机</td><td>完整 FSM</td><td><span class="tag hi">支持</span></td></tr>
-<tr><td>止损触发 mark vs last</td><td><code>exchange.rs</code> 无 <code>process_mark_price</code>；<code>engine.rs:3531-3543</code> MarkPrice 落默认分支按 bid/ask；<code>is_touch_triggered</code> 用 bid/ask</td><td><span class="tag mid">不支持 → 自研补</span></td></tr>
-<tr><td>资金费率结算</td><td>backtest 与 matching 目录 <code>funding</code> 零命中</td><td><span class="tag mid">不支持 → 自研后算</span></td></tr>
-<tr><td>bar 驱动语义</td><td>O→H→L→C 四个 TradeTick；<code>bar_adaptive_high_low_ordering</code> 可 L 先；每 tick 后 bid=ask=last</td><td>tick 化 OHLC</td></tr>
+<tr><td>止损触发 mark vs last</td><td><code>backtest/engine.rs:1018-1023</code> 路由层绕过 MarkPriceUpdate；普通止损 <code>matching_core/mod.rs:584-588 is_stop_matched</code>（买 ask≥触发价、卖 bid≤触发价）；<code>engine.rs:3523</code> 仅追踪止损激活；<code>PriceType::Mark</code> bar panic</td><td><span class="tag mid">内置不支持 → 候选 A 自研 / 候选 B SimulationModule</span></td></tr>
+<tr><td>资金费率结算</td><td>Rust 撮合/结算无 funding 入账；Python <code>data_client.pyx:311</code> 可订阅 FundingRateUpdate；<code>modules.pyx:92</code> FX rollover 模块示范 <code>adjust_account</code> 钩子</td><td><span class="tag mid">无默认结算器 → 两候选各自实现，按结算前仓位 × 结算 mark 入账</span></td></tr>
+<tr><td>bar 驱动语义</td><td><code>engine.rs:1482-1492</code> 按价格类型分路：LAST/MID → 至多四个合成价点、bid=ask=成交价；BID/ASK → 合成 QuoteTick；Mark → panic</td><td>tick 化 OHLC；bid=ask 仅 LAST/MID 路径</td></tr>
 <tr><td>post-only 拒单</td><td><code>engine.rs:2985</code> 限价穿越 bid/ask 即拒</td><td><span class="tag hi">支持</span>（bar 下退化为穿越 last）</td></tr>
 <tr><td>IOC 余量取消</td><td><code>engine.rs:3038/4346</code></td><td><span class="tag hi">支持</span></td></tr>
-<tr><td>同 bar 双触上下界</td><td>只有自适应排序一种</td><td><span class="tag mid">自研跑双界</span></td></tr>
+<tr><td>同 bar 双触</td><td>只有自适应排序一种</td><td><span class="tag mid">两条选定路径情景区间，非上下界</span></td></tr>
 <tr><td>限价成交条件</td><td><code>is_limit_matched</code> 触及即成交</td><td>偏乐观，<code>prob_fill_on_limit&lt;1</code> 或自研保守界</td></tr>
 <tr><td>外部订单计划</td><td>Rust 层 <code>exchange.send(TradingCommand)</code>；Python 走无信号逻辑壳策略</td><td><span class="tag hi">可承接</span></td></tr>
 </table></div>
-<div class="chartbox"><div class="cht">回测双引擎分工（修订）</div><div class="chs">共享 order_plan → 规范执行事件模型；主数字来自自研永续参考实现；Nautilus 经适配器只审 FSM/filter；独立真值 = 不变量测试 + 手工最小 episode 期望，两引擎 diff 只是审计产物之一</div>
+<div class="chartbox"><div class="cht">回测引擎候选（2026-09-10 修订：主内核待比较）</div><div class="chs">共享 order_plan → 规范执行事件模型；候选 A 自研永续参考实现 + Nautilus 审计，候选 B 单 Nautilus 内核 + SimulationModule 扩展；同一最小 episode 集比较后定型；独立真值 = 不变量测试 + 手工最小 episode 期望</div>
 <svg viewBox="0 0 760 200" xmlns="http://www.w3.org/2000/svg" font-size="12.5">
 <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#5f5f66"/></marker></defs>
 <rect x="20" y="70" width="150" height="60" rx="10" fill="#eef4f9" stroke="#2b5f8a"/><text x="95" y="96" text-anchor="middle" fill="#1c1c1e">order_plan</text><text x="95" y="114" text-anchor="middle" fill="#5f5f66">绝对价格计划</text>
 <line x1="170" y1="100" x2="240" y2="55" stroke="#5f5f66" marker-end="url(#ar)"/><line x1="170" y1="100" x2="240" y2="145" stroke="#5f5f66" marker-end="url(#ar)"/>
-<rect x="245" y="25" width="220" height="60" rx="10" fill="#fdf0ee" stroke="#b03a2e"/><text x="355" y="49" text-anchor="middle" fill="#1c1c1e">自研永续参考实现（主）</text><text x="355" y="68" text-anchor="middle" fill="#5f5f66">mark 触发 · funding 账务 · 双界</text>
-<rect x="245" y="115" width="220" height="60" rx="10" fill="#f3f1ec" stroke="#8a6d1e"/><text x="355" y="139" text-anchor="middle" fill="#1c1c1e">Nautilus 1.227 审计引擎</text><text x="355" y="158" text-anchor="middle" fill="#5f5f66">单 engine 长跑 · 壳策略 · tag 归因</text>
+<rect x="245" y="25" width="220" height="60" rx="10" fill="#fdf0ee" stroke="#b03a2e"/><text x="355" y="49" text-anchor="middle" fill="#1c1c1e">候选 A：自研参考实现</text><text x="355" y="68" text-anchor="middle" fill="#5f5f66">mark 触发 · funding 账务 · 路径情景</text>
+<rect x="245" y="115" width="220" height="60" rx="10" fill="#f3f1ec" stroke="#8a6d1e"/><text x="355" y="139" text-anchor="middle" fill="#1c1c1e">候选 B：Nautilus + SimulationModule</text><text x="355" y="158" text-anchor="middle" fill="#5f5f66">mark 控制器 · funding 模块 · 顺序待验</text>
 <line x1="465" y1="55" x2="540" y2="95" stroke="#5f5f66" marker-end="url(#ar)"/><line x1="465" y1="145" x2="540" y2="105" stroke="#5f5f66" marker-end="url(#ar)"/>
 <rect x="545" y="70" width="195" height="60" rx="10" fill="#ecf5f0" stroke="#2e6e4e"/><text x="642" y="96" text-anchor="middle" fill="#1c1c1e">三层验收</text><text x="642" y="114" text-anchor="middle" fill="#5f5f66">不变量 · 最小 episode · diff 审计</text>
 </svg></div>
@@ -216,16 +216,16 @@ footer{color:#9a958a;font-size:12px;text-align:center;margin-top:20px}
 <tr><td>2</td><td>Binance Vision 预热 44 品种 × 4 类型 × 2025-01 起，含 per-partition manifest、原子 rename 幂等、quarantine、funding 账务单测</td><td>每 partition 行数 = 期望或缺口有归因；重复主键 0；schema hash 一致；quarantine 逐条有解释</td><td>无法归因 → 该 symbol 排除出 M3-R</td><td>1.5 天</td></tr>
 <tr><td>3</td><td>不展示预测的分层人工金标集（含 50–100 张截图）+ 解析器/LLM 从原文并行抽取 + 字段级共错率 + 分层抽审设计</td><td>图片字段纠错率 ≤ 30%；各字段共错率有 Wilson 区间</td><td>&gt; 30% 转人工；共错率显著高于独立假设的字段 100% 人工</td><td>2.5 天 + 人工 3h</td></tr>
 <tr><td>4</td><td>Label Studio 3/5 档止盈样例（Repeater）+ 导出 diff + 备份恢复；锁箱重建校验脚本</td><td>表单可表达；导出含 predictions 与 annotations；校验脚本能从 JSONL/manifest/签名/.ots 重建且失败即报错</td><td>表达不了 → Streamlit</td><td>1 天</td></tr>
-<tr><td>5</td><td>冻结 order_plan → 规范执行事件 schema；不变量测试集；≥10 个手工最小 episode 期望；自研永续参考实现 v0；Nautilus 适配器单 engine 壳策略；20 个纯机器人 episode 对账</td><td>不变量与最小 episode 全过；对账数量 ≤1 步进、价格 ≤1 tick，差异按解释码 100% 归类</td><td>不变量/最小 episode 不过 → 先修参考模型</td><td>6 天</td></tr>
-<tr><td>6</td><td>Alpha158 变体复现（逐算子契约）+ 8 算子 + 两类前视测试 + 数出 N、事件簇数、重叠率、特征有效秩</td><td>截断重算一致；维数起点 N/10 预注册，最终维数留给折内嵌套选择</td><td>—</td><td>2.5 天</td></tr>
-<tr><td>7</td><td>PurgedKFold(t1) 参考实现（枚举区间交集）+ 优化实现性质测试 + cluster-level split + purgedcv 对拍 + 事件簇 bootstrap</td><td>性质测试全过；对拍一致；每 split 输出 purge 原因与 embargo 范围</td><td>—</td><td>1.5 天</td></tr>
+<tr><td>5</td><td>冻结 schema 与 estimand；不变量测试集；≥10 个手工最小 episode（含跳空、双价格流异步、funding 边界）；候选 A 与候选 B 各跑同一集合并比较；Binance filter 逐条合法/非法例；20 个纯机器人 episode 对账</td><td>不变量与最小 episode 全过；对账拆状态对账与执行误差分布，不可解释误差率 ≤ 上限；A/B 比较表出具后定型</td><td>两候选都不过 → 先修</td><td>8 天</td></tr>
+<tr><td>6</td><td>先冻结 estimand 与分母表；Alpha158 变体复现 + 8 算子 + 两类前视测试；预先指定 ≤10 个特征 + 固定规则基线；数出分母、簇数、重叠率、有效秩</td><td>截断重算一致；分母表与簇数齐；是否训练由折内样本预算决定</td><td>分母表出不来 → 不建模</td><td>3 天</td></tr>
+<tr><td>7</td><td>walk-forward 主评估框架 + PurgedKFold(t1) 参考实现与性质测试 + episode/频道两种隔离 + 共同日历块簇 bootstrap + 尝试记账与最终时序测试预留</td><td>性质测试全过；每 split 输出索引、purge 原因、embargo 范围；可用训练集规模报告</td><td>训练集不足 → 只出描述</td><td>2 天</td></tr>
 </table></div>
 <div class="callout gold"><div class="ct">待确认</div>OpenAI 中档官方单价（页面 403）；tdl JSON 字段与 TDesktop 导出字段（各实跑一次）；Label Studio Repeater 实跑；imodels <code>get_rules()</code> 格式；teleproto npm 维护数据；是否有可用的有历史次号。</div>
 </section>
 
 <section>
 <h2><span class="no">09</span>局限性声明</h2>
-<p>本报告结论截至 2026-09-07，2026-09-08 按三份 gpt-6-astra 独立审稿（docs/reviews/2026-09-08-gpt6-review-of-toolchain-q3q4q5.md、…-q1q2.md）修订，17 条必修全部采纳；价格类信息（Anthropic/Gemini）来自官方页当日抓取，OpenAI 来自第三方聚合页；FloodWait、tdl/TDesktop 导出字段、Label Studio Repeater 等标注为"未实跑"的项需在 PoC 中闭环。评分为决策辅助，不替代 PoC 结果。完整过程笔记、逐轮发现与来源清单见同目录 <code>research/</code>。</p>
+<p>本报告结论截至 2026-09-07，2026-09-08 按三份 gpt-6-astra 审稿修订；2026-09-10 不沿用既有 review、由 gpt-6-astra 从零独立审稿（docs/reviews/2026-09-10-gpt6-fresh-review-of-toolchain-selection.md，12 必修）再修订并修正本报告自身的源码核验错误；价格类信息（Anthropic/Gemini）来自官方页当日抓取，OpenAI 来自第三方聚合页；FloodWait、tdl/TDesktop 导出字段、Label Studio Repeater 等标注为"未实跑"的项需在 PoC 中闭环。评分为决策辅助，不替代 PoC 结果。完整过程笔记、逐轮发现与来源清单见同目录 <code>research/</code>。</p>
 </section>
 
 <footer>频道种子→量化算法 · 研究工具链选型报告 · 2026-09-07 · 由 Claude Code 深度调研流程生成</footer>
