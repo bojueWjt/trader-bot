@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-10T20:00:27Z",
+  "updatedAt": "2026-09-10T20:15:12Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -187,8 +187,8 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0 OR-02 R5 19:55Z] 实跑：.venv-g0 -m pytest tests/data -q → 119 passed in 1.98s。D-07 verify（跑前已按新 README §3.5.5 打印全文复核：删除段仅 'rm -rf data/lake/telegram data/quarantine/telegram.parquet'，不触 data//data/lake//data/quarantine/ 根，ROOT-DELETE CHECK PASS）→ rc=0，重建+发布 fixture-v1、test_linker+test_lifecycle 通过、load_episodes 三列 null=0。D-10 verify（§9.9 A7 正向判读）→ rc=1：Codex r2 job task-mtvxn3wd-vpg5q3 status=completed，docs/adr/review-G1-P1-r2.md 第476行『二审终裁：**fail**』，汇总 closed 2/16(S02,S16)、partially 14/16、open 0/16、新增必修 T01-T04。**判定：D-10 不够格 done，维持 doing**；G1 须闭合 T01-T04 与 14 项 partially 后再派 r3，且 r3 报告需有唯一可判读的『三审终裁』行。契约裁定入库（v1.2，changeLog #17-#25）：A8 全链 Decimal(38,12)（order_plan 的 price_lo/price_hi/fraction/stop.price/tps.level/tps.fraction/sizing.qty 与 extracted_event.size_hint 现为 Float64 = 未申报漂移，G0 实跑取证 polars 1.44.2 列/Struct/Parquet 三场景均支持 Decimal(38,12)，故非被迫；哈希前规范化为定标度12十进制串）；struct 固定键**准**，四组键集冻结，§2 的 map[string,bool] 改 struct；**待补**：claimed/reconstructed_outcome.kind 枚举取值域未在任何契约定义，下轮 note 申报。A9 CR-07 只立最小协议：published 不可原地变更 + 新增 gold/_manifest/index.json 版本索引（G1 属主，随发布原子更新）+ 消费方回执=内容寻址缓存键，P1 不做 ack；备份/保留期清理列为需用户决定。A10 远端数量级维持更严口径**准**，但须记 basis∈{far_end_only,near_end_only,both_ends} 且损耗表第5层可分出 far_end_only 条数。A11 codes.py 纯别名**确认**（实跑 codes.ReasonCode is reasons.Reason=True；Reason 29 = 契约 28 + EDIT_ORIGINAL_UNAVAILABLE，无缺无多；规范名为 codes.FATAL_REASONS，codes.FATAL 不存在），G0 此前『删 codes.py』指令作废，须加身份测试。A12 层2 不自动折叠**采纳 review S05**，但新增同簇约束：未确认 repost_same_channel 候选必须共享同一 cluster_id，使有效样本量不膨胀（A.1『重发不增种子』在统计层的保守等价），偏多种子由 D-09 抽审吸收，D-11 须单列未确认候选数与确认折叠率。B8（execution-interface §5.10）：G1 保持 fraction 留空**正确**，不得猜值，只需改 dtype 为 Decimal(38,12) 可空。",
-        "at": "2026-09-10T19:58:45Z"
+        "note": "OR-02 R6 @05:20 G0 前台实跑证据。[全量] set -o pipefail; .venv-g1/bin/python -m pytest tests/data -q → '124 passed in 2.16s'（R5 为 119，+5 例，无回归）。[D-07 verify 实跑] 跑前打印全文复核删除范围：只有 tmp=$(mktemp -d) 与末尾 rm -rf \"$tmp\"，无任何对 data/ 或 data/lake/ 的删除，符合 README §3.5 分区纪律——准跑；结果 rc=0，tests/test_linker+test_lifecycle 26 passed，临时湖 load_episodes('fixture-v1') rows=23、instrument_id/t_dec/cluster_id null 0。[D-10 verify 实跑] rc=1，第 2 次失败，维持 fail：终裁行仍是 review-G1-P1-r2.md 的『二审终裁：fail』。**另发现 D-10 verify 命令本身有选错文件的缺陷**：f=$(ls docs/adr/review-G1-P1*.md | sort | tail -1) 实测 f=docs/adr/review-G1-P1.md（'-' 0x2d < '.' 0x2e，'review-G1-P1-r2.md' 排在 'review-G1-P1.md' 前面），即它永远读的是一审文件、读不到最新轮。请改成精确文件名（与 G2 M-10 同类缺陷，contracts/README §2.5 + §9.9 A7 正向判读）。[上轮必修落地核验，逐条只认实跑] (a) A8 Decimal(38,12) 迁移 = **未落地**：pyarrow 读 data/lake/telegram/gold/episode__fixture-v1@f5191444.parquet（36 行）schema，order_plan struct 内 entries[].{price_lo,price_hi,fraction}、stop.price、tps[].{level,fraction}、sizing.qty 全部 double，dec_stop double、dec_tps list<double>，全库 decimal 列数 = 0。(b) A9 gold/_manifest/index.json = **未落地**：ls data/lake/telegram/gold/_manifest/ 只有 _alias.json、fixture-v1.json、fixture-v1@f5191444.json，无 index.json；find data -name index.json 无命中。(c) outcome.kind 枚举申报 = **未落地**：lifecycle.py:96 OUTCOME_SCHEMA 的 kind 仍是 pl.String 自由文本，看板 04:57 之后无新 note，取值全集与 author_claim_state 映射未提交（§9.10.1 A8 第 6 条），G3 因此仍不得对 kind 做字面量分支。(d) A11 codes 纯别名身份测试 = **已落地**：tests/data/test_smoke.py:45 assert codes.ReasonCode is reasons.Reason and codes.FATAL_REASONS is reasons.FATAL，随 124 passed 通过。(e) A12 repost 同 cluster_id / A04 basis 列本轮未见新证据，留待下轮。[判定] issues。窗口自 04:57 停在 D-10 r2 fail 等用户决定（S 项降 P2 / 是否派 r3），这符合纪律，G0 本轮**不要求**你派 r3、不要求重试 D-10。但请注意：A8/A9/outcome.kind 三项是 **G0 契约裁定，不是 review 的 S 项，不受任何待批闸门约束**，可以立刻做，且 A8 是 OR-04 主断言与 G2 B8 的共同前置。下轮 verify 点：读 gold parquet schema 见 decimal(38,12)、_manifest/index.json 存在且按 built_at 升序含 status 字段、看板 note 里有 outcome.kind 取值全集。",
+        "at": "2026-09-10T20:13:44Z"
       },
       "lastUpdate": "2026-09-10T19:57:54Z",
       "tasks": [
@@ -431,8 +431,8 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0 OR-02 R5 19:56Z] 实跑：.venv-g0 -m pytest tests/market -q → 175 passed in 9.89s。Codex 三审 job task-mtvxpb1w-n3flh9 status=completed，docs/adr/review-G2-P1.md 已被重写为终版（12753→95515 bytes，04:52），判定表首行『**P1 判定 fail：S01–S14 合计 closed 4 / partial-P2 8 / open 2**』，尾部同时存在『二审终裁：fail』(L36) 与『三审终裁：fail』(L40)。**两个 open 为 P1 阻断**：S05 覆盖/规则入口——mark 首缺 T+60、last 首缺 T+240 而 A 仍在 T+120 出 TP，net=5、censor=None、bars_ok=False，根因『两个流用 or 选缺口而非最早时刻』，质量失败被可定位时间洞覆盖，明确不属 P2；S14 源修订后旧 silver 复活——superseded 分支修复真实有效，但缺 sha 列/null 时 bars_complete 仍 True、net=5，逐行来源核对→不可执行的全链路不完整。**判定：M-10 不够格 done，维持 doing**——G0 上轮承诺的『三审 pass → M-10 可 done』前提未成立（三审=fail），故本轮不抽跑 test_review_p1_round2.py 与 S07/S09 反例（抽跑只在三审 pass 时用于交叉验证，pass 前提不成立时抽跑绿不能翻案；三审报告已记 R:33 passed 含 round2 9 例）。另：M-10 verify 仍是负向 grep『! grep -q 必修.*未闭合』，实测 rc=1 恰好反映 fail，但违反 §9.9 A7，**请 G2 本轮改为正向判读**（口径同 D-10：f=docs/adr/review-G2-P1.rounds-1-2.md 且 tail -40 grep '^(二审|三审)?终裁[：:] *pass'），注意 review-G2-P1-closure.md 会排在 review-G2-P1.md 之后，sort|tail -1 会选错文件，需按文件名精确指定。契约新增（v1.2，changeLog #17）：**execution-interface §5.10 裁定 B8，属主 G2（M-06/M-09）**——order_plan.entries[].fraction / tps[].fraction 改 decimal? 可空，**Entry.fraction 现有默认 Decimal(1) 必须去掉**（默认1 让『作者未给』与『作者明写全仓』不可分）；ExecutionPolicy 增 entry_fraction_rule/tp_fraction_rule/tp_total_fraction 进 content_hash；同列表 fraction 全有或全无，部分给出→ContractError；build_request 解析结果写 ExecutionRequest.entry_fractions/tp_fractions 并进 REQUEST_ID_COLS→trace_hash；ExecutionResult 增 fraction_source∈{plan,policy} 进 RESULT_SCALAR_COLS（两者来源不同时取 policy，保守）；等分用 Decimal 标度12 ROUND_DOWN 后余量归末腿，禁二进制浮点等分。**证据**：OR-04 本轮 4 条 ERROR 全部落在 contract.py:344 OrderPlan.model_validate 的同一处 ValidationError（entries.0.fraction / tps.0-2.fraction = None），与 §5.9 B7(entry_ttl) 完全同型，是端到端第二次在同一接缝断裂。§5.9 标号勘误：其标题误写 B5（B5 已用于 §5.6），规范标号为 B7，引用一律以节号为准。",
-        "at": "2026-09-10T19:59:10Z"
+        "note": "OR-02 R6 @05:21 G0 前台实跑证据。[全量] set -o pipefail; .venv-g2/bin/python -m pytest tests/market -q → '175 passed in 9.31s'（与 R5 持平，无回归）。[M-10 verify 实跑] 命令仍是 R5 前的负向写法 test -f docs/adr/review-G2-P1.md && ! grep -q '必修.*未闭合' …，实跑 rc=1 → fail（第 3 次）。注意它这次是**歪打正着**：grep 命中的是第 585 行历史一审文字『终裁 **fail**：S01～S13 必修未闭合』，而不是三审结论；一旦把附录里那句话删掉，同一条 verify 会在三审仍 fail 的情况下判 pass。G0 正向判读的结果是同样的 fail：grep -nE '^(二审|三审)?终裁' docs/adr/review-G2-P1.md → 875:『二审终裁：fail』、879:『三审终裁：fail』。请按 §9.9 A7 把 verify 改成精确文件名 + 正向读终裁行（形如 tail -40 docs/adr/review-G2-P1.md | grep -Eq '^三审终裁[：:] *\\*{0,2}pass'）。M-10 已连续 3 次失败，按纪律**本轮不要求你派第四审**，等用户决定。[B8 落地核验 = 未落地，逐条实跑] grep -n fraction src/quant_lab/market/contract.py：第 103 行仍是 'fraction: Decimal = Decimal(1)'（Entry 默认值未删，B8 要求删默认、改可空）；第 125 行 tp fraction: Decimal 非可空；第 169-172 行仍强制 sum(entries.fraction)==1 且 tp fraction>0；grep -rn 'fraction_source|entry_fractions|tp_fractions' src/quant_lab/market/*.py 零命中；contract.py:426 REQUEST_ID_COLS 仍为 (episode_id, graph_version, decision_snapshot_hash, t_dec, policy_version, policy_hash, cost_scenario, path_scenario, market_manifest, execution_contract_version, seed, entry_ttl_s)，无 entry_fractions/tp_fractions；RESULT_SCALAR_COLS(430-432) 有 entry_ttl_source 无 fraction_source。[后果实测] .venv-g0/bin/python -m pytest tests/integration/test_e2e_synthetic.py -q → 4 passed / 3 errors，3 条 error **全部**是同一处：contract.py:344 OrderPlan.model_validate → ValidationError 4 errors（entries.0.fraction / tps.0..2.fraction，input_value=None）。B8 是 OR-04 主断言唯一的阻断点。[仲裁·重要] execution-interface §5.10 B8 是 **G0 契约裁定（changeLog #21/#24），不是 review 的 S 项，不受任何 pending 用户闸门约束，也不需要等第四审**。你停下等用户的范围只覆盖『是否再派一轮 Codex review / S 项能否降 P2』，不覆盖契约落地。请立刻做四件事并回报：删 Entry.fraction 默认值改 decimal? 可空、null 时由 ExecutionPolicy 的 entry_fraction_rule/tp_fraction_rule 兜底（等分用 Decimal 标度 12 ROUND_DOWN 补余，禁止浮点）、entry_fractions/tp_fractions 进 trace_hash 与 REQUEST_ID_COLS、结果表加 fraction_source。[S05/S14 反例] tests/market/test_review_p1.py + test_review_p1_round2.py 存在且随 175 passed 通过，但三审判定 S05/S14 仍 open（缺口取 min、质量失败起点删失、source_sha256 缺列/null 视为未知），本轮无新增反例文件。[判定] issues（不判 fail：套件全绿、窗口按纪律停下，未自报 done）。",
+        "at": "2026-09-10T20:14:10Z"
       },
       "lastUpdate": "2026-09-10T19:53:59Z",
       "tasks": [
@@ -606,10 +606,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0 OR-02 R5 19:57Z] 实跑：.venv-g0 -m pytest tests/research -q → 214 passed in 104.99s。R-09 verify → **rc=0 通过**：run_protocol 端到端出 report.json，tier=T1、K=187、K_eff=173、DEFF 1.05-1.08、p_cap=4、theta=-0.00160、se=0.02418、p_adj=0.522、lower_bound=-0.0409、n_folds=3、n_attempts=73、claim_status=descriptive_only、gates G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending（**闸门未批而保持 descriptive_only，正确，未绕闸**）、block_len 诊断 |ac1|<=0.1 选 L=1 并给出 1/3/7 三档、limitations 四条含 latency=0 声明。R-09 够格 done。**但三项必修/待核**：(1) **estimand 'main' 归属已定位 = G3**：OR-04 上轮 StructFieldNotFoundError 'main' 来自 src/quant_lab/research/evaluator.py:69  去读 G1 gold 的 eligibility_by_estimand，而该 struct 键集是 {description, entry_decision, execution, original_entry, price_check, outcome}，**无 main**；G3 单测不报错只因 src/quant_lab/research/synthetic.py:172 的桩自造 {'main': True}——**桩与真实上游不同构，正是 §9.8 A6 第4条警告的『因为用了桩所以永远绿』**。已立契 research-schema **§9.10.8**（changeLog #25）：estimand 合法域=六键，'main' 即刻废止；R-06 默认改 'entry_decision'，非法 estimand 抛 EvalProtocolError 不得让 StructFieldNotFoundError 冒泡；fake_episodes 必须产出完整六键 struct 与 G1 同构。(2) **尝试账本可疑**：report 的 n_attempts_by_status = {'status': ['duplicate'], 'len': [73]}，73 次尝试**全部**记为 duplicate、零 new——data/lockbox/ledger.parquet 是持久账本且未清理，故无法证明账本能正确登记新尝试。请 G3 用干净 lockbox（临时 data_root）跑一次并给出 status=new 的计数，否则『账本 ≥1 行』这条 DoD 是被历史残留满足的。(3) **R-10 尚未派发**，且其 verify 仍是负向 grep『! grep -q 必修.*未闭合』，违反 §9.9 A7，派发前必须改为正向判读终裁行（口径见 D-10 现行 verify）。契约新增对 G3 的义务（v1.2）：§9.10.1 A8 第7条——读 Decimal 列后不得 cast Float64 再回填任何哈希输入（特征值本身可 float）；§9.10.2 A9 第4条——feature_snapshot 缓存键必须含 graph_version 与 derivation_hash，指向 tombstone graph_version 的缓存条目读到即丢弃；§9.7 A5 第3条 freeze_opportunity_set 断言不变。另：README §3.5 分区表已把 data/lockbox/** 列为 G3 可写（据本轮实跑 ledger_path 取证），data/lake/** 对 G3 一律只读。",
-        "at": "2026-09-10T19:59:32Z"
+        "note": "OR-02 R6 @05:22 G0 前台实跑证据。[全量] set -o pipefail; .venv-g3/bin/python -m pytest tests/research -q → '215 passed in 91.50s'（R5 为 214，+1，无回归）。[上轮必修落地核验] (1) §9.10.8 estimand = **已落地且经独立链路复核**：evaluator.py:31 ESTIMANDS 冻结六键 (description, entry_decision, execution, original_entry, price_check, outcome)；:72 freeze_opportunity_set(..., estimand: str = DEFAULT_ESTIMAND) 且 :75 非法值抛 EvalProtocolError；:79-84 对 eligibility_by_estimand 做 struct 类型 + 键集漂移检查（不再冒泡 StructFieldNotFoundError）。G0 侧独立证据：tests/integration/test_e2e_synthetic.py::test_seam_g3_opportunity_set_frozen 由 R5 的 ERROR 变为 **PASSED**，就是这条修复打通的。(2) synthetic 桩六键同构 = **已落地**：synthetic.py:172-183 eligibility_by_estimand 为 pl.Struct 固定六键 Boolean（约 3% entry_decision=False），与 G1 gold parquet 实测 schema 'struct<description: bool, entry_decision: bool, execution: bool, original_entry: bool, price_check: bool, outcome: bool>' 逐键一致——接缝零漂移。(3) R-10 verify 正向化 = **已落地并实测**：test -f docs/adr/review-G3-P1.md && tail -40 … | grep -Eq '^(二审|三审)?终裁[：:] *\\*{0,2}pass' → rc=1，正确读到第 393 行『终裁：fail』（负向 grep 写法已消除）。(4) R-10 派发 = **已派已回**：job task-mtvy3753-xgk8yy status=completed（job json 直读，非 grep status 输出），产出 docs/adr/review-G3-P1.md 393 行、必修 19 条 S01–S19、一审终裁 fail。这是 R-10 的**第 1 次** verify 失败（G1 D-10 已 2 次、G2 M-10 已 3 次），你还有重试余量，按看板 05:09 的计划逐条闭合后派二审即可，不必停。(5) 账本干净 lockbox = **已举证**（看板 05:04 记录 mktemp lockbox 73 attempts 全 completed、零 duplicate）；G0 本轮复跑 R-09 verify：.venv-g3/bin/python -m quant_lab.research.api run --config tests/research/fixtures/protocol_synthetic.yaml --out /tmp/ql-proto-r6 → rc=0，**tier=T1, n_attempts=74, theta=0.029099962987924135, K=179**；默认湖 data/lockbox/ledger.parquet 293 行（completed 75 / duplicate 218），账本非空且本次运行有终态登记。[判定] issues：R-10 一审 19 条必修未闭合，P1 未达标。[提醒] S17（T1 规模 δ=0.2R 功效 36% 是否满足 P1 DoD）属里程碑准入裁定，G0 同意你提交用户决策，**在用户明示前不得自行放宽 DoD、也不得把未满足的统计验收写成 pass**；G-STAT-CLAIM 闸门仍 pending，R-08/R-09 结论只描述不声明。另：G1 的 outcome.kind 取值域仍未申报（本轮实测 lifecycle.py OUTCOME_SCHEMA kind 仍为自由 String），在 G1 申报前你不得对 claimed_outcome.kind/reconstructed_outcome.kind 做字面量分支。",
+        "at": "2026-09-10T20:14:35Z"
       },
-      "lastUpdate": "2026-09-10T19:59:45Z",
+      "lastUpdate": "2026-09-10T20:09:46Z",
       "tasks": [
         {
           "id": "R-01",
@@ -669,7 +669,7 @@
           "id": "R-10",
           "title": "[Codex review] P1 里程碑 review（R-03..R-09），必修项闭合",
           "status": "doing",
-          "verify": "test -f docs/adr/review-G3-P1.md && ! grep -q '必修.*未闭合' docs/adr/review-G3-P1.md"
+          "verify": "test -f docs/adr/review-G3-P1.md && tail -40 docs/adr/review-G3-P1.md | grep -Eq '^(二审|三审)?终裁[：:] *\\*{0,2}pass'"
         }
       ],
       "notes": [
@@ -732,6 +732,18 @@
         {
           "t": "04:59",
           "n": "[G0 OR-02 R5 补正] 上条 review note 里有一段被 shell 反引号吞掉，补全：定位点是 src/quant_lab/research/evaluator.py:69 的函数签名 def freeze_opportunity_set(episodes: pl.DataFrame, *, estimand: str = \"main\") -> OpportunitySet —— 默认值 \"main\" 即 StructFieldNotFoundError 的来源。裁定见 contracts/research-schema.md §9.10.8。"
+        },
+        {
+          "t": "05:04",
+          "n": "G0 R5 处置：(2) 干净 lockbox 复跑（QUANT_LAB_DATA_ROOT=mktemp）：n_attempts=73 全部 status=completed（search 36 / selection 36 / outer 1），零 duplicate；默认湖里的 73 个 duplicate 是同 protocol scope 第二次同配置运行按 ADR §8 记 duplicate（不耗额度、留终态），非残留满足。(3) R-10 verify 已改正向判读（tail -40 | grep -E '^(二审|三审)?终裁[：:] *\\*{0,2}pass'，正反例实跑核过）；R-10 已派 Codex task-mtvy3753-xgk8yy，Monitor 监控中。(4) A8 已知悉：G3 不读 order_plan 数值、feature_snapshot 用 bars Float64（G2 §1.1）、评估层 Decimal net_R 先校验不变量再 cast，不 fill_null(0)；anchor_hash 不含数值列。(1) estimand 修复见下一条。"
+        },
+        {
+          "t": "05:08",
+          "n": "G0 R5 (1) estimand 修复：evaluator.ESTIMANDS 冻结六键（description/entry_decision/execution/original_entry/price_check/outcome），freeze_opportunity_set 默认 entry_decision，非法 estimand / 非 struct / 键集漂移一律 EvalProtocolError（不再冒泡 StructFieldNotFoundError）；synthetic.fake_episodes 产出完整六键 Boolean struct（约 3% entry_decision=False），测试用 AST 读 G1 lifecycle.ELIG_KEYS 逐键比对（.venv-g3 无 rapidfuzz 不 import）。连带修正：执行请求只对冻结机会集内 episode 发（run_protocol / conftest / parity），机会集外执行行按协议错误拒收。注意：Codex R-10 review 派发时（20:00Z 前）代码尚无本修复，review 结论里若指出 'main' 问题即视为已闭合。"
+        },
+        {
+          "t": "05:09",
+          "n": "R-10 一审落盘：docs/adr/review-G3-P1.md 393 行，必修 19 条（S01–S19），终裁 fail。开始逐条闭合（缓存身份/上下文/撤销门、polars_ta Corr 隔离、内层 purge 与成熟门、分档预算硬门、账本原子性与生命周期、空模型成熟门/诊断门/功效预注册分位、max-t 非空块按 W>0、PanelInputs 不变量、未成交 t1、两臂上下文 null-safe、unclosed_rate 口径、grammar 流式、c14n 精确十进制、verify 正向数值）；闭合后重跑 MC 并派二审。S17 功效 DoD（T1 规模 δ=0.2R 功效 36%）属里程碑准入裁定，将提交用户/G0 决策。"
         }
       ]
     },
@@ -754,7 +766,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-10T19:50:19Z",
+      "lastUpdate": "2026-09-10T20:15:12Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -849,6 +861,14 @@
         {
           "t": "04:50",
           "n": "[G0 第五轮开始 19:50Z] OR-02 r5：本轮议程 = (1) 契约裁定入库：execution-interface §5.10 裁定 B6 (fraction 可空) + research-schema §9.10 逐条答复 G1 五项裁决 (CR-01/CR-07/A04/codes.py/同文不折叠)；(2) 三套全量 pytest；(3) 新增 done/doing 任务 verify: R-09/R-10/D-10/M-10/D-07；(4) 读 G1-r2 与 G2 三审 Codex job status 并判定 D-10/M-10 是否够格 done；(5) OR-04 复跑 6 条并定位 StructFieldNotFoundError 'main' 归属；(6) README §3.5 分区删除边界加严。各窗口本轮请勿改 contracts/。"
+        },
+        {
+          "t": "05:10",
+          "n": "[G0 OR-02 R6 开始 05:10] 第六轮评审启动。计划：三套全量实跑 + 新 done/doing verify（含删除动作的先打印全文复核 README §3.5 分区）→ 逐窗口核上轮必修落地（G2 B8 fraction 契约落地/S05/S14 反例；G1 A8 Decimal(38,12) gold dtype + codes 身份 + index.json + outcome.kind 枚举；G3 estimand 默认 entry_decision + 六键同构 + 账本干净 lockbox new 计数 + R-10 派发状态）→ OR-04 六条复跑，B8 落地则解 skip 真跑主断言 → 三份 review + integration.p1Status 更新。纪律提醒：D-10 已 2 次 fail（G1 已停下等用户），M-10 三审 fail 已达 3 次（G2 已停下等用户），两者本轮均不再要求重试，等用户决定；S 项降 P2 一律未批不生效。"
+        },
+        {
+          "t": "05:15",
+          "n": "[G0 OR-02 R6 收尾 05:25] 三套全量：data 124 / market 175 / research 215 全 passed，无回归。OR-04：7 例，4 passed / 3 errors（新增 test_e2e_loss_table_and_quarantine_readable 通过：损耗表 1..6 层≥5、quarantine telegram 58 行 + market 171 行可读；test_seam_g3_opportunity_set_frozen 由 ERROR 转 PASSED = G3 estimand 修复被独立链路证实）。3 条 error 全阻在 contract.py:344 OrderPlan fraction=None → B8 未落地，主断言 skip 未解。verify 结果：D-07 rc=0（删除范围只在 mktemp 临时根，合 §3.5，准跑）；D-10 rc=1（第2次，且命令 ls|sort|tail -1 选中的是一审文件，有缺陷）；M-10 rc=1（第3次，靠命中历史附录 '必修未闭合' 才失败，逻辑仍不可靠）；R-10 rc=1（第1次，正向判读正确）；R-09 rc=0（tier=T1 n_attempts=74 theta=0.0291 K=179）。契约本轮**未改动**（仍 v1.2，changeLog 25 条，frozen=true）；G0 仲裁广播一条：execution-interface §5.10 B8 与 research-schema §9.10.1 A8/A9 属 G0 契约裁定，不是 review 的 S 项，**不受任何 pending 用户闸门约束、也不需要等下一轮 Codex review**，G1/G2 即使在『停下等用户』状态也应立即落地。用户待决四项不变：S 项降 P2、G1 是否派 r3、G2 是否派四审、备份/保留协议与 risk_acknowledged_by_user；新增第五项 G3 S17（T1 规模 δ=0.2R 功效 36% 是否算满足 P1 DoD）。六项闸门全 pending，未见任何窗口绕过。"
         }
       ]
     }
@@ -998,6 +1018,24 @@
         "module": "orchestrator",
         "verdict": "issues",
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。"
+      },
+      {
+        "at": "05:13",
+        "module": "data",
+        "verdict": "issues",
+        "note": "OR-02 R6 @05:20 G0 前台实跑证据。[全量] set -o pipefail; .venv-g1/bin/python -m pytest tests/data -q → '124 passed in 2.16s'（R5 为 119，+5 例，无回归）。[D-07 verify 实跑] 跑前打印全文复核删除范围：只有 tmp=$(mktemp -d) 与末尾 rm -rf \"$tmp\"，无任何对 data/ 或 data/lake/ 的删除，符合 README §3.5 分区纪律——准跑；结果 rc=0，tests/test_linker+test_lifecycle 26 passed，临时湖 load_episodes('fixture-v1') rows=23、instrument_id/t_dec/cluster_id null 0。[D-10 verify 实跑] rc=1，第 2 次失败，维持 fail：终裁行仍是 review-G1-P1-r2.md 的『二审终裁：fail』。**另发现 D-10 verify 命令本身有选错文件的缺陷**：f=$(ls docs/adr/review-G1-P1*.md | sort | tail -1) 实测 f=docs/adr/review-G1-P1.md（'-' 0x2d < '.' 0x2e，'review-G1-P1-r2.md' 排在 'review-G1-P1.md' 前面），即它永远读的是一审文件、读不到最新轮。请改成精确文件名（与 G2 M-10 同类缺陷，contracts/README §2.5 + §9.9 A7 正向判读）。[上轮必修落地核验，逐条只认实跑] (a) A8 Decimal(38,12) 迁移 = **未落地**：pyarrow 读 data/lake/telegram/gold/episode__fixture-v1@f5191444.parquet（36 行）schema，order_plan struct 内 entries[].{price_lo,price_hi,fraction}、stop.price、tps[].{level,fraction}、sizing.qty 全部 double，dec_stop double、dec_tps list<double>，全库 decimal 列数 = 0。(b) A9 gold/_manifest/index.json = **未落地**：ls data/lake/telegram/gold/_manifest/ 只有 _alias.json、fixture-v1.json、fixture-v1@f5191444.json，无 index.json；find data -name index.json 无命中。(c) outcome.kind 枚举申报 = **未落地**：lifecycle.py:96 OUTCOME_SCHEMA 的 kind 仍是 pl.String 自由文本，看板 04:57 之后无新 note，取值全集与 author_claim_state 映射未提交（§9.10.1 A8 第 6 条），G3 因此仍不得对 kind 做字面量分支。(d) A11 codes 纯别名身份测试 = **已落地**：tests/data/test_smoke.py:45 assert codes.ReasonCode is reasons.Reason and codes.FATAL_REASONS is reasons.FATAL，随 124 passed 通过。(e) A12 repost 同 cluster_id / A04 basis 列本轮未见新证据，留待下轮。[判定] issues。窗口自 04:57 停在 D-10 r2 fail 等用户决定（S 项降 P2 / 是否派 r3），这符合纪律，G0 本轮**不要求**你派 r3、不要求重试 D-10。但请注意：A8/A9/outcome.kind 三项是 **G0 契约裁定，不是 review 的 S 项，不受任何待批闸门约束**，可以立刻做，且 A8 是 OR-04 主断言与 G2 B8 的共同前置。下轮 verify 点：读 gold parquet schema 见 decimal(38,12)、_manifest/index.json 存在且按 built_at 升序含 status 字段、看板 note 里有 outcome.kind 取值全集。"
+      },
+      {
+        "at": "05:14",
+        "module": "market",
+        "verdict": "issues",
+        "note": "OR-02 R6 @05:21 G0 前台实跑证据。[全量] set -o pipefail; .venv-g2/bin/python -m pytest tests/market -q → '175 passed in 9.31s'（与 R5 持平，无回归）。[M-10 verify 实跑] 命令仍是 R5 前的负向写法 test -f docs/adr/review-G2-P1.md && ! grep -q '必修.*未闭合' …，实跑 rc=1 → fail（第 3 次）。注意它这次是**歪打正着**：grep 命中的是第 585 行历史一审文字『终裁 **fail**：S01～S13 必修未闭合』，而不是三审结论；一旦把附录里那句话删掉，同一条 verify 会在三审仍 fail 的情况下判 pass。G0 正向判读的结果是同样的 fail：grep -nE '^(二审|三审)?终裁' docs/adr/review-G2-P1.md → 875:『二审终裁：fail』、879:『三审终裁：fail』。请按 §9.9 A7 把 verify 改成精确文件名 + 正向读终裁行（形如 tail -40 docs/adr/review-G2-P1.md | grep -Eq '^三审终裁[：:] *\\*{0,2}pass'）。M-10 已连续 3 次失败，按纪律**本轮不要求你派第四审**，等用户决定。[B8 落地核验 = 未落地，逐条实跑] grep -n fraction src/quant_lab/market/contract.py：第 103 行仍是 'fraction: Decimal = Decimal(1)'（Entry 默认值未删，B8 要求删默认、改可空）；第 125 行 tp fraction: Decimal 非可空；第 169-172 行仍强制 sum(entries.fraction)==1 且 tp fraction>0；grep -rn 'fraction_source|entry_fractions|tp_fractions' src/quant_lab/market/*.py 零命中；contract.py:426 REQUEST_ID_COLS 仍为 (episode_id, graph_version, decision_snapshot_hash, t_dec, policy_version, policy_hash, cost_scenario, path_scenario, market_manifest, execution_contract_version, seed, entry_ttl_s)，无 entry_fractions/tp_fractions；RESULT_SCALAR_COLS(430-432) 有 entry_ttl_source 无 fraction_source。[后果实测] .venv-g0/bin/python -m pytest tests/integration/test_e2e_synthetic.py -q → 4 passed / 3 errors，3 条 error **全部**是同一处：contract.py:344 OrderPlan.model_validate → ValidationError 4 errors（entries.0.fraction / tps.0..2.fraction，input_value=None）。B8 是 OR-04 主断言唯一的阻断点。[仲裁·重要] execution-interface §5.10 B8 是 **G0 契约裁定（changeLog #21/#24），不是 review 的 S 项，不受任何 pending 用户闸门约束，也不需要等第四审**。你停下等用户的范围只覆盖『是否再派一轮 Codex review / S 项能否降 P2』，不覆盖契约落地。请立刻做四件事并回报：删 Entry.fraction 默认值改 decimal? 可空、null 时由 ExecutionPolicy 的 entry_fraction_rule/tp_fraction_rule 兜底（等分用 Decimal 标度 12 ROUND_DOWN 补余，禁止浮点）、entry_fractions/tp_fractions 进 trace_hash 与 REQUEST_ID_COLS、结果表加 fraction_source。[S05/S14 反例] tests/market/test_review_p1.py + test_review_p1_round2.py 存在且随 175 passed 通过，但三审判定 S05/S14 仍 open（缺口取 min、质量失败起点删失、source_sha256 缺列/null 视为未知），本轮无新增反例文件。[判定] issues（不判 fail：套件全绿、窗口按纪律停下，未自报 done）。"
+      },
+      {
+        "at": "05:14",
+        "module": "research",
+        "verdict": "issues",
+        "note": "OR-02 R6 @05:22 G0 前台实跑证据。[全量] set -o pipefail; .venv-g3/bin/python -m pytest tests/research -q → '215 passed in 91.50s'（R5 为 214，+1，无回归）。[上轮必修落地核验] (1) §9.10.8 estimand = **已落地且经独立链路复核**：evaluator.py:31 ESTIMANDS 冻结六键 (description, entry_decision, execution, original_entry, price_check, outcome)；:72 freeze_opportunity_set(..., estimand: str = DEFAULT_ESTIMAND) 且 :75 非法值抛 EvalProtocolError；:79-84 对 eligibility_by_estimand 做 struct 类型 + 键集漂移检查（不再冒泡 StructFieldNotFoundError）。G0 侧独立证据：tests/integration/test_e2e_synthetic.py::test_seam_g3_opportunity_set_frozen 由 R5 的 ERROR 变为 **PASSED**，就是这条修复打通的。(2) synthetic 桩六键同构 = **已落地**：synthetic.py:172-183 eligibility_by_estimand 为 pl.Struct 固定六键 Boolean（约 3% entry_decision=False），与 G1 gold parquet 实测 schema 'struct<description: bool, entry_decision: bool, execution: bool, original_entry: bool, price_check: bool, outcome: bool>' 逐键一致——接缝零漂移。(3) R-10 verify 正向化 = **已落地并实测**：test -f docs/adr/review-G3-P1.md && tail -40 … | grep -Eq '^(二审|三审)?终裁[：:] *\\*{0,2}pass' → rc=1，正确读到第 393 行『终裁：fail』（负向 grep 写法已消除）。(4) R-10 派发 = **已派已回**：job task-mtvy3753-xgk8yy status=completed（job json 直读，非 grep status 输出），产出 docs/adr/review-G3-P1.md 393 行、必修 19 条 S01–S19、一审终裁 fail。这是 R-10 的**第 1 次** verify 失败（G1 D-10 已 2 次、G2 M-10 已 3 次），你还有重试余量，按看板 05:09 的计划逐条闭合后派二审即可，不必停。(5) 账本干净 lockbox = **已举证**（看板 05:04 记录 mktemp lockbox 73 attempts 全 completed、零 duplicate）；G0 本轮复跑 R-09 verify：.venv-g3/bin/python -m quant_lab.research.api run --config tests/research/fixtures/protocol_synthetic.yaml --out /tmp/ql-proto-r6 → rc=0，**tier=T1, n_attempts=74, theta=0.029099962987924135, K=179**；默认湖 data/lockbox/ledger.parquet 293 行（completed 75 / duplicate 218），账本非空且本次运行有终态登记。[判定] issues：R-10 一审 19 条必修未闭合，P1 未达标。[提醒] S17（T1 规模 δ=0.2R 功效 36% 是否满足 P1 DoD）属里程碑准入裁定，G0 同意你提交用户决策，**在用户明示前不得自行放宽 DoD、也不得把未满足的统计验收写成 pass**；G-STAT-CLAIM 闸门仍 pending，R-08/R-09 结论只描述不声明。另：G1 的 outcome.kind 取值域仍未申报（本轮实测 lifecycle.py OUTCOME_SCHEMA kind 仍为自由 String），在 G1 申报前你不得对 claimed_outcome.kind/reconstructed_outcome.kind 做字面量分支。"
       }
     ],
     "blockers": [
@@ -1089,17 +1127,32 @@
     },
     "readyForStitch": false,
     "p1Status": {
-      "at": "2026-09-11T19:58Z",
+      "at": "2026-09-11T20:23Z",
+      "round": "OR-02 R6",
       "done": false,
+      "suites": {
+        "tests/data": "124 passed",
+        "tests/market": "175 passed",
+        "tests/research": "215 passed",
+        "tests/integration": "4 passed / 3 errors (7 collected)"
+      },
       "missing": [
-        "G1 D-10: Codex r2 二审终裁 fail (closed 2/16, partially 14/16, 新增 T01-T04)，需闭合后派 r3",
-        "G2 M-10: Codex 三审终裁 fail (closed 4/14, partial-P2 8, open 2: S05 覆盖入口 or 选缺口 / S14 缺sha列或null时 bars_complete 仍 True)，需闭合后派四审",
-        "G3 R-10: 未派发；且 verify 仍负向 grep，违反 §9.9 A7，派发前必须改为正向判读终裁行",
-        "OR-04 未全绿: 2 passed / 4 error，全部阻在 execution-interface §5.10 B8 (OrderPlan fraction=None ValidationError)，待 G2 落地",
-        "G1 A8: order_plan 与 size_hint 数值列 Float64 → Decimal(38,12) 迁移未做；outcome.kind 枚举取值域未申报",
-        "G3 §9.10.8: freeze_opportunity_set 默认 estimand=main 需改 entry_decision；synthetic.fake_episodes 需产出与 G1 同构的六键 eligibility struct",
-        "G3 尝试账本: n_attempts 73 全为 duplicate、零 new，需用干净 lockbox 复跑证明能登记新尝试"
-      ]
+        "G2 B8 未落地（P1 唯一整合阻断）：contract.py:103 Entry.fraction 仍 =Decimal(1) 默认、:169 仍强制 sum==1、无 fraction_source、REQUEST_ID_COLS 无 entry_fractions/tp_fractions；OR-04 三条 error 全阻于此。B8 是 G0 契约裁定，不受 pending 闸门约束，可立刻落地",
+        "G1 A8 Decimal(38,12) 未落地：gold episode parquet 数值列（order_plan entries/stop/tps/sizing、dec_stop、dec_tps）实测全 double，decimal 列数=0",
+        "G1 A9 gold/_manifest/index.json 未落地：只有 _alias.json 与两个版本 json",
+        "G1 outcome.kind 枚举取值域未申报：lifecycle.py:96 OUTCOME_SCHEMA kind 仍自由 String；G3 因此不得对 kind 分支",
+        "G1 D-10: r2 二审终裁 fail（第 2 次失败，窗口按纪律停下等用户）；且 verify 的 ls|sort|tail -1 实测选中一审文件 review-G1-P1.md，读不到最新轮，需改精确文件名",
+        "G2 M-10: 三审终裁 fail（第 3 次失败，窗口已停下等用户，G0 本轮不要求四审）；verify 仍负向 grep，本次靠命中历史附录文字才失败，需改正向精确读终裁行",
+        "G3 R-10: 一审落盘 review-G3-P1.md 393 行、必修 S01-S19、终裁 fail（第 1 次失败，仍有重试余量）；S17 功效 DoD 待用户裁定",
+        "OR-04 主断言仍 skip：θ 与账本两项待 B8；损耗表与 quarantine 两项已由新增独立用例转绿"
+      ],
+      "evidence": {
+        "OR-04": "tests/integration/test_e2e_synthetic.py -v：test_seam_g1_decision_view PASSED / test_seam_g2_build_request_is_sole_entrypoint ERROR(B8) / test_seam_g3_opportunity_set_frozen PASSED(R5 为 ERROR，G3 estimand 修复打通) / test_seam_g3_pair_arms_consumes_g2_output ERROR(B8) / test_seam_g3_feature_snapshot_respects_t_dec PASSED / test_e2e_theta_ledger_loss_quarantine ERROR(B8, 体内仍 skip) / test_e2e_loss_table_and_quarantine_readable PASSED(R6 新增)",
+        "theta": "R-09 复跑 rc=0：tier=T1, n_attempts=74, theta=0.029099962987924135, K=179",
+        "ledger": "data/lockbox/ledger.parquet 293 行（completed 75 / duplicate 218）；干净 lockbox 复跑 73 全 completed 零 duplicate（G3 05:04 note）",
+        "loss_table": "quant_lab.data.api --loss latest：batch=tg-3f7d1d9dd77d，层 1..6 均有行（≥5 层达标），layer=5 market_check 与 layer=6 link 分层可见",
+        "quarantine": "data/quarantine/telegram.parquet 58 行 32 列、data/quarantine/market.parquet 171 行 20 列，均可读"
+      }
     },
     "reviewRounds": [
       {

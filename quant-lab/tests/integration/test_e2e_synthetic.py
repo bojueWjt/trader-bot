@@ -126,3 +126,22 @@ def test_seam_g3_feature_snapshot_respects_t_dec(episodes):
 def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity):
     """OR-04 主断言：θ 非空、账本 ≥1 行、损耗表 ≥5 层、quarantine 可读。"""
     pytest.skip("OR-04 骨架：主断言待三窗口 P1 review 必修闭合后接通（见 G0 review note）")
+
+
+def test_e2e_loss_table_and_quarantine_readable():
+    """OR-04 主断言的两项独立子条件（不经 G2 执行链，故不受 B8 阻断）：
+    损耗表 ≥5 层、quarantine 可读。θ 与账本两项仍在主断言里等 B8 闭合。"""
+    import glob
+
+    from quant_lab.data.api import loss_table
+
+    loss = loss_table("latest")
+    assert loss.height > 0, "损耗表为空 —— 静默为空算 fail"
+    layers = sorted(loss["layer"].unique().to_list())
+    assert len(layers) >= 5, f"损耗表层数 {layers} < 5（research-schema §7）"
+
+    qs = sorted(glob.glob("data/quarantine/*.parquet"))
+    assert qs, "quarantine 目录无 parquet"
+    for q in qs:
+        d = pl.read_parquet(q)
+        assert d.height >= 0 and len(d.columns) > 0, f"{q} 不可读"
