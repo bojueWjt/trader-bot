@@ -21,6 +21,21 @@ TERMINAL_LOCAL_ORDER_STATUSES = frozenset(
         "REJECTED",
     }
 )
+EXECUTED_ALGO_STATUSES = frozenset(
+    {
+        "FINISHED",
+        "TRIGGERED",
+        "FILLED",
+    }
+)
+NON_EXECUTED_TERMINAL_ALGO_STATUSES = frozenset(
+    {
+        "CANCELED",
+        "CANCELLED",
+        "EXPIRED",
+        "REJECTED",
+    }
+)
 VENUE_TERMINAL_EVENT_TYPES = {
     "CANCELED": "OrderCanceled",
     "CANCELLED": "OrderCanceled",
@@ -151,12 +166,58 @@ class BinanceOwnedOrderReconciler:
             except BinanceApiError as exc:
                 if exc.code != -2013:
                     raise
-                events.extend(
-                    self._recover_missing_order(
+                try:
+                    algo_snapshot = self._query_algo_order(
                         candidate,
                         deadline_monotonic=deadline_monotonic,
                     )
-                )
+                except BinanceApiError as algo_exc:
+                    if algo_exc.code != -2013:
+                        raise
+                    events.extend(
+                        self._recover_missing_order(
+                            candidate,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                    )
+                    continue
+                _validate_algo_order_identity(candidate, algo_snapshot)
+                algo_status = _text_value(
+                    algo_snapshot.get("algoStatus")
+                ).upper()
+                if algo_status in EXECUTED_ALGO_STATUSES:
+                    actual_order_id = _text_value(
+                        algo_snapshot.get("actualOrderId")
+                    )
+                    if not actual_order_id:
+                        continue
+                    order_snapshot = self._query_actual_order(
+                        candidate,
+                        actual_order_id,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    trades = self._query_trades(
+                        candidate,
+                        order_snapshot,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    events.extend(
+                        _recovered_events(
+                            candidate,
+                            order_snapshot,
+                            trades,
+                        )
+                    )
+                    continue
+                if algo_status in NON_EXECUTED_TERMINAL_ALGO_STATUSES:
+                    events.extend(
+                        _recovered_missing_order_events(
+                            candidate,
+                            (),
+                            reason=f"algo_order_terminal({algo_status})",
+                        )
+                    )
+                    continue
                 continue
             trades = self._query_trades(
                 candidate,
@@ -171,6 +232,55 @@ class BinanceOwnedOrderReconciler:
                 )
             )
         return tuple(events)
+
+    def _query_actual_order(
+        self,
+        candidate: OwnedOrderCandidate,
+        actual_order_id: str,
+        *,
+        deadline_monotonic: float | None,
+    ) -> Mapping[str, Any]:
+        payload = self._request(
+            "/fapi/v1/order",
+            {
+                "symbol": candidate.symbol,
+                "orderId": actual_order_id,
+            },
+            deadline_monotonic=deadline_monotonic,
+        )
+        if not isinstance(payload, Mapping):
+            raise OwnedOrderRecoveryError(
+                "Binance actual order query returned an invalid object"
+            )
+        _validate_order_identity(
+            candidate,
+            payload,
+            expected_venue_order_id=actual_order_id,
+            allow_client_order_id_mismatch=True,
+        )
+        return payload
+
+    def _query_algo_order(
+        self,
+        candidate: OwnedOrderCandidate,
+        *,
+        deadline_monotonic: float | None,
+    ) -> Mapping[str, Any]:
+        params: dict[str, Any] = {"symbol": candidate.symbol}
+        if candidate.venue_order_id:
+            params["algoId"] = candidate.venue_order_id
+        else:
+            params["clientAlgoId"] = candidate.client_order_id
+        payload = self._request(
+            "/fapi/v1/algoOrder",
+            params,
+            deadline_monotonic=deadline_monotonic,
+        )
+        if not isinstance(payload, Mapping):
+            raise OwnedOrderRecoveryError(
+                "Binance algo order query returned an invalid object"
+            )
+        return payload
 
     def _recover_missing_order(
         self,
@@ -348,6 +458,9 @@ def _owned_order_candidate(order: Any) -> OwnedOrderCandidate | None:
 def _validate_order_identity(
     candidate: OwnedOrderCandidate,
     payload: Mapping[str, Any],
+    *,
+    expected_venue_order_id: str = "",
+    allow_client_order_id_mismatch: bool = False,
 ) -> None:
     symbol = _required_text(
         payload.get("symbol"),
@@ -361,7 +474,10 @@ def _validate_order_identity(
         payload.get("clientOrderId"),
         "Binance order query clientOrderId",
     )
-    if client_order_id != candidate.client_order_id:
+    if (
+        not allow_client_order_id_mismatch
+        and client_order_id != candidate.client_order_id
+    ):
         raise OwnedOrderRecoveryError(
             "Binance order query clientOrderId does not match candidate"
         )
@@ -369,10 +485,10 @@ def _validate_order_identity(
         payload.get("orderId"),
         "Binance order query orderId",
     )
-    if (
-        candidate.venue_order_id
-        and venue_order_id != candidate.venue_order_id
-    ):
+    expected_order_id = expected_venue_order_id
+    if not expected_order_id:
+        expected_order_id = candidate.venue_order_id
+    if expected_order_id and venue_order_id != expected_order_id:
         raise OwnedOrderRecoveryError(
             "Binance order query orderId does not match candidate"
         )
@@ -402,6 +518,44 @@ def _validate_order_identity(
     ):
         raise OwnedOrderRecoveryError(
             "Binance order query positionSide does not match candidate"
+        )
+
+
+def _validate_algo_order_identity(
+    candidate: OwnedOrderCandidate,
+    payload: Mapping[str, Any],
+) -> None:
+    symbol = _required_text(
+        payload.get("symbol"),
+        "Binance algo order query symbol",
+    ).upper()
+    if symbol != candidate.symbol:
+        raise OwnedOrderRecoveryError(
+            "Binance algo order query symbol does not match candidate"
+        )
+    algo_order_id = _text_value(payload.get("algoId"))
+    client_algo_id = _text_value(payload.get("clientAlgoId"))
+    if candidate.venue_order_id:
+        if not algo_order_id:
+            raise OwnedOrderRecoveryError(
+                "Binance algo order query is missing algoId"
+            )
+        if algo_order_id != candidate.venue_order_id:
+            raise OwnedOrderRecoveryError(
+                "Binance algo order query algoId does not match candidate"
+            )
+        if client_algo_id and client_algo_id != candidate.client_order_id:
+            raise OwnedOrderRecoveryError(
+                "Binance algo order query clientAlgoId does not match candidate"
+            )
+        return
+    if not client_algo_id:
+        raise OwnedOrderRecoveryError(
+            "Binance algo order query is missing clientAlgoId"
+        )
+    if client_algo_id != candidate.client_order_id:
+        raise OwnedOrderRecoveryError(
+            "Binance algo order query clientAlgoId does not match candidate"
         )
 
 
@@ -609,14 +763,16 @@ def _recovered_events(
 def _recovered_missing_order_events(
     candidate: OwnedOrderCandidate,
     trades: tuple[Mapping[str, Any], ...],
+    *,
+    reason: str = "venue_order_missing(-2013)",
 ) -> tuple[RecoveredOrderEvent, ...]:
     tags = _order_vanished_tags(candidate.tags)
     tagged_candidate = replace(candidate, tags=tags)
     events = []
     filled_quantity = ""
-    reason = "venue_order_missing(-2013)"
+    trades_were_checked = reason == "venue_order_missing(-2013)"
 
-    if candidate.venue_order_id:
+    if candidate.venue_order_id and trades_were_checked:
         reason = (
             f"{reason}; user_trades_checked; "
             f"attributed_trade_count={len(trades)}"
@@ -663,7 +819,7 @@ def _recovered_missing_order_events(
                         reason=reason,
                     )
                 )
-    else:
+    elif not candidate.venue_order_id and trades_were_checked:
         reason = (
             f"{reason}; "
             "fill_attribution_unverifiable_without_venue_order_id"

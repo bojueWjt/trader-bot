@@ -227,6 +227,10 @@ def test_missing_venue_order_without_order_id_recovers_canceled_event() -> None:
                 -2013,
                 "Order does not exist.",
             ),
+            ("GET", "/fapi/v1/algoOrder"): BinanceApiError(
+                -2013,
+                "Algo order does not exist.",
+            ),
         }
     )
     reconciler = BinanceOwnedOrderReconciler(transport=transport)
@@ -256,6 +260,7 @@ def test_missing_venue_order_without_order_id_recovers_canceled_event() -> None:
     assert "order_vanished" in canceled.tags
     assert [call[1] for call in transport.calls] == [
         "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
     ]
 
 
@@ -265,6 +270,10 @@ def test_missing_venue_order_with_trades_recovers_fills_then_canceled() -> None:
             ("GET", "/fapi/v1/order"): BinanceApiError(
                 -2013,
                 "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): BinanceApiError(
+                -2013,
+                "Algo order does not exist.",
             ),
             ("GET", "/fapi/v1/userTrades"): [
                 {
@@ -337,9 +346,10 @@ def test_missing_venue_order_with_trades_recovers_fills_then_canceled() -> None:
     assert "order_vanished" in canceled.tags
     assert [call[1] for call in transport.calls] == [
         "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
         "/fapi/v1/userTrades",
     ]
-    assert transport.calls[1][2] == {
+    assert transport.calls[2][2] == {
         "symbol": "SNDKUSDT",
         "orderId": "82901",
         "limit": 1000,
@@ -352,6 +362,10 @@ def test_missing_venue_order_without_trades_recovers_canceled_event() -> None:
             ("GET", "/fapi/v1/order"): BinanceApiError(
                 -2013,
                 "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): BinanceApiError(
+                -2013,
+                "Algo order does not exist.",
             ),
             ("GET", "/fapi/v1/userTrades"): [],
         }
@@ -378,6 +392,7 @@ def test_missing_venue_order_without_trades_recovers_canceled_event() -> None:
     assert "order_vanished" in canceled.tags
     assert [call[1] for call in transport.calls] == [
         "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
         "/fapi/v1/userTrades",
     ]
 
@@ -403,6 +418,568 @@ def test_non_missing_binance_order_error_is_raised_unchanged() -> None:
     assert raised.value is error
 
 
+def test_algo_order_new_is_left_untouched_while_regular_order_recovers() -> None:
+    algo_venue_order_id = "2000001419214132"
+    algo_order_key = (
+        "GET",
+        "/fapi/v1/order",
+        (
+            ("orderId", algo_venue_order_id),
+            ("symbol", "ATOMUSDT"),
+        ),
+    )
+    regular_order_key = (
+        "GET",
+        "/fapi/v1/order",
+        (
+            ("orderId", "82910"),
+            ("symbol", "PENGUUSDT"),
+        ),
+    )
+    transport = RecordingTransport(
+        {
+            algo_order_key: BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            (
+                "GET",
+                "/fapi/v1/algoOrder",
+                (
+                    ("algoId", algo_venue_order_id),
+                    ("symbol", "ATOMUSDT"),
+                ),
+            ): {
+                "symbol": "ATOMUSDT",
+                "algoId": int(algo_venue_order_id),
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "NEW",
+            },
+            regular_order_key: {
+                "symbol": "PENGUUSDT",
+                "orderId": 82910,
+                "clientOrderId": SECOND_CLIENT_ORDER_ID,
+                "status": "CANCELED",
+                "side": "BUY",
+                "positionSide": "BOTH",
+                "type": "LIMIT",
+                "timeInForce": "GTC",
+                "origQty": "1",
+                "executedQty": "0",
+                "price": "1",
+                "avgPrice": "0",
+                "reduceOnly": False,
+                "updateTime": 1787990404000,
+            },
+            ("GET", "/fapi/v1/userTrades"): [],
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    algo_order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id=algo_venue_order_id,
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+    regular_order = SimpleNamespace(
+        client_order_id=SECOND_CLIENT_ORDER_ID,
+        venue_order_id="82910",
+        instrument_id="PENGUUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="BUY",
+        position_side="BOTH",
+    )
+
+    events = reconciler.recover(
+        reconciler.capture((algo_order, regular_order))
+    )
+
+    assert [event.client_order_id for event in events] == [
+        SECOND_CLIENT_ORDER_ID,
+    ]
+    assert events[0].event_type == "OrderCanceled"
+    assert [call[1] for call in transport.calls] == [
+        "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
+        "/fapi/v1/order",
+        "/fapi/v1/userTrades",
+    ]
+
+
+def test_algo_order_missing_falls_back_to_missing_recovery() -> None:
+    venue_order_id = "2000001419214133"
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): BinanceApiError(
+                -2013,
+                "Algo order does not exist.",
+            ),
+            ("GET", "/fapi/v1/userTrades"): [],
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id=venue_order_id,
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+
+    events = reconciler.recover(reconciler.capture((order,)))
+
+    assert len(events) == 1
+    assert events[0].event_type == "OrderCanceled"
+    assert "venue_order_missing(-2013)" in events[0].reason
+
+
+def test_algo_order_canceled_falls_back_to_missing_recovery() -> None:
+    venue_order_id = "2000001419214134"
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): {
+                "symbol": "ATOMUSDT",
+                "algoId": venue_order_id,
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "CANCELED",
+            },
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id=venue_order_id,
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+
+    events = reconciler.recover(reconciler.capture((order,)))
+
+    assert len(events) == 1
+    assert events[0].event_type == "OrderCanceled"
+    assert events[0].venue_order_id == venue_order_id
+    assert events[0].reason == "algo_order_terminal(CANCELED)"
+    assert [call[1] for call in transport.calls] == [
+        "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
+    ]
+
+
+def test_algo_order_identity_mismatch_fails_closed() -> None:
+    venue_order_id = "2000001419214135"
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): {
+                "symbol": "ATOMUSDT",
+                "algoId": "2000001419214999",
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "NEW",
+            },
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id=venue_order_id,
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+
+    with pytest.raises(
+        OwnedOrderRecoveryError,
+        match="algoId does not match candidate",
+    ):
+        reconciler.recover(reconciler.capture((order,)))
+
+
+def test_algo_order_unknown_status_is_left_untouched() -> None:
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): {
+                "symbol": "ATOMUSDT",
+                "algoId": 2000001419214136,
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "WHATEVER",
+            },
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="",
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+
+    events = reconciler.recover(reconciler.capture((order,)))
+
+    assert events == ()
+    assert transport.calls[1][2] == {
+        "symbol": "ATOMUSDT",
+        "clientAlgoId": CLIENT_ORDER_ID,
+    }
+
+
+def test_algo_order_non_missing_binance_error_is_raised_unchanged() -> None:
+    error = BinanceApiError(-1021, "Timestamp outside recvWindow.")
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): error,
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="2000001419214137",
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+
+    with pytest.raises(BinanceApiError) as raised:
+        reconciler.recover(reconciler.capture((order,)))
+
+    assert raised.value is error
+
+
+@pytest.mark.parametrize("algo_status", ["TRIGGERED", "FINISHED"])
+def test_executed_algo_with_actual_order_recovers_attributed_fill(
+    algo_status: str,
+) -> None:
+    algo_order_id = "2000001419214200"
+    actual_order_id = "82920"
+    transport = RecordingTransport(
+        {
+            (
+                "GET",
+                "/fapi/v1/order",
+                (
+                    ("orderId", algo_order_id),
+                    ("symbol", "ATOMUSDT"),
+                ),
+            ): BinanceApiError(-2013, "Order does not exist."),
+            ("GET", "/fapi/v1/algoOrder"): {
+                "symbol": "ATOMUSDT",
+                "algoId": algo_order_id,
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": algo_status,
+                "actualOrderId": actual_order_id,
+            },
+            (
+                "GET",
+                "/fapi/v1/order",
+                (
+                    ("orderId", actual_order_id),
+                    ("symbol", "ATOMUSDT"),
+                ),
+            ): {
+                "symbol": "ATOMUSDT",
+                "orderId": actual_order_id,
+                "clientOrderId": "spawned-from-algo-order",
+                "status": "FILLED",
+                "side": "SELL",
+                "positionSide": "BOTH",
+                "type": "MARKET",
+                "timeInForce": "GTC",
+                "origQty": "2",
+                "executedQty": "2",
+                "avgPrice": "10",
+                "price": "0",
+                "updateTime": 1787990405000,
+            },
+            ("GET", "/fapi/v1/userTrades"): [
+                {
+                    "symbol": "ATOMUSDT",
+                    "orderId": actual_order_id,
+                    "id": "501",
+                    "price": "10",
+                    "qty": "2",
+                    "quoteQty": "20",
+                    "commission": "0.01",
+                    "commissionAsset": "USDT",
+                    "realizedPnl": "0",
+                    "side": "SELL",
+                    "positionSide": "BOTH",
+                    "time": 1787990404000,
+                }
+            ],
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id=algo_order_id,
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+        position_side="BOTH",
+    )
+
+    events = reconciler.recover(reconciler.capture((order,)))
+
+    assert len(events) == 1
+    assert events[0].event_type == "OrderFilled"
+    assert events[0].client_order_id == CLIENT_ORDER_ID
+    assert events[0].venue_order_id == actual_order_id
+    assert events[0].filled_qty == "2"
+    assert transport.calls[2][2] == {
+        "symbol": "ATOMUSDT",
+        "orderId": actual_order_id,
+    }
+    assert transport.calls[3][2]["orderId"] == actual_order_id
+
+
+@pytest.mark.parametrize("algo_status", ["TRIGGERED", "FINISHED"])
+def test_executed_algo_without_actual_order_id_produces_no_events(
+    algo_status: str,
+) -> None:
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): {
+                "symbol": "ATOMUSDT",
+                "algoId": "2000001419214201",
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": algo_status,
+            },
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="2000001419214201",
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+    )
+
+    events = reconciler.recover(reconciler.capture((order,)))
+
+    assert events == ()
+    assert [call[1] for call in transport.calls] == [
+        "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("algo_payload", "error_match"),
+    [
+        (
+            {
+                "algoId": "2000001419214202",
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "NEW",
+            },
+            "symbol",
+        ),
+        (
+            {
+                "symbol": "BTCUSDT",
+                "algoId": "2000001419214202",
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "NEW",
+            },
+            "symbol does not match candidate",
+        ),
+        (
+            {
+                "symbol": "ATOMUSDT",
+                "algoId": "2000001419214999",
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "NEW",
+            },
+            "algoId does not match candidate",
+        ),
+        (
+            {
+                "symbol": "ATOMUSDT",
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "NEW",
+            },
+            "missing algoId",
+        ),
+    ],
+    ids=[
+        "missing-symbol",
+        "wrong-symbol",
+        "only-client-id-matches",
+        "missing-algo-id",
+    ],
+)
+def test_algo_order_identity_failures_are_rejected(
+    algo_payload: dict[str, Any],
+    error_match: str,
+) -> None:
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): algo_payload,
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="2000001419214202",
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+    )
+
+    with pytest.raises(OwnedOrderRecoveryError, match=error_match):
+        reconciler.recover(reconciler.capture((order,)))
+
+
+@pytest.mark.parametrize("error_code", [-1102, -2011, -4120])
+def test_algo_order_non_missing_errors_are_raised_unchanged(
+    error_code: int,
+) -> None:
+    error = BinanceApiError(error_code, "Algo query rejected.")
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): error,
+        }
+    )
+    reconciler = BinanceOwnedOrderReconciler(transport=transport)
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id="2000001419214203",
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+    )
+
+    with pytest.raises(BinanceApiError) as raised:
+        reconciler.recover(reconciler.capture((order,)))
+
+    assert raised.value is error
+
+
+def test_actual_order_recovery_propagates_deadline_to_every_request() -> None:
+    algo_order_id = "2000001419214204"
+    actual_order_id = "82924"
+    transport = RecordingTransport(
+        {
+            (
+                "GET",
+                "/fapi/v1/order",
+                (("orderId", algo_order_id), ("symbol", "ATOMUSDT")),
+            ): BinanceApiError(-2013, "Order does not exist."),
+            ("GET", "/fapi/v1/algoOrder"): {
+                "symbol": "ATOMUSDT",
+                "algoId": algo_order_id,
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "TRIGGERED",
+                "actualOrderId": actual_order_id,
+            },
+            (
+                "GET",
+                "/fapi/v1/order",
+                (("orderId", actual_order_id), ("symbol", "ATOMUSDT")),
+            ): {
+                "symbol": "ATOMUSDT",
+                "orderId": actual_order_id,
+                "clientOrderId": "spawned-from-algo-order",
+                "status": "NEW",
+                "side": "SELL",
+                "origQty": "1",
+                "executedQty": "0",
+            },
+            ("GET", "/fapi/v1/userTrades"): [],
+        }
+    )
+    timestamps = iter((1.0, 2.0, 3.0, 4.0))
+    reconciler = BinanceOwnedOrderReconciler(
+        transport=transport,
+        monotonic=lambda: next(timestamps),
+    )
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id=algo_order_id,
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+        side="SELL",
+    )
+
+    assert reconciler.recover(
+        reconciler.capture((order,)),
+        deadline_monotonic=10.0,
+    ) == ()
+    assert [call[3] for call in transport.calls] == [9.0, 8.0, 7.0, 6.0]
+
+
+def test_actual_order_recovery_fails_when_deadline_expires_midway() -> None:
+    algo_order_id = "2000001419214205"
+    transport = RecordingTransport(
+        {
+            ("GET", "/fapi/v1/order"): BinanceApiError(
+                -2013,
+                "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): {
+                "symbol": "ATOMUSDT",
+                "algoId": algo_order_id,
+                "clientAlgoId": CLIENT_ORDER_ID,
+                "algoStatus": "TRIGGERED",
+                "actualOrderId": "82925",
+            },
+        }
+    )
+    timestamps = iter((1.0, 2.0, 10.0))
+    reconciler = BinanceOwnedOrderReconciler(
+        transport=transport,
+        monotonic=lambda: next(timestamps),
+    )
+    order = SimpleNamespace(
+        client_order_id=CLIENT_ORDER_ID,
+        venue_order_id=algo_order_id,
+        instrument_id="ATOMUSDT-PERP.BINANCE",
+        status="ACCEPTED",
+    )
+
+    with pytest.raises(TimeoutError, match="deadline exceeded"):
+        reconciler.recover(
+            reconciler.capture((order,)),
+            deadline_monotonic=10.0,
+        )
+
+    assert [call[1] for call in transport.calls] == [
+        "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
+    ]
+
+
 def test_missing_venue_order_does_not_block_later_candidate_recovery() -> None:
     missing_key = (
         "GET",
@@ -425,6 +1002,10 @@ def test_missing_venue_order_does_not_block_later_candidate_recovery() -> None:
             missing_key: BinanceApiError(
                 -2013,
                 "Order does not exist.",
+            ),
+            ("GET", "/fapi/v1/algoOrder"): BinanceApiError(
+                -2013,
+                "Algo order does not exist.",
             ),
             recovered_key: {
                 "symbol": "PENGUUSDT",
@@ -474,12 +1055,17 @@ def test_missing_venue_order_does_not_block_later_candidate_recovery() -> None:
         "OrderCanceled",
         "OrderCanceled",
     ]
-    assert [call[2]["orderId"] for call in transport.calls] == [
-        "82904",
-        "82904",
-        "82905",
-        "82905",
+    assert [call[1] for call in transport.calls] == [
+        "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
+        "/fapi/v1/userTrades",
+        "/fapi/v1/order",
+        "/fapi/v1/userTrades",
     ]
+    assert transport.calls[1][2] == {
+        "symbol": "SNDKUSDT",
+        "algoId": "82904",
+    }
 
 
 def test_manual_and_terminal_local_orders_are_excluded() -> None:
