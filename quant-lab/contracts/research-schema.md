@@ -153,3 +153,16 @@ G1 在 D-07 看板 note 中主动申报三处与 §9.1 的偏离。G0 已实跑�
 3. **`episode_event` 增列 `plan_id string?`**，准（增量列，与 §9.1 的 `channel_id` 同性质）。
 
 **未申报即视为漂移**：`gold/episode` 的 `migration_reason string?`（§9.1 明列）在 `load_episodes('fixture-v1')` 输出中缺失（只有 `is_tombstone`/`tombstoned_at`）。G1 须在 D-09 前补列或在看板 note 申报删列理由由 G0 裁定，不得静默省略。
+
+### 9.7 裁定 A5：`cluster_id` 必填 + 决策视图准入 + 机会集自洽（2026-09-11 OR-02 R3，规范性）
+
+**触发**：G0 OR-04 骨架实跑 `freeze_opportunity_set(load_episodes('fixture-v1'))`，得 `episode_ids=27` 而 `weights.height=0`、`n_clusters=0` —— 因为 `gold/episode.cluster_id` **27/27 全为 null**，簇计数 join 无一命中，机会集"非空但零权重"地静默通过。这正是"静默为空"的最坏形态：下游 θ 会在零权重上算出来而不报错。另发现决策视图有 1 行 `instrument_id = null`（与 review-G1-P1 S07 的隔离行准入问题同源）。
+
+**裁定**：
+
+1. **G1（D-07/D-09 属主）**：`gold/episode.cluster_id` 为**非空必填**列。合成夹具与真实产线一致：无法定簇（缺品种/缺 t_dec/隔离）的 episode 不得以 null 混入决策视图，应 `eligible=false` 且带明确 `reason`。单机会自成一簇是合法取值，null 不是。
+2. **G1**：决策视图（`load_episodes` 默认返回）中 `instrument_id`、`t_dec`、`cluster_id` 三列非空；未达标的行只出现在描述视图/quarantine，不出现在决策视图。
+3. **G3（R-06 属主）**：`freeze_opportunity_set` 必须在返回前断言 `len(episode_ids) == weights.height` 且 `weights["cluster_id"].null_count() == 0`，不成立即抛 `EvalProtocolError`，禁止返回自相矛盾的 `OpportunitySet`。`n_clusters` 不得在 `episode_ids` 非空时为 0。
+4. **G0（OR-04）**：端到端冒烟对 `n_clusters > 0` 与 `weights.height == len(ids)` 双断言，作为回归闸。
+
+**验收**：G1 侧 `load_episodes('fixture-v1')` 三列 null_count 全 0；G3 侧对 cluster_id 含 null 的输入有一条断言测试；OR-04 上述两个断言绿。

@@ -111,3 +111,16 @@ G2 的 R9 明确"输出不含 candidate 概念"，而 `feature-snapshot.md` §4 
 ### 5.8 待 G2 回执（下轮 verify 点）
 
 `policy_hash` 进 `ExecutionRequest` 与 `trace_hash`；`leg` 五值；`instrument_id` 新格式落到 `vision.py` 与 `contract.py`；`build_request(...)` 按 `research-schema.md` §9.4 落到 `quant_lab.market.contract`。G0 下轮实跑核对签名。
+
+### 5.9 裁定 B5：`Expiry.entry_ttl_s` 可空，缺失由 policy 解析（2026-09-11 OR-02 R3，规范性）
+
+**触发**：G0 OR-04 骨架首次以 `build_request` 消费真实 G1 `gold/episode` 行，26 个有 order_plan 的 episode 里 **25 个** `expiry.entry_ttl_s = null`，`Expiry.entry_ttl_s: int = Field(gt=0)` 直接抛 `ValidationError`，端到端在第一个接缝断裂。此前无人发现，因为 G3 用 `synthetic.fake_execution` 自造执行结果、从未调用过 `build_request`。
+
+**裁定**：原文未给入场有效期时，G1 **不得**猜值（与 review-G1-P1 S06 一致：`gold` 不得冒充作者事实）。改由 G2 承接：
+
+1. `Expiry.entry_ttl_s: int | None = Field(default=None, gt=0)`（与 `max_holding_s` 同构）。
+2. `ExecutionPolicy` 增 `entry_ttl_s: int`（默认值，建议 24×3600），作为 policy 内容的一部分进 `content_hash` ⇒ 改默认 TTL 必然改 `policy_hash`，可复算不被静默破坏。
+3. `build_request` 解析：`ttl = plan.expiry.entry_ttl_s if not None else policy.entry_ttl_s`，解析结果必须写进 `ExecutionRequest` 的显式字段（不得只在 `horizon_end` 里隐式体现），并进 `REQUEST_ID_COLS` ⇒ 进 `trace_hash`。
+4. `ExecutionResult` 的 `entry_ttl_source ∈ {plan, policy}` 作为诊断列输出，损耗归因时可区分"作者给了 TTL" 与 "policy 兜底"。
+
+**属主**：G2（M-06/M-09）。**验收**：`build_request` 对 `entry_ttl_s=None` 的真实 G1 行成功构造；两条 policy 只差 `entry_ttl_s` 时 `policy_hash` 与 `trace_hash` 均不同；`entry_ttl_source` 覆盖两种取值各 ≥1 例。
