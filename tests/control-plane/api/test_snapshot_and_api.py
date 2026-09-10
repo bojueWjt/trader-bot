@@ -43,6 +43,7 @@ def test_empty_system_returns_real_empty_state(db_conn):
 
 def test_populated_snapshot_is_schema_valid(db_conn):
     _seed_account(db_conn, last_event_minutes_ago=0)
+    _seed_mirror(db_conn)
     snap = build_system_snapshot(db_conn)
     read_api.validate_snapshot(snap)
     assert snap["data"]["balances"]["equity"] == 1000.0
@@ -50,12 +51,129 @@ def test_populated_snapshot_is_schema_valid(db_conn):
     assert snap["stale"] is False
 
 
-def test_stale_when_last_event_old(db_conn):
+def _seed_mirror(conn, *, account_id="acct-1", age_seconds=0):
+    with transaction(conn), conn.cursor() as cur:
+        ts = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        cur.execute(
+            "INSERT INTO exchange_state_mirror (account_id, payload, updated_at) VALUES (%s, '{}'::jsonb, %s)",
+            (account_id, ts),
+        )
+
+
+def test_quiet_execution_stream_is_not_stale_when_mirror_fresh(db_conn):
+    # Execution events only arrive on fills/placements; an hour of silence is normal and
+    # must not turn the whole panel red while the venue mirror is fresh.
     _seed_account(db_conn, last_event_minutes_ago=120)
+    _seed_mirror(db_conn, age_seconds=30)
     snap = build_system_snapshot(db_conn, staleness_threshold_ms=60_000)
     read_api.validate_snapshot(snap)
-    assert snap["projection_lag_ms"] > 60_000
+    assert snap["projection_lag_ms"] > 3_600_000
+    assert snap["stale"] is False
+
+
+def test_stale_when_mirror_old(db_conn):
+    _seed_account(db_conn, last_event_minutes_ago=0)
+    _seed_mirror(db_conn, age_seconds=400)
+    snap = build_system_snapshot(db_conn, staleness_threshold_ms=300_000)
+    read_api.validate_snapshot(snap)
     assert snap["stale"] is True
+
+
+def test_expected_account_without_mirror_row_is_stale(db_conn):
+    _seed_account(db_conn, last_event_minutes_ago=120)
+    snap = build_system_snapshot(db_conn, staleness_threshold_ms=60_000)
+    assert snap["stale"] is True
+
+
+def test_v1_envelope_matches_snapshot_verdict(db_conn):
+    from psycopg2.extras import RealDictCursor
+
+    _seed_account(db_conn, last_event_minutes_ago=120)
+    _seed_mirror(db_conn, age_seconds=400)
+    snap = build_system_snapshot(db_conn, staleness_threshold_ms=300_000)
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        env = read_api._envelope(cur, threshold_ms=300_000)
+    assert env["stale"] is snap["stale"] is True
+    assert env["projection_lag_ms"] > 3_600_000
+    assert env["reconciliation_state"] == snap["reconciliation_state"]
+    assert env["missing_nodes"] == snap["missing_nodes"]
+
+
+def _snapshot_and_envelope(db_conn, **thresholds):
+    from psycopg2.extras import RealDictCursor
+
+    snap = build_system_snapshot(db_conn, **thresholds)
+    envelope_thresholds = {}
+    staleness_threshold_ms = thresholds.get("staleness_threshold_ms")
+    if staleness_threshold_ms is not None:
+        envelope_thresholds["threshold_ms"] = staleness_threshold_ms
+    heartbeat_threshold_ms = thresholds.get("heartbeat_threshold_ms")
+    if heartbeat_threshold_ms is not None:
+        envelope_thresholds["heartbeat_threshold_ms"] = heartbeat_threshold_ms
+    with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+        env = read_api._envelope(cur, **envelope_thresholds)
+    return snap, env
+
+
+def test_oldest_expected_account_mirror_controls_staleness(db_conn):
+    _seed_account(db_conn, account_id="acct-new")
+    _seed_account(db_conn, account_id="acct-old")
+    _seed_mirror(db_conn, account_id="acct-new", age_seconds=10)
+    _seed_mirror(db_conn, account_id="acct-old", age_seconds=400)
+
+    snap, env = _snapshot_and_envelope(db_conn)
+
+    assert snap["stale"] is True
+    assert env["stale"] is snap["stale"]
+
+
+def test_all_expected_account_mirrors_fresh_are_not_stale(db_conn):
+    _seed_account(db_conn, account_id="acct-a")
+    _seed_account(db_conn, account_id="acct-b")
+    _seed_mirror(db_conn, account_id="acct-a", age_seconds=10)
+    _seed_mirror(db_conn, account_id="acct-b", age_seconds=20)
+
+    snap, env = _snapshot_and_envelope(db_conn)
+
+    assert snap["stale"] is False
+    assert env["stale"] is snap["stale"]
+
+
+def test_missing_expected_account_mirror_fails_closed_consistently(db_conn):
+    _seed_account(db_conn, account_id="acct-a")
+    _seed_account(db_conn, account_id="acct-b")
+    _seed_mirror(db_conn, account_id="acct-a", age_seconds=10)
+
+    snap, env = _snapshot_and_envelope(db_conn)
+
+    assert snap["stale"] is True
+    assert env["stale"] is snap["stale"]
+
+
+def test_empty_system_mirror_state_is_not_stale_consistently(db_conn):
+    snap, env = _snapshot_and_envelope(db_conn)
+
+    assert snap["stale"] is False
+    assert env["stale"] is snap["stale"]
+
+
+def test_default_thresholds_separate_heartbeat_and_mirror_age(db_conn):
+    _seed_account(db_conn)
+    _seed_mirror(db_conn, age_seconds=200)
+    with transaction(db_conn), db_conn.cursor() as cur:
+        old = datetime.now(timezone.utc) - timedelta(seconds=61)
+        cur.execute(
+            "INSERT INTO node_heartbeats (node_id, status, last_seen_at) "
+            "VALUES ('node-61s','up',%s)",
+            (old,),
+        )
+
+    snap, env = _snapshot_and_envelope(db_conn)
+
+    assert "node-61s" in snap["missing_nodes"]
+    assert snap["stale"] is True
+    assert env["missing_nodes"] == snap["missing_nodes"]
+    assert env["stale"] is snap["stale"]
 
 
 def test_failed_reconciliation_marks_stale(db_conn):

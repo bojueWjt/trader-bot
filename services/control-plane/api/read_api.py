@@ -70,7 +70,10 @@ from pools import (  # noqa: E402
 
 from snapshot import (  # noqa: E402
     DEFAULT_STALENESS_MS,
+    HEARTBEAT_STALENESS_MS,
+    _mirror_age_ms,
     _missing_nodes,
+    _stale_verdict,
     _worst_reconciliation_state,
     build_system_snapshot,
     validate_snapshot,
@@ -5186,7 +5189,13 @@ def _symbol(instrument_id: str | None) -> str | None:
     return instrument_id.split("-", 1)[0]
 
 
-def _envelope(cur, *, now: datetime | None = None, threshold_ms: int = DEFAULT_STALENESS_MS) -> dict:
+def _envelope(
+    cur,
+    *,
+    now: datetime | None = None,
+    threshold_ms: int = DEFAULT_STALENESS_MS,
+    heartbeat_threshold_ms: int = HEARTBEAT_STALENESS_MS,
+) -> dict:
     """Compute the SystemSnapshotV1 §2.2 envelope from the live projections — identical
     semantics to snapshot.build_system_snapshot, reused here so every /v1 row payload
     carries the same freshness verdict the snapshot endpoint reports."""
@@ -5199,8 +5208,19 @@ def _envelope(cur, *, now: datetime | None = None, threshold_ms: int = DEFAULT_S
     last_event = cur.fetchone()["t"]
     lag = max(0, int((now - last_event).total_seconds() * 1000)) if last_event is not None else 0
     recon = _worst_reconciliation_state(accounts)
-    missing = _missing_nodes(nodes, now, threshold_ms)
-    stale = bool((last_event is not None and lag > threshold_ms) or recon == "failed" or missing)
+    missing = _missing_nodes(nodes, now, heartbeat_threshold_ms)
+    # Stale follows exchange-mirror age, heartbeat gaps and failed reconciliation; the
+    # execution-event lag is reported but no longer drives the verdict (quiet hours are normal).
+    stale = _stale_verdict(
+        missing_nodes=missing,
+        reconciliation_state=recon,
+        mirror_age_ms=_mirror_age_ms(
+            cur,
+            now,
+            [str(account["account_id"]) for account in accounts],
+        ),
+        threshold_ms=threshold_ms,
+    )
     return {
         "schema_version": "1.0",
         "data_source": "postgres_projection",
