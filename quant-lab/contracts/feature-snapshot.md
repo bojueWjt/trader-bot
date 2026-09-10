@@ -1,6 +1,7 @@
 # 契约：feature-snapshot（G3 research provides）
 
-> 状态：v0 草案，G0 在 OR-01 定稿。来源：合并稿 D.1–D.5 / E。
+> 状态：**v1 已冻结（2026-09-11 OR-01）**。来源：合并稿 D.1–D.5 / E。改签名先 `block`。
+> **优先级**：§7「OR-01 定稿修订」为规范性增补，与 §1–§6 冲突时**以 §7 为准**。
 
 ## 1. AST（JSON，唯一入口；不接受 Python 字符串）
 ```json
@@ -37,7 +38,7 @@ class OpportunitySet:            # 收益前冻结
     episode_ids: list[str]; eligibility: pl.DataFrame; weights: pl.DataFrame  # 簇均权：每经济簇总权重 1
 def evaluate(
     ast: dict, opp: OpportunitySet, *, features: pl.DataFrame, rule: Callable[[pl.DataFrame], pl.Series],  # take/skip
-    execution: pl.DataFrame,      # G2 simulate_batch 输出，含 baseline 与 candidate 同机会
+    execution: pl.DataFrame,      # G2 simulate_batch 输出（见 §7.3：不含 candidate 概念，G3 发两组 request 后自行配对）
     fold_id: str, attempt_id: str,
 ) -> EvalResult                    # theta, se, n_opportunities, n_clusters, coverage, nan_rate, per_fill_R, tail_loss, unclosed_rate
 ```
@@ -57,3 +58,36 @@ def evaluate(
 def run_protocol(config_path: str) -> ProtocolReport   # 冻结配置 → 折、账本、θ/CI、档位、报告文件
 def enumerate_grammar(depth: int = 2, *, ops: list[str], windows: list[int], fields: list[str], cap: int) -> list[dict]
 ```
+
+---
+
+## 7. OR-01 定稿修订（G0 裁定，2026-09-11，规范性）
+
+G3 窗口本轮未启动，未提交修订；以下三条是 G0 在合并 G1（D-01）与 G2（M-01）修订时发现的、**直接改变 G3 桩签名**的跨契约裁定。G3 起步时按本节写桩。
+
+### 7.1 `anchors.t_dec` 来自 `gold/episode` 的实列，不自行推导
+
+见 `research-schema.md` §9.3。`t_dec` 是 G1 落的实列（`= max(闭包内依赖 available_at) + processing_delay_s`）。`decision_eligible_at` 是诊断列，**禁止**当 `t_dec` 用。
+
+### 7.2 `instrument_id` 格式 = `BTCUSDT-PERP.BINANCE-UM`
+
+见 `execution-interface.md` §5.2（Nautilus 实测证据）。旧写法 `BINANCE-PERP:BTCUSDT` 作废，合成夹具一并改。
+
+### 7.3 `evaluate` 的 `execution` 入参：G3 自己配对 baseline/candidate
+
+`simulate_batch` 输出**不含** baseline/candidate 概念（`execution-interface.md` §5.7 裁定 B6）。G3 发两组 `ExecutionRequest`（共享 `episode_id, graph_version`，差异在 `policy_version`/规则），按 `episode_id` 配对成两臂。列名与配对键见 G2 的 `docs/adr/report-G2-contract-revision-M01.md` §3.3 / R9。
+
+### 7.4 `net_R` 可空，与 NaN/0/排除的判定表
+
+| 情形 | 产出 | 谁负责 |
+|---|---|---|
+| 右删失 / 证据缺失（`censor_reason` 非空） | `net_R = null`，**排除出分母并计入损耗**，不记 0 | G2 出 null，G3 排除 |
+| 未成交（`fill_status = none`，无删失） | `net_R = 0` | G2 |
+| 规则判 skip | `net_R = 0`，仍在分母 | G3（G2 不产生 skip） |
+| 候选特征 NaN | 按 skip 处理（记 0），基线仍在分母；`nan_rate > 5%` 拒收 | G3 |
+
+**"删失记 0"是幸存者偏差的主要泄漏口，OR-05 的 adversarial review 会重点查这一条。**
+
+### 7.5 湖路径统一走 `QUANT_LAB_DATA_ROOT`
+
+`data/lockbox/ledger.parquet` 等路径必须经 `QUANT_LAB_DATA_ROOT`（默认 `<repo>/quant-lab/data`）解析，不得写死相对路径；G0 的 OR-04 冒烟会把它指向 tmp 目录。
