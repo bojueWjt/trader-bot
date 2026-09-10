@@ -284,3 +284,14 @@ docs/adr/review-G<N>-P1.md 中最后一条「终裁」/「二审终裁」行的�
 4. **G0（OR-04）**：端到端冒烟必须用 G1 真实 `load_episodes` 输出而非 G3 桩来驱动 `freeze_opportunity_set`，本条已在本轮实跑中生效。
 
 **验收**：`freeze_opportunity_set(load_episodes('fixture-v1'))` 不再抛 `StructFieldNotFoundError`；非法 estimand 有一条断言测试；`fake_episodes` 与 `load_episodes` 的 `eligibility_by_estimand` schema 逐键相同。
+
+### §9.10.9 裁定 A13：`eligibility_by_estimand` 六键可空性（G0 OR-02 R11，changeLog #26）
+
+**取证**：OR-04 `test_seam_g3_opportunity_set_frozen` 由 R6 的 PASS 回退为 ERROR：`evaluator.py:91 EvalProtocolError: eligibility_by_estimand.outcome 含 null`。G1 真实 gold 23 行中 `outcome` 键 23/23 null（其余五键 0 null），G3 在 R10 后把六键全部改为非空校验。契约 §9.10.1/§9.10.8 只冻结了键集与 Boolean 类型，未写可空性，双方各自合理推断导致接缝断。
+
+**裁定**：
+1. **六键一律非空 Boolean**（属主 G1）。语义是"该 estimand 下此 episode 是否合格"，`null` 会让"不合格"与"没算"不可分。`outcome` 键在 gold 发布时按生命周期状态填值：已有 `claimed_outcome` 或 `reconstructed_outcome` 且通过 §9.1 判定表 → `true`，否则 `false`；**禁止 null**。
+2. **G3 只对被请求的 `estimand` 键做非空校验**（属主 G3）。`freeze_opportunity_set(..., estimand=k)` 校验 `k` 键无 null 即可；其余键的 null 记为 `EvalProtocolWarning`（进 report 诊断，不抛）。理由：单个上游键缺陷不应阻塞与之无关的 estimand 评估，且 OR-04 主链路只用 `entry_decision`。
+3. 两条同时生效、互不等待：任一侧落地，OR-04 该接缝即通；两侧都落地后 G3 的 warning 计数应为 0。
+
+**验收**：`load_episodes('fixture-v1')` 六键 null_count 全 0；`freeze_opportunity_set(load_episodes('fixture-v1'), estimand='entry_decision')` 不抛；G3 单测覆盖"非请求键含 null 只 warning"。
