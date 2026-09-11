@@ -8080,11 +8080,13 @@ EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT="$EXECUTION_DOMAIN_TGT/order_ownership.py"
 EXECUTION_DOMAIN_IDEMPOTENCY_TGT="$EXECUTION_DOMAIN_TGT/idempotency.py"
 EXECUTION_DOMAIN_IDENTIFIERS_TGT="$EXECUTION_DOMAIN_TGT/identifiers.py"
 SETTINGS_PACKAGE_TGT="$T/services/control-plane/settings"
+API_EXTENSIONS_PACKAGE_TGT="$T/services/control-plane/api"
+API_EXTENSIONS_PACKAGE_FILES=(v1_trace.py v1_outcomes.py outcomes_kpis.py)
 SETTINGS_PACKAGE_FILES=(__init__.py apply_plan.py import_export.py permissions.py publisher.py resolver.py router.py schema.py service.py versioning.py)
 AUDIT_PACKAGE_TGT="$T/services/control-plane/audit"
 AUDIT_PACKAGE_FILES=(__init__.py settings_audit.py)
 ORDER_MANAGEMENT_PACKAGE_TGT="$T/services/control-plane/order_management"
-ORDER_MANAGEMENT_PACKAGE_FILES=(__init__.py db_helpers.py identifiers.py metrics.py order_reducer.py outbox.py)
+ORDER_MANAGEMENT_PACKAGE_FILES=(__init__.py alerts.py db_helpers.py identifiers.py metrics.py order_reducer.py outbox.py)
 OBSERVABILITY_PACKAGE_TGT="$T/services/nautilus-node/observability"
 OBSERVABILITY_PACKAGE_FILES=(__init__.py _shared.py logs.py metrics.py tracing.py)
 APP_ROLES_TGT="$T/services/control-plane/api/app_roles.py"
@@ -8125,6 +8127,10 @@ REBUILD_ORDERS_PROJECTION_TGT="$T/scripts/rebuild_orders_projection.py"
 for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
   [ -f "host/settings/$settings_file" ] \
     || die "staging missing host/settings/$settings_file"
+done
+for api_extension_file in "${API_EXTENSIONS_PACKAGE_FILES[@]}"; do
+  [ -f "host/api_extensions/$api_extension_file" ] \
+    || die "staging missing host/api_extensions/$api_extension_file"
 done
 for audit_file in "${AUDIT_PACKAGE_FILES[@]}"; do
   [ -f "host/audit/$audit_file" ] \
@@ -9387,6 +9393,13 @@ for settings_file in "${SETTINGS_PACKAGE_FILES[@]}"; do
     break
   fi
 done
+for api_extension_file in "${API_EXTENSIONS_PACKAGE_FILES[@]}"; do
+  if ! cmp -s "host/api_extensions/$api_extension_file" \
+    "$API_EXTENSIONS_PACKAGE_TGT/$api_extension_file"; then
+    CHANGED_HOST+=("api_extensions_package")
+    break
+  fi
+done
 for audit_file in "${AUDIT_PACKAGE_FILES[@]}"; do
   if ! cmp -s "host/audit/$audit_file" \
     "$AUDIT_PACKAGE_TGT/$audit_file"; then
@@ -10558,6 +10571,17 @@ for h in "${CHANGED_HOST[@]:-}"; do
         fi
       done
       ;;
+    api_extensions_package)
+      for api_extension_file in "${API_EXTENSIONS_PACKAGE_FILES[@]}"; do
+        if [ -f "$API_EXTENSIONS_PACKAGE_TGT/$api_extension_file" ]; then
+          bk "$API_EXTENSIONS_PACKAGE_TGT/$api_extension_file" \
+            "host__api_extensions_$api_extension_file"
+        else
+          printf '%s\n' "$API_EXTENSIONS_PACKAGE_TGT/$api_extension_file" \
+            >> "$BACKUP_ROOT/new-files.txt"
+        fi
+      done
+      ;;
     audit_package)
       for audit_file in "${AUDIT_PACKAGE_FILES[@]}"; do
         if [ -f "$AUDIT_PACKAGE_TGT/$audit_file" ]; then
@@ -10899,6 +10923,21 @@ for h in "${CHANGED_HOST[@]:-}"; do
         fi
       done
       ;;
+    api_extensions_package)
+      mkdir -p "$API_EXTENSIONS_PACKAGE_TGT"
+      # The deploy runs under umask 077 and the role services run as
+      # non-root users; pin the package directory world-readable.
+      chmod 0755 "$API_EXTENSIONS_PACKAGE_TGT"
+      for api_extension_file in "${API_EXTENSIONS_PACKAGE_FILES[@]}"; do
+        if [ -f "$API_EXTENSIONS_PACKAGE_TGT/$api_extension_file" ]; then
+          cat "host/api_extensions/$api_extension_file" \
+            > "$API_EXTENSIONS_PACKAGE_TGT/$api_extension_file"
+        else
+          install -m 0644 "host/api_extensions/$api_extension_file" \
+            "$API_EXTENSIONS_PACKAGE_TGT/$api_extension_file"
+        fi
+      done
+      ;;
     audit_package)
       mkdir -p "$AUDIT_PACKAGE_TGT"
       chmod 0755 "$AUDIT_PACKAGE_TGT"
@@ -10978,6 +11017,10 @@ for h in "${CHANGED_HOST[@]:-}"; do
 	cmp -s host/execution_domain/entry_batch.py \
 	  "$EXECUTION_DOMAIN_ENTRY_BATCH_TGT" \
 	  || die "post-install mismatch: host/execution_domain/entry_batch.py"
+for api_extension_file in "${API_EXTENSIONS_PACKAGE_FILES[@]}"; do
+  cmp -s "host/api_extensions/$api_extension_file" "$API_EXTENSIONS_PACKAGE_TGT/$api_extension_file" \
+    || die "post-install mismatch: host/api_extensions/$api_extension_file"
+done
 	cmp -s host/app_roles.py "$APP_ROLES_TGT" \
 	  || die "post-install mismatch: host/app_roles.py"
 	cmp -s host/pools.py "$DB_POOLS_TGT" \

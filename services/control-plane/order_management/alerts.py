@@ -30,6 +30,7 @@ _CRITICAL_CONDITIONS = frozenset(
         "close_all_not_completed",
         "severe_drift",
         "live_data_stale",
+        "node_halted",
     }
 )
 _HIGH_CONDITIONS = frozenset(
@@ -222,6 +223,19 @@ class AlertEngine:
         if last is None:
             return False
         return now - last < self._cooldown
+
+    def seed_active_key(self, key: str) -> None:
+        """Register ``key`` as already active without emitting a notification.
+
+        Callers that persist the "is this alert currently active" fact
+        externally (e.g. a DB column captured atomically with the state
+        transition that caused the alert) need a fresh, request-scoped
+        engine instance to still be able to emit a *recovery* notification
+        for that key. ``evaluate()`` otherwise refuses to emit a recovery
+        for a key it never saw fire, since a brand-new engine has empty
+        in-memory state.
+        """
+        self._active_keys.add(key)
 
 
 class OutboxNotificationSink:
@@ -443,6 +457,46 @@ def condition_from_loss_limit_decision(
         observed_at=observed_at,
         is_active=mode in {"REDUCING", "HALT", "HALTED"},
         severity="high",
+    )
+
+
+def condition_from_node_status_transition(
+    *,
+    account_id: str | None,
+    node_id: str,
+    previous_status: str | None,
+    new_status: str,
+    halt_reason: str | None,
+    observed_at: datetime,
+) -> AlertCondition | None:
+    """Build an ``AlertCondition`` for a node's fail-closed HALT transition.
+
+    Returns ``None`` when neither a HALT-entry nor a HALT-exit transition is
+    present (i.e. ``previous_status`` and ``new_status`` are both HALTED, or
+    both non-HALTED) so callers can skip alerting/audit work on the vast
+    majority of heartbeats that do not cross the HALTED boundary.
+    """
+    previous = str(previous_status or "").strip().upper() or None
+    current = str(new_status or "").strip().upper()
+    entered_halt = current == "HALTED" and previous != "HALTED"
+    left_halt = previous == "HALTED" and current != "HALTED"
+    if not entered_halt and not left_halt:
+        return None
+    payload = {
+        "node_id": node_id,
+        "account_id": account_id,
+        "halt_reason": halt_reason,
+        "previous_status": previous,
+        "new_status": current,
+    }
+    return AlertCondition(
+        condition_type="node_halted",
+        account_id=account_id,
+        entity_id=node_id,
+        payload=payload,
+        observed_at=observed_at,
+        is_active=entered_halt,
+        severity="critical",
     )
 
 

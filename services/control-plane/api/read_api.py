@@ -17,7 +17,7 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -3107,6 +3107,9 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
             payload["health_degraded_reasons"] = health_degraded_reasons
             cur.execute(
                 """
+                WITH previous_heartbeat AS (
+                    SELECT status FROM node_heartbeats WHERE node_id = %s
+                )
                 INSERT INTO node_heartbeats (
                     node_id,
                     account_id,
@@ -3212,8 +3215,12 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                             IS DISTINCT FROM EXCLUDED.redis_fencing_epoch
                     )
                 )
+                RETURNING
+                    (SELECT status FROM previous_heartbeat) AS previous_status,
+                    node_heartbeats.status AS new_status
                 """,
                 (
+                    node_id,
                     node_id,
                     bound_account_id,
                     str(body.get("trading_state") or "UNKNOWN"),
@@ -3243,8 +3250,29 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                     exchange_evidence_accepted,
                 ),
             )
+            # Old status is read back via the CTE above (previous_heartbeat)
+            # riding on this same INSERT/UPSERT statement -- no extra DB
+            # round trip is added to the heartbeat hot path.
+            heartbeat_transition_row = cur.fetchone()
             if cur.rowcount != 1:
                 _raise_writer_fence("stale heartbeat writer")
+            _handle_node_heartbeat_status_transition(
+                conn,
+                node_id=node_id,
+                account_id=bound_account_id,
+                previous_status=(
+                    heartbeat_transition_row[0]
+                    if heartbeat_transition_row
+                    else None
+                ),
+                new_status=(
+                    heartbeat_transition_row[1]
+                    if heartbeat_transition_row
+                    else None
+                ),
+                halt_reason=body.get("halt_reason"),
+                observed_at=datetime.now(timezone.utc),
+            )
             if exchange_evidence_complete:
                 _revoke_changed_portfolio_baselines(
                     cur,
@@ -3276,6 +3304,107 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
         return receipt
     finally:
         conn.close()
+
+
+_node_halt_alert_log = logging.getLogger("control_plane.node_halt_alert")
+
+
+def _handle_node_heartbeat_status_transition(
+    conn,
+    *,
+    node_id: str,
+    account_id: str | None,
+    previous_status: str | None,
+    new_status: str | None,
+    halt_reason: str | None,
+    observed_at: datetime,
+) -> None:
+    """Alert + audit a HALTED boundary crossing observed on this heartbeat.
+
+    Fail-closed HALT is a safety feature, not a bug: this function only adds
+    *observability* for it (2026-09-01 postmortem: an 8h fail-closed HALT
+    produced zero alerts and zero audit rows). It must never make the
+    heartbeat request fail, so callers wrap this call in a SAVEPOINT and
+    swallow+log any exception raised here.
+    """
+    if not new_status:
+        return
+    # Cheap inline pre-check so the overwhelming majority of heartbeats
+    # (no HALTED boundary crossed) never pay for a SAVEPOINT, a module
+    # import, or a second cursor -- those only happen on the rare
+    # transition heartbeat. This mirrors (and is re-verified by) the
+    # canonical check in order_management.alerts.condition_from_node_status_transition
+    # once we're inside the try block below.
+    previous_upper = str(previous_status or "").strip().upper() or None
+    current_upper = str(new_status or "").strip().upper()
+    entered_halt = current_upper == "HALTED" and previous_upper != "HALTED"
+    left_halt = previous_upper == "HALTED" and current_upper != "HALTED"
+    if not entered_halt and not left_halt:
+        return
+    with conn.cursor() as sp:
+        sp.execute("SAVEPOINT node_halt_alert")
+    try:
+        _cp_paths()
+        from audit import record_audit_event
+        from order_management.alerts import (
+            AlertEngine,
+            OutboxNotificationSink,
+            condition_from_node_status_transition,
+        )
+        from datetime import timedelta
+
+        condition = condition_from_node_status_transition(
+            account_id=account_id,
+            node_id=node_id,
+            previous_status=previous_status,
+            new_status=new_status,
+            halt_reason=halt_reason,
+            observed_at=observed_at,
+        )
+        if condition is None:
+            with conn.cursor() as sp:
+                sp.execute("RELEASE SAVEPOINT node_halt_alert")
+            return
+        engine = AlertEngine(
+            cooldown=timedelta(minutes=5),
+            sink=OutboxNotificationSink(conn),
+        )
+        if not condition.is_active:
+            # A fresh, request-scoped engine has no memory of the prior
+            # firing alert; the DB-verified transition itself is the proof
+            # this recovery is real, so seed the active-key set explicitly.
+            engine.seed_active_key(condition.alert_key)
+        engine.evaluate(condition, now=observed_at)
+        record_audit_event(
+            conn,
+            event_type="node.halted" if condition.is_active else "node.resumed",
+            aggregate_type="node",
+            aggregate_id=node_id,
+            actor=f"node:{node_id}",
+            payload={
+                "node_id": node_id,
+                "account_id": account_id,
+                "halt_reason": halt_reason,
+                "previous_status": previous_status,
+                "new_status": new_status,
+                "observed_at": observed_at.isoformat(),
+            },
+        )
+    except Exception as exc:
+        with conn.cursor() as sp:
+            sp.execute("ROLLBACK TO SAVEPOINT node_halt_alert")
+        _node_halt_alert_log.error(
+            "node_halt_alert_failed node_id=%s account_id=%s "
+            "previous_status=%s new_status=%s error=%s",
+            node_id,
+            account_id,
+            previous_status,
+            new_status,
+            f"{type(exc).__name__}: {exc}",
+        )
+    else:
+        with conn.cursor() as sp:
+            sp.execute("RELEASE SAVEPOINT node_halt_alert")
 
 
 def _heartbeat_release_receipt(
@@ -5261,9 +5390,78 @@ def _valid_uuid(value: str) -> str | None:
         return None
 
 
+def _parse_history_hours(raw: str | None) -> int | None:
+    """GET /v1/accounts?history_hours=.. (contracts/backend-api.md §8).
+
+    Absent parameter -> None (caller must leave the response byte-identical
+    to the pre-§8 shape). Present but out of [1, 168] or non-integer -> 400,
+    matching this module's existing manual-validation error style (not
+    FastAPI's default 422 Query() constraint violations).
+    """
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="history_hours must be an integer between 1 and 168",
+        )
+    if not (1 <= value <= 168):
+        raise HTTPException(
+            status_code=400,
+            detail="history_hours must be an integer between 1 and 168",
+        )
+    return value
+
+
+def _decimal_str(value) -> str:
+    return "0" if value is None else str(value)
+
+
+_EQUITY_HISTORY_BUCKET_SECONDS = 1800
+_EQUITY_HISTORY_MAX_POINTS = 336
+
+
+def _equity_history(conn, hours: int, accounts_expected: int) -> tuple[list[dict], dict]:
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT bucket_at, SUM(equity) AS equity_sum, SUM(available) AS available_sum, "
+            "COUNT(*) AS accounts_sampled "
+            "FROM account_equity_samples WHERE bucket_at >= %s "
+            "GROUP BY bucket_at ORDER BY bucket_at ASC LIMIT %s",
+            (since, _EQUITY_HISTORY_MAX_POINTS),
+        )
+        bucket_rows = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT min(sampled_at) AS first_sample_at FROM account_equity_samples")
+        first_row = cur.fetchone()
+    total = [
+        {
+            "t": _iso(row["bucket_at"]),
+            "equity": _decimal_str(row["equity_sum"]),
+            "available": _decimal_str(row["available_sum"]),
+            "accounts_sampled": int(row["accounts_sampled"]),
+        }
+        for row in bucket_rows
+    ]
+    meta = {
+        "bucket_seconds": _EQUITY_HISTORY_BUCKET_SECONDS,
+        "accounts_expected": accounts_expected,
+        "since": since.isoformat(),
+        "first_sample_at": _iso(first_row["first_sample_at"]) if first_row else None,
+    }
+    return total, meta
+
+
 @app.get("/v1/accounts")
-def v1_accounts(authorization: str | None = Header(default=None)):
+def v1_accounts(
+    history_hours: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     require_reader(authorization)
+    parsed_history_hours = _parse_history_hours(history_hours)
     conn = _read_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -5287,7 +5485,16 @@ def v1_accounts(authorization: str | None = Header(default=None)):
                 "reconciliation_state": r["reconciliation_state"],
                 "updated_at": _iso(r["updated_at"]),
             })
-        return {**env, "accounts": accounts}
+        result = {**env, "accounts": accounts}
+        if parsed_history_hours is not None:
+            equity_history_total, equity_history_meta = _equity_history(
+                conn, parsed_history_hours, accounts_expected=len(accounts)
+            )
+            result["data"] = {
+                "equity_history_total": equity_history_total,
+                "equity_history_meta": equity_history_meta,
+            }
+        return result
     finally:
         conn.close()
 
@@ -8705,8 +8912,12 @@ def role_database_health():
 
 
 from v1_mirror import router as v1_mirror_router  # noqa: E402
+from v1_trace import router as v1_trace_router  # noqa: E402
 
-app.include_router(v1_mirror_router)
+# Copy APIRoute objects (same as settings.router). include_router() leaves
+# _IncludedRouter which build_role_app skips, so operator-query would 404.
+app.router.routes.extend(v1_mirror_router.routes)
+app.router.routes.extend(v1_trace_router.routes)
 
 _install_retryable_db_error_handler(app)
 all_role_app = app
@@ -8728,3 +8939,9 @@ def create_app(role: AppRole | str | None = None) -> FastAPI:
 
 
 app = create_app()
+
+from v1_outcomes import router as v1_outcomes_router  # noqa: E402
+
+# Copy APIRoute objects (same as settings.router). include_router() would
+# leave an _IncludedRouter that build_role_app skips (APIRoute-only).
+app.router.routes.extend(v1_outcomes_router.routes)

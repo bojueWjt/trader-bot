@@ -158,6 +158,10 @@ RELEASE_FILES = (
     ("infra/docker/nautilus/uv.node.lock", "uv.node.lock"),
     ("services/control-plane/api/read_api.py", "host/read_api.py"),
     ("services/control-plane/api/snapshot.py", "host/snapshot.py"),
+    ("services/control-plane/api/v1_trace.py", "host/api_extensions/v1_trace.py"),
+    ("services/control-plane/api/v1_outcomes.py", "host/api_extensions/v1_outcomes.py"),
+    ("services/control-plane/api/outcomes_kpis.py", "host/api_extensions/outcomes_kpis.py"),
+    ("services/control-plane/order_management/alerts.py", "host/order_management/alerts.py"),
     (
         "services/control-plane/decision_gateway/gateway.py",
         "host/decision_gateway/gateway.py",
