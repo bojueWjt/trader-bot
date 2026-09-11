@@ -67,6 +67,22 @@ def simulate_batch(reqs: Iterable[ExecutionRequest], **kw) -> pl.DataFrame
 ### 不变量（每次 simulate 后断言）
 数量守恒、手续费/资金费率账务守恒、reduce-only 不增仓、GTD/IOC 终态唯一、累计成交 ≤ 订单量、触 TP 前无 fill 则仓位为零、`net_R` 在 `censor_reason` 非空时为 null。
 
+### 终态映射（A15 / B9，规范性）
+
+`reconstructed_outcome.kind` 由 `ExecutionResult` 按下列顺序唯一确定，首条命中即取值：
+
+| # | 条件 | kind |
+|---|---|---|
+| 1 | `censor_reason == LABEL_RIGHT_CENSORED` | `right_censored` |
+| 2 | `censor_reason` 为其余五种证据缺失码 | `unevaluable`（**禁映 `right_censored`**）|
+| 3 | 未成交且事件含 `rejected` | `rejected`（**禁并入 `unfilled_expired`**）|
+| 4 | 未成交且事件含 `expired` | `unfilled_expired` |
+| 5 | 已 `closed` 且出场成交含 `leg=sl` | `stopped` |
+| 6 | 已 `closed` 且出场成交全为 `leg=tp` | `tp_hit` |
+| 7 | 其余已 `closed` 且有成交 | `filled_closed`（v0 不可达，留给政策平仓腿 C06）|
+
+诊断列 `exit_legs` 给出出场实际参与的腿集合（`("sl",)` / `("sl","tp")` / `("tp",)` / `()`），使混合出场可分而无须扩枚举。
+
 ## 4. 最小 episode 期望集（`tests/market/fixtures/episodes/*.json`）
 ≥10 个手工构造：跳空、同分钟两价格流异步、mark/last 分离触发、funding 结算边界、部分成交、同 bar 双触发、未成交到期、reduce-only、区间入场、多档止盈。每个带独立期望 `ExecutionResult`，两内核候选都要过。
 
@@ -149,3 +165,26 @@ G2 的 R9 明确"输出不含 candidate 概念"，而 `feature-snapshot.md` §4 
 6. **G1 义务**：保持留空，**不得**均分猜值；`gold` 的 `fraction` 列类型按 §9.10 A8 为 `Decimal(38,12)`（可空），不得为 `Float64`——`1/3` 的浮点等分会让 `sum != 1` 在 G2 侧随机报错。
 
 **属主**：G2（M-06/M-09）主改，G1（D-07）只改 dtype。**验收**：(a) `build_request` 对 25 行 `fraction=null` 的真实 G1 行全部成功构造；(b) 两条只差 `tp_total_fraction` 的 policy 产出不同 `policy_hash` 与 `trace_hash`；(c) `fraction_source` 两种取值各 ≥1 例；(d) 3 腿等分用例 `sum(entry_fractions) == Decimal(1)` 精确成立；(e) 部分给出的用例抛 `ContractError`。
+
+### 5.11 裁定 B9：终态映射入契约 + 枚举不可达的正当处置 + 显式字段的一般规则（G0 OR-02 R22，规范性）
+
+G2 按 §9.10.11 A15 做完映射并提交 `docs/adr/report-G2-outcome-kind-mapping.md`，其 §5 段落经 G0 审阅后**已并入本文件 §3「终态映射」**，为规范性内容。另裁两条：
+
+#### 1. `filled_closed` 在 v0 不可达 —— 准，且**禁止为凑满枚举而改判**
+
+v0 无政策平仓腿（ADR C06 留 P2），任何完整平仓都会先命中 `stopped` 或 `tp_hit`，第 7 条规则不可达。
+
+**裁定**：枚举值在某个内核版本下不可达是合法状态。覆盖测试的正确写法是**断言其不可达并注明原因**（`filled_closed` 的原因为"v0 无 `leg=close` 政策平仓腿"），C06 落地后转为正例。**严禁**把 `tp_hit` 或 `stopped` 改判成 `filled_closed` 来让七值"都被覆盖到"——那会把"止盈平仓"与"政策平仓"两种不同事实合并，正是 A15 要堵的标签串味；测试覆盖率不是把标签改错的理由。
+
+同理适用于其余枚举值：任何"为了让覆盖测试好看"而放宽或改判标签的行为，一律视为放宽性变更，须先 `block` 给 G0（§9.10.12 A16 第 4 条）。
+
+#### 2. 显式字段的一般规则（采纳 G2 对 S17 教训的推广，优于 G0 原表述）
+
+凡"**显式字段 + 兜底规则**"型裁定（现有：§5.9 `entry_ttl_s`、§5.10 `entry_fractions`/`tp_fractions`；今后同型一律适用），显式字段在语义上是**解析结果的记录**，不是独立输入。因此必须同时满足：
+
+1. **逐值相等**：显式值与 `resolve_*(plan, policy)` 的解析结果逐值相等，不等即 `ContractError`；
+2. **同域校验**：显式值必须通过与被解析值**同一套**域校验（精度/标度/范围）。
+
+第 2 条是 S17 暴露的第二个口子：`.5000000000001` 能进请求、批表截断到标度 12、而 `trace_hash` 用的是未截断的原值 —— 输出无法忠实复原参与哈希的输入，可复算性在"看起来都对"的情况下静默破裂。
+
+**根因归属**：这是 G0 的 B8 裁定引入的新接缝（要求显式字段进 `trace_hash` 却未规定其域校验），由 G2 在四审中发现并堵上。记为判例 3。

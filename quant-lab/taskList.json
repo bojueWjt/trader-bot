@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T02:37:51Z",
+  "updatedAt": "2026-09-11T02:43:52Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -194,10 +194,18 @@
         "section": "§9.10.12 A16",
         "summary": "批准并追认 G2 新增的 task.py set-verify（补 G0 欠的缺口）；scripts/task.py 纳入 G0 审查范围；立验收门自改护栏：只准收紧不准放宽、--why 视为必填、G0 每轮核 verifyHistory 并对放宽判 fail、放宽须先 block",
         "by": "G0/427ed064 R20"
+      },
+      {
+        "n": 30,
+        "at": "2026-09-11T02:44:41Z",
+        "file": "contracts/execution-interface.md",
+        "section": "§3 终态映射 + §5.11 B9",
+        "summary": "A15 七值映射表并入 §3 为规范性内容；裁定 filled_closed 在 v0 不可达为合法状态，须断言不可达并注明原因，禁止为凑覆盖率改判标签；确立显式字段一般规则——显式字段是解析结果的记录，须逐值相等且通过同域校验（采纳 G2 对 S17 的推广，记判例 3：B8 裁定引入的接缝由 G2 发现堵上）",
+        "by": "G0/427ed064 R22"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.6",
+    "version": "v1.7",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -490,7 +498,7 @@
         "note": "[G0/427ed064 R20 02:3xZ] M-10 假绿已修，G0 自检：新 verify 取最后一条终裁行正向判读，当前 rc=1（四审终裁 fail，正确判死）；verifyHistory 核对：新增 1 条，收紧 1 条，放宽 0 条（§9.10.12 A16）。抽跑 test_review_p1_round4.py 2 passed、S05/S17 相关 13 passed；tests/market 218 passed（首跑 3 failed 为 G1 Codex 写任务同刻改树，复跑全绿）。S17 值得记：B8 的显式 entry_fractions/tp_fractions 曾能在同一 policy_hash 下编码第三种分配且精度校验可绕——**这是 G0 的 B8 裁定引入的新接缝，G2 发现并堵上**，A15/B8 类裁定今后须同时要求显式值与解析值逐值相等的断言。M-10 verify 累计失败 4 次，G2 已按纪律停下请示，同意不派第五轮。",
         "at": "2026-09-11T02:37:51Z"
       },
-      "lastUpdate": "2026-09-11T02:29:25Z",
+      "lastUpdate": "2026-09-11T02:39:20Z",
       "tasks": [
         {
           "id": "M-01",
@@ -667,6 +675,10 @@
         {
           "t": "11:29",
           "n": "按用户裁定改为委派 Codex 直接修改：已派写任务 task-mtwc80bl-dwasc4（可写 src/quant_lab/market、tests/market、新建 docs/adr/report-G2-review-fixes.md；禁改 review-G2-P1.md 终裁行/contracts/taskList/其它窗口/依赖），任务=按四审判定表逐条闭合 open 与可闭合的 partial-P2、横扫 polars .any() 跳过 null 的同类缺陷、B 暴露改真实截止并重新冻结 ab_explanations.json，四条验证命令自跑并写报告。完成后再派一轮只读复核出终裁（Codex 不自评）。G2 已修的 S05/S17 与其回归作为不可推翻基线。"
+        },
+        {
+          "t": "11:39",
+          "n": "A15 七值映射落地规格已按 G0 裁定写定：docs/adr/report-G2-outcome-kind-mapping.md（§1 判定顺序七值含 unevaluable/rejected 与删失两类不互串、§2 exit_legs 取值表、§3 v0 可达性说明：filled_closed 暂不可达因无政策平仓腿 C06，覆盖测试断言不可达而非凑数改判、§4 落地清单、§5 供 G0 粘贴的 execution-interface §3 段落）。**代码未动**：Codex 写任务 task-mtwc80bl-dwasc4 正在改 src/quant_lab/market/，A15 的 contract.outcome_kind/exit_legs + simulate_batch 两列 + test_outcome_kind.py 等该任务落盘后立即实现，避免并发撞写（本项目已有两次写盘竞态记录）。set-verify 追认与护栏收到：本窗口后续 verify 改动一律只收紧、--why 必填、在 note 声明。"
         }
       ]
     },
@@ -688,11 +700,11 @@
       ],
       "artifacts": [],
       "review": {
-        "verdict": "pass",
-        "note": "[G0/427ed064 R12 00:1xZ] A13 G3 侧落地核验：OR-04 test_seam_g3_opportunity_set_frozen 由 ERROR 转 PASS（G1 outcome 键仍 null，仅 warning 进 diagnostics）；test_evaluator/test_g2_parity/test_api 21 passed 1 xfailed。OR-04 现 4P/3E，剩余 3 条 ERROR 全部归 G2 B8（contract.py fraction 默认值/必填）。",
-        "at": "2026-09-11T00:09:42Z"
+        "verdict": "issues",
+        "note": "[G0/427ed064 R21 02:4xZ] R-10 三审产物结构性不合格：job task-mtwbp40g-dx0ch9 status=completed，已追加 '## 三审（R-10 round 3）'（888-1306 行），但全文无行首终裁行——最后一条行首终裁仍是 886 行的二审终裁 fail，文件以代码块输出 exit=0 收尾。按 §9.9 A7 无终裁行=未通过，R-10 verify rc=1 正确判死，但根因是报告未按任务书收尾，不是审查发现阻断项。处置：补写终裁行或重派并把'最后一行必须是 <轮次>终裁：pass|fail|insufficient 且其后无内容'设为硬性收尾要求。附带风险：该报告 1202/1247/1248 行代码块内含 '三审终裁：pass' 字样（grep 自检样例）；G3 的 tail -1 与 G2 锚行尾的写法实测均不被骗，但不锚行首行尾的写法会被骗，建议三窗口统一锚 ^ 与 $。实跑：research 249 passed，integration 7 passed（OR-04 全绿）。verifyHistory 核对：新增 0，收紧 0，放宽 0。",
+        "at": "2026-09-11T02:43:26Z"
       },
-      "lastUpdate": "2026-09-11T02:30:13Z",
+      "lastUpdate": "2026-09-11T02:43:52Z",
       "tasks": [
         {
           "id": "R-01",
@@ -887,6 +899,14 @@
         {
           "t": "11:30",
           "n": "R-10 三审第三次派发：task-mtwc9agv-m3a7jo（源码冻结，任务书要求按取证 SHA256 出终裁、看板 notes 变动不算并发编辑）。审查期间 G3 不再改 src/tests。"
+        },
+        {
+          "t": "11:38",
+          "n": "回 G0 R20（set-verify 护栏）：收到。G3 此前 verify 改动均在 set-verify 出现前经 scripts/task.py 同一目录锁+原子替换路径（task._rmw）完成，为便于 verifyHistory 追溯在此补记：R-01 collect grep 改规范写法（README §2.5）；R-05 由关键词 grep 改为结构化读 spike JSON（矩阵 18/18、128 AST、cold/hot>0、RSS≤8GiB、≤1200s）；R-07 相对路径改经 QUANT_LAB_DATA_ROOT 且断言无 reserved；R-09 加 finite θ、completed>0、reserved=0、duplicate<n、claim_status、final_status 断言；R-10 负向 grep→只读最后一行终裁（A7）；R-08 改为自算 CP 最坏界+机制身份+有搜索次数≥500 且过半+invalid=0——以上均为收紧。**需 G0 知悉的一处口径变更**：R-08 的'功效最坏界下界≥80%'断言按用户 2026-09-11 裁定出口 A 改为'功效 n≥1000 如实报告 + report §3.2 限制声明存在'，这是依用户裁定的 DoD 修订（GOAL-3 §7 已同步），非 G3 自行放宽；如 G0 认为仍应走 block 流程请告知。审查期间源码冻结，后续 verify 改动一律走 set-verify --why。"
+        },
+        {
+          "t": "11:43",
+          "n": "R-10 三审（task-mtwc9agv-m3a7jo）落盘：11 闭合 / 8 部分闭合，终裁 fail（review-G3-P1.md L888–1421，取证 SHA256 与收尾一致）。剩余 8 项分类：**真缺陷可短闭合**（S12 候选单侧删失被 PanelInputs.validate 误拒——两臂分别验证再合成 mask；S08 后续非法/重复 AST 遗留 reserved——家族级 try/finally + occurrence 键；S14 entries/tps 混合来源应整体 policy——按 §5.10 任一组回退即 policy；S17 R-08 verify 应核 power verdict flag 与数字一致、机制记录唯一、诊断一致）；**设计延伸**（S06 候选主目标 DEFF 在 selection 前的收紧门；S10 簇布局/块间/跨品种相关逐 replicate 保持诊断；S07 recover 只按 run 所有权+失活证据、事件序号/文件名一致性）；**依赖上游接缝**（S03 缓存身份绑定真实 graph/derivation/epoch，需 G1 撤销接缝 §9.10.2）。审查者每轮在 partial 上加码，G0 已上报；R-10 verify 三次失败，按纪律停下请用户裁定。"
         }
       ]
     },
@@ -909,7 +929,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T02:32:35Z",
+      "lastUpdate": "2026-09-11T02:43:26Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1064,6 +1084,10 @@
         {
           "t": "11:32",
           "n": "[G0/427ed064 R19 结论] 三窗口 review 收敛性分析：每轮 Codex 复审闭合一批、又新增一批（G1 16→r2 +T01-04→r3 +U01；G2 13→二审 +S14→三审 +S15/S16→四审 insufficient；G3 19→二审 12 partial），属大面工程对抗审查的正常渐近，但**无停止规则则不收敛**。G0 抽验结论支持收口：G1 最高危两类（S16 路径越权、S07 致命降级）经 G0 对抗式实跑确认闭合，非自报。建议用户采用分类闭合标准（前视/幸存偏差/安全越权/可复算性/致命降级必须 closed，其余带残余声明入 P2），与用户已对 G3 裁定的出口 A 一致。四套 567 项全绿，OR-04 端到端全绿，P1 仅差三份终裁口径。"
+        },
+        {
+          "t": "11:43",
+          "n": "[G0/427ed064 OR-02 R21] 实跑：data 134 / market 232 / research 249 / integration 7 全 passed（data 树仍被 G1 Codex 写任务改动，本跑全绿但非稳定态）。verifyHistory 核对（§9.10.12 A16 首次执行）：全库累计 1 条（market M-10），判定收紧，放宽 0 条。三份 review：G1 r3 fail 后 Codex 写任务 task-mtwc7wkd-2415r3 running；G2 四审 fail，M-10 累计 4 次失败已停下请示；G3 三审 completed 但无终裁行，产物结构性不合格需补写或重派。P1 仍差三份终裁 pass。"
         }
       ]
     }
@@ -1315,6 +1339,12 @@
         "module": "market",
         "verdict": "pass",
         "note": "[G0/427ed064 R20 02:3xZ] M-10 假绿已修，G0 自检：新 verify 取最后一条终裁行正向判读，当前 rc=1（四审终裁 fail，正确判死）；verifyHistory 核对：新增 1 条，收紧 1 条，放宽 0 条（§9.10.12 A16）。抽跑 test_review_p1_round4.py 2 passed、S05/S17 相关 13 passed；tests/market 218 passed（首跑 3 failed 为 G1 Codex 写任务同刻改树，复跑全绿）。S17 值得记：B8 的显式 entry_fractions/tp_fractions 曾能在同一 policy_hash 下编码第三种分配且精度校验可绕——**这是 G0 的 B8 裁定引入的新接缝，G2 发现并堵上**，A15/B8 类裁定今后须同时要求显式值与解析值逐值相等的断言。M-10 verify 累计失败 4 次，G2 已按纪律停下请示，同意不派第五轮。"
+      },
+      {
+        "at": "11:43",
+        "module": "research",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R21 02:4xZ] R-10 三审产物结构性不合格：job task-mtwbp40g-dx0ch9 status=completed，已追加 '## 三审（R-10 round 3）'（888-1306 行），但全文无行首终裁行——最后一条行首终裁仍是 886 行的二审终裁 fail，文件以代码块输出 exit=0 收尾。按 §9.9 A7 无终裁行=未通过，R-10 verify rc=1 正确判死，但根因是报告未按任务书收尾，不是审查发现阻断项。处置：补写终裁行或重派并把'最后一行必须是 <轮次>终裁：pass|fail|insufficient 且其后无内容'设为硬性收尾要求。附带风险：该报告 1202/1247/1248 行代码块内含 '三审终裁：pass' 字样（grep 自检样例）；G3 的 tail -1 与 G2 锚行尾的写法实测均不被骗，但不锚行首行尾的写法会被骗，建议三窗口统一锚 ^ 与 $。实跑：research 249 passed，integration 7 passed（OR-04 全绿）。verifyHistory 核对：新增 0，收紧 0，放宽 0。"
       }
     ],
     "blockers": [
