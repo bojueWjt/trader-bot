@@ -282,10 +282,18 @@
         "section": "§9.10.15 A19",
         "summary": "含未完成标记（待核验/稍后回填/TODO/占位）的报告终裁行一律无效、review verify 必须判 fail 并增加标记检查与终裁判读串联；不禁止先落盘后探针但要求终裁行最后写入；补 §9.9 A7 的『何时才算数』一半：可判读的结论必须同时是已完成的结论；判定八审 insufficient 不可解除（成因是 S24-S26 核验未进行，属工作未完成，非环境不可验）",
         "by": "G0/427ed064 R34"
+      },
+      {
+        "n": 41,
+        "at": "2026-09-11T03:57:57Z",
+        "file": "contracts/execution-interface.md",
+        "section": "§5.19 B17",
+        "summary": "采纳 G2 对 B16(3) 副作用的补强为必要组成：PAIR_KEY 加 policy_hash 会把同版本串双内容从重复变成合法两行、放宽 simulate_batch 重复检测，故须另加批量级断言（每个 policy_version 恰好映射一个 policy_hash，冲突即 ContractError）+ 注入式回归；确立突变测试为门禁标准验收方式（注入原缺陷→断言必须红，还原→必须绿），并要求断言写契约公式本身而非对被测实现的同义反复；G0 独立核验 B15 三条与 G2-SC-01 全部闭合",
+        "by": "G0/427ed064 R35"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.17",
+    "version": "v1.18",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
