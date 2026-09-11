@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:18:25Z",
+  "updatedAt": "2026-09-11T03:23:03Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -538,7 +538,7 @@
         "note": "[G0/427ed064 R27] 六审终裁 fail：S01–S21 closed 12 / partial-P2 8 / open 2。两条 open 均属 G0 裁定的落实细节，非新缺陷类别：**S18 残余**——IOC 已命中规则④（主体已修），但 B10 第1条(b) 要求'未命中时抛 ContractError **并回报实际事件集合**'，无 closed 分支只抛错未回报事件集合，一般规则未完整落实。**S22 新增**——contract.py:358 `data.get('entry_fractions') or ef` 用真值性判断，把显式 `[]` 当作未提供并静默改成 (1,)，违反 B9'不等即拒、不得静默修补显式值'；审查方明确未证明可改变经济分配、不宣称哈希碰撞，克制准确。G0 归纳：这是同族第五个实例，**根因是用真值性（or/falsy）区分'未提供'与'提供了空值'**，须显式判 is None。实跑 market 242 passed。",
         "at": "2026-09-11T03:18:25Z"
       },
-      "lastUpdate": "2026-09-11T03:03:18Z",
+      "lastUpdate": "2026-09-11T03:22:54Z",
       "tasks": [
         {
           "id": "M-01",
@@ -731,6 +731,18 @@
         {
           "t": "12:03",
           "n": "G0 v1.8 §5.12 B10 裁定已落地，另附两条自查新发现：S18 规则④改枚举 expired|cancelled、未命中一律 raise 并回报事件集合（删兜底分支）；S19 entry_ttl_s 对称对账（计划给值比计划、计划 null 比 policy）；**S20（自查新发现，A 族穷举）**：t_start 契约语义是 policy 决定的解析记录却从不对账，同一 policy_hash 下平移 45s 即把 filled/net_R=1/tp_hit 翻成 none/net_R=0/unfilled_expired——现要求等于 t_dec+policy.latency_s，要平移须改 policy.latency_s（进 content_hash）；**S21（自查新发现，B 族穷举）**：CENSOR_PRIORITY 是只定义不使用的死常量，主因取决于代码检查顺序，候选 B 更严重（bars 分支无条件覆盖，把 RULE_HISTORY_MISSING 覆写成 BAR_GAP）——两内核改为按契约优先级选主因。回归 test_s18/test_s19/test_s21 + test_request_validation；tests/market 242 passed；A 22/22；report rc=0。自查覆盖面与剩余问题（horizon_end 是否也应由推导决定）见 report-G2-outcome-kind-mapping.md §7。下一步派第六轮终审。"
+        },
+        {
+          "t": "12:20",
+          "n": "六审终裁：fail（review-G2-P1.md 第 279 行）closed 12 / partial-P2 8 / open 2；两条已修：S18 残留（'有成交却无 closed'分支未回报事件集合 → 现每条未命中分支都回报）、S22（entry_fractions=[] 等合法假值被  兜底静默替换成推导值 → 改 ，空值现按 B9 逐值对账被拒）。**同族横扫另修一处**：partition_check 空分区路径  把未知期望填成 missing=0（等于宣称一根不缺）→ 改为未知即 None。**B11/B12 已落地**：ExecutionRequest.horizon_source∈{policy,caller}（推导路径受 B9 对账，自选路径合法但必须显式声明，未声明即拒）、ExecutionPolicy 拆 max_horizon_s（安全上限，两条路径都受封顶）与 research_horizon_s（研究标准观察窗，推导式改用它）、ExecutionResult 诊断列 + simulate_batch 列；验收测试 test_b11_b12_horizon_source_and_policy_split（含 horizon_end 必须留在 trace_hash 的规范断言）。政策 schema 变更已按 §5.5 B4 迁移 policy_hashes.json（5 条全部换哈希），夹具重生成为 horizon_source=caller。**research_horizon_s 取值提案已出**：docs/adr/report-G2-research-horizon-proposal.md，真实 BTCUSDT 2024-01 + 47 合成 episode 的右删失率曲线 4h 78.7% / 12h 48.9% / 1d 25.5% / 3d 4.3% / 7d 0%，提议 3d 并列出四条限制（单品种单月单括号、15m 重采样高估删失、单路径、改值需走版本登记）。tests/market 245 passed；A 22/22；report rc=0。"
+        },
+        {
+          "t": "12:21",
+          "n": "六审终裁 fail（review-G2-P1.md 第 279 行）closed 12 / partial-P2 8 / open 2；两条 open 已修：S18 残留（\"有成交却无 closed\" 分支未回报事件集合 → 现每条未命中分支都回报实际事件集合）、S22（entry_fractions=[] 等合法假值被 or 兜底静默替换成推导值 → 改 is None，显式空值现按 B9 逐值对账被拒）。同族横扫另修一处：partition_check 空分区路径把未知 expected_rows 用 or 0 填成 missing=0（等于宣称一根不缺）→ 未知即 None。B11/B12 已落地：horizon_source 二值（推导路径受 B9 对账；自选合法但必须显式声明，未声明即拒）、policy 拆 max_horizon_s 安全上限与 research_horizon_s 研究窗、结果诊断列与 batch 列，验收测试含 horizon_end 必须留在 trace_hash 的规范断言。政策 schema 变更按 B4 迁移 policy_hashes.json（5 条全换哈希），夹具重生成为 caller。research_horizon_s 取值提案见 docs/adr/report-G2-research-horizon-proposal.md：真实 BTCUSDT 2024-01 + 47 合成 episode，右删失率 4h 78.7% / 12h 48.9% / 1d 25.5% / 3d 4.3% / 7d 0%，提议 3d 并列四条限制。tests/market 245 passed；A 22/22；report rc=0。"
+        },
+        {
+          "t": "12:22",
+          "n": "S23 已闭合（G0 常量新规则）：DF_DECIMAL 曾是死常量——execution.py 硬编码 pl.Decimal(38,12)，改契约常量不会改 schema，现改为从 DF_DECIMAL 派生；新增 tests/market/test_constants_effective.py 6 例，为 DF_DECIMAL / SETTLEMENT_QUANTUM / RATIO_QUANTUM / EXIT_LEG_ORDER / SPIKE_K / SPIKE_MIN_SAMPLES / INTERVAL_SECONDS / CENSOR_PRIORITY 各补一条\"断言其生效\"的测试，每条期望值都从常量推导，改常量而不改行为（或反之）都会立刻失败。EXIT_LEG_ORDER 那条专门验证输出按常量序而非事件时间序（E12 时间序 TP 在前、输出必须 sl 在前）。tests/market 251 passed；A 22/22；report rc=0。"
         }
       ]
     },
@@ -1008,7 +1020,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T02:43:26Z",
+      "lastUpdate": "2026-09-11T03:23:03Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1167,6 +1179,10 @@
         {
           "t": "11:43",
           "n": "[G0/427ed064 OR-02 R21] 实跑：data 134 / market 232 / research 249 / integration 7 全 passed（data 树仍被 G1 Codex 写任务改动，本跑全绿但非稳定态）。verifyHistory 核对（§9.10.12 A16 首次执行）：全库累计 1 条（market M-10），判定收紧，放宽 0 条。三份 review：G1 r3 fail 后 Codex 写任务 task-mtwc7wkd-2415r3 running；G2 四审 fail，M-10 累计 4 次失败已停下请示；G3 三审 completed 但无终裁行，产物结构性不合格需补写或重派。P1 仍差三份终裁 pass。"
+        },
+        {
+          "t": "12:23",
+          "n": "[G0/427ed064 R28 · OR-04 自查，问题在 G0 自己的集成测试] G1 夹具按 ADR §10 重生成（fixture-v1@0c51102b，决策视图 23→79 行）后重跑 OR-04，**发现主断言曾在退化样本上连绿六轮**：行情湖只登记 BTCUSDT 规则，其余品种走 Rules() 默认 step_size=1，按风险预算定的量直接撞 LOT_SIZE，G2 fail-closed 全部拒单 → 79 请求中 70 rejected / 9 right_censored / **零成交**，而主断言只查『θ 非空』，于是 θ 在一个没有发生过实验的样本上被算出并判绿。这是『静默为空』的变体：表不空，但里面没有事件。**根因在 G0 的 test_e2e_synthetic.py，不是三窗口的缺陷**。另查出两处同族问题也在本文件：(a) simulate_batch(strict=False) 把 ContractError 吞成 null 行（37/79），主断言不查 error 列就看不见；(b) 我的合成价点用除法生成超标度 12 的小数，撞上我自己裁定的 §9.10.1 A8 Decimal(38,12) 域校验——自己的规则抓住自己的测试。修复：resolver 提供真实档位规则（tick 0.01 / step 0.001 / min_notional 5）、价点按 tick 量化、路径小幅超越末档 TP；新增 test_e2e_sample_is_not_degenerate 门（无吞错 + 成交样本≥半数 + outcome_kind 非单一且非全 rejected/unevaluable），主断言内亦加成交下限。修复后：79 请求零错误，fill 50 partial/28 filled/1 none，outcome 65 tp_hit/13 right_censored/1 rejected，tests/integration **8 passed**。教训入账：**验收断言必须同时约束『有输出』与『输出非退化』**，只查非空会让整条链路在无事发生时判绿——这正是我对三窗口反复强调的标准，我自己的测试漏了六轮。"
         }
       ]
     }

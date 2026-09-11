@@ -10,7 +10,7 @@ G0 据此判 P1 缺项；**不得**为了让它变绿去改 src/quant_lab/*。
 from __future__ import annotations
 
 import datetime as dt
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 import polars as pl
 import pytest
@@ -39,23 +39,38 @@ def test_seam_g1_decision_view(episodes):
 
 # --------------------------------------------------------------- G2 接缝
 def _resolver(req):
-    """合成行情：从 t_dec 起每分钟一个价点，由入场中值走向首个 TP（保证有成交与出场）。"""
-    from quant_lab.market.contract import MarketView, PricePoint
+    """合成行情：从 t_start 起每分钟一个价点，由入场中值走向首个 TP 并小幅超越（保证成交与出场）。
+
+    同时提供**真实档位规则**：默认 `Rules()` 的 step_size=1 会让 ETH/BTC 这类价格的按风险预算定量
+    直接撞 LOT_SIZE 被拒（G2 的 fail-closed 正确行为），那样整批样本零成交，θ 会在"没有实验"的
+    样本上算出来——OR-04 曾因此连绿六轮（见 G0 R28 记录）。
+    """
+    from quant_lab.market.contract import MarketView, PricePoint, Rules
     plan = req.order_plan
     lo = min(e.price_lo for e in plan.entries)
     hi = max(e.price_hi for e in plan.entries)
     mid = (lo + hi) / 2
-    target = plan.tps[0].level if plan.tps else (mid * Decimal("1.02") if plan.side == "long" else mid * Decimal("0.98"))
-    n = 120
+    if plan.tps:
+        target = plan.tps[-1].level
+    else:
+        target = mid * Decimal("1.02") if plan.side == "long" else mid * Decimal("0.98")
+    over = Decimal("1.01") if plan.side == "long" else Decimal("0.99")
+    target = target * over
+    n = 240
+    tick = Decimal("0.01")
     pts = []
     t = req.t_start or req.t_dec
     for i in range(n + 1):
         ts = t + dt.timedelta(minutes=i)
         if ts > req.horizon_end:
             break
-        price = mid + (target - mid) * Decimal(i) / Decimal(n)
-        pts.append(PricePoint(ts=ts, price=price))
-    return MarketView(manifest_id=req.market_manifest, last=list(pts), mark=list(pts))
+        # 必须按 tick 量化：直接相除会产生超过标度 12 的小数，撞 §9.10.1 A8 的 Decimal(38,12) 域校验，
+        # 而 simulate_batch(strict=False) 会把这类 ContractError 吞成 null 行（G0 R28 自查发现）。
+        raw = mid + (target - mid) * Decimal(i) / Decimal(n)
+        pts.append(PricePoint(ts=ts, price=(raw / tick).quantize(Decimal(1), rounding=ROUND_DOWN) * tick))
+    rules = Rules(tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+                  min_notional=Decimal("5"), min_qty=Decimal("0.001"))
+    return MarketView(manifest_id=req.market_manifest, last=list(pts), mark=list(pts), rules=rules)
 
 
 @pytest.fixture(scope="module")
@@ -81,6 +96,24 @@ def test_seam_g2_build_request_is_sole_entrypoint(execution):
     if "error" in execution.columns:
         errs = execution.filter(pl.col("error").is_not_null())
         assert errs.height == 0, f"内核报错 {errs.height} 行：{errs['error'].to_list()[:3]}"
+
+
+def test_e2e_sample_is_not_degenerate(execution):
+    """样本非退化门（G0 R28 新增）。
+
+    OR-04 曾连绿六轮而整批零成交：行情湖只登记了 BTCUSDT 规则，其余品种走 `Rules()` 默认
+    step_size=1，按风险预算定的量直接撞 LOT_SIZE，G2 fail-closed 全部拒单——而主断言只查
+    「θ 非空」，于是 θ 在一个**没有发生过实验**的样本上被算了出来并判绿。
+    这是"静默为空"的变体：表不空，但里面没有事件。故单列此门。
+    """
+    n = execution.height
+    if "error" in execution.columns:
+        assert execution["error"].null_count() == n, "有请求被 strict=False 吞成 null 行，先修再谈 θ"
+    filled = execution.filter(pl.col("fill_status") != "none").height
+    assert filled >= n // 2, f"成交样本仅 {filled}/{n} —— 样本退化，θ 无意义"
+    kinds = set(execution["outcome_kind"].drop_nulls().to_list())
+    assert len(kinds) >= 2, f"outcome_kind 单一取值 {kinds} —— 样本退化"
+    assert not kinds <= {"rejected", "unevaluable"}, f"全部为未挂出/不可评估 {kinds} —— 没有实验"
 
 
 # --------------------------------------------------------------- G3 接缝
@@ -164,6 +197,9 @@ def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity, tmp_
     assert res.status == "ok", f"evaluate 非 ok：status={res.status} reason={res.reason}"
     assert res.theta is not None, "θ 为空 —— 静默为空算 fail"
     assert res.n_evaluated > 0, "共同可评机会数为 0"
+    # 非退化：θ 必须建立在真的发生过成交的样本上（见 test_e2e_sample_is_not_degenerate）
+    assert execution.filter(pl.col("fill_status") != "none").height >= execution.height // 2, \
+        "θ 建立在零成交样本上 —— 不是没有效应，是没有实验"
 
     # --- 账本：本次 run 至少 1 行 completed
     led = ledger.read()
