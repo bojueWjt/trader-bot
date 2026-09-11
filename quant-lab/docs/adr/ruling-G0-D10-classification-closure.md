@@ -1,0 +1,47 @@
+# G0 裁定：D-10 按分类闭合标准收口
+
+> **本文件是 G0 的裁定，不是一轮独立审查。** 故不命名为 `review-G1-P1-r6.md`——
+> 审查轮次（`review-G1-P1*.md`）由独立审查方出具，本文件由 G0 署名出具，二者证据性质不同，
+> 文件名不得使其混淆（契约 README §9 A21「审计记录」与 §11 A23「措辞不应让它看起来更轻」同源）。
+
+- 出具方：G0（session `427ed064`）
+- 日期：2026-09-11
+- 对象：`modules.data` 任务 **D-10**
+- 依据：用户裁定的**分类闭合标准**（前视 / 幸存偏差 / 安全越权 / 可复算性 / 致命降级五类必须 closed，其余带残余声明进 P2）
+- 被判对象状态：`review-G1-P1-r5.md` 五审终裁 **fail**；open 项收敛至 W01–W03（同一根因），G1 已直接修复
+
+## 1. 授权链（provenance）
+
+用户在 G1 会话中通过 `AskUserQuestion` 亲自选定选项「再一轮 Codex 修改 + r5（推荐）」，该选项描述明写「**若 r5 仍 fail 改走 G0 分类闭合标准**」；G1 于当时（12:0x）记入看板 `data` note。
+
+G0 未直接收到该指令，但**授权来源具体且可核**（看板 note + AskUserQuestion 选项原文），非转述推断。G0 已另行向用户报备本判定基于该链路，口径不同可撤回。
+
+## 2. 五类必闭合项：G0 对抗式实跑核验
+
+**不采信窗口回执**，以下为 G0 在 `.venv-g0` 下针对别名版本 `fixture-v1@25d8e4ca`（决策视图 80 行）的实跑结果。
+
+| 类别 | 判据 | 实跑结果 |
+|---|---|---|
+| **前视** | 决策投影不得含 `edge_available_at > t_dec` 的边 | `load_episode_events` 决策事件 81 条，越界 **0** |
+| **致命降级** | 致命码不得被降为一般；致命码不得进决策视图 | `[EDIT_ORIGINAL_UNAVAILABLE, UNIT_SCALE_CONFLICT] → fatal`，主因按冻结优先级取 `UNIT_SCALE_CONFLICT`；`FATAL` 集 = 契约 §4 三项，未私增；决策视图 80 行含致命码 **0** |
+| **安全越权** | 媒体路径不得逃出导出根 | `../`、`..\`、`/etc/hosts`、`C:\W\x`、UNC `\\srv\s\x`、`a/../../`、外指 symlink —— **全部 REJECT**，理由分类正确（`parent_escape` / `absolute_path` / `symlink_escape`） |
+| **可复算性** | 经济量必须以声明精度落盘，不得经有损中间转换 | `gold/episode` 经济量叶列全为 `decimal128(38,12)`；字段路径无 `float(`；逐字源串断言测试通过 |
+| **幸存偏差** | 隔离不删除、损耗可数 | `quarantine/telegram.parquet` 745 行、`market.parquet` 171 行，均可读未删除；损耗表 **1–6 层齐全**，61 行 |
+
+**一处 G0 自身的假阳性，如实记录**：初筛以字段名含 `price` 抓「非 decimal 的经济量列」时命中 `eligibility_by_estimand.price_check` 与 `dec_eligibility.price_check`，核后为六键 eligibility 结构中的**布尔**字段，非经济量——**是 G0 过滤器按名字匹配所致，不是 G1 的缺陷**。
+
+## 3. 旁证
+
+- `tests/data` **225 passed**（`set -o pipefail`）
+- `D-03`..`D-07` / `D-09` verify 逐条 `exit=0`
+- **OR-04 端到端 8 passed 全绿**（含 R28 新增的样本非退化门：无吞错、成交样本过半、终态分布非单一且非全为未挂出）
+
+## 4. 残余与已知缺口
+
+未列入五类必闭合的残余项按标准带声明进 P2，须在 `INTEGRATION_REPORT.md` 的**已知缺口表**中逐条列出，来源为看板 `modules.data` 的 P2 标注项与 `review-G1-P1-r*.md` 各轮 `partial` 项。**残余不因本裁定消失，只是不阻断 P1。**
+
+## 5. 适用边界
+
+本裁定**仅覆盖 D-10**。M-10（market）与 R-10（research）不受影响，各自按其审查终裁或另行裁定处理。
+
+分类终裁：pass

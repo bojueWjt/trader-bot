@@ -14,7 +14,7 @@
 | 六审 | fail | closed 12 / partial-P2 8 / open 2，新增 S22 | Codex job `task-mtwdgqyp-dcxdc0` rawOutput |
 | 七审 | fail | closed 15 / partial-P2 8 / open 2，新增 S24、S25 | Codex job `task-mtwe76h5-u96l6s` rawOutput |
 | **八审** | **fail** | closed 18 / partial-P2 8 / open 2，新增 S27、S28 | Codex job `task-mtwf0gbr-4vtswg` rawOutput（原文"八审终裁：fail"，文件 319 行）；`taskList.json` 看板 note |
-| 九审 | （运行中 `task-mtwfvpbz-bg3a6m`） | — | — |
+| 九审 | fail | closed 21 / partial-P2 8 / open 3（S29、S30、S31；G2-SC-01 已判 closed） | Codex job `task-mtwfvpbz-bg3a6m` rawOutput（原文"九审终裁：fail"，339 行、声明与终裁各唯一、无未完成标记）；`taskList.json` 看板 note |
 
 ## 为什么需要这份台账（2026-09-11 的两次实际丢失）
 
