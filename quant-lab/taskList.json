@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T08:43:50Z",
+  "updatedAt": "2026-09-11T09:00:10Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -514,10 +514,18 @@
         "section": "§9.10.19 补充",
         "summary": "A39 第3节立重采样比对为 P2 前置却未规定口径，G3 指出该缺口；未规定时默认逐位相等，而合法重跑因代码版本/平台浮点/库版本差异会在末位不同，该前置将持续对诚实复核报红并按 A26 终被关掉、连伪造一并放过；裁定比对口径落结论层——判据为阳性计数与 CP 区间是否落在同一判定侧，不要求数值逐位相等，依据是该检查目的是发现伪造报告而非数值漂移（伪造会在结论层不同、诚实跨版本重跑不会）；同版本（重跑方摘要 == 报告内嵌 research_code_sha256）可要求更严数值一致，不同版本一律按结论层判，该区分须写进比对协议并随结果声明；附记 G3 自我更正——原把『该不该写』与『写在哪』混为一件事致成本顾虑，A39 判据『换一次运行这句话还成立吗』斩断该链条，自此适用于所有要不要写进制品的取舍",
         "by": "G0/427ed064 R73"
+      },
+      {
+        "n": 70,
+        "at": "2026-09-11T09:00:10Z",
+        "file": "contracts/README.md",
+        "section": "§25 A40",
+        "summary": "写入窗口改按写入频率判（最近 10 分钟内 ≥2 次写入即视为活跃会话记不判），不按单点 mtime——本轮 G0 于 08:49Z 测得 research 距今 1074 秒判为可判，跑完四套约 4 分钟期间该模块两次被写，最终 125 秒刚越阈值而实为活跃会话间隙；依据与 A30 同源：A30 立测量时刻是证据一部分，本条补测量与判定之间那段时间也是，单点阈值只约束测量那一刻未约束判定成立的整个区间；裁定审查报告证据块内不得出现列首终裁形状行（review-G3-P1.md 现有 4 处五审终裁其中 3 处在代码块内，G3 的 tail -1 对块内免疫但对追加失效、G2 的 grep|tail -1 对追加免疫但会读块内行，从源头消除而非要求每条 verify 绕开）；记五审实质：S08 闭合、S17 部分、S10 由闭合改判部分（新增弱相关机制破坏暴露旧盲区，明写不能把旧回归全绿写成完整闭合），核心发现为结构失败未强制纳入 n_failed 致条件 FPR 最坏界假绿，属 A22 族且方向是把不合格判成合格",
+        "by": "G0/427ed064 R74"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.46",
+    "version": "v1.47",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -1595,7 +1603,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T08:43:50Z",
+      "lastUpdate": "2026-09-11T09:00:10Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1786,6 +1794,10 @@
         {
           "t": "17:43",
           "n": "[G0/427ed064 R73] **A39 的 P2 前置证据 G0 独立核实已满足**：报告 meta 公开 11 键（含 world / pipeline 完整 repr、可复跑 command、research_code_sha256）；正文写明 seed 公式；实测由公开前五 seed 的 `seeds[0]//100000` 反推 seed0 并重建前五，**三个机制逐字一致**——不生成报告的一方拿这份 JSON 即可按公开 seed 抽样重跑，无须向 G3 索取任何东西。**G3 指出 A39 第 3 节的一个缺口并已补**：我立了『独立重采样比对』却**未规定比对口径**。未规定时默认逐位相等，而合法重跑因代码版本/平台浮点/库版本会在末位不同——该前置将**持续对诚实复核报红**，按 A26 终被关掉，连它本该挡住的伪造也一并放过。**已裁定（changeLog #69）：口径落结论层**——判据为阳性计数与 CP 区间是否落在同一判定侧，不要求数值逐位相等；依据是该检查目的是**发现伪造报告而非数值漂移**，伪造会在结论层不同、诚实跨版本重跑不会。同版本（重跑方摘要 == 报告内嵌值）可要求更严数值一致，不同版本按结论层判，该区分须写进比对协议并随结果声明。tests/research **336 passed**；五审 task-mtwp9ktc-m4sgyu 仍在跑，**不预判**。"
+        },
+        {
+          "t": "18:00",
+          "n": "[G0/427ed064 OR-02 R74] A35 必报量：src 48/48、tests 60/60。实跑：data **225**、market **358**、integration **8** 全绿。**research 记不判，且本轮暴露我自己判据的缺陷**：08:49Z 测得距今 1074 秒判为可判，跑完四套约 4 分钟后复核，发现该模块在 17:54 与 17:56:58 又各写一次——**测量与判定之间它一直在被改**；最终距今 125 秒刚越 120 秒阈值。**单点 mtime 阈值只约束测量那一刻，没约束判定成立的整个区间**，已改为按写入频率判（近 10 分钟 ≥2 次即活跃会话，一律不判）——见 §25 A40。research 现 5 failed 属该活跃会话中间态。**五审终裁 fail**：S08 闭合、S17 部分闭合、**S10 由已闭合改判部分闭合**（新增弱相关机制破坏暴露既有总体判据盲区）。**核心发现：结构失败未被强制纳入 n_failed，能使本应超过 7% 的条件 FPR 最坏界假绿**——属 A22 族，且方向是『把不合格判成合格』。审查方『旧用例无回退，新覆盖揭露旧盲区』『不能把旧回归全绿写成完整闭合』的表述已采信并记档。**另裁一条判读完整性**：review-G3-P1.md 有 4 处列首 `五审终裁：fail`，3 处在证据代码块内。本次无害，但 G3 的 `tail -1` 对追加失效、G2 的 `grep|tail -1` 会读块内行——已裁定证据块内不得出现列首终裁形状行，从源头消除而非要求每条 verify 各自绕开。"
         }
       ]
     }
