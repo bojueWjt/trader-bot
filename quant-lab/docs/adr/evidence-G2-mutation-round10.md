@@ -63,3 +63,62 @@ PYTHONDONTWRITEBYTECODE=1 .venv-g2/bin/python -m pytest tests/market -q -p no:ca
 PYTHONPATH=src .venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A → kernel=A passed=22 failed=0, rc=0
 PYTHONPATH=src .venv-g2/bin/python -m quant_lab.market.nautilus_adapter report --reps 1 → rc=0，MATCH 12 / B_COMMAND_LATENCY 3 / GAP_PRICE 1 / SAME_TS_PRIORITY 4 / GTD_BOUNDARY 1 / B_LIQUIDITY_MODEL 1，UNEXPLAINED 0
 ```
+
+---
+
+# 附：`force_close_net_R` 的 G2 自证（A29 合规，2026-09-11）
+
+> A29：突变取证必须**真实写盘 + 子进程隔离**，基线/注入/还原三次各起新进程，还原以**内容 SHA256** 为准。
+> 本表直接在真实树上写盘注入再还原，**不使用隔离副本**，因此不存在"副本继承祖先 `pythonpath=真实 src`、突变模块未被加载"那类路径问题。
+
+## 1. 我自己跑的七条（选择器 `tests/market/test_force_close_net_r.py`）
+
+| 我注入的生产缺陷 | 基线 | 注入后 | 还原后 | SHA256 | 判定 |
+|---|---|---|---|---|---|
+| 漏计余仓平仓费 | 17 passed | **5 failed, 12 passed** | 17 passed | 一致 | ✓ |
+| 方向符号写反（`short` 判据改 `long`） | 17 passed | **5 failed, 12 passed** | 17 passed | 一致 | ✓ |
+| 漏计资金费 | 17 passed | **5 failed, 12 passed** | 17 passed | 一致 | ✓ |
+| 漏计已实现损益（只算余仓浮盈） | 17 passed | **5 failed, 12 passed** | 17 passed | 一致 | ✓ |
+| 漏计累计费 | 17 passed | **5 failed, 12 passed** | 17 passed | 一致 | ✓ |
+| `gross_pnl` 缺失改为兜底 0（§2.1 裁定二禁止形态的等价替代） | 17 passed | **1 failed, 16 passed** | 17 passed | 一致 | ✓ |
+| 无余仓返回 0 而非 `None` | 17 passed | **2 failed, 15 passed** | 17 passed | 一致 | ✓ |
+
+**7/7 证成。**
+
+## 2. 一条与承包方证据的交叉核对（值得单记）
+
+承包方在 `tests/market/force_close_harness_audit.json` 里记录：注入"漏计余仓平仓费"后测试**仍绿**，并自行诊断为
+
+> 隔离副本继承祖先 `pyproject.toml` `pythonpath=真实 src`，未执行突变模块。属验证器路径错误……**此记录不是通过证据**。
+
+**该诊断成立**：同一条缺陷我在真实树上注入，得到 **5 failed**。所以那次绿是取证器没把突变模块喂进去，**不是测试无效**。承包方没有把它当作通过证据，这个处理是对的——**一条自己不确定的绿，被如实记成"不是证据"，比记成"通过"有用得多**。
+
+## 3. B19 三条硬约束的独立行为验证
+
+夹具 `E15a.json`（`outcome_kind=right_censored`，`filled_qty=1`），调用前后对比：
+
+| 约束 | 结果 |
+|---|---|
+| 不产生 `canonical_events` | 事件对象同一 `True`，条数 10 → 10 ✓ |
+| 不改 `fill_status` | `filled` → `filled` ✓ |
+| 不改 `outcome_kind` | `right_censored` → **仍 `right_censored`** ✓ |
+| 不改 `censor_reason` | `LABEL_RIGHT_CENSORED` → 不变 ✓ |
+| 不覆写 `net_R` | `net_R` 仍为 `None`，`net_R_forced` 另行给出 ✓ |
+
+溯源与诊断字段齐备：`estimand=forced_close`、`mark` / `mark_at` / `mark_source`、`residual_qty` / `close_fee`；返回体 frozen（改写抛 `FrozenInstanceError`）。
+
+## 4. 独立复核的验收命令（测量时刻 14:55:26，关键路径 180s 内无源码写入）
+
+```
+pytest tests/market -q                    → 322 passed
+pytest tests/market/test_single_source.py → 26 passed
+execution replay --kernel A               → kernel=A passed=22 failed=0
+nautilus_adapter report --reps 1          → MATCH 12 / B_COMMAND_LATENCY 3 / GAP_PRICE 1
+                                            / SAME_TS_PRIORITY 4 / GTD_BOUNDARY 1
+                                            / B_LIQUIDITY_MODEL 1，UNEXPLAINED 0
+```
+
+## 5. 本轮**未**完成的（A19：写明未做及原因，不留悬空）
+
+- **A28 性质差分测试未开始**。承包方在完成 `force_close_net_R` 后如实报告本项未动，未两件各做一半。已单独派 `task-mtwjotp6-5a6doi`。
+- **G3 接入未完成**，跨窗口调用方登记为**空集**。按裁定不得预登记尚不存在的调用方——一份声称存在而实际不存在的条目会让「登记 == 实际调用方」因错误的原因通过。函数与测试模块 docstring 已各写明：夹具只证明函数行为与 A24 机制对本函数生效，**不证明 G3 调用而非自算**。
