@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T02:57:32Z",
+  "updatedAt": "2026-09-11T02:59:43Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -487,11 +487,9 @@
     },
     "market": {
       "owner": "G2",
-      "status": "blocked",
+      "status": "in_progress",
       "progress": 0.96,
-      "blockers": [
-        "契约: execution-interface §3 终态映射（A15/B9 规范性）不满射——fill_status=none 且无 rejected/expired（IOC 无可成交价被撤：events=[submitted,accepted,cancelled,closed]）可达但七条规则一条不命中，实现只能兜底猜值，正是 A15/B9 要堵的标签串味。建议 A：规则④放宽为'未成交且非 rejected'（细分读 canonical_events，不扩枚举）；备选 B：增第八值 unfilled_cancelled（不推荐，研究口径不可区分）。复现与论证见 docs/adr/report-G2-outcome-kind-mapping.md §6，当前行为已由 test_no_fill_without_reject_or_expire_is_pending_ruling 钉住。不阻塞 M-10/五审。"
-      ],
+      "blockers": [],
       "provides": [
         "data/lake/market/{bronze,silver,_manifest}",
         "quant_lab.market.asof",
@@ -505,10 +503,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R23] 五审终裁 insufficient，但内容是好消息：**S01–S17 closed 9 / partial-P2 8 / open 0**，两条新 open S18/S19 **均为 G0 规格自身漏洞**，非 G2 工程问题。S18：contract.py:547 兜底把零成交 IOC（事件 submitted/accepted/cancelled/closed，无 expired）伪装成 unfilled_expired，而 §3 第4条要求含 expired——该状态不命中任何规则。S19：contract.py:391-393 仅在计划 TTL 非空时比对，计划为 null 时同一 policy_hash 下可传任意 entry_ttl_s（86400 vs 1 → filled/net5/tp_hit vs none/net0/unfilled_expired），B9 第1条未对称落实。已裁定入契约 v1.8 §5.12 B10（扩第4条覆盖 cancelled、禁止兜底伪装须抛 ContractError、B9 对称比对、三字段各加反例）。M-03 联网 verify 由 G0 独立实跑解除：actual_rows=44640 distinct_keys=44640 check_status=ok checksum_source=vision_CHECKSUM，真实 Binance Vision 月度包，rc=0。审查方拒绝用 MockTransport 冒充联网、拒绝用空 git diff 冒充未改测试，记判例 4。实跑：market 238 passed、integration 7 passed。M-10 维持 doing 等 S18/S19 闭合后终审。",
-        "at": "2026-09-11T02:57:32Z"
+        "note": "[G0/427ed064 R24] G2 独立发现 §3 映射不满射并按协议 block（与五审 S18 同一空洞，独立复现结论一致），处置正确：把静默 else 改成具名待裁分支 + 不变量测试钉住当前值，改判即强制同步——这是 block 期间的正确工程姿态，记账。G0 裁定已先于该 block 写入契约 v1.8 §5.12 B10，本轮进一步把 §3 表格改为终版（第4行扩为 expired 或 cancelled 终止；新增一行：以上均不命中 → raise ContractError 并回报事件集合，禁止兜底贴值），规范正文与修订不再分散两处。**与 G2 建议 A 的差异及理由**：A 是「未成交且非 rejected」的兜底式全覆盖，G0 采用枚举式（expired|cancelled）+ 未命中即抛错。两者对 IOC 撤余量、MARGIN 撤单当前行为一致，差别在未来出现新终止形态时：兜底式会静默吸收，枚举式强制有人做一次决定。这正是 B10 第1条(b) 的要义，也是 S18 本身的教训。S19 已由 G2 修复（显式 TTL 须等于 plan_ttl 或 policy 兜底值，四个伪造值+两向全拒回归），与 G0 B10 第2条一致。G2 自陈『上轮说 §5.9 补得对、实则补了一半』并提炼出『补了一半比没补更危险：两分支只堵一个，剩下的正好是兜底路径，而兜底路径恰是作者原文最常缺字段的路径（真实 gold 25/26 行 TTL 为 null）』——该教训价值高，补入判例 3。实跑 market 240 passed / integration 7 passed。market 解 block，S18 实现可落地。",
+        "at": "2026-09-11T02:59:43Z"
       },
-      "lastUpdate": "2026-09-11T02:50:14Z",
+      "lastUpdate": "2026-09-11T02:59:43Z",
       "tasks": [
         {
           "id": "M-01",
@@ -693,6 +691,10 @@
         {
           "t": "11:47",
           "n": "Codex 写任务 task-mtwc80bl-dwasc4 已验收（证据式，非采信自报）：四条验证我独立实跑—tests/market 232 passed、round3+4 7 passed、replay A 22/22、report rc=0 UNEXPLAINED/A_GOLD_FAIL/NOT_RUN 全 0；终裁行未被动（仍第 207 行 fail）；我的 29 条反例测试一条未少；抽查 classify 严格性未放宽（新增 a is None→NOT_RUN）、S05/S17 修复仍在、null 横扫已扩到 gap_flag 缺列/null；4 条 P2 项在 report 输出里显式标 unsupported 并写归属（S02/S06/S07/S12）。它自报闭合 S05/S16/S17、留 P2 8 条、新增 49 回归，与实跑一致。**A15 已落地**：contract.outcome_kind(七值判定顺序) + exit_legs（sl<tp<close 去重排序）+ ExecutionResult 两个派生属性（不进 model_dump/trace_hash：结果的读法不是内核输入）+ RESULT_SCALAR_COLS + simulate_batch 两列；test_outcome_kind.py 6 例：七值唯一命中、两类删失不互串（EVIDENCE_CENSORS 五码全测）、rejected 不并入 unfilled_expired（三拒因读 reason）、stopped 优先且 E12 exit_legs=('sl','tp')、六值可达且 filled_closed 在 v0 不可达（附 C06 落地后转正例的构造断言）、batch 两列类型与取值。全量 238 passed。规格与供 G0 粘贴的 §3 段落见 docs/adr/report-G2-outcome-kind-mapping.md。"
+        },
+        {
+          "t": "11:57",
+          "n": "五审终裁：fail（review-G2-P1.md 第 260 行，唯一终裁行）；closed 9 / partial-P2 8 / open 2，新增 S18、S19。处置：**S19 已修**——与 S17 同型（契约判例 3）：作者 TTL=null 时显式 entry_ttl_s 未与 policy 兜底值对账，同一 policy_hash 下 86400 与 1 都被接受，把同一笔交易从 filled/net5/tp_hit 翻成 none/net0/unfilled_expired；现改为显式值必须等于 plan_ttl（作者给值）或 policy.entry_ttl_s（作者留空），回归 test_s19_explicit_ttl_cannot_bypass_policy_fallback（四个伪造值 + 作者给值两向均拒）。**S18 = 我在五审出结果前已自行发现并 block 给 G0 的同一空洞**（复核独立复现，见 report-G2-outcome-kind-mapping.md §6）：契约 §3 七条规则不覆盖'挂出后未成交却非到期'（IOC 撤余量/MARGIN 撤单）；代码里已把静默 else 兜底改成具名待裁分支并注明 block，行为维持建议 A，测试钉住。**S18 需 G0 裁定契约后才能真正闭合，第六轮复核在裁定前必然再判 fail，故暂不派。** tests/market 240 passed；A 22/22；report rc=0。M-10 verify 累计失败 5 次。"
         }
       ]
     },
@@ -718,7 +720,7 @@
         "note": "[G0/427ed064 R23] tests/research 2 failed：test_g2_parity 的 BATCH_SCHEMA 镜像与真假输出列集断言，根因是 G2 落地 A15 后 simulate_batch 新增 outcome_kind / exit_legs 两列，G3 镜像未跟。**这是 parity 测试在正确工作**（它就是为捉这类接缝漂移而存在），非缺陷。请 G3 按新列集更新镜像与 fake_execution。G3 源码 02:53Z 仍在写入，判为修中。",
         "at": "2026-09-11T02:57:32Z"
       },
-      "lastUpdate": "2026-09-11T02:55:21Z",
+      "lastUpdate": "2026-09-11T02:58:23Z",
       "tasks": [
         {
           "id": "R-01",
@@ -929,6 +931,10 @@
         {
           "t": "11:55",
           "n": "回 G0 R21：三审产物已按任务书收尾——review-G3-P1.md 现 1421 行，行首终裁行 L393「终裁：fail」/ L886「二审终裁：fail」/ L1421「三审终裁：fail」（最后一行、无后续内容）。G0 看到的 888–1306 行以 exit=0 收尾是 Codex 写入中途状态（三审来自 task-mtwc9agv-m3a7jo；task-mtwbp40g-dx0ch9 未追加任何节）。R-10 verify 为 tail -1 + 行首行尾双锚，代码块内 '三审终裁：pass' 样例骗不过；rc=1 是真实 fail（8 项部分闭合）。处置：用户裁定 codex 直接修，写任务 task-mtwd0wpp-ihodxk 运行中；修完核对后重跑 MC 并派四审（任务书加'最后一行必须是 <轮次>终裁：pass|fail|insufficient，其后无内容'硬性收尾）。"
+        },
+        {
+          "t": "11:58",
+          "n": "回 G0 R23：收到——G2 A15 落地新增 outcome_kind/exit_legs 两列，parity 红是预期（接缝漂移探测器有效）。Codex 修复任务 task-mtwd0wpp-ihodxk 正在改 synthetic.py（S14），为避免并发编辑，镜像同步在其完成后立即做（派生属性，不进 trace_hash，只镜像不当输入）；B10 unfilled_expired 扩 cancelled 等 G2 最终版再对齐。"
         }
       ]
     },
@@ -1385,6 +1391,12 @@
         "module": "research",
         "verdict": "issues",
         "note": "[G0/427ed064 R23] tests/research 2 failed：test_g2_parity 的 BATCH_SCHEMA 镜像与真假输出列集断言，根因是 G2 落地 A15 后 simulate_batch 新增 outcome_kind / exit_legs 两列，G3 镜像未跟。**这是 parity 测试在正确工作**（它就是为捉这类接缝漂移而存在），非缺陷。请 G3 按新列集更新镜像与 fake_execution。G3 源码 02:53Z 仍在写入，判为修中。"
+      },
+      {
+        "at": "11:59",
+        "module": "market",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R24] G2 独立发现 §3 映射不满射并按协议 block（与五审 S18 同一空洞，独立复现结论一致），处置正确：把静默 else 改成具名待裁分支 + 不变量测试钉住当前值，改判即强制同步——这是 block 期间的正确工程姿态，记账。G0 裁定已先于该 block 写入契约 v1.8 §5.12 B10，本轮进一步把 §3 表格改为终版（第4行扩为 expired 或 cancelled 终止；新增一行：以上均不命中 → raise ContractError 并回报事件集合，禁止兜底贴值），规范正文与修订不再分散两处。**与 G2 建议 A 的差异及理由**：A 是「未成交且非 rejected」的兜底式全覆盖，G0 采用枚举式（expired|cancelled）+ 未命中即抛错。两者对 IOC 撤余量、MARGIN 撤单当前行为一致，差别在未来出现新终止形态时：兜底式会静默吸收，枚举式强制有人做一次决定。这正是 B10 第1条(b) 的要义，也是 S18 本身的教训。S19 已由 G2 修复（显式 TTL 须等于 plan_ttl 或 policy 兜底值，四个伪造值+两向全拒回归），与 G0 B10 第2条一致。G2 自陈『上轮说 §5.9 补得对、实则补了一半』并提炼出『补了一半比没补更危险：两分支只堵一个，剩下的正好是兜底路径，而兜底路径恰是作者原文最常缺字段的路径（真实 gold 25/26 行 TTL 为 null）』——该教训价值高，补入判例 3。实跑 market 240 passed / integration 7 passed。market 解 block，S18 实现可落地。"
       }
     ],
     "blockers": [

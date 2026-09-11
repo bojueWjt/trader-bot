@@ -76,7 +76,8 @@ def simulate_batch(reqs: Iterable[ExecutionRequest], **kw) -> pl.DataFrame
 | 1 | `censor_reason == LABEL_RIGHT_CENSORED` | `right_censored` |
 | 2 | `censor_reason` 为其余五种证据缺失码 | `unevaluable`（**禁映 `right_censored`**）|
 | 3 | 未成交且事件含 `rejected` | `rejected`（**禁并入 `unfilled_expired`**）|
-| 4 | 未成交且事件含 `expired` | `unfilled_expired` |
+| 4 | 未成交且订单以 `expired` **或** `cancelled` 终止（TTL 到期 / IOC·FOK 立即撤销 / 撤单）| `unfilled_expired`（§5.12 B10）|
+| — | **以上均不命中** | **`raise ContractError`，回报实际事件集合；禁止兜底贴值（§5.12 B10 第 1 条 (b)）** |
 | 5 | 已 `closed` 且出场成交含 `leg=sl` | `stopped` |
 | 6 | 已 `closed` 且出场成交全为 `leg=tp` | `tp_hit` |
 | 7 | 其余已 `closed` 且有成交 | `filled_closed`（v0 不可达，留给政策平仓腿 C06）|
