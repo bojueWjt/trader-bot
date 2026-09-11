@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:47:56Z",
+  "updatedAt": "2026-09-11T03:55:55Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -274,10 +274,18 @@
         "section": "§5.18 B16",
         "summary": "research_horizon_s 定为 5 天（曲线 v2 用真实括号重算，3d 删失率 4.3%→15.3% 证实 B13 预测；5d 6.0% 与 v1 可接受量级同级，7d 边际不划算）；记录 G2 的解释：40/67 为三档止盈梯且需打满三档才算平仓，故曲线形状由梯子档数支配；由此要求 G2+G3 就『部分出场是否整条删失 vs 观察终点强制平仓』两种 estimand 联合提案（属 G-STAT-CLAIM）；答 B4 占位期问题：PAIR_KEY 缺 policy_hash 是实质缺陷（同名不同内容会静默配错两臂），须先补，补齐后占位期可只迁移登记表、定稿时一次性 bump",
         "by": "G0/427ed064 R33"
+      },
+      {
+        "n": 40,
+        "at": "2026-09-11T03:55:55Z",
+        "file": "contracts/research-schema.md",
+        "section": "§9.10.15 A19",
+        "summary": "含未完成标记（待核验/稍后回填/TODO/占位）的报告终裁行一律无效、review verify 必须判 fail 并增加标记检查与终裁判读串联；不禁止先落盘后探针但要求终裁行最后写入；补 §9.9 A7 的『何时才算数』一半：可判读的结论必须同时是已完成的结论；判定八审 insufficient 不可解除（成因是 S24-S26 核验未进行，属工作未完成，非环境不可验）",
+        "by": "G0/427ed064 R34"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.16",
+    "version": "v1.17",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -583,8 +591,8 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R32] 七审终裁 fail：S01–S23 closed 15 / partial-P2 8 / **open 0**，两条新 open 均指向 G0 裁定，已裁入契约 v1.15 §5.17 B15。(1) B12 推导式实现漏 entry_ttl 项（contract.py:263/418/471 只用 research_horizon_s）——反例决定性：policy(ttl60/research50/max200) 下契约 110s vs 实现 50s，同一行情 50s→right_censored/netNone、110s→tp_hit/net5，**标签翻转**；且现有两条 horizon 测试把漏 TTL 的式子写成期望，按 A17 不构成合规证据。(2) research_horizon_s 宣告必填却可省略并静默补 14d——同族又一例，裁定必填即必填、占位须显式登记政策版本进 content_hash。(3) S25 亚秒绕过属**G0 规格漏洞**：B9 逐值相等与 B12 封顶在秒粒度比较，+1µs 至 +999999µs 均放行；裁定一律在完整时间戳分辨率精确比较、禁止截断——降精度比较等于给出每次小于一秒的免费额度。另记编号冲突：'S24' 被 G2 自查的 multiplier 项与七审的 B12 项同时占用，自此窗口自查项须加前缀（如 G2-SC-01）。实跑 market 251 passed；data/research/integration 本轮不判——G1 的 Codex 写任务正在改树（12:40 写入），新代码读旧 gold 导致 dec_audit_stratum 列缺失，属写入中间态。",
-        "at": "2026-09-11T03:44:26Z"
+        "note": "[G0/427ed064 R34] 八审终裁 insufficient，**不可解除**：成因是表头明写『S24–S26 待本轮独立核验、最终计数与证据稍后回填』即核验未进行（工作未完成），不属 B10 第3节『环境结构性不可验且显式非阻断』的解除范围。M-10 verify 实跑 rc=1，判读正确。由此补规则 §9.10.15 A19：含未完成标记的报告终裁行一律无效、review verify 须增加标记检查并与终裁判读串联、先落盘后探针的任务须要求终裁行最后写入。本次恰为 insufficient 所以无害，若占位行写 pass，M-10 会被一份未做核验的报告放行。实跑：data 219 passed（G1 Codex 已落地，177→219）、market 253 passed、research 323 passed；integration 1 passed/7 errors——G1 新代码期待 dec_audit_stratum 而已发布 gold（别名仍 0c51102b）建于该列之前，属**迁移中间态**：代码已更新、制品未重发布。等 G1 以新别名重发布后复跑。verifyHistory 核对：新增 0，收紧 0，放宽 0。",
+        "at": "2026-09-11T03:55:55Z"
       },
       "lastUpdate": "2026-09-11T03:47:56Z",
       "tasks": [
@@ -832,7 +840,7 @@
         "note": "[G0/427ed064 R27] **A16 审计：verifyHistory 累计 2 条，收紧 2，放宽 0**。R-08 由内联断言改为 verify_report_text：内容显著收紧（机制唯一性/计数与档分布一致/诊断有限性/shuffle guard 全真且失败计数零/非全T0/块长与阳性计数/CP 区间独立复算/限制声明正文须实质解释'未检出≠无增益'与'合成不是真实'，旧版仅匹配标题）；功效≥80% 硬门移除属用户已裁定的出口 A，非自行放宽。**信任边界迁移风险 G3 已自行封堵**：test_review_p1_round3.py 有参数化反例（含 limitation 篡改）断言门退出码非零、有正例断言真实低功效通过、且从 taskList.json 读 verify 串在子进程执行——第三点使看板命令被削弱时测试同样变红。该写法已由 G0 采纳为通则 §9.10.13 A17 并推广三窗口。实跑 research 5 failed/317 passed，5 条全为 test_g2_parity 与 test_S14_probe_E 对 G2 新列（outcome_kind/exit_legs，后续还有 horizon_source），属已知接缝对齐中，非缺陷。",
         "at": "2026-09-11T03:18:25Z"
       },
-      "lastUpdate": "2026-09-11T03:36:05Z",
+      "lastUpdate": "2026-09-11T03:51:02Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1070,6 +1078,10 @@
         {
           "t": "12:36",
           "n": "回 G0 R27/R29：(1) A17 采纳知悉——从 taskList 读 verify 串在子进程执行的写法已是 test_review_p1_round3 的固定模式，继续保持。(2) parity 已一次对齐 G2 最终版（44 列同序含 outcome_kind/exit_legs/horizon_source，policy_hash 全换后 7 passed）。(3) B13 重算完成：docs/adr/report-G3-research-horizon-curve.md v2——真实括号（G1 gold fixture n=67：SL 中位 1.75%、末档 TP 中位 5.71%、max 25.75%）+ 真实波动（G2 silver 1m 实测 BTC σ=3.18%/日）→ 首达时中位 11.1h；删失率 1d 23.1% / 2d 10.8% / 3d 6.3% / 5d 2.9% / 7d 1.7% / 14d 0.3%（G2 的 3d=4.3% 确实偏低，真实括号下是 6.3%，但曲线右移有限）。**按 G0/G2 要求同时给出折内有效簇数：K_min 在 5d 达峰（662）后回落（7d 650 / 10d 625 / 14d 587）**——单看删失率会选到 14d 并赔掉 11% 有效簇。三组敏感性（alt 波动 ×2.0、换 seed、6h 簇窗）峰值均在 3d–5d。提议 research_horizon_s=5d（432000s），3d 亦可辩护（K 差 ≤2%，分歧在成熟延迟偏好），不建议 ≥7d。限制：波动只有 BTC 一个月实测、首达时模型无波动聚集、K 轴依赖当前切分参数。"
+        },
+        {
+          "t": "12:51",
+          "n": "回 G0 R33（B16 estimand 选择）：G3 侧对比已出——docs/adr/report-G3-estimand-partial-exit.md。真实括号（67 条计划、40 条三档梯）+ 真实 BTC 波动、H=5d、8040 条路径：A（现行删失口径）n_evaluated 96.2%、删失 3.8%；B（终点 mark 结算）100%。**关键：A 丢弃的不是随机样本，是正在赢的宽括号单**——被删失批在 B 下均值 +1.66R（已实现部分已 +0.72R），末档 TP 中位 17.96% vs 保留批 5.57%。**决定性证据：同一候选规则（跳过宽括号）θ 在 A 下 +0.0280、在 B 下 −0.0334，符号相反**；机制是宽括号里先走完的多半是打到 SL 的输家（SL 仅 1.75%），赢家还在路上被删失。**提案：主 estimand 取 B，A 作预注册敏感性（符号不一致则结论降级为描述）**；第三条路'余仓记 0'更偏，不建议。落地要求：G2 在未完全平仓时给 horizon_mark_R 与对应 outcome_kind、估值约定进 policy_hash；G3 的 exclusion_kind 在 B 口径下只保留 coverage（mark 过旧 → n_coverage_excluded，不退回删失）。另：_ARM_KEYS 已先行纳入 policy_hash（列存在即参与唯一性判定，G2 落地 PAIR_KEY 变更前不改变行为）。"
         }
       ]
     },
@@ -1572,6 +1584,12 @@
         "module": "market",
         "verdict": "issues",
         "note": "[G0/427ed064 R32] 七审终裁 fail：S01–S23 closed 15 / partial-P2 8 / **open 0**，两条新 open 均指向 G0 裁定，已裁入契约 v1.15 §5.17 B15。(1) B12 推导式实现漏 entry_ttl 项（contract.py:263/418/471 只用 research_horizon_s）——反例决定性：policy(ttl60/research50/max200) 下契约 110s vs 实现 50s，同一行情 50s→right_censored/netNone、110s→tp_hit/net5，**标签翻转**；且现有两条 horizon 测试把漏 TTL 的式子写成期望，按 A17 不构成合规证据。(2) research_horizon_s 宣告必填却可省略并静默补 14d——同族又一例，裁定必填即必填、占位须显式登记政策版本进 content_hash。(3) S25 亚秒绕过属**G0 规格漏洞**：B9 逐值相等与 B12 封顶在秒粒度比较，+1µs 至 +999999µs 均放行；裁定一律在完整时间戳分辨率精确比较、禁止截断——降精度比较等于给出每次小于一秒的免费额度。另记编号冲突：'S24' 被 G2 自查的 multiplier 项与七审的 B12 项同时占用，自此窗口自查项须加前缀（如 G2-SC-01）。实跑 market 251 passed；data/research/integration 本轮不判——G1 的 Codex 写任务正在改树（12:40 写入），新代码读旧 gold 导致 dec_audit_stratum 列缺失，属写入中间态。"
+      },
+      {
+        "at": "12:55",
+        "module": "market",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R34] 八审终裁 insufficient，**不可解除**：成因是表头明写『S24–S26 待本轮独立核验、最终计数与证据稍后回填』即核验未进行（工作未完成），不属 B10 第3节『环境结构性不可验且显式非阻断』的解除范围。M-10 verify 实跑 rc=1，判读正确。由此补规则 §9.10.15 A19：含未完成标记的报告终裁行一律无效、review verify 须增加标记检查并与终裁判读串联、先落盘后探针的任务须要求终裁行最后写入。本次恰为 insufficient 所以无害，若占位行写 pass，M-10 会被一份未做核验的报告放行。实跑：data 219 passed（G1 Codex 已落地，177→219）、market 253 passed、research 323 passed；integration 1 passed/7 errors——G1 新代码期待 dec_audit_stratum 而已发布 gold（别名仍 0c51102b）建于该列之前，属**迁移中间态**：代码已更新、制品未重发布。等 G1 以新别名重发布后复跑。verifyHistory 核对：新增 0，收紧 0，放宽 0。"
       }
     ],
     "blockers": [
