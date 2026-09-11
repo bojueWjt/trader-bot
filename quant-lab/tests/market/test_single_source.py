@@ -198,6 +198,14 @@ def _accepts(payload):
     return True
 
 
+def _partition_interior_variants(expected):
+    # S45 独立消费方义务：移动窗口内网格点，短生命周期窗口不硬造点。
+    if len(expected) < 3:
+        return []
+    first, middle, *tail = expected
+    return [[first, middle + offset * US, *tail] for offset in (-1, 0, 1)]
+
+
 def test_differential_partition_grid():
     rng = random.Random(2802)
     for start in _times():
@@ -209,7 +217,8 @@ def test_differential_partition_grid():
             expected = _grid(a, b)
             variants = [expected, [], expected[1:], expected[:-1], expected[::2],
                         [t for t in expected if rng.getrandbits(1)],
-                        [t + US for t in expected], sorted(set(expected + [a - US, b]))]
+                        [t + US for t in expected], [t - US for t in expected],
+                        *_partition_interior_variants(expected), sorted(set(expected + [a - US, b]))]
             for opens in variants:
                 frame = fixture_bars(max(1, len(opens))).head(len(opens)).with_columns(
                     pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
@@ -261,6 +270,13 @@ def test_differential_vision_count():
             assert vision.expected_rows(kind, '8h', period) is None
 
 
+def _interior_bar_variants(expected):
+    # S42：移动的是窗口内 bar.open_time，而不是请求边界。条数始终不变。
+    first, middle, *tail = expected
+    for offset in (-1, 0, 1):
+        yield [first, middle + offset * US, *tail]
+
+
 def test_differential_kernel_grid():
     rng = random.Random(2804)
     for start in _times():
@@ -269,8 +285,9 @@ def test_differential_kernel_grid():
             req = _request(t_dec=start, t_start=None, horizon_end=end)
             kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
             expected = _grid(start, end)
-            for opens in (expected, [], expected[1:], expected[:-1], expected[::2],
-                          [t for t in expected if rng.getrandbits(1)]):
+            variants = [expected, [], expected[1:], expected[:-1], expected[::2],
+                        [t for t in expected if rng.getrandbits(1)], *_interior_bar_variants(expected)]
+            for opens in variants:
                 bars = [c.Bar(open_time=t, o=Decimal(100), h=Decimal(100), l=Decimal(100), c=Decimal(100))
                         for t in opens]
                 missing = sorted(set(expected) - set(opens))
@@ -324,14 +341,19 @@ def test_differential_lake_grid(tmp_path):
         end = start.replace(microsecond=0) + dt.timedelta(minutes=5) + rng.choice((-1, 0, 1)) * US
         expected = _grid(start, end)
         req = _request(t_dec=start, t_start=None, horizon_end=end)
-        for variant, opens in enumerate((expected, expected[:-1], [], expected[1:])):
+        variants = [expected, expected[:-1], [], expected[1:], *_interior_bar_variants(expected)]
+        for variant, opens in enumerate(variants):
             root = tmp_path / f'{index}-{variant}'
             # 文件包含半开区间两侧的行，装载必须排除。
             supplied = sorted(set(opens + [start - US, end]))
             _write_lake(root, start, end, supplied)
             market = execution.load_market_from_lake(req, lake_root=root)
-            assert market.bars_complete == (len(opens) == c.grid_points_between(start, end, 60))
-            assert market.bars_quality_ok
+            present = set(opens) & set(expected)
+            off_grid = set(opens) - set(expected)
+            assert market.bars_complete == (present == set(expected) and not off_grid)
+            assert market.bars_quality_ok == (not off_grid)
+            for opened in off_grid:
+                assert any("off-grid" in note and opened.isoformat() in note for note in market.quality_notes)
             for bars in (market.bars_last, market.bars_mark):
                 assert [bar.open_time for bar in bars] == opens
             # Decimal 同路径载荷不能浮点往返；这不是估值公式的副本。
@@ -500,3 +522,58 @@ def test_differential_expiry_b():
                 assert expired[0].reason == 'entry_ttl'
             else:
                 assert expired[0].reason == 'horizon_end'
+
+
+@pytest.mark.parametrize("offset_us", [-1, 0, 1])
+@pytest.mark.parametrize("stream", ["bars_last", "bars_mark"])
+def test_differential_kernel_public_interior_bar(offset_us, stream):
+    """S42/S43：真实 Bar → MarketView → simulate，不绕验证、不替换生产函数。"""
+    start = dt.datetime(2024, 1, 1, 1, tzinfo=dt.UTC)
+    end = start + dt.timedelta(minutes=3)
+    req = _request(t_dec=start, t_start=None, horizon_end=end)
+    expected = _grid(start, end)
+    opens = [start + dt.timedelta(microseconds=value)
+             for value in (0, 60000000 + offset_us, 120000000)]
+
+    def bars(times):
+        return [c.Bar(open_time=time, interval_s=60, o=Decimal(100), h=Decimal(100),
+                      l=Decimal(100), c=Decimal(100)) for time in times]
+
+    payload = {"manifest_id": req.market_manifest, "bars_last": bars(expected),
+               "bars_mark": bars(expected)}
+    payload[stream] = bars(opens)
+    market = c.MarketView.model_validate(payload)
+    kernel = KernelA(req, market)
+    result = execution.simulate(req, market=market)
+    missing = sorted(set(expected) - set(opens))
+    want_gap = None
+    want_reason = "LABEL_RIGHT_CENSORED"
+    if missing:
+        want_gap = missing[0]
+        want_reason = "BAR_GAP"
+    assert result.censor_reason == want_reason
+    assert result.coverage_mask.bars_ok == (not missing)
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+
+
+@pytest.mark.parametrize("offset_us", [-1, 0, 1])
+@pytest.mark.parametrize("stream", ["klines", "markPriceKlines"])
+def test_differential_lake_public_interior_bar(tmp_path, offset_us, stream):
+    start = dt.datetime(2024, 1, 1, 1, tzinfo=dt.UTC)
+    end = start + dt.timedelta(minutes=3)
+    req = _request(t_dec=start, t_start=None, horizon_end=end)
+    expected = _grid(start, end)
+    lake = _write_lake(tmp_path, start, end, expected)
+    path = lake.silver_dir(stream, "1m", "BTCUSDT") / "date=2024-01-01" / "part.parquet"
+    opens = [start + dt.timedelta(microseconds=value)
+             for value in (0, 60000000 + offset_us, 120000000)]
+    frame = pl.read_parquet(path).with_columns(
+        pl.Series("open_time", opens, dtype=pl.Datetime("us", "UTC")))
+    vision.atomic_write_parquet(path, frame)
+    market = execution.load_market_from_lake(req, lake_root=tmp_path)
+    result = execution.simulate(req, market=market)
+    assert market.bars_complete == (offset_us == 0)
+    assert market.bars_quality_ok == (offset_us == 0)
+    if offset_us != 0:
+        assert not result.coverage_mask.bars_ok
+        assert any(stream in note and opens[1].isoformat() in note for note in market.quality_notes)

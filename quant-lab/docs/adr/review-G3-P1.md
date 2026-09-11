@@ -1419,3 +1419,913 @@ d9fc1690653016db72cd78c4756efc5b36b34ae04dcf6815aa02c27858cd7afd  docs/adr/repor
 机械验收命令：`tail -1 docs/adr/review-G3-P1.md | grep -E "^三审终裁：(pass|fail)$"`；`grep -c "已闭合" docs/adr/review-G3-P1.md`。后者统计整份历史文档出现行数，不是本轮闭合项数；本轮条数以上表为准。
 
 三审终裁：fail
+
+
+## 四审（R-10 round 4）
+
+取证日期：2026-09-11。审查者：GPT-6 / Codex 主控，未委派其他模型。范围：只读复核；仅在本文件末尾追加本节。按用户要求复核三审剩余 8 项，原已闭合 11 项只抽验、不回退；S17 使用用户已裁定的出口 A，功效如实报告并保留限制声明，不以功效数值作准入门。所有数字均为本轮测试、合成模拟或已有报告的描述。
+
+**版本绑定（开审逐文件 SHA256）**：为同时满足“只追加、不改历史正文”，开审快照记在本次四审节头，不向三审正文插入内容。覆盖 research 源码及 tests/research 的全部源文件/夹具（35 个；不含生成的 __pycache__）。历史一至三审前缀 126433 bytes，SHA256=3be200166c763d60d00b541393191be11b4435538a946f4ab2f6a0e9bb92b5fe。
+
+```text
+5792ae78cc7030ef6f8e40e786177e84df851a892bd555eafeb7c91e1beadca0  src/quant_lab/research/__init__.py
+8f3f2321b33be1d41ab8147d93e928802be1771b8673c45f3e26866c4f716629  src/quant_lab/research/api.py
+b9fd438b20443a0705f0b0eb140efa28fd6cc8fef256fffc2b5cf99a4d7bc903  src/quant_lab/research/ast.py
+4ac9410eda1a7df71c1ec2ff4e0d275e968fc0a4c18e17f177ed9fa20185117d  src/quant_lab/research/backends/__init__.py
+c39e3efc2c07cbf69d8fbc8d7d78ddb12d2f003322c0b01fb78d807dec4d06a5  src/quant_lab/research/backends/polars.py
+3873a84db354235cf3662e4b6bfab6a64e87835d963001f80b6230e530c78e27  src/quant_lab/research/backends/polars_ta.py
+25053d6f43be30807fb7580893174fcee18ecff880e342074d2856c63eba683f  src/quant_lab/research/contract_tests.py
+d2c73127ad42b91d83be4362b3ce56c730044bd80813688ea7d4b8dc377aa9fd  src/quant_lab/research/evaluator.py
+65f36acacec9b7656dc572ee2490ef7dafc3f2782a43706560dbaae88cd07b46  src/quant_lab/research/features.py
+03841ce8d3c03bd65ed7d9e6fe310417319dc97c6befb3a3aa56c93ad02f09d9  src/quant_lab/research/grammar.py
+5838db4b5741fdac553cd48a21bea92975bf7fe16760196313b721edbecf6608  src/quant_lab/research/ledger.py
+603c46f339300822fc2a503c4fde1cfcd2181347bb43bace1f7e5f3b30e3a7e2  src/quant_lab/research/maxt.py
+023526012adab32b6fc52975f608e6b28ac1aadedae1792ff0fa5eba6ac88345  src/quant_lab/research/nullmodel.py
+2893fcfab671fa39abd7b6c6549ebaf92740652372dffc5f9fcb4e367b950d05  src/quant_lab/research/ops.py
+2501ad7858939258167357dd830454475d044454ea294002a8140545af484ac9  src/quant_lab/research/paths.py
+66e1c9494982624eaccb7dadcf64e02142ccba7c0e3c28aeafec52572cb2fc54  src/quant_lab/research/protocol.py
+09a1b940e36c07367317e5ce74eb718dfee8918d3940d375aaef6e3111f4ad25  src/quant_lab/research/reference.py
+9f3178104aab91ca67d76d14cbc49777f75167ea3b9788b81dfe32509150b503  src/quant_lab/research/spike.py
+e3259d422a7e676ac4699c1a4a6e0a85baf05f435be1292dbfa424a6b6fd284f  src/quant_lab/research/synthetic.py
+987037ccf008b8874b78903a5c14645b55b9e0b099b5a248040c909029e1c418  src/quant_lab/research/tiers.py
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  tests/research/__init__.py
+d375f18e484d7ccaa698e22505e1bddc087558290ea03c479e7385328ce93fa2  tests/research/conftest.py
+1d2af763e4b00ba120d3e79cde981f5e54e8a6b2567128df9562b524ac3fb506  tests/research/fixtures/protocol_synthetic.yaml
+aa9a5bf44c99c95dd1cb4717450e5eec30ec1b50dabebae1b0712b6e4360e176  tests/research/test_api.py
+c0b19d733d2965b6677fbbc5acbe777916bbd5187aaf95107539b81ee8c28d50  tests/research/test_ast.py
+af52849349543c3fb82d27f6e2b778a4a3f3b7e8200209ec3e83e59d5ad691af  tests/research/test_evaluator.py
+34a62aa954f3714df9e5501680bea55df71d6c5ed0144c282ce8325b0115d5ff  tests/research/test_features.py
+d7e0cb2045cc12d252ae9d390c4837bfcef64ef0b35108b7512fafef38468f94  tests/research/test_g2_parity.py
+42253d2e41189805c127eacd92dd1b46e739a51ebd6da15127998aacca23b71c  tests/research/test_maxt.py
+78e1a22c7e0239d05f77fc486b66bb2414d5430e47425ab9c77da8fd0f3434b7  tests/research/test_nullmodel.py
+664ef151fa6258c931cb41d55c01b979448cf2398745b64b0e5543ac208c4ca1  tests/research/test_ops_contract.py
+d70d1a608797661005bd3858810dc0cc9c2f06ce7303cff8de1d9ef22cab850f  tests/research/test_protocol.py
+e1338b9c14e781f4fdaa20f6103945fd378603ea3c1662adb918cbe1808957ee  tests/research/test_review_p1_closure.py
+fc12c2eef451126c9a10afab630dc55a77f3cd0ff566bb10cdfd68c4f0d76271  tests/research/test_review_p1_round3.py
+be33574cdf8c298dc140713d040c55ffec113c61afad5a2bfe5df59eeab616ca  tests/research/test_smoke.py
+```
+核读依据：本文件一、二、三审全文及 A–G 探针；feature-snapshot 全文（§7 优先）、research-schema §9、execution-interface §5、ADR-G3；research 全部源码与 tests/research 全部测试/夹具；null-model、backend-spike、research-horizon-curve 三份报告；taskList.json 的 modules.research 与 R-05–R-10 verify 原文。源码边界核查包括 Decimal c14n、流式枚举、后端隔离、快照身份/撤销、两臂与 estimand、锁内账本、W>0、计算前分档门、成熟 t1、残差重采样及并行 MC。
+
+### 逐条闭合表
+
+判定：**已闭合 17 项，部分闭合 2 项（S08、S17），未闭合 0 项；未完全闭合合计 2 项。** 三审剩余 8 项中，本轮闭合 6 项。表内 Q-Sxx 命令与实跑输出见紧随其后的命令表；R4-L、R4-V、R4-STRUCT 是本节给出的独立内存探针。没有以 pytest/verify 全绿替代反例判定。
+
+| 编号 | 四审判定 | 复现与实跑证据 |
+|---|---|---|
+| S01 | 已闭合 | 抽验 Q-S01：1 passed。热读按 episode 身份对齐，换序结果一致。 |
+| S02 | 已闭合 | 抽验 Q-S02：2 passed；A 的 full/visible_only 均 (None, False)，历史晚到依赖未穿透，ctx 参数与 key 一致。 |
+| S03 | 已闭合 | Q-S03：1 passed；F identity_mismatch 抛 SnapshotInvalid。三审文件回归覆盖零参回调拒收、绑定 graph/derivation/epoch、冷发布/AST 间/热读撤销，均通过。B 原探针在零参回调处提前拒绝，不能把该早退当作热读路径证明；热读由真实缓存回归补齐。 |
+| S04 | 已闭合 | 抽验 Q-S04：2 passed。BACKEND_QUARANTINE 新进程即隔离 polars_ta.Corr；主 polars 路径可用，历史 spike 的 Corr FAIL 未删除。 |
+| S05 | 已闭合 | 抽验 Q-S05：1 passed。inner_split 按日历、簇、区间 purge 与成熟标签形成 search/selection，未退回按行切半。 |
+| S06 | 已闭合 | Q-S06：1 passed；B 尾部空窗保留 wf001 且 tail_loss_recorded=True；C undefined→T0/p=0/cap=0。F deff_inputs 包含候选配对目标，新增真实强依赖/undefined 候选回归拒绝原预算并禁止 selection。 |
+| S07 | 已闭合 | Q-S07：1 passed（真实多进程）；锁内 reserve/mark、水位重放、坏事件 fail-closed 回归通过。F old_active_run recover=0；真实 PID 活跃/已失活对照及 seq/attempt/status/重复序号/非法转移测试通过。 |
+| S08 | 部分闭合 | Q-S08：2 passed；E later_invalid/repeated_ast 均无 live 残留；ast_occurrences、selection 家族异常、recompute_of、成本/结果与 MemoryLedger/磁盘对拍通过。但 R4-L：backend bytes 变化时 ledger code_version 不变，backend_version=None，实际版本血缘仍缺。 |
+| S09 | 已闭合 | 抽验 Q-S09：1 passed；C train_end=(0,180)、immature_excluded=46、population_q30=-0.7797157283503584。成熟门与总体预注册分位保持。 |
+| S10 | 已闭合 | Q-S10：2 passed；F cluster-layout 破坏 guard=False。A27 回归及 R4-STRUCT 独立真实返回值+冲击格点注入均执行；正常 0/20 误拒，独立重排 8/20 单次检出；整轮 null/power 均 invalid_null_model。按当前校准规范闭合；报告验收遗漏归 S17。 |
+| S11 | 已闭合 | 抽验 Q-S11：1 passed。非空块按共同 mask 上 W>0；全删失块仍可保留在日历矩阵但不增加准入块数。B20 成对 floor 另核通过。 |
+| S12 | 已闭合 | Q-S12：3 passed；E candidate_only_censored validate 返回 None（正常完成），正反单侧删失回归均排除共同支持；m=True 任一臂 null/NaN/±Inf 拒收；直接 PairedPanel 不静默补零。 |
+| S13 | 已闭合 | 抽验 Q-S13：1 passed。未成交未删失有 expiry t1，合法零收益不会仅因 t1 空而被删除。 |
+| S14 | 已闭合 | Q-S14：8 passed；E mixed_sources real/fake 均 policy；三腿非均分、两组混合、部分缺失拒收、policy 总额回归通过。独立输出 44/44 列逐列逐序 dtype 一致，派生列存在且非特征输入；A13/A15 通过。 |
+| S15 | 已闭合 | 抽验 Q-S15：1 passed；分段 A 对 market_manifest/contract_version/seed/risk_budget 双方 null 及缺 policy_hash 均抛 EvalProtocolError。 |
+| S16 | 已闭合 | 抽验 Q-S16：1 passed；A 全删失输出 insufficient、n_censored_excluded=2、unclosed_rate=1.0，诊断未因提前返回归零。 |
+| S17 | 部分闭合 | R-08 原文 exit=0；D1 伪造 power pass、D2 全 T0、E 重复机制、G shuffle_guard=false 均拒收，R-10 最新行判断正确；出口 A 与有效 §3.2 已满足。但 R4-V 的新结构诊断 false/缺失/invalid_reason/guard_fail_rate 仍被接受，A31 --rebuild 可洗掉旧生成哈希，故工程闭合不成立。 |
+| S18 | 已闭合 | 抽验 Q-S18：1 passed。grammar 流式展开与 visited/cap 截断说明保持。 |
+| S19 | 已闭合 | 抽验 Q-S19：1 passed；A 两个不同 31 位十进制 hash_equal=False，Decimal context=10/40 得相同完整规范串，未再受 normalize 精度舍入。 |
+
+#### Q-Sxx：逐项命令及本轮新输出
+
+以下命令 cwd=quant-lab，统一设置 `PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider'`，不写源码或 pytest cache。每条 exit=0。
+
+| 证据 | 实跑命令 | 实跑输出末行 |
+|---|---|---|
+| Q-S01 | `.venv-g3/bin/python -m pytest tests/research/test_features.py::test_cache_hot_read_follows_episode_identity_not_position -q` | `1 passed in 0.52s` |
+| Q-S02 | `.venv-g3/bin/python -m pytest tests/research/test_features.py::test_context_is_single_source_and_in_key tests/research/test_features.py::test_late_available_at_is_not_visible -q` | `2 passed in 0.94s` |
+| Q-S03 | `.venv-g3/bin/python -m pytest tests/research/test_features.py::test_revocation_gate_blocks_cached_and_fresh_reads -q` | `1 passed in 0.40s` |
+| Q-S04 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s04_quarantine_persists_across_processes tests/research/test_features.py::test_quarantined_backend_op_rejected_in_snapshot -q` | `2 passed in 1.16s` |
+| Q-S05 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s05_inner_split_is_calendar_based_purged_and_mature -q` | `1 passed in 0.53s` |
+| Q-S06 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s06_config_cap_can_only_tighten_and_insufficient_folds_do_not_fit -q` | `1 passed in 1.45s` |
+| Q-S07 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s07_concurrent_reserve_only_one_wins_and_replay_after_crash -q` | `1 passed in 3.23s` |
+| Q-S08 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s08_every_stage_has_terminal_state_including_failures_and_final tests/research/test_review_p1_closure.py::test_s08_run_protocol_reserves_before_lint_and_rejects_bad_ast -q` | `2 passed in 7.56s` |
+| Q-S09 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s09_residual_fit_uses_only_mature_labels_and_population_quantile -q` | `1 passed in 0.41s` |
+| Q-S10 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s10_diagnostic_failure_cannot_pass tests/research/test_review_p1_closure.py::test_s10_all_t0_is_not_run_not_pass -q` | `2 passed in 0.44s` |
+| Q-S11 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s11_censored_blocks_do_not_count_as_nonempty -q` | `1 passed in 0.48s` |
+| Q-S12 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s12_panel_invariants_and_placeholder_only_under_mask tests/research/test_review_p1_closure.py::test_s12_outer_nan_gate_falls_back_to_baseline tests/research/test_evaluator.py::test_nan_feature_is_skip_and_keeps_denominator -q` | `3 passed in 1.17s` |
+| Q-S13 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s13_unfilled_uncensored_gets_expiry_t1_not_null -q` | `1 passed in 2.66s` |
+| Q-S14 | `.venv-g3/bin/python -m pytest tests/research/test_evaluator.py::test_estimand_vocabulary_frozen_and_stub_isomorphic_with_g1 tests/research/test_g2_parity.py -q` | `8 passed in 0.15s` |
+| Q-S15 | `.venv-g3/bin/python -m pytest tests/research/test_evaluator.py::test_two_arm_pairing_and_protocol_errors -q` | `1 passed in 0.07s` |
+| Q-S16 | `.venv-g3/bin/python -m pytest tests/research/test_evaluator.py::test_synthetic_end_to_end_pairs_and_decimal -q` | `1 passed in 0.16s` |
+| Q-S18 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s18_streaming_budget_and_truncation_reason -q` | `1 passed in 0.48s` |
+| Q-S19 | `.venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s19_exact_decimal_canonicalization -q` | `1 passed in 0.40s` |
+
+#### R-05–R-09：taskList 原文 verify 实跑
+
+原文从 taskList.json 读取执行，没有替换断言。R-09 写 /tmp/ql-proto 与默认湖账本是本轮明确授权的验证副作用。R-07 默认湖快照数量是读取时的描述，不把历史条目当成本轮新计算。
+
+**R-05**
+
+```bash
+test -f docs/adr/report-G3-backend-spike.md && .venv-g3/bin/python -c "import json,re,sys;t=open('docs/adr/report-G3-backend-spike.md',encoding='utf-8').read();j=json.loads(t[t.rindex(chr(96)*3+'json')+7:t.rindex(chr(96)*3)]);m=j['matrix'];assert all(v['status']=='pass' for v in m['polars'].values()),m['polars'];assert sum(v['status']=='pass' for v in m['polars_ta'].values())>=10;tm={r['backend']:r for r in j['timings']};assert tm['polars']['n_ast']==128 and tm['polars']['cold_s']>0 and tm['polars']['hot_s']>0 and 0<tm['polars']['rss_gib_after_hot_s']<=8 and tm['polars']['cold_s']<=1200;print('spike ok',tm['polars']['cold_s'],tm['polars_ta']['cold_s'])"
+```
+
+```text
+spike ok 206.77 36.11
+exit=0
+```
+
+**R-06**
+
+```bash
+.venv-g3/bin/python -m pytest tests/research/test_features.py tests/research/test_evaluator.py -q
+```
+
+```text
+.........................                                                [100%]
+25 passed in 0.78s
+
+exit=0
+```
+
+**R-07**
+
+```bash
+.venv-g3/bin/python -m pytest tests/research/test_protocol.py -q && .venv-g3/bin/python -c "import polars as pl;from quant_lab.research.paths import ledger_path;p=ledger_path();d=pl.read_parquet(p);assert d.height>0 and (d['status']=='reserved').sum()==0;print(p,d.height)"
+```
+
+```text
+..........                                                               [100%]
+10 passed in 0.09s
+/Users/balen/projects/trader-bot/quant-lab/data/lockbox/ledger.parquet 1969
+
+exit=0
+```
+
+**R-08**
+
+```bash
+.venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py tests/research/test_review_p1_round3.py -q && .venv-g3/bin/python -c "from quant_lab.research.nullmodel import verify_report_text; verify_report_text(open('docs/adr/report-G3-null-model.md',encoding='utf-8').read())"
+```
+
+```text
+91 passed in 33.76s
+POWER(reported, limitation statement applies) common_shock 327 768 0.3905 fail
+R-08 report verified: 5 unique primary records; arithmetic and diagnostics consistent
+exit=0
+```
+
+**R-09**
+
+```bash
+.venv-g3/bin/python -m quant_lab.research.api run --config tests/research/fixtures/protocol_synthetic.yaml --out /tmp/ql-proto && .venv-g3/bin/python -c "import json,math;r=json.load(open('/tmp/ql-proto/report.json'));assert r['tier'] in ('T0','T1','T2','T3a','T3b') and r['n_attempts']>0 and r['theta'] is not None and math.isfinite(r['theta']);s=r['n_attempts_by_status'];st=dict(zip(s['status'],s['len']));assert st.get('completed',0)>0 and st.get('reserved',0)==0 and st.get('duplicate',0)<r['n_attempts'];assert r['claim_status']=='descriptive_only' and r['final_status'] in ('ok','no_claim');print({k:r[k] for k in ('tier','K','theta','n_attempts','final_status')},st)"
+```
+
+```text
+{"status": "ok", "tier": "T1", "K": 531, "theta": 0.0, "se": null, "lower_bound": null, "p_adj": null, "n_attempts": 160, "n_folds": 3, "claim_status": "descriptive_only", "out_dir": "/tmp/ql-proto"}
+{'tier': 'T1', 'K': 531, 'theta': 0.0, 'n_attempts': 160, 'final_status': 'no_claim'} {'completed': 80, 'duplicate': 80}
+EXIT R-09 0
+```
+
+R-10 原文亦运行（追加前末行为三审 fail），exit=1、无 stdout，符合最新终裁为失败时应拒收；其历史串注入结果见 D3。四审写入后的格式/计数另行机械复核。
+
+```bash
+test -f docs/adr/review-G3-P1.md && tail -1 docs/adr/review-G3-P1.md | grep -Eq '^(二审|三审|四审|五审)?终裁：pass$'
+```
+
+#### 全套与三审专项回归
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' .venv-g3/bin/python -m pytest tests/research -q
+```
+```text
+328 passed in 182.54s (0:03:02)
+exit=0
+```
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' .venv-g3/bin/python -m pytest tests/research/test_review_p1_round3.py -q
+```
+```text
+........................................................................ [ 93%]
+.....                                                                    [100%]
+77 passed in 28.16s
+
+exit=0
+```
+三审文件当前实收 **77** 个测试（原 73 条加本轮 B11/A27/B19/A31 四个测试），不是把 73 当作当前统计数。文件中的 A27 正常侧与破坏侧、A31 旧 hash 拒收均实际运行；A31 绿测不覆盖下面的 rebuild 绕路。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' .venv-g3/bin/python -m pytest tests/research/test_review_p1_round3.py tests/research/test_evaluator.py tests/research/test_maxt.py tests/research/test_g2_parity.py -q
+```
+```text
+........................................................................ [ 69%]
+...............................                                          [100%]
+103 passed in 27.50s
+
+exit=0
+```
+
+#### A–G 原文重放与后续分支
+
+A/B/D/F 在新硬门提前退出时，exit=1 是该输入被拒绝的证据，不代表其后未运行分支已验收。下面保留新输出；分段 A/B/D/E 与继续执行的 F 补齐后续路径。S07 的旧 object.__new__ 内存替身不代表真实跨进程锁，真实恢复/并发证据来自以上 pytest。
+
+#### 探针A
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import datetime as dt
+from decimal import localcontext
+import polars as pl
+from quant_lab.research.ast import canonical_hash,canonical_json,parse_json_text
+from quant_lab.research import features as F, contract_tests as C
+from quant_lab.research.maxt import PairedPanel,max_t_panel
+from quant_lab.research.evaluator import pair_arms,evaluate,freeze_opportunity_set
+from tests.research.test_evaluator import episodes,execution,features,take_all,AST
+j=lambda n: parse_json_text('{"op":"Add","args":[{"field":"close"},{"const":'+n+'}]}')
+a=j('0.1234567890123456789012345678901');b=j('0.1234567890123456789012345678902')
+print('S19 different_31_digit_hash_equal=',canonical_hash(a)==canonical_hash(b))
+with localcontext() as ctx:
+    ctx.prec=10
+    c10=canonical_json(a)
+with localcontext() as ctx:
+    ctx.prec=40
+    c40=canonical_json(a)
+print('S19 context10=',c10,'context40=',c40)
+bars=C.make_bars([0.,1.,2.,3.,4.,5.]).with_columns(pl.when(pl.col('close')==3).then(pl.col('close_time')+dt.timedelta(hours=2)).otherwise(pl.col('close_time')).alias('available_at'))
+anchors=pl.DataFrame({'episode_id':['a'],'instrument_id':['X'],'t_dec':[C.T0+4*C.STEP]})
+ast={'op':'Mean','args':[{'field':'close'}],'window':{'unit':'rows','count':3}}
+h=canonical_hash(ast)
+r=F.feature_snapshot([ast],anchors,bars=bars)
+vis=F.feature_snapshot([ast],anchors,bars=bars.filter(pl.col('available_at')<=anchors['t_dec'][0]))
+print('S02 full=',r.select('f_'+h,'validity_'+h).row(0),'visible_only=',vis.select('f_'+h,'validity_'+h).row(0))
+ep=episodes([('a','ca',False),('b','cb',False)])
+x=execution(ep,[1.,2.])
+for key in ['market_manifest','execution_contract_version','seed','risk_budget']:
+    bad=x.with_columns(pl.lit(None,dtype=x.schema[key]).alias(key))
+    print('S15 both_null',key,'accepted_rows=',pair_arms(bad,['a','b']).height)
+print('S15 missing_policy_hash accepted_rows=',pair_arms(x.drop('policy_hash'),['a','b']).height)
+allc=episodes([('a','ca',True),('b','cb',True)])
+opp=freeze_opportunity_set(allc)
+r=evaluate(AST,opp,features=features(opp.episode_ids,[1.,1.]),rule=take_all,execution=execution(allc,[None,None]),fold_id='f',attempt_id='a')
+print('S16 all_censored=',r.status,r.n_censored_excluded,r.unclosed_rate)
+df=pl.DataFrame({'episode_id':[f'e{i}' for i in range(30)],'cluster_id':[f'c{i}' for i in range(30)],'t_dec':[C.T0+dt.timedelta(days=i) for i in range(30)],'weight':[1.]*30,'m':[True]*30,'d':[None]+[float(i%7) for i in range(29)]})
+p=PairedPanel.from_frame(df,['d']);r=max_t_panel(p,block_len_days=1,B=200,seed=1)
+print('S12 null_m_true=',p.diffs[0,0],bool(p.mask[0]),r.status,r.n_nonempty_blocks)
+print('S14 missing_eligibility accepted=',freeze_opportunity_set(ep.drop('eligibility_by_estimand')).episode_ids)
+PY
+```
+```text
+S19 different_31_digit_hash_equal= False
+S19 context10= {"args":[{"field":"close"},{"const":0.1234567890123456789012345678901}],"op":"Add"} context40= {"args":[{"field":"close"},{"const":0.1234567890123456789012345678901}],"op":"Add"}
+S02 full= (None, False) visible_only= (None, False)
+Traceback (most recent call last):
+  File "<stdin>", line 30, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/evaluator.py", line 225, in pair_arms
+    b = _validate_and_cast(_arm(execution, baseline_policy, ids, "baseline"), "baseline")
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/evaluator.py", line 187, in _arm
+    raise EvalProtocolError(f"{label} 臂 {c} 含 null（{x[c].null_count()} 行）")
+quant_lab.research.evaluator.EvalProtocolError: baseline 臂 market_manifest 含 null（2 行）
+exit=1
+```
+
+#### 探针B
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import copy,datetime as dt,threading
+from unittest.mock import patch
+import polars as pl
+from quant_lab.research import api as A, nullmodel as N, features as F, synthetic as S, contract_tests as C
+from quant_lab.research.ledger import Ledger,MemoryLedger
+from quant_lab.research.protocol import walk_forward
+from quant_lab.research.ops import REGISTRY
+from tests.research.test_protocol import anchors,T0,D
+from tests.research.test_features import CLOSE,CTX,H_CLOSE
+# S03: cache read revokes graph after initial check; no filesystem writes.
+state={'ok':True,'checks':0}
+def consumable():
+    state['checks']+=1
+    return state['ok']
+def read_cache(key,a):
+    state['ok']=False
+    return pl.DataFrame({'__row':[0],'value':[4.],'__valid':[True]})
+ctx=F.replace(CTX,consumable=consumable)
+a=pl.DataFrame({'episode_id':['a'],'instrument_id':['X'],'t_dec':[C.T0+4*C.STEP]})
+with patch.object(F,'_cache_read',read_cache):
+    r=F.feature_snapshot([CLOSE],a,bars=C.make_bars([float(i) for i in range(10)]),ctx=ctx,cache=True)
+print('S03 revoked_during_hot_read=',state,'returned_valid=',r['validity_'+H_CLOSE].to_list())
+# S06: final carry disappears.
+a=anchors([('train','ct',0.,1.),('first','cx',89.5,90.),('tail','cx',90.5,91.)])
+fs=walk_forward(a,min_train_clusters=1,test_span=D,min_train_span=89*D,origin=T0)
+print('S06 folds=',[f.fold_id for f in fs],'tested=',[i for f in fs for i in f.test_ids],'tail_loss_recorded=',any('tail' in f.purged for f in fs))
+# S07: deterministic interleaving of real mark() with memory-backed event I/O.
+led=object.__new__(Ledger); current={'attempt_id':'a','status':'running','reason_code':None}
+barrier=threading.Barrier(2); committed=threading.Event(); history=[]
+def row(aid):
+    snapshot=dict(current)
+    barrier.wait(timeout=5)
+    return snapshot
+def commit(event):
+    if event['status']=='interrupted':
+        assert committed.wait(5)
+    current.update(event);history.append(event['status'])
+    if event['status']=='completed':
+        committed.set()
+    return event
+led._row=row;led._commit=commit
+threads=[threading.Thread(target=led.mark,args=('a',s)) for s in ['completed','interrupted']]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+print('S07 concurrent_terminal_history=',history,'final=',current['status'])
+# S08: synthetic execution already read before any reservation; backend exception after completed.
+cfg=A.load_config('tests/research/fixtures/protocol_synthetic.yaml'); cfg=copy.deepcopy(cfg)
+cfg['data']['synthetic'].update(n_episodes=30,n_bars=200,span_days=1)
+cfg['candidates']['asts']=[{'field':'close'}]
+l=MemoryLedger();original=S.fake_execution; seen=[]
+def execution_probe(*args,**kw):
+    seen.append(len(l.rows))
+    return original(*args,**kw)
+def boom(*args,**kw):
+    raise RuntimeError('backend boom')
+with patch.object(S,'fake_execution',execution_probe),patch.object(A,'feature_snapshot',boom):
+    try:
+        A.build_inputs_from_synthetic(cfg,ledger=l)
+    except RuntimeError as e:
+        print('S08 snapshot_error=',str(e),'rows_at_execution=',seen,'terminal_states=',[r['status'] for r in l.rows.values()])
+# S14 independently compare frozen contract, not two local mirrors.
+from quant_lab.market.execution import BATCH_SCHEMA
+print('S14 fraction_source fake/real=', 'fraction_source' in S.BATCH_SCHEMA,'fraction_source' in BATCH_SCHEMA)
+print('S14 window_enums=',sorted({s.window_semantics for s in REGISTRY.values()}))
+# S10 state gate fault injection, not statistical evidence.
+w=N.synth_world(N.WorldConfig(seed=1,n_clusters=200)); calls={'n':0}
+def guard(*args,**kw):
+    calls['n']+=1
+    return {'ok':calls['n']!=1,'block_icc':{}}
+def positive(*args,**kw):
+    return {'status':'ok','final_status':'ok','synthetic_claim_positive':True,'tier':'T1','folds':[]}
+with patch.object(N,'resample_null',lambda *a,**k:w.inputs),patch.object(N,'assert_not_episode_shuffle',guard),patch.object(N,'run_pipeline',positive):
+    r=N.run_mc('common_shock',kind='power',n_rep=100,seed0=1,world_cfg=N.WorldConfig(n_clusters=200),pipe_cfg=A.PipelineConfig(B=200))
+print('S10 injected_power=',r.verdict,'invalid=',r.diagnostics['n_invalid_null_model'],'failed=',r.n_failed,'worst_ci=',r.worst_case_ci)
+PY
+```
+```text
+Traceback (most recent call last):
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/features.py", line 62, in check_identity
+    return self.consumable(self.graph_version, self.derivation_hash, self.revocation_epoch) is True
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: consumable() takes 0 positional arguments but 3 were given
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<stdin>", line 21, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/features.py", line 157, in feature_snapshot
+    if not ctx.check_identity(anchors):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/features.py", line 64, in check_identity
+    raise SnapshotInvalid("consumable 必须接收 graph_version/derivation_hash/revocation_epoch") from exc
+quant_lab.research.features.SnapshotInvalid: consumable 必须接收 graph_version/derivation_hash/revocation_epoch
+exit=1
+```
+
+#### 探针C
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+from unittest.mock import patch
+import numpy as np
+from quant_lab.research import api as A,nullmodel as N
+from quant_lab.research.ledger import MemoryLedger
+w=N.synth_world(N.WorldConfig(seed=1,n_clusters=1600)); led=MemoryLedger(); orig=A.candidate_diffs; calls={'n':0}
+def boom_second(*args,**kw):
+    calls['n']+=1
+    if calls['n']==2:
+        raise RuntimeError('second selection fails')
+    return orig(*args,**kw)
+with patch.object(A,'candidate_diffs',boom_second):
+    try:
+        A.run_pipeline(w.inputs,N.default_candidates(12),A.PipelineConfig(B=200,seed=6),ledger=led)
+    except RuntimeError as e:
+        print('S08 selection_error=',str(e))
+print('S08 remaining_selection_states=',[r['status'] for r in led.rows.values() if r['stage']=='selection'])
+model=N.fit_residual_model(w)
+x=N.resample_null(w,model,np.random.default_rng(3))
+bad=N.replace(x,base_R=x.base_R*100)
+print('S10 tail_scale_x100_guard=',N.assert_not_episode_shuffle(w.inputs,bad,w.day)['ok'],'sd_ratio=',round(float(np.nanstd(bad.base_R)/np.nanstd(x.base_R))))
+# S09 actual maturity gate and training-only q diagnostics, no I/O.
+m=N.fit_residual_model(w,train_end_day=180,label_maturity_days=2)
+print('S09 train_end=',m.train_days,'immature_excluded=',m.diagnostics['n_immature_excluded'],'population_q30=',N.feature_population_quantile(.3))
+# S06 undefined report remains search-capable even though pipeline skips that individual fold.
+from quant_lab.research.tiers import tier_report
+r=tier_report({'f':250},DEFF_by_fold={'f':None},span_months=13,n_outer_folds=3,min_fold_test_clusters=40)
+print('S06 undefined_tier=',r.tier,'p=',r.p_allowed,'cap=',r.config_cap,'K_eff=',r.K_eff)
+PY
+```
+```text
+S08 selection_error= second selection fails
+S08 remaining_selection_states= ['failed']
+S10 tail_scale_x100_guard= False sd_ratio= 100
+S09 train_end= (0, 180) immature_excluded= 46 population_q30= -0.7797157283503584
+S06 undefined_tier= T0 p= 0 cap= 0 K_eff= None
+exit=0
+```
+
+#### 探针D
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import io,json,shlex,contextlib,subprocess
+from unittest.mock import patch
+m=json.load(open('taskList.json'))['modules']['research']
+tasks={t['id']:t for t in m['tasks']}
+t=open('docs/adr/report-G3-null-model.md',encoding='utf-8').read()
+j=json.loads(t[t.rindex('```json')+7:t.rindex('```')])
+code=shlex.split(tasks['R-08']['verify'].split(' && ')[-1])[-1]
+for r in j['results']:
+    if r['kind']=='power':
+        r['verdict']='pass'
+fake='```json\n'+json.dumps(j)+'\n```'
+with patch('builtins.open',lambda *a,**k:io.StringIO(fake)),contextlib.redirect_stdout(io.StringIO()):
+    exec(compile(code,'taskList:R-08:original-python-assertions','exec'),{})
+print('S17 original_R08_python_accepts_power_fail_numbers_with_pass_flag=True')
+for r in j['results']:
+    if r['kind']=='null':
+        r['verdict']='not_run_T0'
+        r['diagnostics']['n_invalid_null_model']=1000
+        r['tiers']={'T0':1000}
+fake='```json\n'+json.dumps(j)+'\n```'
+with patch('builtins.open',lambda *a,**k:io.StringIO(fake)),contextlib.redirect_stdout(io.StringIO()):
+    exec(compile(code,'taskList:R-08:original-python-assertions','exec'),{})
+print('S17 original_R08_python_accepts_all_T0_nulls_with_invalid_diagnostics=True')
+cmd=tasks['R-10']['verify'].split(' | ')[-1]
+r=subprocess.run(cmd,shell=True,executable='/bin/zsh',input='二审终裁：pass\n三审终裁：fail\n',text=True)
+print('S17 R10_grep_old_pass_then_latest_fail_exit=',r.returncode)
+PY
+```
+```text
+Traceback (most recent call last):
+  File "<stdin>", line 13, in <module>
+  File "taskList:R-08:original-python-assertions", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 699, in verify_report_text
+    raise ValueError("限制声明缺失")
+ValueError: 限制声明缺失
+exit=1
+```
+
+#### 分段 A/B/D/E（保持真实报告限制正文）
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+
+import copy,datetime as dt,io,json,shlex,contextlib
+from decimal import Decimal
+from unittest.mock import patch
+import numpy as np
+import polars as pl
+from quant_lab.research import api as A,nullmodel as N,features as F,synthetic as S,contract_tests as C
+from quant_lab.research.evaluator import pair_arms,evaluate,freeze_opportunity_set
+from quant_lab.research.ledger import Ledger,MemoryLedger
+from quant_lab.research.maxt import PairedPanel
+from quant_lab.research.protocol import walk_forward
+from tests.research.test_evaluator import episodes,execution,features,take_all,AST
+from tests.research.test_features import CLOSE,CTX,H_CLOSE
+from tests.research.test_protocol import anchors,T0,D
+
+def probe(label,fn):
+    try:
+        print(label,fn())
+    except Exception as e:
+        print(label,type(e).__name__,str(e))
+
+ep=episodes([('a','ca',False),('b','cb',False)]);x=execution(ep,[1.,2.])
+for key in ['market_manifest','execution_contract_version','seed','risk_budget']:
+    probe('A S15 both_null '+key,lambda:pair_arms(x.with_columns(pl.lit(None,dtype=x.schema[key]).alias(key)),['a','b']).height)
+probe('A S15 missing_policy_hash',lambda:pair_arms(x.drop('policy_hash'),['a','b']).height)
+allc=episodes([('a','ca',True),('b','cb',True)]);opp=freeze_opportunity_set(allc)
+r=evaluate(AST,opp,features=features(opp.episode_ids,[1.,1.]),rule=take_all,execution=execution(allc,[None,None]),fold_id='f',attempt_id='a')
+print('A S16 all_censored',r.status,r.n_censored_excluded,r.unclosed_rate)
+df=pl.DataFrame({'episode_id':[f'e{i}' for i in range(30)],'cluster_id':[f'c{i}' for i in range(30)],'t_dec':[C.T0+dt.timedelta(days=i) for i in range(30)],'weight':[1.]*30,'m':[True]*30,'d':[None]+[float(i%7) for i in range(29)]})
+probe('A S12 null_m_true',lambda:PairedPanel.from_frame(df,['d']))
+probe('A S14 missing_eligibility',lambda:freeze_opportunity_set(ep.drop('eligibility_by_estimand')).episode_ids)
+a=anchors([('train','ct',0.,1.),('first','cx',89.5,90.),('tail','cx',90.5,91.)])
+fs=walk_forward(a,min_train_clusters=1,test_span=D,min_train_span=89*D,origin=T0)
+print('B S06 folds',[f.fold_id for f in fs],'tested',[i for f in fs for i in f.test_ids],'tail_loss_recorded',any('tail' in f.purged for f in fs))
+# Original S07 object.__new__ no longer supplies the new lock state; real disk multiprocessing test Q-S07/r2 supplies this evidence.
+cfg=copy.deepcopy(A.load_config('tests/research/fixtures/protocol_synthetic.yaml'))
+cfg['data']['synthetic'].update(n_episodes=30,n_bars=200,span_days=1)
+cfg['candidates']['asts']=[{'field':'close'}]
+l=MemoryLedger();original=S.fake_execution;seen=[]
+def execution_probe(*args,**kw):
+    seen.append(len(l.rows));return original(*args,**kw)
+def boom(*args,**kw):
+    raise RuntimeError('backend boom')
+with patch.object(S,'fake_execution',execution_probe),patch.object(A,'feature_snapshot',boom):
+    probe('B S08 snapshot_error',lambda:A.build_inputs_from_synthetic(cfg,ledger=l))
+print('B S08 rows_at_execution',seen,'terminal_states',[r['status'] for r in l.rows.values()])
+from quant_lab.market.execution import BATCH_SCHEMA
+from quant_lab.research.ops import REGISTRY
+print('B S14 fraction_source fake/real','fraction_source' in S.BATCH_SCHEMA,'fraction_source' in BATCH_SCHEMA,'schema_order_equal',list(S.BATCH_SCHEMA.items())==list(BATCH_SCHEMA.items()))
+print('B S14 window_enums',sorted({s.window_semantics for s in REGISTRY.values()}))
+w=N.synth_world(N.WorldConfig(seed=1,n_clusters=200));calls={'n':0}
+def guard(*args,**kw):
+    calls['n']+=1;return {'ok':calls['n']!=1,'block_icc':{}}
+def positive(*args,**kw):
+    return {'status':'ok','final_status':'ok','synthetic_claim_positive':True,'tier':'T1','folds':[]}
+with patch.object(N,'resample_null',lambda *a,**k:w.inputs),patch.object(N,'assert_not_episode_shuffle',guard),patch.object(N,'run_pipeline',positive):
+    r=N.run_mc('common_shock',kind='power',n_rep=100,seed0=1,world_cfg=N.WorldConfig(n_clusters=200),pipe_cfg=A.PipelineConfig(B=200))
+print('B S10 injected_power',r.verdict,'invalid',r.diagnostics['n_invalid_null_model'],'failed',r.n_failed,'worst_ci',r.worst_case_ci)
+# D: retain real report prose/limitation, mutate JSON only (avoid the new missing-heading short circuit).
+tasks={t['id']:t for t in json.load(open('taskList.json'))['modules']['research']['tasks']}
+t=open('docs/adr/report-G3-null-model.md').read();start=t.rindex('```json')+7;end=t.rindex('```');j=json.loads(t[start:end])
+verify=shlex.split(tasks['R-08']['verify'].split(' && ')[-1])[-1]
+def check_json(label,data):
+    fake=t[:start]+json.dumps(data)+t[end:]
+    out=io.StringIO()
+    try:
+        with patch('builtins.open',lambda *a,**k:io.StringIO(fake)),contextlib.redirect_stdout(out):
+            exec(compile(verify,'taskList:R08','exec'),{})
+        print(label,'ACCEPTED',out.getvalue().strip())
+    except Exception as e:
+        print(label,'REJECTED',type(e).__name__,str(e))
+q=copy.deepcopy(j)
+for r in q['results']:
+    if r['kind']=='power':r['verdict']='pass'
+check_json('D1 power_false_pass_flag',q)
+q=copy.deepcopy(j)
+for r in q['results']:
+    if r['kind']=='null':
+        r['verdict']='not_run_T0';r['diagnostics']['n_invalid_null_model']=1000;r['tiers']={'T0':1000}
+check_json('D2 all_T0_invalid',q)
+# Equivalent complete tail+grep data path; do not strip tail as old probe D did.
+import subprocess
+pipeline=tasks['R-10']['verify'].split(' && ')[1].replace('docs/adr/review-G3-P1.md','')
+for text in ['二审终裁：pass\n三审终裁：fail\n','二审终裁：fail\n三审终裁：pass\n']:
+    rr=subprocess.run(pipeline,shell=True,executable='/bin/zsh',input=text,text=True)
+    print('D3 full_tail_grep',repr(text),'exit',rr.returncode)
+# S08: valid AST before invalid AST; repeated AST overwrites snap_aids entry.
+for label,asts in [('later_invalid',[{'field':'close'},{'op':'Div','args':[{'field':'close'},{'field':'open'}]}]),('repeated_ast',[{'field':'close'},{'field':'close'}])]:
+    cc=copy.deepcopy(cfg);cc['candidates']['asts']=asts;led=MemoryLedger()
+    try:A.build_inputs_from_synthetic(cc,ledger=led)
+    except Exception as e:print('E S08',label,type(e).__name__,str(e))
+    print('E S08',label,[(r['objective'],r['status']) for r in led.rows.values()])
+# S12: valid baseline, candidate-only censoring, common mask must exclude.
+inp=A.PanelInputs(ep.select('episode_id','cluster_id','t_dec'),np.array([1.,2.]),np.array([True,False]),np.ones(2),{'f':np.ones(2)},cand_R=np.array([np.nan,2.]))
+probe('E S12 candidate_only_censored',inp.validate)
+# S14: valid mixed sources across entries vs TPs (not partial within one list).
+from quant_lab.market.contract import build_request,resolve_policy
+row=S.fake_episodes(1,span_days=2,seed=3,censor_frac=0).row(0,named=True)
+row['order_plan']['entries'][0]['fraction']=Decimal(1)
+for tp in row['order_plan']['tps']:tp['fraction']=None
+req=build_request(row,policy_version='base-v1',policy_hash=resolve_policy('base-v1').content_hash,risk_budget=Decimal(100),market_manifest='mm')
+fake=S.fake_execution(pl.DataFrame([row],schema_overrides={'order_plan':S.ORDER_PLAN_DTYPE}))
+print('E S14 mixed_sources real/fake',req.fraction_source,fake['fraction_source'].to_list())
+# S17 extra: duplicate bad mechanism before a good same-name row must not be dropped by dict comprehension.
+q=copy.deepcopy(j);bad=copy.deepcopy(q['results'][0]);bad['n_positive']=900;bad['verdict']='fail';q['results'].insert(0,bad)
+check_json('E S17 duplicate_failed_mechanism',q)
+
+PY
+```
+```text
+A S15 both_null market_manifest EvalProtocolError baseline 臂 market_manifest 含 null（2 行）
+A S15 both_null execution_contract_version EvalProtocolError baseline 臂 execution_contract_version 含 null（2 行）
+A S15 both_null seed EvalProtocolError baseline 臂 seed 含 null（2 行）
+A S15 both_null risk_budget EvalProtocolError baseline 臂 risk_budget 含 null（2 行）
+A S15 missing_policy_hash EvalProtocolError baseline 臂缺必需列 policy_hash
+A S16 all_censored insufficient 2 1.0
+A S12 null_m_true ValueError PairedPanel: 候选 d 在 1 个共同可评行（m=True）上为 null/NaN/Inf，拒收（不得静默补 0）
+A S14 missing_eligibility EvalProtocolError 决策视图缺 eligibility_by_estimand（struct 固定六键），不得默认全部合格
+B S06 folds ['wf000', 'wf001'] tested ['first'] tail_loss_recorded True
+B S08 snapshot_error RuntimeError backend boom
+B S08 rows_at_execution [1] terminal_states ['completed', 'failed']
+B S14 fraction_source fake/real True True schema_order_equal True
+B S14 window_enums ['none', 'rows', 'wallclock']
+B S10 injected_power pass invalid 1 failed 1 worst_ci (0.9455406146079194, 0.9997468539670226)
+D1 power_false_pass_flag REJECTED ValueError 功效不足却伪造 pass
+D2 all_T0_invalid REJECTED ValueError 搜索计数不一致
+D3 full_tail_grep '二审终裁：pass\n三审终裁：fail\n' exit 1
+D3 full_tail_grep '二审终裁：fail\n三审终裁：pass\n' exit 0
+E S08 later_invalid ASTRejected UNKNOWN_OP at $: Div
+E S08 later_invalid [('execution_batch', 'completed'), ('feature_snapshot', 'failed'), ('feature_snapshot', 'rejected')]
+E S08 repeated_ast [('execution_batch', 'completed'), ('feature_snapshot', 'completed'), ('feature_snapshot', 'completed')]
+E S12 candidate_only_censored None
+E S14 mixed_sources real/fake policy ['policy']
+E S17 duplicate_failed_mechanism REJECTED ValueError 重复主机制
+
+exit=0
+```
+
+解释：E `candidate_only_censored=None` 是 validate 正常返回，不是收益为零；正反单臂排除由专项测试核定。重复 AST 的两条 snapshot reservation 都有终态，第二次计算保留父关系。B 旧的“一次 guard 失败/100 次”内存替身现在给 power pass，是本轮 >5% 规则下的预期变化；这是控制流注入、不是新的功效数值证据，不能沿用旧规则将其判回退。
+
+#### F：原文拒收 + 捕获拒收后继续逐条运行
+
+```text
+Traceback (most recent call last):
+  File "<stdin>", line 13, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/features.py", line 157, in feature_snapshot
+    if not ctx.check_identity(anchors):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/features.py", line 58, in check_identity
+    raise SnapshotInvalid(f"anchors {name} 身份错配")
+quant_lab.research.features.SnapshotInvalid: anchors graph_version 身份错配
+exit=1
+```
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+from unittest.mock import patch
+from dataclasses import replace
+import datetime as dt
+import polars as pl
+import numpy as np
+from quant_lab.research import features as F, nullmodel as N, api as A
+from quant_lab.research.ledger import Ledger,MemoryLedger
+from quant_lab.research.contract_tests import T0,make_bars
+ast={"op":"Ref","args":[{"field":"close"}],"params":{"lag":0}}
+a=pl.DataFrame({"episode_id":["e"],"instrument_id":["X"],"t_dec":[T0],"graph_version":["actual-revoked"],"derivation_hash":["actual-d"]})
+ctx=F.SnapshotContext(market_manifest="m",graph_version="different-live",derivation_hash="different-d",consumable=lambda:True)
+with patch.object(F,"_cache_read",return_value=None),patch.object(F,"_cache_write"):
+    try:
+        r=F.feature_snapshot([ast],a,bars=make_bars([1.,2.,3.]),ctx=ctx,cache=True)
+    except Exception as e:
+        print("F identity_mismatch",type(e).__name__,str(e))
+# Recover logic real, event I/O in memory; caller PID is demonstrably alive throughout.
+led=object.__new__(Ledger)
+led.read=lambda:pl.DataFrame([{"attempt_id":"live-other","run_id":"other-active-run","status":"running","created_at":(dt.datetime.now(dt.UTC)-dt.timedelta(hours=2)).isoformat()}])
+marks=[]
+led.mark=lambda *args,**kw:marks.append((args,kw))
+print("F S07 active_old_run_recover",led.recover(),marks)
+w=N.synth_world(N.WorldConfig(seed=1,n_clusters=900,n_candidates=2))
+bad=replace(w.inputs,anchors=w.inputs.anchors.with_columns(pl.Series("cluster_id",["unique"+str(i) for i in range(w.inputs.n)]),pl.lit("ONE-INSTRUMENT").alias("instrument_id")))
+g=N.assert_not_episode_shuffle(w.inputs,bad,w.day)
+print("F S10 clusters",w.inputs.anchors["cluster_id"].n_unique(),bad.anchors["cluster_id"].n_unique(),"instruments",bad.anchors["instrument_id"].n_unique(),"guard",g["ok"],"checks",g["checks"])
+seen=[]
+orig=A.deff_from_panel
+def observed(panel,**kw):
+    seen.append(panel.candidate_ids)
+    return orig(panel,**kw)
+with patch.object(A,"deff_from_panel",side_effect=observed):
+    report=A.run_pipeline(w.inputs,N.default_candidates(2),A.PipelineConfig(B=100,block_len_days=3,config_cap=2),ledger=MemoryLedger())
+print("F S06 deff_inputs",seen,"admitted",report["candidate_pool"]["n_admitted"],"selection_status",[f["selection"]["status"] for f in report["folds"]])
+PY
+```
+```text
+F identity_mismatch SnapshotInvalid anchors graph_version 身份错配
+F S07 active_old_run_recover 0 []
+F S10 clusters 900 2204 instruments 1 guard False checks {'cluster_layout': False, 'missing_layout': True, 'block_ac1': False, 'cross_instrument': False, 'finite_diagnostics': False, 'icc': True, 'scale': True, 'tail': True, 'missing': True}
+F S06 deff_inputs [('base',), ('base',), ('base',), ('base',), ('base',), ('base',), ('f00:gt_q30',), ('f00:gt_q30',), ('f00:gt_q70',), ('f00:gt_q70',), ('f00:gt_q30',), ('f00:gt_q30',), ('f00:gt_q70',), ('f00:gt_q70',), ('f00:gt_q30',), ('f00:gt_q30',), ('f00:gt_q70',), ('f00:gt_q70',)] admitted 2 selection_status ['ok', 'ok', 'ok']
+
+exit=0
+```
+
+F 的 identity_mismatch、old_active_run、cluster-layout、deff_inputs 均有新输出。无 shock_grid 的旧 F 兼容路径仍显示 block_ac1 检查；本轮 MC 实际生成器的冲击格点路径不以块间自相关设门，不能混为同一判据。
+
+#### G：D1/E/G 伪造报告及独立算术
+
+D1/E 已在分段探针运行，G 原文如下；均通过调用 taskList 中的实际 R-08 Python 判读体，不是手写替代 verify。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import copy,io,json,shlex,contextlib,re
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research.nullmodel import clopper_pearson as cp
+s=Path("docs/adr/report-G3-null-model.md").read_text();start=s.rindex("```json")+7;end=s.rindex("```");j=json.loads(s[start:end])
+tasks={x["id"]:x for x in json.loads(Path("taskList.json").read_text())["modules"]["research"]["tasks"]}
+v=shlex.split(tasks["R-08"]["verify"].split(" && ")[-1])[-1]
+q=copy.deepcopy(j)
+for r in q["results"]:
+    if r["kind"]=="null":r["diagnostics"]["shuffle_guard"]["ok"]=False
+fake=s[:start]+json.dumps(q)+s[end:]
+try:
+    with patch("builtins.open",lambda *a,**k:io.StringIO(fake)),contextlib.redirect_stdout(io.StringIO()):exec(compile(v,"R08","exec"),{})
+    print("G D diagnostic_false_only ACCEPTED")
+except Exception as e:print("G D diagnostic_false_only REJECTED",type(e).__name__)
+for r in j["results"]:
+    n,x,f=r["n_done"],r["n_positive"],r["n_failed"]
+    worst=x+f if r["kind"]=="null" else x
+    for key,actual in [("ci",cp(x,n-f)),("worst_case_ci",cp(worst,n)),("searched_worst_ci",cp(worst,r["n_searched"]))]:
+        assert all(abs(a-b)<1e-12 for a,b in zip(actual,r[key])),(r["kind"],key)
+    assert abs(r["rate"]-x/(n-f))<1e-12
+    assert abs(r["worst_case_rate"]-worst/n)<1e-12
+    assert sum(r["tiers"].values())==n
+    if r["kind"] in ("null","power"):
+        print("G report",r["mechanism"],r["kind"],"n/x/failed",n,x,f,"searched",r["n_searched"],"searched_ci",[round(z,6) for z in r["searched_worst_ci"]],"verdict",r["verdict"])
+print("G arithmetic",len(j["results"]),"rows checked")
+PY
+```
+```text
+G D diagnostic_false_only REJECTED ValueError
+G report common_shock null n/x/failed 1000 2 1 searched 842 searched_ci [0.000735, 0.010377] verdict pass
+G report cluster_heavy_tail null n/x/failed 1000 6 3 searched 974 searched_ci [0.004234, 0.017468] verdict pass
+G report nonuniform_density null n/x/failed 1000 8 11 searched 725 searched_ci [0.01585, 0.040624] verdict pass
+G report circular_shift null n/x/failed 1000 4 0 searched 993 searched_ci [0.001099, 0.010281] verdict pass
+G report common_shock power n/x/failed 1000 327 34 searched 768 searched_ci [0.390503, 0.461632] verdict fail
+G arithmetic 13 rows checked
+
+exit=0
+```
+
+### 新增取证与独立注入
+
+#### R4-STRUCT：S10/A27 结构门仍会触发
+
+核对实现：跨品种相关使用生成器实际操作的 shock_grid 与拟合训练格点；逐复制以 Fisher-z 差及块数 SE 的 4 倍带宽判断；块间自相关只记诊断；ICC 以洗牌基线为锚（另保留绝对地板）；整轮由总体检查失败或 guard_fail_rate>0.05 判 invalid。不是把原 episode 噪声统计量换一个宽阈值继续门控。
+
+独立种子与现有 A27 不同。破坏同时改 shock_grid **和实际 base_R**：逐品种独立重排完整 3 日冲击块，把新旧格点差加回对应 episode，保留特异残差与缺失布局。没有只改诊断旗标。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import numpy as np
+from dataclasses import replace
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+from quant_lab.research.api import PipelineConfig
+w=N.synth_world(N.WorldConfig(seed=2,n_clusters=1600));m=N.fit_residual_model(w,block_len_days=3,train_end_day=180);fitted=m.grid[:180]
+def broken(world,x,rng):
+ old=x.shock_grid;grid=old.copy();nb=len(grid)//3
+ for j in range(grid.shape[1]):grid[:nb*3,j]=grid[:nb*3,j].reshape(nb,3)[rng.permutation(nb)].reshape(-1)
+ # Change actual returns as well as diagnostic grid, retaining idiosyncratic residual and missing layout.
+ r=x.base_R+grid[world.day,world.inst]-old[world.day,world.inst]
+ return replace(x,shock_grid=grid,base_R=r)
+normal=bad=0
+for i in range(20):
+ rng=np.random.default_rng(192110+i);x=N.resample_null(w,m,rng)
+ g=N.assert_not_episode_shuffle(w.inputs,x,w.day,block_len_days=3,fitted_grid=fitted);normal+=not g['ok']
+ y=broken(w,x,np.random.default_rng(292110+i));h=N.assert_not_episode_shuffle(w.inputs,y,w.day,block_len_days=3,fitted_grid=fitted)
+ bad+=not h['checks']['cross_instrument']
+print('R4 independent actual_returns_and_grid normal_fail',normal,'/20 broken_cross_caught',bad,'/20',flush=True)
+original=N.resample_null
+for kind in ['null','power']:
+ for damage in [False,True]:
+  def generate(world,model,rng,**kw):
+   x=original(world,model,rng,**kw)
+   return broken(world,x,rng) if damage else x
+  with patch.object(N,'resample_null',generate):r=N.run_mc('common_shock',kind=kind,n_rep=8,seed0=2,world_cfg=N.WorldConfig(n_clusters=1600),pipe_cfg=PipelineConfig(B=100))
+  print('R4 independent MC',kind,'damage',damage,'verdict',r.verdict,'reason',r.diagnostics['invalid_reason'],'invalid',r.diagnostics['n_invalid_null_model'],'grid',r.diagnostics['grid_dependence'],flush=True)
+PY
+```
+```text
+R4 independent actual_returns_and_grid normal_fail 0 /20 broken_cross_caught 8 /20
+R4 independent MC null damage False verdict insufficient reason None invalid 0 grid {'fitted_ac1': -0.34331975388460007, 'null_mean_ac1': 0.0007829382515213024, 'fitted_cross': [0.4634950088944095, 0.39532745335499664, 0.5163415706931419], 'null_mean_cross': [0.4217087467435885, 0.35433834572116457, 0.5306870654567748], 'ok': True}
+R4 independent MC null damage True verdict invalid_null_model reason GRID_DEPENDENCE_NOT_PRESERVED invalid 2 grid {'fitted_ac1': -0.34331975388460007, 'null_mean_ac1': -0.03617183796898137, 'fitted_cross': [0.4634950088944095, 0.39532745335499664, 0.5163415706931419], 'null_mean_cross': [0.052500310092695956, -0.013516525284505206, -0.005475121031724707], 'ok': False}
+R4 independent MC power damage False verdict fail reason None invalid 0 grid {'fitted_ac1': -0.34331975388460007, 'null_mean_ac1': 0.0007829382515213024, 'fitted_cross': [0.4634950088944095, 0.39532745335499664, 0.5163415706931419], 'null_mean_cross': [0.4217087467435885, 0.35433834572116457, 0.5306870654567748], 'ok': True}
+R4 independent MC power damage True verdict invalid_null_model reason GRID_DEPENDENCE_NOT_PRESERVED invalid 2 grid {'fitted_ac1': -0.34331975388460007, 'null_mean_ac1': -0.03617183796898137, 'fitted_cross': [0.4634950088944095, 0.39532745335499664, 0.5163415706931419], 'null_mean_cross': [0.052500310092695956, -0.013516525284505206, -0.005475121031724707], 'ok': False}
+
+exit=0
+```
+
+正常单次 0/20，破坏单次 cross 检出 8/20；这不是“单次必检”的证明。更关键的是同一实际收益破坏在 null、power 整轮都输出 GRID_DEPENDENCE_NOT_PRESERVED / invalid_null_model，正常两条路径都未判结构无效。8 次小 MC 的 insufficient/fail 只说明小样本统计出口，不作 FPR/功效准入证据。按 A27 要求，校准后既有误拒对照又有真实破坏检出，S10 本体闭合。
+
+#### B11、44 列、B19/B20、A13/A15 与曲线措辞
+
+B11 现有测试实跑：caller 的 horizon_end 纳入 config_id，同值 duplicate，换窗独立 reserved；policy 推导窗不额外进入此键，由 policy_hash 标识。api 的候选、最终与执行 reservation 有 caller_horizon_end 传递。B20 的 SufficiencyFloor 成对声明 block_len/下限，并检查 block_len≥horizon+embargo、cross 与 max_span；max_t_panel 使用该 floor 的断言通过。B19 源码核读未见 G3 自算强平；哨兵通过，目前只镜像 liquidation_unmodeled，未以它替代 G2 经济记账。
+
+A13 六键词汇保持，只对请求 estimand 的 null 拒收，其余 null 记 warning/diagnostics；A15 覆盖失败与右删失互斥排除并各记数。两条具名断言随专项与全套通过。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import inspect
+from quant_lab.research import synthetic as S
+from quant_lab.market.execution import BATCH_SCHEMA
+from quant_lab.research.ops import FIELD_UNITS
+x=S.fake_execution(S.fake_episodes(20,span_days=2,seed=19))
+print('schema_columns',len(S.BATCH_SCHEMA),len(BATCH_SCHEMA),'order_dtype_equal',list(S.BATCH_SCHEMA.items())==list(BATCH_SCHEMA.items()))
+for k in ['outcome_kind','exit_legs','horizon_source']:
+ print(k,'produced',k in x.columns,'parameter',k in inspect.signature(S.fake_execution).parameters,'allowed_feature',k in FIELD_UNITS,'values',x[k].unique().to_list())
+PY
+```
+```text
+schema_columns 44 44 order_dtype_equal True
+outcome_kind produced True parameter False allowed_feature False values ['filled_closed', 'unevaluable', 'unfilled_expired']
+exit_legs produced True parameter False allowed_feature False values [[], ['sl'], ['tp']]
+horizon_source produced True parameter False allowed_feature False values ['policy']
+
+exit=0
+```
+
+parity 的 CONTRACT_PENDING_G2 为空；schema 镜像是 44 列逐列逐序一致（包含 outcome_kind、exit_legs、horizon_source）。上述三列由 fake_execution 产出，非它的同名参数、非 FIELD_UNITS 合法输入。fraction_source/entry_fractions/tp_fractions 另有 G2 实际 build_request→simulate_batch 对拍，不把随机 fake 收益与真实撮合数值要求相等。
+
+B12 曲线报告把 67 条真实括号、单月 BTC 波动和随机游走假设分开，4000 机会是合成布局，未把它称作真实功效，G-STAT-CLAIM 仍 pending。记录两处非阻塞措辞修订建议：将“真实尾部只会更厚/真实删失率会略高”改成待验证的方向假设；将“统计效率赔掉约 11%”改成“该合成设定 K_min 从 662 到 587”，K 变化不等于功效或有效日历块数变化。报告的 3d 占位表述属于历史提案，现行 5d 以 §5.18 定稿为准，不能据旧提案自由回落。临时脚本路径含省略号，故本轮仅核读该提案，未声称重跑曲线。
+
+### 剩余必修
+
+#### S08：实际代码血缘未覆盖后端实现（R4-L）
+
+位置：src/quant_lab/research/ledger.py:186 与 api.py 的 reservation。生命周期、重复 AST occurrence、异常终态、recompute_of、成本及 protocol/opportunity/policy/result 摘要已补齐；但 code_version 只对 research 顶层 glob("*.py") 求 hash，遗漏 backends/ 全部代码。api 未传实际 backend_version，默认 None。三审要求的“实际 code 血缘”尚未完成。
+
+本轮不改磁盘源码，内存替换 Path.read_bytes 对 polars 后端返回的字节；递归 research digest 变化而账本身份完全相同。该遗漏同样会隐藏后端运算实现的实际改动，不只下面用来定位的字节标记。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import datetime as dt
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research.ledger import MemoryLedger
+from quant_lab.research.nullmodel import research_code_digest
+kw=dict(origin='human',canonical_hash='h',params={},fold_id='f',visible_cutoff=dt.datetime(2024,1,1,tzinfo=dt.UTC),objective='feature_snapshot',data_manifest='m',seed=1)
+def row():
+ l=MemoryLedger();a=l.reserve(**kw);return l.rows[a]
+a=row();d=research_code_digest();original=Path.read_bytes
+def changed(p):
+ b=original(p)
+ if p.as_posix().endswith('/research/backends/polars.py'):
+  return b+b'\n# independent changed backend bytes\n'
+ return b
+with patch.object(Path,'read_bytes',changed):
+ b=row();e=research_code_digest()
+print('R4 S08 backend_bytes_changed',d!=e,'ledger_code_version_equal',a['code_version']==b['code_version'],'backend_version',a['backend_version'],b['backend_version'])
+print('ledger_code_version',a['code_version'])
+PY
+```
+```text
+R4 S08 backend_bytes_changed True ledger_code_version_equal True backend_version None None
+ledger_code_version 826fcd56c78cf1af21e99c05cc72067ee1fb396f429541f4d0c5ad0a5d87d562
+
+exit=0
+```
+
+改法：使用包含相对路径与全部递归 research 源码的统一、冻结代码摘要（可复用 research_code_digest 的文件覆盖口径），写入实际后端名/版本及必要语义版本，绑定运行 scope/结果身份；不能只断言 code_version 非空。验收：仅改后端运算实现时，新 reservation 与旧记录的 code identity 必须不同，旧结果不得当作当前实现 duplicate 复用；MemoryLedger/磁盘两条路径都测；所有生命周期与并发回归保持通过。
+
+#### S17：新结构诊断仍可假绿，A31 rebuild 可给旧结果换新身份（R4-V）
+
+位置：nullmodel.py:749 附近 verify_report_text、:790/910 write_report、:935 --rebuild。原 D1/E/G 与全 T0、短跑、计数/算术、不完整限制、非有限值等拒收都已补齐。剩余两个独立可复现工程缺口：
+
+1. verify_report_text 没有核对 grid_dependence.ok、dependence_aggregate.ok、invalid_reason、guard_fail_rate，也未要求新 grid 字段存在。只改其中一个字段，其余真实计数、区间、hash 与 §3.2 保持原样，R-08 实际判读仍接受。尤其总体 grid 检查失败不要求逐复制 invalid 计数必非零，不能靠旧 shuffle_guard/计数门代替新总体门。
+2. --rebuild 只读取旧 JSON 的 MCResult 后重新排版，write_report 却把 meta.research_code_sha256 无条件替换为当前源码摘要。下面把旧 hash 置零，完整调用现有 --rebuild 路径并将 I/O 捕获在内存：results 完全没变、未运行 MC，却得到当前 hash 且 verify 接受。A31 的“陈旧文本直接拒收”测试通过，不等于生成来源绑定闭合。此反例不指控当前报告实际由旧结果伪装，只证明现有公开重建路径允许绕过。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import copy,io,json,contextlib,shlex
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+s=Path('docs/adr/report-G3-null-model.md').read_text(); start=s.rindex('```json')+7;end=s.rindex('```');j=json.loads(s[start:end])
+body=shlex.split(next(t for t in json.loads(Path('taskList.json').read_text())['modules']['research']['tasks'] if t['id']=='R-08')['verify'].split(' && ')[-1])[-1]
+for damage in ['grid_false','aggregate_false','invalid_reason','guard_rate','missing_grid','stale_hash']:
+ q=copy.deepcopy(j);d=q['results'][0]['diagnostics']
+ if damage=='grid_false':d['grid_dependence']['ok']=False
+ if damage=='aggregate_false':d['dependence_aggregate']['ok']=False
+ if damage=='invalid_reason':d['invalid_reason']='GRID_DEPENDENCE_NOT_PRESERVED'
+ if damage=='guard_rate':d['guard_fail_rate']=1.0
+ if damage=='missing_grid':del d['grid_dependence']
+ if damage=='stale_hash':q['meta']['research_code_sha256']='0'*64
+ fake=s[:start]+json.dumps(q)+s[end:]
+ try:
+  with patch('builtins.open',return_value=io.StringIO(fake)),contextlib.redirect_stdout(io.StringIO()):exec(compile(body,'R08-original','exec'),{})
+  print('R4 report',damage,'ACCEPTED')
+ except Exception as e:print('R4 report',damage,'REJECTED',type(e).__name__,str(e))
+# Exercise the exact --rebuild path with only read/write endpoints captured in memory.
+old=copy.deepcopy(j);old['meta']['research_code_sha256']='0'*64
+stale=s[:start]+json.dumps(old)+s[end:]; captured=[]
+with patch.object(Path,'read_text',return_value=stale),patch.object(Path,'mkdir'),patch.object(Path,'write_text',lambda self,text,**kw:captured.append(text)),contextlib.redirect_stdout(io.StringIO()):
+ N._main(['--rebuild','/tmp/not-created-old-report.md','--out','/tmp/not-created-rebuilt.md'])
+new=json.loads(captured[0][captured[0].rindex('```json')+7:captured[0].rindex('```')])
+with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(captured[0])
+print('R4 A31 rebuild old_digest',old['meta']['research_code_sha256'],'new_digest',new['meta']['research_code_sha256'],'results_unchanged',new['results']==old['results'],'verify ACCEPTED','writes_captured',len(captured))
+PY
+```
+```text
+R4 report grid_false ACCEPTED
+R4 report aggregate_false ACCEPTED
+R4 report invalid_reason ACCEPTED
+R4 report guard_rate ACCEPTED
+R4 report missing_grid ACCEPTED
+R4 report stale_hash REJECTED ValueError 制品陈旧（A31）：报告由代码 000000000000 生成，当前研究代码为 0ab9ba6a1649——门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定
+R4 A31 rebuild old_digest 0000000000000000000000000000000000000000000000000000000000000000 new_digest 0ab9ba6a164992f314d04438a00f82615f46fde8132dd179b98677c6bc196707 results_unchanged True verify ACCEPTED writes_captured 1
+
+exit=0
+```
+
+改法与验收：
+
+- 将本轮总体格点门及失败率规则纳入结构化 report schema；要求字段齐全、类型正确且依据原始诊断重算判断，与 invalid_reason/verdict/各失败计数一致。新增本轮五种变体，每种均须由 taskList R-08 实际 verify 拒收；正常当前报告仍可接受。同步明确 ≤5% 时 run_mc 与 verifier 的口径（现 verifier 的零失败要求更严，不应把两个不同判定宣传为同一门）。
+- MC 开始时冻结 generating_code_sha256，结束时确认源码仍一致；重排版沿用原生成 digest，可另记 renderer digest，禁止把旧 MC 身份更新成新生成身份。旧 hash 或缺生成 hash 的 --rebuild 产物必须仍被 verify 拒收，只有在当前代码真正重跑 MC 才能更新生成身份。回归须走实际 --rebuild 路径，不能只改文本 hash。
+- §3.2 当前已有有效“未检出不能解释为无增益”“合成不是真实功效”等限制。功效 fail 历史记录继续保留，无需为本轮修复把功效提高到 80%；R-10 继续只读文件最后一行。
+
+### 四审终裁
+
+**fail。** 原 8 项工程中 S03、S06、S07、S10、S12、S14 已闭合；S08、S17 部分闭合。新增 (0) 的结构门独立注入条件成立；(0b) 的 A31 陈旧文本拒收成立，但 rebuild 生成来源绑定仍有绕路。11 项原已闭合项目抽验保持，没有回退。
+
+R-05–R-09 原文 verify 均 exit=0，研究全套 328 passed；这些实跑结果与上述反例同时成立。R-08 正向结构化判读虽修复旧 D1/E/G，仍遗漏三审后重做的新结构门，因此不能出 pass。
+
+现有闭合后重跑报告的 13 行计数、三分母比率和 CP 区间已独立复算。四个 null 主机制各 n=1000，阳性/失败/有搜索分别为 2/1/842、6/3/974、8/11/725、4/0/993；有搜索、失败计阳性的区间上界依次约 1.0377%、1.7468%、4.0624%、1.0281%。仅描述当前合成结果。
+
+功效主记录 n=1000，检出 327，失败 34，T0=232，有搜索 768；全计划失败计未检出为 32.7000%（95% CP 29.7970%–35.7053%），非失败分母为 327/966=33.8509%，有搜索分母为 327/768=42.5781%（95% CP 39.0503%–46.1632%）。原 verdict=fail 保留；按用户出口 A 不作准入否决。不是实际交易/真实频道功效证明。
+
+后端报告仍保留 polars 18/18、polars_ta 16/17 加 EMA unsupported 与 Corr 18 条失败；206.77s/36.11s 是历史报告冷跑描述、工作量并不等同，RSS 为进程峰值。本轮运行指定 verify/pytest 与列出的独立小规模注入，未另起全规模 5000 次主 MC 或 416 万行后端计时，也未改写任何报告/契约/源码/测试/taskList。
+
+收尾版本复核：2026-09-11T06:59:35.811226+00:00；35 个开审文件与收尾相同，无新增/删除/内容变更；taskList notes 不作源码并发事件。收尾报告/契约摘要：
+
+```text
+f70c06ae5c46ecc57372ad7c0d7413ce24fbf504aeaea5bffc46906550cecce5  contracts/feature-snapshot.md
+50ae0a3af130a5047612eb183efc13fd597bd949cbebc6a8de59f8f6cbe85644  contracts/research-schema.md
+81ade79b819a6946579ddca80afa06baf09171e40ca7a4614e52132bbc88c7e8  contracts/execution-interface.md
+dfae7f3708185c00e4b25b0705828858b03080a29bd7422e517df9dbca3ed151  docs/adr/report-G3-null-model.md
+d9fc1690653016db72cd78c4756efc5b36b34ae04dcf6815aa02c27858cd7afd  docs/adr/report-G3-backend-spike.md
+3c1845297e4055dab49383c6f3c47e89e90600a2550b00477941bea95e3ef8a8  docs/adr/report-G3-research-horizon-curve.md
+```
+
+落盘以 append 二进制模式写入，并机械验证一至三审 126433 bytes 前缀 SHA256 未变。收尾验证命令：`tail -1 docs/adr/review-G3-P1.md | grep -E '^四审终裁：(pass|fail)$'`；`grep -c '已闭合' docs/adr/review-G3-P1.md`。后者是整份历史文件出现行数，不能充当本轮 17 项闭合计数；本轮以逐条闭合表为准。
+
+四审终裁：fail

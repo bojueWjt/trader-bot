@@ -1,3 +1,6690 @@
+## 十三审判定表
+
+本轮为第十二轮独立 P1 review（十三审），审查方 Codex。终裁 **fail**。
+阻断项：**S44 快照护栏漏检新增文件；S45 分区消费方负向微秒边界未被三道机制检出**。
+S42/S43 本轮指定原反例 closed；这不外推成所有消费方的离网边界均已覆盖。
+本会话只写本报告；不修产品，不修测试。真实写盘突变全部发生在系统临时目录的独立副本。
+
+### 测量时刻、批前基线与写入边界
+
+首次快照：2026-09-11 15:03:47 +08:00，最年轻关键文件静默94.36秒，当时不判状态。
+快照在验证和突变驱动程序启动前独立采集，记录157个文件的 SHA256 与 mtime_ns，并另存 git status 与实际 diff。
+初步验证于15:04:57开始，关键范围最小静默163.86秒；不以这一轮的中途结果作终裁。
+正式全量验证于15:07:05开始，最小静默292.29秒；源码、market测试、契约、护栏与批前快照相等。
+主突变批在此前已复核关键范围快照相等后开始；补充批于15:09:43、15:13:57开始，最小静默分别449.54、703.82秒。
+用户给出的15:59:45基线晚于本机取证时刻；本轮只采信自己记录的运行结果，不把该时刻当本次测量依据。
+工作树合法地不同于HEAD；没有checkout、reset、清理或覆盖修复方的改动。
+批前HEAD差异中，market范围为contract.py/execution.py/kernel_a.py/single_source.py及test_single_source.py已修改；两个验证脚本及两份S42/S43证据文件未跟踪；tree_guard.py亦未跟踪。
+实际内容差异与SHA均保存在审查方批前快照；报告下方列关键文件摘要。未将未提交状态伪称为HEAD干净。
+验证期间其他会话修改research/{paths,ledger,api,nullmodel}.py及review-G3-P1.md。
+第一次整src批后检查实际报错，列出上述四个research文件；该次“整树保持原样”认证不成立，未吞掉报错。
+冻结副本仍保持批前字节。本轮不判其他窗口写入中的模块状态，不把其改动归因给本轮。
+15:11:29 +08:00再读当前全src门：CALL_DIFF=[]、COUNT_EQUAL=True、VIOLATIONS=[]。
+同次检查关键范围文件集合无新增/删除、SHA无变化，最小静默556.18秒；这使冻结副本门与当前全树门的边界可核对。
+批后本轮market源码与market测试85个文件的字节、文件集合和mtime均对照批前快照核验。
+没有连接交易所私有API；没有读services/nautilus-node配置；没有import services；没有调用codex恢复历史会话命令。
+
+### 命令、取证口径
+
+执行目录为quant-lab。所有被测Python子进程设置PYTHONDONTWRITEBYTECODE=1；pytest均加-p no:cacheprovider。
+T：`.venv-g2/bin/python -m pytest tests/market -q -p no:cacheprovider`。
+S：`.venv-g2/bin/python -m pytest tests/market/test_single_source.py -q -v -p no:cacheprovider`。
+A：`.venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A`。
+AB：`.venv-g2/bin/python -m quant_lab.market.nautilus_adapter report --reps 1`。
+这些命令在冻结副本内执行；复制真实湖之后T为344 passed，无skip；复制湖之前一次T为342 passed、2 skipped，不用后者冒充完整基线。
+M表示下方内嵌真实写盘执行器，参数为突变名。回执来自本会话独立驱动运行，非转抄修复方证据；内嵌入口用于下一轮复跑。
+每个突变的baseline/injected/restored都是独立新进程；收集前后核验七个market模块导入路径，收集后核验测试路径。
+主批91项、两批补充各3项，共97次三阶段实验：93次注入RED、4次注入GREEN；所有baseline/restored为exit0且内容SHA相等。
+四次GREEN为两个旧S37哨兵选择器对新身份语义突变无感，以及S45的S/T；前两次不作S37闭合证据，后两次是阻断证据。
+每批均有expected_rows+1同批活性对照，单独的vision差分确实1 failed；没有将收集错误、静态门失败或TypeError充当差分失败。
+M复跑入口会先运行该活性对照。SHA证明还原，退出码仅报告测试结果。
+
+M完整入口：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。
+S44最小只读复现：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_GUARD -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。
+S45最小只读复现：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S45-partition-negative-tolerance`。
+S45全套复现：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S45-partition-negative-fullT`。
+S43/分区原始输入只读复现：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_BEHAVIOR -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。
+资金费时间戳核验：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_FUNDING -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。
+
+| ID / 命题 | 状态 | 亲跑命令与真实输出摘要（M名称对应下方完整命令及三阶段回执） | 阻断P1 |
+|---|---|---|---|
+| S29 原分区离网覆盖与回归 | closed | P10N原样：mixed missing=0 / all-off-grid missing=3，均quarantined；M S29-first-gap/range-only/truncated-count分别1/2/1 failed后还原绿 | 否；S45另列 |
+| S31 B17冲突门 | closed | M S31-remove-output-gate/sanitized-copy/redacted-version各2 failed；三阶段基线/还原均2 passed | 否 |
+| S38 负latency分叉 | closed | 十审S38/P10C原样exit1，ContractError latency_s必须非负；M remove-domain/explicit-only各1 failed后1 passed | 否 |
+| S39 loader返回值实际生效 | closed | 旧命令因旧表达不存在在assert处exit1；不计证明。M discard-return/inline-count/wrong-helper-value各1 failed后1 passed | 否 |
+| S32 第二处latency加法 | closed | P10I与TREE只剩来源定义；M S32-build-start-bypass 2 failed；A28-start-builder单独1 failed | 否 |
+| S33 vision自写整除 | closed | M S33-wrong-expected 12 failed；A28-vision-count 1 failed；P10I不再命中vision.total_seconds | 否 |
+| S35 TTL三解析/三到期 | closed | M三ttl解析各失败，三expiry调用各2 failed；TREE登记解析3处、到期3处，数量相等 | 否 |
+| S37 中尾网格原独立比较 | closed | A28-kernel-first/middle/tail各1 failed；S37-first-registration-bypass 3 failed，tail-registration-bypass 2 failed；还原均绿 | 否；两条旧哨兵GREEN不算闭合证据 |
+| A24 调用集合双向 | closed | M real-caller-missing/extra各1 failed；分别停用missing/extra诊断也各1 failed；S37局部调用删除另有实跑 | 否 |
+| A24 每种禁令活性 | closed | P1–P7逐条不可达注入RED、逐条停用模式RED；P8 suppress 2 failed、真实树注入1 failed | 否；不声称语义完备 |
+| A24 例外与实际表达 | closed | TREE九个命中、VIOLATIONS=[]、集合及计数相等；foreign-freeze 1 failed；例外逐项说明见下 | 否 |
+| A28 每条差分可失败 | closed | 十条原差分逐条在所选消费方注入下失败；附录列具体节点，不把静态门失败记给差分 | 否；生成器域另列S45 |
+| A28 新增/修改测试活性 | closed | 14个节点逐一FAILED→PASSED，全部由生产文件突变触发；见逐节点表 | 否 |
+| S42 kernel/loader窗口内离网域 | closed | 原样replace(microsecond=0)：3 failed/45 passed；两消费方各自含−1/0/+1µs，loader截断5 failed | 否；分区不是这两消费方 |
+| S43 逐点身份覆盖 | closed | 原输入0/59999999/120000000µs：FIRST_GAP=01:01:00Z、BAR_GAP、bars_ok=False；loader complete=False；count-only突变5 failed | 否 |
+| 真实归档与funding抖动 | closed | ARCHIVE两路44640、31/31；funding93/15；F原始/装载时间戳集合相等、抖动1000/2000/3000µs、quarantine0 | 否；限BTCUSDT 2024-01 |
+| G3无消费方及欠条 | closed | TREE实际force_close_net_R调用集合set()、计数{}；S调用登记通过；docstring含理由/G3/接入时三件 | 否；消费方差分不适用 |
+| S34 funding网格 | partial-P2 | P10I仍有8h步进与60s容差；F真实93行保留，未套bar精确网格 | 否；有意未做 |
+| S36 持仓截止 | partial-P2 | P10I仍显示A及B持仓截止；T344 passed、AB分类不变 | 否；有意未做 |
+| S02/S04/S06/S07/S10/S11/S12/S13 | partial-P2 | T344 passed；AB输出四键P2_UNSUPPORTED与contract一致；不宣称这八项已全部实现 | 否；保留既有边界 |
+| S44 A34/A35快照护栏 | open | G：新增src/unregistered.py后树SHA改变，assert_matches仍exit0；还原SHA相等；selftest报绿未检测该模式 | 是 |
+| S45 分区负向微秒域漏检 | open | M：允许提前1µs后S仍48 passed、T仍344 passed；B同输入从missing1/quarantine2变成missing0/quarantine0 | 是 |
+
+### S44 必修：快照分支无法发现新增文件
+
+落点：scripts/tree_guard.py:TreeGuard.assert_matches。仅遍历snap["files"]，不重新枚举当前路径集合。
+因此批中新建源码、测试或其他残留不会被比较；它输出的是“旧文件都没变”，不是“树与批前相等”。
+本轮在系统临时git仓库先提交baseline，再由独立进程生成snapshot；随后新建src/unregistered.py。
+三阶段均以新进程调用assert_matches，真实树SHA从c897be…变为20f5dd…，护栏仍打印“1个文件逐一回到批前快照”。
+未改真实仓库源码，未修改任何既有源文件，恢复只删除本会话创建的临时新文件。
+selftest确实通过新建自身探针触发assert_clean，且删除探针后恢复；这证明HEAD模式有活性，不能证明snapshot模式有活性。
+A35允许的“修复已完成但未提交”恰好使用snapshot模式，故这不是不相关的边缘API。
+最小命令G与三个进程输出、树SHA完整附后。该缺陷为取证机制缺陷，不宣称当前生产树存在残留。
+修复验收方向：比较文件集合与内容，并对新增、删除、修改各自证明当前实际使用的护栏分支会失败。
+不能用仅assert_clean的活性结果替assert_matches背书，也不能靠每案重新采集基线掩盖残留。
+修复方实际执行A34/A35的可复核性：指定evidence-G2-mutation-round10.md没有snapshot/assert_matches/批前/批后回执；verify_s42_s43.py未调用TreeGuard。
+这仅说明所给证据不足以证明实际执行，不推断其在其他会话一定没有执行；本轮独立证据不替修复方补写自证声明。
+
+### S45 必修：分区消费方缺少窗口内−1µs对抗输入
+
+落点：tests/market/test_single_source.py:test_differential_partition_grid生成器，以及partition_check.check_bars的legal谓词。
+原生成器移动所有expected时间时只用+t的1µs；端点a−1µs/b样本不是窗口内网格点提前1µs。
+kernel与loader的新_interior_bar_variants覆盖了各自消费方，不能替分区入口证明负向离网边界。
+真实写盘突变只把 `first_grid_point(t, sec) == t` 改为 `(first_grid_point(t, sec) - t <= dt.timedelta(microseconds=1))`。
+该式保持同一helper和调用次数，只把消费方精确身份误改为1µs前向容差；不是别名、不可达代码或收集期替身。
+全部三道门48 passed；全T344 passed，均exit0；同批expected_rows+1活性对照1 failed。
+同一个真实DataFrame输入0/59999999/120000000µs、60秒间隔：基线expected3/missing1/quarantine2；突变expected3/missing0/quarantine0。
+突变后输出真实保留59.999999s离网行。当前未突变实现仍正确，本项是会放过真实退化的检验缺口。
+三阶段源SHA分别列出；还原后行为恢复missing1/quarantine2，源SHA等于基线。
+这证明A28的“各消费方自身边界覆盖”尚不成立，而不是要求差分捕获不可达或完全等价的实现。
+这是A28已经要求的输入域未被完整实现，不据此声称第三层设计已被否定。修复须在分区真实消费路径兑现约定边界及失败证据；不能用replace或特定减法禁令冒充语义覆盖。规格兑现后若仍被穿过，再按A28换层。
+本项与S42不合并抹掉历史：S42指定kernel/loader落点已闭合，S45是同族在partition消费方的独立漏检。
+
+### A24 / A28 清单与例外核对
+
+ALLOWED_CALLERS与实际树函数位置集合相等；ALLOWED_CALL_COUNTS也相等；不是只检查“新增未登记”。
+S35三处resolve_entry_ttl_s分别是before validator、after validator、build_request；三处entry_expiry_at是A timeline、A submit_entries、B _submit_entries。
+S37现为first_grid_point初始化游标、逐点身份匹配、grid_points_between核尾部。旧相邻差比较已不在当前函数中。
+中段直接对网格身份推进游标不是另一份网格舍入公式；原先只保留首点委派而独立计算中尾距离的结构已消失。
+登记能捕获删除首点/尾部调用；中段语义偏离由kernel差分捕获，具体三阶段失败节点见附录。
+P1例外derived_t_start：真实唯一latency加法；S32及start消费方突变均有失败证据。
+P3例外_us：以timedelta微秒整除得到精确整数微秒；P10G375组helper穷举通过，无整秒截断。
+P5例外derived_window_s：TTL加持仓/研究段形成窗口长度；与entry_expiry_at的绝对到期时刻是不同输出，两个来源各有差分。
+P5例外entry_expiry_at：绝对到期时刻唯一来源，A/B三处已委派；三处失真各有失败证据。
+P7例外resolve_entry_ttl_s：计划优先、None回退政策在此实现；TREE有同一home内两次命中，非两份消费方实现。
+P8例外force_close_net_R：mark减entry_avg_price估值唯一home；停用P8与在home外追加表达均会红。
+FOREIGN_HITS的research/api.py与research/maxt.py是外窗既有位置冻结，分别为合成输入到期及按天时间跨度；未冒称两处已经归一。
+TREE实际命中与两个冻结项相等；删除外窗命中清单观测的突变使foreign_hits_exact失败。外窗语义改造未做，原因是本轮审查范围与所有权。
+funding不在当前FORBIDDEN_HOMES里；现有8h循环及60s相邻容差也没有被P1–P8命中。没有“放行一个已命中的funding例外”这一事实可声称。
+其规则差异有note-G2-archive-timestamp-grid.md与本轮F实测支持：15个原始抖动时间戳逐个保留，不能归一为bar精确网格。
+清单缺少直接指向该note的funding注释属文档可追溯性边界，本轮没有观察到错误禁令或错误资金费隔离，不单独升级P1。
+十条原差分分别是partition、vision、kernel、lake、start、window、ttl、expiry timeline/orders/B。每条都有对应消费方失真导致的真正断言失败。
+时间生成器含−1/0/+1µs请求边界、首尾网格、半开端点；TTL/窗口含显式、省略、None、空数组与缺列；Decimal包含跨量级及第12位小数。
+但“含边界”不等于“每一消费方每类边界都含”：S45给出分区窗口内负向离网类的缺失证据。
+源码模块docstring明确三道互补、差分不取代禁令、不宣称第三层不可穿过、再被穿过须换层；这些声明如实，覆盖性仍以实测为准。
+force_close_net_R实际调用与计数都是空；理由为无消费方，债主G3，触发事件G3接入时。三件齐备，消费方差分不适用。
+未做G3消费方差分，原因是等式左侧不存在；没有用测试夹具冒充生产消费方。
+
+### 归档边界与P1 DoD
+
+真实归档核验范围只有BTCUSDT 2024-01，两个bar流和funding流；未做其他品种/月份的推广验证。
+该限制声明诚实，单品种单月恰覆盖M-03要求的BTCUSDT 2024-01 markPrice≥40000；它本身不阻断P1。
+本轮未重新联网下载归档；使用本地真实silver做逐行及31日窗口核验，未将本地检查冒称新网络冒烟。
+S34的8h假设与60秒容差、S36的持仓截止重复有意未做；尊重既有partial-P2裁定，不借本轮升级。
+P2_UNSUPPORTED实际四键为S02/S06/S07/S12，AB逐字输出相同边界；其余四项继续按历史partial-P2记录，不声称存在机读八键声明。
+GOAL-2 §7：A在22个episode上重放及不变量通过；AB报告已出具且UNEXPLAINED=0；T含当前市场与接口回归全部通过。
+P1最后一条“Codex P1 review必修闭合”不满足：S44/S45仍open。因此即使T/S/A/AB全绿，也不能判P1 pass。
+
+### 新增/修改测试逐节点证伪
+
+HEAD差异仅test_single_source.py：两个原差分函数修改、新增两个参数化函数共12节点。以下14节点均亲跑生产文件突变而失败，还原后通过。
+同一个参数化函数的另一个参数失败不能代替本节点失败；0µs控制点也单独注入“误拒合法网格”证明能失败。
+
+| 测试节点 | 生产突变 | 注入 / 还原 |
+|---|---|---|
+| `test_differential_kernel_grid` | M `S42-kernel-truncate-open` | FAILED / PASSED；SHA相等 |
+| `test_differential_lake_grid` | M `NEW-loader-truncate` | FAILED / PASSED；SHA相等 |
+| `test_differential_kernel_public_interior_bar[bars_last--1]` | M `NEW-kernel-accept-missing` | FAILED / PASSED；SHA相等 |
+| `test_differential_kernel_public_interior_bar[bars_last-0]` | M `NEW-kernel-reject-aligned` | FAILED / PASSED；SHA相等 |
+| `test_differential_kernel_public_interior_bar[bars_last-1]` | M `S42-kernel-truncate-open` | FAILED / PASSED；SHA相等 |
+| `test_differential_kernel_public_interior_bar[bars_mark--1]` | M `NEW-kernel-accept-missing` | FAILED / PASSED；SHA相等 |
+| `test_differential_kernel_public_interior_bar[bars_mark-0]` | M `NEW-kernel-reject-aligned` | FAILED / PASSED；SHA相等 |
+| `test_differential_kernel_public_interior_bar[bars_mark-1]` | M `S42-kernel-truncate-open` | FAILED / PASSED；SHA相等 |
+| `test_differential_lake_public_interior_bar[klines--1]` | M `NEW-loader-truncate` | FAILED / PASSED；SHA相等 |
+| `test_differential_lake_public_interior_bar[klines-0]` | M `NEW-loader-reject-aligned` | FAILED / PASSED；SHA相等 |
+| `test_differential_lake_public_interior_bar[klines-1]` | M `NEW-loader-truncate` | FAILED / PASSED；SHA相等 |
+| `test_differential_lake_public_interior_bar[markPriceKlines--1]` | M `NEW-loader-truncate` | FAILED / PASSED；SHA相等 |
+| `test_differential_lake_public_interior_bar[markPriceKlines-0]` | M `NEW-loader-reject-aligned` | FAILED / PASSED；SHA相等 |
+| `test_differential_lake_public_interior_bar[markPriceKlines-1]` | M `NEW-loader-truncate` | FAILED / PASSED；SHA相等 |
+
+### 主验证与原始只读输出
+
+#### T-full / exit 0
+
+```text
+........................................................................ [ 20%]
+........................................................................ [ 41%]
+........................................................................ [ 62%]
+........................................................................ [ 83%]
+........................................................                 [100%]
+344 passed in 20.46s
+```
+
+#### S / exit 0
+
+```text
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/copy
+configfile: pytest.ini
+collected 48 items
+
+tests/market/test_single_source.py ..................................... [ 77%]
+...........                                                              [100%]
+
+============================== 48 passed in 5.35s ==============================
+```
+
+#### A / exit 0
+
+```text
+E01    ok  replay=True 
+E02    ok  replay=True 
+E03    ok  replay=True 
+E04a   ok  replay=True 
+E04b   ok  replay=True 
+E04c   ok  replay=True 
+E05    ok  replay=True 
+E06    ok  replay=True 
+E07    ok  replay=True 
+E08    ok  replay=True 
+E09    ok  replay=True 
+E10    ok  replay=True 
+E11    ok  replay=True 
+E12    ok  replay=True 
+E14a   ok  replay=True 
+E14b   ok  replay=True 
+E14c   ok  replay=True 
+E15a   ok  replay=True 
+E15b   ok  replay=True 
+E16    ok  replay=True 
+E17    ok  replay=True 
+E18    ok  replay=True 
+kernel=A passed=22 failed=0
+```
+
+#### AB / exit 0
+
+```text
+{"codes": {"MATCH": 12, "B_COMMAND_LATENCY": 3, "GAP_PRICE": 1, "SAME_TS_PRIORITY": 4, "GTD_BOUNDARY": 1, "B_LIQUIDITY_MODEL": 1}, "median_ms": {"A": 8.385416003875434, "B": 36.262583002098836}, "unsupported": {"S02": {"status": "unsupported", "capability": "real_settlement_time_U03_and_engine_balance", "owner": "G0 settlement contract + G2 P2"}, "S06": {"status": "unsupported", "capability": "bronze_depth_replay_and_multi_source_versions", "owner": "G1 lake + G2 P2"}, "S07": {"status": "unsupported", "capability": "management_commands_E13_C01_and_reservation_lifecycle", "owner": "G0 C01 + G2 P2"}, "S12": {"status": "unsupported", "capability": "versioned_lake_snapshot_resolution", "owner": "G1 lake + G0 identity contract"}}}
+```
+
+#### behavior / exit 0
+
+```text
+OFFSETS [0, 59999999, 120000000] VALIDATED 3 FIRST_GAP 2024-01-01 01:01:00+00:00 SIMULATE BAR_GAP BARS_OK False
+MIDDLE_GRID False MIDDLE_ADJACENT True
+LOADER False False ['2024-01-01T01:00:00+00:00', '2024-01-01T01:00:59.999999+00:00', '2024-01-01T01:02:00+00:00']
+OFFSETS [0, 60000001, 120000000] VALIDATED 3 FIRST_GAP 2024-01-01 01:01:00+00:00 SIMULATE BAR_GAP BARS_OK False
+MIDDLE_GRID False MIDDLE_ADJACENT False
+LOADER False False ['2024-01-01T01:00:00+00:00', '2024-01-01T01:01:00.000001+00:00', '2024-01-01T01:02:00+00:00']
+```
+
+#### archive / exit 0
+
+```text
+S43 AFTER explicit FIRST_GAP=2024-01-01 01:01:00+00:00 censor_reason=BAR_GAP bars_ok=False
+S43 AFTER loader bars_complete=False bars_quality_ok=False bars_ok=False
+klines off-grid bar open_time=2024-01-01T01:00:59.999999+00:00 interval_s=60
+klines 期望 3 根，实际 2 根合法唯一网格 bar（原始 3 行）
+markPriceKlines off-grid bar open_time=2024-01-01T01:00:59.999999+00:00 interval_s=60
+markPriceKlines 期望 3 根，实际 2 根合法唯一网格 bar（原始 3 行）
+BTCUSDT 2024-01-01 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-02 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-03 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-04 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-05 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-06 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-07 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-08 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-09 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-10 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-11 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-12 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-13 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-14 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-15 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-16 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-17 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-18 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-19 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-20 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-21 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-22 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-23 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-24 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-25 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-26 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-27 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-28 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-29 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-30 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+BTCUSDT 2024-01-31 last=1440 mark=1440 bars_complete=True bars_quality_ok=True funding_complete=True
+ARCHIVE bars_last: rows=44640 off_grid=0 bars_complete=True (31/31 windows)
+ARCHIVE bars_mark: rows=44640 off_grid=0 bars_complete=True (31/31 windows)
+ARCHIVE fundingRate: rows=93 jitter_rows=15 retained=True funding_complete=True
+```
+
+#### funding / exit 0
+
+```text
+RAW_ROWS 93 RAW_UNIQUE 93 LOADED_UNIQUE 93 EXACT_TIMESTAMP_SET_EQUAL True
+JITTER_US [1000, 2000, 3000]
+CHECK_FUNDING_ROWS 93 QUARANTINES 0 EXACT_TIMES_RETAINED True
+```
+
+#### tree / exit 0
+
+```text
+CALL_DIFF []
+COUNT_EQUAL True
+HITS [('P3_duration_div', 237, 'market/contract.py:_us', '(t - EPOCH) // dt.timedelta(microseconds=1)'), ('P1_inline_latency', 263, 'market/contract.py:derived_t_start', 'dt.timedelta(seconds=policy.latency_s)'), ('P5_inline_entry_ttl', 272, 'market/contract.py:derived_window_s', 'entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)'), ('P7_inline_ttl_resolution', 277, 'market/contract.py:resolve_entry_ttl_s', 'ttl = plan.expiry.entry_ttl_s'), ('P7_inline_ttl_resolution', 280, 'market/contract.py:resolve_entry_ttl_s', 'return policy.entry_ttl_s'), ('P5_inline_entry_ttl', 285, 'market/contract.py:entry_expiry_at', 't_start + dt.timedelta(seconds=entry_ttl_s)'), ('P8_inline_force_close', 671, 'market/contract.py:force_close_net_R', 'mark - res.entry_avg_price'), ('P5_inline_entry_ttl', 616, 'research/api.py:build_inputs_from_synthetic', 'pl.col("t_dec") + pl.duration(seconds=pl.col("entry_ttl_s"))'), ('P3_duration_div', 157, 'research/maxt.py:calendar_blocks', '(max(v) - min(v)).total_seconds() / 86400')]
+VIOLATIONS []
+G3 set() {}
+```
+
+#### 当前树再次测量
+
+```json
+{"time": "2026-09-11T07:11:29.720056+00:00", "min_age": 556.1751577854156, "inventory_added": [], "inventory_removed": [], "sha_changed": [], "call_diff": [], "count_equal": true, "violations": []}
+```
+
+#### S44 三阶段与护栏自身活性
+
+```text
+before：工作树 == HEAD(63f42b8)，无残骸 ✓
+活性自检 ✓ 护栏在脏树上确实报警；探针还原后：工作树 == HEAD(63f42b8)，无残骸 ✓
+baseline exit 0 tree_sha256 c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(63f42b8)）
+files ['src/base.py']
+injected exit 0 tree_sha256 20f5ddebbc26da20f78e91bf84c46377fc9a662b5eb42e97e38ae5519d56918e
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(63f42b8)）
+files ['src/base.py', 'src/unregistered.py']
+restored exit 0 tree_sha256 c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(63f42b8)）
+files ['src/base.py']
+RESTORED_SHA_EQUAL True
+```
+
+#### S45 三阶段行为对照（预探针）
+
+该预探针结果经同批带路径断言的S/T突变重做，后者的完整回执在后。
+
+```text
+baseline SHA256 1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374
+S exit 0 ................................................                         [100%]
+=============================== warnings summary ===============================
+tests/market/test_single_source.py::test_differential_expiry_b
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+tests/market/test_single_source.py::test_differential_expiry_b
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+tests/market/test_single_source.py: 36 warnings
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+48 passed, 38 warnings in 6.32s
+
+BEHAVIOR exit 0 PRESENT [datetime.datetime(2024, 1, 1, 0, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC')), datetime.datetime(2024, 1, 1, 0, 2, tzinfo=zoneinfo.ZoneInfo(key='UTC'))] EXPECTED 3 MISSING 1 QUARANTINES 2
+
+injected SHA256 045ea1ba667b337c66a23ed5b90e0f84caa35ac2b28eaf7741b8c7b50eea851d
+S exit 0 ................................................                         [100%]
+=============================== warnings summary ===============================
+tests/market/test_single_source.py::test_differential_expiry_b
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+tests/market/test_single_source.py::test_differential_expiry_b
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+tests/market/test_single_source.py: 36 warnings
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+48 passed, 38 warnings in 6.63s
+
+BEHAVIOR exit 0 PRESENT [datetime.datetime(2024, 1, 1, 0, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC')), datetime.datetime(2024, 1, 1, 0, 0, 59, 999999, tzinfo=zoneinfo.ZoneInfo(key='UTC')), datetime.datetime(2024, 1, 1, 0, 2, tzinfo=zoneinfo.ZoneInfo(key='UTC'))] EXPECTED 3 MISSING 0 QUARANTINES 0
+
+restored SHA256 1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374
+S exit 0 ................................................                         [100%]
+=============================== warnings summary ===============================
+tests/market/test_single_source.py::test_differential_expiry_b
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+tests/market/test_single_source.py::test_differential_expiry_b
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+tests/market/test_single_source.py: 36 warnings
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+48 passed, 38 warnings in 6.10s
+
+BEHAVIOR exit 0 PRESENT [datetime.datetime(2024, 1, 1, 0, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC')), datetime.datetime(2024, 1, 1, 0, 2, tzinfo=zoneinfo.ZoneInfo(key='UTC'))] EXPECTED 3 MISSING 1 QUARANTINES 2
+```
+
+#### A34/A35所给证据检索
+
+```json
+{"evidence_markers": {"S42": true, "S43": true, "snapshot": false, "assert_matches": false, "\u6279\u524d": false, "\u6279\u540e": false}, "verifier_guard_calls": {"TreeGuard": false, "snapshot": false, "assert_matches": false, "assert_clean": false}}
+```
+
+### 十审反引号原命令逐字复跑
+从原十审段落提取11条不同命令，逐条shlex.split后subprocess.run；环境与上文相同，cwd为冻结副本。旧命令的同进程patch仅记录兼容性输出，不用于本轮A29还原证明。TypeError/旧表达缺失/旧测试名缺失均照录，不把这些退出当作缺陷已被捕获。
+
+#### L01 / exit 1
+
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom quant_lab.market import contract as c\nfrom tests.market.test_review_p1 import e03\nq,_=e03()\np=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"negative-latency-audit\",\"latency_s\":-1})\nwith patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value={p.version:p.content_hash}):\n    for s in (None,q.t_dec-dt.timedelta(seconds=1)):\n        try:\n            r=c.ExecutionRequest.model_validate({**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":s})\n            print(s,\"ACCEPT\",r.resolved_t_start(p))\n        except c.ContractError as e:print(s,\"REJECT\",str(e))\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 6, in <module>
+  File "/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/copy/.venv-g2/lib/python3.12/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/copy/src/quant_lab/market/contract.py", line 330, in _latency_domain
+    raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+quant_lab.market.contract.ContractError: latency_s 必须非负：启动时刻不能早于决策时刻
+```
+
+#### L02 / exit 1
+
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom quant_lab.market import execution as x\nfrom tests.market.test_constants_effective import test_grid_math_single_source_and_exact_to_microsecond as test\nold='"'"'expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"'\nsrc=inspect.getsource(x.load_market_from_lake)\nassert src.count(old)==1\nns=dict(x.__dict__)\nexec(compile(src.replace(old,'"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"]); expected = 0'"'"'),\"<memory>\",\"exec\"),ns)\nns[\"grid_points_between\"]=lambda *args:x.grid_points_between(*args)\nwith patch.object(x,\"load_market_from_lake\",ns[\"load_market_from_lake\"]):\n    test();print(\"discarded result: GREEN\")\ntest();print(\"restored: GREEN\")\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 7, in <module>
+AssertionError
+```
+
+#### L03 / exit 1
+
+`.venv-g2/bin/python -c 'exec("import ast,inspect,textwrap\nfrom unittest.mock import patch\nfrom tests.market import test_outcome_kind as t\nfrom tests.market import test_constants_effective as k\nfrom quant_lab.market import contract as c,execution as x,partition_check as pc,kernel_a as ka\ndef outcome(fn):\n    try:\n        fn()\n        return \"GREEN\"\n    except BaseException as e:\n        return \"RED \"+type(e).__name__+\" \"+str(e)[:160]\ndef mutant(fn,old,new):\n    src=textwrap.dedent(inspect.getsource(fn))\n    assert src.count(old)==1,(fn.__name__,src.count(old))\n    ns=dict(fn.__globals__);exec(compile(src.replace(old,new),\"<memory-mutant>\",\"exec\"),ns)\n    return ns[fn.__name__]\nold=t.test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain\nnew=t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes\nfor label,replacement in [(\"delete\",\"pass\")]:\n    fn=mutant(x.simulate_batch,\"check_policy_hash_consistency(df)\",replacement)\n    with patch.object(x,\"simulate_batch\",fn):\n        print(\"B17\",label,\"legacy\",outcome(old),\"new\",outcome(new))\nprint(\"B17 restored\",outcome(old),outcome(new))\nfn=mutant(pc.check_bars,\"first_gap = bool(df.height and grid_points_between(cal_from, df[key][0], sec) > 0)\",\"first_gap = bool(df.height and df[key][0] > cal_from)\")\nwith patch.object(pc,\"check_bars\",fn):\n    print(\"S29 old-first-gap\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\nfn=mutant(pc.check_bars,\"exp_n = grid_points_between(cal_from, cal_to, sec)\",\"exp_n = int((cal_to-cal_from).total_seconds() // sec)\")\nwith patch.object(pc,\"check_bars\",fn):\n    print(\"S29 old-count\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\nprint(\"S29 restored\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\n# bypass a delegation but preserve behavior through a captured binding\nfor label,fn,oldexpr,newexpr,owner,attr,test in [\n(\"A-grid\",ka.KernelA._first_bar_gap,\"first_grid_point(self.t_start, bars[0].interval_s)\",\"_captured(self.t_start, bars[0].interval_s)\",ka.KernelA,\"_first_bar_gap\",k.test_grid_math_single_source_and_exact_to_microsecond),\n(\"loader-grid\",x.load_market_from_lake,'"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"','"'"'_captured(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"',x,\"load_market_from_lake\",k.test_grid_math_single_source_and_exact_to_microsecond)]:\n    m=mutant(fn,oldexpr,newexpr)\n    m.__globals__[\"_captured\"]=c.first_grid_point if label==\"A-grid\" else c.grid_points_between\n    with patch.object(owner,attr,m):\n        print(label,\"bypass\",outcome(test))\n    print(label,\"restored\",outcome(test))\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 17, in <module>
+AttributeError: module 'tests.market.test_outcome_kind' has no attribute 'test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain'
+```
+
+#### L04 / exit 0
+
+`.venv-g2/bin/python -c 'exec("import datetime as dt,inspect,textwrap\nfrom unittest.mock import patch\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nfrom tests.market import test_outcome_kind as t,test_constants_effective as k\nfrom quant_lab.market import contract as c,execution as x\nimport polars as pl\nfor offsets in [(0,1,60000000,120000000),(1,60000001,120000001)]:\n    df=bars(len(offsets)).with_columns(pl.Series(\"open_time\",[JAN+dt.timedelta(microseconds=u) for u in offsets]),pl.Series(\"close_time\",[JAN+dt.timedelta(microseconds=u,seconds=60) for u in offsets]))\n    out,qs,r=run(df,rules(JAN,JAN+dt.timedelta(seconds=180)))\n    print(\"offgrid\",offsets,\"expected\",r.expected_rows,\"missing\",r.missing,\"gaps\",r.gaps,\"flags\",out[\"gap_flag\"].to_list(),\"status\",r.status)\ndef outcome(fn):\n    try:\n        fn();return \"GREEN\"\n    except BaseException as e:\n        return \"RED \"+type(e).__name__+\" \"+str(e)[:140]\nsrc=inspect.getsource(x.simulate_batch).replace(\"check_policy_hash_consistency(df)\",'"'"'check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))'"'"')\nns=dict(x.__dict__);exec(compile(src,\"<memory-mutant>\",\"exec\"),ns)\nns[\"check_policy_hash_consistency\"]=lambda df:x.check_policy_hash_consistency(df)\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    print(\"B17 sanitized dynamic\",outcome(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n# rebuild the pydantic model in memory so validator substitutions actually execute\nsrc=inspect.getsource(c.ExecutionRequest).replace(\"if self.horizon_end <= exp_t_start:\",\"if self.horizon_end <= (self.t_start or self.t_dec):\")\nns=dict(c.__dict__);exec(compile(src,\"<memory-model-mutant>\",\"exec\"),ns)\nclass Registry:\n    def __init__(self): self.s=c.POLICY_HASH_REGISTRY.read_text()\n    def exists(self): return True\n    def read_text(self,**kw): return self.s\n    def write_text(self,s,**kw): self.s=s;return len(s)\nwith patch.object(c,\"POLICY_HASH_REGISTRY\",Registry()):\n    with patch.object(c,\"ExecutionRequest\",ns[\"ExecutionRequest\"]):\n        print(\"S30 old lower bound\",outcome(t.test_s30_window_lower_bound_uses_derived_start_not_t_dec))\n    print(\"S30 restored\",outcome(t.test_s30_window_lower_bound_uses_derived_start_not_t_dec))\nsrc=inspect.getsource(c.ExecutionRequest).replace(\"exp_t_start = derived_t_start(self.t_dec, pol)\",\"exp_t_start = self.t_dec + dt.timedelta(seconds=pol.latency_s)\")\nns=dict(c.__dict__);exec(compile(src,\"<memory-model-mutant>\",\"exec\"),ns)\nwith patch.object(c,\"ExecutionRequest\",ns[\"ExecutionRequest\"]):\n    print(\"start delegate bypass\",outcome(k.test_t_start_derivation_single_source))\nprint(\"start restored\",outcome(k.test_t_start_derivation_single_source))\n")'`
+
+```text
+offgrid (0, 1, 60000000, 120000000) expected 3 missing 0 gaps [] flags [False, False, False] status quarantined
+offgrid (1, 60000001, 120000001) expected 3 missing 3 gaps [{'from': '2024-01-01T00:00:00+00:00', 'to': '2024-01-01T00:03:00+00:00', 'n': 3}] flags [] status quarantined
+B17 sanitized dynamic RED TypeError test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes() missing 2 required positional arguments: 'monkeypatch' and 'later_versi
+S30 old lower bound RED TypeError test_s30_window_lower_bound_uses_derived_start_not_t_dec() missing 2 required positional arguments: 'tmp_path' and 'monkeypatch'
+S30 restored RED TypeError test_s30_window_lower_bound_uses_derived_start_not_t_dec() missing 2 required positional arguments: 'tmp_path' and 'monkeypatch'
+start delegate bypass RED Failed DID NOT RAISE ContractError
+start restored GREEN
+```
+
+#### L05 / exit 1
+
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom quant_lab.market import contract as c\nq,m=e03()\nfor latency in (-1,0,60):\n    p=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"audit-latency\",\"latency_s\":latency})\n    reg={**c.load_policy_registry(),p.version:p.content_hash}\n    with patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value=reg):\n        for explicit in (False,True):\n            try:\n                d={**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":q.t_dec+dt.timedelta(seconds=latency) if explicit else None}\n                r=c.ExecutionRequest.model_validate(d)\n                print(\"latency\",latency,\"explicit\",explicit,\"ACCEPT\",r.resolved_t_start(p))\n            except Exception as e: print(\"latency\",latency,\"explicit\",explicit,\"REJECT\",type(e).__name__,str(e))\n        for us in (-1,0,1):\n            try:\n                r=c.build_request(q.model_dump(),policy_version=p.version,policy_hash=p.content_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest,horizon_end=q.t_dec+dt.timedelta(seconds=latency,microseconds=us))\n                print(\"build caller\",latency,us,\"ACCEPT\")\n            except Exception as e: print(\"build caller\",latency,us,\"REJECT\",type(e).__name__)\nwith patch.object(c,\"derived_t_start\",side_effect=lambda t,p:t+dt.timedelta(seconds=7)):\n    try:\n        c.build_request(q.model_dump(),policy_version=q.policy_version,policy_hash=q.policy_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest)\n        print(\"build sentinel ACCEPT\")\n    except Exception as e: print(\"build sentinel\",type(e).__name__,str(e))\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 7, in <module>
+  File "/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/copy/.venv-g2/lib/python3.12/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/copy/src/quant_lab/market/contract.py", line 330, in _latency_domain
+    raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+quant_lab.market.contract.ContractError: latency_s 必须非负：启动时刻不能早于决策时刻
+```
+
+#### L06 / exit 1
+
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom quant_lab.market import execution as x,contract as c\nfrom tests.market import test_constants_effective as k,test_outcome_kind as t\nfrom tests.market.test_review_p1 import e03\ndef result(fn):\n    try: fn();return \"GREEN\"\n    except BaseException as e: return \"RED \"+type(e).__name__+\" \"+str(e)[:100]\nsrc=inspect.getsource(x.load_market_from_lake)\nold='"'"'expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"'\nnew='"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"]); expected = 0'"'"'\nassert src.count(old)==1\nns=dict(x.__dict__);exec(compile(src.replace(old,new),\"<discard-grid-result>\",\"exec\"),ns)\nns[\"grid_points_between\"]=lambda *args:x.grid_points_between(*args)\nwith patch.object(x,\"load_market_from_lake\",ns[\"load_market_from_lake\"]):\n    print(\"loader discard return\",result(k.test_grid_math_single_source_and_exact_to_microsecond))\nprint(\"loader restored\",result(k.test_grid_math_single_source_and_exact_to_microsecond))\nsrc=inspect.getsource(x.simulate_batch)\nold=\"check_policy_hash_consistency(df)\"\nns=dict(x.__dict__);exec(compile(src.replace(old,'"'"'check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))'"'"'),\"<sanitize-gate-input>\",\"exec\"),ns)\nns[\"check_policy_hash_consistency\"]=lambda df:x.check_policy_hash_consistency(df)\nq,m=e03();q2=c.ExecutionRequest.model_validate({**q.model_dump(),\"episode_id\":\"merge\"})\noriginal=x.result_row\ndef inject(req,res):\n    row=original(req,res)\n    if req.episode_id==\"merge\": row[\"policy_hash\"]=\"0\"*64\n    return row\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    print(\"sanitized gate regression\",result(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n    ns[\"result_row\"]=inject\n    df=x.simulate_batch([q,q2],markets={m.manifest_id:m})\n    print(\"sanitized gate actual\",df.height,df[\"policy_hash\"].n_unique(),\"NO ContractError\")\nprint(\"gate restored\",result(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 12, in <module>
+AssertionError
+```
+
+#### L07 / exit 0
+
+`.venv-g2/bin/python -c 'exec("import pathlib,re\npatterns={\"S32\":(\"contract.py\",r\"return t_dec|horizon_end = t_dec\"),\"S33\":(\"vision.py\",r\"total_seconds\"),\"S34\":(\"execution.py\",r\"g = |while g|g \\+=|abs\\(\\(h - g\"),\"S35\":(\"contract.py\",r\"plan_ttl =|exp_ttl =|ttl = plan.expiry\"),\"S36A\":(\"kernel_a.py\",r\"self.hold_end = ts\"),\"S36B\":(\"nautilus_adapter.py\",r\"hold_end =|cutoff = min\"),\"S37\":(\"kernel_a.py\",r\"first_expected =|o - prev|return prev \\+|prev \\+ iv <\"),\"TTL-deadline-A\":(\"kernel_a.py\",r\"deadline =\"),\"TTL-deadline-B\":(\"nautilus_adapter.py\",r\"deadline =\")}\nfor label,(file,pattern) in patterns.items():\n    for i,line in enumerate((pathlib.Path(\"src/quant_lab/market\")/file).read_text().splitlines(),1):\n        if re.search(pattern,line):print(label,file+\":\"+str(i),line.strip())\n")'`
+
+```text
+S32 contract.py:263 return t_dec + dt.timedelta(seconds=policy.latency_s)
+S34 execution.py:247 g = a.replace(minute=0, second=0, microsecond=0)
+S34 execution.py:248 g = g.replace(hour=(g.hour // 8) * 8)
+S34 execution.py:250 while g <= b:
+S34 execution.py:251 if g >= a and not any(abs((h - g).total_seconds()) <= 60 for h in have):
+S34 execution.py:254 g += dt.timedelta(hours=8)
+S35 contract.py:277 ttl = plan.expiry.entry_ttl_s
+S35 contract.py:480 exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)
+S36A kernel_a.py:422 self.hold_end = ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+S36B nautilus_adapter.py:530 hold_end = min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+S36B nautilus_adapter.py:556 cutoff = min(cutoff, st["close_at"])
+S36B nautilus_adapter.py:558 cutoff = min(cutoff, st["censor_at"] - dt.timedelta(microseconds=1))
+S36B nautilus_adapter.py:560 cutoff = min(cutoff, st["open_at"] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1))
+TTL-deadline-A kernel_a.py:222 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+TTL-deadline-A kernel_a.py:317 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+TTL-deadline-B nautilus_adapter.py:226 deadline = entry_expiry_at(t_start, req.entry_ttl_s)
+```
+
+#### L08 / exit 0
+
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom tests.market import test_outcome_kind as t\nfrom quant_lab.market import execution as x\ndef out(fn):\n    try:fn();return \"GREEN\"\n    except BaseException as e:return \"RED \"+type(e).__name__\nreal=inspect.getsource\nfor name,token in [(\"test_lint_forbidden_patterns_do_not_reappear\",'"'"'multiplier\"] or \"1\"'"'"'),(\"test_s27_s28_single_source_start_time_and_exact_grid\",\"(req.t_start or req.t_dec)\")]:\n    fn=getattr(t,name)\n    with patch.object(inspect,\"getsource\",side_effect=lambda obj:real(obj)+\"\\n# \"+token):\n        print(name,\"forbidden injected\",out(fn))\n    print(name,\"restored\",out(fn))\nsrc=real(x.check_policy_hash_consistency).replace(\"{r['"'"'policy_version'"'"']}\",\"REDACTED\")\nns=dict(x.__dict__);exec(compile(src,\"<missing-version-diagnostic>\",\"exec\"),ns)\nwith patch.object(x,\"check_policy_hash_consistency\",ns[\"check_policy_hash_consistency\"]):\n    print(\"B17 missing version diagnostic\",out(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\nprint(\"B17 restored\",out(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n")'`
+
+```text
+test_lint_forbidden_patterns_do_not_reappear forbidden injected RED AssertionError
+test_lint_forbidden_patterns_do_not_reappear restored GREEN
+test_s27_s28_single_source_start_time_and_exact_grid forbidden injected RED AssertionError
+test_s27_s28_single_source_start_time_and_exact_grid restored GREEN
+B17 missing version diagnostic RED TypeError
+B17 restored RED TypeError
+```
+
+#### L09 / exit 0
+
+`.venv-g2/bin/python -c 'exec("import datetime as dt,itertools\nfrom quant_lab.market import contract as c\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nimport polars as pl\ncount=0\nfor iv,base,au,bu in itertools.product((1,7,60,900,28800),(c.EPOCH-dt.timedelta(days=1),c.EPOCH,JAN),(-1,0,1,999999,60000001),(-1,0,1,999999,180000001)):\n    a=base+dt.timedelta(microseconds=au);b=base+dt.timedelta(microseconds=bu)\n    first=c.first_grid_point(a,iv)\n    points=[c.EPOCH+dt.timedelta(seconds=i*iv) for i in range(int((a-c.EPOCH).total_seconds()//iv)-2,int((b-c.EPOCH).total_seconds()//iv)+3)]\n    want=sum(a<=p<b for p in points)\n    assert c.grid_points_between(a,b,iv)==want\n    assert first>=a and first-a<dt.timedelta(seconds=iv) and (first-c.EPOCH)%dt.timedelta(seconds=iv)==dt.timedelta(0)\n    count+=1\nprint(\"helper brute\",count,\"PASS\")\nn=0\nfor au,bu in [(0,180000000),(1,180000000),(0,180000001)]:\n    a=JAN+dt.timedelta(microseconds=au);b=JAN+dt.timedelta(microseconds=bu)\n    expected=[i for i in range(4) if a<=JAN+dt.timedelta(seconds=i*60)<b]\n    for mask in range(1,1<<len(expected)):\n        keep=[i for j,i in enumerate(expected) if mask&(1<<j)]\n        df=bars(4).filter(pl.col(\"open_time\").is_in([JAN+dt.timedelta(seconds=i*60) for i in keep]))\n        out,qs,r=run(df,rules(a,b))\n        assert r.missing==len(expected)-len(keep),(au,bu,keep,r)\n        assert sum(g[\"n\"] for g in r.gaps)==r.missing,(au,bu,keep,r)\n        assert all(g[\"n\"]>0 for g in r.gaps)\n        n+=1\nprint(\"partition aligned subsets\",n,\"PASS\")\n")'`
+
+```text
+helper brute 375 PASS
+partition aligned subsets 25 PASS
+```
+
+#### L10 / exit 0
+
+`.venv-g2/bin/python -c 'exec("from quant_lab.market import contract as c\nfrom tests.market.test_review_p1 import e03\nq,m=e03()\nmodels=[(c.ExecutionRequest,q.model_dump()),(c.OrderPlan,q.order_plan.model_dump()),(c.ExecutionPolicy,c.resolve_policy(q.policy_version).model_dump()),(c.Entry,q.order_plan.entries[0].model_dump()),(c.Stop,q.order_plan.stop.model_dump()),(c.TakeProfit,q.order_plan.tps[0].model_dump()),(c.Sizing,q.order_plan.sizing.model_dump()),(c.Expiry,q.order_plan.expiry.model_dump()),(c.CostSpec,c.CostSpec().model_dump())]\nfor cls,base in models:\n    for name,f in cls.model_fields.items():\n        if f.is_required() and \"None\" not in str(f.annotation):\n            continue\n        results=[]\n        for tag,val in [(\"omit\",None),(\"None\",None),(\"False\",False),(\"0\",0),(\"emptystr\",\"\"),(\"emptylist\",[])]:\n            d=dict(base)\n            if tag==\"omit\": d.pop(name,None)\n            else: d[name]=val\n            try:\n                z=cls.model_validate(d)\n                results.append(tag+\"=\"+repr(getattr(z,name)))\n            except Exception: pass\n        print(cls.__name__+\".\"+name+\" | \"+(\"; \".join(results) or \"all reject\"))\n")'`
+
+```text
+ExecutionRequest.cost_scenario | omit='base'
+ExecutionRequest.path_scenario | omit='primary'
+ExecutionRequest.execution_contract_version | omit='g2-exec-v0'
+ExecutionRequest.seed | omit=0; False=0; 0=0
+ExecutionRequest.t_start | omit=None; None=None
+ExecutionRequest.position_mode | omit='one_way'
+ExecutionRequest.entry_ttl_s | omit=3600; None=3600
+ExecutionRequest.entry_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.tp_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.horizon_source | all reject
+OrderPlan.tps | omit=[]; emptylist=[]
+OrderPlan.reduce_only_exit | omit=True
+ExecutionPolicy.latency_s | omit=0; False=0; 0=0
+ExecutionPolicy.ladder_steps | omit=2; False=0; 0=0
+ExecutionPolicy.participation | omit=None; None=None; 0=Decimal('0')
+ExecutionPolicy.wallet | omit=Decimal('1000'); 0=Decimal('0')
+ExecutionPolicy.leverage | omit=Decimal('1'); 0=Decimal('0')
+ExecutionPolicy.mark_max_staleness_s | omit=120; False=0; 0=0
+ExecutionPolicy.settlement_quantum | omit=Decimal('1E-8'); 0=Decimal('0')
+ExecutionPolicy.max_horizon_s | omit=1209600; False=0; 0=0
+ExecutionPolicy.entry_ttl_s | omit=86400; False=0; 0=0
+ExecutionPolicy.entry_fraction_rule | omit='equal'
+ExecutionPolicy.tp_fraction_rule | omit='equal'
+ExecutionPolicy.tp_total_fraction | omit=Decimal('1'); 0=Decimal('0')
+Entry.fraction | omit=None; None=None
+Entry.tif | omit='GTC'
+Entry.post_only | omit=False; False=False; 0=False
+Stop.trigger | omit='mark'
+TakeProfit.fraction | omit=None; None=None; 0=Decimal('0')
+Sizing.qty | omit=None; None=None; 0=Decimal('0')
+Expiry.entry_ttl_s | omit=None; None=None
+Expiry.max_holding_s | omit=None; None=None
+CostSpec.maker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.taker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.slippage_ticks | omit=0; False=0; 0=0
+CostSpec.slippage_bps | omit=Decimal('0'); 0=Decimal('0')
+```
+
+#### L11 / exit 0
+
+`.venv-g2/bin/python -c 'exec("import ast,pathlib,re\nfor p in sorted(pathlib.Path(\"src/quant_lab/market\").glob(\"*.py\")):\n    tree=ast.parse(p.read_text())\n    for node in sorted(ast.walk(tree),key=lambda n:getattr(n,\"lineno\",0)):\n        if isinstance(node,(ast.Compare,ast.BinOp,ast.BoolOp)):\n            expr=ast.unparse(node)\n            if re.search(r\"t_start|t_dec|horizon|ttl|holding|hold_end|deadline|staleness|grid|cal_from|cal_to|gap_h|total_seconds|calc_time\",expr) and len(expr)<240:\n                print(str(p)+\":\"+str(node.lineno)+\" \"+expr)\n")'`
+
+```text
+src/quant_lab/market/asof.py:180 stale > max_staleness_s
+src/quant_lab/market/contract.py:263 t_dec + dt.timedelta(seconds=policy.latency_s)
+src/quant_lab/market/contract.py:272 entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)
+src/quant_lab/market/contract.py:278 ttl is not None
+src/quant_lab/market/contract.py:285 t_start + dt.timedelta(seconds=entry_ttl_s)
+src/quant_lab/market/contract.py:428 data.get('entry_ttl_s') is None and isinstance(plan, OrderPlan) and (pol is not None)
+src/quant_lab/market/contract.py:428 data.get('entry_ttl_s') is None
+src/quant_lab/market/contract.py:447 self.order_plan.expiry.entry_ttl_s is not None
+src/quant_lab/market/contract.py:463 exp_t_start < self.t_dec
+src/quant_lab/market/contract.py:465 self.horizon_end <= exp_t_start
+src/quant_lab/market/contract.py:470 self.entry_ttl_s is None
+src/quant_lab/market/contract.py:477 self.t_start is not None and self.t_start != exp_t_start
+src/quant_lab/market/contract.py:477 self.t_start is not None
+src/quant_lab/market/contract.py:477 self.t_start != exp_t_start
+src/quant_lab/market/contract.py:481 self.entry_ttl_s != exp_ttl
+src/quant_lab/market/contract.py:482 self.entry_ttl_source == 'plan'
+src/quant_lab/market/contract.py:487 self.horizon_end - exp_t_start
+src/quant_lab/market/contract.py:488 window > dt.timedelta(seconds=pol.max_horizon_s)
+src/quant_lab/market/contract.py:492 self.horizon_source == 'policy' and window != dt.timedelta(seconds=derived_s)
+src/quant_lab/market/contract.py:492 self.horizon_source == 'policy'
+src/quant_lab/market/contract.py:516 self.t_start is not None
+src/quant_lab/market/contract.py:537 horizon_end is not None
+src/quant_lab/market/contract.py:538 horizon_end is None
+src/quant_lab/market/contract.py:539 derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))
+src/quant_lab/market/contract.py:830 e.ts in settle_keys
+src/quant_lab/market/execution.py:153 req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)
+src/quant_lab/market/execution.py:219 first_grid_point(opened, interval_s) != opened
+src/quant_lab/market/execution.py:251 g >= a and (not any((abs((h - g).total_seconds()) <= 60 for h in have)))
+src/quant_lab/market/execution.py:251 abs((h - g).total_seconds()) <= 60
+src/quant_lab/market/kernel_a.py:202 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:208 [p for p in m.last if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_last, self.policy.participation) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:208 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:209 [p for p in m.mark if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_mark, None) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:209 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:220 self.t_start <= f.calc_time <= end
+src/quant_lab/market/kernel_a.py:223 deadline <= end
+src/quant_lab/market/kernel_a.py:240 b.open_time >= self.t_start and b.open_time < end
+src/quant_lab/market/kernel_a.py:240 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:251 grid_points_between(expected, end, interval_s) > 0
+src/quant_lab/market/kernel_a.py:257 self.hold_end is not None and self.hold_end <= self.req.horizon_end and (self.hold_end not in self.moments)
+src/quant_lab/market/kernel_a.py:257 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:257 self.hold_end <= self.req.horizon_end
+src/quant_lab/market/kernel_a.py:257 self.hold_end not in self.moments
+src/quant_lab/market/kernel_a.py:260 self.hold_end is not None and self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:260 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:260 self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:421 self.plan.expiry.max_holding_s is not None
+src/quant_lab/market/kernel_a.py:422 ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+src/quant_lab/market/kernel_a.py:567 ts in self.settled_keys
+src/quant_lab/market/kernel_a.py:568 self.settled_keys[ts] != row.rate
+src/quant_lab/market/kernel_a.py:572 mp is None or (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:572 (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:590 r.effective_from and self.t_start < r.effective_from or (r.effective_to and self.t_start >= r.effective_to)
+src/quant_lab/market/kernel_a.py:590 r.effective_from and self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:590 r.effective_to and self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:590 self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:590 self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:594 not self.market.bars_complete and (self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None)
+src/quant_lab/market/kernel_a.py:594 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:594 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:595 self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:615 (mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)) and self.pos != 0
+src/quant_lab/market/kernel_a.py:615 mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)
+src/quant_lab/market/kernel_a.py:615 self.hold_end is not None and ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:615 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:615 ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:618 mo.horizon and self.pos != 0
+src/quant_lab/market/kernel_a.py:621 ts == self.t_start and (not self.orders)
+src/quant_lab/market/kernel_a.py:621 ts == self.t_start
+src/quant_lab/market/kernel_a.py:633 o.deadline is not None and o.deadline <= ts
+src/quant_lab/market/kernel_a.py:633 o.deadline is not None
+src/quant_lab/market/kernel_a.py:633 o.deadline <= ts
+src/quant_lab/market/kernel_a.py:654 self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:654 (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:671 self.hold_end is not None and self.pos != 0
+src/quant_lab/market/kernel_a.py:671 self.hold_end is not None
+src/quant_lab/market/nautilus_adapter.py:146 list(market.last) + [p for b in market.bars_last if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:146 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:148 list(market.mark) + [p for b in market.bars_mark if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:149 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:150 b.open_time < t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.path_step == 'C' and p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:153 market.funding and len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:153 len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:156 t_start <= p.ts <= end
+src/quant_lab/market/nautilus_adapter.py:237 deadline <= end
+src/quant_lab/market/nautilus_adapter.py:419 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:419 self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start or row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:426 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:442 st['pos'] != 0 and (st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s)
+src/quant_lab/market/nautilus_adapter.py:442 st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:442 (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:450 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= until and (st['pos'] != 0) and (not st['censor'])
+src/quant_lab/market/nautilus_adapter.py:450 self.funding_rows[self.fi].calc_time <= until
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start or row.calc_time in self.settled_at or row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 st['open_at'] or t_start
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:457 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from or (rules.effective_to and t_start >= rules.effective_to)
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_to and t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:499 t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:527 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:530 min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:531 e['ts'] < hold_end
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None and st['open_at'] is not None
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1)
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:561 {m.ts for m in marks if t_start <= m.ts <= cutoff} | {p.ts for p in lasts if p.ts <= cutoff}
+src/quant_lab/market/nautilus_adapter.py:561 t_start <= m.ts <= cutoff
+src/quant_lab/market/partition_check.py:246 cal_from <= t < cal_to and first_grid_point(t, sec) == t
+src/quant_lab/market/partition_check.py:246 cal_from <= t < cal_to
+src/quant_lab/market/partition_check.py:246 first_grid_point(t, sec) == t
+src/quant_lab/market/partition_check.py:259 [False] + [grid_points_between(prev[i] + step, df[key][i], sec) > 0 for i in range(1, df.height)]
+src/quant_lab/market/partition_check.py:259 grid_points_between(prev[i] + step, df[key][i], sec) > 0
+src/quant_lab/market/partition_check.py:263 df.height and grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:263 grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:277 grid_points_between(df[key][-1] + step, cal_to, sec) > 0
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite() & pl.col('low').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0)
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high'))
+src/quant_lab/market/partition_check.py:291 pl.col('low') <= pl.min_horizontal('open', 'close')
+src/quant_lab/market/partition_check.py:291 pl.max_horizontal('open', 'close') <= pl.col('high')
+src/quant_lab/market/partition_check.py:335 df.height - df['calc_time'].n_unique()
+src/quant_lab/market/single_source.py:201 't_start' in attrs and 't_dec' in attrs
+src/quant_lab/market/single_source.py:201 't_start' in attrs
+src/quant_lab/market/single_source.py:201 't_dec' in attrs
+src/quant_lab/market/single_source.py:211 name == 'int' and node.args and ('total_seconds()' in self._seg(node.args[0]))
+src/quant_lab/market/single_source.py:211 'total_seconds()' in self._seg(node.args[0])
+src/quant_lab/market/single_source.py:253 isinstance(n, ast.Attribute) and n.attr == 'entry_ttl_s'
+src/quant_lab/market/single_source.py:253 n.attr == 'entry_ttl_s'
+src/quant_lab/market/single_source.py:286 isinstance(node.op, (ast.FloorDiv, ast.Div)) and ('total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg)
+src/quant_lab/market/single_source.py:287 'total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg
+src/quant_lab/market/single_source.py:287 'total_seconds()' in seg
+src/quant_lab/market/single_source.py:290 isinstance(node.op, ast.Add) and 'entry_ttl_s' in seg
+src/quant_lab/market/single_source.py:290 'entry_ttl_s' in seg
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite() & pl.col('low').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0)
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high'))
+src/quant_lab/market/vision.py:262 pl.col('low') <= pl.min_horizontal('open', 'close')
+src/quant_lab/market/vision.py:262 pl.max_horizontal('open', 'close') <= pl.col('high')
+```
+
+### 97次三阶段实验完整回执
+每项给所跑选择器、完整复跑命令、三次输出及三次内容SHA256。两个S37旧哨兵GREEN已在前文排除；其对应新差分与登记删除证据另列，不隐藏无效的初选。
+
+#### M01 CONTROL-expected-plus-one
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_differential_vision_count`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' CONTROL-expected-plus-one`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 15760
+ISOLATION_OK PID 15760
+.                                                                        [100%]
+1 passed in 0.22s
+```
+
+injected / exit 1 / SHA256 `621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21`
+
+```text
+ISOLATION_OK PID 15869
+ISOLATION_OK PID 15869
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:258: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x10ab70d60>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x10ab70d60> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x109589da0>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x109589da0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_vision_count
+1 failed in 0.14s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 15870
+ISOLATION_OK PID 15870
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M02 S29-first-gap
+
+文件：`src/quant_lab/market/partition_check.py`。选择器：`tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-first-gap`。
+
+baseline / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 15871
+ISOLATION_OK PID 15871
+.                                                                        [100%]
+1 passed in 0.17s
+```
+
+injected / exit 1 / SHA256 `c7c0cbe6c46d55054bf1ee2aa32e98fe3bcdbee1cb28bbec73d501b74028dc5e`
+
+```text
+ISOLATION_OK PID 15876
+ISOLATION_OK PID 15876
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_s29_subsecond_calendar_start_has_no_false_first_gap ___________
+tests/market/test_review_p1_round10.py:35: in test_s29_subsecond_calendar_start_has_no_false_first_gap
+    assert out["gap_flag"].to_list() == [False, False]
+E   assert [True, False] == [False, False]
+E     
+E     At index 0 diff: True != False
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s29_subsecond_calendar_start_has_no_false_first_gap
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 15877
+ISOLATION_OK PID 15877
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M03 S29-range-only
+
+文件：`src/quant_lab/market/partition_check.py`。选择器：`tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-range-only`。
+
+baseline / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 15882
+ISOLATION_OK PID 15882
+..                                                                       [100%]
+2 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `0ce79f68208294b8711c813177ae11de1d5934b3980d78354b36858f03210957`
+
+```text
+ISOLATION_OK PID 15883
+ISOLATION_OK PID 15883
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+___________ test_s29_off_grid_never_covers_calendar[mixed-off-grid] ____________
+tests/market/test_review_p1_round10.py:21: in test_s29_off_grid_never_covers_calendar
+    out, qs, report = run(df, rules(eff_from=JAN, eff_to=JAN + dt.timedelta(seconds=180)))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+____________ test_s29_off_grid_never_covers_calendar[all-off-grid] _____________
+tests/market/test_review_p1_round10.py:21: in test_s29_off_grid_never_covers_calendar
+    out, qs, report = run(df, rules(eff_from=JAN, eff_to=JAN + dt.timedelta(seconds=180)))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s29_off_grid_never_covers_calendar[mixed-off-grid]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s29_off_grid_never_covers_calendar[all-off-grid]
+2 failed in 0.17s
+```
+
+restored / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 15884
+ISOLATION_OK PID 15884
+..                                                                       [100%]
+2 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M04 S29-truncated-count
+
+文件：`src/quant_lab/market/partition_check.py`。选择器：`tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-truncated-count`。
+
+baseline / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 15894
+ISOLATION_OK PID 15894
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `f66016b2c89496f9d14377060b0bb2c774f3c692f02c3cfbee4cbfa817c77bc9`
+
+```text
+ISOLATION_OK PID 15902
+ISOLATION_OK PID 15902
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_s29_subsecond_end_includes_last_grid_point ________________
+tests/market/test_review_p1_round10.py:39: in test_s29_subsecond_end_includes_last_grid_point
+    _, _, report = run(bars(2), rules(eff_from=JAN, eff_to=JAN + dt.timedelta(minutes=2, microseconds=1)))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s29_subsecond_end_includes_last_grid_point
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 15917
+ISOLATION_OK PID 15917
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M05 S31-remove-output-gate
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-remove-output-gate`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 15922
+ISOLATION_OK PID 15922
+..                                                                       [100%]
+2 passed in 0.22s
+```
+
+injected / exit 1 / SHA256 `908fefbe9a732125ab4e796cba3637e69c3898c345362fb0617aa1270a2518e5`
+
+```text
+ISOLATION_OK PID 15923
+ISOLATION_OK PID 15923
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.21s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 15928
+ISOLATION_OK PID 15928
+..                                                                       [100%]
+2 passed in 0.19s
+```
+还原内容SHA256等于基线：True。
+
+#### M06 S31-sanitized-copy
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-sanitized-copy`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 15929
+ISOLATION_OK PID 15929
+..                                                                       [100%]
+2 passed in 0.19s
+```
+
+injected / exit 1 / SHA256 `4b1b88c06345bf057405428979ceae497c1fb8f90cc09971f88adb63c36d4d2b`
+
+```text
+ISOLATION_OK PID 15934
+ISOLATION_OK PID 15934
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.21s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 15935
+ISOLATION_OK PID 15935
+..                                                                       [100%]
+2 passed in 0.19s
+```
+还原内容SHA256等于基线：True。
+
+#### M07 S31-redacted-version
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-redacted-version`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 15967
+ISOLATION_OK PID 15967
+..                                                                       [100%]
+2 passed in 0.19s
+```
+
+injected / exit 1 / SHA256 `4ea653e7ddad73aafec5c49d501103c594b255f34b99c7460562cdb7a45589ef`
+
+```text
+ISOLATION_OK PID 16077
+ISOLATION_OK PID 16077
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:313: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    assert "conflict-version-S31" in message
+E   assert 'conflict-version-S31' in "同一 policy_version 对应多个 policy_hash（版本串与内容不一一对应）：REDACTED → ['11111111111111111111111111111111111111111111111111111111...222222222222222222222222222222222222222222222222', '3333333333333333333333333333333333333333333333333333333333333333']"
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:313: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    assert "conflict-version-S31" in message
+E   assert 'conflict-version-S31' in "同一 policy_version 对应多个 policy_hash（版本串与内容不一一对应）：REDACTED → ['11111111111111111111111111111111111111111111111111111111...222222222222222222222222222222222222222222222222', '3333333333333333333333333333333333333333333333333333333333333333']"
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.21s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 16082
+ISOLATION_OK PID 16082
+..                                                                       [100%]
+2 passed in 0.19s
+```
+还原内容SHA256等于基线：True。
+
+#### M08 S38-remove-domain
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S38-remove-domain`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 16090
+ISOLATION_OK PID 16090
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `ce341f9b7a9f4374c46f7724ac59ee3f9ea5b7ee5c604a2993018eceeca2a85d`
+
+```text
+ISOLATION_OK PID 16091
+ISOLATION_OK PID 16091
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________ test_s38_policy_rejects_negative_latency ___________________
+tests/market/test_review_p1_round10.py:46: in test_s38_policy_rejects_negative_latency
+    with pytest.raises(c.ContractError, match="启动时刻不能早于决策时刻"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s38_policy_rejects_negative_latency
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 16096
+ISOLATION_OK PID 16096
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M09 S38-explicit-only
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S38-explicit-only`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 16097
+ISOLATION_OK PID 16097
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `06884f316e975d66464f0dc94c65daa819f340c9b9380f25a469969c71cfdf1c`
+
+```text
+ISOLATION_OK PID 16102
+ISOLATION_OK PID 16102
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_s38_resolved_start_checked_for_both_spellings ______________
+tests/market/test_review_p1_round10.py:56: in test_s38_resolved_start_checked_for_both_spellings
+    with pytest.raises(c.ContractError, match="不能早于 t_dec"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s38_resolved_start_checked_for_both_spellings
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 16103
+ISOLATION_OK PID 16103
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M10 S39-discard-return
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-discard-return`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 16104
+ISOLATION_OK PID 16104
+.                                                                        [100%]
+1 passed in 0.70s
+```
+
+injected / exit 1 / SHA256 `d46c423dafb9a031e8b5675d6a745e21bfb21b08896f061138ae2084e8964d6a`
+
+```text
+ISOLATION_OK PID 16109
+ISOLATION_OK PID 16109
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:79: in test_s39_loader_grid_return_controls_coverage
+    assert baseline.bars_complete and baseline.bars_quality_ok
+E   AssertionError: assert (False)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 0, 0, t... archive calc_time only', 'klines 期望 0 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'markPriceKlines 期望 0 根，实际 3 根合法唯一网格 bar（原始 3 行）']).bars_complete
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s39_loader_grid_return_controls_coverage
+1 failed in 0.59s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 16121
+ISOLATION_OK PID 16121
+.                                                                        [100%]
+1 passed in 0.16s
+```
+还原内容SHA256等于基线：True。
+
+#### M11 S39-inline-count
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-inline-count`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 16122
+ISOLATION_OK PID 16122
+.                                                                        [100%]
+1 passed in 0.17s
+```
+
+injected / exit 1 / SHA256 `8effc3ddf17d961087a4ccdb5a6b6bf6c8269d5b3ad1cf563b0f97c446df888a`
+
+```text
+ISOLATION_OK PID 16139
+ISOLATION_OK PID 16139
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:89: in test_s39_loader_grid_return_controls_coverage
+    assert calls == [(JAN, request.horizon_end, 60)] * 2
+E   assert [] == [(datetime.da...one.utc), 60)]
+E     
+E     Right contains 2 more items, first extra item: (datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 0, 3, tzinfo=datetime.timezone.utc), 60)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s39_loader_grid_return_controls_coverage
+1 failed in 0.17s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 16141
+ISOLATION_OK PID 16141
+.                                                                        [100%]
+1 passed in 0.16s
+```
+还原内容SHA256等于基线：True。
+
+#### M12 S39-wrong-helper-value
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-wrong-helper-value`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 16155
+ISOLATION_OK PID 16155
+.                                                                        [100%]
+1 passed in 0.16s
+```
+
+injected / exit 1 / SHA256 `d90cdd03c1fb61fc41d5ea227babb49423cbbc7ada10b15ae8e1edde01b057a2`
+
+```text
+ISOLATION_OK PID 16156
+ISOLATION_OK PID 16156
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:79: in test_s39_loader_grid_return_controls_coverage
+    assert baseline.bars_complete and baseline.bars_quality_ok
+E   AssertionError: assert (False)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 0, 0, t...rchive calc_time only', 'klines 期望 10 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'markPriceKlines 期望 10 根，实际 3 根合法唯一网格 bar（原始 3 行）']).bars_complete
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s39_loader_grid_return_controls_coverage
+1 failed in 0.17s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 16157
+ISOLATION_OK PID 16157
+.                                                                        [100%]
+1 passed in 0.16s
+```
+还原内容SHA256等于基线：True。
+
+#### M13 S33-wrong-expected
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S33-wrong-expected`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16162
+ISOLATION_OK PID 16162
+............                                                             [100%]
+12 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21`
+
+```text
+ISOLATION_OK PID 16163
+ISOLATION_OK PID 16163
+FFFFFFFFFFFF                                                             [100%]
+=================================== FAILURES ===================================
+____________ test_s33_aligned_calendar_equivalence[2024-01-01-1-1m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 1441 == ((1 * 86400) // 60)
+E    +  where 1441 = <function expected_rows at 0x10a370d60>('klines', '1m', '2024-01-01')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+___________ test_s33_aligned_calendar_equivalence[2024-01-01-1-15m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 97 == ((1 * 86400) // 900)
+E    +  where 97 = <function expected_rows at 0x10a370d60>('klines', '15m', '2024-01-01')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-02-29-1-1m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 1441 == ((1 * 86400) // 60)
+E    +  where 1441 = <function expected_rows at 0x10a370d60>('klines', '1m', '2024-02-29')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+___________ test_s33_aligned_calendar_equivalence[2024-02-29-1-15m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 97 == ((1 * 86400) // 900)
+E    +  where 97 = <function expected_rows at 0x10a370d60>('klines', '15m', '2024-02-29')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-01-31-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 44641 == ((31 * 86400) // 60)
+E    +  where 44641 = <function expected_rows at 0x10a370d60>('klines', '1m', '2024-01')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-01-31-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2977 == ((31 * 86400) // 900)
+E    +  where 2977 = <function expected_rows at 0x10a370d60>('klines', '15m', '2024-01')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-02-29-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 41761 == ((29 * 86400) // 60)
+E    +  where 41761 = <function expected_rows at 0x10a370d60>('klines', '1m', '2024-02')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-02-29-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2785 == ((29 * 86400) // 900)
+E    +  where 2785 = <function expected_rows at 0x10a370d60>('klines', '15m', '2024-02')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2023-02-28-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 40321 == ((28 * 86400) // 60)
+E    +  where 40321 = <function expected_rows at 0x10a370d60>('klines', '1m', '2023-02')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2023-02-28-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2689 == ((28 * 86400) // 900)
+E    +  where 2689 = <function expected_rows at 0x10a370d60>('klines', '15m', '2023-02')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-12-31-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 44641 == ((31 * 86400) // 60)
+E    +  where 44641 = <function expected_rows at 0x10a370d60>('klines', '1m', '2024-12')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-12-31-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2977 == ((31 * 86400) // 900)
+E    +  where 2977 = <function expected_rows at 0x10a370d60>('klines', '15m', '2024-12')
+E    +    where <function expected_rows at 0x10a370d60> = v.expected_rows
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-01-31-1m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-01-31-15m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-02-29-1m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-02-29-15m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2023-02-28-1m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2023-02-28-15m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-12-31-1m]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_s33_aligned_calendar_equivalence[2024-12-31-15m]
+12 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16168
+ISOLATION_OK PID 16168
+............                                                             [100%]
+12 passed in 0.15s
+```
+还原内容SHA256等于基线：True。
+
+#### M14 modified-existing-first-point-sentinel
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' modified-existing-first-point-sentinel`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 16169
+ISOLATION_OK PID 16169
+.                                                                        [100%]
+1 passed in 0.18s
+```
+
+injected / exit 1 / SHA256 `bccd4290969ab0947ba22d3c8bfe57a3275e8477de98641da7cd90f730faf65c`
+
+```text
+ISOLATION_OK PID 16174
+ISOLATION_OK PID 16174
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_grid_math_single_source_and_exact_to_microsecond _____________
+tests/market/test_constants_effective.py:133: in test_grid_math_single_source_and_exact_to_microsecond
+    assert moved != real, "_first_bar_gap 未真正委派给 first_grid_point（换哨兵后行为不变）"
+E   AssertionError: _first_bar_gap 未真正委派给 first_grid_point（换哨兵后行为不变）
+E   assert datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc) != datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_grid_math_single_source_and_exact_to_microsecond
+1 failed in 0.14s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 16175
+ISOLATION_OK PID 16175
+.                                                                        [100%]
+1 passed in 0.16s
+```
+还原内容SHA256等于基线：True。
+
+#### M15 A24-real-caller-missing
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-caller-missing`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16326
+ISOLATION_OK PID 16326
+.                                                                        [100%]
+1 passed in 0.28s
+```
+
+injected / exit 1 / SHA256 `86e7c48d7c1030eaa15df9e9fb247369b569ba5a825999ae8e93bccb76ee6d85`
+
+```text
+ISOLATION_OK PID 16331
+ISOLATION_OK PID 16331
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "grid_points_between：登记的调用方 ['market/vision.py:expected_rows'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+1 failed in 0.27s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16332
+ISOLATION_OK PID 16332
+.                                                                        [100%]
+1 passed in 0.26s
+```
+还原内容SHA256等于基线：True。
+
+#### M16 A24-real-caller-extra
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-caller-extra`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16337
+ISOLATION_OK PID 16337
+.                                                                        [100%]
+1 passed in 0.26s
+```
+
+injected / exit 1 / SHA256 `52e4bf1dd6077f5123c85bc8da687a150f9883f18a0403aea120f3a20653598c`
+
+```text
+ISOLATION_OK PID 16338
+ISOLATION_OK PID 16338
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...则单一来源的使用面不可知'] == []
+E     
+E     Left contains one more item: "grid_points_between：出现**未登记**的调用方 ['market/vision.py:_unregistered_grid_probe']——新调用方必须登记，否则单一来源的使用面不可知"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+1 failed in 0.30s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16357
+ISOLATION_OK PID 16357
+.                                                                        [100%]
+1 passed in 0.26s
+```
+还原内容SHA256等于基线：True。
+
+#### M17 A24-gate-missing-disabled
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-gate-missing-disabled`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16358
+ISOLATION_OK PID 16358
+.                                                                        [100%]
+1 passed in 0.24s
+```
+
+injected / exit 1 / SHA256 `c7e1fb20dc57ef5ab67064a08418647f50699cc5e0860e2b3410be2dc9a5ad82`
+
+```text
+ISOLATION_OK PID 16373
+ISOLATION_OK PID 16373
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_registry_gate_fails_when_mutated[missing] ________________
+tests/market/test_single_source.py:52: in test_registry_gate_fails_when_mutated
+    assert len(message) == 1
+E   assert 0 == 1
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_registry_gate_fails_when_mutated[missing]
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16375
+ISOLATION_OK PID 16375
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M18 A24-gate-extra-disabled
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-gate-extra-disabled`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16401
+ISOLATION_OK PID 16401
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `ea3f8bd46bf21ce930979e516e766e1055c8fa5a0bef7f77b3f838c1b3f5c415`
+
+```text
+ISOLATION_OK PID 16403
+ISOLATION_OK PID 16403
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_registry_gate_fails_when_mutated[extra] _________________
+tests/market/test_single_source.py:52: in test_registry_gate_fails_when_mutated
+    assert len(message) == 1
+E   assert 0 == 1
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_registry_gate_fails_when_mutated[extra]
+1 failed in 0.14s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16417
+ISOLATION_OK PID 16417
+.                                                                        [100%]
+1 passed in 0.19s
+```
+还原内容SHA256等于基线：True。
+
+#### M19 A24-real-inline-latency
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-latency`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16422
+ISOLATION_OK PID 16422
+.                                                                        [100%]
+1 passed in 0.68s
+```
+
+injected / exit 1 / SHA256 `348df56392200c54a60c20b9d25b12a93cd0266881a2a1c69fca21048312ed90`
+
+```text
+ISOLATION_OK PID 16427
+ISOLATION_OK PID 16427
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P1_inline_....latency_s)')] == []
+E     
+E     Left contains one more item: ('P1_inline_latency', 566, 'market/vision.py:_inline_probe', 'dt.timedelta(seconds=policy.latency_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.69s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16439
+ISOLATION_OK PID 16439
+.                                                                        [100%]
+1 passed in 0.62s
+```
+还原内容SHA256等于基线：True。
+
+#### M20 A24-disable-pattern-latency
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-latency`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16446
+ISOLATION_OK PID 16446
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `b5a287cd7624e0fd2070fd81ae2ef316935cd262c5220085a7bf670cfd88434c`
+
+```text
+ISOLATION_OK PID 16447
+ISOLATION_OK PID 16447
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_lint_gate_fails_on_injected_violation[latency] ______________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P1_inline_latency'}
+E     
+E     Extra items in the right set:
+E     'P1_inline_latency'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[latency]
+1 failed in 0.17s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16449
+ISOLATION_OK PID 16449
+.                                                                        [100%]
+1 passed in 0.15s
+```
+还原内容SHA256等于基线：True。
+
+#### M21 A24-real-inline-int-seconds
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-int-seconds`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16464
+ISOLATION_OK PID 16464
+.                                                                        [100%]
+1 passed in 0.66s
+```
+
+injected / exit 1 / SHA256 `cb0f44ee75eaf94eea519b7308e278c21d048dc871cf77ca9a1ee935ea160cd0`
+
+```text
+ISOLATION_OK PID 16471
+ISOLATION_OK PID 16471
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P2_int_tot..._seconds())')] == []
+E     
+E     Left contains one more item: ('P2_int_total_seconds', 566, 'market/vision.py:_inline_probe', 'int((b - a).total_seconds())')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.64s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16480
+ISOLATION_OK PID 16480
+.                                                                        [100%]
+1 passed in 0.63s
+```
+还原内容SHA256等于基线：True。
+
+#### M22 A24-disable-pattern-int-seconds
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-int-seconds`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16485
+ISOLATION_OK PID 16485
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `bb55f83af65c060a3b6028a78c7d5d38c7649f984e5c9d265ffc2f4febcbd33b`
+
+```text
+ISOLATION_OK PID 16486
+ISOLATION_OK PID 16486
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[int-seconds] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P2_int_total_seconds'}
+E     
+E     Extra items in the right set:
+E     'P2_int_total_seconds'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[int-seconds]
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16489
+ISOLATION_OK PID 16489
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M23 A24-real-inline-duration-div
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-duration-div`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16494
+ISOLATION_OK PID 16494
+.                                                                        [100%]
+1 passed in 0.67s
+```
+
+injected / exit 1 / SHA256 `d7c8ff9a7f9e099896722f51a74945f546b80b64f535f2b7ca0262f5b190d020`
+
+```text
+ISOLATION_OK PID 16511
+ISOLATION_OK PID 16511
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P3_duratio... interval_s')] == []
+E     
+E     Left contains one more item: ('P3_duration_div', 566, 'market/vision.py:_inline_probe', '(b - a).total_seconds() // interval_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.65s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16522
+ISOLATION_OK PID 16522
+.                                                                        [100%]
+1 passed in 0.69s
+```
+还原内容SHA256等于基线：True。
+
+#### M24 A24-disable-pattern-duration-div
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-duration-div`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16527
+ISOLATION_OK PID 16527
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `ef8ea14f08a2ae8bd9f3a7ef29338b0c649648a17a9e25200f7118a9933a58ea`
+
+```text
+ISOLATION_OK PID 16532
+ISOLATION_OK PID 16532
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[duration-div] ___________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P3_duration_div'}
+E     
+E     Extra items in the right set:
+E     'P3_duration_div'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[duration-div]
+1 failed in 0.19s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16533
+ISOLATION_OK PID 16533
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M25 A24-real-inline-start-or
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-start-or`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16538
+ISOLATION_OK PID 16538
+.                                                                        [100%]
+1 passed in 0.89s
+```
+
+injected / exit 1 / SHA256 `5b2f0731ed9f91e922c98b649a6e41bdfd509920164d76f5ff00c3048d5fdf46`
+
+```text
+ISOLATION_OK PID 16543
+ISOLATION_OK PID 16543
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P4_t_start...r req.t_dec')] == []
+E     
+E     Left contains one more item: ('P4_t_start_or_t_dec', 566, 'market/vision.py:_inline_probe', 'req.t_start or req.t_dec')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.68s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16569
+ISOLATION_OK PID 16569
+.                                                                        [100%]
+1 passed in 0.65s
+```
+还原内容SHA256等于基线：True。
+
+#### M26 A24-disable-pattern-start-or
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-start-or`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16574
+ISOLATION_OK PID 16574
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `fd030c485761268edd0e3366f5ad9ff54fe6313c2fb89de89494361c9144225e`
+
+```text
+ISOLATION_OK PID 16575
+ISOLATION_OK PID 16575
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_lint_gate_fails_on_injected_violation[start-or] _____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P4_t_start_or_t_dec'}
+E     
+E     Extra items in the right set:
+E     'P4_t_start_or_t_dec'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[start-or]
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16579
+ISOLATION_OK PID 16579
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M27 A24-real-inline-expiry-add
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-expiry-add`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16592
+ISOLATION_OK PID 16592
+.                                                                        [100%]
+1 passed in 0.63s
+```
+
+injected / exit 1 / SHA256 `11ffbd653ff7bdac251f76e2190cbd0dbe25fdba295441b5f2271266e7ee7e4d`
+
+```text
+ISOLATION_OK PID 16597
+ISOLATION_OK PID 16597
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P5_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains one more item: ('P5_inline_entry_ttl', 566, 'market/vision.py:_inline_probe', 't + dt.timedelta(seconds=req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.66s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16604
+ISOLATION_OK PID 16604
+.                                                                        [100%]
+1 passed in 0.66s
+```
+还原内容SHA256等于基线：True。
+
+#### M28 A24-disable-pattern-expiry-add
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-expiry-add`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16631
+ISOLATION_OK PID 16631
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `d519d609c831cd527420c10d9cc227715b0927f5d3733da1ec753acfebda7faa`
+
+```text
+ISOLATION_OK PID 16636
+ISOLATION_OK PID 16636
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_lint_gate_fails_on_injected_violation[expiry-add] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P5_inline_entry_ttl'}
+E     
+E     Extra items in the right set:
+E     'P5_inline_entry_ttl'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[expiry-add]
+1 failed in 0.14s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16647
+ISOLATION_OK PID 16647
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M29 A24-real-inline-middle-grid
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-middle-grid`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16652
+ISOLATION_OK PID 16652
+.                                                                        [100%]
+1 passed in 0.64s
+```
+
+injected / exit 1 / SHA256 `4a82ee5c698d826bbbf35216129bb26d80475ea0f21428fe544bda713fbd29f0`
+
+```text
+ISOLATION_OK PID 16666
+ISOLATION_OK PID 16666
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_...- prev > iv')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 566, 'market/vision.py:_inline_probe', 'o - prev > iv')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.69s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16671
+ISOLATION_OK PID 16671
+.                                                                        [100%]
+1 passed in 0.74s
+```
+还原内容SHA256等于基线：True。
+
+#### M30 A24-disable-pattern-middle-grid
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-middle-grid`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16685
+ISOLATION_OK PID 16685
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `095fcb211f4ceab70e4bd1d19417a098fb6e0814412943cdcab568e812cff5be`
+
+```text
+ISOLATION_OK PID 16690
+ISOLATION_OK PID 16690
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[middle-grid] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[middle-grid]
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16692
+ISOLATION_OK PID 16692
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M31 A24-real-inline-tail-grid
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-tail-grid`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16701
+ISOLATION_OK PID 16701
+.                                                                        [100%]
+1 passed in 0.69s
+```
+
+injected / exit 1 / SHA256 `09cd1de0e6648ef44383e0d9c2c080be58406ae600ba395cd47ee05142dd651f`
+
+```text
+ISOLATION_OK PID 16711
+ISOLATION_OK PID 16711
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_... + iv < end')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 566, 'market/vision.py:_inline_probe', 'prev + iv < end')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.68s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16720
+ISOLATION_OK PID 16720
+.                                                                        [100%]
+1 passed in 0.64s
+```
+还原内容SHA256等于基线：True。
+
+#### M32 A24-disable-pattern-tail-grid
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-tail-grid`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16725
+ISOLATION_OK PID 16725
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `095fcb211f4ceab70e4bd1d19417a098fb6e0814412943cdcab568e812cff5be`
+
+```text
+ISOLATION_OK PID 16730
+ISOLATION_OK PID 16730
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_lint_gate_fails_on_injected_violation[tail-grid] _____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[tail-grid]
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16731
+ISOLATION_OK PID 16731
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M33 A24-real-inline-ttl-expression
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-ttl-expression`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16737
+ISOLATION_OK PID 16737
+.                                                                        [100%]
+1 passed in 0.65s
+```
+
+injected / exit 1 / SHA256 `3be936d956d379b3cae352064b6f9173708ec17e03782987ef4a6238f612fdbd`
+
+```text
+ISOLATION_OK PID 16750
+ISOLATION_OK PID 16750
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_inline_probe', 'ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.68s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16778
+ISOLATION_OK PID 16778
+.                                                                        [100%]
+1 passed in 0.69s
+```
+还原内容SHA256等于基线：True。
+
+#### M34 A24-disable-pattern-ttl-expression
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-ttl-expression`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16783
+ISOLATION_OK PID 16783
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531`
+
+```text
+ISOLATION_OK PID 16788
+ISOLATION_OK PID 16788
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________ test_lint_gate_fails_on_injected_violation[ttl-expression] __________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[ttl-expression]
+1 failed in 0.48s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16789
+ISOLATION_OK PID 16789
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M35 A24-real-inline-ttl-branches
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-ttl-branches`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16795
+ISOLATION_OK PID 16795
+.                                                                        [100%]
+1 passed in 0.76s
+```
+
+injected / exit 1 / SHA256 `fcb5b81a0c9ddfdbfecb860ff52782f451d40845e2dfe85a94aaf5805cacb992`
+
+```text
+ISOLATION_OK PID 16801
+ISOLATION_OK PID 16801
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_inline_probe', 'ttl = plan.expiry.entry_ttl_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.67s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 16814
+ISOLATION_OK PID 16814
+.                                                                        [100%]
+1 passed in 0.65s
+```
+还原内容SHA256等于基线：True。
+
+#### M36 A24-disable-pattern-ttl-branches
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-ttl-branches`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16819
+ISOLATION_OK PID 16819
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531`
+
+```text
+ISOLATION_OK PID 16820
+ISOLATION_OK PID 16820
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[ttl-branches] ___________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_lint_gate_fails_on_injected_violation[ttl-branches]
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16821
+ISOLATION_OK PID 16821
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M37 A24-foreign-freeze
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_foreign_hits_registry_is_exact`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-foreign-freeze`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16826
+ISOLATION_OK PID 16826
+.                                                                        [100%]
+1 passed in 0.62s
+```
+
+injected / exit 1 / SHA256 `aab3a308cd0f5ed1985041810867726bece1f79b700687b8a5b6430ead4c1147`
+
+```text
+ISOLATION_OK PID 16831
+ISOLATION_OK PID 16831
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_foreign_hits_registry_is_exact ______________________
+tests/market/test_single_source.py:36: in test_foreign_hits_registry_is_exact
+    assert hits == gate.FOREIGN_HITS
+E   AssertionError: assert set() == {('P3_duratio...m_synthetic')}
+E     
+E     Extra items in the right set:
+E     ('P5_inline_entry_ttl', 'research/api.py:build_inputs_from_synthetic')
+E     ('P3_duration_div', 'research/maxt.py:calendar_blocks')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_foreign_hits_registry_is_exact
+1 failed in 0.64s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 16832
+ISOLATION_OK PID 16832
+.                                                                        [100%]
+1 passed in 0.65s
+```
+还原内容SHA256等于基线：True。
+
+#### M38 S32-build-start-bypass
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S32-build-start-bypass`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 16849
+ISOLATION_OK PID 16849
+..                                                                       [100%]
+2 passed in 0.75s
+```
+
+injected / exit 1 / SHA256 `73e5b37bf438d8a43e089ccd00ad00e022ed135af1c5b0ee02703f1ac84b8950`
+
+```text
+ISOLATION_OK PID 16864
+ISOLATION_OK PID 16864
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['derived_t_s...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "derived_t_start：登记的调用方 ['market/contract.py:build_request'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P1_inline_...licy, ttl))')] == []
+E     
+E     Left contains one more item: ('P1_inline_latency', 539, 'market/contract.py:build_request', 'dt.timedelta(seconds=policy.latency_s + derived_window_s(plan, policy, ttl))')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 0.78s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17011
+ISOLATION_OK PID 17011
+..                                                                       [100%]
+2 passed in 0.77s
+```
+还原内容SHA256等于基线：True。
+
+#### M39 S35-ttl-before
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-before`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17017
+ISOLATION_OK PID 17017
+.                                                                        [100%]
+1 passed in 0.25s
+```
+
+injected / exit 1 / SHA256 `250e2c27a7f6cd156c6b1d7f0aec747ec8f1f54bdb9250fce0e66622dfc0ad2b`
+
+```text
+ISOLATION_OK PID 17022
+ISOLATION_OK PID 17022
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:ExecutionRequest._resolve_ttl'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+1 failed in 0.27s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17098
+ISOLATION_OK PID 17098
+.                                                                        [100%]
+1 passed in 0.29s
+```
+还原内容SHA256等于基线：True。
+
+#### M40 S35-ttl-after
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-after`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17171
+ISOLATION_OK PID 17171
+.                                                                        [100%]
+1 passed in 0.26s
+```
+
+injected / exit 1 / SHA256 `d1a403053ee5edd02c2543fd6cfc638cca2168525bf994532e2197dc7de640bb`
+
+```text
+ISOLATION_OK PID 17177
+ISOLATION_OK PID 17177
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:ExecutionRequest._chk'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+1 failed in 0.27s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17178
+ISOLATION_OK PID 17178
+.                                                                        [100%]
+1 passed in 0.25s
+```
+还原内容SHA256等于基线：True。
+
+#### M41 S35-ttl-builder
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-builder`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17183
+ISOLATION_OK PID 17183
+.                                                                        [100%]
+1 passed in 0.25s
+```
+
+injected / exit 1 / SHA256 `0df5cb109a5ab90545fb6629d25b9c200f227762177e0e77e6b7815a51060162`
+
+```text
+ISOLATION_OK PID 17184
+ISOLATION_OK PID 17184
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:build_request'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+1 failed in 0.27s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17189
+ISOLATION_OK PID 17189
+.                                                                        [100%]
+1 passed in 0.25s
+```
+还原内容SHA256等于基线：True。
+
+#### M42 S35-expiry-A-timeline
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-A-timeline`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17190
+ISOLATION_OK PID 17190
+..                                                                       [100%]
+2 passed in 0.78s
+```
+
+injected / exit 1 / SHA256 `d10dbefdcbf1c0d6b9bfbada42129e502e3d10200b04bc958f18d79a75d5a8ee`
+
+```text
+ISOLATION_OK PID 17201
+ISOLATION_OK PID 17201
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/kernel_a.py:KernelA.timeline'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 222, 'market/kernel_a.py:KernelA.timeline', 'deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 0.77s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17240
+ISOLATION_OK PID 17240
+..                                                                       [100%]
+2 passed in 0.78s
+```
+还原内容SHA256等于基线：True。
+
+#### M43 S35-expiry-A-entries
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-A-entries`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17255
+ISOLATION_OK PID 17255
+..                                                                       [100%]
+2 passed in 1.21s
+```
+
+injected / exit 1 / SHA256 `933409fa62febda37d554f0ccd0d8f4a881b96ddbd86f8932d2feedb671b0339`
+
+```text
+ISOLATION_OK PID 17266
+ISOLATION_OK PID 17266
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/kernel_a.py:KernelA.submit_entries'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 317, 'market/kernel_a.py:KernelA.submit_entries', 'deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 0.92s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17272
+ISOLATION_OK PID 17272
+..                                                                       [100%]
+2 passed in 0.75s
+```
+还原内容SHA256等于基线：True。
+
+#### M44 S35-expiry-B
+
+文件：`src/quant_lab/market/nautilus_adapter.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-B`。
+
+baseline / exit 0 / SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+
+```text
+ISOLATION_OK PID 17285
+ISOLATION_OK PID 17285
+..                                                                       [100%]
+2 passed in 0.76s
+```
+
+injected / exit 1 / SHA256 `abca157a7613de5e72286335d295ec1ea02a3a6bc4d26fe1b039a221f4b9430c`
+
+```text
+ISOLATION_OK PID 17290
+ISOLATION_OK PID 17290
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 226, 'market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries', 'deadline = t_start + dt.timedelta(seconds=req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_single_source_call_sites_match_registry
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 0.75s
+```
+
+restored / exit 0 / SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+
+```text
+ISOLATION_OK PID 17296
+ISOLATION_OK PID 17296
+..                                                                       [100%]
+2 passed in 0.75s
+```
+还原内容SHA256等于基线：True。
+
+#### M45 S37-middle
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-middle`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17302
+ISOLATION_OK PID 17302
+.                                                                        [100%]
+1 passed in 0.62s
+```
+
+injected / exit 0 / SHA256 `561a12ec6b2c2a64877c45445e90e21899cd6f5251aec51b8e4aca69b5fffc71`
+
+```text
+ISOLATION_OK PID 17307
+ISOLATION_OK PID 17307
+.                                                                        [100%]
+1 passed in 0.65s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17316
+ISOLATION_OK PID 17316
+.                                                                        [100%]
+1 passed in 0.68s
+```
+还原内容SHA256等于基线：True。
+
+#### M46 S37-tail
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-tail`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17343
+ISOLATION_OK PID 17343
+.                                                                        [100%]
+1 passed in 0.65s
+```
+
+injected / exit 0 / SHA256 `a220143099e69580a32112ca7df775f3e620121b5f1504bd4cfa0557d3d10e7f`
+
+```text
+ISOLATION_OK PID 17344
+ISOLATION_OK PID 17344
+.                                                                        [100%]
+1 passed in 0.62s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17351
+ISOLATION_OK PID 17351
+.                                                                        [100%]
+1 passed in 1.23s
+```
+还原内容SHA256等于基线：True。
+
+#### M47 A28-partition-count
+
+文件：`src/quant_lab/market/partition_check.py`。选择器：`tests/market/test_single_source.py::test_differential_partition_grid`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-count`。
+
+baseline / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 17374
+ISOLATION_OK PID 17374
+.                                                                        [100%]
+1 passed in 1.96s
+```
+
+injected / exit 1 / SHA256 `9ce967bc18a2cae92142e68b3767d6cefd3321e76c8382657b16b33ac0dd5fba`
+
+```text
+ISOLATION_OK PID 17453
+ISOLATION_OK PID 17453
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:218: in test_differential_partition_grid
+    out, quarantines, report = pc.check_bars(
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_partition_grid
+1 failed in 2.48s
+```
+
+restored / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 17566
+ISOLATION_OK PID 17566
+.                                                                        [100%]
+1 passed in 1.42s
+```
+还原内容SHA256等于基线：True。
+
+#### M48 A28-partition-first
+
+文件：`src/quant_lab/market/partition_check.py`。选择器：`tests/market/test_single_source.py::test_differential_partition_grid`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-first`。
+
+baseline / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 17652
+ISOLATION_OK PID 17652
+.                                                                        [100%]
+1 passed in 1.48s
+```
+
+injected / exit 1 / SHA256 `8c612fd9703614f287dd01afc9fa2977cc5d53dcd914dc06c74133707c395bcc`
+
+```text
+ISOLATION_OK PID 17683
+ISOLATION_OK PID 17683
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:218: in test_differential_partition_grid
+    out, quarantines, report = pc.check_bars(
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_partition_grid
+1 failed in 0.18s
+```
+
+restored / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 17684
+ISOLATION_OK PID 17684
+.                                                                        [100%]
+1 passed in 2.82s
+```
+还原内容SHA256等于基线：True。
+
+#### M49 A28-partition-middle
+
+文件：`src/quant_lab/market/partition_check.py`。选择器：`tests/market/test_single_source.py::test_differential_partition_grid`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-middle`。
+
+baseline / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 17726
+ISOLATION_OK PID 17726
+.                                                                        [100%]
+1 passed in 2.06s
+```
+
+injected / exit 1 / SHA256 `f62b408fc41ee6159e9a1c240e520ba7dc761bfe23177afb43ef991ee6b3aaae`
+
+```text
+ISOLATION_OK PID 17756
+ISOLATION_OK PID 17756
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:238: in test_differential_partition_grid
+    assert out['gap_flag'].to_list() == flags
+E   assert [False, True, True, True] == [False, False, False, False]
+E     
+E     At index 1 diff: True != False
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_partition_grid
+1 failed in 0.90s
+```
+
+restored / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 17764
+ISOLATION_OK PID 17764
+.                                                                        [100%]
+1 passed in 1.40s
+```
+还原内容SHA256等于基线：True。
+
+#### M50 A28-vision-count
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_differential_vision_count`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-vision-count`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 17780
+ISOLATION_OK PID 17780
+.                                                                        [100%]
+1 passed in 0.15s
+```
+
+injected / exit 1 / SHA256 `7b958775ba0a60c66fc580244dad71d04d60dd887eccba4273d9cc57ae1b06ee`
+
+```text
+ISOLATION_OK PID 17782
+ISOLATION_OK PID 17782
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:258: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x10cb70d60>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x10cb70d60> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x10b561da0>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x10b561da0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_vision_count
+1 failed in 0.21s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 17787
+ISOLATION_OK PID 17787
+.                                                                        [100%]
+1 passed in 0.15s
+```
+还原内容SHA256等于基线：True。
+
+#### M51 A28-kernel-first
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_differential_kernel_grid`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-first`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17788
+ISOLATION_OK PID 17788
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `bccd4290969ab0947ba22d3c8bfe57a3275e8477de98641da7cd90f730faf65c`
+
+```text
+ISOLATION_OK PID 17794
+ISOLATION_OK PID 17794
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:289: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) == None
+E    +  where datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10aab00b0>._first_bar_gap
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_grid
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17795
+ISOLATION_OK PID 17795
+.                                                                        [100%]
+1 passed in 0.15s
+```
+还原内容SHA256等于基线：True。
+
+#### M52 A28-kernel-middle
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_differential_kernel_grid`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-middle`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17800
+ISOLATION_OK PID 17800
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `561a12ec6b2c2a64877c45445e90e21899cd6f5251aec51b8e4aca69b5fffc71`
+
+```text
+ISOLATION_OK PID 17801
+ISOLATION_OK PID 17801
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:289: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10a3418b0>._first_bar_gap
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_grid
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17815
+ISOLATION_OK PID 17815
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M53 A28-kernel-tail
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_differential_kernel_grid`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-tail`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17816
+ISOLATION_OK PID 17816
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `a220143099e69580a32112ca7df775f3e620121b5f1504bd4cfa0557d3d10e7f`
+
+```text
+ISOLATION_OK PID 17822
+ISOLATION_OK PID 17822
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:289: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert None == datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc)
+E    +  where None = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x105361700>._first_bar_gap
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_grid
+1 failed in 0.14s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 17834
+ISOLATION_OK PID 17834
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M54 A28-lake-count
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_single_source.py::test_differential_lake_grid`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-lake-count`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 17847
+ISOLATION_OK PID 17847
+.                                                                        [100%]
+1 passed in 1.43s
+```
+
+injected / exit 1 / SHA256 `fd3eca0318b42f2feb50e3be93752c649eb9ea977fc410dcd1286b2da0a72d9b`
+
+```text
+ISOLATION_OK PID 17856
+ISOLATION_OK PID 17856
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________________ test_differential_lake_grid __________________________
+tests/market/test_single_source.py:344: in test_differential_lake_grid
+    assert market.bars_complete == (present == set(expected) and not off_grid)
+E   AssertionError: assert False == (({datetime.dat...timezone.utc)} == {datetime.dat...timezone.utc)}
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59... 4 根，实际 5 根合法唯一网格 bar（原始 5 行）', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete
+E     
+E     Use -v to get more diff and not set()))
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_grid
+1 failed in 0.19s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 17857
+ISOLATION_OK PID 17857
+.                                                                        [100%]
+1 passed in 1.19s
+```
+还原内容SHA256等于基线：True。
+
+#### M55 A28-lake-start
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_single_source.py::test_differential_start`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-lake-start`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 17870
+ISOLATION_OK PID 17870
+.                                                                        [100%]
+1 passed in 1.20s
+```
+
+injected / exit 1 / SHA256 `147a05e42c56268a5ae01b9e7ae49a352b6127215734fe57b726ad1785403f55`
+
+```text
+ISOLATION_OK PID 17883
+ISOLATION_OK PID 17883
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:388: in test_differential_start
+    assert actual.bars_complete
+E   AssertionError: assert False
+E    +  where False = MarketView(manifest_id='a28', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=da... 4 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_start
+1 failed in 0.39s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 17888
+ISOLATION_OK PID 17888
+.                                                                        [100%]
+1 passed in 1.17s
+```
+还原内容SHA256等于基线：True。
+
+#### M56 A28-start-validator
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_start`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-validator`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17894
+ISOLATION_OK PID 17894
+.                                                                        [100%]
+1 passed in 1.50s
+```
+
+injected / exit 1 / SHA256 `b194a886107374696d1f95646ac587854160cfad9fd6b9cb8335f378fd67b97e`
+
+```text
+ISOLATION_OK PID 17950
+ISOLATION_OK PID 17950
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:374: in test_differential_start
+    req = _build(_plan(), t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:464: in _chk
+    raise ContractError("t_start 不能早于 t_dec（解析后的启动时刻）")
+E   quant_lab.market.contract.ContractError: t_start 不能早于 t_dec（解析后的启动时刻）
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_start
+1 failed in 0.23s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 17967
+ISOLATION_OK PID 17967
+.                                                                        [100%]
+1 passed in 1.10s
+```
+还原内容SHA256等于基线：True。
+
+#### M57 A28-start-resolver
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_start`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-resolver`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18086
+ISOLATION_OK PID 18086
+.                                                                        [100%]
+1 passed in 0.94s
+```
+
+injected / exit 1 / SHA256 `6b7c2889234ddd54cc81425074864054cfd978c1a370e07608df2b7a4fec6653`
+
+```text
+ISOLATION_OK PID 18093
+ISOLATION_OK PID 18093
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:375: in test_differential_start
+    assert req.resolved_t_start(policy) == start
+E   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 58, 59, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 31, 23, 58, 59, tzinfo=datetime.timezone.utc) = resolved_t_start(ExecutionPolicy(version='a28-input', latency_s=0, ladder_steps=2, costs={'base': CostSpec(maker_fee=Decimal('0'), take...zon_s=432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')))
+E    +    where resolved_t_start = ExecutionRequest(episode_id='E03', graph_version='gv-fixture', decision_snapshot_hash='dsh-E03', t_dec=datetime.dateti...e='one_way', entry_ttl_s=86400, entry_fractions=(Decimal('1'),), tp_fractions=(Decimal('1'),), horizon_source='policy').resolved_t_start
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_start
+1 failed in 0.55s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18099
+ISOLATION_OK PID 18099
+.                                                                        [100%]
+1 passed in 1.43s
+```
+还原内容SHA256等于基线：True。
+
+#### M58 A28-start-builder
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_start`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-builder`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18264
+ISOLATION_OK PID 18264
+.                                                                        [100%]
+1 passed in 1.09s
+```
+
+injected / exit 1 / SHA256 `421af52edf02d96b1be61a57c2acded47681af5371c149c2b0bf9ed73f5c9454`
+
+```text
+ISOLATION_OK PID 18270
+ISOLATION_OK PID 18270
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:374: in test_differential_start
+    req = _build(_plan(), t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:493: in _chk
+    raise ContractError(f"horizon_source=policy 但 horizon_end 与推导值不一致：窗口 {window} != {dt.timedelta(seconds=derived_s)}"
+E   quant_lab.market.contract.ContractError: horizon_source=policy 但 horizon_end 与推导值不一致：窗口 5 days, 23:59:59.000001 != 6 days, 0:00:00（自选观察窗请显式标 horizon_source='caller'，它会进 trace_hash 并由 G3 记入尝试账本）
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_start
+1 failed in 0.37s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18275
+ISOLATION_OK PID 18275
+.                                                                        [100%]
+1 passed in 1.84s
+```
+还原内容SHA256等于基线：True。
+
+#### M59 A28-start-lower-bound
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_start`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-lower-bound`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18296
+ISOLATION_OK PID 18296
+.                                                                        [100%]
+1 passed in 1.66s
+```
+
+injected / exit 1 / SHA256 `1e5e8b8badf409666a61e8f32477bf3bc1f3d4eda2a403aa42b0c0617950222e`
+
+```text
+ISOLATION_OK PID 18328
+ISOLATION_OK PID 18328
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:397: in test_differential_start
+    assert _accepts(data) == (valid_spelling and data['horizon_end'] > start)
+E   AssertionError: assert True == ((True and datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) > datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc)))
+E    +  where True = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_start
+1 failed in 0.19s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18329
+ISOLATION_OK PID 18329
+.                                                                        [100%]
+1 passed in 1.37s
+```
+还原内容SHA256等于基线：True。
+
+#### M60 A28-window-validator
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_window`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-validator`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18344
+ISOLATION_OK PID 18344
+.                                                                        [100%]
+1 passed in 0.22s
+```
+
+injected / exit 1 / SHA256 `1e8f7f3ccb3d4c48c7583b2cda736e2ac417f76f31567c69969dd0b3376ebe9c`
+
+```text
+ISOLATION_OK PID 18345
+ISOLATION_OK PID 18345
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:423: in test_differential_window
+    assert _accepts(data) == want
+E   AssertionError: assert True == False
+E    +  where True = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_window
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18350
+ISOLATION_OK PID 18350
+.                                                                        [100%]
+1 passed in 0.23s
+```
+还原内容SHA256等于基线：True。
+
+#### M61 A28-window-builder
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_window`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-builder`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18358
+ISOLATION_OK PID 18358
+.                                                                        [100%]
+1 passed in 0.23s
+```
+
+injected / exit 1 / SHA256 `d2c0a0271cb19a80a6963a052d5a555c54ce93081300d9f9261348ae3c480952`
+
+```text
+ISOLATION_OK PID 18363
+ISOLATION_OK PID 18363
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:412: in test_differential_window
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:489: in _chk
+    raise ContractError(f"观察窗 {window} 超过 policy {self.policy_version} 的安全上限 "
+E   quant_lab.market.contract.ContractError: 观察窗 4 days, 15:07:40 超过 policy a28-input 的安全上限 max_horizon_s=400000s（亚秒偏移同样超限）
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_window
+1 failed in 0.18s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18373
+ISOLATION_OK PID 18373
+.                                                                        [100%]
+1 passed in 0.22s
+```
+还原内容SHA256等于基线：True。
+
+#### M62 A28-window-derived-validator
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_window`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-derived-validator`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18378
+ISOLATION_OK PID 18378
+.                                                                        [100%]
+1 passed in 0.22s
+```
+
+injected / exit 1 / SHA256 `24cd58ea7430a2afb8a8eb97c51677f6f4d39bf1998e77c3b466463de6a3ff9c`
+
+```text
+ISOLATION_OK PID 18379
+ISOLATION_OK PID 18379
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:412: in test_differential_window
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:493: in _chk
+    raise ContractError(f"horizon_source=policy 但 horizon_end 与推导值不一致：窗口 {window} != {dt.timedelta(seconds=derived_s)}"
+E   quant_lab.market.contract.ContractError: horizon_source=policy 但 horizon_end 与推导值不一致：窗口 0:03:03 != 4 days, 15:07:40（自选观察窗请显式标 horizon_source='caller'，它会进 trace_hash 并由 G3 记入尝试账本）
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_window
+1 failed in 0.19s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18525
+ISOLATION_OK PID 18525
+.                                                                        [100%]
+1 passed in 0.23s
+```
+还原内容SHA256等于基线：True。
+
+#### M63 A28-ttl-before
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_ttl`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-before`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18531
+ISOLATION_OK PID 18531
+.                                                                        [100%]
+1 passed in 0.15s
+```
+
+injected / exit 1 / SHA256 `250e2c27a7f6cd156c6b1d7f0aec747ec8f1f54bdb9250fce0e66622dfc0ad2b`
+
+```text
+ISOLATION_OK PID 18538
+ISOLATION_OK PID 18538
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:448: in test_differential_ttl
+    assert _accepts(data) == want
+E   AssertionError: assert False == True
+E    +  where False = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_ttl
+1 failed in 0.20s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18543
+ISOLATION_OK PID 18543
+.                                                                        [100%]
+1 passed in 0.16s
+```
+还原内容SHA256等于基线：True。
+
+#### M64 A28-ttl-validator
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_ttl`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-validator`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18548
+ISOLATION_OK PID 18548
+.                                                                        [100%]
+1 passed in 0.15s
+```
+
+injected / exit 1 / SHA256 `d1a403053ee5edd02c2543fd6cfc638cca2168525bf994532e2197dc7de640bb`
+
+```text
+ISOLATION_OK PID 18554
+ISOLATION_OK PID 18554
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:439: in test_differential_ttl
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:483: in _chk
+    raise ContractError(f"entry_ttl_s 与{src}解析值不一致：{self.entry_ttl_s} != {exp_ttl}")
+E   quant_lab.market.contract.ContractError: entry_ttl_s 与计划解析值不一致：1 != 321
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_ttl
+1 failed in 0.18s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18562
+ISOLATION_OK PID 18562
+.                                                                        [100%]
+1 passed in 0.17s
+```
+还原内容SHA256等于基线：True。
+
+#### M65 A28-ttl-builder
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_differential_ttl`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-builder`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18578
+ISOLATION_OK PID 18578
+.                                                                        [100%]
+1 passed in 0.15s
+```
+
+injected / exit 1 / SHA256 `0df5cb109a5ab90545fb6629d25b9c200f227762177e0e77e6b7815a51060162`
+
+```text
+ISOLATION_OK PID 18579
+ISOLATION_OK PID 18579
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:439: in test_differential_ttl
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut/src/quant_lab/market/contract.py:483: in _chk
+    raise ContractError(f"entry_ttl_s 与{src}解析值不一致：{self.entry_ttl_s} != {exp_ttl}")
+E   quant_lab.market.contract.ContractError: entry_ttl_s 与计划解析值不一致：321 != 1
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_ttl
+1 failed in 0.18s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 18584
+ISOLATION_OK PID 18584
+.                                                                        [100%]
+1 passed in 0.17s
+```
+还原内容SHA256等于基线：True。
+
+#### M66 A28-expiry-timeline
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_differential_expiry_timeline`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-timeline`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 18585
+ISOLATION_OK PID 18585
+.                                                                        [100%]
+1 passed in 0.16s
+```
+
+injected / exit 1 / SHA256 `c457948f7ee6c7853ffe080fd135072c9ca4a2cf9ef30e927c51ad6a19693be7`
+
+```text
+ISOLATION_OK PID 18590
+ISOLATION_OK PID 18590
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_differential_expiry_timeline _______________________
+tests/market/test_single_source.py:480: in test_differential_expiry_timeline
+    assert [moment.ts for moment in moments if moment.expiry] == expected
+E   assert [datetime.dat...timezone.utc)] == []
+E     
+E     Left contains one more item: datetime.datetime(2024, 2, 1, 0, 1, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_expiry_timeline
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 18591
+ISOLATION_OK PID 18591
+.                                                                        [100%]
+1 passed in 0.15s
+```
+还原内容SHA256等于基线：True。
+
+#### M67 A28-expiry-timeline-bound
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_differential_expiry_timeline`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-timeline-bound`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 18599
+ISOLATION_OK PID 18599
+.                                                                        [100%]
+1 passed in 0.15s
+```
+
+injected / exit 1 / SHA256 `43b0ef3f8793b59124ae93c21e44ca5fb916d622e364165401bbac6cdd32d17d`
+
+```text
+ISOLATION_OK PID 18602
+ISOLATION_OK PID 18602
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_differential_expiry_timeline _______________________
+tests/market/test_single_source.py:480: in test_differential_expiry_timeline
+    assert [moment.ts for moment in moments if moment.expiry] == expected
+E   assert [] == [datetime.dat...timezone.utc)]
+E     
+E     Right contains one more item: datetime.datetime(2024, 2, 1, 0, 1, 0, 999999, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_expiry_timeline
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 18603
+ISOLATION_OK PID 18603
+.                                                                        [100%]
+1 passed in 0.16s
+```
+还原内容SHA256等于基线：True。
+
+#### M68 A28-expiry-orders
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_differential_expiry_orders`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-orders`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 18610
+ISOLATION_OK PID 18610
+.                                                                        [100%]
+1 passed in 0.16s
+```
+
+injected / exit 1 / SHA256 `699a5ea5ec065b8d861e7d083e9033cc3b9bd4ae55fcb7104af5928aa0274d06`
+
+```text
+ISOLATION_OK PID 18756
+ISOLATION_OK PID 18756
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_expiry_orders ________________________
+tests/market/test_single_source.py:490: in test_differential_expiry_orders
+    assert [order.deadline for order in orders] == [expiry] * len(orders)
+E   assert [datetime.dat...timezone.utc)] == [datetime.dat...timezone.utc)]
+E     
+E     At index 0 diff: datetime.datetime(2024, 2, 1, 0, 1, tzinfo=datetime.timezone.utc) != datetime.datetime(2024, 2, 1, 0, 1, 0, 999999, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_expiry_orders
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 18762
+ISOLATION_OK PID 18762
+.                                                                        [100%]
+1 passed in 0.15s
+```
+还原内容SHA256等于基线：True。
+
+#### M69 A28-expiry-b
+
+文件：`src/quant_lab/market/nautilus_adapter.py`。选择器：`tests/market/test_single_source.py::test_differential_expiry_b`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-b`。
+
+baseline / exit 0 / SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+
+```text
+ISOLATION_OK PID 18763
+ISOLATION_OK PID 18763
+.                                                                        [100%]
+1 passed in 0.85s
+```
+
+injected / exit 1 / SHA256 `93508dd01932ee32e33966c8fb8d6220995c1c0e55245a7106def6830e4b8bd6`
+
+```text
+ISOLATION_OK PID 18771
+ISOLATION_OK PID 18771
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________ test_differential_expiry_b __________________________
+tests/market/test_single_source.py:515: in test_differential_expiry_b
+    assert expired[0].reason == 'horizon_end'
+E   AssertionError: assert 'entry_ttl' == 'horizon_end'
+E     
+E     - horizon_end
+E     + entry_ttl
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_expiry_b
+1 failed in 0.89s
+```
+
+restored / exit 0 / SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+
+```text
+ISOLATION_OK PID 18780
+ISOLATION_OK PID 18780
+.                                                                        [100%]
+1 passed in 1.20s
+```
+还原内容SHA256等于基线：True。
+
+#### M70 A28-expiry-b-bound
+
+文件：`src/quant_lab/market/nautilus_adapter.py`。选择器：`tests/market/test_single_source.py::test_differential_expiry_b`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-b-bound`。
+
+baseline / exit 0 / SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+
+```text
+ISOLATION_OK PID 18802
+ISOLATION_OK PID 18802
+.                                                                        [100%]
+1 passed in 0.85s
+```
+
+injected / exit 1 / SHA256 `4074659c55f2818731864050c5c15d5cfda38b9137a541b1ae42e64111f32fe1`
+
+```text
+ISOLATION_OK PID 18827
+ISOLATION_OK PID 18827
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________ test_differential_expiry_b __________________________
+tests/market/test_single_source.py:513: in test_differential_expiry_b
+    assert expired[0].reason == 'entry_ttl'
+E   AssertionError: assert 'horizon_end' == 'entry_ttl'
+E     
+E     - entry_ttl
+E     + horizon_end
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_expiry_b
+1 failed in 0.77s
+```
+
+restored / exit 0 / SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+
+```text
+ISOLATION_OK PID 18845
+ISOLATION_OK PID 18845
+.                                                                        [100%]
+1 passed in 0.85s
+```
+还原内容SHA256等于基线：True。
+
+#### M71 P7-disable-annotated
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-annotated`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 18854
+ISOLATION_OK PID 18854
+.                                                                        [100%]
+1 passed in 0.15s
+```
+
+injected / exit 1 / SHA256 `1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531`
+
+```text
+ISOLATION_OK PID 18855
+ISOLATION_OK PID 18855
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_ttl_standard_nodes[annotated] ______________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_ttl_standard_nodes[annotated]
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 18865
+ISOLATION_OK PID 18865
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M72 P7-disable-augmented
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-augmented`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 18873
+ISOLATION_OK PID 18873
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531`
+
+```text
+ISOLATION_OK PID 18874
+ISOLATION_OK PID 18874
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_ttl_standard_nodes[augmented] ______________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_ttl_standard_nodes[augmented]
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 18880
+ISOLATION_OK PID 18880
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M73 P7-disable-named
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_ttl_standard_nodes[named]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-named`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 18881
+ISOLATION_OK PID 18881
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+injected / exit 1 / SHA256 `1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531`
+
+```text
+ISOLATION_OK PID 18886
+ISOLATION_OK PID 18886
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_ttl_standard_nodes[named] ________________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_ttl_standard_nodes[named]
+1 failed in 0.17s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 18888
+ISOLATION_OK PID 18888
+.                                                                        [100%]
+1 passed in 0.14s
+```
+还原内容SHA256等于基线：True。
+
+#### M74 P7-disable-return
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_ttl_standard_nodes[return]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-return`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19029
+ISOLATION_OK PID 19029
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531`
+
+```text
+ISOLATION_OK PID 19032
+ISOLATION_OK PID 19032
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_ttl_standard_nodes[return] ________________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_ttl_standard_nodes[return]
+1 failed in 0.15s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19037
+ISOLATION_OK PID 19037
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M75 P7-disable-comprehension
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-comprehension`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19038
+ISOLATION_OK PID 19038
+.                                                                        [100%]
+1 passed in 0.21s
+```
+
+injected / exit 1 / SHA256 `1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531`
+
+```text
+ISOLATION_OK PID 19045
+ISOLATION_OK PID 19045
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________ test_ttl_standard_nodes[comprehension] ____________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_ttl_standard_nodes[comprehension]
+1 failed in 0.14s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19053
+ISOLATION_OK PID 19053
+.                                                                        [100%]
+1 passed in 0.18s
+```
+还原内容SHA256等于基线：True。
+
+#### M76 P7-disable-return-field
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-return-field`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19063
+ISOLATION_OK PID 19063
+.                                                                        [100%]
+1 passed in 0.17s
+```
+
+injected / exit 1 / SHA256 `1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531`
+
+```text
+ISOLATION_OK PID 19079
+ISOLATION_OK PID 19079
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________ test_ttl_standard_nodes[return-field] _____________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_ttl_standard_nodes[return-field]
+1 failed in 0.16s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19081
+ISOLATION_OK PID 19081
+.                                                                        [100%]
+1 passed in 0.13s
+```
+还原内容SHA256等于基线：True。
+
+#### M77 P6-defuse-delta = o - prev
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta = o - prev'`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19089
+ISOLATION_OK PID 19089
+.                                                                        [100%]
+1 passed in 0.15s
+```
+
+injected / exit 1 / SHA256 `d2238c2948f5ad7261542b0c03da6dea108f8fdbd90d898f98ed401424d96e81`
+
+```text
+ISOLATION_OK PID 19091
+ISOLATION_OK PID 19091
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_grid_local_definition[delta = o - prev] _________________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_grid_local_definition[delta = o - prev]
+1 failed in 0.19s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19106
+ISOLATION_OK PID 19106
+.                                                                        [100%]
+1 passed in 0.17s
+```
+还原内容SHA256等于基线：True。
+
+#### M78 P6-defuse-delta: int = o - prev
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta: int = o - prev'`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19248
+ISOLATION_OK PID 19248
+.                                                                        [100%]
+1 passed in 0.14s
+```
+
+injected / exit 1 / SHA256 `d2238c2948f5ad7261542b0c03da6dea108f8fdbd90d898f98ed401424d96e81`
+
+```text
+ISOLATION_OK PID 19251
+ISOLATION_OK PID 19251
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_grid_local_definition[delta: int = o - prev] _______________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_grid_local_definition[delta: int = o - prev]
+1 failed in 0.29s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19263
+ISOLATION_OK PID 19263
+.                                                                        [100%]
+1 passed in 0.21s
+```
+还原内容SHA256等于基线：True。
+
+#### M79 P6-defuse-delta -= prev
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta -= prev'`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19276
+ISOLATION_OK PID 19276
+.                                                                        [100%]
+1 passed in 0.24s
+```
+
+injected / exit 1 / SHA256 `d2238c2948f5ad7261542b0c03da6dea108f8fdbd90d898f98ed401424d96e81`
+
+```text
+ISOLATION_OK PID 19282
+ISOLATION_OK PID 19282
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________ test_grid_local_definition[delta -= prev] ___________________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_grid_local_definition[delta -= prev]
+1 failed in 0.29s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19288
+ISOLATION_OK PID 19288
+.                                                                        [100%]
+1 passed in 0.29s
+```
+还原内容SHA256等于基线：True。
+
+#### M80 augmented-duration-augmented
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' augmented-duration-augmented`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19293
+ISOLATION_OK PID 19293
+.                                                                        [100%]
+1 passed in 0.19s
+```
+
+injected / exit 1 / SHA256 `ef8ea14f08a2ae8bd9f3a7ef29338b0c649648a17a9e25200f7118a9933a58ea`
+
+```text
+ISOLATION_OK PID 19298
+ISOLATION_OK PID 19298
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_augmented_binary_patterns[duration-augmented] ______________
+tests/market/test_single_source.py:115: in test_augmented_binary_patterns
+    assert {p for p, _, _, _ in lint.hits} == {pattern}
+E   AssertionError: assert set() == {'P3_duration_div'}
+E     
+E     Extra items in the right set:
+E     'P3_duration_div'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_augmented_binary_patterns[duration-augmented]
+1 failed in 0.26s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19303
+ISOLATION_OK PID 19303
+.                                                                        [100%]
+1 passed in 0.22s
+```
+还原内容SHA256等于基线：True。
+
+#### M81 augmented-expiry-augmented
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' augmented-expiry-augmented`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19322
+ISOLATION_OK PID 19322
+.                                                                        [100%]
+1 passed in 0.22s
+```
+
+injected / exit 1 / SHA256 `d519d609c831cd527420c10d9cc227715b0927f5d3733da1ec753acfebda7faa`
+
+```text
+ISOLATION_OK PID 19332
+ISOLATION_OK PID 19332
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_augmented_binary_patterns[expiry-augmented] _______________
+tests/market/test_single_source.py:115: in test_augmented_binary_patterns
+    assert {p for p, _, _, _ in lint.hits} == {pattern}
+E   AssertionError: assert set() == {'P5_inline_entry_ttl'}
+E     
+E     Extra items in the right set:
+E     'P5_inline_entry_ttl'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_augmented_binary_patterns[expiry-augmented]
+1 failed in 0.23s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 19337
+ISOLATION_OK PID 19337
+.                                                                        [100%]
+1 passed in 0.29s
+```
+还原内容SHA256等于基线：True。
+
+#### M82 S40-middle-split-bypass
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S40-middle-split-bypass`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 19342
+ISOLATION_OK PID 19342
+................................................                         [100%]
+48 passed in 19.43s
+```
+
+injected / exit 1 / SHA256 `561a12ec6b2c2a64877c45445e90e21899cd6f5251aec51b8e4aca69b5fffc71`
+
+```text
+ISOLATION_OK PID 19823
+ISOLATION_OK PID 19823
+............................F.........F..F......                         [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:289: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10c5ace30>._first_bar_gap
+__________ test_differential_kernel_public_interior_bar[bars_last-1] ___________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_mark-1] ___________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_grid
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_last-1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_mark-1]
+3 failed, 45 passed in 28.68s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 20105
+ISOLATION_OK PID 20105
+................................................                         [100%]
+48 passed in 24.36s
+```
+还原内容SHA256等于基线：True。
+
+#### M83 S41-annotated-ttl
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S41-annotated-ttl`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 20314
+ISOLATION_OK PID 20314
+................................................                         [100%]
+48 passed in 19.66s
+```
+
+injected / exit 1 / SHA256 `7be204eac4b97c9c03a3756daf28fa91f311f4ff78770ce8cbd9b03419a9dc6d`
+
+```text
+ISOLATION_OK PID 20716
+ISOLATION_OK PID 20716
+.F..............................................                         [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_audit_ttl', 'ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed, 47 passed in 17.15s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 20873
+ISOLATION_OK PID 20873
+................................................                         [100%]
+48 passed in 25.11s
+```
+还原内容SHA256等于基线：True。
+
+#### M84 S42-kernel-truncate-open
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S42-kernel-truncate-open`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 21339
+ISOLATION_OK PID 21339
+................................................                         [100%]
+48 passed in 21.60s
+```
+
+injected / exit 1 / SHA256 `7b89a662c108d1d7d1c0f46531b3bd182672842f82984f1fcef605422375c06b`
+
+```text
+ISOLATION_OK PID 21970
+ISOLATION_OK PID 21970
+............................F.........F..F......                         [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:289: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert None == datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc)
+E    +  where None = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10b3a5fa0>._first_bar_gap
+__________ test_differential_kernel_public_interior_bar[bars_last-1] ___________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_mark-1] ___________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_grid
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_last-1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_mark-1]
+3 failed, 45 passed in 19.20s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 22283
+ISOLATION_OK PID 22283
+................................................                         [100%]
+48 passed in 14.44s
+```
+还原内容SHA256等于基线：True。
+
+#### M85 NEW-kernel-accept-missing
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_differential_kernel_grid`, `tests/market/test_single_source.py::test_differential_kernel_public_interior_bar`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-kernel-accept-missing`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 22476
+ISOLATION_OK PID 22476
+.......                                                                  [100%]
+7 passed in 0.39s
+```
+
+injected / exit 1 / SHA256 `2760c52fd86e34f85a7a7f926bdd6c31edb50a726420ee9879d5bf251c6f6068`
+
+```text
+ISOLATION_OK PID 22482
+ISOLATION_OK PID 22482
+FF.FF.F                                                                  [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:289: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10811c530>._first_bar_gap
+__________ test_differential_kernel_public_interior_bar[bars_last--1] __________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_last-1] ___________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_mark--1] __________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_mark-1] ___________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_grid
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_last--1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_last-1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_mark--1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_mark-1]
+5 failed, 2 passed in 0.50s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 22488
+ISOLATION_OK PID 22488
+.......                                                                  [100%]
+7 passed in 0.40s
+```
+还原内容SHA256等于基线：True。
+
+#### M86 NEW-kernel-reject-aligned
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_differential_kernel_public_interior_bar`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-kernel-reject-aligned`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 22512
+ISOLATION_OK PID 22512
+......                                                                   [100%]
+6 passed in 0.30s
+```
+
+injected / exit 1 / SHA256 `4e9db5bc371c152032fbb9192666265d5742dace94ec22a1dfb2263d3a06c766`
+
+```text
+ISOLATION_OK PID 22541
+ISOLATION_OK PID 22541
+FFFFFF                                                                   [100%]
+=================================== FAILURES ===================================
+__________ test_differential_kernel_public_interior_bar[bars_last--1] __________
+tests/market/test_single_source.py:547: in test_differential_kernel_public_interior_bar
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 1, 3, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10bd7f0e0>._first_bar_gap
+E    +    and   [Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)] = getattr(MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...ne, effective_to=None), rules_known=True, bars_complete=True, bars_quality_ok=True, manifest_refs=[], quality_notes=[]), 'bars_last')
+__________ test_differential_kernel_public_interior_bar[bars_last-0] ___________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'BAR_GAP' == 'LABEL_RIGHT_CENSORED'
+E     
+E     - LABEL_RIGHT_CENSORED
+E     + BAR_GAP
+__________ test_differential_kernel_public_interior_bar[bars_last-1] ___________
+tests/market/test_single_source.py:547: in test_differential_kernel_public_interior_bar
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 1, 3, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10bfb25d0>._first_bar_gap
+E    +    and   [Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)] = getattr(MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...ne, effective_to=None), rules_known=True, bars_complete=True, bars_quality_ok=True, manifest_refs=[], quality_notes=[]), 'bars_last')
+__________ test_differential_kernel_public_interior_bar[bars_mark--1] __________
+tests/market/test_single_source.py:547: in test_differential_kernel_public_interior_bar
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 1, 3, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10bfb2b40>._first_bar_gap
+E    +    and   [Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)] = getattr(MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...ne, effective_to=None), rules_known=True, bars_complete=True, bars_quality_ok=True, manifest_refs=[], quality_notes=[]), 'bars_mark')
+__________ test_differential_kernel_public_interior_bar[bars_mark-0] ___________
+tests/market/test_single_source.py:545: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'BAR_GAP' == 'LABEL_RIGHT_CENSORED'
+E     
+E     - LABEL_RIGHT_CENSORED
+E     + BAR_GAP
+__________ test_differential_kernel_public_interior_bar[bars_mark-1] ___________
+tests/market/test_single_source.py:547: in test_differential_kernel_public_interior_bar
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 1, 3, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10c079580>._first_bar_gap
+E    +    and   [Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)] = getattr(MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...ne, effective_to=None), rules_known=True, bars_complete=True, bars_quality_ok=True, manifest_refs=[], quality_notes=[]), 'bars_mark')
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_last--1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_last-0]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_last-1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_mark--1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_mark-0]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_kernel_public_interior_bar[bars_mark-1]
+6 failed in 0.81s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 22563
+ISOLATION_OK PID 22563
+......                                                                   [100%]
+6 passed in 0.26s
+```
+还原内容SHA256等于基线：True。
+
+#### M87 NEW-loader-truncate
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_single_source.py::test_differential_lake_grid`, `tests/market/test_single_source.py::test_differential_lake_public_interior_bar`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-loader-truncate`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 22570
+ISOLATION_OK PID 22570
+.......                                                                  [100%]
+7 passed in 5.04s
+```
+
+injected / exit 1 / SHA256 `cd7a326db5d8d853dd9449d3d1eb3be1c3d4141efc49fa9f13538adf8456417c`
+
+```text
+ISOLATION_OK PID 22625
+ISOLATION_OK PID 22625
+FF.FF.F                                                                  [100%]
+=================================== FAILURES ===================================
+_________________________ test_differential_lake_grid __________________________
+tests/market/test_single_source.py:347: in test_differential_lake_grid
+    assert any("off-grid" in note and opened.isoformat() in note for note in market.quality_notes)
+E   assert False
+E    +  where False = any(<generator object test_differential_lake_grid.<locals>.<genexpr> at 0x10a8a8930>)
+____________ test_differential_lake_public_interior_bar[klines--1] _____________
+tests/market/test_single_source.py:570: in test_differential_lake_public_interior_bar
+    assert any(stream in note and opens[1].isoformat() in note for note in market.quality_notes)
+E   assert False
+E    +  where False = any(<generator object test_differential_lake_public_interior_bar.<locals>.<genexpr> at 0x10a887a00>)
+_____________ test_differential_lake_public_interior_bar[klines-1] _____________
+tests/market/test_single_source.py:566: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+________ test_differential_lake_public_interior_bar[markPriceKlines--1] ________
+tests/market/test_single_source.py:570: in test_differential_lake_public_interior_bar
+    assert any(stream in note and opens[1].isoformat() in note for note in market.quality_notes)
+E   assert False
+E    +  where False = any(<generator object test_differential_lake_public_interior_bar.<locals>.<genexpr> at 0x1100526c0>)
+________ test_differential_lake_public_interior_bar[markPriceKlines-1] _________
+tests/market/test_single_source.py:566: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_grid
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[klines--1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[klines-1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[markPriceKlines--1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[markPriceKlines-1]
+5 failed, 2 passed in 2.88s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 22683
+ISOLATION_OK PID 22683
+.......                                                                  [100%]
+7 passed in 4.44s
+```
+还原内容SHA256等于基线：True。
+
+#### M88 NEW-loader-count-only
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_single_source.py::test_differential_lake_grid`, `tests/market/test_single_source.py::test_differential_lake_public_interior_bar`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-loader-count-only`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 22763
+ISOLATION_OK PID 22763
+.......                                                                  [100%]
+7 passed in 5.40s
+```
+
+injected / exit 1 / SHA256 `a779f7256ae06479cfccaf1629152fd2b9f879cfc7def238f957d48e95ec6b02`
+
+```text
+ISOLATION_OK PID 22832
+ISOLATION_OK PID 22832
+FF.FF.F                                                                  [100%]
+=================================== FAILURES ===================================
+_________________________ test_differential_lake_grid __________________________
+tests/market/test_single_source.py:344: in test_differential_lake_grid
+    assert market.bars_complete == (present == set(expected) and not off_grid)
+E   AssertionError: assert True == (({datetime.dat...timezone.utc)} == {datetime.dat...timezone.utc)}
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59... time; archive calc_time only', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete
+E     
+E     Extra items in the right set:
+E     datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff))
+____________ test_differential_lake_public_interior_bar[klines--1] _____________
+tests/market/test_single_source.py:566: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (-1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+_____________ test_differential_lake_public_interior_bar[klines-1] _____________
+tests/market/test_single_source.py:566: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+________ test_differential_lake_public_interior_bar[markPriceKlines--1] ________
+tests/market/test_single_source.py:566: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (-1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+________ test_differential_lake_public_interior_bar[markPriceKlines-1] _________
+tests/market/test_single_source.py:566: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_grid
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[klines--1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[klines-1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[markPriceKlines--1]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[markPriceKlines-1]
+5 failed, 2 passed in 2.16s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 22885
+ISOLATION_OK PID 22885
+.......                                                                  [100%]
+7 passed in 5.56s
+```
+还原内容SHA256等于基线：True。
+
+#### M89 NEW-loader-reject-aligned
+
+文件：`src/quant_lab/market/execution.py`。选择器：`tests/market/test_single_source.py::test_differential_lake_public_interior_bar`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-loader-reject-aligned`。
+
+baseline / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 22926
+ISOLATION_OK PID 22926
+......                                                                   [100%]
+6 passed in 0.57s
+```
+
+injected / exit 1 / SHA256 `b31e98bfa630d116dcf3260dbf1453fc5312c465fd720866477f6fa96d4857a9`
+
+```text
+ISOLATION_OK PID 22961
+ISOLATION_OK PID 22961
+.F..F.                                                                   [100%]
+=================================== FAILURES ===================================
+_____________ test_differential_lake_public_interior_bar[klines-0] _____________
+tests/market/test_single_source.py:566: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert False == (0 == 0)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...，实际 3 根合法唯一网格 bar（原始 3 行）', 'markPriceKlines 期望 4 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'manifest missing fundingRate 2024-01']).bars_complete
+________ test_differential_lake_public_interior_bar[markPriceKlines-0] _________
+tests/market/test_single_source.py:566: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert False == (0 == 0)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...，实际 3 根合法唯一网格 bar（原始 3 行）', 'markPriceKlines 期望 4 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'manifest missing fundingRate 2024-01']).bars_complete
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[klines-0]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_differential_lake_public_interior_bar[markPriceKlines-0]
+2 failed, 4 passed in 0.65s
+```
+
+restored / exit 0 / SHA256 `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e`
+
+```text
+ISOLATION_OK PID 22989
+ISOLATION_OK PID 22989
+......                                                                   [100%]
+6 passed in 1.47s
+```
+还原内容SHA256等于基线：True。
+
+#### M90 B19-M25 suppress inline ban
+
+文件：`src/quant_lab/market/single_source.py`。选择器：`tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M25 suppress inline ban'`。
+
+baseline / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 23006
+ISOLATION_OK PID 23006
+..                                                                       [100%]
+2 passed in 0.22s
+```
+
+injected / exit 1 / SHA256 `b006f8959e950996f7338661accbb9490da369d86d2fa2e320f2e7309d401c90`
+
+```text
+ISOLATION_OK PID 23011
+ISOLATION_OK PID 23011
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+________________ test_force_close_inline_ban_independent[mark] _________________
+tests/market/test_force_close_net_r.py:191: in test_force_close_inline_ban_independent
+    assert len(bad) == 1 and bad[0][0] == "P8_inline_force_close"
+E   assert (0 == 1)
+E    +  where 0 = len([])
+_____________ test_force_close_inline_ban_independent[quote.mark] ______________
+tests/market/test_force_close_net_r.py:191: in test_force_close_inline_ban_independent
+    assert len(bad) == 1 and bad[0][0] == "P8_inline_force_close"
+E   assert (0 == 1)
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_force_close_inline_ban_independent[mark]
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_force_close_inline_ban_independent[quote.mark]
+2 failed in 0.26s
+```
+
+restored / exit 0 / SHA256 `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502`
+
+```text
+ISOLATION_OK PID 23079
+ISOLATION_OK PID 23079
+..                                                                       [100%]
+2 passed in 1.63s
+```
+还原内容SHA256等于基线：True。
+
+#### M91 B19-M31 inline expression real tree gate
+
+文件：`src/quant_lab/market/contract.py`。选择器：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M31 inline expression real tree gate'`。
+
+baseline / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 23332
+ISOLATION_OK PID 23332
+.                                                                        [100%]
+1 passed in 1.10s
+```
+
+injected / exit 1 / SHA256 `c4e842e76bd8407510e1a52d2fcfee29a3e7a94e715a711ef5f4516ae0c23ab9`
+
+```text
+ISOLATION_OK PID 23341
+ISOLATION_OK PID 23341
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P8_inline_...y_avg_price')] == []
+E     
+E     Left contains one more item: ('P8_inline_force_close', 1105, 'market/contract.py:forbidden_valuation', 'mark - res.entry_avg_price')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.20s
+```
+
+restored / exit 0 / SHA256 `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d`
+
+```text
+ISOLATION_OK PID 23375
+ISOLATION_OK PID 23375
+.                                                                        [100%]
+1 passed in 1.11s
+```
+还原内容SHA256等于基线：True。
+
+#### M92 CONTROL-expected-plus-one
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_differential_vision_count`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' CONTROL-expected-plus-one`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 19869
+ISOLATION_OK PID 19869
+.                                                                        [100%]
+1 passed in 0.25s
+```
+
+injected / exit 1 / SHA256 `621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21`
+
+```text
+ISOLATION_OK PID 19875
+ISOLATION_OK PID 19875
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:258: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x10ae70cc0>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x10ae70cc0> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x1098a1d00>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x1098a1d00> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut3::test_differential_vision_count
+1 failed in 0.37s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 19898
+ISOLATION_OK PID 19898
+.                                                                        [100%]
+1 passed in 0.47s
+```
+还原内容SHA256等于基线：True。
+
+#### M93 S45-partition-negative-tolerance
+
+文件：`src/quant_lab/market/partition_check.py`。选择器：`tests/market/test_single_source.py`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S45-partition-negative-tolerance`。
+
+baseline / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 19921
+ISOLATION_OK PID 19921
+................................................                         [100%]
+48 passed in 24.84s
+```
+
+injected / exit 0 / SHA256 `045ea1ba667b337c66a23ed5b90e0f84caa35ac2b28eaf7741b8c7b50eea851d`
+
+```text
+ISOLATION_OK PID 20151
+ISOLATION_OK PID 20151
+................................................                         [100%]
+48 passed in 19.34s
+```
+
+restored / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 20332
+ISOLATION_OK PID 20332
+................................................                         [100%]
+48 passed in 17.85s
+```
+还原内容SHA256等于基线：True。
+
+#### M94 S45-partition-negative-fullT
+
+文件：`src/quant_lab/market/partition_check.py`。选择器：`tests/market`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S45-partition-negative-fullT`。
+
+baseline / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 20715
+ISOLATION_OK PID 20715
+........................................................................ [ 20%]
+........................................................................ [ 41%]
+........................................................................ [ 62%]
+........................................................................ [ 83%]
+........................................................                 [100%]
+344 passed in 47.39s
+```
+
+injected / exit 0 / SHA256 `045ea1ba667b337c66a23ed5b90e0f84caa35ac2b28eaf7741b8c7b50eea851d`
+
+```text
+ISOLATION_OK PID 21764
+ISOLATION_OK PID 21764
+........................................................................ [ 20%]
+........................................................................ [ 41%]
+........................................................................ [ 62%]
+........................................................................ [ 83%]
+........................................................                 [100%]
+344 passed in 50.11s
+```
+
+restored / exit 0 / SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+
+```text
+ISOLATION_OK PID 22426
+ISOLATION_OK PID 22426
+........................................................................ [ 20%]
+........................................................................ [ 41%]
+........................................................................ [ 62%]
+........................................................................ [ 83%]
+........................................................                 [100%]
+344 passed in 46.32s
+```
+还原内容SHA256等于基线：True。
+
+#### M95 CONTROL-expected-plus-one
+
+文件：`src/quant_lab/market/vision.py`。选择器：`tests/market/test_single_source.py::test_differential_vision_count`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' CONTROL-expected-plus-one`。
+
+baseline / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 23985
+ISOLATION_OK PID 23985
+.                                                                        [100%]
+1 passed in 0.24s
+```
+
+injected / exit 1 / SHA256 `621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21`
+
+```text
+ISOLATION_OK PID 23990
+ISOLATION_OK PID 23990
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:258: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x10aa70cc0>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x10aa70cc0> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x1094e5d00>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x1094e5d00> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut4::test_differential_vision_count
+1 failed in 0.26s
+```
+
+restored / exit 0 / SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+
+```text
+ISOLATION_OK PID 23995
+ISOLATION_OK PID 23995
+.                                                                        [100%]
+1 passed in 0.45s
+```
+还原内容SHA256等于基线：True。
+
+#### M96 S37-first-registration-bypass
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_single_source_use_counts_match_registry`, `tests/market/test_single_source.py::test_differential_kernel_grid`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-first-registration-bypass`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 24021
+ISOLATION_OK PID 24021
+...                                                                      [100%]
+3 passed in 0.80s
+```
+
+injected / exit 1 / SHA256 `bccd4290969ab0947ba22d3c8bfe57a3275e8477de98641da7cd90f730faf65c`
+
+```text
+ISOLATION_OK PID 24032
+ISOLATION_OK PID 24032
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['first_grid_...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "first_grid_point：登记的调用方 ['market/kernel_a.py:KernelA._first_bar_gap'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+_________________ test_single_source_use_counts_match_registry _________________
+tests/market/test_single_source.py:79: in test_single_source_use_counts_match_registry
+    assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E   AssertionError: assert {'check_polic...ows': 1}, ...} == {'force_close...est': 1}, ...}
+E     
+E     Omitting 7 identical items, use -vv to show
+E     Differing items:
+E     {'first_grid_point': {'market/execution.py:load_market_from_lake.bars': 1, 'market/partition_check.py:check_bars': 1}} != {'first_grid_point': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 1}}
+E     Use -v to get more diff
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:289: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) == None
+E    +  where datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10cd1f2f0>._first_bar_gap
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut4::test_single_source_call_sites_match_registry
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut4::test_single_source_use_counts_match_registry
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut4::test_differential_kernel_grid
+3 failed in 0.72s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 24037
+ISOLATION_OK PID 24037
+...                                                                      [100%]
+3 passed in 0.78s
+```
+还原内容SHA256等于基线：True。
+
+#### M97 S37-tail-registration-bypass
+
+文件：`src/quant_lab/market/kernel_a.py`。选择器：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_single_source_use_counts_match_registry`。
+复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-tail-registration-bypass`。
+
+baseline / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 24055
+ISOLATION_OK PID 24055
+..                                                                       [100%]
+2 passed in 0.77s
+```
+
+injected / exit 1 / SHA256 `a0c7684ded7c4b4a4e9ef093d4f64ca48b49a71968dadb738fd66a1da254c36d`
+
+```text
+ISOLATION_OK PID 24080
+ISOLATION_OK PID 24080
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "grid_points_between：登记的调用方 ['market/kernel_a.py:KernelA._first_bar_gap'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+_________________ test_single_source_use_counts_match_registry _________________
+tests/market/test_single_source.py:79: in test_single_source_use_counts_match_registry
+    assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E   AssertionError: assert {'force_close...ows': 1}, ...} == {'force_close...est': 1}, ...}
+E     
+E     Omitting 7 identical items, use -vv to show
+E     Differing items:
+E     {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}} != {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}}
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut4::test_single_source_call_sites_match_registry
+FAILED ../../../../../../../../var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p13-24nuo2_3/mut4::test_single_source_use_counts_match_registry
+2 failed in 0.80s
+```
+
+restored / exit 0 / SHA256 `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e`
+
+```text
+ISOLATION_OK PID 24085
+ISOLATION_OK PID 24085
+..                                                                       [100%]
+2 passed in 0.76s
+```
+还原内容SHA256等于基线：True。
+
+### 可复跑执行器与突变定义
+
+所有写入均限制在新建的系统临时副本，原项目树只读。单项复跑也先执行同批活性对照；返回0的注入仅作为GREEN事实打印，不会被执行器自动判为通过。
+
+<!-- P13_RUNNER -->
+```python
+import hashlib,json,os,pathlib,shutil,subprocess,sys,tempfile
+root=pathlib.Path.cwd().resolve()
+report=(root/'docs/adr/review-G2-P1.md').read_text()
+def block(marker,language):
+ return report.split('\n<!-- '+marker+' -->\n',1)[1].split('```'+language+'\n',1)[1].split('\n```',1)[0]
+items=json.loads(block('P13_CASES','json'))
+selected=[x for x in items if len(sys.argv)==1 or x['name'] in sys.argv[1:]]
+assert selected
+control=next(x for x in items if x['name']=='CONTROL-expected-plus-one')
+selected=[control]+[x for x in selected if x['name']!=control['name']]
+homes=['src','tests/market','contracts','docs/adr']
+def inventory(base):
+ return {str(p.relative_to(base)):hashlib.sha256(p.read_bytes()).hexdigest() for home in homes for p in (base/home).rglob('*') if p.is_file() and '__pycache__' not in p.parts}
+# One batch baseline, outside all measured child processes and before any injection.
+batch=inventory(root)
+with tempfile.TemporaryDirectory(prefix='g2-p13-replay-') as tmp:
+ mirror=pathlib.Path(tmp).resolve()
+ for home in homes:
+  shutil.copytree(root/home,mirror/home,ignore=shutil.ignore_patterns('__pycache__','.pytest_cache'))
+ if (root/'data/lake/market').exists():
+  shutil.copytree(root/'data/lake/market',mirror/'data/lake/market')
+ (mirror/'tests/__init__.py').write_text('')
+ (mirror/'pytest.ini').write_text('[pytest]\nfilterwarnings = ignore::DeprecationWarning\n')
+ pristine=inventory(mirror)
+ env={k:v for k,v in os.environ.items() if not k.startswith(('PYTEST','PYTHON'))}
+ env.update(PYTHONDONTWRITEBYTECODE='1',PYTHONPATH=str(mirror/'src'),PYTEST_DISABLE_PLUGIN_AUTOLOAD='1')
+ child='''import sys,pathlib,importlib,pytest,os
+root=pathlib.Path.cwd()
+def verify():
+ for name in ('contract','execution','kernel_a','single_source','partition_check','vision','nautilus_adapter'):
+  m=importlib.import_module('quant_lab.market.'+name)
+  assert pathlib.Path(m.__file__).resolve()==root/'src/quant_lab/market'/(name+'.py'),m.__file__
+ print('ISOLATION_OK PID',os.getpid(),flush=True)
+verify()
+class Origins:
+ def pytest_collection_finish(self,session):
+  verify()
+  for item in session.items:
+   assert pathlib.Path(item.path).resolve().is_relative_to(root/'tests/market')
+sys.exit(pytest.main(sys.argv[1:],plugins=[Origins()]))
+'''
+ for item in selected:
+  assert inventory(mirror)==pristine
+  target=mirror/item['file'];raw=target.read_bytes();source=raw.decode();old=item['old']
+  assert old is None or old in source,(item['name'],'old expression absent')
+  mutant=source+item['new'] if old is None else source.replace(old,item['new'],1 if item.get('first') else -1)
+  assert mutant!=source
+  print('CASE',item['name'],flush=True)
+  try:
+   for phase in ['baseline','injected','restored']:
+    if phase=='injected':
+     target.write_text(mutant)
+    if phase=='restored':
+     target.write_bytes(raw)
+    result=subprocess.run([sys.executable,'-B','-c',child,'-c',str(mirror/'pytest.ini'),*item['tests'],'-q','-p','no:cacheprovider','--tb=short'],cwd=mirror,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=240)
+    print(phase,'exit',result.returncode,'SHA256',hashlib.sha256(target.read_bytes()).hexdigest(),flush=True)
+    print(result.stdout,flush=True)
+    if phase!='injected':
+     assert result.returncode==0
+  finally:
+   target.write_bytes(raw)
+  assert inventory(mirror)==pristine
+  print('RESTORED_TREE_SHA_EQUAL True',flush=True)
+assert inventory(root)==batch
+print('ORIGINAL_TREE_INVENTORY_AND_SHA_EQUAL True')
+```
+
+<!-- P13_CASES -->
+```json
+[
+  {
+    "name": "CONTROL-expected-plus-one",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return grid_points_between(a, b, INTERVAL_SECONDS[interval]) + 1",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_vision_count"
+    ]
+  },
+  {
+    "name": "S29-first-gap",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_gap = bool(df.height and grid_points_between(cal_from, df[key][0], sec) > 0)",
+    "new": "first_gap = bool(df.height and df[key][0] > cal_from)",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap"
+    ]
+  },
+  {
+    "name": "S29-range-only",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "present = df.filter(legal)[key]",
+    "new": "present = df.filter((pl.col(key) >= cal_from) & (pl.col(key) < cal_to))[key]",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar"
+    ]
+  },
+  {
+    "name": "S29-truncated-count",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "exp_n = grid_points_between(cal_from, cal_to, sec)",
+    "new": "exp_n = int((cal_to - cal_from).total_seconds()) // sec",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point"
+    ]
+  },
+  {
+    "name": "S31-remove-output-gate",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "    check_policy_hash_consistency(df)\n",
+    "new": "",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S31-sanitized-copy",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "    check_policy_hash_consistency(df)\n",
+    "new": "    check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))\n",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S31-redacted-version",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "{r['policy_version']} →",
+    "new": "REDACTED →",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S38-remove-domain",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if value < 0:",
+    "new": "if False:",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency"
+    ]
+  },
+  {
+    "name": "S38-explicit-only",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if exp_t_start < self.t_dec:",
+    "new": "if self.t_start is not None and self.t_start < self.t_dec:",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings"
+    ]
+  },
+  {
+    "name": "S39-discard-return",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, until, interval_s)",
+    "new": "grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])\n        expected = 0",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S39-inline-count",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, until, interval_s)",
+    "new": "expected = int((min(b, dt.datetime.now(dt.UTC)) - a).total_seconds() // INTERVAL_SECONDS[\"1m\"])",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S39-wrong-helper-value",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return max(0, last_idx - first_idx + 1)",
+    "new": "return max(0, last_idx - first_idx + 1) + 7",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S33-wrong-expected",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return grid_points_between(a, b, INTERVAL_SECONDS[interval]) + 1",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence"
+    ]
+  },
+  {
+    "name": "modified-existing-first-point-sentinel",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "expected = first_grid_point(self.t_start, interval_s)",
+    "new": "expected = self.t_start",
+    "tests": [
+      "tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond"
+    ]
+  },
+  {
+    "name": "A24-real-caller-missing",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds() // INTERVAL_SECONDS[interval])",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "A24-real-caller-extra",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _unregistered_grid_probe():\n    return grid_points_between(a, b, 60)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "A24-gate-missing-disabled",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        if missing:\n",
+    "new": "        if False:\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]"
+    ]
+  },
+  {
+    "name": "A24-gate-extra-disabled",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        if extra:\n",
+    "new": "        if False:\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-latency",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return t + dt.timedelta(seconds=policy.latency_s)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-latency",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P1_inline_latency\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-int-seconds",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return int((b - a).total_seconds())\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-int-seconds",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P2_int_total_seconds\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-duration-div",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return (b - a).total_seconds() // interval_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-duration-div",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P3_duration_div\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-start-or",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return req.t_start or req.t_dec\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-start-or",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P4_t_start_or_t_dec\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-expiry-add",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return t + dt.timedelta(seconds=req.entry_ttl_s)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-expiry-add",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P5_inline_entry_ttl\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-middle-grid",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return o - prev > iv\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-middle-grid",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P6_inline_grid_comparison\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-tail-grid",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return prev + iv < end\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-tail-grid",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P6_inline_grid_comparison\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-ttl-expression",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-ttl-expression",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-ttl-branches",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    ttl = plan.expiry.entry_ttl_s\n    if ttl is None:\n        ttl = policy.entry_ttl_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-ttl-branches",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]"
+    ]
+  },
+  {
+    "name": "A24-foreign-freeze",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        out.extend(lint.hits)",
+    "new": "        out.extend(hit for hit in lint.hits if not hit[2].startswith(\"research/\"))",
+    "tests": [
+      "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact"
+    ]
+  },
+  {
+    "name": "S32-build-start-bypass",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = t_dec + dt.timedelta(seconds=policy.latency_s + derived_window_s(plan, policy, ttl))",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-ttl-before",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\"entry_ttl_s\": resolve_entry_ttl_s(plan, pol)",
+    "new": "\"entry_ttl_s\": pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-ttl-after",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)",
+    "new": "exp_ttl = pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-ttl-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "ttl = resolve_entry_ttl_s(plan, policy)",
+    "new": "ttl = policy.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-expiry-A-timeline",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        if deadline <= end:",
+    "new": "deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)\n        if deadline <= end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-expiry-A-entries",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "new": "deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-expiry-B",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "deadline = entry_expiry_at(t_start, req.entry_ttl_s)",
+    "new": "deadline = t_start + dt.timedelta(seconds=req.entry_ttl_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S37-middle",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if opened < expected:",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S37-tail",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(expected, end, interval_s) > 0:",
+    "new": "if expected < end - dt.timedelta(seconds=60):",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A28-partition-count",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "exp_n = grid_points_between(cal_from, cal_to, sec)",
+    "new": "exp_n = max(0, int((cal_to - cal_from).total_seconds()) // sec)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-partition-first",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "int(t.timestamp()) % sec == 0",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-partition-middle",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "grid_points_between(prev[i] + step, df[key][i], sec) > 0",
+    "new": "grid_points_between(prev[i] + step, df[key][i], sec) >= 0",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-vision-count",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds()) // INTERVAL_SECONDS[interval] + 1",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_vision_count"
+    ]
+  },
+  {
+    "name": "A28-kernel-first",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "expected = first_grid_point(self.t_start, interval_s)",
+    "new": "expected = self.t_start",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-kernel-middle",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if opened < expected:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-kernel-tail",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(expected, end, interval_s) > 0:",
+    "new": "if expected < end - dt.timedelta(seconds=60):",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-lake-count",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, until, interval_s)",
+    "new": "expected = max(0, int((min(b, dt.datetime.now(dt.UTC)) - a).total_seconds()) // INTERVAL_SECONDS[\"1m\"])",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_grid"
+    ]
+  },
+  {
+    "name": "A28-lake-start",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "a = req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)",
+    "new": "a = (req.t_start or req.t_dec) - dt.timedelta(seconds=window_before_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_t_start = derived_t_start(self.t_dec, pol)",
+    "new": "exp_t_start = (self.t_dec + dt.timedelta(seconds=pol.latency_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-resolver",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return self.t_start if self.t_start is not None else derived_t_start(self.t_dec, policy)",
+    "new": "return self.t_start if self.t_start is not None else (self.t_dec + dt.timedelta(seconds=policy.latency_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = (t_dec + dt.timedelta(seconds=policy.latency_s)).replace(microsecond=0) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-lower-bound",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if self.horizon_end <= exp_t_start:",
+    "new": "if self.horizon_end < exp_t_start:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-window-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "window = self.horizon_end - exp_t_start",
+    "new": "window = dt.timedelta(seconds=int((self.horizon_end - exp_t_start).total_seconds()))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-window-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=ttl + (plan.expiry.max_holding_s or policy.max_horizon_s))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-window-derived-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "derived_s = derived_window_s(self.order_plan, pol, exp_ttl)",
+    "new": "derived_s = exp_ttl + (self.order_plan.expiry.max_holding_s or pol.max_horizon_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-ttl-before",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\"entry_ttl_s\": resolve_entry_ttl_s(plan, pol)",
+    "new": "\"entry_ttl_s\": pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-ttl-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)",
+    "new": "exp_ttl = pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-ttl-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "ttl = resolve_entry_ttl_s(plan, policy)",
+    "new": "ttl = policy.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-expiry-timeline",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        if deadline <= end:",
+    "new": "deadline = (self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)).replace(microsecond=0)\n        if deadline <= end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_timeline"
+    ]
+  },
+  {
+    "name": "A28-expiry-timeline-bound",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if deadline <= end:",
+    "new": "if deadline < end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_timeline"
+    ]
+  },
+  {
+    "name": "A28-expiry-orders",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "new": "deadline = (self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)).replace(microsecond=0)\n        for i, (e, p, q) in enumerate(legs):",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_orders"
+    ]
+  },
+  {
+    "name": "A28-expiry-b",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "deadline = entry_expiry_at(t_start, req.entry_ttl_s)",
+    "new": "deadline = (t_start + dt.timedelta(seconds=req.entry_ttl_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_b"
+    ]
+  },
+  {
+    "name": "A28-expiry-b-bound",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "TimeInForce.GTD if deadline <= end else TimeInForce.GTC",
+    "new": "TimeInForce.GTD if deadline < end else TimeInForce.GTC",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_b"
+    ]
+  },
+  {
+    "name": "P7-disable-annotated",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]"
+    ]
+  },
+  {
+    "name": "P7-disable-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]"
+    ]
+  },
+  {
+    "name": "P7-disable-named",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[named]"
+    ]
+  },
+  {
+    "name": "P7-disable-return",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[return]"
+    ]
+  },
+  {
+    "name": "P7-disable-comprehension",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]"
+    ]
+  },
+  {
+    "name": "P7-disable-return-field",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta = o - prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta: int = o - prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta -= prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]"
+    ]
+  },
+  {
+    "name": "augmented-duration-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P3_duration_div\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]"
+    ]
+  },
+  {
+    "name": "augmented-expiry-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P5_inline_entry_ttl\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]"
+    ]
+  },
+  {
+    "name": "S40-middle-split-bypass",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if opened < expected:",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S41-annotated-ttl",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _audit_ttl(plan, policy):\n    ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n    return ttl\n",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S42-kernel-truncate-open",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "opens = sorted(b.open_time for b in bars if b.open_time >= self.t_start and b.open_time < end)",
+    "new": "opens = sorted(b.open_time.replace(microsecond=0) for b in bars if b.open_time >= self.t_start and b.open_time < end)",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "NEW-kernel-accept-missing",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if False:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid",
+      "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar"
+    ]
+  },
+  {
+    "name": "NEW-kernel-reject-aligned",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if opened == expected:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar"
+    ]
+  },
+  {
+    "name": "NEW-loader-truncate",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "opened = bar.open_time",
+    "new": "opened = bar.open_time.replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_grid",
+      "tests/market/test_single_source.py::test_differential_lake_public_interior_bar"
+    ]
+  },
+  {
+    "name": "NEW-loader-count-only",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "        present = set()\n        for bar in out:\n            opened = bar.open_time\n            if first_grid_point(opened, interval_s) != opened:\n                complete = False\n                quality_ok[0] = False\n                problems.append(f\"{data_type} off-grid bar open_time={opened.isoformat()} interval_s={interval_s}\")\n                continue\n            if opened < until:\n                present.add(opened)\n        if len(present) != expected:\n            complete = False\n            problems.append(f\"{data_type} 期望 {expected} 根，实际 {len(present)} 根合法唯一网格 bar（原始 {len(out)} 行）\")\n",
+    "new": "        present = {bar.open_time for bar in out}\n        if len(present) != expected:\n            complete = False\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_grid",
+      "tests/market/test_single_source.py::test_differential_lake_public_interior_bar"
+    ]
+  },
+  {
+    "name": "NEW-loader-reject-aligned",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, until, interval_s)",
+    "new": "expected = grid_points_between(a, until, interval_s) + 1",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_public_interior_bar"
+    ]
+  },
+  {
+    "name": "B19-M25 suppress inline ban",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P8_inline_force_close\", node)",
+    "new": "pass # injected missing P8",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M31 inline expression real tree gate",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\n__all__ = [",
+    "new": "\ndef forbidden_valuation():\n    return (mark - res.entry_avg_price) * qty\n\n__all__ = [",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ],
+    "first": true
+  },
+  {
+    "name": "S45-partition-negative-tolerance",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "(first_grid_point(t, sec) - t <= dt.timedelta(microseconds=1))",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S45-partition-negative-fullT",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "(first_grid_point(t, sec) - t <= dt.timedelta(microseconds=1))",
+    "tests": [
+      "tests/market"
+    ]
+  },
+  {
+    "name": "S37-first-registration-bypass",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "expected = first_grid_point(self.t_start, interval_s)",
+    "new": "expected = self.t_start",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_single_source_use_counts_match_registry",
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "S37-tail-registration-bypass",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(expected, end, interval_s) > 0:",
+    "new": "if expected < end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_single_source_use_counts_match_registry"
+    ]
+  }
+]
+```
+
+<!-- P13_GUARD -->
+```python
+import pathlib,tempfile,subprocess,sys,hashlib,json,os,shutil
+root=pathlib.Path.cwd(); source=root/'scripts/tree_guard.py'
+env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'}
+with tempfile.TemporaryDirectory(prefix='p13-guard-') as temp:
+ p=pathlib.Path(temp); (p/'src').mkdir(); (p/'src/base.py').write_text('value = 1\n'); shutil.copyfile(source,p/'guard.py')
+ def git(*args): return subprocess.run(['git',*args],cwd=p,text=True,capture_output=True,check=True)
+ git('init','-q');git('add','src/base.py','guard.py');git('-c','user.name=review','-c','user.email=review@localhost','commit','-qm','independent baseline')
+ collect='from guard import TreeGuard; import json; from pathlib import Path; g=TreeGuard(["src"],repo=str(Path.cwd())); Path("baseline.json").write_text(json.dumps(g.snapshot())); print(g.assert_clean("before")); print(g.selftest())'
+ print(subprocess.check_output([sys.executable,'-B','-c',collect],cwd=p,env=env,text=True).strip())
+ child='from guard import TreeGuard; import json; from pathlib import Path; g=TreeGuard(["src"],repo=str(Path.cwd())); print(g.assert_matches(json.loads(Path("baseline.json").read_text()),"check")); print("files",sorted(str(f.relative_to(Path.cwd())) for f in (Path.cwd()/"src").rglob("*")))'
+ probe=p/'src/unregistered.py'
+ def sha(): return hashlib.sha256(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted((p/'src').rglob('*')) if f.is_file()},sort_keys=True).encode()).hexdigest()
+ before=sha()
+ for phase in ['baseline','injected','restored']:
+  if phase=='injected': probe.write_text('def unregistered():\n    return grid_points_between(a, b, 60)\n')
+  if phase=='restored': probe.unlink()
+  r=subprocess.run([sys.executable,'-B','-c',child],cwd=p,env=env,text=True,capture_output=True)
+  print(phase,'exit',r.returncode,'tree_sha256',sha());print(r.stdout+r.stderr,end='')
+ assert sha()==before
+ print('RESTORED_SHA_EQUAL True')
+```
+
+<!-- P13_BEHAVIOR -->
+```python
+import datetime as dt,tempfile,json
+from pathlib import Path
+from decimal import Decimal as D
+from quant_lab.market import contract as c,execution as ex,partition_check as pc,vision
+from quant_lab.market.kernel_a import KernelA
+from tests.market.test_review_p1 import e03
+from tests.market.test_single_source import _write_lake
+q,_=e03();start=q.t_dec;end=start+dt.timedelta(seconds=180)
+q=c.ExecutionRequest.model_validate({**q.model_dump(),'t_start':None,'horizon_end':end,'horizon_source':'caller'})
+for offsets in [[0,59999999,120000000],[0,60000001,120000000]]:
+ bars=[c.Bar(open_time=start+dt.timedelta(microseconds=x),o=D(100),h=D(100),l=D(100),c=D(100)) for x in offsets]
+ market=c.MarketView(manifest_id=q.market_manifest,bars_last=bars,bars_mark=bars)
+ k=KernelA(q,market);r=ex.simulate(q,market=market)
+ print('OFFSETS',offsets,'VALIDATED',len(bars),'FIRST_GAP',k._first_bar_gap(bars,end),'SIMULATE',r.censor_reason,'BARS_OK',r.coverage_mask.bars_ok)
+ prev,o=bars[1].open_time,bars[2].open_time;iv=dt.timedelta(seconds=60)
+ print('MIDDLE_GRID',c.grid_points_between(prev+iv,o,60)>0,'MIDDLE_ADJACENT',o-prev>iv)
+ with tempfile.TemporaryDirectory() as d:
+  _write_lake(Path(d),start,end,[b.open_time for b in bars]);loaded=ex.load_market_from_lake(q,lake_root=d)
+  print('LOADER',loaded.bars_complete,loaded.bars_quality_ok,[t.open_time.isoformat() for t in loaded.bars_last])
+import datetime as dt
+import polars as pl
+from tests.market.test_partition_check import bars,rules,run,JAN
+opens=[JAN+dt.timedelta(microseconds=x) for x in (0,59999999,120000000)]
+df=bars(3).with_columns(pl.Series('open_time',opens),pl.Series('close_time',[x+dt.timedelta(seconds=60) for x in opens]))
+out,qs,r=run(df,rules(JAN,JAN+dt.timedelta(seconds=180)))
+print('PRESENT',out['open_time'].to_list(),'EXPECTED',r.expected_rows,'MISSING',r.missing,'QUARANTINES',len(qs))
+
+```
+
+<!-- P13_FUNDING -->
+```python
+import datetime as dt
+from pathlib import Path
+import polars as pl
+from quant_lab.market import contract as c,execution,partition_check as pc
+from tests.market.test_single_source import _request
+files=sorted(Path('data/lake/market/silver/binance/um/fundingRate/8h').rglob('*.parquet'))
+raw=pl.concat([pl.read_parquet(p) for p in files]); times=set(raw['calc_time'].to_list()); loaded=set()
+for day in range(1,32):
+ a=dt.datetime(2024,1,day,tzinfo=dt.UTC); b=a+dt.timedelta(days=1)-dt.timedelta(microseconds=1)
+ m=execution.load_market_from_lake(_request(t_dec=a,t_start=None,horizon_end=b),lake_root='data/lake/market')
+ loaded.update(f.calc_time for f in m.funding)
+print('RAW_ROWS',raw.height,'RAW_UNIQUE',len(times),'LOADED_UNIQUE',len(loaded),'EXACT_TIMESTAMP_SET_EQUAL',times==loaded)
+print('JITTER_US',sorted({int((t-t.replace(minute=0,second=0,microsecond=0)).total_seconds()*1000000) for t in times if t.microsecond}))
+out,qs,rep=pc.check_funding(raw,pid='p13',inst='BTCUSDT-PERP.BINANCE-UM',period='2024-01')
+print('CHECK_FUNDING_ROWS',out.height,'QUARANTINES',len(qs),'EXACT_TIMES_RETAINED',set(out['calc_time'].to_list())==times)
+```
+
+### 批前关键文件指纹与交付完整性
+| 文件 | 批前SHA256 |
+|---|---|
+| `src/quant_lab/market/partition_check.py` | `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374` |
+| `src/quant_lab/market/execution.py` | `8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e` |
+| `src/quant_lab/market/single_source.py` | `5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502` |
+| `src/quant_lab/market/vision.py` | `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8` |
+| `src/quant_lab/market/ab_explanations.json` | `2d9da013340add3431f96b3cec4a246fe4cbf546679fb4f8755685f10a281a20` |
+| `src/quant_lab/market/nautilus_adapter.py` | `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650` |
+| `src/quant_lab/market/__init__.py` | `70149b449a03075ef4218d03921491270426af8851fce59d942d8966fca8f80f` |
+| `src/quant_lab/market/policy_hashes.json` | `a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65` |
+| `src/quant_lab/market/quarantine.py` | `abdacaba0e7be23d1741a79f01ad0ca77132b68b1f7594121e3563426dfb0662` |
+| `src/quant_lab/market/contract.py` | `7a37cae369f8d2441085b9bb8e091072cba006f9b254f4a53b0b8338fe1d2d2d` |
+| `src/quant_lab/market/asof.py` | `91e35abd6dd83199af7b47fa253b2d2121fea15bc428b50e7724e3321a2ec090` |
+| `src/quant_lab/market/kernel_a.py` | `f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e` |
+| `tests/market/test_single_source.py` | `90d93a6d9b2e643968f71adf010390babd9baabcaeb7640d8a9ff0bdd6e49c74` |
+| `scripts/tree_guard.py` | `5e6cc189fee55f979dd4ab274cf712cb54be33316a0e63dfcfbbe048588d5ac1` |
+
+批前git status（原样，含其他窗口既有改动，不代表本会话修改）：
+
+```text
+ M quant-lab/src/quant_lab/market/contract.py
+ M quant-lab/src/quant_lab/market/execution.py
+ M quant-lab/src/quant_lab/market/kernel_a.py
+ M quant-lab/src/quant_lab/market/single_source.py
+ M quant-lab/taskList.json
+ M quant-lab/tests/market/test_single_source.py
+?? docs/plans/2026-09-11-watcher-to-app-migration.md
+?? docs/plans/2026-09-11-watcher-to-app-migration.review.md
+?? quant-lab/scripts/tree_guard.py
+?? quant-lab/tests/market/s42-s43-mutation-evidence.json
+?? quant-lab/tests/market/s42-s43-verification.md
+?? quant-lab/tests/market/verify_s42_s43.py
+?? quant-lab/tests/market/verify_s43_archive.py
+?? tests/control-plane/api/test_m1e_trace.py
+```
+
+本轮取证器的失败尝试也保留边界：首次整树比对捕获其他窗口写入；补充副本曾因已存在data目录抛FileExistsError；一次辅助命令误解析venv符号链接导致polars导入失败。三者均未用于产品结论，修正执行路径后才采集上列正式回执。
+只在原报告前部添加本章节，历史报告作为连续原始字节块保留。原报告SHA256：`d2c8d9f3bbdbd85a12aa6786b3f4055d253d105d0b18c6f63b07153508d69de7`。
+原报告实际已有九审、十审、十一审、十二审结尾；九审/十审指定四行及其他历史结尾全部保留，不为凑组数删历史。十三审两行追加到整个文件末尾。
+证据范围为本轮表内命题与明确限定的输入域；没有以证据完整性宣称产品完备。阻断项S44/S45均有实跑复现，其余closed均有本轮回执。
+
+### 收尾复跑与同时写入记录
+
+本报告内嵌M/G/B/F命令已再经shlex.split+subprocess.run逐条实跑，四个入口均exit0。
+M的exit0只表示执行器完成；其中S45注入仍48 passed，是缺陷证据，不是P1通过。
+本轮冻结基线对应HEAD `254e3adac8be9487ed1b1fdb70fb531ba7c832ff`；`git show`该提交README的SHA与批前快照相等，实跑结果BASE_HEAD_README_MATCH=True。
+后续G0另提交1ae8461与6704aa9，README增加§22 A36/§23 A37。§23.4明确其到达在本轮派出之后、义务顺延本轮回执后；本轮不把新要求追溯套成已经完成的自证。
+新增四类边界“只有该类能捕获”的专项认证未做，原因是后到A36已有明确时序裁定；前文closed仅指每个测试/指定注入可失败，不声称已完成该更强判据。
+S45本身已有真实窗口内负向边界反例，按本轮原A28亦构成阻断。
+收尾期间tree_guard.py增加assert_declared及G2_PATHS，属于其他会话改动；写入窗口内曾明确不判新版。
+新版S44是否仍在，以后附稳定窗口复跑为准，不以先前版本结果代替新版证据。
+批前声明差异的来源是用户指定的十二审后修复，以及本会话读取的实际patch；未归因的research等差异不作为G2工作树认证对象。
+以下补列批前已保存的market产品/测试实际diff，避免只给状态文件名而不展示差异内容。
+
+```diff
+diff --git a/quant-lab/src/quant_lab/market/contract.py b/quant-lab/src/quant_lab/market/contract.py
+index f2404a6..2be4940 100644
+--- a/quant-lab/src/quant_lab/market/contract.py
++++ b/quant-lab/src/quant_lab/market/contract.py
+@@ -953,6 +953,7 @@ class PricePoint(_Model):
+ 
+ 
+ class Bar(_Model):
++    """保留原始 open_time（含离网证据）；消费方须按精确网格身份判覆盖，不得取整。"""
+     open_time: dt.datetime
+     o: Decimal
+     h: Decimal
+@@ -992,7 +993,11 @@ class Rules(_Model):
+ 
+ 
+ class MarketView(_Model):
+-    """一次 simulate 的行情输入：显式价点（points）或 bars（按 path_scenario 展开）。"""
++    """一次 simulate 的行情输入：显式价点或 bars。
++
++    bars_complete 是来源证据，不替代内核的网格身份检查；离网 bar 可保留，
++    但消费结果必须报告 BAR_GAP / bars_ok=False。funding 不适用 bar 网格规则。
++    """
+     manifest_id: str
+     last: list[PricePoint] = []
+     mark: list[PricePoint] = []
+diff --git a/quant-lab/src/quant_lab/market/execution.py b/quant-lab/src/quant_lab/market/execution.py
+index 4b88852..aae3221 100644
+--- a/quant-lab/src/quant_lab/market/execution.py
++++ b/quant-lab/src/quant_lab/market/execution.py
+@@ -17,7 +17,7 @@ from typing import Callable, Literal
+ import polars as pl
+ 
+ from quant_lab.market.contract import (
+-    DF_DECIMAL, PAIR_KEY, REQUEST_ID_COLS, RESULT_SCALAR_COLS, ContractError, grid_points_between, EpisodeFixture, ExecutionRequest, ExecutionResult,
++    DF_DECIMAL, PAIR_KEY, REQUEST_ID_COLS, RESULT_SCALAR_COLS, ContractError, first_grid_point, grid_points_between, EpisodeFixture, ExecutionRequest, ExecutionResult,
+     MarketView, check_invariants, diff_result, load_fixtures,
+ )
+ 
+@@ -133,7 +133,7 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path = "dat
+                           window_before_s: int = 0, snapshot_id: str | None = None) -> MarketView:
+     """按 request 的 instrument 与 [t_dec, horizon_end] 从 silver 装 1m last/mark bars + funding + rules（S05/S12）。
+     覆盖证据：每个涉及分区的 manifest 必须存在且 check_status ∈ {ok, gap}（体检过）；quarantine severity=error 的 bar 与
+-    ohlc_valid=false 的 bar 视为不可用（bars_complete=False）；网格首尾完整性按期望 bar 数核对；
++    ohlc_valid=false 的 bar 视为不可用（bars_complete=False）；网格覆盖按合法且唯一的 open_time 身份核对；
+     manifest_refs（partition_id, source_sha256, schema_hash, available_at_basis, check_rule_version）进入 manifest_hash。"""
+     import json as _json
+ 
+@@ -209,12 +209,23 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path = "dat
+             if not manifest_ok(data_type, "1m", mo):
+                 complete = False
+                 quality_ok[0] = False
+-        # 网格首尾完整性：期望 bar 数 = [a, b) 内的**网格点个数**（S05：尾缺无后续行承载 gap_flag）。
+-        # 族B 漏网处：此前按 (b-a)/interval 取整，t_dec 带亚秒时窗口不与网格对齐，计数会错一根（S28 同族）。
+-        expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS["1m"])
+-        if len(out) != expected:
++        # S43：只统计窗口内合法的唯一网格点；离网行/重复行不能凑齐缺失点。
++        until = min(b, dt.datetime.now(dt.UTC))
++        interval_s = INTERVAL_SECONDS["1m"]
++        expected = grid_points_between(a, until, interval_s)
++        present = set()
++        for bar in out:
++            opened = bar.open_time
++            if first_grid_point(opened, interval_s) != opened:
++                complete = False
++                quality_ok[0] = False
++                problems.append(f"{data_type} off-grid bar open_time={opened.isoformat()} interval_s={interval_s}")
++                continue
++            if opened < until:
++                present.add(opened)
++        if len(present) != expected:
+             complete = False
+-            problems.append(f"{data_type} 期望 {expected} 根，实际 {len(out)}")
++            problems.append(f"{data_type} 期望 {expected} 根，实际 {len(present)} 根合法唯一网格 bar（原始 {len(out)} 行）")
+         return out, complete
+ 
+     last, ok1 = bars("klines")
+diff --git a/quant-lab/src/quant_lab/market/kernel_a.py b/quant-lab/src/quant_lab/market/kernel_a.py
+index 1019333..326a933 100644
+--- a/quant-lab/src/quant_lab/market/kernel_a.py
++++ b/quant-lab/src/quant_lab/market/kernel_a.py
+@@ -232,26 +232,24 @@ class KernelA:
+         return [moments[k] for k in sorted(moments)]
+ 
+     def _first_bar_gap(self, bars: list[Bar], end: dt.datetime) -> dt.datetime | None:
+-        """bars 网格在 [t_start, end) 内的首个缺口时刻：首缺 → 首个应有 bar 的 open；内部洞 → prev+iv；尾缺 → last+iv。"""
++        """bars 网格在 [t_start, end) 内的首个缺口时刻：逐点匹配身份，离网行不计覆盖。"""
+         if not bars:
+             return None
+         interval_s = bars[0].interval_s
+         iv = dt.timedelta(seconds=interval_s)
+         opens = sorted(b.open_time for b in bars if b.open_time >= self.t_start and b.open_time < end)
+-        # S28：网格对齐用单一来源 contract.first_grid_point（精确微秒）——此前按整秒取模，
+-        # t_start 带亚秒时把"在网格上"误判成"不在"，完整行情也会被判 BAR_GAP。
+-        first_expected = first_grid_point(self.t_start, bars[0].interval_s)
++        # S43：游标只由精确匹配的网格点推进；离网行不能填补缺口或移动网格。
++        expected = first_grid_point(self.t_start, interval_s)
+         if not opens:
+-            return None                    # 该流在窗口内没有 bars（显式点驱动或早于启动的 bar），不按网格判缺
+-        if opens[0] > first_expected:
+-            return first_expected
+-        prev = opens[0]
+-        for o in opens[1:]:
+-            if grid_points_between(prev + iv, o, interval_s) > 0:
+-                return first_grid_point(prev + iv, interval_s)
+-            prev = o
+-        if grid_points_between(prev + iv, end, interval_s) > 0:
+-            return first_grid_point(prev + iv, interval_s)
++            return None                    # 保留显式 points / 窗口外 bars 的既有语义
++        for opened in opens:
++            if opened != expected:
++                if expected < end:
++                    return expected
++                return opened              # 网格已齐但多出离网行，仍不能报 bars_ok
++            expected += iv
++        if grid_points_between(expected, end, interval_s) > 0:
++            return expected
+         return None
+ 
+     def add_hold_end_moment(self) -> None:
+diff --git a/quant-lab/src/quant_lab/market/single_source.py b/quant-lab/src/quant_lab/market/single_source.py
+index bb8feba..40a552c 100644
+--- a/quant-lab/src/quant_lab/market/single_source.py
++++ b/quant-lab/src/quant_lab/market/single_source.py
+@@ -43,6 +43,7 @@ ALLOWED_CALLERS: dict[str, set[str]] = {
+     },
+     # 网格首点 / 网格计数的唯一表达（S28/S29 同族；vision.expected_rows 曾自写整除，A24 后归一）
+     "first_grid_point": {
++        "market/execution.py:load_market_from_lake.bars",
+         "market/kernel_a.py:KernelA._first_bar_gap",
+         "market/partition_check.py:check_bars",
+     },
+@@ -324,10 +325,11 @@ ALLOWED_CALL_COUNTS = {"force_close_net_R": {},  # G3 尚未接入；夹具不
+  'entry_expiry_at': {'market/kernel_a.py:KernelA.submit_entries': 1,
+                      'market/kernel_a.py:KernelA.timeline': 1,
+                      'market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries': 1},
+- 'first_grid_point': {'market/kernel_a.py:KernelA._first_bar_gap': 3,
++ 'first_grid_point': {'market/execution.py:load_market_from_lake.bars': 1,
++                      'market/kernel_a.py:KernelA._first_bar_gap': 1,
+                       'market/partition_check.py:check_bars': 1},
+  'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1,
+-                         'market/kernel_a.py:KernelA._first_bar_gap': 2,
++                         'market/kernel_a.py:KernelA._first_bar_gap': 1,
+                          'market/partition_check.py:check_bars': 7,
+                          'market/vision.py:expected_rows': 1},
+  'resolve_entry_ttl_s': {'market/contract.py:ExecutionRequest._chk': 1,
+diff --git a/quant-lab/tests/market/test_single_source.py b/quant-lab/tests/market/test_single_source.py
+index d757541..ec6d484 100644
+--- a/quant-lab/tests/market/test_single_source.py
++++ b/quant-lab/tests/market/test_single_source.py
+@@ -261,6 +261,13 @@ def test_differential_vision_count():
+             assert vision.expected_rows(kind, '8h', period) is None
+ 
+ 
++def _interior_bar_variants(expected):
++    # S42：移动的是窗口内 bar.open_time，而不是请求边界。条数始终不变。
++    first, middle, *tail = expected
++    for offset in (-1, 0, 1):
++        yield [first, middle + offset * US, *tail]
++
++
+ def test_differential_kernel_grid():
+     rng = random.Random(2804)
+     for start in _times():
+@@ -269,8 +276,9 @@ def test_differential_kernel_grid():
+             req = _request(t_dec=start, t_start=None, horizon_end=end)
+             kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+             expected = _grid(start, end)
+-            for opens in (expected, [], expected[1:], expected[:-1], expected[::2],
+-                          [t for t in expected if rng.getrandbits(1)]):
++            variants = [expected, [], expected[1:], expected[:-1], expected[::2],
++                        [t for t in expected if rng.getrandbits(1)], *_interior_bar_variants(expected)]
++            for opens in variants:
+                 bars = [c.Bar(open_time=t, o=Decimal(100), h=Decimal(100), l=Decimal(100), c=Decimal(100))
+                         for t in opens]
+                 missing = sorted(set(expected) - set(opens))
+@@ -324,14 +332,19 @@ def test_differential_lake_grid(tmp_path):
+         end = start.replace(microsecond=0) + dt.timedelta(minutes=5) + rng.choice((-1, 0, 1)) * US
+         expected = _grid(start, end)
+         req = _request(t_dec=start, t_start=None, horizon_end=end)
+-        for variant, opens in enumerate((expected, expected[:-1], [], expected[1:])):
++        variants = [expected, expected[:-1], [], expected[1:], *_interior_bar_variants(expected)]
++        for variant, opens in enumerate(variants):
+             root = tmp_path / f'{index}-{variant}'
+             # 文件包含半开区间两侧的行，装载必须排除。
+             supplied = sorted(set(opens + [start - US, end]))
+             _write_lake(root, start, end, supplied)
+             market = execution.load_market_from_lake(req, lake_root=root)
+-            assert market.bars_complete == (len(opens) == c.grid_points_between(start, end, 60))
+-            assert market.bars_quality_ok
++            present = set(opens) & set(expected)
++            off_grid = set(opens) - set(expected)
++            assert market.bars_complete == (present == set(expected) and not off_grid)
++            assert market.bars_quality_ok == (not off_grid)
++            for opened in off_grid:
++                assert any("off-grid" in note and opened.isoformat() in note for note in market.quality_notes)
+             for bars in (market.bars_last, market.bars_mark):
+                 assert [bar.open_time for bar in bars] == opens
+             # Decimal 同路径载荷不能浮点往返；这不是估值公式的副本。
+@@ -500,3 +513,58 @@ def test_differential_expiry_b():
+                 assert expired[0].reason == 'entry_ttl'
+             else:
+                 assert expired[0].reason == 'horizon_end'
++
++
++@pytest.mark.parametrize("offset_us", [-1, 0, 1])
++@pytest.mark.parametrize("stream", ["bars_last", "bars_mark"])
++def test_differential_kernel_public_interior_bar(offset_us, stream):
++    """S42/S43：真实 Bar → MarketView → simulate，不绕验证、不替换生产函数。"""
++    start = dt.datetime(2024, 1, 1, 1, tzinfo=dt.UTC)
++    end = start + dt.timedelta(minutes=3)
++    req = _request(t_dec=start, t_start=None, horizon_end=end)
++    expected = _grid(start, end)
++    opens = [start + dt.timedelta(microseconds=value)
++             for value in (0, 60000000 + offset_us, 120000000)]
++
++    def bars(times):
++        return [c.Bar(open_time=time, interval_s=60, o=Decimal(100), h=Decimal(100),
++                      l=Decimal(100), c=Decimal(100)) for time in times]
++
++    payload = {"manifest_id": req.market_manifest, "bars_last": bars(expected),
++               "bars_mark": bars(expected)}
++    payload[stream] = bars(opens)
++    market = c.MarketView.model_validate(payload)
++    kernel = KernelA(req, market)
++    result = execution.simulate(req, market=market)
++    missing = sorted(set(expected) - set(opens))
++    want_gap = None
++    want_reason = "LABEL_RIGHT_CENSORED"
++    if missing:
++        want_gap = missing[0]
++        want_reason = "BAR_GAP"
++    assert result.censor_reason == want_reason
++    assert result.coverage_mask.bars_ok == (not missing)
++    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
++
++
++@pytest.mark.parametrize("offset_us", [-1, 0, 1])
++@pytest.mark.parametrize("stream", ["klines", "markPriceKlines"])
++def test_differential_lake_public_interior_bar(tmp_path, offset_us, stream):
++    start = dt.datetime(2024, 1, 1, 1, tzinfo=dt.UTC)
++    end = start + dt.timedelta(minutes=3)
++    req = _request(t_dec=start, t_start=None, horizon_end=end)
++    expected = _grid(start, end)
++    lake = _write_lake(tmp_path, start, end, expected)
++    path = lake.silver_dir(stream, "1m", "BTCUSDT") / "date=2024-01-01" / "part.parquet"
++    opens = [start + dt.timedelta(microseconds=value)
++             for value in (0, 60000000 + offset_us, 120000000)]
++    frame = pl.read_parquet(path).with_columns(
++        pl.Series("open_time", opens, dtype=pl.Datetime("us", "UTC")))
++    vision.atomic_write_parquet(path, frame)
++    market = execution.load_market_from_lake(req, lake_root=tmp_path)
++    result = execution.simulate(req, market=market)
++    assert market.bars_complete == (offset_us == 0)
++    assert market.bars_quality_ok == (offset_us == 0)
++    if offset_us != 0:
++        assert not result.coverage_mask.bars_ok
++        assert any(stream in note and opens[1].isoformat() in note for note in market.quality_notes)
+```
+
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S45-partition-negative-tolerance`，exit 0。
+
+```text
+CASE CONTROL-expected-plus-one
+baseline exit 0 SHA256 30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8
+ISOLATION_OK PID 28374
+ISOLATION_OK PID 28374
+.                                                                        [100%]
+1 passed in 0.10s
+
+injected exit 1 SHA256 621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21
+ISOLATION_OK PID 28379
+ISOLATION_OK PID 28379
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:258: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x108071080>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x108071080> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x106a99ee0>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x106a99ee0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_vision_count - A...
+1 failed in 0.09s
+
+restored exit 0 SHA256 30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8
+ISOLATION_OK PID 28388
+ISOLATION_OK PID 28388
+.                                                                        [100%]
+1 passed in 0.09s
+
+RESTORED_TREE_SHA_EQUAL True
+CASE S45-partition-negative-tolerance
+baseline exit 0 SHA256 1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374
+ISOLATION_OK PID 28392
+ISOLATION_OK PID 28392
+................................................                         [100%]
+48 passed in 10.69s
+
+injected exit 0 SHA256 045ea1ba667b337c66a23ed5b90e0f84caa35ac2b28eaf7741b8c7b50eea851d
+ISOLATION_OK PID 28498
+ISOLATION_OK PID 28498
+................................................                         [100%]
+48 passed in 11.14s
+
+restored exit 0 SHA256 1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374
+ISOLATION_OK PID 28603
+ISOLATION_OK PID 28603
+................................................                         [100%]
+48 passed in 9.70s
+
+RESTORED_TREE_SHA_EQUAL True
+ORIGINAL_TREE_INVENTORY_AND_SHA_EQUAL True
+```
+
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_GUARD -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`，exit 0。
+
+```text
+before：工作树 == HEAD(e823dc1)，无残骸 ✓
+活性自检 ✓ 护栏在脏树上确实报警；探针还原后：工作树 == HEAD(e823dc1)，无残骸 ✓
+baseline exit 0 tree_sha256 c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(e823dc1)）
+files ['src/base.py']
+injected exit 0 tree_sha256 20f5ddebbc26da20f78e91bf84c46377fc9a662b5eb42e97e38ae5519d56918e
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(e823dc1)）
+files ['src/base.py', 'src/unregistered.py']
+restored exit 0 tree_sha256 c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(e823dc1)）
+files ['src/base.py']
+RESTORED_SHA_EQUAL True
+```
+
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_BEHAVIOR -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`，exit 0。
+
+```text
+OFFSETS [0, 59999999, 120000000] VALIDATED 3 FIRST_GAP 2024-01-01 01:01:00+00:00 SIMULATE BAR_GAP BARS_OK False
+MIDDLE_GRID False MIDDLE_ADJACENT True
+LOADER False False ['2024-01-01T01:00:00+00:00', '2024-01-01T01:00:59.999999+00:00', '2024-01-01T01:02:00+00:00']
+OFFSETS [0, 60000001, 120000000] VALIDATED 3 FIRST_GAP 2024-01-01 01:01:00+00:00 SIMULATE BAR_GAP BARS_OK False
+MIDDLE_GRID False MIDDLE_ADJACENT False
+LOADER False False ['2024-01-01T01:00:00+00:00', '2024-01-01T01:01:00.000001+00:00', '2024-01-01T01:02:00+00:00']
+PRESENT [datetime.datetime(2024, 1, 1, 0, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC')), datetime.datetime(2024, 1, 1, 0, 2, tzinfo=zoneinfo.ZoneInfo(key='UTC'))] EXPECTED 3 MISSING 1 QUARANTINES 2
+```
+
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P13_FUNDING -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`，exit 0。
+
+```text
+RAW_ROWS 93 RAW_UNIQUE 93 LOADED_UNIQUE 93 EXACT_TIMESTAMP_SET_EQUAL True
+JITTER_US [1000, 2000, 3000]
+CHECK_FUNDING_ROWS 93 QUARANTINES 0 EXACT_TIMES_RETAINED True
+```
+
+### 最终稳定窗口复核
+
+2026-09-11 15:23:13 +08:00，新版tree_guard.py静默240.46秒后重新执行G。新版护栏SHA256为 `d08a67bee41dd1a58426bb45c09950b9f13a311e4b1fae6a0095e4bbc809b725`，复跑前后相等。
+新增assert_declared不改变assert_matches漏掉新增文件的事实；三阶段依旧全部exit0、注入树SHA不同，故新版S44仍open。
+
+```text
+before：工作树 == HEAD(8af77b4)，无残骸 ✓
+活性自检 ✓ 护栏在脏树上确实报警；探针还原后：工作树 == HEAD(8af77b4)，无残骸 ✓
+baseline exit 0 tree_sha256 c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(8af77b4)）
+files ['src/base.py']
+injected exit 0 tree_sha256 20f5ddebbc26da20f78e91bf84c46377fc9a662b5eb42e97e38ae5519d56918e
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(8af77b4)）
+files ['src/base.py', 'src/unregistered.py']
+restored exit 0 tree_sha256 c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+check：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(8af77b4)）
+files ['src/base.py']
+RESTORED_SHA_EQUAL True
+```
+
+market源码与market测试最终文件集合、SHA256、mtime核验：
+
+```json
+{
+  "market_test_files": 85,
+  "inventory_equal": true,
+  "sha_changed": [],
+  "mtime_changed": []
+}
+```
+
+85个原market源码/测试文件均未被本会话更动，无新增或删除。本会话唯一项目写入为本报告；其他窗口的文件/契约变更已单独记录。
+历史连续字节块SHA256仍为 `d2c8d9f3bbdbd85a12aa6786b3f4055d253d105d0b18c6f63b07153508d69de7`；本轮新章节超过200行。
+十三审结论保持fail，阻断项只有S44/S45；S42/S43指定原形closed。
+
+<!-- P13_HISTORY_BYTES_BEGIN -->
+
 ## 十二审判定表
 
 审查日期：2026-09-11。独立审查方：Codex 主控。十二审判 **fail**；阻断项为 **S42、S43**。
@@ -9838,3 +16525,6 @@ PY
 
 证据完整性：完成
 十二审终裁：fail
+
+证据完整性：完成
+十三审终裁：fail

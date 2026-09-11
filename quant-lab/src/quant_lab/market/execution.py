@@ -17,7 +17,7 @@ from typing import Callable, Literal
 import polars as pl
 
 from quant_lab.market.contract import (
-    DF_DECIMAL, PAIR_KEY, REQUEST_ID_COLS, RESULT_SCALAR_COLS, ContractError, grid_points_between, EpisodeFixture, ExecutionRequest, ExecutionResult,
+    DF_DECIMAL, PAIR_KEY, REQUEST_ID_COLS, RESULT_SCALAR_COLS, ContractError, first_grid_point, grid_points_between, EpisodeFixture, ExecutionRequest, ExecutionResult,
     MarketView, check_invariants, diff_result, load_fixtures,
 )
 
@@ -133,7 +133,7 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path = "dat
                           window_before_s: int = 0, snapshot_id: str | None = None) -> MarketView:
     """按 request 的 instrument 与 [t_dec, horizon_end] 从 silver 装 1m last/mark bars + funding + rules（S05/S12）。
     覆盖证据：每个涉及分区的 manifest 必须存在且 check_status ∈ {ok, gap}（体检过）；quarantine severity=error 的 bar 与
-    ohlc_valid=false 的 bar 视为不可用（bars_complete=False）；网格首尾完整性按期望 bar 数核对；
+    ohlc_valid=false 的 bar 视为不可用（bars_complete=False）；网格覆盖按合法且唯一的 open_time 身份核对；
     manifest_refs（partition_id, source_sha256, schema_hash, available_at_basis, check_rule_version）进入 manifest_hash。"""
     import json as _json
 
@@ -209,12 +209,23 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path = "dat
             if not manifest_ok(data_type, "1m", mo):
                 complete = False
                 quality_ok[0] = False
-        # 网格首尾完整性：期望 bar 数 = [a, b) 内的**网格点个数**（S05：尾缺无后续行承载 gap_flag）。
-        # 族B 漏网处：此前按 (b-a)/interval 取整，t_dec 带亚秒时窗口不与网格对齐，计数会错一根（S28 同族）。
-        expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS["1m"])
-        if len(out) != expected:
+        # S43：只统计窗口内合法的唯一网格点；离网行/重复行不能凑齐缺失点。
+        until = min(b, dt.datetime.now(dt.UTC))
+        interval_s = INTERVAL_SECONDS["1m"]
+        expected = grid_points_between(a, until, interval_s)
+        present = set()
+        for bar in out:
+            opened = bar.open_time
+            if first_grid_point(opened, interval_s) != opened:
+                complete = False
+                quality_ok[0] = False
+                problems.append(f"{data_type} off-grid bar open_time={opened.isoformat()} interval_s={interval_s}")
+                continue
+            if opened < until:
+                present.add(opened)
+        if len(present) != expected:
             complete = False
-            problems.append(f"{data_type} 期望 {expected} 根，实际 {len(out)}")
+            problems.append(f"{data_type} 期望 {expected} 根，实际 {len(present)} 根合法唯一网格 bar（原始 {len(out)} 行）")
         return out, complete
 
     last, ok1 = bars("klines")

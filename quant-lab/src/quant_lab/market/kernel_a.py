@@ -232,26 +232,24 @@ class KernelA:
         return [moments[k] for k in sorted(moments)]
 
     def _first_bar_gap(self, bars: list[Bar], end: dt.datetime) -> dt.datetime | None:
-        """bars 网格在 [t_start, end) 内的首个缺口时刻：首缺 → 首个应有 bar 的 open；内部洞 → prev+iv；尾缺 → last+iv。"""
+        """bars 网格在 [t_start, end) 内的首个缺口时刻：逐点匹配身份，离网行不计覆盖。"""
         if not bars:
             return None
         interval_s = bars[0].interval_s
         iv = dt.timedelta(seconds=interval_s)
         opens = sorted(b.open_time for b in bars if b.open_time >= self.t_start and b.open_time < end)
-        # S28：网格对齐用单一来源 contract.first_grid_point（精确微秒）——此前按整秒取模，
-        # t_start 带亚秒时把"在网格上"误判成"不在"，完整行情也会被判 BAR_GAP。
-        first_expected = first_grid_point(self.t_start, bars[0].interval_s)
+        # S43：游标只由精确匹配的网格点推进；离网行不能填补缺口或移动网格。
+        expected = first_grid_point(self.t_start, interval_s)
         if not opens:
-            return None                    # 该流在窗口内没有 bars（显式点驱动或早于启动的 bar），不按网格判缺
-        if opens[0] > first_expected:
-            return first_expected
-        prev = opens[0]
-        for o in opens[1:]:
-            if grid_points_between(prev + iv, o, interval_s) > 0:
-                return first_grid_point(prev + iv, interval_s)
-            prev = o
-        if grid_points_between(prev + iv, end, interval_s) > 0:
-            return first_grid_point(prev + iv, interval_s)
+            return None                    # 保留显式 points / 窗口外 bars 的既有语义
+        for opened in opens:
+            if opened != expected:
+                if expected < end:
+                    return expected
+                return opened              # 网格已齐但多出离网行，仍不能报 bars_ok
+            expected += iv
+        if grid_points_between(expected, end, interval_s) > 0:
+            return expected
         return None
 
     def add_hold_end_moment(self) -> None:

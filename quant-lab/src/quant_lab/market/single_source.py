@@ -43,6 +43,7 @@ ALLOWED_CALLERS: dict[str, set[str]] = {
     },
     # 网格首点 / 网格计数的唯一表达（S28/S29 同族；vision.expected_rows 曾自写整除，A24 后归一）
     "first_grid_point": {
+        "market/execution.py:load_market_from_lake.bars",
         "market/kernel_a.py:KernelA._first_bar_gap",
         "market/partition_check.py:check_bars",
     },
@@ -324,10 +325,11 @@ ALLOWED_CALL_COUNTS = {"force_close_net_R": {},  # G3 尚未接入；夹具不�
  'entry_expiry_at': {'market/kernel_a.py:KernelA.submit_entries': 1,
                      'market/kernel_a.py:KernelA.timeline': 1,
                      'market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries': 1},
- 'first_grid_point': {'market/kernel_a.py:KernelA._first_bar_gap': 3,
+ 'first_grid_point': {'market/execution.py:load_market_from_lake.bars': 1,
+                      'market/kernel_a.py:KernelA._first_bar_gap': 1,
                       'market/partition_check.py:check_bars': 1},
  'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1,
-                         'market/kernel_a.py:KernelA._first_bar_gap': 2,
+                         'market/kernel_a.py:KernelA._first_bar_gap': 1,
                          'market/partition_check.py:check_bars': 7,
                          'market/vision.py:expected_rows': 1},
  'resolve_entry_ttl_s': {'market/contract.py:ExecutionRequest._chk': 1,

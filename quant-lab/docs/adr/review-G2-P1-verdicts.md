@@ -18,6 +18,7 @@
 | 十审 | fail | closed 3（S30、A23-A/C/L）/ partial-P2 2 / open 8（S29、S31、S38、S39 阻断；S32、S33、S35、S37 同族未归一） | Codex job `task-mtwgpvh7-bifmsn` rawOutput（原文"十审终裁：fail"；文件 828 行，九审正文 339 行逐字保留，末尾四行符合 A21 追加制）；`taskList.json` 看板 note |
 | 十一审 | fail | 十审指定修复项**全部 closed**（S29/S31/S32/S33/S35/S37/S38/S39）；新增 open 2（S40、S41），两条均为 **A24 门自身的漏检**而非被守护代码的缺陷 | Codex job `task-mtwhxe7y-rc756b` rawOutput（原文"十一审终裁：fail"；文件 1678 行，十审段 487 行、九审段 339 行**经我逐行核对逐字保留**，末六行三组结尾符合 A21 追加制）；`taskList.json` 看板 note |
 | 十二审 | fail | 十一审指定项**全部 closed**（S40、S41、B19 `force_close_net_R`、A24 集合双向与使用次数、P1–P8 各模式自身可失败、A28 十条差分能失败）；新增 open 2（**S42** A28 离网生成器与三道门漏检、**S43** 消费接缝把离网行冒充完整网格）。**S43 是真实行为缺陷，不只是门的缺口。** | Codex job `task-mtwkpm4k-me6mtf` rawOutput（原文"十二审终裁：fail"；文件 9840 行，历史正文及各轮尾行完整保留，源码与测试 SHA256 及 mtime 均未变）；131 组三阶段突变取证；`taskList.json` 看板 note |
+| 十三审 | fail | 十二审指定项**全部 closed**（S42、S43 原反例闭合）；新增 open 2——**S44** 我的快照护栏漏检批中新增文件（单向比对）、**S45** 分区消费方缺少窗口内 −1µs 对抗输入（1µs 前向容差突变下三道门全绿）。**S44 是我自己工具的缺陷，已由我当场修复并三向自证**（新增/删除/干净）。 | Codex job `task-mtwm08j6-54w9yy` rawOutput（原文"十三审终裁：fail"；97 次三阶段突变实验；历史字节完整保留）；`taskList.json` 看板 note |
 
 ## 为什么需要这份台账（2026-09-11 的两次实际丢失）
 

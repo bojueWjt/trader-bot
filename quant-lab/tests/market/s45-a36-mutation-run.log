@@ -1,0 +1,1526 @@
+CASE known_red_control BASELINE
+ISOLATION_OK pid=39720 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=39720 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 3.12s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE known_red_control INJECTED
+ISOLATION_OK pid=39880 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=39880 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+
+    def test_boundary_time():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x10618f210>
+allocation = <object object at 0x10618f210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+____________________________ test_boundary_numeric _____________________________
+
+tmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1416/test_boundary_numeric0')
+
+    def test_boundary_numeric(tmp_path):
+>       probe()
+
+tests/market/test_boundary_discrimination.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x10618f210>
+allocation = <object object at 0x10618f210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_____________________________ test_boundary_empty ______________________________
+
+    def test_boundary_empty():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:85: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x10618f210>
+allocation = <object object at 0x10618f210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+__________________________ test_boundary_equivalence ___________________________
+
+    def test_boundary_equivalence():
+>       omitted = probe()[0]
+                  ^^^^^^^
+
+tests/market/test_boundary_discrimination.py:98: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x10618f210>
+allocation = <object object at 0x10618f210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_______________________ test_differential_partition_grid _______________________
+
+    def test_differential_partition_grid():
+        rng = random.Random(2802)
+        for start in _times():
+            period = start.strftime('%Y-%m')
+            pa, pb = vision.period_bounds(period)
+            for end_offset in (-1, 0, 1):
+                end = start.replace(microsecond=0) + dt.timedelta(minutes=4) + end_offset * US
+                a, b = max(pa, start), min(pb, end)
+                expected = _grid(a, b)
+                variants = [expected, [], expected[1:], expected[:-1], expected[::2],
+                            [t for t in expected if rng.getrandbits(1)],
+                            [t + US for t in expected], [t - US for t in expected],
+                            *_partition_interior_variants(expected), sorted(set(expected + [a - US, b]))]
+                for opens in variants:
+                    frame = fixture_bars(max(1, len(opens))).head(len(opens)).with_columns(
+                        pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+                        pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                                  dtype=pl.Datetime('us', 'UTC')))
+                    out, quarantines, report = pc.check_bars(
+                        frame, pid='a28', data_type='markPriceKlines', interval='1m', inst=INST,
+                        period=period, rules=fixture_rules(eff_from=start, eff_to=end))
+                    present = sorted(set(opens) & set(expected))
+>                   assert report.expected_rows == c.grid_points_between(a, b, 60)
+E                   AssertionError: assert 2 == 1
+E                    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E                    +  and   1 = <function grid_points_between at 0x106ebb100>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E                    +    where <function grid_points_between at 0x106ebb100> = c.grid_points_between
+
+tests/market/test_single_source.py:231: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 0.15s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+
+CASE known_red_control RESTORED SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374
+ISOLATION_OK pid=39917 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=39917 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.22s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE S45_time_forward_tolerance BASELINE
+ISOLATION_OK pid=39937 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=39937 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.25s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE S45_time_forward_tolerance INJECTED
+ISOLATION_OK pid=39975 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=39975 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+F.............F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+
+    def test_boundary_time():
+        probe()
+        # 首、中、尾网格点都做 −1/0/+1µs；另测半开区间外端点。
+        for index in range(3):
+            for offset in (-1, 0, 1):
+                opens = list(GRID)
+                opens[index] += offset * US
+>               probe(opens=opens)
+
+tests/market/test_boundary_discrimination.py:59: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 0, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x106157210>
+allocation = <object object at 0x106157210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+>       assert out['open_time'].to_list() == present
+E       AssertionError: assert [datetime.dat...o(key='UTC'))] == [datetime.dat...timezone.utc)]
+E         
+E         At index 1 diff: datetime.datetime(2024, 1, 1, 1, 0, 59, 999999, tzinfo=zoneinfo.ZoneInfo(key='UTC')) != datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)
+E         Left contains one more item: datetime.datetime(2024, 1, 1, 1, 2, tzinfo=zoneinfo.ZoneInfo(key='UTC'))
+E         Use -v to get more diff
+
+tests/market/test_boundary_discrimination.py:40: AssertionError
+_______________________ test_differential_partition_grid _______________________
+
+    def test_differential_partition_grid():
+        rng = random.Random(2802)
+        for start in _times():
+            period = start.strftime('%Y-%m')
+            pa, pb = vision.period_bounds(period)
+            for end_offset in (-1, 0, 1):
+                end = start.replace(microsecond=0) + dt.timedelta(minutes=4) + end_offset * US
+                a, b = max(pa, start), min(pb, end)
+                expected = _grid(a, b)
+                variants = [expected, [], expected[1:], expected[:-1], expected[::2],
+                            [t for t in expected if rng.getrandbits(1)],
+                            [t + US for t in expected], [t - US for t in expected],
+                            *_partition_interior_variants(expected), sorted(set(expected + [a - US, b]))]
+                for opens in variants:
+                    frame = fixture_bars(max(1, len(opens))).head(len(opens)).with_columns(
+                        pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+                        pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                                  dtype=pl.Datetime('us', 'UTC')))
+                    out, quarantines, report = pc.check_bars(
+                        frame, pid='a28', data_type='markPriceKlines', interval='1m', inst=INST,
+                        period=period, rules=fixture_rules(eff_from=start, eff_to=end))
+                    present = sorted(set(opens) & set(expected))
+                    assert report.expected_rows == c.grid_points_between(a, b, 60)
+>                   assert out['open_time'].to_list() == present
+E                   AssertionError: assert [datetime.dat...o(key='UTC'))] == []
+E                     
+E                     Left contains one more item: datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=zoneinfo.ZoneInfo(key='UTC'))
+E                     Use -v to get more diff
+
+tests/market/test_single_source.py:232: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+2 failed, 13 passed in 0.26s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+
+CASE S45_time_forward_tolerance A26 OVERLAY
+ISOLATION_OK pid=39982 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=39982 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+
+    def test_boundary_time():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x109ca3210>
+allocation = <object object at 0x109ca3210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+____________________________ test_boundary_numeric _____________________________
+
+tmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1420/test_boundary_numeric0')
+
+    def test_boundary_numeric(tmp_path):
+>       probe()
+
+tests/market/test_boundary_discrimination.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x109ca3210>
+allocation = <object object at 0x109ca3210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_____________________________ test_boundary_empty ______________________________
+
+    def test_boundary_empty():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:85: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x109ca3210>
+allocation = <object object at 0x109ca3210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+__________________________ test_boundary_equivalence ___________________________
+
+    def test_boundary_equivalence():
+>       omitted = probe()[0]
+                  ^^^^^^^
+
+tests/market/test_boundary_discrimination.py:98: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x109ca3210>
+allocation = <object object at 0x109ca3210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_______________________ test_differential_partition_grid _______________________
+
+    def test_differential_partition_grid():
+        rng = random.Random(2802)
+        for start in _times():
+            period = start.strftime('%Y-%m')
+            pa, pb = vision.period_bounds(period)
+            for end_offset in (-1, 0, 1):
+                end = start.replace(microsecond=0) + dt.timedelta(minutes=4) + end_offset * US
+                a, b = max(pa, start), min(pb, end)
+                expected = _grid(a, b)
+                variants = [expected, [], expected[1:], expected[:-1], expected[::2],
+                            [t for t in expected if rng.getrandbits(1)],
+                            [t + US for t in expected], [t - US for t in expected],
+                            *_partition_interior_variants(expected), sorted(set(expected + [a - US, b]))]
+                for opens in variants:
+                    frame = fixture_bars(max(1, len(opens))).head(len(opens)).with_columns(
+                        pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+                        pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                                  dtype=pl.Datetime('us', 'UTC')))
+                    out, quarantines, report = pc.check_bars(
+                        frame, pid='a28', data_type='markPriceKlines', interval='1m', inst=INST,
+                        period=period, rules=fixture_rules(eff_from=start, eff_to=end))
+                    present = sorted(set(opens) & set(expected))
+>                   assert report.expected_rows == c.grid_points_between(a, b, 60)
+E                   AssertionError: assert 2 == 1
+E                    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E                    +  and   1 = <function grid_points_between at 0x10a9cf100>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E                    +    where <function grid_points_between at 0x10a9cf100> = c.grid_points_between
+
+tests/market/test_single_source.py:231: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 0.14s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+
+CASE S45_time_forward_tolerance RESTORED SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374
+ISOLATION_OK pid=39983 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=39983 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.24s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_numeric_float_validation BASELINE
+ISOLATION_OK pid=39996 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=39996 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.24s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_numeric_float_validation INJECTED
+ISOLATION_OK pid=40013 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40013 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+.F.............                                                          [100%]
+=================================== FAILURES ===================================
+____________________________ test_boundary_numeric _____________________________
+
+tmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1423/test_boundary_numeric0')
+
+    def test_boundary_numeric(tmp_path):
+        probe()
+        for risk in DECIMAL_EDGES:
+>           probe(risk=risk)
+
+tests/market/test_boundary_discrimination.py:70: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/market/test_boundary_discrimination.py:30: in probe
+    req = c.ExecutionRequest.model_validate(payload)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/quant_lab/market/contract.py:459: in _chk
+    check_decimal(Decimal(float(self.risk_budget)), "risk_budget")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+d = Decimal('1.0000000000000000209225608301284726753266340892878361046314239501953125E-8')
+name = 'risk_budget', positive = True
+
+    def check_decimal(d: Decimal, name: str, *, positive: bool = True) -> None:
+        """Decimal(38,12) 合同边界（S13）：有限、（正）、小数位 ≤ 12、总位数 ≤ 38。"""
+        if not d.is_finite() or (positive and d <= 0):
+            raise ContractError(f"{name} 必须有限{'且 > 0' if positive else ''}：{d}")
+        tup = d.normalize().as_tuple()
+        if tup.exponent < -12 or len(tup.digits) > 38 or (len(tup.digits) + max(0, tup.exponent)) > 26:   # 整数位 ≤ 38−12
+>           raise ContractError(f"{name} 超出 Decimal(38,12)：{d}")
+E           quant_lab.market.contract.ContractError: risk_budget 超出 Decimal(38,12)：1.0000000000000000209225608301284726753266340892878361046314239501953125E-8
+
+src/quant_lab/market/contract.py:89: ContractError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+1 failed, 14 passed in 2.28s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_numeric_float_validation A26 OVERLAY
+ISOLATION_OK pid=40027 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40027 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+
+    def test_boundary_time():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x108a0b210>
+allocation = <object object at 0x108a0b210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+____________________________ test_boundary_numeric _____________________________
+
+tmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1424/test_boundary_numeric0')
+
+    def test_boundary_numeric(tmp_path):
+>       probe()
+
+tests/market/test_boundary_discrimination.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x108a0b210>
+allocation = <object object at 0x108a0b210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_____________________________ test_boundary_empty ______________________________
+
+    def test_boundary_empty():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:85: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x108a0b210>
+allocation = <object object at 0x108a0b210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+__________________________ test_boundary_equivalence ___________________________
+
+    def test_boundary_equivalence():
+>       omitted = probe()[0]
+                  ^^^^^^^
+
+tests/market/test_boundary_discrimination.py:98: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x108a0b210>
+allocation = <object object at 0x108a0b210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_______________________ test_differential_partition_grid _______________________
+
+    def test_differential_partition_grid():
+        rng = random.Random(2802)
+        for start in _times():
+            period = start.strftime('%Y-%m')
+            pa, pb = vision.period_bounds(period)
+            for end_offset in (-1, 0, 1):
+                end = start.replace(microsecond=0) + dt.timedelta(minutes=4) + end_offset * US
+                a, b = max(pa, start), min(pb, end)
+                expected = _grid(a, b)
+                variants = [expected, [], expected[1:], expected[:-1], expected[::2],
+                            [t for t in expected if rng.getrandbits(1)],
+                            [t + US for t in expected], [t - US for t in expected],
+                            *_partition_interior_variants(expected), sorted(set(expected + [a - US, b]))]
+                for opens in variants:
+                    frame = fixture_bars(max(1, len(opens))).head(len(opens)).with_columns(
+                        pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+                        pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                                  dtype=pl.Datetime('us', 'UTC')))
+                    out, quarantines, report = pc.check_bars(
+                        frame, pid='a28', data_type='markPriceKlines', interval='1m', inst=INST,
+                        period=period, rules=fixture_rules(eff_from=start, eff_to=end))
+                    present = sorted(set(opens) & set(expected))
+>                   assert report.expected_rows == c.grid_points_between(a, b, 60)
+E                   AssertionError: assert 2 == 1
+E                    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E                    +  and   1 = <function grid_points_between at 0x109737100>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E                    +    where <function grid_points_between at 0x109737100> = c.grid_points_between
+
+tests/market/test_single_source.py:231: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 0.16s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+
+CASE A36_numeric_float_validation RESTORED SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7
+ISOLATION_OK pid=40040 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40040 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.23s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_empty_falsy_fallback BASELINE
+ISOLATION_OK pid=40064 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40064 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.28s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_empty_falsy_fallback INJECTED
+ISOLATION_OK pid=40081 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40081 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+..F............                                                          [100%]
+=================================== FAILURES ===================================
+_____________________________ test_boundary_empty ______________________________
+
+    def test_boundary_empty():
+        probe()
+        assert probe(allocation=None)[0].entry_fractions == (Decimal(1),)
+>       with pytest.raises(c.ContractError, match='长度|推导不一致'):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ContractError
+
+tests/market/test_boundary_discrimination.py:87: Failed
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - Fa...
+1 failed, 14 passed in 2.33s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_empty_falsy_fallback A26 OVERLAY
+ISOLATION_OK pid=40095 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40095 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+
+    def test_boundary_time():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x103cfb210>
+allocation = <object object at 0x103cfb210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+____________________________ test_boundary_numeric _____________________________
+
+tmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1428/test_boundary_numeric0')
+
+    def test_boundary_numeric(tmp_path):
+>       probe()
+
+tests/market/test_boundary_discrimination.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x103cfb210>
+allocation = <object object at 0x103cfb210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_____________________________ test_boundary_empty ______________________________
+
+    def test_boundary_empty():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:85: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x103cfb210>
+allocation = <object object at 0x103cfb210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+__________________________ test_boundary_equivalence ___________________________
+
+    def test_boundary_equivalence():
+>       omitted = probe()[0]
+                  ^^^^^^^
+
+tests/market/test_boundary_discrimination.py:98: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x103cfb210>
+allocation = <object object at 0x103cfb210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_______________________ test_differential_partition_grid _______________________
+
+    def test_differential_partition_grid():
+        rng = random.Random(2802)
+        for start in _times():
+            period = start.strftime('%Y-%m')
+            pa, pb = vision.period_bounds(period)
+            for end_offset in (-1, 0, 1):
+                end = start.replace(microsecond=0) + dt.timedelta(minutes=4) + end_offset * US
+                a, b = max(pa, start), min(pb, end)
+                expected = _grid(a, b)
+                variants = [expected, [], expected[1:], expected[:-1], expected[::2],
+                            [t for t in expected if rng.getrandbits(1)],
+                            [t + US for t in expected], [t - US for t in expected],
+                            *_partition_interior_variants(expected), sorted(set(expected + [a - US, b]))]
+                for opens in variants:
+                    frame = fixture_bars(max(1, len(opens))).head(len(opens)).with_columns(
+                        pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+                        pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                                  dtype=pl.Datetime('us', 'UTC')))
+                    out, quarantines, report = pc.check_bars(
+                        frame, pid='a28', data_type='markPriceKlines', interval='1m', inst=INST,
+                        period=period, rules=fixture_rules(eff_from=start, eff_to=end))
+                    present = sorted(set(opens) & set(expected))
+>                   assert report.expected_rows == c.grid_points_between(a, b, 60)
+E                   AssertionError: assert 2 == 1
+E                    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E                    +  and   1 = <function grid_points_between at 0x1093e3100>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E                    +    where <function grid_points_between at 0x1093e3100> = c.grid_points_between
+
+tests/market/test_single_source.py:231: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 0.16s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+
+CASE A36_empty_falsy_fallback RESTORED SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7
+ISOLATION_OK pid=40096 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40096 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.60s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_equivalence_explicit_start BASELINE
+ISOLATION_OK pid=40140 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40140 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.26s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_equivalence_explicit_start INJECTED
+ISOLATION_OK pid=40153 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40153 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...F...........                                                          [100%]
+=================================== FAILURES ===================================
+__________________________ test_boundary_equivalence ___________________________
+
+    def test_boundary_equivalence():
+        omitted = probe()[0]
+>       explicit = probe(spelling=START, allocation=(Decimal(1),))[0]
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/market/test_boundary_discrimination.py:99: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5')
+spelling = datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc)
+allocation = (Decimal('1'),)
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+>       assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+E       AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, 0, 1, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc)
+E        +  where datetime.datetime(2024, 1, 1, 1, 0, 0, 1, tzinfo=datetime.timezone.utc) = resolved_t_start(ExecutionPolicy(version='fixture-zero-v1', latency_s=0, ladder_steps=2, costs={'base': CostSpec(maker_fee=Decimal('0')...zon_s=432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')))
+E        +    where resolved_t_start = ExecutionRequest(episode_id='E03', graph_version='gv-fixture', decision_snapshot_hash='dsh-E03', t_dec=datetime.dateti...de='one_way', entry_ttl_s=3600, entry_fractions=(Decimal('1'),), tp_fractions=(Decimal('1'),), horizon_source='caller').resolved_t_start
+E        +    and   ExecutionPolicy(version='fixture-zero-v1', latency_s=0, ladder_steps=2, costs={'base': CostSpec(maker_fee=Decimal('0')...zon_s=432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')) = <function resolve_policy at 0x10adab9c0>('fixture-zero-v1')
+E        +      where <function resolve_policy at 0x10adab9c0> = c.resolve_policy
+E        +      and   'fixture-zero-v1' = ExecutionRequest(episode_id='E03', graph_version='gv-fixture', decision_snapshot_hash='dsh-E03', t_dec=datetime.dateti...de='one_way', entry_ttl_s=3600, entry_fractions=(Decimal('1'),), tp_fractions=(Decimal('1'),), horizon_source='caller').policy_version
+
+tests/market/test_boundary_discrimination.py:32: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+1 failed, 14 passed in 2.50s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A36_equivalence_explicit_start A26 OVERLAY
+ISOLATION_OK pid=40172 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40172 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+
+    def test_boundary_time():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x103297210>
+allocation = <object object at 0x103297210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+____________________________ test_boundary_numeric _____________________________
+
+tmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1433/test_boundary_numeric0')
+
+    def test_boundary_numeric(tmp_path):
+>       probe()
+
+tests/market/test_boundary_discrimination.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x103297210>
+allocation = <object object at 0x103297210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_____________________________ test_boundary_empty ______________________________
+
+    def test_boundary_empty():
+>       probe()
+
+tests/market/test_boundary_discrimination.py:85: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x103297210>
+allocation = <object object at 0x103297210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+__________________________ test_boundary_equivalence ___________________________
+
+    def test_boundary_equivalence():
+>       omitted = probe()[0]
+                  ^^^^^^^
+
+tests/market/test_boundary_discrimination.py:98: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+opens = [datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)]
+risk = Decimal('5'), spelling = <object object at 0x103297210>
+allocation = <object object at 0x103297210>
+
+    def probe(*, opens=GRID, risk=Decimal(5), spelling=ABSENT, allocation=ABSENT):
+        payload = {**BASE_REQUEST, 't_dec': START, 'horizon_end': END, 'risk_budget': risk}
+        payload.pop('t_start', None)
+        if spelling is not ABSENT:
+            payload['t_start'] = spelling
+        if allocation is not ABSENT:
+            payload['entry_fractions'] = allocation
+        req = c.ExecutionRequest.model_validate(payload)
+        assert req.risk_budget == risk
+        assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+        assert KernelA(req, c.MarketView(manifest_id=req.market_manifest)).t_start == START
+        frame = bars(max(1, len(opens)), start=START).head(len(opens)).with_columns(
+            pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+            pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                      dtype=pl.Datetime('us', 'UTC')))
+        out, qs, report = partition(frame)
+        present = sorted(set(opens) & set(GRID))
+        assert out['open_time'].to_list() == present
+>       assert report.expected_rows == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+
+tests/market/test_boundary_discrimination.py:41: AssertionError
+_______________________ test_differential_partition_grid _______________________
+
+    def test_differential_partition_grid():
+        rng = random.Random(2802)
+        for start in _times():
+            period = start.strftime('%Y-%m')
+            pa, pb = vision.period_bounds(period)
+            for end_offset in (-1, 0, 1):
+                end = start.replace(microsecond=0) + dt.timedelta(minutes=4) + end_offset * US
+                a, b = max(pa, start), min(pb, end)
+                expected = _grid(a, b)
+                variants = [expected, [], expected[1:], expected[:-1], expected[::2],
+                            [t for t in expected if rng.getrandbits(1)],
+                            [t + US for t in expected], [t - US for t in expected],
+                            *_partition_interior_variants(expected), sorted(set(expected + [a - US, b]))]
+                for opens in variants:
+                    frame = fixture_bars(max(1, len(opens))).head(len(opens)).with_columns(
+                        pl.Series('open_time', opens, dtype=pl.Datetime('us', 'UTC')),
+                        pl.Series('close_time', [t + dt.timedelta(minutes=1) for t in opens],
+                                  dtype=pl.Datetime('us', 'UTC')))
+                    out, quarantines, report = pc.check_bars(
+                        frame, pid='a28', data_type='markPriceKlines', interval='1m', inst=INST,
+                        period=period, rules=fixture_rules(eff_from=start, eff_to=end))
+                    present = sorted(set(opens) & set(expected))
+>                   assert report.expected_rows == c.grid_points_between(a, b, 60)
+E                   AssertionError: assert 2 == 1
+E                    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E                    +  and   1 = <function grid_points_between at 0x1088cb100>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E                    +    where <function grid_points_between at 0x1088cb100> = c.grid_points_between
+
+tests/market/test_single_source.py:231: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 0.16s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+
+CASE A36_equivalence_explicit_start RESTORED SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7
+ISOLATION_OK pid=40178 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40178 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.57s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A37_label_before_evidence BASELINE
+ISOLATION_OK pid=40221 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40221 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.87s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A37_label_before_evidence INJECTED
+ISOLATION_OK pid=40251 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40251 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+....FFFFFFFFFF.                                                          [100%]
+=================================== FAILURES ===================================
+____ test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok] _____
+
+reason = 'SYMBOL_TIME_INVALID', cov_key = 'rules_ok', label_first = False
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'SYMBOL_TIME_INVALID'
+E         
+E         - SYMBOL_TIME_INVALID
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+____ test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok] ____
+
+reason = 'RULE_HISTORY_MISSING', cov_key = 'rules_ok', label_first = False
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'RULE_HISTORY_MISSING'
+E         
+E         - RULE_HISTORY_MISSING
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+___________ test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok] ___________
+
+reason = 'BAR_GAP', cov_key = 'bars_ok', label_first = False
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E         
+E         - BAR_GAP
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+_________ test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok] __________
+
+reason = 'MARK_STALE', cov_key = 'mark_ok', label_first = False
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'MARK_STALE'
+E         
+E         - MARK_STALE
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+___ test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok] ___
+
+reason = 'FUNDING_SCHEDULE_GAP', cov_key = 'funding_ok', label_first = False
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'FUNDING_SCHEDULE_GAP'
+E         
+E         - FUNDING_SCHEDULE_GAP
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+_____ test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok] _____
+
+reason = 'SYMBOL_TIME_INVALID', cov_key = 'rules_ok', label_first = True
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'SYMBOL_TIME_INVALID'
+E         
+E         - SYMBOL_TIME_INVALID
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+____ test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok] _____
+
+reason = 'RULE_HISTORY_MISSING', cov_key = 'rules_ok', label_first = True
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'RULE_HISTORY_MISSING'
+E         
+E         - RULE_HISTORY_MISSING
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+___________ test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok] ____________
+
+reason = 'BAR_GAP', cov_key = 'bars_ok', label_first = True
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E         
+E         - BAR_GAP
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+__________ test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok] __________
+
+reason = 'MARK_STALE', cov_key = 'mark_ok', label_first = True
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'MARK_STALE'
+E         
+E         - MARK_STALE
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+___ test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok] ____
+
+reason = 'FUNDING_SCHEDULE_GAP', cov_key = 'funding_ok', label_first = True
+
+    @pytest.mark.parametrize('reason,cov_key', [
+        ('SYMBOL_TIME_INVALID', 'rules_ok'), ('RULE_HISTORY_MISSING', 'rules_ok'),
+        ('BAR_GAP', 'bars_ok'), ('MARK_STALE', 'mark_ok'),
+        ('FUNDING_SCHEDULE_GAP', 'funding_ok'),
+    ])
+    @pytest.mark.parametrize('label_first', [False, True])
+    def test_a37_evidence_wins_over_label(reason, cov_key, label_first):
+        """真实优先级消费方，两种到达顺序；预期不从被测优先级表推导。"""
+        req = _request()
+        kernel = KernelA(req, c.MarketView(manifest_id=req.market_manifest))
+        candidates = [(reason, cov_key), ('LABEL_RIGHT_CENSORED', None)]
+        if label_first:
+            candidates.reverse()
+        for candidate, key in candidates:
+            kernel.censor_now(candidate, key)
+        result = kernel.result()
+>       assert result.censor_reason == reason
+E       AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'FUNDING_SCHEDULE_GAP'
+E         
+E         - FUNDING_SCHEDULE_GAP
+E         + LABEL_RIGHT_CENSORED
+
+tests/market/test_boundary_discrimination.py:120: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]
+10 failed, 5 passed in 2.81s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "failed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+CASE A37_label_before_evidence RESTORED SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7
+ISOLATION_OK pid=40274 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+ISOLATION_OK pid=40274 root=/Users/balen/projects/trader-bot/quant-lab/tests/market/.s45-a36-5cmh_bv0
+COLLECTION_ORIGINS_OK items=15
+...............                                                          [100%]
+15 passed in 2.55s
+OUTCOMES_JSON={"tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+
+BATCH_VALID: same-batch control RED; four diagonal RED / off-diagonal GREEN; A26 overlays RED; SHA256 restored

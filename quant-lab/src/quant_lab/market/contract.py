@@ -43,6 +43,9 @@ OUTCOME_KINDS = ("filled_closed", "unfilled_expired", "stopped", "tp_hit", "righ
 EVIDENCE_CENSORS = ("MARK_STALE", "BAR_GAP", "FUNDING_SCHEDULE_GAP", "RULE_HISTORY_MISSING", "SYMBOL_TIME_INVALID")
 EXIT_LEG_ORDER = ("sl", "tp", "close")
 CENSOR_REASONS = ("LABEL_RIGHT_CENSORED", "MARK_STALE", "BAR_GAP", "FUNDING_SCHEDULE_GAP", "RULE_HISTORY_MISSING", "SYMBOL_TIME_INVALID")
+# A37.2：本门偏向证据不足 → unevaluable（排除样本）这一低代价侧。
+# 误排世界事实只损失统计效率；把我们的无知归为 LABEL_RIGHT_CENSORED
+# 会让编造的中性世界事实进入 θ 分母，损害结论。因此证据类必须全在标签删失之前。
 CENSOR_PRIORITY = ("SYMBOL_TIME_INVALID", "RULE_HISTORY_MISSING", "BAR_GAP", "MARK_STALE", "FUNDING_SCHEDULE_GAP", "LABEL_RIGHT_CENSORED")
 TERMINAL_KINDS = ("filled", "cancelled", "expired", "rejected")
 FILL_KINDS = ("filled", "partial_fill")
@@ -953,6 +956,7 @@ class PricePoint(_Model):
 
 
 class Bar(_Model):
+    """保留原始 open_time（含离网证据）；消费方须按精确网格身份判覆盖，不得取整。"""
     open_time: dt.datetime
     o: Decimal
     h: Decimal
@@ -992,7 +996,11 @@ class Rules(_Model):
 
 
 class MarketView(_Model):
-    """一次 simulate 的行情输入：显式价点（points）或 bars（按 path_scenario 展开）。"""
+    """一次 simulate 的行情输入：显式价点或 bars。
+
+    bars_complete 是来源证据，不替代内核的网格身份检查；离网 bar 可保留，
+    但消费结果必须报告 BAR_GAP / bars_ok=False。funding 不适用 bar 网格规则。
+    """
     manifest_id: str
     last: list[PricePoint] = []
     mark: list[PricePoint] = []
