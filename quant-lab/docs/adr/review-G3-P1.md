@@ -3125,3 +3125,1259 @@ tail_check_exit=0
 本更正也用 ab 模式追加；再次核验原一至四审 192105 bytes 前缀，最终最后一行如下。
 
 五审终裁：fail
+
+## 六审（R-10 round 6）
+
+审查日期：2026-09-11。审查者：Codex 主控；未委派。结论：**fail**。当前回归全绿并不闭合本轮所有工程反例：相关标准差缺可实现性上界，能把真实相关归零后的记录放行；worker 首尾自报磁盘摘要仍不能绑定已经加载的执行修订。失败收费与首样本规则的核心修复成立，真实弱相关破坏已被新版总体门捕获。
+
+本节只追加；未修改 research 源码、测试、G3 报告、契约或 taskList。运行命令均在 quant-lab/，前台执行并收集终态；Python 禁写 bytecode、pytest 禁用 cacheprovider。测试/指定 CLI 自身需要的临时账本和输出使用 /tmp；原文脚本保留其 /tmp/ql-review-r5-lake，故 R-07 看到的是累计 154 行而非重新建库的 77 行，仍无 reserved。报告篡改、源码视图/函数修订和发布端点捕获均在内存中完成，没有落盘伪造制品。
+
+### 逐条闭合表
+
+| 项目 | 六审裁定 | 实跑证据及边界 |
+|---|---|---|
+| R5-C：失败收费 | 闭合 | 原 50 invalid / 1 failed 被拒；最低正确收费 50 的 searched CP 上界 0.08020158944615748，被 FPR 门拒；helper 保留原失败再加 50（总 51）的上界 0.08152876375416514，也拒。5 次正确计费接受。B-C 错误漏记与 invalid+error 漏记均拒。未找到满足已知失败计数约束却低估三分母最坏界的反例。 |
+| R5-C：主 L 计数完整性 | 部分闭合 | 有值时约束正确；将当前 auto-L 报告 chosen_block_len 清空仍 ACCEPTED，整个计数门被跳过，见 R6-L。故 R5-C 整项为部分闭合，而非否定失败收费的有效修复。 |
+| R5-G | 部分闭合 | 原截断、2.0，以及新增逆序 pair、bool n_grid/sd、非法缩小 n_grid 全拒；但新增 sd 只查非负有限，不查来自 [-1,1] 样本的可实现范围。单对 mean=0、sd=3 即被接受，见 R6-G。 |
+| R5-O | 闭合 | 正确计费后首位/非首位失败都 ACCEPTED。原 B1first 两位置均被主 L 记账门拒（实际输出不是 invalid+error 门）；首样本不再享有零失败特权。sample_index 已生成，仅为展示字段。 |
+| R5-H | 部分闭合 | 缺回执、缺结果键、起止摘要不符均 SystemExit 且零发布；worker 异常、仅父进程收尾漂移/中断均零发布。真实两个 worker 执行缓存修订、首尾摘要全等时仍发布，见 R6-H。 |
+| R5-W / S10 | 闭合 | 新总体均值门在强/弱相关及其余两机制的真实独立整块重排上全部触发；正常四批总体误拒 0/4，逐次 0/800。n=0/1 放宽、sd=0 的地板行为另列 B-W；不把小样本单函数返回 True 当成通过 R-08 主记录门。 |
+| A39 coordinated_zero_reference | 已声明边界 | 原 B1 仍 ACCEPTED；接受 contracts/research-schema.md §9.10.19 的方法边界与 P2 独立重跑前置，不升为本轮 P1 必修。全字段协调且数学可能的伪造，与本轮 sd 数学不可能、worker 执行修订不绑定是不同问题。 |
+| S01 | 闭合 | Q-S01 热缓存按 episode 身份对齐。 |
+| S02 | 闭合 | Q-S02 上下文单源及晚到不可见。 |
+| S03 | 闭合 | Q-S03 与全套 epoch/撤销回归。 |
+| S04 | 闭合 | Q-S04 跨进程隔离及后端拒收。 |
+| S05 | 闭合 | Q-S05 日历 purge/成熟门。 |
+| S06 | 闭合 | Q-S06 预算只收紧、insufficient 不拟合；全套真实依赖回归。 |
+| S07 | 闭合 | Q-S07 并发 reserve；R-07 原文账本无 reserved。 |
+| S08 / R4-L | 闭合 | 后端字节改变使 digest 改变；内存/磁盘复用、代码/后端版本重算与唯一配置预算保持，B2/API 实际血缘复核。 |
+| S09 | 闭合 | Q-S09 成熟标签/训练界/总体分位。 |
+| S11 | 闭合 | Q-S11 删失块不增加有效块数。 |
+| S12 | 闭合 | Q-S12 两臂不变量与 NaN 分母保持。 |
+| S13 | 闭合 | Q-S13 未成交未删失到期时刻。 |
+| S14 | 闭合 | Q-S14 冻结 estimand 与 G2 对拍。 |
+| S15 | 闭合 | Q-S15 两臂身份/协议错误。 |
+| S16 | 闭合 | Q-S16 合成端到端/Decimal。 |
+| S17 / R4-V / A31 | 部分闭合 | 原六种篡改、两种 rebuild 拒收；当前 13 行三分母/CP/代码摘要一致；新增 R6-G/H/L 尚未闭合。 |
+| S18 / S19 | 闭合 | Q-S18 流式预算、Q-S19 Decimal 规范化。 |
+| R-10 轮次扩展 | 闭合 | taskList 原文仍 tail -1 + 锚定 pass 正则；六种正反向输入实测符合预期，不接受历史 pass、尾随行或关键词。 |
+| 功效 rate=None 排版 | 闭合 | 真实注入两次 resample 异常形成 rate=None，再走 write_report，成功渲染；未把全失败制品当成可准入。 |
+
+“闭合”限定于本节抽验，不是全仓正确性证明。R5-C 的主 L 下界按实际源码是 n_done − n_failed，不是请求描述中的 n_failed；它约束非失败完成者应有主 L。对应上界是 n_done − errors − n_invalid。该差异不作为措辞问题判 fail；R6-L 是可执行的绕过。
+
+### A–E 证据说明
+
+以下保留命令与本轮真实 stdout/stderr。ACCEPTED 指反例被门接受，不等于工程验收通过。EXIT 1 对拒收型反例可能正是预期结果。
+
+取证驱动有两处需要如实区分：
+1. 第一遍原样运行五审提取器时，全文 rindex 命中五审内引用字符串，错选后续脚本。已中断（exit 130），不把该段算作完成。修正仅限定提取器检索一至四审固定前缀；实际反例命令不变。全套测试及四条 verify 在中断前已经完成且退出码均为 0。
+2. B1lowcorr 原文直接调用仍保留的旧 _correlation_preserved，因此原文复跑弱相关仍打印 aggregate_ok True；这不是新版 run_mc 的结果。本轮 C 用相同实际破坏数据、独立计算 mean/sd/n 调用新版 aggregate_preserved，弱相关为 False；另有原 B1weakMC 完整流水线确认。没有把改过判据的脚本冒称“原样输出”。
+
+本轮没有重跑报告全部 6600 次 MC，也没有重新测量历史后端计时。E 独立复算 13 行所有计数、三分母及 CP，并核当前源码与制品摘要；四机制各 200 次结构对照与小规模完整流水线另列，不冒称全量重新生成。
+
+### 指定全套 / 四条 verify 原文；首遍提取器中断记录
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' QUANT_LAB_DATA_ROOT=/tmp/ql-review-r6-lake .venv-g3/bin/python - <<'PY'
+import re,subprocess,os
+from pathlib import Path
+s=Path('docs/adr/review-G3-P1.md').read_text().split('## 五审（R-10 round 5）',1)[1]
+blocks=re.findall(r'^````bash\n(.*?)\n````$',s,re.M|re.S)
+for i,cmd in enumerate(blocks):
+ print('\nROUND5_BLOCK',i,'COMMAND\n'+cmd,flush=True)
+ r=subprocess.run(cmd,shell=True,executable='/bin/bash',env=os.environ.copy(),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+ print(r.stdout+'\nEXIT='+str(r.returncode),flush=True)
+PY
+`````
+
+`````text
+
+ROUND5_BLOCK 0 COMMAND
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' QUANT_LAB_DATA_ROOT=/tmp/ql-review-r5-lake .venv-g3/bin/python -m pytest tests/research -q
+........................................................................ [ 20%]
+........................................................................ [ 41%]
+........................................................................ [ 61%]
+........................................................................ [ 82%]
+...............................................................          [100%]
+351 passed in 149.93s (0:02:29)
+
+EXIT=0
+
+ROUND5_BLOCK 1 COMMAND
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' QUANT_LAB_DATA_ROOT=/tmp/ql-review-r5-lake .venv-g3/bin/python - <<'PY'
+import json,subprocess,os
+from pathlib import Path
+tasks=json.loads(Path('taskList.json').read_text())['modules']['research']['tasks']
+for k in ['R-05','R-09','R-07','R-08']:
+ cmd=next(t['verify'] for t in tasks if t['id']==k)
+ print('TASK',k,'COMMAND',cmd,flush=True)
+ r=subprocess.run(cmd,shell=True,executable='/bin/bash',env=os.environ.copy(),text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+ print(r.stdout+'exit='+str(r.returncode),flush=True)
+PY
+TASK R-05 COMMAND test -f docs/adr/report-G3-backend-spike.md && .venv-g3/bin/python -c "import json,re,sys;t=open('docs/adr/report-G3-backend-spike.md',encoding='utf-8').read();j=json.loads(t[t.rindex(chr(96)*3+'json')+7:t.rindex(chr(96)*3)]);m=j['matrix'];assert all(v['status']=='pass' for v in m['polars'].values()),m['polars'];assert sum(v['status']=='pass' for v in m['polars_ta'].values())>=10;tm={r['backend']:r for r in j['timings']};assert tm['polars']['n_ast']==128 and tm['polars']['cold_s']>0 and tm['polars']['hot_s']>0 and 0<tm['polars']['rss_gib_after_hot_s']<=8 and tm['polars']['cold_s']<=1200;print('spike ok',tm['polars']['cold_s'],tm['polars_ta']['cold_s'])"
+spike ok 206.77 36.11
+exit=0
+TASK R-09 COMMAND .venv-g3/bin/python -m quant_lab.research.api run --config tests/research/fixtures/protocol_synthetic.yaml --out /tmp/ql-proto && .venv-g3/bin/python -c "import json,math;r=json.load(open('/tmp/ql-proto/report.json'));assert r['tier'] in ('T0','T1','T2','T3a','T3b') and r['n_attempts']>0 and r['theta'] is not None and math.isfinite(r['theta']);s=r['n_attempts_by_status'];st=dict(zip(s['status'],s['len']));assert st.get('completed',0)>0 and st.get('reserved',0)==0 and st.get('duplicate',0)<r['n_attempts'];assert r['claim_status']=='descriptive_only' and r['final_status'] in ('ok','no_claim');print({k:r[k] for k in ('tier','K','theta','n_attempts','final_status')},st)"
+{"status": "ok", "tier": "T1", "K": 531, "theta": 0.0, "se": null, "lower_bound": null, "p_adj": null, "n_attempts": 77, "n_folds": 3, "claim_status": "descriptive_only", "out_dir": "/tmp/ql-proto"}
+{'tier': 'T1', 'K': 531, 'theta': 0.0, 'n_attempts': 77, 'final_status': 'no_claim'} {'budget_exhausted': 3, 'completed': 74}
+exit=0
+TASK R-07 COMMAND .venv-g3/bin/python -m pytest tests/research/test_protocol.py -q && .venv-g3/bin/python -c "import polars as pl;from quant_lab.research.paths import ledger_path;p=ledger_path();d=pl.read_parquet(p);assert d.height>0 and (d['status']=='reserved').sum()==0;print(p,d.height)"
+..........                                                               [100%]
+10 passed in 0.09s
+/private/tmp/ql-review-r5-lake/lockbox/ledger.parquet 154
+exit=0
+TASK R-08 COMMAND .venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py tests/research/test_review_p1_round3.py -q && .venv-g3/bin/python -c "from quant_lab.research.nullmodel import verify_report_text; verify_report_text(open('docs/adr/report-G3-null-model.md',encoding='utf-8').read())"
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 27.97s
+POWER(reported, limitation statement applies) common_shock 327 768 0.3905 fail
+R-08 report verified: 5 unique primary records; arithmetic and diagnostics consistent
+exit=0
+
+EXIT=0
+
+ROUND5_BLOCK 2 COMMAND
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import re,subprocess,os,json
+from pathlib import Path
+s=Path('docs/adr/review-G3-P1.md').read_text()
+for label,section in [('A-R4-L','#### S08：实际代码血缘'),('A-R4-V','#### S17：新结构诊断')]:
+ chunk=s[s.rindex(section):];cmd=re.search(r'```bash\n(.*?)\n```',chunk,re.S).group(1)
+ print('COMMAND',label,'original round4 block',flush=True)
+ r=subprocess.run(cmd,shell=True,executable='/bin/bash',env=os.environ.copy(),text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+ print(r.stdout, 'exit='+str(r.returncode),flush=True)
+PY
+Traceback (most recent call last):
+  File "<stdin>", line 7, in <module>
+  File "/Users/balen/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py", line 1196, in communicate
+    stdout = self.stdout.read()
+             ^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+
+`````
+
+### A、D、E：原五审反例、完整 R-08 篡改链、Q-Sxx 与三分母复算
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' QUANT_LAB_DATA_ROOT=/tmp/ql-review-r6-lake .venv-g3/bin/python - <<'PY'
+import re,subprocess,os
+from pathlib import Path
+s=Path('docs/adr/review-G3-P1.md').read_text();prefix,round5=s.split('## 五审（R-10 round 5）',1);blocks=re.findall(r'^````bash\n(.*?)\n````$',round5,re.M|re.S)
+def run(label,cmd):
+ print('\nEVIDENCE',label,'COMMAND\n'+cmd,flush=True)
+ r=subprocess.run(cmd,shell=True,executable='/bin/bash',env=os.environ.copy())
+ print('EVIDENCE',label,'EXIT',r.returncode,flush=True)
+for title in ['#### S08：实际代码血缘','#### S17：新结构诊断']:
+ chunk=prefix[prefix.rindex(title):];run(title,re.search(r'```bash\n(.*?)\n```',chunk,re.S).group(1))
+for i in [4,5,6,7,8,9]:run('ROUND5_BLOCK_'+str(i),blocks[i])
+chunk=prefix[prefix.rindex('#### R4-STRUCT：'):];cmd=re.search(r'```bash\n(.*?)\n```',chunk,re.S).group(1).replace('n_rep=8','n_rep=12').replace('R4 independent','R5 actual structure');run('ROUND5_C_ORIGINAL_RESOLVED',cmd)
+for i in [11,12,3]:run('ROUND5_BLOCK_'+str(i),blocks[i])
+PY
+`````
+
+`````text
+
+EVIDENCE #### S08：实际代码血缘 COMMAND
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import datetime as dt
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research.ledger import MemoryLedger
+from quant_lab.research.nullmodel import research_code_digest
+kw=dict(origin='human',canonical_hash='h',params={},fold_id='f',visible_cutoff=dt.datetime(2024,1,1,tzinfo=dt.UTC),objective='feature_snapshot',data_manifest='m',seed=1)
+def row():
+ l=MemoryLedger();a=l.reserve(**kw);return l.rows[a]
+a=row();d=research_code_digest();original=Path.read_bytes
+def changed(p):
+ b=original(p)
+ if p.as_posix().endswith('/research/backends/polars.py'):
+  return b+b'\n# independent changed backend bytes\n'
+ return b
+with patch.object(Path,'read_bytes',changed):
+ b=row();e=research_code_digest()
+print('R4 S08 backend_bytes_changed',d!=e,'ledger_code_version_equal',a['code_version']==b['code_version'],'backend_version',a['backend_version'],b['backend_version'])
+print('ledger_code_version',a['code_version'])
+PY
+R4 S08 backend_bytes_changed True ledger_code_version_equal False backend_version None None
+ledger_code_version ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402
+EVIDENCE #### S08：实际代码血缘 EXIT 0
+
+EVIDENCE #### S17：新结构诊断 COMMAND
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import copy,io,json,contextlib,shlex
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+s=Path('docs/adr/report-G3-null-model.md').read_text(); start=s.rindex('```json')+7;end=s.rindex('```');j=json.loads(s[start:end])
+body=shlex.split(next(t for t in json.loads(Path('taskList.json').read_text())['modules']['research']['tasks'] if t['id']=='R-08')['verify'].split(' && ')[-1])[-1]
+for damage in ['grid_false','aggregate_false','invalid_reason','guard_rate','missing_grid','stale_hash']:
+ q=copy.deepcopy(j);d=q['results'][0]['diagnostics']
+ if damage=='grid_false':d['grid_dependence']['ok']=False
+ if damage=='aggregate_false':d['dependence_aggregate']['ok']=False
+ if damage=='invalid_reason':d['invalid_reason']='GRID_DEPENDENCE_NOT_PRESERVED'
+ if damage=='guard_rate':d['guard_fail_rate']=1.0
+ if damage=='missing_grid':del d['grid_dependence']
+ if damage=='stale_hash':q['meta']['research_code_sha256']='0'*64
+ fake=s[:start]+json.dumps(q)+s[end:]
+ try:
+  with patch('builtins.open',return_value=io.StringIO(fake)),contextlib.redirect_stdout(io.StringIO()):exec(compile(body,'R08-original','exec'),{})
+  print('R4 report',damage,'ACCEPTED')
+ except Exception as e:print('R4 report',damage,'REJECTED',type(e).__name__,str(e))
+# Exercise the exact --rebuild path with only read/write endpoints captured in memory.
+old=copy.deepcopy(j);old['meta']['research_code_sha256']='0'*64
+stale=s[:start]+json.dumps(old)+s[end:]; captured=[]
+with patch.object(Path,'read_text',return_value=stale),patch.object(Path,'mkdir'),patch.object(Path,'write_text',lambda self,text,**kw:captured.append(text)),contextlib.redirect_stdout(io.StringIO()):
+ N._main(['--rebuild','/tmp/not-created-old-report.md','--out','/tmp/not-created-rebuilt.md'])
+new=json.loads(captured[0][captured[0].rindex('```json')+7:captured[0].rindex('```')])
+with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(captured[0])
+print('R4 A31 rebuild old_digest',old['meta']['research_code_sha256'],'new_digest',new['meta']['research_code_sha256'],'results_unchanged',new['results']==old['results'],'verify ACCEPTED','writes_captured',len(captured))
+PY
+Traceback (most recent call last):
+  File "<stdin>", line 26, in <module>
+R4 report grid_false REJECTED ValueError grid_dependence.ok 与重算不符
+R4 report aggregate_false REJECTED ValueError dependence_aggregate.ok 与重算不符
+R4 report invalid_reason REJECTED ValueError invalid_reason 与重算不符：记录 'GRID_DEPENDENCE_NOT_PRESERVED' vs 重算 None
+R4 report guard_rate REJECTED ValueError 报告算术不一致
+R4 report missing_grid REJECTED ValueError grid_dependence 缺失
+R4 report stale_hash REJECTED ValueError 制品陈旧（A31）：报告由代码 000000000000 生成，当前研究代码为 ec118a6a340c——门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 742, in verify_report_text
+    raise ValueError(f"制品陈旧（A31）：报告由代码 {str(embedded)[:12]} 生成，当前研究代码为 {current[:12]}——"
+ValueError: 制品陈旧（A31）：报告由代码 000000000000 生成，当前研究代码为 ec118a6a340c——门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定
+EVIDENCE #### S17：新结构诊断 EXIT 1
+
+EVIDENCE ROUND5_BLOCK_4 COMMAND
+PYTHONDONTWRITEBYTECODE=1 QUANT_LAB_DATA_ROOT=/tmp/ql-review-r5-lake .venv-g3/bin/python - <<'PY'
+import copy,io,json,contextlib,shlex
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+s=Path('docs/adr/report-G3-null-model.md').read_text(); start=s.rindex('```json')+7; end=s.rindex('```'); j=json.loads(s[start:end])
+body=shlex.split(next(t for t in json.loads(Path('taskList.json').read_text())['modules']['research']['tasks'] if t['id']=='R-08')['verify'].split(' && ')[-1])[-1]
+def verify(label,q=None,text=None):
+ fake=text if text is not None else s[:start]+json.dumps(q)+s[end:]
+ try:
+  with patch('builtins.open',return_value=io.StringIO(fake)),contextlib.redirect_stdout(io.StringIO()):exec(compile(body,'R08-original','exec'),{})
+  print(label,'ACCEPTED')
+ except Exception as e:print(label,'REJECTED',type(e).__name__,str(e))
+for missing in [False,True]:
+ old=copy.deepcopy(j)
+ if missing:old['meta'].pop('research_code_sha256')
+ else:old['meta']['research_code_sha256']='0'*64
+ stale=s[:start]+json.dumps(old)+s[end:]; captured=[]
+ with patch.object(Path,'read_text',return_value=stale),patch.object(Path,'mkdir'),patch.object(Path,'write_text',lambda self,text,**kw:captured.append(text)),contextlib.redirect_stdout(io.StringIO()):N._main(['--rebuild','/tmp/not-created-old-report.md','--out','/tmp/not-created-rebuilt.md'])
+ new=json.loads(captured[0][captured[0].rindex('```json')+7:captured[0].rindex('```')])
+ print('A rebuild missing',missing,'generating',new['meta']['research_code_sha256'],'renderer',new['meta']['renderer_code_sha256'],'results_unchanged',new['results']==old['results'])
+ verify('A rebuild R08',text=captured[0])
+# New: retain a visible broken pair then omit it, without replacing all report fields.
+q=copy.deepcopy(j);g=q['results'][0]['diagnostics']['grid_dependence'];g['null_mean_cross'][1]=0.0
+verify('B1 broken_pair_present',q)
+g['fitted_cross']=g['fitted_cross'][:1];g['null_mean_cross']=g['null_mean_cross'][:1]
+verify('B1 broken_pair_omitted_vector_len1',q)
+q=copy.deepcopy(j);d=q['results'][0]['diagnostics'];d['grid_dependence']['fitted_cross']=[2.,2.,2.];d['grid_dependence']['null_mean_cross']=[2.,2.,2.]
+verify('B1 impossible_correlations_2',q)
+# New: 50 real guard failures not charged to worst case, all eight listed fields self-consistent.
+q=copy.deepcopy(j);r=q['results'][0];d=r['diagnostics'];k=50
+r['tiers']['T1']-=k;r['tiers']['invalid']=k;d['n_invalid_null_model']=k;d['guard_fail_rate']=k/r['n_done'];d['guard_failures_by_check']={c:(k if c=='icc' else 0) for c in d['shuffle_guard']['checks']}
+print('B1 omitted_worst_charge n_invalid',k,'n_failed',r['n_failed'],'reported_upper',r['searched_worst_ci'][1],'minimum_correct_upper',N.clopper_pearson(r['n_positive']+k,r['n_searched'])[1])
+verify('B1 50_invalid_only_1_failed',q)
+# Provenance boundary: wholly coordinated fabricated cross values cannot prove execution.
+q=copy.deepcopy(j);g=q['results'][0]['diagnostics']['grid_dependence'];g['fitted_cross']=[0.,0.,0.];g['null_mean_cross']=[0.,0.,0.]
+verify('B1 coordinated_zero_reference',q)
+PY
+A rebuild missing False generating 0000000000000000000000000000000000000000000000000000000000000000 renderer ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402 results_unchanged True
+A rebuild R08 REJECTED ValueError 制品陈旧（A31）：报告由代码 000000000000 生成，当前研究代码为 ec118a6a340c——门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定
+A rebuild missing True generating missing-generating-digest renderer ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402 results_unchanged True
+A rebuild R08 REJECTED ValueError 制品陈旧（A31）：报告由代码 missing-gene 生成，当前研究代码为 ec118a6a340c——门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定
+B1 broken_pair_present REJECTED ValueError grid_dependence.ok 与重算不符
+B1 broken_pair_omitted_vector_len1 REJECTED ValueError 相关向量与品种对数不一致
+B1 impossible_correlations_2 REJECTED ValueError 跨品种相关取值非法：2.0（须为有限实数且落在 [-1,1]）
+B1 omitted_worst_charge n_invalid 50 n_failed 1 reported_upper 0.010376831619745201 minimum_correct_upper 0.08020158944615748
+B1 50_invalid_only_1_failed REJECTED ValueError invalid(50) + error(0) 未全部计入失败数 1
+B1 coordinated_zero_reference ACCEPTED
+EVIDENCE ROUND5_BLOCK_4 EXIT 0
+
+EVIDENCE ROUND5_BLOCK_5 COMMAND
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import copy,json,io,contextlib
+from pathlib import Path
+from quant_lab.research import nullmodel as N
+s=Path('docs/adr/report-G3-null-model.md').read_text();start=s.rindex('```json')+7;end=s.rindex('```');j=json.loads(s[start:end])
+r=j['results'][0];d=r['diagnostics'];r['tiers']['T1']-=1;r['tiers']['invalid']=1;d['n_invalid_null_model']=1;d['guard_fail_rate']=.001;d['guard_failures_by_check']={k:int(k=='icc') for k in d['shuffle_guard']['checks']}
+for first in [False,True]:
+ q=copy.deepcopy(j)
+ if first:q['results'][0]['diagnostics']['shuffle_guard']['ok']=False;q['results'][0]['diagnostics']['shuffle_guard']['checks']['icc']=False
+ try:
+  with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(s[:start]+json.dumps(q)+s[end:])
+  print('B1 first_replicate_failed',first,'invalid=failed=1/1000','ACCEPTED')
+ except Exception as e:print('B1 first_replicate_failed',first,'invalid=failed=1/1000','REJECTED',str(e))
+PY
+B1 first_replicate_failed False invalid=failed=1/1000 REJECTED 块长计数不一致：主 L 共 1000，但完成 1000、失败 1、invalid 1、error 0
+B1 first_replicate_failed True invalid=failed=1/1000 REJECTED 块长计数不一致：主 L 共 1000，但完成 1000、失败 1、invalid 1、error 0
+EVIDENCE ROUND5_BLOCK_5 EXIT 0
+
+EVIDENCE ROUND5_BLOCK_6 COMMAND
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import numpy as np
+from dataclasses import replace
+from quant_lab.research import nullmodel as N
+for mech,seed in [('common_shock',1),('cluster_heavy_tail',2)]:
+ w=N.synth_world(N.WorldConfig(mechanism=mech,seed=seed,n_clusters=1600));m=N.fit_residual_model(w,block_len_days=3,train_end_day=180);fg=m.grid[:180];fc=N._grid_cross_corr(fg,3);vals=[];failed=0;normal=0
+ for i in range(200):
+  rng=np.random.default_rng(820000+i);x=N.resample_null(w,m,rng)
+  normal+=not N.assert_not_episode_shuffle(w.inputs,x,w.day,block_len_days=3,fitted_grid=fg)['ok']
+  old=x.shock_grid;grid=old.copy();nb=len(grid)//3
+  for col in range(grid.shape[1]):grid[:nb*3,col]=grid[:nb*3,col].reshape(nb,3)[rng.permutation(nb)].reshape(-1)
+  bad=replace(x,shock_grid=grid,base_R=x.base_R+grid[w.day,w.inst]-old[w.day,w.inst]);g=N.assert_not_episode_shuffle(w.inputs,bad,w.day,block_len_days=3,fitted_grid=fg)
+  vals.append(g['grid']['cross_instrument']['null']);failed+=not g['ok']
+ mc=np.mean(vals,axis=0).tolist();ok=all(N._correlation_preserved(f,v) for f,v in zip(fc,mc))
+ print('B1 actual independent instrument blocks',mech,'normal_invalid',normal,'broken_invalid',failed,'/200','fitted',fc,'broken_mean',mc,'aggregate_ok',ok,'invalid_reason',('GRID_DEPENDENCE_NOT_PRESERVED' if not ok else ('GUARD_FAIL_RATE' if failed/200>.05 else None)),flush=True)
+PY
+B1 actual independent instrument blocks common_shock normal_invalid 0 broken_invalid 103 /200 fitted [0.5589960708759241, 0.5040997763236431, 0.4244275959833148] broken_mean [-0.0029295105509298276, 0.0006290536328795726, 0.001159820041183417] aggregate_ok False invalid_reason GRID_DEPENDENCE_NOT_PRESERVED
+B1 actual independent instrument blocks cluster_heavy_tail normal_invalid 0 broken_invalid 0 /200 fitted [0.1392838284143582, 0.1769549842158233, 0.17954215469804016] broken_mean [0.001993250922467166, -0.001094925123612903, 0.00473002712518701] aggregate_ok True invalid_reason None
+EVIDENCE ROUND5_BLOCK_6 EXIT 0
+
+EVIDENCE ROUND5_BLOCK_7 COMMAND
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import numpy as np
+from dataclasses import replace
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+from quant_lab.research.api import PipelineConfig
+original=N.resample_null
+samples={'normal':[],'broken':[]}
+def broken(w,m,rng,**kw):
+ x=original(w,m,rng,**kw);old=x.shock_grid;g=old.copy();nb=len(g)//3
+ for col in range(g.shape[1]):g[:nb*3,col]=g[:nb*3,col].reshape(nb,3)[rng.permutation(nb)].reshape(-1)
+ samples['normal'].append(N._grid_cross_corr(old,3));samples['broken'].append(N._grid_cross_corr(g,3))
+ return replace(x,shock_grid=g,base_R=x.base_R+g[w.day,w.inst]-old[w.day,w.inst])
+with patch.object(N,'resample_null',broken):r=N.run_mc('cluster_heavy_tail',n_rep=100,seed0=2,world_cfg=N.WorldConfig(n_clusters=1600),pipe_cfg=PipelineConfig(B=100))
+print('B1 actual weak-correlation MC','verdict',r.verdict,'reason',r.diagnostics['invalid_reason'],'invalid',r.diagnostics['n_invalid_null_model'],'done/positive/failed',r.n_done,r.n_positive,r.n_failed,'grid',r.diagnostics['grid_dependence'],'tiers',r.tiers,'errors',r.diagnostics.get('errors',[])[:2])
+a=np.asarray(samples['normal']);b=np.asarray(samples['broken']);delta=a-b;se=delta.std(axis=0,ddof=1)/np.sqrt(len(delta))
+print('B1 paired normal_mean',a.mean(axis=0).tolist(),'broken_mean',b.mean(axis=0).tolist(),'paired_difference_SE',se.tolist(),'difference_over_SE',(delta.mean(axis=0)/se).tolist())
+PY
+B1 actual weak-correlation MC verdict invalid_null_model reason GRID_DEPENDENCE_NOT_PRESERVED invalid 0 done/positive/failed 100 3 0 grid {'fitted_ac1': 0.020652651142966244, 'null_mean_ac1': -0.01565415055775264, 'fitted_cross': [0.1392838284143582, 0.1769549842158233, 0.17954215469804016], 'null_mean_cross': [-0.014176441759468965, 0.02007381701675623, -0.005835202366649829], 'null_sd_cross': [0.09655837273222569, 0.08565178293961821, 0.08944668602357299], 'n_grid': 100, 'pairs': [['BTCUSDT-PERP.BINANCE-UM', 'ETHUSDT-PERP.BINANCE-UM'], ['BTCUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM'], ['ETHUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM']], 'band': [0.057935023639335406, 0.05139106976377093, 0.05366801161414379], 'ok': False} tiers {'T1': 100} errors []
+B1 paired normal_mean [0.11550704372202836, 0.16350301682393503, 0.174862640796078] broken_mean [-0.014176441759468965, 0.02007381701675623, -0.005835202366649829] paired_difference_SE [0.013870042749428052, 0.012545825881122543, 0.012480059468164413] difference_over_SE [9.349898037397535, 11.432423912641259, 14.478924849971504]
+EVIDENCE ROUND5_BLOCK_7 EXIT 0
+
+EVIDENCE ROUND5_BLOCK_8 COMMAND
+PYTHONDONTWRITEBYTECODE=1 QUANT_LAB_DATA_ROOT=/tmp/ql-review-r5-lake .venv-g3/bin/python - <<'PY'
+import datetime as dt,tempfile,copy,yaml
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research import ledger as L,paths,api as A
+from quant_lab.research.features import get_backend
+kw=dict(origin='human',canonical_hash='h',params={},fold_id='f',visible_cutoff=dt.datetime(2024,1,1,tzinfo=dt.UTC),objective='theta',data_manifest='m',seed=1,backend_version='polars:probe-v1')
+read=Path.read_bytes
+for disk in [False,True]:
+ with tempfile.TemporaryDirectory(prefix='r5-ledger-') as tmp:
+  led=L.Ledger(root=Path(tmp),budget_configs=1) if disk else L.MemoryLedger(budget_configs=1)
+  def row(a):return led.read().filter(__import__('polars').col('attempt_id')==a).to_dicts()[0]
+  a=led.reserve(**kw);led.mark(a,'completed');b=led.reserve(**kw)
+  def changed(p):
+   out=read(p)
+   if p.as_posix().endswith('/research/backends/polars.py'):out+=b'\n# R5 backend byte change\n'
+   return out
+  with patch.object(Path,'read_bytes',changed):
+   c=led.reserve(**kw);led.mark(c,'completed')
+  d=led.reserve(**(kw|{'backend_version':'polars:probe-v2'}));led.mark(d,'completed')
+  print('A/B2 disk',disk,'baseline',row(a)['status'],'repeat',row(b)['status'],'byte_changed',row(c)['status'],'digest_changed',row(a)['code_version']!=row(c)['code_version'],'backend_changed',row(d)['status'])
+  try:led.reserve(**(kw|{'canonical_hash':'different-config'}))
+  except L.LedgerBudgetExhausted:print('B2 new_config_after_versions BUDGET_EXHAUSTED')
+  print('B2 recorded_rows',led.read().height,'unique_config_for_three_completed',led.read().filter(__import__('polars').col('status')=='completed')['config_id'].n_unique())
+# API actual configured backend, real synthetic snapshot and search reservations.
+cfg=yaml.safe_load(Path('tests/research/fixtures/protocol_synthetic.yaml').read_text());led=L.MemoryLedger()
+inp,cands,meta=A.build_inputs_from_synthetic(cfg,ledger=led)
+print('A API PanelInputs.backend_version',inp.backend_version,'actual_get_backend_version',get_backend(cfg.get('backend','polars')).version)
+a=A._reserve(led,cands[0],fold_id='probe',cutoff=dt.datetime(2024,1,1,tzinfo=dt.UTC),stage='search',cfg=A.PipelineConfig(),inputs=inp)
+print('A API feature_snapshot_versions',[r['backend_version'] for r in led.rows.values() if r['objective']=='feature_snapshot'],'search_version',led.rows[a]['backend_version'])
+led.mark(a,'failed',reason='review probe complete')
+PY
+A/B2 disk False baseline completed repeat duplicate byte_changed completed digest_changed True backend_changed completed
+B2 new_config_after_versions BUDGET_EXHAUSTED
+B2 recorded_rows 5 unique_config_for_three_completed 1
+A/B2 disk True baseline completed repeat duplicate byte_changed completed digest_changed True backend_changed completed
+B2 new_config_after_versions BUDGET_EXHAUSTED
+B2 recorded_rows 5 unique_config_for_three_completed 1
+A API PanelInputs.backend_version polars/0.2 actual_get_backend_version 0.2
+A API feature_snapshot_versions ['polars/0.2', 'polars/0.2', 'polars/0.2', 'polars/0.2', 'polars/0.2', 'polars/0.2'] search_version polars/0.2
+EVIDENCE ROUND5_BLOCK_8 EXIT 0
+
+EVIDENCE ROUND5_BLOCK_9 COMMAND
+PYTHONDONTWRITEBYTECODE=1 QUANT_LAB_DATA_ROOT=/tmp/ql-review-r5-lake .venv-g3/bin/python - <<'PY'
+import os,io,contextlib,multiprocessing,functools,inspect
+from pathlib import Path
+from unittest.mock import patch
+from concurrent.futures import ProcessPoolExecutor
+from quant_lab.research import nullmodel as N
+original=N.run_mc; reader=Path.read_bytes; mode='stable'
+def worker(**kw):
+ if mode=='exception':raise RuntimeError('R5 injected worker exception')
+ def changed(p):
+  b=reader(p)
+  if p.as_posix().endswith('/research/nullmodel.py'):b=b.replace(b'n_rec, label)',b'n_rec, "R5-child-code")')
+  return b
+ if mode=='worker_drift':
+  with patch.object(Path,'read_bytes',changed):
+   ns=dict(N.__dict__);exec(compile(inspect.getsource(original).replace('n_rec, label)', 'n_rec, "R5-child-code")'), '<r5-worker-revision>', 'exec'),ns);r=ns['run_mc'](**kw);r.diagnostics['r5_worker_digest']=__import__('quant_lab.research.paths',fromlist=['research_code_digest']).research_code_digest()
+ else:
+  r=original(**kw);r.diagnostics['r5_worker_digest']=__import__('quant_lab.research.paths',fromlist=['research_code_digest']).research_code_digest()
+ r.diagnostics['r5_worker_pid']=os.getpid()
+ return r
+factory=functools.partial(ProcessPoolExecutor,mp_context=multiprocessing.get_context('fork'))
+for mode in ['stable','worker_drift','exception','parent_end_drift','parent_interrupt']:
+ captured=[];logs=io.StringIO();dig=N.research_code_digest();calls=[]
+ def digest():
+  calls.append(1)
+  if mode=='parent_interrupt' and len(calls)>1:raise KeyboardInterrupt('R5 parent interrupted after workers')
+  if mode=='parent_end_drift' and len(calls)>1:return 'f'*64
+  return dig
+ def capture(results,out,**kw):captured.append((results,kw))
+ try:
+  with patch('concurrent.futures.ProcessPoolExecutor',factory),patch.object(N,'run_mc',worker),patch.object(N,'write_report',capture),patch.object(N,'research_code_digest',digest),contextlib.redirect_stdout(logs):
+   N._main(['--out','/tmp/not-created-r5-mc.md','--n-rep','2','--no-ext','--jobs','2','--B','100','--n-clusters','1600','--mechanisms','common_shock,circular_shift','--power-mechanisms',''])
+  status='returned'
+ except BaseException as e:status=type(e).__name__+': '+str(e)
+ print('B3',mode,'status',status,'write_calls',len(captured))
+ if captured:
+  rs,kw=captured[0]
+  print('B3 worker_processes',len(set(r.diagnostics['r5_worker_pid'] for r in rs)),'parent_pid_distinct',all(r.diagnostics['r5_worker_pid']!=os.getpid() for r in rs),'digest_equal',[r.diagnostics['r5_worker_digest']==kw['code_digest'] for r in rs],'executed_labels',[r.label for r in rs],'pipeline_errors',[len(r.diagnostics.get('errors',[])) for r in rs])
+PY
+B3 stable status returned write_calls 1
+B3 worker_processes 2 parent_pid_distinct True digest_equal [True, True] executed_labels ['', ''] pipeline_errors [0, 0]
+B3 worker_drift status returned write_calls 1
+B3 worker_processes 2 parent_pid_distinct True digest_equal [False, False] executed_labels ['R5-child-code', 'R5-child-code'] pipeline_errors [0, 0]
+B3 exception status RuntimeError: R5 injected worker exception write_calls 0
+B3 parent_end_drift status SystemExit: worker 的 digest_start=ffffffffffff 与父进程冻结身份 ec118a6a340c 不一致：该结果并非由本次冻结的源码产生，不得发布（R5-H） write_calls 0
+B3 parent_interrupt status KeyboardInterrupt: R5 parent interrupted after workers write_calls 0
+EVIDENCE ROUND5_BLOCK_9 EXIT 0
+
+EVIDENCE ROUND5_C_ORIGINAL_RESOLVED COMMAND
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import numpy as np
+from dataclasses import replace
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+from quant_lab.research.api import PipelineConfig
+w=N.synth_world(N.WorldConfig(seed=2,n_clusters=1600));m=N.fit_residual_model(w,block_len_days=3,train_end_day=180);fitted=m.grid[:180]
+def broken(world,x,rng):
+ old=x.shock_grid;grid=old.copy();nb=len(grid)//3
+ for j in range(grid.shape[1]):grid[:nb*3,j]=grid[:nb*3,j].reshape(nb,3)[rng.permutation(nb)].reshape(-1)
+ # Change actual returns as well as diagnostic grid, retaining idiosyncratic residual and missing layout.
+ r=x.base_R+grid[world.day,world.inst]-old[world.day,world.inst]
+ return replace(x,shock_grid=grid,base_R=r)
+normal=bad=0
+for i in range(20):
+ rng=np.random.default_rng(192110+i);x=N.resample_null(w,m,rng)
+ g=N.assert_not_episode_shuffle(w.inputs,x,w.day,block_len_days=3,fitted_grid=fitted);normal+=not g['ok']
+ y=broken(w,x,np.random.default_rng(292110+i));h=N.assert_not_episode_shuffle(w.inputs,y,w.day,block_len_days=3,fitted_grid=fitted)
+ bad+=not h['checks']['cross_instrument']
+print('R5 actual structure actual_returns_and_grid normal_fail',normal,'/20 broken_cross_caught',bad,'/20',flush=True)
+original=N.resample_null
+for kind in ['null','power']:
+ for damage in [False,True]:
+  def generate(world,model,rng,**kw):
+   x=original(world,model,rng,**kw)
+   return broken(world,x,rng) if damage else x
+  with patch.object(N,'resample_null',generate):r=N.run_mc('common_shock',kind=kind,n_rep=12,seed0=2,world_cfg=N.WorldConfig(n_clusters=1600),pipe_cfg=PipelineConfig(B=100))
+  print('R5 actual structure MC',kind,'damage',damage,'verdict',r.verdict,'reason',r.diagnostics['invalid_reason'],'invalid',r.diagnostics['n_invalid_null_model'],'grid',r.diagnostics['grid_dependence'],flush=True)
+PY
+R5 actual structure actual_returns_and_grid normal_fail 0 /20 broken_cross_caught 8 /20
+R5 actual structure MC null damage False verdict insufficient reason None invalid 0 grid {'fitted_ac1': -0.34331975388460007, 'null_mean_ac1': 0.02525547307905279, 'fitted_cross': [0.4634950088944095, 0.39532745335499664, 0.5163415706931419], 'null_mean_cross': [0.43447188394598285, 0.3738123620903324, 0.509407596487563], 'null_sd_cross': [0.09978375403183108, 0.09751526846307644, 0.05944983825174245], 'n_grid': 12, 'pairs': [['BTCUSDT-PERP.BINANCE-UM', 'ETHUSDT-PERP.BINANCE-UM'], ['BTCUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM'], ['ETHUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM']], 'band': [0.17283053175308727, 0.16890139949176744, 0.10297014035376967], 'ok': True}
+R5 actual structure MC null damage True verdict invalid_null_model reason GRID_DEPENDENCE_NOT_PRESERVED invalid 5 grid {'fitted_ac1': -0.34331975388460007, 'null_mean_ac1': -0.027041081320688, 'fitted_cross': [0.4634950088944095, 0.39532745335499664, 0.5163415706931419], 'null_mean_cross': [0.03857487148497074, -0.03041932824048423, -0.04065053881222184], 'null_sd_cross': [0.07549051474884921, 0.09206486875861312, 0.09152500154676028], 'n_grid': 12, 'pairs': [['BTCUSDT-PERP.BINANCE-UM', 'ETHUSDT-PERP.BINANCE-UM'], ['BTCUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM'], ['ETHUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM']], 'band': [0.13075340703453453, 0.1594610302820786, 0.1585259528418089], 'ok': False}
+R5 actual structure MC power damage False verdict fail reason None invalid 0 grid {'fitted_ac1': -0.34331975388460007, 'null_mean_ac1': 0.02525547307905279, 'fitted_cross': [0.4634950088944095, 0.39532745335499664, 0.5163415706931419], 'null_mean_cross': [0.43447188394598285, 0.3738123620903324, 0.509407596487563], 'null_sd_cross': [0.09978375403183108, 0.09751526846307644, 0.05944983825174245], 'n_grid': 12, 'pairs': [['BTCUSDT-PERP.BINANCE-UM', 'ETHUSDT-PERP.BINANCE-UM'], ['BTCUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM'], ['ETHUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM']], 'band': [0.17283053175308727, 0.16890139949176744, 0.10297014035376967], 'ok': True}
+R5 actual structure MC power damage True verdict invalid_null_model reason GRID_DEPENDENCE_NOT_PRESERVED invalid 5 grid {'fitted_ac1': -0.34331975388460007, 'null_mean_ac1': -0.027041081320688, 'fitted_cross': [0.4634950088944095, 0.39532745335499664, 0.5163415706931419], 'null_mean_cross': [0.03857487148497074, -0.03041932824048423, -0.04065053881222184], 'null_sd_cross': [0.07549051474884921, 0.09206486875861312, 0.09152500154676028], 'n_grid': 12, 'pairs': [['BTCUSDT-PERP.BINANCE-UM', 'ETHUSDT-PERP.BINANCE-UM'], ['BTCUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM'], ['ETHUSDT-PERP.BINANCE-UM', 'SOLUSDT-PERP.BINANCE-UM']], 'band': [0.13075340703453453, 0.1594610302820786, 0.1585259528418089], 'ok': False}
+EVIDENCE ROUND5_C_ORIGINAL_RESOLVED EXIT 0
+
+EVIDENCE ROUND5_BLOCK_11 COMMAND
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' QUANT_LAB_DATA_ROOT=/tmp/ql-review-r5-lake .venv-g3/bin/python - <<'PY'
+import re,subprocess,os
+from pathlib import Path
+s=Path('docs/adr/review-G3-P1.md').read_text();s=s[s.index('#### Q-Sxx：'):s.index('#### R-05–R-09：')]
+for label,cmd in re.findall(r'\| (Q-S\d+) \| `([^`]+)`',s):
+ print(label,cmd,flush=True)
+ r=subprocess.run(cmd,shell=True,executable='/bin/bash',env=os.environ.copy(),text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+ print(r.stdout+'exit='+str(r.returncode),flush=True)
+PY
+Q-S01 .venv-g3/bin/python -m pytest tests/research/test_features.py::test_cache_hot_read_follows_episode_identity_not_position -q
+.                                                                        [100%]
+1 passed in 0.09s
+exit=0
+Q-S02 .venv-g3/bin/python -m pytest tests/research/test_features.py::test_context_is_single_source_and_in_key tests/research/test_features.py::test_late_available_at_is_not_visible -q
+..                                                                       [100%]
+2 passed in 0.06s
+exit=0
+Q-S03 .venv-g3/bin/python -m pytest tests/research/test_features.py::test_revocation_gate_blocks_cached_and_fresh_reads -q
+.                                                                        [100%]
+1 passed in 0.03s
+exit=0
+Q-S04 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s04_quarantine_persists_across_processes tests/research/test_features.py::test_quarantined_backend_op_rejected_in_snapshot -q
+..                                                                       [100%]
+2 passed in 1.32s
+exit=0
+Q-S05 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s05_inner_split_is_calendar_based_purged_and_mature -q
+.                                                                        [100%]
+1 passed in 0.54s
+exit=0
+Q-S06 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s06_config_cap_can_only_tighten_and_insufficient_folds_do_not_fit -q
+.                                                                        [100%]
+1 passed in 1.04s
+exit=0
+Q-S07 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s07_concurrent_reserve_only_one_wins_and_replay_after_crash -q
+.                                                                        [100%]
+1 passed in 1.04s
+exit=0
+Q-S08 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s08_every_stage_has_terminal_state_including_failures_and_final tests/research/test_review_p1_closure.py::test_s08_run_protocol_reserves_before_lint_and_rejects_bad_ast -q
+..                                                                       [100%]
+2 passed in 4.96s
+exit=0
+Q-S09 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s09_residual_fit_uses_only_mature_labels_and_population_quantile -q
+.                                                                        [100%]
+1 passed in 0.39s
+exit=0
+Q-S10 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s10_diagnostic_failure_cannot_pass tests/research/test_review_p1_closure.py::test_s10_all_t0_is_not_run_not_pass -q
+..                                                                       [100%]
+2 passed in 0.44s
+exit=0
+Q-S11 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s11_censored_blocks_do_not_count_as_nonempty -q
+.                                                                        [100%]
+1 passed in 0.38s
+exit=0
+Q-S12 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s12_panel_invariants_and_placeholder_only_under_mask tests/research/test_review_p1_closure.py::test_s12_outer_nan_gate_falls_back_to_baseline tests/research/test_evaluator.py::test_nan_feature_is_skip_and_keeps_denominator -q
+...                                                                      [100%]
+3 passed in 0.75s
+exit=0
+Q-S13 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s13_unfilled_uncensored_gets_expiry_t1_not_null -q
+.                                                                        [100%]
+1 passed in 2.53s
+exit=0
+Q-S14 .venv-g3/bin/python -m pytest tests/research/test_evaluator.py::test_estimand_vocabulary_frozen_and_stub_isomorphic_with_g1 tests/research/test_g2_parity.py -q
+........                                                                 [100%]
+8 passed in 0.14s
+exit=0
+Q-S15 .venv-g3/bin/python -m pytest tests/research/test_evaluator.py::test_two_arm_pairing_and_protocol_errors -q
+.                                                                        [100%]
+1 passed in 0.07s
+exit=0
+Q-S16 .venv-g3/bin/python -m pytest tests/research/test_evaluator.py::test_synthetic_end_to_end_pairs_and_decimal -q
+.                                                                        [100%]
+1 passed in 0.15s
+exit=0
+Q-S18 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s18_streaming_budget_and_truncation_reason -q
+.                                                                        [100%]
+1 passed in 0.39s
+exit=0
+Q-S19 .venv-g3/bin/python -m pytest tests/research/test_review_p1_closure.py::test_s19_exact_decimal_canonicalization -q
+.                                                                        [100%]
+1 passed in 0.38s
+exit=0
+EVIDENCE ROUND5_BLOCK_11 EXIT 0
+
+EVIDENCE ROUND5_BLOCK_12 COMMAND
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import json,hashlib,math
+from pathlib import Path
+from scipy.stats import beta,binom
+s=Path('docs/adr/report-G3-null-model.md').read_text();j=json.loads(s[s.rindex('```json')+7:s.rindex('```')])
+h=hashlib.sha256();root=Path('src/quant_lab/research')
+for p in sorted(root.rglob('*.py')):h.update(str(p.relative_to(root)).encode()+b'\0'+p.read_bytes()+b'\0')
+print('E digest',h.hexdigest(),'embedded',j['meta']['research_code_sha256'],'equal',h.hexdigest()==j['meta']['research_code_sha256'])
+def cp(x,n):return (0. if x==0 else float(beta.ppf(.025,x,n-x+1)),1. if x==n else float(beta.ppf(.975,x+1,n-x)))
+for i,r in enumerate(j['results']):
+ n,x,f=r['n_done'],r['n_positive'],r['n_failed'];t0=r['tiers'].get('T0',0);ns=n-t0;w=x+f if r['kind'].startswith('null') else x
+ assert n==r['n_planned']==sum(r['tiers'].values()) and 0<=x+f<=n and r['n_T0']==t0 and r['n_searched']==ns
+ vals=[(x,n-f,'rate','ci'),(w,n,'worst_case_rate','worst_case_ci'),(w,ns,'searched_worst_rate','searched_worst_ci')]
+ for num,den,rk,ck in vals:
+  assert abs(r[rk]-num/den)<1e-12 and all(abs(a-b)<1e-12 for a,b in zip(r[ck],cp(num,den)))
+ print('E',i,r['kind'],r['mechanism'],r.get('label',''),'n/x/f/T0/search',n,x,f,t0,ns,'triples',[(num,den,round(num/den,8),tuple(round(v,8) for v in cp(num,den))) for num,den,_,_ in vals],'OK')
+print('E all',len(j['results']),'rows checked; no pooled denominator')
+for p in [.01,.02]:
+ print('noise p',p,'P(any fail;1000)',1-binom.pmf(0,1000,p),'P(>5%;1000)',binom.sf(50,1000,p),'P(>5%;200)',binom.sf(10,200,p))
+PY
+E digest ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402 embedded ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402 equal True
+E 0 null common_shock  n/x/f/T0/search 1000 2 1 158 842 triples [(2, 999, 0.002002, (0.00024254, 0.00721303)), (3, 1000, 0.003, (0.0006191, 0.00874202)), (3, 842, 0.00356295, (0.00073537, 0.01037683))] OK
+E 1 null cluster_heavy_tail  n/x/f/T0/search 1000 6 3 26 974 triples [(6, 997, 0.00601805, (0.00221163, 0.01305244)), (9, 1000, 0.009, (0.0041234, 0.01701578)), (9, 974, 0.00924025, (0.00423369, 0.01746811))] OK
+E 2 null nonuniform_density  n/x/f/T0/search 1000 8 11 275 725 triples [(8, 989, 0.00808898, (0.00349853, 0.01587601)), (19, 1000, 0.019, (0.01147704, 0.0295124)), (19, 725, 0.0262069, (0.01585037, 0.04062375))] OK
+E 3 null circular_shift  n/x/f/T0/search 1000 4 0 7 993 triples [(4, 1000, 0.004, (0.00109091, 0.01020966)), (4, 1000, 0.004, (0.00109091, 0.01020966)), (4, 993, 0.0040282, (0.00109861, 0.01028141))] OK
+E 4 power common_shock  n/x/f/T0/search 1000 327 34 232 768 triples [(327, 966, 0.33850932, (0.3086819, 0.36932502)), (327, 1000, 0.327, (0.29796969, 0.3570529)), (327, 768, 0.42578125, (0.39050275, 0.46163176))] OK
+E 5 power_sens common_shock δ=0.2 noise×1.0 clusters=1600 n/x/f/T0/search 200 96 8 27 173 triples [(96, 192, 0.5, (0.42715469, 0.57284531)), (96, 200, 0.48, (0.409014, 0.5515876)), (96, 173, 0.55491329, (0.47757047, 0.630342))] OK
+E 6 power_sens common_shock δ=0.2 noise×1.0 clusters=2400 n/x/f/T0/search 200 146 2 10 190 triples [(146, 198, 0.73737374, (0.67027724, 0.79721445)), (146, 200, 0.73, (0.66284741, 0.79019666)), (146, 190, 0.76842105, (0.70185865, 0.82640877))] OK
+E 7 power_sens common_shock δ=0.2 noise×0.6 clusters=1600 n/x/f/T0/search 200 115 9 65 135 triples [(115, 191, 0.60209424, (0.52891826, 0.67204941)), (115, 200, 0.575, (0.50330413, 0.64443882)), (115, 135, 0.85185185, (0.78051027, 0.90709706))] OK
+E 8 power_sens common_shock δ=0.2 noise×0.6 clusters=2400 n/x/f/T0/search 200 169 2 27 173 triples [(169, 198, 0.85353535, (0.79647184, 0.8996645)), (169, 200, 0.845, (0.78726236, 0.8921906)), (169, 173, 0.97687861, (0.94186071, 0.99366509))] OK
+E 9 power_sens common_shock δ=0.4 noise×1.0 clusters=1600 n/x/f/T0/search 200 94 8 93 107 triples [(94, 192, 0.48958333, (0.41691647, 0.56257678)), (94, 200, 0.47, (0.39923294, 0.5416695)), (94, 107, 0.87850467, (0.80120287, 0.93369579))] OK
+E 10 power_sens common_shock δ=0.4 noise×1.0 clusters=2400 n/x/f/T0/search 200 141 1 55 145 triples [(141, 199, 0.70854271, (0.64010184, 0.77065143)), (141, 200, 0.705, (0.63657687, 0.76723122)), (141, 145, 0.97241379, (0.9308762, 0.99243361))] OK
+E 11 power_sens common_shock δ=0.4 noise×0.6 clusters=1600 n/x/f/T0/search 200 27 0 172 28 triples [(27, 200, 0.135, (0.0908871, 0.19030917)), (27, 200, 0.135, (0.0908871, 0.19030917)), (27, 28, 0.96428571, (0.8165224, 0.9990962))] OK
+E 12 power_sens common_shock δ=0.4 noise×0.6 clusters=2400 n/x/f/T0/search 200 50 1 149 51 triples [(50, 199, 0.25125628, (0.19260375, 0.31747867)), (50, 200, 0.25, (0.19160717, 0.31596283)), (50, 51, 0.98039216, (0.8955251, 0.9995037))] OK
+E all 13 rows checked; no pooled denominator
+noise p 0.01 P(any fail;1000) 0.9999568287525893 P(>5%;1000) 1.555696931554219e-20 P(>5%;200) 6.881770411199629e-06
+noise p 0.02 P(any fail;1000) 0.9999999983170327 P(>5%;1000) 2.9622365546214887e-09 P(>5%;200) 0.0025305994353454625
+EVIDENCE ROUND5_BLOCK_12 EXIT 0
+
+EVIDENCE ROUND5_BLOCK_3 COMMAND
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' QUANT_LAB_DATA_ROOT=/tmp/ql-review-r5-lake .venv-g3/bin/python - <<'PY'
+import os,json,subprocess
+from pathlib import Path
+cmd=next(t['verify'] for t in json.loads(Path('taskList.json').read_text())['modules']['research']['tasks'] if t['id']=='R-08')
+injector=r'''
+import os,sys,copy,io,json,contextlib
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+s=Path('docs/adr/report-G3-null-model.md').read_text();start=s.rindex('```json')+7;end=s.rindex('```');q=json.loads(s[start:end]);d=q['results'][0]['diagnostics'];damage=os.environ['R5_CASE']
+if damage=='grid_false':d['grid_dependence']['ok']=False
+if damage=='aggregate_false':d['dependence_aggregate']['ok']=False
+if damage=='invalid_reason':d['invalid_reason']='GRID_DEPENDENCE_NOT_PRESERVED'
+if damage=='guard_rate':d['guard_fail_rate']=1.
+if damage=='missing_grid':del d['grid_dependence']
+if damage in ['stale_hash','rebuild_stale']:q['meta']['research_code_sha256']='0'*64
+if damage=='rebuild_missing':del q['meta']['research_code_sha256']
+fake=s[:start]+json.dumps(q)+s[end:]
+if damage.startswith('rebuild'):
+ captured=[]
+ with patch.object(Path,'read_text',return_value=fake),patch.object(Path,'mkdir'),patch.object(Path,'write_text',lambda self,text,**kw:captured.append(text)),contextlib.redirect_stdout(io.StringIO()):N._main(['--rebuild','/tmp/not-created-source','--out','/tmp/not-created-rebuild'])
+ fake=captured[0]
+with patch('builtins.open',return_value=io.StringIO(fake)):exec(compile(sys.argv[1],'R08-original-body','exec'),{})
+'''
+# Execute unchanged verify text; Bash launcher only intercepts its report-reader -c I/O.
+launcher='function .venv-g3/bin/python() { if [[ "$1" == "-c" ]]; then command .venv-g3/bin/python -c "$R5_INJECTOR" "$2"; else command .venv-g3/bin/python "$@"; fi; }\n'
+print('R08 ORIGINAL',cmd,flush=True)
+for case in ['grid_false','aggregate_false','invalid_reason','guard_rate','missing_grid','stale_hash','rebuild_stale','rebuild_missing']:
+ env=dict(os.environ,R5_INJECTOR=injector,R5_CASE=case)
+ r=subprocess.run(launcher+cmd,shell=True,executable='/bin/bash',env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+ print('A FULL ORIGINAL VERIFY CASE',case,'\n'+r.stdout+'exit='+str(r.returncode),flush=True)
+PY
+R08 ORIGINAL .venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py tests/research/test_review_p1_round3.py -q && .venv-g3/bin/python -c "from quant_lab.research.nullmodel import verify_report_text; verify_report_text(open('docs/adr/report-G3-null-model.md',encoding='utf-8').read())"
+A FULL ORIGINAL VERIFY CASE grid_false 
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 31.68s
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "R08-original-body", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 803, in verify_report_text
+    require(gridd["ok"] is agg_ok, "grid_dependence.ok 与重算不符")
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 756, in require
+    raise ValueError(reason)
+ValueError: grid_dependence.ok 与重算不符
+exit=1
+A FULL ORIGINAL VERIFY CASE aggregate_false 
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 30.32s
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "R08-original-body", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 804, in verify_report_text
+    require((diag.get("dependence_aggregate") or {}).get("ok") is agg_ok, "dependence_aggregate.ok 与重算不符")
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 756, in require
+    raise ValueError(reason)
+ValueError: dependence_aggregate.ok 与重算不符
+exit=1
+A FULL ORIGINAL VERIFY CASE invalid_reason 
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 28.92s
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "R08-original-body", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 831, in verify_report_text
+    require((diag.get("invalid_reason") or None) == expected_reason,
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 756, in require
+    raise ValueError(reason)
+ValueError: invalid_reason 与重算不符：记录 'GRID_DEPENDENCE_NOT_PRESERVED' vs 重算 None
+exit=1
+A FULL ORIGINAL VERIFY CASE guard_rate 
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 28.47s
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "R08-original-body", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 826, in verify_report_text
+    close(rate, n_invalid / n)
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 772, in close
+    require(np.allclose(actual, expected, rtol=0, atol=1e-12, equal_nan=False), "报告算术不一致")
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 756, in require
+    raise ValueError(reason)
+ValueError: 报告算术不一致
+exit=1
+A FULL ORIGINAL VERIFY CASE missing_grid 
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 28.46s
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "R08-original-body", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 788, in verify_report_text
+    require(isinstance(gridd, dict), "grid_dependence 缺失")
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 756, in require
+    raise ValueError(reason)
+ValueError: grid_dependence 缺失
+exit=1
+A FULL ORIGINAL VERIFY CASE stale_hash 
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 28.06s
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "R08-original-body", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 742, in verify_report_text
+    raise ValueError(f"制品陈旧（A31）：报告由代码 {str(embedded)[:12]} 生成，当前研究代码为 {current[:12]}——"
+ValueError: 制品陈旧（A31）：报告由代码 000000000000 生成，当前研究代码为 ec118a6a340c——门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定
+exit=1
+A FULL ORIGINAL VERIFY CASE rebuild_stale 
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 28.61s
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "R08-original-body", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 742, in verify_report_text
+    raise ValueError(f"制品陈旧（A31）：报告由代码 {str(embedded)[:12]} 生成，当前研究代码为 {current[:12]}——"
+ValueError: 制品陈旧（A31）：报告由代码 000000000000 生成，当前研究代码为 ec118a6a340c——门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定
+exit=1
+A FULL ORIGINAL VERIFY CASE rebuild_missing 
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 28.25s
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "R08-original-body", line 1, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/nullmodel.py", line 742, in verify_report_text
+    raise ValueError(f"制品陈旧（A31）：报告由代码 {str(embedded)[:12]} 生成，当前研究代码为 {current[:12]}——"
+ValueError: 制品陈旧（A31）：报告由代码 missing-gene 生成，当前研究代码为 ec118a6a340c——门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定
+exit=1
+EVIDENCE ROUND5_BLOCK_3 EXIT 0
+
+`````
+
+### B：新记账 / pair 与 n_grid / 小 n 与 sd 退化；合法首位失败对照
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import copy,json,io,contextlib,math
+from pathlib import Path
+from quant_lab.research import nullmodel as N
+from tests.research.test_review_p1_round5 import _move_to_invalid
+s=Path('docs/adr/report-G3-null-model.md').read_text();a=s.rindex('```json')+7;b=s.rindex('```');j=json.loads(s[a:b])
+def check(label,q):
+ try:
+  with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(s[:a]+json.dumps(q)+s[b:])
+  print(label,'ACCEPTED')
+ except Exception as e:print(label,'REJECTED',type(e).__name__,str(e))
+for k in [5,50]:
+ q=copy.deepcopy(j);_move_to_invalid(q['results'][0],k,pay_failed=True);check('B-C paid '+str(k),q)
+ print('B-C worst_upper',q['results'][0]['searched_worst_ci'][1])
+for first in [False,True]:
+ q=copy.deepcopy(j);r=q['results'][0];_move_to_invalid(r,1,pay_failed=True)
+ if first:
+  r['diagnostics']['shuffle_guard']['checks']['icc']=False;r['diagnostics']['shuffle_guard']['ok']=False
+ check('B-O paid first='+str(first),q)
+# Attempt to conceal additional failures as errors, missing L and mismatched tiers.
+for case in ['errors_only_50','empty_L','undercharged_invalid','error_plus_invalid']:
+ q=copy.deepcopy(j);r=q['results'][0];d=r['diagnostics']
+ if case=='errors_only_50':d['errors']=['injected']*50
+ if case=='empty_L':d['chosen_block_len']={}
+ if case=='undercharged_invalid':_move_to_invalid(r,50,pay_failed=False)
+ if case=='error_plus_invalid':
+  _move_to_invalid(r,1,pay_failed=True);r['tiers']['T1']-=5;r['tiers']['error']=5
+ check('B-C '+case,q)
+for case in ['pair_order','n_grid_bool','n_grid_999','sd_bool','sd_2','sd_1e6','bounded_sd_mean_099','band_forged','receipts_missing']:
+ q=copy.deepcopy(j);g=q['results'][0]['diagnostics']['grid_dependence']
+ if case=='pair_order':g['pairs']=list(reversed(g['pairs']))
+ if case=='n_grid_bool':g['n_grid']=True
+ if case=='n_grid_999':g['n_grid']=999
+ if case=='sd_bool':g['null_sd_cross']=[True]*3
+ if case in ['sd_2','sd_1e6']:
+  g['null_mean_cross']=[0.]*3;g['null_sd_cross']=[float(case[3:])]*3
+ if case=='bounded_sd_mean_099':g['null_mean_cross']=[.99]*3;g['null_sd_cross']=[1.]*3
+ if case=='band_forged':g['band']=[0.]*3
+ if case=='receipts_missing':q['meta'].pop('worker_receipts_confirmed');q['meta'].pop('worker_code_sha256')
+ check('B-G '+case,q)
+ if case in ['sd_2','sd_1e6']:
+  print('B-G bound',math.sqrt(g['n_grid']/(g['n_grid']-1)),'claimed_sd',g['null_sd_cross'],'fitted',g['fitted_cross'],'mean',g['null_mean_cross'])
+for n in [0,1,2,8,200,1000]:
+ for sd in [0.,.1]:print('B-W',n,sd,N.aggregate_pair_ok(.14,0.,sd,n))
+print('B-W zero_sd_same',N.aggregate_pair_ok(.14,.14,0.,2))
+PY
+`````
+
+`````text
+B-C paid 5 ACCEPTED
+B-C worst_upper 0.01863490094775447
+B-C paid 50 REJECTED ValueError FPR 未通过
+B-C worst_upper 0.08152876375416514
+B-O paid first=False ACCEPTED
+B-O paid first=True ACCEPTED
+B-C errors_only_50 REJECTED ValueError 错误计数不一致
+B-C empty_L ACCEPTED
+B-C undercharged_invalid REJECTED ValueError invalid(50) + error(0) 未全部计入失败数 1
+B-C error_plus_invalid REJECTED ValueError invalid(1) + error(5) 未全部计入失败数 2
+B-G pair_order REJECTED ValueError 跨品种对标识缺失/顺序不符/含未知或重复对
+B-G n_grid_bool REJECTED ValueError 计数须为非负整数
+B-G n_grid_999 REJECTED ValueError 格点观测数与完成数不自洽
+B-G sd_bool REJECTED ValueError 相关标准差非法：True
+B-G sd_2 REJECTED ValueError grid_dependence.ok 与重算不符
+B-G bound 1.0005003753127737 claimed_sd [2.0, 2.0, 2.0] fitted [0.5589960708759241, 0.5040997763236431, 0.4244275959833148] mean [0.0, 0.0, 0.0]
+B-G sd_1e6 ACCEPTED
+B-G bound 1.0005003753127737 claimed_sd [1000000.0, 1000000.0, 1000000.0] fitted [0.5589960708759241, 0.5040997763236431, 0.4244275959833148] mean [0.0, 0.0, 0.0]
+B-G bounded_sd_mean_099 REJECTED ValueError grid_dependence.ok 与重算不符
+B-G band_forged ACCEPTED
+B-G receipts_missing ACCEPTED
+B-W 0 0.0 (True, 0.14, inf)
+B-W 0 0.1 (True, 0.14, inf)
+B-W 1 0.0 (True, 0.14, inf)
+B-W 1 0.1 (True, 0.14, inf)
+B-W 2 0.0 (False, 0.14, 0.03)
+B-W 2 0.1 (True, 0.14, 0.4242640687119285)
+B-W 8 0.0 (False, 0.14, 0.03)
+B-W 8 0.1 (True, 0.14, 0.21213203435596426)
+B-W 200 0.0 (False, 0.14, 0.03)
+B-W 200 0.1 (False, 0.14, 0.042426406871192854)
+B-W 1000 0.0 (False, 0.14, 0.03)
+B-W 1000 0.1 (False, 0.14, 0.03)
+B-W zero_sd_same (True, 0.0, 0.03)
+
+`````
+
+### B-C：最低失败收费，复核五审 8.020159%
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import io,json,contextlib
+from pathlib import Path
+from tests.research.test_review_p1_round5 import _move_to_invalid
+from quant_lab.research import nullmodel as N
+s=Path('docs/adr/report-G3-null-model.md').read_text();a=s.rindex('```json')+7;b=s.rindex('```');q=json.loads(s[a:b]);r=q['results'][0];_move_to_invalid(r,50,pay_failed=True);r['n_failed']=50
+x=r['n_positive'];n=r['n_done'];ns=r['n_searched'];w=x+50
+for value,den,rk,ck in [(x,n-50,'rate','ci'),(w,n,'worst_case_rate','worst_case_ci'),(w,ns,'searched_worst_rate','searched_worst_ci')]:r[rk]=value/den;r[ck]=N.clopper_pearson(value,den)
+print('B-C minimum_charge n_failed=50 upper',r['searched_worst_ci'][1])
+try:
+ with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(s[:a]+json.dumps(q)+s[b:])
+ print('ACCEPTED')
+except Exception as e:print('REJECTED',type(e).__name__,str(e))
+PY
+`````
+
+`````text
+B-C minimum_charge n_failed=50 upper 0.08020158944615748
+REJECTED ValueError FPR 未通过
+
+`````
+
+### B-G：单品种对的最小反例
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import io,contextlib,json,copy,math
+from pathlib import Path
+from quant_lab.research import nullmodel as N
+s=Path('docs/adr/report-G3-null-model.md').read_text();a=s.rindex('```json')+7;b=s.rindex('```');q=json.loads(s[a:b]);g=q['results'][0]['diagnostics']['grid_dependence'];g['null_mean_cross'][1]=0.;g['null_sd_cross'][1]=3.;g['band'][1]=18/math.sqrt(g['n_grid'])
+with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(s[:a]+json.dumps(q)+s[b:])
+print('B-G minimal_single_pair ACCEPTED fitted',g['fitted_cross'][1],'mean',g['null_mean_cross'][1],'sd',g['null_sd_cross'][1],'band',g['band'][1],'max_possible_sd',math.sqrt(g['n_grid']/(g['n_grid']-1)))
+PY
+`````
+
+`````text
+B-G minimal_single_pair ACCEPTED fitted 0.5040997763236431 mean 0.0 sd 3.0 band 0.5692099788303083 max_possible_sd 1.0005003753127737
+
+`````
+
+### B-G：补充 -2.0、缺对、重复对、未知对、负 sd 与无限 sd
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import copy,json,io,contextlib
+from pathlib import Path
+from quant_lab.research import nullmodel as N
+s=Path('docs/adr/report-G3-null-model.md').read_text();a=s.rindex('```json')+7;b=s.rindex('```');base=json.loads(s[a:b])
+for case in ['minus2','missing_pair','duplicate_pair','unknown_pair','negative_sd','sd_inf']:
+ q=copy.deepcopy(base);g=q['results'][0]['diagnostics']['grid_dependence']
+ if case=='minus2':g['fitted_cross']=[-2.]*3;g['null_mean_cross']=[-2.]*3
+ if case=='missing_pair':g['pairs']=g['pairs'][:2]
+ if case=='duplicate_pair':g['pairs'][2]=g['pairs'][1]
+ if case=='unknown_pair':g['pairs'][0]=['unknown','unknown']
+ if case=='negative_sd':g['null_sd_cross'][0]=-.1
+ if case=='sd_inf':g['null_sd_cross'][0]=float('inf')
+ try:
+  with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(s[:a]+json.dumps(q)+s[b:])
+  print('B-G',case,'ACCEPTED')
+ except Exception as e:print('B-G',case,'REJECTED',str(e))
+PY
+`````
+
+`````text
+B-G minus2 REJECTED 跨品种相关取值非法：-2.0（须为有限实数且落在 [-1,1]）
+B-G missing_pair REJECTED 跨品种对标识缺失/顺序不符/含未知或重复对
+B-G duplicate_pair REJECTED 跨品种对标识缺失/顺序不符/含未知或重复对
+B-G unknown_pair REJECTED 跨品种对标识缺失/顺序不符/含未知或重复对
+B-G negative_sd REJECTED 相关标准差非法：-0.1
+B-G sd_inf REJECTED 非有限诊断
+
+`````
+
+### B-H：真实 worker 缓存修订，不替换摘要读取
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import os,io,contextlib,multiprocessing,functools,inspect
+from unittest.mock import patch
+from concurrent.futures import ProcessPoolExecutor
+from quant_lab.research import nullmodel as N
+original=N.run_mc
+source=inspect.getsource(original)
+assert 'n_rec, label)' in source
+ns=dict(N.__dict__)
+exec(compile(source.replace('n_rec, label)', 'n_rec, "R6-cached-revision")'),'<cached-worker-module>','exec'),ns)
+modified=ns['run_mc']
+mode='stable'
+def worker(**kw):
+ fn=original
+ if mode=='cached_revision':fn=modified
+ r=fn(**kw);r.diagnostics['r6_pid']=os.getpid();return r
+factory=functools.partial(ProcessPoolExecutor,mp_context=multiprocessing.get_context('fork'))
+for mode in ['stable','cached_revision']:
+ captured=[];receipts=[];logs=io.StringIO();checker=N.check_worker_receipt
+ def checked(payload,digest):
+  receipts.append((payload['digest_start'],payload['digest_end'],digest))
+  return checker(payload,digest)
+ with patch('concurrent.futures.ProcessPoolExecutor',factory),patch.object(N,'run_mc',worker),patch.object(N,'check_worker_receipt',checked),patch.object(N,'write_report',lambda rs,out,**kw:captured.append((rs,kw))),contextlib.redirect_stdout(logs):
+  N._main(['--out','/tmp/not-created-r6.md','--n-rep','2','--no-ext','--jobs','2','--B','100','--n-clusters','1600','--mechanisms','common_shock,circular_shift','--power-mechanisms',''])
+ rs,kw=captured[0]
+ print('B-H',mode,'write_calls',len(captured),'processes',len(set(r.diagnostics['r6_pid'] for r in rs)),'parent_distinct',all(r.diagnostics['r6_pid']!=os.getpid() for r in rs),'labels',[r.label for r in rs],'receipts_equal',all(a==b==c for a,b,c in receipts),'receipt_count',kw['meta']['worker_receipts_confirmed'],'errors',[r.diagnostics.get('errors',[]) for r in rs])
+for payload in [{},{'digest_start':'a'*64,'digest_end':'a'*64},{'result':None,'digest_start':'a'*64,'digest_end':'a'*64}]:
+ try:print('B-H missing_result',N.check_worker_receipt(payload,'a'*64))
+ except BaseException as e:print('B-H missing_result',type(e).__name__,str(e))
+PY
+`````
+
+`````text
+B-H stable write_calls 1 processes 2 parent_distinct True labels ['', ''] receipts_equal True receipt_count 2 errors [[], []]
+B-H cached_revision write_calls 1 processes 2 parent_distinct True labels ['R6-cached-revision', 'R6-cached-revision'] receipts_equal True receipt_count 2 errors [[], []]
+B-H missing_result SystemExit worker 未回传生成身份回执：结果不得发布（R5-H）
+B-H missing_result SystemExit worker 未回传生成身份回执：结果不得发布（R5-H）
+B-H missing_result None
+
+`````
+
+### C：四机制正常/真实结构破坏各 200 次
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import numpy as np
+from dataclasses import replace
+from quant_lab.research import nullmodel as N
+for mech,seed in zip(N.MECHANISMS,[1,2,3,4]):
+ w=N.synth_world(N.WorldConfig(mechanism=mech,seed=seed,n_clusters=1600));m=N.fit_residual_model(w,block_len_days=3,train_end_day=180);fg=m.grid[:180];fc=N._grid_cross_corr(fg,3)
+ vals=[[],[]];fails=[0,0]
+ for i in range(200):
+  rng=np.random.default_rng(820000+i);x=N.resample_null(w,m,rng,circular_shift=mech=='circular_shift')
+  old=x.shock_grid;grid=old.copy();nb=len(grid)//3
+  for col in range(grid.shape[1]):grid[:nb*3,col]=grid[:nb*3,col].reshape(nb,3)[rng.permutation(nb)].reshape(-1)
+  bad=replace(x,shock_grid=grid,base_R=x.base_R+grid[w.day,w.inst]-old[w.day,w.inst])
+  for k,inp in enumerate([x,bad]):
+   g=N.assert_not_episode_shuffle(w.inputs,inp,w.day,block_len_days=3,fitted_grid=fg);fails[k]+=not g['ok'];vals[k].append(g['grid']['cross_instrument']['null'])
+ for k,label in enumerate(['normal','broken']):
+  arr=np.array(vals[k]);mean=arr.mean(axis=0).tolist();sd=arr.std(axis=0,ddof=1).tolist();ok=N.aggregate_preserved(fc,mean,sd,200)
+  print('C',mech,label,'n=200','individual_failures',fails[k],'rate',fails[k]/200,'aggregate_ok',ok,'reason',None if ok else 'GRID_DEPENDENCE_NOT_PRESERVED','fitted',fc,'mean',mean,'sd',sd,'band',[N.aggregate_pair_ok(f,v,s,200)[2] for f,v,s in zip(fc,mean,sd)],flush=True)
+PY
+`````
+
+`````text
+C common_shock normal n=200 individual_failures 0 rate 0.0 aggregate_ok True reason None fitted [0.5589960708759241, 0.5040997763236431, 0.4244275959833148] mean [0.5552347654564647, 0.5035853978368143, 0.42041975105922214] sd [0.05974344488143267, 0.0529240804590123, 0.07085359391620352] band [0.03, 0.03, 0.030060634037751253]
+C common_shock broken n=200 individual_failures 103 rate 0.515 aggregate_ok False reason GRID_DEPENDENCE_NOT_PRESERVED fitted [0.5589960708759241, 0.5040997763236431, 0.4244275959833148] mean [-0.0029295105509298276, 0.0006290536328795726, 0.001159820041183417] sd [0.08864709429032795, 0.08704880440254605, 0.09941356700792672] band [0.0376097769031045, 0.03693167993233302, 0.04217760442394893]
+C cluster_heavy_tail normal n=200 individual_failures 0 rate 0.0 aggregate_ok True reason None fitted [0.1392838284143582, 0.1769549842158233, 0.17954215469804016] mean [0.14346494879025146, 0.1698354179788861, 0.17215762645601418] sd [0.10899096933257613, 0.09314142684887322, 0.0851559964813366] band [0.04624095210189577, 0.039516560720537414, 0.03612862954239053]
+C cluster_heavy_tail broken n=200 individual_failures 0 rate 0.0 aggregate_ok False reason GRID_DEPENDENCE_NOT_PRESERVED fitted [0.1392838284143582, 0.1769549842158233, 0.17954215469804016] mean [0.001993250922467166, -0.001094925123612903, 0.00473002712518701] sd [0.0963277662513496, 0.08774689154165168, 0.09030267713613016] band [0.04086841003972917, 0.037227853222285445, 0.03831218121735422]
+C nonuniform_density normal n=200 individual_failures 0 rate 0.0 aggregate_ok True reason None fitted [0.33724128941781295, 0.5164425518064831, 0.34035073268047855] mean [0.3304210063076273, 0.509332018653407, 0.33430163882220626] sd [0.09047261896482493, 0.06952759026314499, 0.0837139958026424] band [0.038384281429040615, 0.03, 0.03551684046736237]
+C nonuniform_density broken n=200 individual_failures 45 rate 0.225 aggregate_ok False reason GRID_DEPENDENCE_NOT_PRESERVED fitted [0.33724128941781295, 0.5164425518064831, 0.34035073268047855] mean [-0.0006951661887391048, 7.073451370181851e-05, 0.0038082927850319197] sd [0.08639796690689094, 0.09299246825054307, 0.09679956514330063] band [0.036655552968356105, 0.03945336293954023, 0.0410685773572421]
+C circular_shift normal n=200 individual_failures 0 rate 0.0 aggregate_ok True reason None fitted [0.5521197927365366, 0.5726065396825362, 0.5205994123655606] mean [0.5521197927365346, 0.5726065396825382, 0.5205994123655592] sd [2.0441828259011082e-15, 1.934795821766584e-15, 1.5096973683343048e-15] band [0.03, 0.03, 0.03]
+C circular_shift broken n=200 individual_failures 155 rate 0.775 aggregate_ok False reason GRID_DEPENDENCE_NOT_PRESERVED fitted [0.5521197927365366, 0.5726065396825362, 0.5205994123655606] mean [0.0038132930830657662, 0.004700243707504243, 0.009578789216454033] sd [0.08454879244505421, 0.09239251888651935, 0.09396480310967627] band [0.035871014687419066, 0.0391988259813384, 0.039865889683026526]
+
+`````
+
+### D：真实多进程发布故障；仅父进程收尾漂移与中断
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import os,io,contextlib,multiprocessing,functools
+from unittest.mock import patch
+from concurrent.futures import ProcessPoolExecutor
+from quant_lab.research import nullmodel as N
+original=N._run_mc_job;digest_fn=N.research_code_digest;parent=os.getpid();mode='stable';calls=[]
+def job(**kw):
+ p=original(**kw)
+ if mode=='missing_receipt':p.pop('digest_start')
+ if mode=='missing_result':p.pop('result')
+ if mode=='start_drift':p['digest_start']='f'*64
+ if mode=='end_drift':p['digest_end']='f'*64
+ if mode=='worker_exception':raise RuntimeError('R6 worker exception')
+ return p
+def digest():
+ if os.getpid()==parent:
+  calls.append(1)
+  if len(calls)>1:
+   if mode=='parent_drift':return 'f'*64
+   if mode=='parent_interrupt':raise KeyboardInterrupt('R6 parent only interrupt')
+ return digest_fn()
+factory=functools.partial(ProcessPoolExecutor,mp_context=multiprocessing.get_context('fork'))
+for mode in ['stable','missing_receipt','missing_result','start_drift','end_drift','worker_exception','parent_drift','parent_interrupt']:
+ writes=[];calls.clear()
+ try:
+  with patch('concurrent.futures.ProcessPoolExecutor',factory),patch.object(N,'_run_mc_job',job),patch.object(N,'research_code_digest',digest),patch.object(N,'write_report',lambda *a,**kw:writes.append(1)),contextlib.redirect_stdout(io.StringIO()):
+   N._main(['--out','/tmp/not-created-r6-fault.md','--n-rep','2','--no-ext','--jobs','2','--B','100','--n-clusters','200','--mechanisms','common_shock,circular_shift','--power-mechanisms',''])
+  status='returned'
+ except BaseException as e:status=type(e).__name__+': '+str(e)
+ print('D publish',mode,'writes',len(writes),'status',status,flush=True)
+PY
+`````
+
+`````text
+D publish stable writes 1 status returned
+D publish missing_receipt writes 0 status SystemExit: worker 的 digest_start=None 与父进程冻结身份 ec118a6a340c 不一致：该结果并非由本次冻结的源码产生，不得发布（R5-H）
+D publish missing_result writes 0 status SystemExit: worker 未回传生成身份回执：结果不得发布（R5-H）
+D publish start_drift writes 0 status SystemExit: worker 的 digest_start=ffffffffffff 与父进程冻结身份 ec118a6a340c 不一致：该结果并非由本次冻结的源码产生，不得发布（R5-H）
+D publish end_drift writes 0 status SystemExit: worker 的 digest_end=ffffffffffff 与父进程冻结身份 ec118a6a340c 不一致：该结果并非由本次冻结的源码产生，不得发布（R5-H）
+D publish worker_exception writes 0 status RuntimeError: R6 worker exception
+D publish parent_drift writes 0 status SystemExit: 研究代码在 MC 运行期间发生变化（起 ec118a6a340c / 止 ffffffffffff）：结果与代码身份不再一一对应，必须在稳定源码上重跑，不得落盘
+D publish parent_interrupt writes 0 status KeyboardInterrupt: R6 parent only interrupt
+
+`````
+
+### D：R-10 取证器初次形态误判（修正前，后续代码未执行）
+
+本次误将 shell tail/grep 门当成 Python -c 门，驱动抛 ValueError；不是产品拒收。随后按实际 shell 原文重新执行六个输入，完整成功输出见下一节。
+
+### D：初次命令及错误输出
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import json,shlex,io,contextlib,copy,math
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+j=json.loads(Path('taskList.json').read_text());t=next(t for t in j['modules']['research']['tasks'] if t['id']=='R-10');print('R10 ORIGINAL',t['verify'])
+cmd=shlex.split(t['verify']);body=cmd[cmd.index('-c')+1]
+for name,text in [('six_pass','六审终裁：pass\n'),('six_fail','六审终裁：fail\n'),('old_pass_new_fail','五审终裁：pass\n六审终裁：fail\n'),('trailing_text','六审终裁：pass\nextra\n'),('keyword','正文包含六审终裁：pass\n'),('trailing_blank','六审终裁：pass\n\n')]:
+ try:
+  with patch('builtins.open',return_value=io.StringIO(text)),contextlib.redirect_stdout(io.StringIO()):exec(compile(body,'R10-original','exec'),{})
+  print('R10',name,'ACCEPTED')
+ except BaseException as e:print('R10',name,'REJECTED',type(e).__name__)
+s=Path('docs/adr/report-G3-null-model.md').read_text();a=s.rindex('```json')+7;b=s.rindex('```');j=json.loads(s[a:b]);q=copy.deepcopy(j)
+g=q['results'][0]['diagnostics']['grid_dependence'];g['null_mean_cross']=[0.]*3;g['null_sd_cross']=[1e6]*3;g['band']=[6e6/math.sqrt(g['n_grid'])]*3
+captured=[]
+fields=N.MCResult.__dataclass_fields__;rs=[N.MCResult(**{k:v for k,v in r.items() if k in fields}) for r in q['results']]
+with patch.object(Path,'mkdir'),patch.object(Path,'write_text',lambda self,text,**kw:captured.append(text)):N.write_report(rs,Path('/tmp/not-created-r6-render.md'),meta=q['meta'],code_digest=q['meta']['research_code_sha256'])
+with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(captured[0])
+print('B-G impossible_sd_after_current_renderer ACCEPTED band=',g['band'])
+# No file is written; exercise rate=None rendering from actual all-error MC.
+with patch.object(N,'resample_null',side_effect=RuntimeError('R6 all replicates fail')),contextlib.redirect_stderr(io.StringIO()):r=N.run_mc('common_shock',kind='power',n_rep=2)
+captured=[]
+with patch.object(Path,'mkdir'),patch.object(Path,'write_text',lambda self,text,**kw:captured.append(text)):N.write_report([r],Path('/tmp/not-created-r6-none.md'),meta=j['meta'])
+print('D power_rate_none','rate',r.rate,'failed',r.n_failed,'rendered',len(captured),'chars',len(captured[0]))
+PY
+`````
+
+`````text
+R10 ORIGINAL test -f docs/adr/review-G3-P1.md && tail -1 docs/adr/review-G3-P1.md | grep -Eq '^(二审|三审|四审|五审|六审|七审|八审|九审|十审)?终裁：pass$'
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+ValueError: '-c' is not in list
+
+`````
+
+### D：R-10 原文六输入；当前排版器仍接受不可能 sd；rate=None 修复
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import json,shlex,io,contextlib,copy,math,subprocess,os
+from pathlib import Path
+from unittest.mock import patch
+from quant_lab.research import nullmodel as N
+j=json.loads(Path('taskList.json').read_text());t=next(t for t in j['modules']['research']['tasks'] if t['id']=='R-10');print('R10 ORIGINAL',t['verify'])
+launcher="function tail() { printf '%s' \"$R6_TEXT\" | command tail \"${@:1:$#-1}\"; }\n"
+for name,text in [('six_pass','六审终裁：pass\n'),('six_fail','六审终裁：fail\n'),('old_pass_new_fail','五审终裁：pass\n六审终裁：fail\n'),('trailing_text','六审终裁：pass\nextra\n'),('keyword','正文包含六审终裁：pass\n'),('trailing_blank','六审终裁：pass\n\n')]:
+ r=subprocess.run(launcher+t['verify'],shell=True,executable='/bin/bash',env=dict(os.environ,R6_TEXT=text),capture_output=True,text=True)
+ print('R10',name,'exit',r.returncode,repr(r.stderr))
+s=Path('docs/adr/report-G3-null-model.md').read_text();a=s.rindex('```json')+7;b=s.rindex('```');j=json.loads(s[a:b]);q=copy.deepcopy(j)
+g=q['results'][0]['diagnostics']['grid_dependence'];g['null_mean_cross']=[0.]*3;g['null_sd_cross']=[1e6]*3;g['band']=[6e6/math.sqrt(g['n_grid'])]*3
+captured=[]
+fields=N.MCResult.__dataclass_fields__;rs=[N.MCResult(**{k:v for k,v in r.items() if k in fields}) for r in q['results']]
+with patch.object(Path,'mkdir'),patch.object(Path,'write_text',lambda self,text,**kw:captured.append(text)):N.write_report(rs,Path('/tmp/not-created-r6-render.md'),meta=q['meta'],code_digest=q['meta']['research_code_sha256'])
+with contextlib.redirect_stdout(io.StringIO()):N.verify_report_text(captured[0])
+print('B-G impossible_sd_after_current_renderer ACCEPTED band=',g['band'])
+# No file is written; exercise rate=None rendering from actual all-error MC.
+with patch.object(N,'resample_null',side_effect=RuntimeError('R6 all replicates fail')),contextlib.redirect_stderr(io.StringIO()):r=N.run_mc('common_shock',kind='power',n_rep=2)
+captured=[]
+with patch.object(Path,'mkdir'),patch.object(Path,'write_text',lambda self,text,**kw:captured.append(text)):N.write_report([r],Path('/tmp/not-created-r6-none.md'),meta=j['meta'])
+print('D power_rate_none','rate',r.rate,'failed',r.n_failed,'rendered',len(captured),'chars',len(captured[0]))
+PY
+`````
+
+`````text
+R10 ORIGINAL test -f docs/adr/review-G3-P1.md && tail -1 docs/adr/review-G3-P1.md | grep -Eq '^(二审|三审|四审|五审|六审|七审|八审|九审|十审)?终裁：pass$'
+R10 six_pass exit 0 ''
+R10 six_fail exit 1 ''
+R10 old_pass_new_fail exit 1 ''
+R10 trailing_text exit 1 ''
+R10 keyword exit 1 ''
+R10 trailing_blank exit 1 ''
+B-G impossible_sd_after_current_renderer ACCEPTED band= [189736.65961010277, 189736.65961010277, 189736.65961010277]
+D power_rate_none rate None failed 2 rendered 1 chars 8470
+
+`````
+
+### E：独立核回执集合、格点带宽、主 L 账本、公开 seed/config
+
+`````bash
+PYTHONDONTWRITEBYTECODE=1 .venv-g3/bin/python - <<'PY'
+import json,hashlib,math
+from pathlib import Path
+s=Path('docs/adr/report-G3-null-model.md').read_text();j=json.loads(s[s.rindex('```json')+7:s.rindex('```')]);m=j['meta'];h=hashlib.sha256();root=Path('src/quant_lab/research')
+for p in sorted(root.rglob('*.py')):h.update(str(p.relative_to(root)).encode()+b'\0'+p.read_bytes()+b'\0')
+assert h.hexdigest()==m['research_code_sha256'];assert m['worker_receipts_confirmed']==len(j['results'])==13;assert m['worker_code_sha256']==[h.hexdigest()]
+print('E digest',h.hexdigest(),'worker_receipts',m['worker_receipts_confirmed'],'set',m['worker_code_sha256'])
+print('E command',m['command']);print('E world',m['world']);print('E pipeline',m['pipeline'])
+for i,r in enumerate(j['results']):
+ d=r['diagnostics'];g=d['grid_dependence'];n=g['n_grid'];bands=[max(6*sd/math.sqrt(n),.03) for sd in g['null_sd_cross']];ok=all(abs(a-b)<=band for a,b,band in zip(g['fitted_cross'],g['null_mean_cross'],bands))
+ assert ok==g['ok'] and all(abs(a-b)<1e-12 for a,b in zip(bands,g['band']))
+ assert r['tiers'].get('invalid',0)+r['tiers'].get('error',0)<=r['n_failed']
+ assert r['n_done']-r['n_failed']<=sum(d['chosen_block_len'].values())<=r['n_done']-len(d.get('errors',[]))-d['n_invalid_null_model']
+ print('E grid/accounting',i,'n_grid',n,'bands',bands,'ok',ok,'seed0',r['seeds'][0]//100000)
+print('E self-reported receipts MATCH; not execution authentication')
+PY
+`````
+
+`````text
+E digest ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402 worker_receipts 13 set ['ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402']
+E command python -m quant_lab.research.nullmodel
+E world WorldConfig(mechanism='common_shock', n_clusters=1600, span_days=360, n_candidates=12, delta=0.0, pi=0.3, censor_frac=0.05, cluster_size_max=4, noise_scale=1.0, seed=0)
+E pipeline PipelineConfig(scheme='expanding', test_span_days=60, min_train_span_days=180, embargo_days=1.0, label_maturity_days=0.0, min_train_clusters=20, search_frac=0.5, block_len_days=None, block_len_sensitivity=(1, 3, 7), B=2000, alpha=0.05, config_cap=None, seed=0, max_folds=None)
+E grid/accounting 0 n_grid 1000 bands [0.03, 0.03, 0.03] ok True seed0 1
+E grid/accounting 1 n_grid 1000 bands [0.03, 0.03, 0.03] ok True seed0 2
+E grid/accounting 2 n_grid 1000 bands [0.03, 0.03, 0.03] ok True seed0 3
+E grid/accounting 3 n_grid 1000 bands [0.03, 0.03, 0.03] ok True seed0 4
+E grid/accounting 4 n_grid 1000 bands [0.03, 0.03, 0.03] ok True seed0 11
+E grid/accounting 5 n_grid 200 bands [0.03, 0.033176392987695695, 0.03152598760551125] ok True seed0 41
+E grid/accounting 6 n_grid 200 bands [0.03, 0.03, 0.03] ok True seed0 41
+E grid/accounting 7 n_grid 200 bands [0.03, 0.03317639298769569, 0.03152598760551126] ok True seed0 41
+E grid/accounting 8 n_grid 200 bands [0.03, 0.03, 0.03] ok True seed0 41
+E grid/accounting 9 n_grid 200 bands [0.03, 0.033176392987695695, 0.03152598760551125] ok True seed0 41
+E grid/accounting 10 n_grid 200 bands [0.03, 0.03, 0.03] ok True seed0 41
+E grid/accounting 11 n_grid 200 bands [0.03, 0.03317639298769569, 0.03152598760551126] ok True seed0 41
+E grid/accounting 12 n_grid 200 bands [0.03, 0.03, 0.03] ok True seed0 41
+E self-reported receipts MATCH; not execution authentication
+
+`````
+
+### 剩余必修与可落地验收
+
+**R6-G（P1；R5-G 部分闭合）：相关标准差可用不可能的数值撑开总体门。**
+
+位置：src/quant_lab/research/nullmodel.py:798（只检查 sd≥0）、:433（aggregate_pair_ok）、:802（门重算）。复现见 B-G minimal_single_pair：只改第一条主记录第二个品种对的 null_mean_cross=0、null_sd_cross=3，并把 band 同步重算，其余计数、CP、哈希、pair 和 fitted=0.5040997763236431 全保留，verify_report_text ACCEPTED。带宽变成 0.5692099788303083，足以吞掉完整相关丢失。另一个 sd=1e6 的版本经当前 write_report 重排版后仍 ACCEPTED；这不是仅改展示 band。
+
+每个 replicate 的相关系数都在 [-1,1]，所以对于 n≥2、样本均值 m、ddof=1 的样本标准差 s，必须满足
+s² ≤ n/(n−1) × (1−m²)。
+本例 n=1000、m=0，最大 s=1.0005003753127737，3 不可能由任何这样的抽样产生。这里不需要相信 fitted 真值，也不需要重跑 MC 才能否证；它违反报告自身的可实现性约束，不能归入 A39。
+
+改法：producer/verifier 对齐相关统计的有效样本数与缺失策略，核每对 sd 的上述上界（允许合理浮点舍入误差），核派生 band 与 mean/sd/n 重算一致；n<2 应明确“不可估”，不要伪造有限 sd。若允许每对缺失，公开并使用每对有效 n，而不是拿共同 n_grid 代替。验收：本节单对 sd=3 和重排版 sd=1e6 均拒收；实际正常四机制报告继续通过；真实强/弱破坏继续触发；源文件变化后按 A31 重生成报告。**此反例单独足以判本轮 fail。**
+
+**R6-H（P1；R5-H 部分闭合）：回执绑定磁盘视图，未绑定已经加载的执行修订。**
+
+位置：nullmodel.py:1051–1071、:1122–1132；paths.py:research_code_digest。原 B3 worker_drift 本轮依然 returned / write_calls=1，两个 worker 都执行 R5-child-code。原脚本把 N.research_code_digest 也替换成了捕获的摘要函数，且源码视图改变位于 run_mc 调用内部；所以不得把它描述成“仅持久磁盘漂移、真实 digest 不被替换”的实验。原 parent_end_drift 现在在 worker 起跑摘要处被拒，也不能冒称真实父收尾实验。D publish 补充实验用 PID 区分父/子，真实父收尾异常均零发布。
+
+更直接的新 B-H 不替换 research_code_digest、不替换 Path.read_bytes、不伪造回执，只给子进程一个预先编译、返回标签为 R6-cached-revision 的 run_mc 函数对象，模拟导入缓存/驻留修订与当前磁盘不一致。两个真实 OS worker、起止摘要与父冻结摘要全部相等、零流水线异常，父进程仍调用 write_report，两个结果标签都证明执行了另一修订。稳定对照也发布一次。没有把注入说成生产磁盘真的变过；它是对五审已要求覆盖的缓存执行身份边界的受控复现。
+
+改法：从父进程冻结的一份不可变源码快照或安装制品，以新解释器启动整组 worker，禁止复用父进程已加载的 research 模块对象，隔离可变源目录和陈旧 pycache；回执绑定该制品身份，并校验导入来源。首尾磁盘摘要保留作漂移检查，但不得声称它证明执行修订。验收：稳定串/并行相同 seeds 的结果一致；本节缓存修订注入不能作为冻结制品结果发布（可拒收，或新解释器正确运行被冻结修订）；启动后可变原工作树漂移不污染快照结果；缺回执/起止漂移/异常/中断仍零发布。无需防御能任意改写全部执行与验证代码的恶意进程，也不要求签名体系；目标是消除正常导入与缓存混版。仅将已知缺口写成边界，不能完成原 R5-H 的工程验收。
+
+**R6-L（R5-C 主 L 子项）：空分布跳过记账门。**
+
+位置：nullmodel.py:837–843 的 if chosen。B-C empty_L 对当前完整 auto-L 主记录把 chosen_block_len={}，其余字段均不变，仍 ACCEPTED。当前记录 n_done=1000、n_failed=1，因此下界应为 999，但实际分布总数为 0。删除该字段同样会经默认空字典走旁路（本轮实跑的是清空；删除行为由源码推断，不冒称另跑）。
+
+改法：对声明 auto-L 的记录要求该分布存在、为合法 L=1/3/7 的非负整数映射，无条件核总数上下界；固定 L 路径若不产生分布，应显式声明模式并校验其适用性，不能以“空字典”兼任免检开关。验收：清空/缺失 auto-L 分布拒收，合法结构早退者不被强迫补主 L；正确计费 5 invalid 继续接受、50 invalid 继续由 FPR 拒收。该缺口没有证明三分母最坏界再次被低估，不能与 R5-C 原准入翻转混称。
+
+### 非阻断边界与验证解释
+
+- B-W 对 n=0/1 返回无限带宽，是“无法估计均值不确定性”的宽松结果。R-08 主记录仍要求 n≥1000、有搜索≥500 且过半；finite_tree 还拒非有限诊断，因此这些小 n 单函数结果不是 1000 次验收绕过。n≥2、sd=0 时带宽为 0.03，同值通过，0.14→0 拒绝；正常 circular_shift 的 sd≈1e-15，四机制对照中未被误拒。没有以小样本宽松本身判 fail。
+- B-G receipts_missing 与 band_forged 会被 report verifier 接受，显示该层没有验证这些新增 meta/派生字段。当前实际报告的 13 份回执集合及 band 已独立核对一致；删除自报来源字段不单独作为另一条 P1 终裁依据，band 的一致性可并入 R6-G。
+- check_worker_receipt 对“result 键存在但为 None”直接返回 None；真正缺键会 SystemExit。主流程随后不能把 None 当结果发布，属于错误类型/载荷校验不完整，不是本轮成功发布反例。
+- 接受 A39 的 P2 独立复算安排，不要求在每份制品重复写方法边界。公开 world/pipeline repr、命令与 seed0 段已核；独立复核要明确版本与抽样口径，不能把当前源码哈希相等说成“计算发生过”的认证。
+- 现行出口 A 保持：主功效 327/966（非失败）、327/1000（全计划）、327/768（有搜索），有搜索下界约 0.3905，低功效如实 fail 可接受；不把合成功效当真实收益保证。
+
+### 历史字节前缀与并发变更核验
+
+开审一至五审前缀长度为 257439 bytes，SHA256 为 7b63173d7c78ce8f06378cca8079b6f0eda31c782be11611f7929136f5311fe6。本轮使用二进制 ab 追加，并在追加前、追加后按相同长度复算。下面会记录真实计算出的校验值。
+
+第一遍“所有保护文件应全相等”的收尾断言报错：contracts/README.md 与 taskList.json 的摘要发生变化。已核读 README §25.5–25.6 与 taskList changeLog #72（G0 R78），它们记录失败收费与 R-10 中性扩展；本会话没有写入它们。不能将“我没修改”说成“环境中无人修改”。源码、测试与 G3 报告字节未变，五条 verify 原文逐字未变，测试不因这些注释/审计追加失效。README §25.2 要求证据中的终裁回显加引导符，本节执行该要求；既有五审证据字节不回改。
+
+首遍全保护文件断言真实输出（exit=1）：
+
+`````text
+protected_files 45 changed ['quant-lab/contracts/README.md', 'quant-lab/taskList.json']
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+AssertionError
+
+`````
+
+### 收尾：五条 verify 逐字核对与并发变更摘要
+
+`````bash
+python3 - <<'PY'
+import json,hashlib
+from pathlib import Path
+expected={"R-05":"test -f docs/adr/report-G3-backend-spike.md && .venv-g3/bin/python -c \"import json,re,sys;t=open('docs/adr/report-G3-backend-spike.md',encoding='utf-8').read();j=json.loads(t[t.rindex(chr(96)*3+'json')+7:t.rindex(chr(96)*3)]);m=j['matrix'];assert all(v['status']=='pass' for v in m['polars'].values()),m['polars'];assert sum(v['status']=='pass' for v in m['polars_ta'].values())>=10;tm={r['backend']:r for r in j['timings']};assert tm['polars']['n_ast']==128 and tm['polars']['cold_s']>0 and tm['polars']['hot_s']>0 and 0<tm['polars']['rss_gib_after_hot_s']<=8 and tm['polars']['cold_s']<=1200;print('spike ok',tm['polars']['cold_s'],tm['polars_ta']['cold_s'])\"","R-07":".venv-g3/bin/python -m pytest tests/research/test_protocol.py -q && .venv-g3/bin/python -c \"import polars as pl;from quant_lab.research.paths import ledger_path;p=ledger_path();d=pl.read_parquet(p);assert d.height>0 and (d['status']=='reserved').sum()==0;print(p,d.height)\"","R-08":".venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py tests/research/test_review_p1_round3.py -q && .venv-g3/bin/python -c \"from quant_lab.research.nullmodel import verify_report_text; verify_report_text(open('docs/adr/report-G3-null-model.md',encoding='utf-8').read())\"","R-09":".venv-g3/bin/python -m quant_lab.research.api run --config tests/research/fixtures/protocol_synthetic.yaml --out /tmp/ql-proto && .venv-g3/bin/python -c \"import json,math;r=json.load(open('/tmp/ql-proto/report.json'));assert r['tier'] in ('T0','T1','T2','T3a','T3b') and r['n_attempts']>0 and r['theta'] is not None and math.isfinite(r['theta']);s=r['n_attempts_by_status'];st=dict(zip(s['status'],s['len']));assert st.get('completed',0)>0 and st.get('reserved',0)==0 and st.get('duplicate',0)<r['n_attempts'];assert r['claim_status']=='descriptive_only' and r['final_status'] in ('ok','no_claim');print({k:r[k] for k in ('tier','K','theta','n_attempts','final_status')},st)\"","R-10":"test -f docs/adr/review-G3-P1.md && tail -1 docs/adr/review-G3-P1.md | grep -Eq '^(二审|三审|四审|五审|六审|七审|八审|九审|十审)?终裁：pass$'"}
+base={"prefix_bytes":257439,"prefix_sha256":"7b63173d7c78ce8f06378cca8079b6f0eda31c782be11611f7929136f5311fe6","files":{"quant-lab/src/quant_lab/research/synthetic.py":"e3259d422a7e676ac4699c1a4a6e0a85baf05f435be1292dbfa424a6b6fd284f","quant-lab/src/quant_lab/research/maxt.py":"603c46f339300822fc2a503c4fde1cfcd2181347bb43bace1f7e5f3b30e3a7e2","quant-lab/src/quant_lab/research/paths.py":"619e7b961528e896c2a780177e49e2bd5195b52d45bc03f885da70aeb41af662","quant-lab/src/quant_lab/research/protocol.py":"66e1c9494982624eaccb7dadcf64e02142ccba7c0e3c28aeafec52572cb2fc54","quant-lab/src/quant_lab/research/ledger.py":"dd8ee9017bf9587873d495b45ba4b64e96531028665f2cd5e7fe40764f7e2db7","quant-lab/src/quant_lab/research/__init__.py":"5792ae78cc7030ef6f8e40e786177e84df851a892bd555eafeb7c91e1beadca0","quant-lab/src/quant_lab/research/features.py":"65f36acacec9b7656dc572ee2490ef7dafc3f2782a43706560dbaae88cd07b46","quant-lab/src/quant_lab/research/grammar.py":"03841ce8d3c03bd65ed7d9e6fe310417319dc97c6befb3a3aa56c93ad02f09d9","quant-lab/src/quant_lab/research/api.py":"ae2c60c1685ee025bd724ddcbed63270ed6de707d272c31c6bdf076d85edf592","quant-lab/src/quant_lab/research/spike.py":"9f3178104aab91ca67d76d14cbc49777f75167ea3b9788b81dfe32509150b503","quant-lab/src/quant_lab/research/contract_tests.py":"25053d6f43be30807fb7580893174fcee18ecff880e342074d2856c63eba683f","quant-lab/src/quant_lab/research/ops.py":"2893fcfab671fa39abd7b6c6549ebaf92740652372dffc5f9fcb4e367b950d05","quant-lab/src/quant_lab/research/ast.py":"b9fd438b20443a0705f0b0eb140efa28fd6cc8fef256fffc2b5cf99a4d7bc903","quant-lab/src/quant_lab/research/reference.py":"09a1b940e36c07367317e5ce74eb718dfee8918d3940d375aaef6e3111f4ad25","quant-lab/src/quant_lab/research/nullmodel.py":"6e9b5d3445ad98295f72559537c960efdef9e49baec5b4a77193ee70a49a5301","quant-lab/src/quant_lab/research/evaluator.py":"d2c73127ad42b91d83be4362b3ce56c730044bd80813688ea7d4b8dc377aa9fd","quant-lab/src/quant_lab/research/tiers.py":"987037ccf008b8874b78903a5c14645b55b9e0b099b5a248040c909029e1c418","quant-lab/src/quant_lab/research/backends/__init__.py":"4ac9410eda1a7df71c1ec2ff4e0d275e968fc0a4c18e17f177ed9fa20185117d","quant-lab/src/quant_lab/research/backends/polars.py":"c39e3efc2c07cbf69d8fbc8d7d78ddb12d2f003322c0b01fb78d807dec4d06a5","quant-lab/src/quant_lab/research/backends/polars_ta.py":"3873a84db354235cf3662e4b6bfab6a64e87835d963001f80b6230e530c78e27","quant-lab/tests/research/test_review_p1_closure.py":"25f27e99acc167c4e924acb5d5f2ae44185e86fa32324b8098d9f69eda73982b","quant-lab/tests/research/conftest.py":"d375f18e484d7ccaa698e22505e1bddc087558290ea03c479e7385328ce93fa2","quant-lab/tests/research/test_protocol.py":"d70d1a608797661005bd3858810dc0cc9c2f06ce7303cff8de1d9ef22cab850f","quant-lab/tests/research/test_maxt.py":"42253d2e41189805c127eacd92dd1b46e739a51ebd6da15127998aacca23b71c","quant-lab/tests/research/test_features.py":"34a62aa954f3714df9e5501680bea55df71d6c5ed0144c282ce8325b0115d5ff","quant-lab/tests/research/test_evaluator.py":"af52849349543c3fb82d27f6e2b778a4a3f3b7e8200209ec3e83e59d5ad691af","quant-lab/tests/research/test_review_p1_round5.py":"38391afb35eb7d5f84c7b5c8bcd3cb0fdb3ffbaa4649903f00a0ef4f34ba8549","quant-lab/tests/research/__init__.py":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","quant-lab/tests/research/test_smoke.py":"be33574cdf8c298dc140713d040c55ffec113c61afad5a2bfe5df59eeab616ca","quant-lab/tests/research/test_nullmodel.py":"78e1a22c7e0239d05f77fc486b66bb2414d5430e47425ab9c77da8fd0f3434b7","quant-lab/tests/research/test_ops_contract.py":"664ef151fa6258c931cb41d55c01b979448cf2398745b64b0e5543ac208c4ca1","quant-lab/tests/research/test_review_p1_round3.py":"7c92ff77684136700fb7fbe83ffe974c5ae5d81190babee27002b542a392af61","quant-lab/tests/research/test_g2_parity.py":"d7e0cb2045cc12d252ae9d390c4837bfcef64ef0b35108b7512fafef38468f94","quant-lab/tests/research/test_api.py":"aa9a5bf44c99c95dd1cb4717450e5eec30ec1b50dabebae1b0712b6e4360e176","quant-lab/tests/research/test_ast.py":"c0b19d733d2965b6677fbbc5acbe777916bbd5187aaf95107539b81ee8c28d50","quant-lab/tests/research/fixtures/protocol_synthetic.yaml":"1d2af763e4b00ba120d3e79cde981f5e54e8a6b2567128df9562b524ac3fb506","quant-lab/contracts/execution-interface.md":"81ade79b819a6946579ddca80afa06baf09171e40ca7a4614e52132bbc88c7e8","quant-lab/contracts/research-schema.md":"f8391b51e7f74b512681d3d3b26a4b910f5b97cbe94931dfd5d439b046ac6418","quant-lab/contracts/README.md":"4590a345c6681206a29956eb5a37ddab12a6aa1efcc64edbdad0872e3f66ae9c","quant-lab/contracts/feature-snapshot.md":"f70c06ae5c46ecc57372ad7c0d7413ce24fbf504aeaea5bffc46906550cecce5","quant-lab/docs/adr/report-G3-research-horizon-curve.md":"5f3dbe3e3cde87962b9abcc59a80089397988deed25f739a87e489cf1d25eb52","quant-lab/docs/adr/report-G3-null-model.md":"0369e77ed0bc84e77c5ee65dcc8443aa09b4a0b0f617abfc01f444bea10e6256","quant-lab/docs/adr/report-G3-backend-spike.md":"d9fc1690653016db72cd78c4756efc5b36b34ae04dcf6815aa02c27858cd7afd","quant-lab/docs/adr/report-G3-estimand-partial-exit.md":"8503feeaa23745771044af63959ed70649ee1cdcb9a37490665ecbae9d0b3c81","quant-lab/taskList.json":"8efcadeb667ab9bfb5f21ab20041c6d8dfa790e7ee2865de8ec8607a6f8e2236"}}
+j=json.loads(Path('quant-lab/taskList.json').read_text());current={t['id']:t['verify'] for t in j['modules']['research']['tasks'] if t['id'] in expected};assert current==expected
+print('verify_text_unchanged',sorted(expected))
+for name,h in base['files'].items():
+ now=hashlib.sha256(Path(name).read_bytes()).hexdigest()
+ if now!=h:print('external_change',name,'before',h,'after',now)
+print('unchanged_source_tests_reports',all(hashlib.sha256(Path(p).read_bytes()).hexdigest()==h for p,h in base['files'].items() if any(part in p for part in ['/src/','/tests/','/docs/adr/'])))
+PY
+`````
+
+`````text
+verify_text_unchanged ['R-05', 'R-07', 'R-08', 'R-09', 'R-10']
+external_change quant-lab/contracts/README.md before 4590a345c6681206a29956eb5a37ddab12a6aa1efcc64edbdad0872e3f66ae9c after b686a7c56750c2725c4be8b168d258e5e1c76deabf9520ef1cfe4da432565c76
+external_change quant-lab/taskList.json before 8efcadeb667ab9bfb5f21ab20041c6d8dfa790e7ee2865de8ec8607a6f8e2236 after 218e801dd35142594fe5cb494990b89e413ac216867efee0bde3bc2305a5560b
+unchanged_source_tests_reports True
+
+`````
+
+### 追加后机械核验（真实计算输出）
+
+```text
+historical_prefix_bytes=257439
+before_sha256=7b63173d7c78ce8f06378cca8079b6f0eda31c782be11611f7929136f5311fe6
+after_prefix_sha256=7b63173d7c78ce8f06378cca8079b6f0eda31c782be11611f7929136f5311fe6
+prefix_bytes_equal=True
+protected_source_test_report_files=40 unchanged=True
+verify_text_unchanged=R-05/R-07/R-08/R-09/R-10
+```
+
+可独立复查原一至五审前缀：
+
+```bash
+python3 - <<'CHECK'
+from pathlib import Path
+import hashlib
+b=Path('docs/adr/review-G3-P1.md').read_bytes()
+h=hashlib.sha256(b[:257439]).hexdigest()
+assert h == '7b63173d7c78ce8f06378cca8079b6f0eda31c782be11611f7929136f5311fe6'
+print(h)
+CHECK
+tail -1 docs/adr/review-G3-P1.md | grep -E '^六审终裁：(pass|fail)$'
+```
+
+写后运行上述 tail/grep，并运行 taskList 的 R-10 原文；下列值由落盘驱动逐项断言后才结束本次写入操作：
+
+```text
+stdout: 六审终裁：fail
+tail_check_exit=0
+R-10_original_exit=1 (expected: verdict is fail)
+actual_round6_heading_lines=1
+```
+
+六审终裁：fail

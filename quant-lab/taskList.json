@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T09:54:06Z",
+  "updatedAt": "2026-09-11T10:13:37Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -538,10 +538,18 @@
         "section": "§25.5-25.6",
         "summary": "采纳 G3 自陈同形错误的归纳立为一般教训：测试里为了让断言跑通而绕开的那个报错往往就是要找的不变式（G3 把 50 条搬进 invalid 撞上『报告算术不一致』时选择绕开而未追问，破掉的正是结构失败须计入 n_failed 这条不变式）；机制是绕开等于把『系统拒绝我构造的状态』当障碍而非信息，若被断言性质依赖该不变式则绕开后断言仍过但已不测原事；要求测试构造遇被测系统主动抛错时须先确认与被测性质无关方可绕开并记录确认过程，不得以『改了输入就不报错』为由；记 G3 补充证据——付清失败费后同一记录按 FPR 未通过被拒、上界 8.020159% 与五审独立算出的 minimum_correct_upper 逐位相同，坐实该门在正确记账下真把 pass 翻成 fail；A16 审计 R-10 verify：G0 以八组探针独立实测，唯一差异为六审 pass 由不可达变可达，尾随/空格/非行首/超枚举轮次行为全同，判为口径修正准；全库 verifyHistory 累计 8 条，收紧或口径修正 8，放宽 0",
         "by": "G0/427ed064 R78"
+      },
+      {
+        "n": 73,
+        "at": "2026-09-11T10:13:36Z",
+        "file": "contracts/README.md",
+        "section": "§25.7-25.8",
+        "summary": "修订 A40：活跃判据改为析取（最近写入<120s 或 近10分钟≥2次，任一满足即不判），此前 G0 用频率判据替换了单点 mtime 而非与之合取，两信号互不包含（单点捕捉刚写过、频率捕捉会话进行中），本轮 research 22 秒前刚写但近10分钟仅1次，按字面不算活跃而显然是移动靶；一般教训：修一条失效规则时先确认是在补充信号还是丢弃信号，A40 立于单点阈值被会话间隙骗过、正确反应是再加信号而 G0 整个换掉致刚修好的规则立刻在另一侧被骗——一条规则失效不等于它捕捉的那件事不再需要捕捉；记六审终裁 fail 但核心闭合：R5-C 失败收费闭合（CP 上界 0.08020158944615748 与 0.08152876375416514 均被拒、5 次正确计费接受、审查方明写未找到满足已知约束却低估最坏界的反例），真实弱相关破坏已被新总体门捕获，两条新 open 为相关标准差缺可实现性上界与 worker 自报磁盘摘要不能绑定已加载执行修订，后者与 A39 同族（证明磁盘上是什么不证明进程里跑的是什么）",
+        "by": "G0/427ed064 R79"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.49",
+    "version": "v1.50",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -1634,7 +1642,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T09:37:09Z",
+      "lastUpdate": "2026-09-11T10:13:37Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1833,6 +1841,10 @@
         {
           "t": "18:37",
           "n": "[G0/427ed064 OR-02 R76 · 静止轮 + OR-06 预备] 测量 09:29Z，A40 频率判据：data/market/research **近 10 分钟均 0 次写入**，三者可判；**判定后复核 0 次写入，判定有效**。A35：src 48/48、tests 61/61。实跑与上轮一致：data **225**、market **358**、integration **8** 全绿；research **10 failed / 341 passed**，按 §25.4 判为**进度**（6 条五审反例先行测试 R5C/R5G×4/R5O + 4 条 A31 陈旧级联），非回归。G3 已空闲约 28 分钟，未被阻塞。**本轮无状态变化，故转做 OR-06 预备**：起草 `docs/known-gaps-draft.md`（45 行），把本会话累积的边界逐条落到可追溯形式，分五节——(1) **方法边界**（机器判读证明不了计算发生过；重采样比对为 P2 前置且口径落结论层；三道机制互补非穷尽）；(2) **范围边界**（G3 未接入 force_close_net_R 且登记为空集、真实归档仅 BTCUSDT 2024-01、M-11/D-08/D-11 **gated 未启动属有意边界不是未完成**）；(3) **统计口径**（estimand 主 B 副 A、research_horizon_s=5d 与其数据量前置、功效出口 A、最小有效样本下限口径）；(4) **各窗口 partial-P2 残余**；(5) 定稿前须补三项。**每条均要求可追溯到契约条款或审查编号**，且只记『已知且已判定』，不记未决争议。P1 唯一剩余项仍为 R-10。"
+        },
+        {
+          "t": "19:13",
+          "n": "[G0/427ed064 OR-02 R79] 测量 10:09Z。data/market 近10分钟 0 次 → 可判：**data 225、market 358、integration 8 全绿**。**research 记不判**：22 秒前刚写（近10分钟 1 次）。**本轮由此暴露我自己 A40 的过度矫正**：我用频率判据**替换**了单点 mtime 判据而非与之**合取**，于是『22 秒前刚写但 10 分钟内仅 1 次』按字面不算活跃——刚修好的规则立刻在另一侧被骗。已改为析取（<120s 或 ≥2 次，任一即不判），见 §25.7。**一般教训**：修一条失效的规则时，先确认是在**补充信号**还是在**丢弃信号**。**一条规则失效，不等于它捕捉的那件事不再需要捕捉。****六审终裁 fail，但核心项已闭合**：R5-C 失败收费闭合——最低正确收费 50 的 searched CP 上界 0.08020158944615748 被 FPR 门拒、总 51 的 0.08152876375416514 亦拒、5 次正确计费接受，**审查方明写『未找到满足已知失败计数约束却低估三分母最坏界的反例』**（比『测试通过』强的表述）；真实弱相关破坏已被新版总体门捕获。**两条新 open**：(1) 相关标准差缺可实现性上界，能把真实相关归零后的记录放行；(2) worker 首尾自报磁盘摘要不能绑定已加载的执行修订——**后者与 A39 同族：自报摘要证明磁盘上是什么，不证明进程里跑的是什么**。research 现 6 failed / 345 passed，按 §25.4 形状疑为六审反例先行测试，但因在写入窗口内**本轮不判**。"
         }
       ]
     }
