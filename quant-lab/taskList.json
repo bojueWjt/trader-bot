@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T09:21:47Z",
+  "updatedAt": "2026-09-11T09:37:09Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -1615,7 +1615,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T09:00:10Z",
+      "lastUpdate": "2026-09-11T09:37:09Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1810,6 +1810,10 @@
         {
           "t": "18:00",
           "n": "[G0/427ed064 OR-02 R74] A35 必报量：src 48/48、tests 60/60。实跑：data **225**、market **358**、integration **8** 全绿。**research 记不判，且本轮暴露我自己判据的缺陷**：08:49Z 测得距今 1074 秒判为可判，跑完四套约 4 分钟后复核，发现该模块在 17:54 与 17:56:58 又各写一次——**测量与判定之间它一直在被改**；最终距今 125 秒刚越 120 秒阈值。**单点 mtime 阈值只约束测量那一刻，没约束判定成立的整个区间**，已改为按写入频率判（近 10 分钟 ≥2 次即活跃会话，一律不判）——见 §25 A40。research 现 5 failed 属该活跃会话中间态。**五审终裁 fail**：S08 闭合、S17 部分闭合、**S10 由已闭合改判部分闭合**（新增弱相关机制破坏暴露既有总体判据盲区）。**核心发现：结构失败未被强制纳入 n_failed，能使本应超过 7% 的条件 FPR 最坏界假绿**——属 A22 族，且方向是『把不合格判成合格』。审查方『旧用例无回退，新覆盖揭露旧盲区』『不能把旧回归全绿写成完整闭合』的表述已采信并记档。**另裁一条判读完整性**：review-G3-P1.md 有 4 处列首 `五审终裁：fail`，3 处在证据代码块内。本次无害，但 G3 的 `tail -1` 对追加失效、G2 的 `grep|tail -1` 会读块内行——已裁定证据块内不得出现列首终裁形状行，从源头消除而非要求每条 verify 各自绕开。"
+        },
+        {
+          "t": "18:37",
+          "n": "[G0/427ed064 OR-02 R76 · 静止轮 + OR-06 预备] 测量 09:29Z，A40 频率判据：data/market/research **近 10 分钟均 0 次写入**，三者可判；**判定后复核 0 次写入，判定有效**。A35：src 48/48、tests 61/61。实跑与上轮一致：data **225**、market **358**、integration **8** 全绿；research **10 failed / 341 passed**，按 §25.4 判为**进度**（6 条五审反例先行测试 R5C/R5G×4/R5O + 4 条 A31 陈旧级联），非回归。G3 已空闲约 28 分钟，未被阻塞。**本轮无状态变化，故转做 OR-06 预备**：起草 `docs/known-gaps-draft.md`（45 行），把本会话累积的边界逐条落到可追溯形式，分五节——(1) **方法边界**（机器判读证明不了计算发生过；重采样比对为 P2 前置且口径落结论层；三道机制互补非穷尽）；(2) **范围边界**（G3 未接入 force_close_net_R 且登记为空集、真实归档仅 BTCUSDT 2024-01、M-11/D-08/D-11 **gated 未启动属有意边界不是未完成**）；(3) **统计口径**（estimand 主 B 副 A、research_horizon_s=5d 与其数据量前置、功效出口 A、最小有效样本下限口径）；(4) **各窗口 partial-P2 残余**；(5) 定稿前须补三项。**每条均要求可追溯到契约条款或审查编号**，且只记『已知且已判定』，不记未决争议。P1 唯一剩余项仍为 R-10。"
         }
       ]
     }
