@@ -268,7 +268,13 @@ def test_s10_diagnostic_failure_cannot_pass(monkeypatch):
 
 def test_s10_all_t0_is_not_run_not_pass(monkeypatch):
     # 分档状态机独立于结构门；结构失败的优先级另有定向回归。
-    monkeypatch.setattr(NM, "assert_not_episode_shuffle", lambda *a, **kw: {"ok": True, "checks": {"fixture": True}})
+    # 桩要**测得出**格点结构：总体门对"有拟合结构却没有任何测量"是 fail-closed（R5-G），
+    # 桩回填拟合值本身即"结构完全保持"，把本用例隔离回它要测的分档状态机。
+    def _pass_guard(*a, **kw):
+        f = NM._grid_cross_corr(kw.get("fitted_grid"), kw.get("block_len_days", 3))
+        return {"ok": True, "checks": {"fixture": True},
+                "grid": {"used": True, "ac1": {"null": 0.0}, "cross_instrument": {"null": list(f)}}}
+    monkeypatch.setattr(NM, "assert_not_episode_shuffle", _pass_guard)
     r = NM.run_mc("common_shock", kind="null", n_rep=4, seed0=3, world_cfg=NM.WorldConfig(n_clusters=40), pipe_cfg=API.PipelineConfig(B=200))
     assert r.verdict == "not_run_T0" and r.diagnostics["all_T0"]
 

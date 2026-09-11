@@ -262,8 +262,15 @@ def _kurt(x: np.ndarray) -> float:
     return float(np.mean(z ** 4))
 
 
-# 预注册：相关绝对误差至多 0.25；强相关保留符号及至少一半幅度。
+# 预注册：相关绝对误差至多 0.25；强相关保留符号及至少一半幅度。**只用于逐 replicate 的粗检查**，
+# 不再用于总体门——绝对容差会把 0.14–0.18 这类真实但弱的拟合相关整体划进"允许归零"区，弱结构被摧毁也不报（R5-W）。
 CORRELATION_TOLERANCE = 0.25
+#: 总体门（均值 vs 拟合格点）的带宽：max(AGG_Z×SE(均值), AGG_ABS_FLOOR)。
+#: 校准依据（4 机制 × 200 次重采样，实测见 report §4）：正常重采样 |Δ| 最大 0.0096、|Δ|/SE 最大 1.8；
+#: 整块重排摧毁跨品种结构后 |Δ| 最小 0.1379（弱相关机制 cluster_heavy_tail，拟合 0.1393/0.1770/0.1795）。
+#: 地板 0.03 在两侧各留约 3 倍余量；SE 项只在样本少时**放宽**，避免小样本假警报（MC8/MC9 的教训）。
+AGG_Z = 6.0
+AGG_ABS_FLOOR = 0.03
 #: 逐 replicate 结构门的失败率上限：超过即认定不是估计噪声而是结构破坏（设计误拒率约 1–2%）
 GUARD_FAIL_RATE_MAX = 0.05
 MISSING_GENERATING_DIGEST = "missing-generating-digest"   # 源报告没有生成哈希时的显式占位：绝不回落到当前源码摘要
@@ -415,6 +422,36 @@ def calibrate_dependence(world, model, *, n_calib: int = 60, block_len_days: int
 
 def _in_band(v: float, band: tuple[float, float]) -> bool:
     return bool(math.isfinite(v) and band[0] <= v <= band[1])
+
+
+def grid_pair_labels(n_inst: int = len(INSTRUMENTS)) -> list[list[str]]:
+    """跨品种相关向量的对标识，顺序与 _grid_cross_corr 的双重循环逐项对应（R5-G：报告须能核对齐全集与顺序）。"""
+    names = list(INSTRUMENTS[:n_inst])
+    return [[names[i], names[j]] for i in range(len(names)) for j in range(i + 1, len(names))]
+
+
+def aggregate_pair_ok(fitted: float, mean: float, sd: float, n: int) -> tuple[bool, float, float]:
+    """总体门的单对判据（R5-W）：比较**均值**与拟合值，带宽 = max(AGG_Z×SE(均值), AGG_ABS_FLOOR)。
+
+    返回 (是否保持, |Δ|, 带宽)。要点：
+    - 判的是重复抽样**均值**，其不确定性是 SE=sd/√n，与单次复制噪声 sd 不是一回事——旧的绝对容差
+      把两者混为一谈，于是弱相关（拟合 0.14）被摧毁到 0 仍落在容差内（R5-W 反例）。
+    - 只有一端不可估 → 显式判失败：结构信息丢失不能当作"无结构可保持"（R5-G）。
+    """
+    if not math.isfinite(fitted) and not math.isfinite(mean):
+        return True, 0.0, math.inf          # 两端都不可估（品种/块太少）：无结构可保持
+    if not math.isfinite(fitted) or not math.isfinite(mean):
+        return False, math.inf, 0.0
+    se = (sd / math.sqrt(n)) if (n >= 2 and math.isfinite(sd)) else math.inf
+    tol = max(AGG_Z * se, AGG_ABS_FLOOR)
+    d = abs(mean - fitted)
+    return bool(d <= tol), d, tol
+
+
+def aggregate_preserved(fitted: list, mean: list, sd: list, n: int) -> bool:
+    if not fitted or len(fitted) != len(mean) or len(fitted) != len(sd):
+        return False
+    return all(aggregate_pair_ok(f, m, s, n)[0] for f, m, s in zip(fitted, mean, sd))
 
 
 def _correlation_preserved(a: float, b: float) -> bool:
@@ -591,7 +628,7 @@ def run_mc(mechanism: str, *, kind: str = "null", n_rep: int = 1000, seed0: int 
             dep_ac.append((guard.get("block_ac1") or {}).get("null", math.nan))      # 容忍精简 guard（故障注入/替身）
             dep_cross.append((guard.get("cross_instrument") or {}).get("null", []))
             if i == 0:
-                diag["shuffle_guard"] = guard
+                diag["shuffle_guard"] = dict(guard, sample_index=0)      # 展示样本；R5-O：它失败也只按统一总量规则记账
             for k, ok in guard.get("checks", {}).items():
                 guard_fail[k] = guard_fail.get(k, 0) + (0 if ok else 1)
             if not guard["ok"] or not all(guard.get("checks", {}).values()):
@@ -634,10 +671,18 @@ def run_mc(mechanism: str, *, kind: str = "null", n_rep: int = 1000, seed0: int 
     # cluster_heavy_tail / nonuniform_density 误判为结构未保持，而两者的 orig 都落在各自校准带内）。
     # 总体检查：格点量的均值 vs 拟合格点（有区分力的口径；均值比单次更稳，直接用绝对/相对规则即可）
     gf_cross, gf_ac = _grid_cross_corr(fitted_grid, pc.block_len_days or 3), _grid_ac1(fitted_grid, pc.block_len_days or 3)
-    gm_cross = (np.nanmean(np.array(grid_cross), axis=0).tolist() if grid_cross else [math.nan] * len(gf_cross))
+    gc = np.array(grid_cross, dtype=float) if grid_cross else None
+    gm_cross = (np.nanmean(gc, axis=0).tolist() if gc is not None else [math.nan] * len(gf_cross))
+    gs_cross = (np.nanstd(gc, axis=0, ddof=1).tolist() if (gc is not None and gc.shape[0] >= 2) else [math.nan] * len(gf_cross))
+    n_grid = int(gc.shape[0]) if gc is not None else 0
     gm_ac = float(np.nanmean(grid_ac)) if grid_ac else math.nan
-    agg_ok = all((not math.isfinite(m_)) or _correlation_preserved(f_, m_) for f_, m_ in zip(gf_cross, gm_cross))   # 块间 ac1 只报告不判（见 checks 注释）
-    diag["grid_dependence"] = {"fitted_ac1": gf_ac, "null_mean_ac1": gm_ac, "fitted_cross": gf_cross, "null_mean_cross": gm_cross, "ok": bool(agg_ok)}
+    # R5-W：总体门判"均值 vs 拟合"，带宽按均值的 SE 校准；块间 ac1 只报告不判（见 checks 注释）
+    agg_ok = aggregate_preserved(gf_cross, gm_cross, gs_cross, n_grid)
+    diag["grid_dependence"] = {"fitted_ac1": gf_ac, "null_mean_ac1": gm_ac, "fitted_cross": gf_cross,
+                               "null_mean_cross": gm_cross, "null_sd_cross": gs_cross, "n_grid": n_grid,
+                               "pairs": grid_pair_labels(len(gf_cross) and len(INSTRUMENTS)),
+                               "band": [aggregate_pair_ok(f_, m_, s_, n_grid)[2] for f_, m_, s_ in zip(gf_cross, gm_cross, gs_cross)],
+                               "ok": bool(agg_ok)}
     diag["dependence_aggregate"] = {"block_ac1": agg["block_ac1"], "cross_instrument": agg["cross_instrument"], "ok": bool(agg_ok),
                                     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"}
     # 整轮 invalid 的判定：逐 replicate 诊断门有设计误拒率（校准带 q=0.1/99.9 + padding，实测约 1–2%），
@@ -741,22 +786,41 @@ def verify_report_text(text: str) -> dict:
         # 只核 ok 标志时，篡改任一字段都能让总体门失效而计数、区间、哈希、§3.2 全部照旧。
         gridd = diag.get("grid_dependence")
         require(isinstance(gridd, dict), "grid_dependence 缺失")
-        require(all(k in gridd for k in ("fitted_cross", "null_mean_cross", "fitted_ac1", "null_mean_ac1", "ok")), "grid_dependence 字段不完整")
-        fc, mc_ = gridd["fitted_cross"], gridd["null_mean_cross"]
-        require(isinstance(fc, list) and isinstance(mc_, list) and bool(fc) and len(fc) == len(mc_), "grid_dependence 跨品种向量不成对")
-        agg_ok = all((not math.isfinite(m)) or _correlation_preserved(f, m) for f, m in zip(fc, mc_))   # 与 run_mc 同一判据，独立重算
+        require(all(k in gridd for k in ("fitted_cross", "null_mean_cross", "null_sd_cross", "n_grid", "pairs",
+                                         "fitted_ac1", "null_mean_ac1", "ok")), "grid_dependence 字段不完整")
+        fc, mc_, sc_ = gridd["fitted_cross"], gridd["null_mean_cross"], gridd["null_sd_cross"]
+        # R5-G：向量必须按冻结世界核齐全集与顺序，并落在相关系数的值域内——只比两边长度相等是不够的
+        require(gridd["pairs"] == grid_pair_labels(), "跨品种对标识缺失/顺序不符/含未知或重复对")
+        require(all(isinstance(v, list) and len(v) == len(gridd["pairs"]) for v in (fc, mc_, sc_)), "相关向量与品种对数不一致")
+        for v in list(fc) + list(mc_):
+            require(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and -1.0 <= v <= 1.0,
+                    f"跨品种相关取值非法：{v!r}（须为有限实数且落在 [-1,1]）")
+        for v in sc_:
+            require(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0.0, f"相关标准差非法：{v!r}")
+        n_grid = count(gridd["n_grid"])
+        require(n - len(diag.get("errors", [])) <= n_grid <= n, "格点观测数与完成数不自洽")
+        agg_ok = aggregate_preserved(fc, mc_, sc_, n_grid)               # 与 run_mc 同一判据，独立重算
         require(gridd["ok"] is agg_ok, "grid_dependence.ok 与重算不符")
         require((diag.get("dependence_aggregate") or {}).get("ok") is agg_ok, "dependence_aggregate.ok 与重算不符")
 
-        guard = diag["shuffle_guard"]
-        require(guard["ok"] is True and bool(guard["checks"]) and all(v is True for v in guard["checks"].values()), "guard 失败")
         failures = diag["guard_failures_by_check"]
-        require(set(guard["checks"]) <= set(failures), "guard 失败计数缺 check")
         n_invalid = count(diag["n_invalid_null_model"])
         per_check = [count(v) for v in failures.values()]
         # 一次 replicate 可同时命中多个 check，故 max ≤ n_invalid ≤ sum；三处计数必须同源
         require(max(per_check, default=0) <= n_invalid <= sum(per_check), "guard 失败计数与 invalid 数不自洽")
         require(count(tiers.get("invalid", 0)) == n_invalid, "tiers.invalid 与 n_invalid_null_model 不一致")
+        # R5-C：结构失败与运行错误都是**失败集合的子集**，必须真正计进 n_failed，否则三分母最坏界会被低估到翻转准入
+        require(count(tiers.get("invalid", 0)) + count(tiers.get("error", 0)) <= failed,
+                f"invalid({tiers.get('invalid', 0)}) + error({tiers.get('error', 0)}) 未全部计入失败数 {failed}")
+        # R5-O：展示样本只是第一个 replicate 的快照，不构成"首个必须零失败"的门；但它失败就必须在总量里有对应记账
+        guard = diag["shuffle_guard"]
+        require(isinstance(guard, dict) and isinstance(guard.get("checks"), dict) and bool(guard["checks"]), "guard 样本缺 checks")
+        require(set(guard["checks"]) <= set(failures), "guard 失败计数缺 check")
+        require(all(isinstance(v, bool) for v in guard["checks"].values()), "guard check 非布尔")
+        require(guard.get("ok") is all(v is True for v in guard["checks"].values()), "guard 样本 ok 与其 checks 不自洽")
+        for k_, v_ in guard["checks"].items():
+            require(v_ is True or count(failures.get(k_, 0)) >= 1, f"展示样本 {k_} 失败却未计入 guard_failures_by_check")
+        require(guard["ok"] is True or n_invalid >= 1, "展示样本失败却未计入 invalid 数")
         rate = diag.get("guard_fail_rate")
         require(isinstance(rate, (int, float)) and not isinstance(rate, bool) and math.isfinite(rate), "guard_fail_rate 非数")
         close(rate, n_invalid / n)
@@ -771,7 +835,11 @@ def verify_report_text(text: str) -> dict:
         require(not diag.get("all_T0"), "全部 T0")
         require(len(diag.get("errors", [])) <= failed and tiers.get("error", 0) <= failed, "错误计数不一致")
         chosen = diag.get("chosen_block_len", {})
-        require(not chosen or sum(count(v) for v in chosen.values()) == n - len(diag.get("errors", [])), "块长计数不一致")
+        # R5-C：结构早退（invalid）与异常（error）都没进流水线，不该有主 L；其余完成的 replicate 应各有一个
+        if chosen:
+            got = sum(count(v) for v in chosen.values())
+            require(n - failed <= got <= n - len(diag.get("errors", [])) - n_invalid,
+                    f"块长计数不一致：主 L 共 {got}，但完成 {n}、失败 {failed}、invalid {n_invalid}、error {len(diag.get('errors', []))}")
         require(all(count(v) <= n - failed for v in diag.get("positive_by_block_len", {}).values()), "阳性计数不一致")
         require(n > failed and ns > 0, "没有可复算样本")
         worst = x
@@ -801,8 +869,15 @@ def verify_report_text(text: str) -> dict:
 
 
 def _grid_pairs(gd: dict) -> str:
+    """把每个品种对写成「拟合→null 均值（|Δ| vs 带宽）」，判据可直接目视复核（R5-W）。"""
     f, m = gd.get("fitted_cross") or [], gd.get("null_mean_cross") or []
-    return "、".join(f"{a_:.3f}→{b_:.3f}" for a_, b_ in zip(f, m)) or "—"
+    sd, n = gd.get("null_sd_cross") or [], gd.get("n_grid") or 0
+    out = []
+    for i, (a_, b_) in enumerate(zip(f, m)):
+        s_ = sd[i] if i < len(sd) else float("nan")
+        ok_, d_, tol_ = aggregate_pair_ok(a_, b_, s_, n)
+        out.append(f"{a_:.3f}→{b_:.3f}（|Δ|={d_:.4f} vs 带 {tol_:.4f}{'' if ok_ else ' **超**'}）")
+    return "、".join(out) or "—"
 
 
 def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest: str | None = None) -> None:
@@ -868,7 +943,8 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest:
         "",
         f"> 在 T1 档合成规模（{meta.get('world_summary', '约 1600 经济簇')}）下，本协议对每种子 {meta['delta']}R 的真实过滤增益的全流程检出功效"
         + (f"约 {100 * pw.rate:.1f}%（条件于实际进入搜索的 replicate 为 {100 * (pw.searched_rate_ci()[0] or 0):.1f}%，"
-           f"95% 最坏界下界约 {100 * (pw.worst_case_ci[0] if pw.worst_case_ci else 0):.1f}%）" if pw else "未测")
+           f"95% 最坏界下界约 {100 * (pw.worst_case_ci[0] if pw.worst_case_ci else 0):.1f}%）"
+           if (pw and pw.rate is not None) else "未测")   # 全失败时 rate 为 None：写"未测"而不是让排版崩掉
         + "。因此：",
         "> 1. 本协议在该规模下**不能**把「未检出」解释为「无增益」；未检出只描述为「在该功效下未检出」。",
         "> 2. 任何 P2 真实数据研究若样本规模/噪声与该档相当，只能对更大量级的效应或更大样本作检出声明；本档效应量需预注册扩样本后另验。",
@@ -916,6 +992,12 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest:
                      f"{_grid_pairs(r.diagnostics.get('grid_dependence', {}))} → **{r.diagnostics.get('grid_dependence', {}).get('ok')}**（invalid_reason={r.diagnostics.get('invalid_reason')}） |")
     lines += [
         "",
+        f"总体门的带宽 = max({AGG_Z:g}×SE(均值), {AGG_ABS_FLOOR}), SE=sd/√n_grid（n_grid 为参与统计的 replicate 数）。"
+        f"**为什么不是绝对容差**（R5-W）：绝对容差把 0.14–0.18 这类真实但弱的拟合相关整体划进「允许归零」区，"
+        f"结构被完全摧毁也不报。校准依据（4 机制 × 200 次重采样实测）：正常重采样 |Δ| 最大 0.0096、|Δ|/SE 最大 1.8；"
+        f"整块重排摧毁跨品种结构后 |Δ| 最小 0.1379（弱相关机制 cluster_heavy_tail）。地板 {AGG_ABS_FLOOR} 两侧各留约 3 倍余量；"
+        f"SE 项只在样本少时**放宽**带宽——样本不足时本就无从区分，宁可不报也不制造假警报。",
+        "",
         "**两个门，口径不同，不得混称**（R4-V）：",
         "",
         f"1. **逐 replicate 结构门**（冲击格点上的 Fisher-z 判据）有设计误拒率，按校准带约 1–2%。单次失败的 replicate 直接计失败，"
@@ -927,6 +1009,19 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest:
         "R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断重算**这两条，并要求 "
         "`grid_dependence.ok` / `dependence_aggregate.ok` / `invalid_reason` / `verdict` / `tiers.invalid` / "
         "`n_invalid_null_model` / `guard_fail_rate` / `guard_failures_by_check` 八处彼此自洽——单改任意一处即被拒收。",
+        "",
+        "另有三条记账约束（R5-C / R5-G / R5-O）：**(a)** `tiers.invalid + tiers.error ≤ n_failed`，"
+        "且主 L 分布只覆盖真正进入流水线的 replicate——结构早退者不该有主 L；结构失败必须真正计进失败数，"
+        "否则三分母最坏界会被低估到足以翻转 7% 准入。**(b)** 跨品种相关向量按冻结世界核对齐全集与顺序"
+        f"（{len(INSTRUMENTS)} 品种恰好 {len(grid_pair_labels())} 对，见上表 `pairs`），取值须为有限实数且落在 [-1,1]，"
+        "缺项/重复/越界一律拒收。**(c)** 上表展示的 `shuffle_guard` 只是第一个 replicate 的快照，"
+        "**不是**「首个必须零失败」的门；它失败时必须在 per-check 与 invalid 总量里有对应记账。",
+        "",
+        f"生成身份（A31 / R5-H）：MC 起跑冻结父进程源码摘要，**每个 worker 另行回传自己起跑与收尾的摘要**，"
+        f"父进程逐份核对，任何不等或缺回执都拒绝落盘。本报告的 worker 回执数："
+        f"{meta.get('worker_receipts_confirmed', '—')}，回执摘要集合：{meta.get('worker_code_sha256', '—')}。"
+        f"**边界**：本机制绑定的是各 worker 自报的源码视图，未实现"
+        f"「从同一份只读源码快照启动整组 worker」；父进程异常退出时不落盘，代价是丢弃 worker 已算结果。",
         "",
         "全部落 T0 的机制标 not_run_T0（cap=0 无搜索，FPR 平凡为 0，不作 T1 验收替身）。",
         "",
@@ -951,6 +1046,29 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest:
     ]
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _run_mc_job(**kw) -> dict:
+    """worker 侧自报生成身份（R5-H）：起跑与收尾各取一次递归源码摘要，随结果回传，父进程逐份核对。
+
+    父进程首尾摘要相等**不能**证明各 worker 见到的源码与它相同——spawn 的延迟导入、
+    不同 worker 的源码视图、A→B→A 式往返都不在父进程那两次测量的覆盖范围内。
+    """
+    d0 = research_code_digest()
+    r = run_mc(**kw)
+    return {"digest_start": d0, "digest_end": research_code_digest(), "result": r}
+
+
+def check_worker_receipt(payload, frozen_digest: str) -> "MCResult":
+    """父进程侧核对 worker 回执（R5-H）：缺回执、起跑或收尾摘要与冻结身份不等，一律拒绝发布。"""
+    if not isinstance(payload, dict) or "result" not in payload:
+        raise SystemExit("worker 未回传生成身份回执：结果不得发布（R5-H）")
+    for key in ("digest_start", "digest_end"):
+        got = payload.get(key)
+        if got != frozen_digest:
+            raise SystemExit(f"worker 的 {key}={str(got)[:12]} 与父进程冻结身份 {frozen_digest[:12]} 不一致："
+                             f"该结果并非由本次冻结的源码产生，不得发布（R5-H）")
+    return payload["result"]
 
 
 def _main(argv=None):  # pragma: no cover - CLI
@@ -999,12 +1117,17 @@ def _main(argv=None):  # pragma: no cover - CLI
     for m in [x for x in a.power_mechanisms.split(",") if x]:
         jobs.append(("power", "", dict(mechanism=m, kind="power", n_rep=a.n_rep, seed0=11 + MECHANISMS.index(m), world_cfg=wc, pipe_cfg=pc, delta=a.delta)))
 
+    worker_receipts: list[str] = []
+
     def run_jobs(js):
         with ProcessPoolExecutor(max_workers=max(1, a.jobs)) as ex:
-            futs = [ex.submit(run_mc, **kw) for _, _, kw in js]
+            futs = [ex.submit(_run_mc_job, **kw) for _, _, kw in js]
             out = []
             for (kind_o, label, _), fu in zip(js, futs):
-                r = fu.result(); r.kind = kind_o; r.label = label or r.label
+                payload = fu.result()
+                r = check_worker_receipt(payload, frozen_digest)     # 缺回执 / 与冻结身份不等 → 拒绝发布
+                worker_receipts.append(payload["digest_end"])
+                r.kind = kind_o; r.label = label or r.label
                 print(r.to_dict(), flush=True)
                 out.append(r)
         return out
@@ -1026,7 +1149,8 @@ def _main(argv=None):  # pragma: no cover - CLI
         results += run_jobs(ext)
     meta = {"command": " ".join(["python -m quant_lab.research.nullmodel"] + (argv or [])), "world": str(wc), "n_candidates": len(default_candidates(wc.n_candidates)),
             "candidates": "12 独立特征 × 规则 {gt_q30, lt_q30, gt_q70}（36 提交，T1 cap=12 → 按规范顺序前 12 个 = f00..f03 × 3 规则，含植入候选 f00:gt_q30）", "pipeline": str(pc), "B": pc.B, "alpha": pc.alpha,
-            "L": "auto(1/3/7 训练诊断)" if pc.block_len_days is None else pc.block_len_days, "delta": a.delta, "pi": wc.pi}
+            "L": "auto(1/3/7 训练诊断)" if pc.block_len_days is None else pc.block_len_days, "delta": a.delta, "pi": wc.pi,
+        "worker_receipts_confirmed": len(worker_receipts), "worker_code_sha256": sorted(set(worker_receipts))}
     end_digest = research_code_digest()
     if end_digest != frozen_digest:                 # 运行期改过源码 → 结果与任何单一代码身份都不对应，拒绝落盘
         raise SystemExit(f"研究代码在 MC 运行期间发生变化（起 {frozen_digest[:12]} / 止 {end_digest[:12]}）："
@@ -1039,5 +1163,5 @@ if __name__ == "__main__":  # pragma: no cover
     _main()
 
 
-__all__ = ["INSTRUMENTS", "MECHANISMS", "research_code_digest", "MCResult", "ResidualModel", "World", "WorldConfig", "assert_not_episode_shuffle", "clopper_pearson",
+__all__ = ["INSTRUMENTS", "MECHANISMS", "research_code_digest", "MCResult", "ResidualModel", "World", "WorldConfig", "assert_not_episode_shuffle", "check_worker_receipt", "clopper_pearson",
            "default_candidates", "fit_residual_model", "resample_null", "run_mc", "synth_world", "write_report"]
