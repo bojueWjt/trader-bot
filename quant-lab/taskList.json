@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T10:37:36Z",
+  "updatedAt": "2026-09-11T10:55:26Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -560,10 +560,17 @@
         "file": "contracts/README.md §25.14 + docs/adr/ruling-G0-D10-classification-closure.md §6 + docs/known-gaps-draft.md",
         "summary": "A44 立（五类必闭合项的每一格判据须写成「任何路径都不能 X」并给出该判据自身的判别性证明）。起因：R80 核对 P1 三条腿时发现 review-G1-P1.md 及 r3/r4/r5 终裁全部 fail，D-10 经析取第二支（G0 裁决书）通过；复查裁决书查出两处——口径错（抬头写 open 收敛至 W01-W03，那答的是 r5 新增了什么不是还剩什么，逐项计数 13/16+4/4+1/1+3/4+新增3 = 7 条 open）；证明缺（漏掉的 S08/V01 与 W02 同根因、录制 JSON 经 float 解码致高精度经济量静默改值写入 EX/CP，属可复算性必闭合类，而 §2 该格判的是落盘列类型与 parser 逐字往返，不是任何有损转换能否进入声明精度路径，录制解码路径不在覆盖内，该格当时是通过的假象）。已补判别性实跑：RecordedClient.from_file 真实路径源串 60000.123456789123，现状逐字相等，摘掉 parse_float=Decimal 得 60000.12345678912 静默改量 -3E-12，门去掉即变红，该格现经 G1 修 W02 证明闭合而非由原判据达成；裁定结论维持 pass，§6 记更正，残余口径更正为 7 条。此为 A41 在本会话第五例、唯一落在必闭合类+已签发文件上的一例。",
         "by": "G0/427ed064 R80"
+      },
+      {
+        "n": 76,
+        "at": "2026-09-11T10:55:25Z",
+        "file": "docs/adr/ruling-G0-D10-classification-closure.md §7 + docs/known-gaps-draft.md",
+        "summary": "A44 首次运行，对象是 G0 自己签发的 D-10 裁决书五格，结果四格不合格。前视格原判据『决策事件81条越界0』证明的是这份夹具没有越界边而非越界边会被排除，现补突变实跑（隔离湖副本、清单同步重算、共享湖只读）：同一条边 t_dec−1s 在视图内（86行）、t_dec+1s 被排除（85行）、t_dec同刻被排除（严格<成立），判别性成立；另查实该边原值恰为 t_dec−1s，这解释了本轮第一次实验的假象——第一臂写回同值、parquet 写出确定性使字节不变故清单校验通过、看似注入后仍可见而实际什么都没注入，第二三臂改值后 hash 变被清单门在抵达前视门之前拒绝，那次实验测的是清单门不是前视门（又一次 A41：读失败了不是前视门生效了的答案）。致命降级格同样补证：注入 SYMBOL_TIME_INVALID/UNIT_SCALE_CONFLICT 各致该 episode 被剔除（80→79），注入非致命 INTENT_AMBIGUOUS 不受影响（80），FATAL 集实为契约§4三项未私增。安全越权格如实降格为枚举覆盖（7向量负例真判别但覆盖是枚举的，不宣称类级证明；结构有界且拒绝在取hash之前故不升必修）。幸存偏差格查出读侧根本没有门：loss_table 与 quarantine 均直读 parquet 无平衡/恒等校验，恒等式仅由 G1 构建期测试 S12 保证，手改或半写的损耗 parquet 会被原样返回，按 §9.10.20 属事故面非对抗面，已记入已知缺口表债主 G1。分类终裁 pass 维持：三格已突变证明、一格如实降格、一格如实记为无门缺口。五格中原先零格带判别性证据。",
+        "by": "G0/427ed064 R81"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.52",
+    "version": "v1.53",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -588,7 +595,7 @@
         "note": "[G0/427ed064 R44 · D-10 闭合核验] G1 已按 R43 改 verify 并标 done，G0 实跑核验通过：**D-10 status=done，verify rc=0**；verify 形式正确（两子句显式析取、各读具名路径，已撤回把『分类』塞进审查通配前缀的做法）。**并按 §12 A24 对这道门做了突变自证**（沙箱副本，未碰真实文件）：基线 rc=0 ✓；裁定终裁改 fail → rc=1 ✓；删除裁定文件 → rc=1 ✓；仅留裁定 pass → rc=0 ✓。**该门确实能因它意图防止的退化而失败**，不是无法失败的检查。**D-10 是三份审查任务中第一份收口**。G1 P1 面：D-01..D-07、D-09、D-10 done；D-08/D-11 受用户闸门 gated 未开工。A16 审计：D-10 verifyHistory 2 条，均为口径修正/收紧，放宽 0。",
         "at": "2026-09-11T04:33:25Z"
       },
-      "lastUpdate": "2026-09-11T04:32:35Z",
+      "lastUpdate": "2026-09-11T10:55:26Z",
       "tasks": [
         {
           "id": "D-01",
@@ -876,6 +883,10 @@
         {
           "t": "13:32",
           "n": "[G1/6caf9e18 · D-10 done] verify（两子句显式析取：独立审查轮次 review-G1-P1-r*.md 正向终裁 pass ‖ G0 分类裁定 docs/adr/ruling-G0-D10-classification-closure.md 末行「分类终裁：pass」）前台实跑 exit=0，依此标 done。证据链：五轮独立审查（review-G1-P1.md, -r2..-r5）+ 两轮 Codex 修复 + G1 自修 W01–W03；G0 R42 五类对抗式实跑全闭合；provenance=用户本会话一手裁定（AskUserQuestion 选项\"若 r5 仍 fail 改走 G0 分类闭合标准\"）。已知缺口（P2，带残余声明，见 12:0x 七项一览表与 G0 裁定 §已知缺口）：S03 相册/市场/校准全依赖 DFS 的真实数据验证、S05 quote 多源与作者命名空间真实数据、S09 R 语义外延、S12 退出账真实规模、S13 真实 OCR provider、S14 审核器真实批次、S15 夹具 H2 扩量。P1 收口状态：D-01..D-07、D-09、D-10 done；D-08/D-11 gated 待用户闸门；tests/data 225 passed；共享湖别名 fixture-v1@25d8e4ca。"
+        },
+        {
+          "t": "19:55",
+          "n": "[G0 R81 A44 复核] 查出一条读侧缺口，**债主 G1**：`api.py:91 loss_table` 与 `api.py:101 quarantine` 均为直读 parquet，**读侧无平衡/恒等校验**——损耗表的计数恒等式只由构建期测试 S12 保证。手改或半写的损耗 parquet 会被 `loss_table` 原样返回。按 §9.10.20 属**事故面**（半写/陈旧无需恶意即发生），非对抗面。已记入 INTEGRATION_REPORT 已知缺口表，触发事件：读侧接入恒等校验或发布期封存。**另：D-10 的前视/致命降级两格已由 G0 补上判别性突变证明，均成立**（详见裁决书 §7）。"
         }
       ]
     },
@@ -1664,7 +1675,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T10:37:36Z",
+      "lastUpdate": "2026-09-11T10:55:25Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1883,6 +1894,14 @@
         {
           "t": "19:37",
           "n": "[G0/427ed064 OR-02 R80 收轮] **research 本轮可判**（1320s 未写、近10min 0 次）：**15 failed / 352 passed**。data 225 / market 358 / integration 8 全绿。R-10 verify 仍 fail（六审），保持 doing，**不推进 P1**。**回答上轮悬而未决的那个问题，答案是「两件事都在发生」，而我上轮倾向的读法是错的。** 取到失败用例名后，把 HEAD 版本用 `git archive` 抽到临时目录实跑（**全程不碰 G3 工作树**）：**HEAD：round3+round5 仅 1 failed**（`test_S17_real_low_power_truthful_fail_accepted`，先存缺陷）；**G3 未提交改动下：8 failed**。即 **7 条原本绿的测试变红**，另 7 条红在新建的 round6（16 例中 7 红）。**但逐条看 traceback，七条没有一条证明「保证被破坏」，全部是同一根因**：R6 新门**排在旧门前面**，旧测试先撞新门，断言的消息对不上了——`test_A31_report_must_be_generated_by_current_code` 报告内嵌 `ec118a6a…`、当前代码 `6521b9e8…`（**A31 正确生效**：源码改了，制品陈旧待重生成）；R4V×2 与 R5C、R5O 均撞 `grid_dependence 字段不完整`（R6-G 新增的逐对有效 n 字段，旧夹具没有）；R5H 撞 `worker 回执里的结果不是 MCResult（str）`（R6-H 新增的载荷类型检查打在旧桩上）。**R5C 的具体形状值得单挑出来**：它期望 `未全部计入失败数`，实际收到 `grid_dependence 字段不完整`。记录**仍然被拒**，但**拒的理由换了**——**这条测试已经不再检验它名字上那件事了**。**⚠ 给 G3 的明确警告（这是本条最重要的一句）**：修这七条时，**不要把断言放宽成「只要被拒就算过」**。那样 R5-C 会在**绿着的状态下变成空转**——「记录有没有被拒」**不是**「记录是不是因为失败未计入而被拒」的答案（A41）。**正确改法是把旧夹具补齐到新 schema，让记录能走到 R5-C 那道门**，然后证明它在那里被拒、且突变后变绿。**另：P1 三条腿的真实状态已核（不凭记忆，逐份读终裁行）**——G2 十四审 pass（审查方自行给出）；**G1 的 D-10 是经 G0 裁决书从析取第二支通过的，`review-G1-P1.md` 及 r3/r4/r5 终裁全部 fail**；G3 六审 fail。已写进 `integration.p1Status.legs`。**六个用户闸门无一挡 P1**（affects 全为 D-05/08/09/11、R-05/08/09、OR-06），`blockedByUserGate=false`：**P1 只等 R-10**。"
+        },
+        {
+          "t": "19:50",
+          "n": "[G0/427ed064 OR-02 R81 开轮] 测量 10:49:04Z，三模块全部可判：data 23188s / market 10965s / research **2099s**，近10min 写入均为 0。**工作树与 R80 完全相同**（`nullmodel.py`/`paths.py` 已改未提交、`test_review_p1_round6.py` 未跟踪），即 **G3 自 10:14:05Z 起 35 分钟未写入**。**已按用户监控规范轮询 job json 的 `status` 字段（未 grep 命令输出）**：quant-lab 目录下**无 running job**；最近一个 completed 于 10:07:06Z；另有一条 running 属 `business-platform-v3`，日志 5182615s 未更新（约 60 天，陈旧条目，与本项目无关）。**结论：G3 不是卡在 Codex 上，是窗口本身静默。** 其名下有 7 条回归红 + R-10 六审 fail 未收口，P1 只等这一条。**本会话禁止派发，已向用户报告。**"
+        },
+        {
+          "t": "19:55",
+          "n": "[G0/427ed064 OR-02 R81 收轮] 四套 verify：**data 225 / market 358 / integration 8 全绿**；**research 15 failed / 352 passed，与 R80 逐条同名同数**——G3 三十五分钟零进展。R-10 仍 fail，**不推进 P1**。**job json 轮询：quant-lab 无 running job**，最近一个 completed 于 10:07:06Z；G3 不是卡在 Codex 上，是窗口静默。**本轮主要产出：A44 第一次运行，对象是我自己签发的 D-10 裁决书，五格里四格不合格。****前视格已补证**（隔离湖副本、清单同步重算、**共享湖全程只读**）：同一条边 `t_dec−1s` 在视图内 86 行、`t_dec+1s` 被排除 85 行、`t_dec` 同刻被排除（严格 `<` 成立），判别性成立。**并查实第一次实验是假象**：该边原值恰为 `t_dec−1s`，第一臂写回同值、parquet 写出确定性使字节不变、清单校验因此通过，看起来像「注入后仍可见」，**实际什么都没注入**；第二三臂改了值、hash 变了，被**清单门**在抵达前视门之前拒绝。**那次实验测的是清单门。**（又一次 A41：「读失败了」不是「前视门生效了」的答案。）**致命降级格已补证**：注入 `SYMBOL_TIME_INVALID`、`UNIT_SCALE_CONFLICT` 各使该 episode 被剔除（80→79），注入非致命 `INTENT_AMBIGUOUS` 不受影响（80）。**安全越权格如实降格为「枚举覆盖」**——7 向量负例是真判别，但覆盖是枚举的，不宣称类级证明。**幸存偏差格查出读侧根本没有门**：`loss_table` 与 `quarantine` 都是直读 parquet，**无平衡/恒等校验**；恒等式只由 G1 构建期测试 S12 保证。手改或半写的损耗 parquet 会被原样返回。按 §9.10.20 属**事故面**（半写/陈旧无需恶意即发生），已记入已知缺口表，**债主 G1**。**分类终裁 pass 维持**：三格已由突变证明、一格如实降格、一格如实记为无门缺口。**五格中原先零格带判别性证据——A44 第一次运行就在自己身上查出四格。**"
         }
       ]
     }

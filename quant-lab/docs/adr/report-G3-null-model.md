@@ -1,8 +1,8 @@
 # report-G3-null-model：空模型 FPR / 功效验收（合成 T1 规模，synthetic_validation）
 
-生成本报告的研究代码 sha256：`ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402`（A31：制品须由不旧于门代码的版本生成，R-08 verify 机械比对）。
+生成本报告的研究代码 sha256：`6521b9e8618b6f80072af13b6f4e51273b1e2b386e5fae7278a3f09ed51f38bf`（A31：制品须由不旧于门代码的版本生成，R-08 verify 机械比对）。
 
-日期：2026-09-11 09:42 UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。
+日期：2026-09-11 10:53 UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。
 依据：合并稿 D.5、ADR-G3 §10、Claude 验收 R03（按档分级：T1/T2 各机制 1000 次；T3 200 次预注册更宽精确区间）。
 命令：`python -m quant_lab.research.nullmodel`
 
@@ -19,10 +19,10 @@
 
 | 机制 | 计划 n | 完成 | 失败/insufficient | 阳性 x | FPR 点估计 | FPR 95% CI（区间） | 最坏界（失败计阳性）FPR / CI | 有搜索 replicate（非 T0）n / 最坏界 FPR / CI | 阳性数按块长 L=1/3/7（敏感性，不选） | 档分布 | 耗时 s | 判定 |
 |---|---:|---:|---:|---:|---:|---|---|---|---|---|---:|---|
-| common_shock | 1000 | 1000 | 1 | 2 | 0.20% | [0.02%, 0.72%] | 0.30% / [0.06%, 0.87%] | 842 / 0.36% / [0.07%, 1.04%] | 3 / 3 / 3（主 L 分布 {"L=7": 325, "L=1": 281, "L=3": 394}） | {"T0": 158, "T1": 842} | 1490.0 | **pass** |
-| cluster_heavy_tail | 1000 | 1000 | 3 | 6 | 0.60% | [0.22%, 1.31%] | 0.90% / [0.41%, 1.70%] | 974 / 0.92% / [0.42%, 1.75%] | 7 / 6 / 6（主 L 分布 {"L=3": 505, "L=7": 451, "L=1": 44}） | {"T1": 974, "T0": 26} | 1555.4 | **pass** |
-| nonuniform_density | 1000 | 1000 | 11 | 8 | 0.81% | [0.35%, 1.59%] | 1.90% / [1.15%, 2.95%] | 725 / 2.62% / [1.59%, 4.06%] | 9 / 6 / 8（主 L 分布 {"L=1": 786, "L=3": 119, "L=7": 95}） | {"T1": 725, "T0": 275} | 1613.7 | **pass** |
-| circular_shift | 1000 | 1000 | 0 | 4 | 0.40% | [0.11%, 1.02%] | 0.40% / [0.11%, 1.02%] | 993 / 0.40% / [0.11%, 1.03%] | 4 / 4 / 6（主 L 分布 {"L=1": 980, "L=7": 14, "L=3": 6}） | {"T1": 993, "T0": 7} | 1579.5 | **pass** |
+| common_shock | 1000 | 1000 | 1 | 2 | 0.20% | [0.02%, 0.72%] | 0.30% / [0.06%, 0.87%] | 842 / 0.36% / [0.07%, 1.04%] | 3 / 3 / 3（主 L 分布 {"L=7": 325, "L=1": 281, "L=3": 394}） | {"T0": 158, "T1": 842} | 1363.0 | **pass** |
+| cluster_heavy_tail | 1000 | 1000 | 3 | 6 | 0.60% | [0.22%, 1.31%] | 0.90% / [0.41%, 1.70%] | 974 / 0.92% / [0.42%, 1.75%] | 7 / 6 / 6（主 L 分布 {"L=3": 505, "L=7": 451, "L=1": 44}） | {"T1": 974, "T0": 26} | 1411.0 | **pass** |
+| nonuniform_density | 1000 | 1000 | 11 | 8 | 0.81% | [0.35%, 1.59%] | 1.90% / [1.15%, 2.95%] | 725 / 2.62% / [1.59%, 4.06%] | 9 / 6 / 8（主 L 分布 {"L=1": 786, "L=3": 119, "L=7": 95}） | {"T1": 725, "T0": 275} | 1520.1 | **pass** |
+| circular_shift | 1000 | 1000 | 0 | 4 | 0.40% | [0.11%, 1.02%] | 0.40% / [0.11%, 1.02%] | 993 / 0.40% / [0.11%, 1.03%] | 4 / 4 / 6（主 L 分布 {"L=1": 980, "L=7": 14, "L=3": 6}） | {"T1": 993, "T0": 7} | 1464.7 | **pass** |
 
 - 最坏机制 FPR CI 上界：2.95%（阈值 7%）。所有机制均须过门，不混池稀释。
 - T0 replicate（基线 DEFF 降档 → cap=0 无搜索）必然 no_claim，不作 FPR 证据；验收以「有搜索 replicate」条件最坏界为准，并要求其占多数且 ≥ 500 次。
@@ -31,7 +31,7 @@
 
 | 机制 | 计划 n | 完成 | 失败 | 检出 x | 功效点估计 | 功效 95% CI | 最坏界（失败计未检出）功效 / CI | 规则找回率 | base_R sd（噪声） | 耗时 s | 判定 |
 |---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---|
-| common_shock | 1000 | 1000 | 34 | 327 | 33.85% | [30.87%, 36.93%] | 32.70% / [29.80%, 35.71%]（有搜索 768：42.58% / [39.05%, 46.16%]） | 42.4% | 1.77 | 1539.3 | **fail** |
+| common_shock | 1000 | 1000 | 34 | 327 | 33.85% | [30.87%, 36.93%] | 32.70% / [29.80%, 35.71%]（有搜索 768：42.58% / [39.05%, 46.16%]） | 42.4% | 1.77 | 1403.8 | **fail** |
 
 - 功效未达标时按 D.5「未达标限制声明或扩新样本」处理：本档（T1，约 1600 簇 / 4013 机会，噪声 sd≈1.77R）对 δ=0.2R 的全流程功效见上表；§3.1 给出效应/噪声/样本规模的适用范围。流程的功效瓶颈在 selection（内层 max-t 只见训练窗一半样本）。
 
@@ -76,9 +76,15 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
 
 R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断重算**这两条，并要求 `grid_dependence.ok` / `dependence_aggregate.ok` / `invalid_reason` / `verdict` / `tiers.invalid` / `n_invalid_null_model` / `guard_fail_rate` / `guard_failures_by_check` 八处彼此自洽——单改任意一处即被拒收。
 
+**带宽的分母与 sd 都不是自由参数**（R6-G）：带宽用**逐对**有效样本数 `n_cross`（某对不可估时它小于 `n_grid`，拿共同 n_grid 当分母会把带宽算窄）；相关系数逐次取值恒在 [-1,1]，故样本 sd 有硬上界 `s² ≤ n/(n−1)·(1−m²)`——超界的 sd 不可能由任何合法抽样产生，判读按该上界拒收，`band` 也必须能由 (fitted, mean, sd, n_cross) 重算出来。这条不属溯源边界：不必相信 fitted 是真值、也不必重跑 MC 就能否证。
+
+**主 L 分布显式声明模式**（R6-L）：`block_len_mode` 为 auto 时必须给出合法分布并无条件核上下界；为 fixed 时必须声明固定 L 且不给分布。原先「空字典」既表示固定 L、又能表示分布被清空，于是清空即可跳过整个计数门。
+
 另有三条记账约束（R5-C / R5-G / R5-O）：**(a)** `tiers.invalid + tiers.error ≤ n_failed`，且主 L 分布只覆盖真正进入流水线的 replicate——结构早退者不该有主 L；结构失败必须真正计进失败数，否则三分母最坏界会被低估到足以翻转 7% 准入。**(b)** 跨品种相关向量按冻结世界核对齐全集与顺序（3 品种恰好 3 对，见上表 `pairs`），取值须为有限实数且落在 [-1,1]，缺项/重复/越界一律拒收。**(c)** 上表展示的 `shuffle_guard` 只是第一个 replicate 的快照，**不是**「首个必须零失败」的门；它失败时必须在 per-check 与 invalid 总量里有对应记账。
 
-生成身份（A31 / R5-H）：MC 起跑冻结父进程源码摘要，**每个 worker 另行回传自己起跑与收尾的摘要**，父进程逐份核对，任何不等或缺回执都拒绝落盘。本报告的 worker 回执数：13，回执摘要集合：['ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402']。**边界**：本机制绑定的是各 worker 自报的源码视图，未实现「从同一份只读源码快照启动整组 worker」；父进程异常退出时不落盘，代价是丢弃 worker 已算结果。
+生成身份（A31 / R5-H）：MC 起跑冻结父进程源码摘要，**每个 worker 另行回传自己起跑与收尾的摘要**，父进程逐份核对，任何不等或缺回执都拒绝落盘。本报告的 worker 回执数：13，回执摘要集合：['6521b9e8618b6f80072af13b6f4e51273b1e2b386e5fae7278a3f09ed51f38bf']。**两种身份都要核**（R6-H）：磁盘摘要只回答「文件长什么样」，回答不了「这个 worker 实际跑的是哪一版」——导入缓存或驻留修订能让两者背离。因此每个 worker 另报一份**执行修订**摘要：对本包全部模块命名空间里函数/方法的 code object（含常量）取摘要，覆盖集合由包本身决定而非「当前恰好加载了哪些」。实测：两个真实 worker 装上只改返回标签的驻留修订后，磁盘摘要全等而执行摘要不同，父进程拒绝发布。本报告的父进程执行修订：87d8a2bc58a7ec73…，worker 执行修订集合：['87d8a2bc58a7ec73…']。
+
+**仍未实现的边界**：未做到「从同一份只读源码快照/安装制品以新解释器启动整组 worker」——当前是**检出**执行修订不一致并拒绝发布，而不是从源头消除混版可能。父进程异常退出时不落盘，代价是丢弃 worker 已算结果。
 
 全部落 T0 的机制标 not_run_T0（cap=0 无搜索，FPR 平凡为 0，不作 T1 验收替身）。
 
@@ -90,7 +96,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
 
 ## 6. 资源与限制
 
-- 总耗时 11193s；单 replicate 均值 1.696s；峰值 RSS 见 report.json。
+- 总耗时 10094s；单 replicate 均值 1.529s；峰值 RSS 见 report.json。
 - 限制：合成世界的相关结构是预注册假设，不等于真实频道数据；T3 档（200 次）未运行；块长敏感性只报告不选择；max-t 是依赖假设下近似，不是有限样本保证。
 - 任何真实数据的 θ 声明须另行通过 G-STAT-CLAIM、最终 V 窗口与 latency=1s 敏感性；本报告结果只描述。
 
@@ -111,9 +117,13 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
   "pi": 0.3,
   "worker_receipts_confirmed": 13,
   "worker_code_sha256": [
-   "ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402"
+   "6521b9e8618b6f80072af13b6f4e51273b1e2b386e5fae7278a3f09ed51f38bf"
   ],
-  "research_code_sha256": "ec118a6a340c8cd4edff88f8b63a38e2ae96afd48f8fe44a15bf84e3e875b402"
+  "worker_exec_revision": [
+   "87d8a2bc58a7ec73b398ecda83e4bc6ef19b9275d0edcfb6f51a8119baf29e27"
+  ],
+  "parent_exec_revision": "87d8a2bc58a7ec73b398ecda83e4bc6ef19b9275d0edcfb6f51a8119baf29e27",
+  "research_code_sha256": "6521b9e8618b6f80072af13b6f4e51273b1e2b386e5fae7278a3f09ed51f38bf"
  },
  "results": [
   {
@@ -144,7 +154,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 158,
     "T1": 842
    },
-   "wall_s": 1490.0,
+   "wall_s": 1363.0,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -254,6 +264,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.07345864594316859
      ],
      "n_grid": 1000,
+     "n_cross": [
+      1000,
+      1000,
+      1000
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -316,7 +331,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=7": 325,
      "L=1": 281,
      "L=3": 394
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "pass",
    "n_recovered": 15,
@@ -357,7 +374,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 974,
     "T0": 26
    },
-   "wall_s": 1555.4,
+   "wall_s": 1411.0,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -467,6 +484,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.08372988502670506
      ],
      "n_grid": 1000,
+     "n_cross": [
+      1000,
+      1000,
+      1000
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -529,7 +551,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=3": 505,
      "L=7": 451,
      "L=1": 44
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "pass",
    "n_recovered": 3,
@@ -570,7 +594,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 725,
     "T0": 275
    },
-   "wall_s": 1613.7,
+   "wall_s": 1520.1,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -680,6 +704,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.08511056440215932
      ],
      "n_grid": 1000,
+     "n_cross": [
+      1000,
+      1000,
+      1000
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -742,7 +771,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=1": 786,
      "L=3": 119,
      "L=7": 95
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "pass",
    "n_recovered": 10,
@@ -783,7 +814,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 993,
     "T0": 7
    },
-   "wall_s": 1579.5,
+   "wall_s": 1464.7,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -893,6 +924,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       9.265720940071938e-15
      ],
      "n_grid": 1000,
+     "n_cross": [
+      1000,
+      1000,
+      1000
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -955,7 +991,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=1": 980,
      "L=7": 14,
      "L=3": 6
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "pass",
    "n_recovered": 18,
@@ -996,7 +1034,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 232,
     "T1": 768
    },
-   "wall_s": 1539.3,
+   "wall_s": 1403.8,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1106,6 +1144,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.08232641389276181
      ],
      "n_grid": 1000,
+     "n_cross": [
+      1000,
+      1000,
+      1000
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -1168,7 +1211,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=3": 470,
      "L=7": 483,
      "L=1": 47
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "fail",
    "n_recovered": 424,
@@ -1209,7 +1254,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 173,
     "T0": 27
    },
-   "wall_s": 350.3,
+   "wall_s": 278.7,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1319,6 +1364,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.07430746539820018
      ],
      "n_grid": 200,
+     "n_cross": [
+      200,
+      200,
+      200
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -1381,7 +1431,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=3": 92,
      "L=7": 77,
      "L=1": 31
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "fail",
    "n_recovered": 113,
@@ -1422,7 +1474,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 190,
     "T0": 10
    },
-   "wall_s": 620.6,
+   "wall_s": 523.8,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1532,6 +1584,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.04611744110495231
      ],
      "n_grid": 200,
+     "n_cross": [
+      200,
+      200,
+      200
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -1594,7 +1651,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=3": 25,
      "L=1": 154,
      "L=7": 21
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "fail",
    "n_recovered": 164,
@@ -1635,7 +1694,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 65,
     "T1": 135
    },
-   "wall_s": 323.7,
+   "wall_s": 259.6,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1745,6 +1804,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.0743074653982002
      ],
      "n_grid": 200,
+     "n_cross": [
+      200,
+      200,
+      200
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -1807,7 +1871,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=7": 100,
      "L=3": 87,
      "L=1": 13
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "fail",
    "n_recovered": 119,
@@ -1848,7 +1914,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 173,
     "T0": 27
    },
-   "wall_s": 611.6,
+   "wall_s": 524.6,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1958,6 +2024,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.046117441104952306
      ],
      "n_grid": 200,
+     "n_cross": [
+      200,
+      200,
+      200
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -2020,7 +2091,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=3": 36,
      "L=1": 123,
      "L=7": 41
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "insufficient",
    "n_recovered": 167,
@@ -2061,7 +2134,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 93,
     "T1": 107
    },
-   "wall_s": 310.2,
+   "wall_s": 244.5,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2171,6 +2244,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.07430746539820018
      ],
      "n_grid": 200,
+     "n_cross": [
+      200,
+      200,
+      200
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -2233,7 +2311,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=7": 120,
      "L=3": 77,
      "L=1": 3
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "fail",
    "n_recovered": 94,
@@ -2274,7 +2354,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 145,
     "T0": 55
    },
-   "wall_s": 503.4,
+   "wall_s": 462.8,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2384,6 +2464,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.04611744110495231
      ],
      "n_grid": 200,
+     "n_cross": [
+      200,
+      200,
+      200
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -2446,7 +2531,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=1": 102,
      "L=3": 33,
      "L=7": 65
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "fail",
    "n_recovered": 139,
@@ -2487,7 +2574,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 172,
     "T1": 28
    },
-   "wall_s": 242.3,
+   "wall_s": 212.4,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2597,6 +2684,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.0743074653982002
      ],
      "n_grid": 200,
+     "n_cross": [
+      200,
+      200,
+      200
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -2658,7 +2750,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "chosen_block_len": {
      "L=7": 169,
      "L=3": 31
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "fail",
    "n_recovered": 21,
@@ -2699,7 +2793,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 51,
     "T0": 149
    },
-   "wall_s": 453.3,
+   "wall_s": 425.0,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2809,6 +2903,11 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
       0.046117441104952306
      ],
      "n_grid": 200,
+     "n_cross": [
+      200,
+      200,
+      200
+     ],
      "pairs": [
       [
        "BTCUSDT-PERP.BINANCE-UM",
@@ -2871,7 +2970,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
      "L=1": 20,
      "L=3": 44,
      "L=7": 136
-    }
+    },
+    "block_len_mode": "auto",
+    "block_len_fixed": null
    },
    "verdict": "fail",
    "n_recovered": 47,
