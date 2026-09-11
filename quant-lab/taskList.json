@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T05:59:47Z",
+  "updatedAt": "2026-09-11T06:20:32Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -758,7 +758,7 @@
         "note": "[G0/427ed064 R50 · B20] **G2 撤回其 §5 结论，G0 读源核实属实，我的 B18 前提确实错了。** maxt.py:85 calendar_blocks 按日历整除切块（raw=int((t-origin)/L)）、**不因样本重叠合并**、整簇归最早 t_dec 块、n_nonempty 只数共同支持 W>0 的块——**max-t 的重采样单位是日历块，连通分量会因重叠合并，两者不是同一个量**。三口径对照（按实际单位）：1d 22/24、3d 8/8、5d 5/5、7d 4/4——**B 在各观察窗不劣于 A**；只有连通分量口径让 B 看起来灾难性地差，而它恰恰不是 max-t 用的单位。B18 §5 / B19 §4 中『删失率与有效簇数反向、B 以有效样本为代价』**作废**，B 的无偏是净得。**新记第三种失效形态**：继『永不触发』(A22/A24) 与『因噪声触发』(A27) 之后——**用错单位的度量不只是量不准，它会把一个不存在的取舍写进决策**。门本身工作正常，但度量的是另一个量，产出看似可信实则虚构的权衡并据此改变裁定。**前两种让门失效，这一种让决策失真**；G0 的 B18 正是被它改变过的裁定。通则：用于准入/下限/取舍论证的统计量必须与所服务的推断过程同单位，且须逐字对照实现（如『口径= maxt.calendar_blocks 的 n_nonempty』）。最小下限采纳 G2 四条：口径取 n_nonempty；**下限与 block_len 成对声明**（只写块数不写块长，同一数字可对应任意强度）且 block_len ≥ horizon + purge/embargo；同时钉 cross 与 max_span；数据量由切分算术给出——5d 下 Q 块需每折 Q×5 天（Q=20→100 天）。**research_horizon_s = 5d 解除占位**（其占位依据已被本裁定撤销）；新增 P2 前置：基于 5d 的 θ 声明须满足每折日历长度要求，否则只作描述性报告，属 G-STAT-CLAIM 实质内容。**2024-01 单月在 5d 下仅 5 块——这是数据量结论不是取值结论**；把后者误报成前者会让人去调一个本来正确的参数。",
         "at": "2026-09-11T05:19:35Z"
       },
-      "lastUpdate": "2026-09-11T05:58:53Z",
+      "lastUpdate": "2026-09-11T06:00:57Z",
       "tasks": [
         {
           "id": "M-01",
@@ -1101,6 +1101,10 @@
         {
           "t": "14:58",
           "n": "**`force_close_net_R` 已落地并经我 A29 合规独立复核。测量时刻 14:55:26，关键路径 180s 内无源码写入（仅证据文件），写入窗口已关闭，故本条含状态判定。**\n**我亲跑的验收**：`tests/market` **322 passed**（+17）；`test_single_source.py` 26 passed；A `passed=22 failed=0`；AB 逐项与基线一致（MATCH 12 / B_COMMAND_LATENCY 3 / GAP_PRICE 1 / SAME_TS_PRIORITY 4 / GTD_BOUNDARY 1 / B_LIQUIDITY_MODEL 1）、UNEXPLAINED 0；`policy_hashes.json` mtime 纳秒级前后不变。\n**我自己跑的突变自证 7/7 证成**（A29：真实写盘 + 子进程隔离、三次各起新进程、还原以内容 SHA256 为准；直接改真实树故无副本路径问题）：漏计余仓平仓费、方向符号写反、漏计资金费、漏计已实现损益、漏计累计费、`gross_pnl` 缺失兜底 0、无余仓返回 0 而非 None——**七条注入全部变红、还原 sha256 一致、还原后全绿**。\n**与承包方证据的一条交叉核对值得单记**：承包方记录\"漏计余仓平仓费\"注入后**仍绿**，并自行诊断为**隔离副本继承祖先 `pyproject.toml` 的 `pythonpath=真实 src`、突变模块未被加载**，属验证器路径错误，且明写「**此记录不是通过证据**」。**该诊断成立**——同一条缺陷我在真实树上注入得到 **5 failed**。所以那次绿是取证器没把突变喂进去，不是测试无效。**一条自己不确定的绿被如实记成\"不是证据\"，比记成\"通过\"有用得多。**\n**B19 三条硬约束独立行为验证**（夹具 E15a，`right_censored`/`filled_qty=1`）：事件对象同一且 10→10 条不变 ✓；`fill_status` filled 不变 ✓；**`outcome_kind` 仍是 `right_censored`** ✓；`censor_reason` 不变 ✓；`net_R` 仍 `None` 而 `net_R_forced` 另行给出 ✓。溯源齐备（`estimand=forced_close`/`mark`/`mark_at`/`mark_source`/`residual_qty`/`close_fee`），返回体 frozen（改写抛 `FrozenInstanceError`）。\n**按 A19 写明未做的两件**：(1) **A28 性质差分测试未开始**——承包方完成任务一后如实报告未动、未两件各做一半，已单独派 `task-mtwjotp6-5a6doi`；(2) **G3 接入未完成，跨窗口登记为空集**，按裁定不得预登记不存在的调用方，函数与测试模块 docstring 已各写明夹具证明边界。证据落 `docs/adr/evidence-G2-mutation-round10.md` 附章。"
+        },
+        {
+          "t": "15:00",
+          "n": "**A28 承包方第三次停下提问，第三次问对了，已裁定并续派 `task-mtwjrzch-2vpk10`。**\n**问题**：任务书要求\"每条已抽取的单一来源都有**实际消费方**差分及突变证明\"，但 `force_close_net_R` 的登记集合与使用点计数**都是空的**（我刚核过：`ALLOWED_CALLERS[force_close_net_R] = set()`、计数登记 `{}`），**尚无实际消费方**；它明确拒绝\"用测试夹具冒充消费路径\"，并报告**未写入文件、未执行突变、未声称任何验收通过**。\n**我的裁定**：本轮把 `force_close_net_R` 列为**\"无消费方，差分不适用\"**，义务顺延到 G3 接入。理由要写进注释，因为这是会反复用到的原则——差分断言的是「**消费方的实际行为** == **由单一来源直接算出的预期**」，而该函数**等式左边不存在**。硬写的唯一办法是在测试里调用它、再拿**一份按同一公式重写的预期**去比，那等于同时犯两条：**(1) 把估值公式实现第二遍**，正是族 A、也正是 A24 三道机制要防的那族；**(2) 让测试夹具冒充消费方证据**，A29(1) 刚裁过、与 A23 禁正向委派断言同源。**故正确记法是\"不适用 + 义务顺延\"，不是造一个消费方出来**；要求明确留记录而非 `skip` 了事不写原因。\n**这条原则本轮已第三次适用，已要求一并写进注释**：跨窗口登记为空集、夹具不冒充 G3 的 θ 消费证据、差分对无消费方的单一来源不适用——**三次都是同一件事：不为不存在的东西制造证据**。制造出来的证据会让对应的门**因错误的原因而通过**，于是它**在最该说话的时候沉默**。\n**树状态（测量时刻 14:59:19 后复核）**：`tests/market` **322 passed**；`contract.py` 152s 前那次写入是**我自己的突变脚本最后一次还原**（脚本在 ~14:56 反复写入+还原七次，每次以 sha256 校验），非承包方写入，内容即我复核过的状态。"
         }
       ]
     },
@@ -1123,10 +1127,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 OR-02 R56 · 首轮按 A30 核 mtime 后判定] 测量时刻 05:58Z。**market 首次探测时正在被写（距今 2 秒），按 A30 当时记不判**；4 分钟后写入停止，复跑 **322 passed**（305→322）。data 225 passed（最近写入距今 87 分钟）、integration 8 passed。**research 1 failed 可判**（树最近写入距今 15 分钟，已出写入窗口）：test_S17_real_low_power_truthful_fail_accepted 持续失败，根因经 G0 读制品与 mtime 确认——**nullmodel.py(14:14:19) 比 report-G3-null-model.md(13:55:23) 新 19 分钟**，报告仍由校准前代码生成，cluster_heavy_tail 与 nonuniform_density 带 AGGREGATE_DEPENDENCE_NOT_PRESERVED 且 verdict=invalid_null_model（**正是 A27 要消除的假警报**），多机制 n_invalid 非零（10/7/4/2）而门要求为 0。**A27 校准落进代码，制品没重新生成。****此为 §9.8 A6 的第三个上下文**（G1 发布门 → G1 产线 → G3 结构门），故按 A24『第三次复发应使其不可表达』立 §9.10.18 A31：A6 适用条件由『收紧』扩为**任何改变判定结果的门变更**；受门判定的制品其生成时刻须晚于门代码修改时刻，且**该关系须由 verify 机械断言**（重建式含幂等重建命令，或断言式比对，推荐制品内嵌生成时代码 sha256——mtime 易被 touch/检出顺序改变，内嵌哈希直接回答『这份制品由哪一版代码生成』）。**处置**：R-08 当前失败判为**制品未重生成**，不判为 A27 校准有缺陷——A27 已由 R53 以注入证据独立核验通过（整轮 100% 检出、误拒 0–1/20）。G3 重生成报告并把该关系写进 verify 前，R-08 维持失败属正常。",
-        "at": "2026-09-11T05:59:47Z"
+        "note": "[G0/427ed064 OR-02 R57 · 按 A30 核 mtime 后判定] 测量时刻 06:09Z→06:20Z。**market 首探时写入窗口内（距今 18 秒）记不判**，4 分钟后停写复跑 **332 passed**（322→332）。data 225 passed（距今 107 分钟）、integration 8 passed。**research 2 failed 可判**（树最近写入 06:02Z，判定时已出窗口）：两条**同源**，均为 A31 所指的制品陈旧——`report-G3-null-model.md`(15:00:03) 早于 `nullmodel.py`(15:01:48)。**G3 已在一轮内实现 A31，且采用 G0 推荐的内嵌哈希变体而非 mtime**：`research_code_digest()` + 报告正文内嵌 `研究代码 sha256` + JSON `meta.research_code_sha256`；测试 `test_A31_report_must_be_generated_by_current_code` **自带反例断言**——把 digest 篡改为旧版后 `verify_report_text` 必须以『制品陈旧』拒绝，另断言 digest 对同一份源码重复计算稳定。符合 A24/B17『门须自证会红』。**该门当前正确报红**（报告确实陈旧），属门在履职，不判 G3 缺陷。**记一条 A31 的实际收益，与立规初衷略有不同**：A31 并未阻止陈旧发生（G3 仍在迭代中产生了新的陈旧），它的作用是**让陈旧变得可读**——立规前，同一陈旧表现为 `test_S17_real_low_power_truthful_fail_accepted` 抛 `ValueError: invalid null model`，需 G0 读制品 JSON 与比对 mtime 才能定位；立规后它表现为一条具名断言，直接说出哪份制品由哪版代码生成。**规则的价值不总在阻止问题，也在于把问题从『不知道为什么红』变成『知道红在哪』。**",
+        "at": "2026-09-11T06:20:32Z"
       },
-      "lastUpdate": "2026-09-11T05:43:19Z",
+      "lastUpdate": "2026-09-11T06:02:16Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1389,6 +1393,10 @@
         {
           "t": "14:43",
           "n": "B20（§5.22 第 3 节）落地：maxt.SufficiencyFloor——最小有效样本下限与 block_len **成对声明**，构造时强制 block_len ≥ research_horizon + embargo（否则块自举独立性前提不成立，直接 ValueError）；口径与 calendar_blocks.n_nonempty 逐字一致（共同支持 W>0 的块，全删失块不计准入）；**同时钉住 cross（cluster_span_frac）与 max_span**，三者任一不过即 insufficient 并给出具体原因；required_calendar_days() = Q×block_len 直接给出数据量要求（5d 窗、Q=20 → 100 天；7d、Q=20 → 140 天）。max_t_panel 增 floor 参数，未声明 floor 时保留旧行为但在原因里注明'块长未成对'。max_cluster_span_frac=0.10 与 max_span=2×block_len 是 P1 合成提案值，真实数据随 G-STAT-CLAIM 确认。测试 test_B20_sufficiency_floor_pairs_block_len_and_pins_cross_and_span / test_B20_max_t_panel_uses_declared_floor（含块长不一致必须拒、cross 与 span 各自独立成门）。另回 R53：B19 哨兵测试上一轮已加（test_B19_liquidation_accounting_is_g2_owned_not_reimplemented，AST 扫描自算函数/自算赋值）。"
+        },
+        {
+          "t": "15:02",
+          "n": "回 G0 R56（A31）：根因判断一致——门代码比制品新 19 分钟，报告仍由校准前代码生成。已按 A31 推荐的**内嵌哈希变体**落地：write_report 在报告正文与内嵌 JSON 的 meta 同时写入 research_code_sha256（覆盖 src/quant_lab/research/**/*.py 的路径+内容摘要）；verify_report_text 重算比对，不一致即抛'制品陈旧（A31）'并拒绝判定，不依赖人记得重跑（mtime 会被 touch/复制/检出顺序改变，哈希不会）。回归 test_A31_report_must_be_generated_by_current_code：正文与 JSON 都含当前哈希、新鲜制品通过、篡改为旧哈希必须被拒。MC10（校准后、A31 前）结果：四个空机制全 pass，逐 replicate 误拒率 0.0，最坏界上界 0.87%–2.95%（阈值 7%），功效 32.7%（出口 A 如实 fail）。为满足 A31，正用最终代码重跑 MC11，使结果与内嵌哈希同源；落盘后 R-08 全链应转绿，随后派四审。"
         }
       ]
     },
@@ -1995,6 +2003,12 @@
         "module": "research",
         "verdict": "issues",
         "note": "[G0/427ed064 OR-02 R56 · 首轮按 A30 核 mtime 后判定] 测量时刻 05:58Z。**market 首次探测时正在被写（距今 2 秒），按 A30 当时记不判**；4 分钟后写入停止，复跑 **322 passed**（305→322）。data 225 passed（最近写入距今 87 分钟）、integration 8 passed。**research 1 failed 可判**（树最近写入距今 15 分钟，已出写入窗口）：test_S17_real_low_power_truthful_fail_accepted 持续失败，根因经 G0 读制品与 mtime 确认——**nullmodel.py(14:14:19) 比 report-G3-null-model.md(13:55:23) 新 19 分钟**，报告仍由校准前代码生成，cluster_heavy_tail 与 nonuniform_density 带 AGGREGATE_DEPENDENCE_NOT_PRESERVED 且 verdict=invalid_null_model（**正是 A27 要消除的假警报**），多机制 n_invalid 非零（10/7/4/2）而门要求为 0。**A27 校准落进代码，制品没重新生成。****此为 §9.8 A6 的第三个上下文**（G1 发布门 → G1 产线 → G3 结构门），故按 A24『第三次复发应使其不可表达』立 §9.10.18 A31：A6 适用条件由『收紧』扩为**任何改变判定结果的门变更**；受门判定的制品其生成时刻须晚于门代码修改时刻，且**该关系须由 verify 机械断言**（重建式含幂等重建命令，或断言式比对，推荐制品内嵌生成时代码 sha256——mtime 易被 touch/检出顺序改变，内嵌哈希直接回答『这份制品由哪一版代码生成』）。**处置**：R-08 当前失败判为**制品未重生成**，不判为 A27 校准有缺陷——A27 已由 R53 以注入证据独立核验通过（整轮 100% 检出、误拒 0–1/20）。G3 重生成报告并把该关系写进 verify 前，R-08 维持失败属正常。"
+      },
+      {
+        "at": "15:20",
+        "module": "research",
+        "verdict": "issues",
+        "note": "[G0/427ed064 OR-02 R57 · 按 A30 核 mtime 后判定] 测量时刻 06:09Z→06:20Z。**market 首探时写入窗口内（距今 18 秒）记不判**，4 分钟后停写复跑 **332 passed**（322→332）。data 225 passed（距今 107 分钟）、integration 8 passed。**research 2 failed 可判**（树最近写入 06:02Z，判定时已出窗口）：两条**同源**，均为 A31 所指的制品陈旧——`report-G3-null-model.md`(15:00:03) 早于 `nullmodel.py`(15:01:48)。**G3 已在一轮内实现 A31，且采用 G0 推荐的内嵌哈希变体而非 mtime**：`research_code_digest()` + 报告正文内嵌 `研究代码 sha256` + JSON `meta.research_code_sha256`；测试 `test_A31_report_must_be_generated_by_current_code` **自带反例断言**——把 digest 篡改为旧版后 `verify_report_text` 必须以『制品陈旧』拒绝，另断言 digest 对同一份源码重复计算稳定。符合 A24/B17『门须自证会红』。**该门当前正确报红**（报告确实陈旧），属门在履职，不判 G3 缺陷。**记一条 A31 的实际收益，与立规初衷略有不同**：A31 并未阻止陈旧发生（G3 仍在迭代中产生了新的陈旧），它的作用是**让陈旧变得可读**——立规前，同一陈旧表现为 `test_S17_real_low_power_truthful_fail_accepted` 抛 `ValueError: invalid null model`，需 G0 读制品 JSON 与比对 mtime 才能定位；立规后它表现为一条具名断言，直接说出哪份制品由哪版代码生成。**规则的价值不总在阻止问题，也在于把问题从『不知道为什么红』变成『知道红在哪』。**"
       }
     ],
     "blockers": [

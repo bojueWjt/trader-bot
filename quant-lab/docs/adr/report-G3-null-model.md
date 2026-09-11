@@ -1,12 +1,12 @@
 # report-G3-null-model：空模型 FPR / 功效验收（合成 T1 规模，synthetic_validation）
 
-日期：2026-09-11 04:55 UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。
+日期：2026-09-11 06:00 UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。
 依据：合并稿 D.5、ADR-G3 §10、Claude 验收 R03（按档分级：T1/T2 各机制 1000 次；T3 200 次预注册更宽精确区间）。
-命令：`python -m quant_lab.research.nullmodel --out docs/adr/report-G3-null-model.md --n-rep 1000 --jobs 5`
+命令：`python -m quant_lab.research.nullmodel`
 
 ## 1. 设定
 
-- 合成世界：WorldConfig(n_clusters=1600, span_days=360, n_candidates=12, pi=0.3, censor_frac=0.05)；候选池：36 个（12 独立特征 × 规则 {gt_q30, lt_q30, gt_q70}（T1 cap=12））；流水线：PipelineConfig(B=2000, block_len_days=auto(1/3/7 训练诊断))。
+- 合成世界：WorldConfig(mechanism='common_shock', n_clusters=1600, span_days=360, n_candidates=12, delta=0.0, pi=0.3, censor_frac=0.05, cluster_size_max=4, noise_scale=1.0, seed=0)；候选池：36 个（12 独立特征 × 规则 {gt_q30, lt_q30, gt_q70}（36 提交，T1 cap=12 → 按规范顺序前 12 个 = f00..f03 × 3 规则，含植入候选 f00:gt_q30））；流水线：PipelineConfig(scheme='expanding', test_span_days=60, min_train_span_days=180, embargo_days=1.0, label_maturity_days=0.0, min_train_clusters=20, search_frac=0.5, block_len_days=None, block_len_sensitivity=(1, 3, 7), B=2000, alpha=0.05, config_cap=None, seed=0, max_folds=None)。
 - 空模型：训练窗（前 50% 天）拟合联合残差 → 整 L 日块（全品种联动）重采样格点冲击 + 整簇重采样特异残差 → 固定 episode 布局暴露映射；因果特征独立随机流重生成；**禁止逐 episode 洗牌**（结构断言 + 诊断见 §4）。
 - 每次 replicate 完整流程：walk-forward 折 → 分档/预算 → search（阈值只在 search 子窗拟合）→ selection（共同块 max-t 一次，B=2000，α=0.05）→ 外折每机会一次预测 → final 全时间共同块 θ/LB（主 L=auto(1/3/7 训练诊断)：由首折训练窗残差块均值 lag-1 自相关诊断在 1/3/7 中预注册，不看候选结果；1/3/7 日敏感性另报）。
 - FPR 事件：final LB > 0（合成声明函数，输出 synthetic_validation）；失败/insufficient 单列并给最坏界。
@@ -17,25 +17,25 @@
 
 | 机制 | 计划 n | 完成 | 失败/insufficient | 阳性 x | FPR 点估计 | FPR 95% CI（区间） | 最坏界（失败计阳性）FPR / CI | 有搜索 replicate（非 T0）n / 最坏界 FPR / CI | 阳性数按块长 L=1/3/7（敏感性，不选） | 档分布 | 耗时 s | 判定 |
 |---|---:|---:|---:|---:|---:|---|---|---|---|---|---:|---|
-| common_shock | 1000 | 1000 | 11 | 2 | 0.20% | [0.02%, 0.73%] | 1.30% / [0.69%, 2.21%] | 846 / 1.54% / [0.82%, 2.61%] | 3 / 3 / 3（主 L 分布 {"L=7": 320, "L=1": 279, "L=3": 391}） | {"T0": 154, "T1": 836, "invalid": 10} | 1329.0 | **pass** |
-| cluster_heavy_tail | 1000 | 1000 | 10 | 6 | 0.61% | [0.22%, 1.31%] | 1.60% / [0.92%, 2.59%] | 975 / 1.64% / [0.94%, 2.65%] | 7 / 6 / 6（主 L 分布 {"L=3": 502, "L=7": 448, "L=1": 43}） | {"T1": 968, "T0": 25, "invalid": 7} | 1362.0 | **invalid_null_model** |
-| nonuniform_density | 1000 | 1000 | 13 | 8 | 0.81% | [0.35%, 1.59%] | 2.10% / [1.30%, 3.19%] | 726 / 2.89% / [1.80%, 4.39%] | 9 / 6 / 8（主 L 分布 {"L=1": 784, "L=3": 119, "L=7": 95}） | {"T1": 724, "T0": 274, "invalid": 2} | 1460.0 | **invalid_null_model** |
-| circular_shift | 1000 | 1000 | 4 | 3 | 0.30% | [0.06%, 0.88%] | 0.70% / [0.28%, 1.44%] | 993 / 0.70% / [0.28%, 1.45%] | 3 / 4 / 5（主 L 分布 {"L=1": 976, "L=7": 14, "L=3": 6}） | {"T1": 989, "T0": 7, "invalid": 4} | 1417.4 | **pass** |
+| common_shock | 1000 | 1000 | 1 | 2 | 0.20% | [0.02%, 0.72%] | 0.30% / [0.06%, 0.87%] | 842 / 0.36% / [0.07%, 1.04%] | 3 / 3 / 3（主 L 分布 {"L=7": 325, "L=1": 281, "L=3": 394}） | {"T0": 158, "T1": 842} | 1383.0 | **pass** |
+| cluster_heavy_tail | 1000 | 1000 | 3 | 6 | 0.60% | [0.22%, 1.31%] | 0.90% / [0.41%, 1.70%] | 974 / 0.92% / [0.42%, 1.75%] | 7 / 6 / 6（主 L 分布 {"L=3": 505, "L=7": 451, "L=1": 44}） | {"T1": 974, "T0": 26} | 1434.3 | **pass** |
+| nonuniform_density | 1000 | 1000 | 11 | 8 | 0.81% | [0.35%, 1.59%] | 1.90% / [1.15%, 2.95%] | 725 / 2.62% / [1.59%, 4.06%] | 9 / 6 / 8（主 L 分布 {"L=1": 786, "L=3": 119, "L=7": 95}） | {"T1": 725, "T0": 275} | 1529.0 | **pass** |
+| circular_shift | 1000 | 1000 | 0 | 4 | 0.40% | [0.11%, 1.02%] | 0.40% / [0.11%, 1.02%] | 993 / 0.40% / [0.11%, 1.03%] | 4 / 4 / 6（主 L 分布 {"L=1": 980, "L=7": 14, "L=3": 6}） | {"T1": 993, "T0": 7} | 1460.8 | **pass** |
 
-- 最坏机制 FPR CI 上界：3.19%（阈值 7%）。所有机制均须过门，不混池稀释。
+- 最坏机制 FPR CI 上界：2.95%（阈值 7%）。所有机制均须过门，不混池稀释。
 - T0 replicate（基线 DEFF 降档 → cap=0 无搜索）必然 no_claim，不作 FPR 证据；验收以「有搜索 replicate」条件最坏界为准，并要求其占多数且 ≥ 500 次。
 
 ## 3. 功效（注入 δ）
 
 | 机制 | 计划 n | 完成 | 失败 | 检出 x | 功效点估计 | 功效 95% CI | 最坏界（失败计未检出）功效 / CI | 规则找回率 | base_R sd（噪声） | 耗时 s | 判定 |
 |---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---|
-| common_shock | 1000 | 1000 | 36 | 327 | 33.92% | [30.93%, 37.01%] | 32.70% / [29.80%, 35.71%]（有搜索 769：42.52% / [39.00%, 46.11%]） | 42.4% | 1.77 | 1331.4 | **fail** |
+| common_shock | 1000 | 1000 | 34 | 327 | 33.85% | [30.87%, 36.93%] | 32.70% / [29.80%, 35.71%]（有搜索 768：42.58% / [39.05%, 46.16%]） | 42.4% | 1.77 | 1402.7 | **fail** |
 
 - 功效未达标时按 D.5「未达标限制声明或扩新样本」处理：本档（T1，约 1600 簇 / 4013 机会，噪声 sd≈1.77R）对 δ=0.2R 的全流程功效见上表；§3.1 给出效应/噪声/样本规模的适用范围。流程的功效瓶颈在 selection（内层 max-t 只见训练窗一半样本）。
 
 ## 3.2 限制声明（用户裁定出口 A，2026-09-11；规范性，随本报告发布）
 
-> 在 T1 档合成规模（约 1600 经济簇 / 4000 机会）下，本协议对每种子 0.2R 的真实过滤增益的全流程检出功效约 33.9%（条件于实际进入搜索的 replicate 为 42.5%，95% 最坏界下界约 29.8%）。因此：
+> 在 T1 档合成规模（约 1600 经济簇）下，本协议对每种子 0.2R 的真实过滤增益的全流程检出功效约 33.9%（条件于实际进入搜索的 replicate 为 42.6%，95% 最坏界下界约 29.8%）。因此：
 > 1. 本协议在该规模下**不能**把「未检出」解释为「无增益」；未检出只描述为「在该功效下未检出」。
 > 2. 任何 P2 真实数据研究若样本规模/噪声与该档相当，只能对更大量级的效应或更大样本作检出声明；本档效应量需预注册扩样本后另验。
 > 3. 上述数字均为**合成**世界预注册假设下的结果，**不是真实**频道数据的功效；真实功效须在 G1/G2 真实接缝就绪后按实测 K/DEFF 重估。
@@ -47,35 +47,35 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
 
 | 设定 | 机制 | n | 检出 | 功效 | 95% CI | 规则找回率（植入候选被选中 ≥1 折） | base_R sd | 簇数 | 档分布 |
 |---|---|---:|---:|---:|---|---:|---:|---:|---|
-| δ=0.2 noise×1.0 clusters=1600 | common_shock | 200 | 96 | 50.3% | [42.95%, 57.56%] | 56.5% | 1.75 | 1600 | {"T1": 173, "T0": 26, "invalid": 1} |
+| δ=0.2 noise×1.0 clusters=1600 | common_shock | 200 | 96 | 50.0% | [42.72%, 57.28%] | 56.5% | 1.75 | 1600 | {"T1": 173, "T0": 27} |
 | δ=0.2 noise×1.0 clusters=2400 | common_shock | 200 | 146 | 73.7% | [67.03%, 79.72%] | 82.0% | 1.75 | 2400 | {"T1": 190, "T0": 10} |
-| δ=0.2 noise×0.6 clusters=1600 | common_shock | 200 | 112 | 60.9% | [53.42%, 67.97%] | 57.5% | 1.05 | 1600 | {"T0": 61, "T1": 131, "invalid": 8} |
-| δ=0.2 noise×0.6 clusters=2400 | common_shock | 200 | 168 | 85.3% | [79.55%, 89.91%] | 83.0% | 1.05 | 2400 | {"T1": 172, "T0": 27, "invalid": 1} |
-| δ=0.4 noise×1.0 clusters=1600 | common_shock | 200 | 90 | 50.3% | [42.72%, 57.82%] | 44.5% | 1.75 | 1600 | {"T0": 84, "T1": 102, "invalid": 14} |
-| δ=0.4 noise×1.0 clusters=2400 | common_shock | 200 | 139 | 70.9% | [64.02%, 77.17%] | 69.0% | 1.75 | 2400 | {"T1": 143, "T0": 54, "invalid": 3} |
-| δ=0.4 noise×0.6 clusters=1600 | common_shock | 200 | 18 | 18.8% | [11.51%, 28.00%] | 7.5% | 1.05 | 1600 | {"T0": 77, "invalid": 104, "T1": 19} |
-| δ=0.4 noise×0.6 clusters=2400 | common_shock | 200 | 40 | 34.8% | [26.14%, 44.23%] | 19.5% | 1.05 | 2400 | {"T1": 40, "invalid": 85, "T0": 75} |
+| δ=0.2 noise×0.6 clusters=1600 | common_shock | 200 | 115 | 60.2% | [52.89%, 67.20%] | 59.5% | 1.05 | 1600 | {"T0": 65, "T1": 135} |
+| δ=0.2 noise×0.6 clusters=2400 | common_shock | 200 | 169 | 85.4% | [79.65%, 89.97%] | 83.5% | 1.05 | 2400 | {"T1": 173, "T0": 27} |
+| δ=0.4 noise×1.0 clusters=1600 | common_shock | 200 | 94 | 49.0% | [41.69%, 56.26%] | 47.0% | 1.75 | 1600 | {"T0": 93, "T1": 107} |
+| δ=0.4 noise×1.0 clusters=2400 | common_shock | 200 | 141 | 70.9% | [64.01%, 77.07%] | 69.5% | 1.75 | 2400 | {"T1": 145, "T0": 55} |
+| δ=0.4 noise×0.6 clusters=1600 | common_shock | 200 | 27 | 13.5% | [9.09%, 19.03%] | 10.5% | 1.05 | 1600 | {"T0": 172, "T1": 28} |
+| δ=0.4 noise×0.6 clusters=2400 | common_shock | 200 | 50 | 25.1% | [19.26%, 31.75%] | 23.5% | 1.05 | 2400 | {"T1": 51, "T0": 149} |
 
 ## 4. 空模型诊断（块内相关是否保留）
 
 | 机制 | 训练窗天数 / 观测 | 块均值 lag-1 自相关 | 跨品种格点相关 | 块 ICC orig / null / 逐 episode 洗牌 | 通过 |
 |---|---|---:|---:|---|---|
-| common_shock | 180 / 1859（未成熟排除 24） | 0.055 | 0.491 | 0.1481 / 0.2307 / 0.0038 | True（逐 replicate 诊断失败 10 次） |
-| cluster_heavy_tail | 180 / 1909（未成熟排除 8） | 0.021 | 0.119 | 0.0721 / 0.1637 / -0.0026 | True（逐 replicate 诊断失败 7 次） |
-| nonuniform_density | 180 / 2096（未成熟排除 27） | -0.020 | 0.446 | 0.1754 / 0.1808 / -0.0019 | True（逐 replicate 诊断失败 2 次） |
-| circular_shift | 180 / 1812（未成熟排除 11） | 0.174 | 0.549 | 0.1924 / 0.2041 / -0.0016 | True（逐 replicate 诊断失败 4 次） |
+| common_shock | 180 / 1859（未成熟排除 24） | 0.055 | 0.491 | 0.1481 / 0.2307 / 0.0038 | True（逐 replicate 诊断失败 0 次） |
+| cluster_heavy_tail | 180 / 1909（未成熟排除 8） | 0.021 | 0.119 | 0.0721 / 0.1637 / -0.0026 | True（逐 replicate 诊断失败 0 次） |
+| nonuniform_density | 180 / 2096（未成熟排除 27） | -0.020 | 0.446 | 0.1754 / 0.1808 / -0.0019 | True（逐 replicate 诊断失败 0 次） |
+| circular_shift | 180 / 1812（未成熟排除 11） | 0.174 | 0.549 | 0.1924 / 0.2041 / -0.0016 | True（逐 replicate 诊断失败 0 次） |
 
 每个 replicate 都跑块 ICC 诊断；任一失败计入失败最坏界并使该机制 verdict=invalid_null_model（不得 pass）；全部落 T0 的机制标 not_run_T0（cap=0 无搜索，FPR 平凡为 0，不作 T1 验收替身）。
 
 ## 5. 总判定（synthetic_validation）
 
-- FPR：common_shock=pass、cluster_heavy_tail=invalid_null_model、nonuniform_density=invalid_null_model、circular_shift=pass；扩展：无。
+- FPR：common_shock=pass、cluster_heavy_tail=pass、nonuniform_density=pass、circular_shift=pass；扩展：无。
 - 功效（δ=0.2）：common_shock=fail。
 - 全部结果只描述；任何档位的真实数据声明仍需 G-STAT-CLAIM。
 
 ## 6. 资源与限制
 
-- 总耗时 9471s；单 replicate 均值 1.435s；峰值 RSS 见 report.json。
+- 总耗时 10426s；单 replicate 均值 1.580s；峰值 RSS 见 report.json。
 - 限制：合成世界的相关结构是预注册假设，不等于真实频道数据；T3 档（200 次）未运行；块长敏感性只报告不选择；max-t 是依赖假设下近似，不是有限样本保证。
 - 任何真实数据的 θ 声明须另行通过 G-STAT-CLAIM、最终 V 窗口与 latency=1s 敏感性；本报告结果只描述。
 
@@ -84,12 +84,11 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
 ```json
 {
  "meta": {
-  "command": "python -m quant_lab.research.nullmodel --out docs/adr/report-G3-null-model.md --n-rep 1000 --jobs 5",
-  "world": "WorldConfig(n_clusters=1600, span_days=360, n_candidates=12, pi=0.3, censor_frac=0.05)",
-  "world_summary": "约 1600 经济簇 / 4000 机会",
+  "command": "python -m quant_lab.research.nullmodel",
+  "world": "WorldConfig(mechanism='common_shock', n_clusters=1600, span_days=360, n_candidates=12, delta=0.0, pi=0.3, censor_frac=0.05, cluster_size_max=4, noise_scale=1.0, seed=0)",
   "n_candidates": 36,
-  "candidates": "12 独立特征 × 规则 {gt_q30, lt_q30, gt_q70}（T1 cap=12）",
-  "pipeline": "PipelineConfig(B=2000, block_len_days=auto(1/3/7 训练诊断))",
+  "candidates": "12 独立特征 × 规则 {gt_q30, lt_q30, gt_q70}（36 提交，T1 cap=12 → 按规范顺序前 12 个 = f00..f03 × 3 规则，含植入候选 f00:gt_q30）",
+  "pipeline": "PipelineConfig(scheme='expanding', test_span_days=60, min_train_span_days=180, embargo_days=1.0, label_maturity_days=0.0, min_train_clusters=20, search_frac=0.5, block_len_days=None, block_len_sensitivity=(1, 3, 7), B=2000, alpha=0.05, config_cap=None, seed=0, max_folds=None)",
   "B": 2000,
   "alpha": 0.05,
   "L": "auto(1/3/7 训练诊断)",
@@ -103,7 +102,7 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "n_planned": 1000,
    "n_done": 1000,
    "n_positive": 2,
-   "n_failed": 11,
+   "n_failed": 1,
    "seeds": [
     100000,
     100001,
@@ -111,22 +110,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     100003,
     100004
    ],
-   "rate": 0.0020222446916076846,
+   "rate": 0.002002002002002002,
    "ci": [
-    0.00024499710726171606,
-    0.007285773049121517
+    0.00024254375262666952,
+    0.007213033101571868
    ],
-   "worst_case_rate": 0.013,
+   "worst_case_rate": 0.003,
    "worst_case_ci": [
-    0.006939617502851475,
-    0.022127803636778486
+    0.0006190999316495711,
+    0.008742023238478303
    ],
    "tiers": {
-    "T0": 154,
-    "T1": 836,
-    "invalid": 10
+    "T0": 158,
+    "T1": 842
    },
-   "wall_s": 1329.0,
+   "wall_s": 1383.0,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -190,12 +188,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.4171508651517406
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.054733956017369176,
+       "null": 0.08334326004323793
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.5589960708759241,
+        0.5040997763236431,
+        0.4244275959833148
+       ],
+       "null": [
+        0.571275005327457,
+        0.5325821463547059,
+        0.5052412934514777
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
      "L=1": 3,
      "L=3": 3,
      "L=7": 3
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.054733956017369176,
+     "null_mean_ac1": -0.011992350420685518,
+     "fitted_cross": [
+      0.5589960708759241,
+      0.5040997763236431,
+      0.4244275959833148
+     ],
+     "null_mean_cross": [
+      0.5590458605494382,
+      0.5100828575540027,
+      0.4300975486850363
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -217,41 +249,16 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.27934265029346356,
-       0.2622787745208851
-      ],
-      "cross_bands": [
-       [
-        0.04949646959733234,
-        0.5794151467463275
-       ],
-       [
-        0.0031814095026152095,
-        0.4894471050290372
-       ],
-       [
-        -0.011893034575876524,
-        0.585433928044088
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.01,
+    "guard_fail_rate": 0.0,
     "invalid_reason": null,
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 10,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
-     "block_ac1": 3,
-     "cross_instrument": 7,
+     "block_ac1": 0,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -260,20 +267,20 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=7": 320,
-     "L=1": 279,
-     "L=3": 391
+     "L=7": 325,
+     "L=1": 281,
+     "L=3": 394
     }
    },
    "verdict": "pass",
    "n_recovered": 15,
    "label": "",
-   "n_T0": 154,
-   "n_searched": 846,
-   "searched_worst_rate": 0.015366430260047281,
+   "n_T0": 158,
+   "n_searched": 842,
+   "searched_worst_rate": 0.0035629453681710215,
    "searched_worst_ci": [
-    0.008206681613178415,
-    0.026133722662101188
+    0.0007353685559325966,
+    0.010376831619745201
    ]
   },
   {
@@ -282,7 +289,7 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "n_planned": 1000,
    "n_done": 1000,
    "n_positive": 6,
-   "n_failed": 10,
+   "n_failed": 3,
    "seeds": [
     200000,
     200001,
@@ -290,22 +297,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     200003,
     200004
    ],
-   "rate": 0.006060606060606061,
+   "rate": 0.006018054162487462,
    "ci": [
-    0.0022272866241055496,
-    0.01314440260373584
+    0.0022116266809733224,
+    0.013052442167313738
    ],
-   "worst_case_rate": 0.016,
+   "worst_case_rate": 0.009,
    "worst_case_ci": [
-    0.009172319269222079,
-    0.02585324908137346
+    0.004123395660342472,
+    0.017015783069894586
    ],
    "tiers": {
-    "T1": 968,
-    "T0": 25,
-    "invalid": 7
+    "T1": 974,
+    "T0": 26
    },
-   "wall_s": 1362.0,
+   "wall_s": 1434.3,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -369,12 +375,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.17008880674293886
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.020652651142966244,
+       "null": -0.060873708045252134
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.1392838284143582,
+        0.1769549842158233,
+        0.17954215469804016
+       ],
+       "null": [
+        0.138125740208326,
+        0.2541223825753843,
+        0.18570438482826798
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
      "L=1": 7,
      "L=3": 6,
      "L=7": 6
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.020652651142966244,
+     "null_mean_ac1": -0.004850899315197338,
+     "fitted_cross": [
+      0.1392838284143582,
+      0.1769549842158233,
+      0.17954215469804016
+     ],
+     "null_mean_cross": [
+      0.14141717868779494,
+      0.18106912945144757,
+      0.18167559855509102
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -395,42 +435,17 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.25726487100481565
       ]
      ],
-     "ok": false,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.37672407558092724,
-       0.34498703198217856
-      ],
-      "cross_bands": [
-       [
-        -0.18775594640286192,
-        0.38085216351517703
-       ],
-       [
-        -0.2562618463464149,
-        0.4047033639562726
-       ],
-       [
-        -0.2063925589995935,
-        0.3512195741090054
-       ]
-      ]
-     }
+     "ok": true,
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.007,
-    "invalid_reason": "AGGREGATE_DEPENDENCE_NOT_PRESERVED",
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 7,
+    "guard_fail_rate": 0.0,
+    "invalid_reason": null,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
      "block_ac1": 0,
-     "cross_instrument": 7,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -439,20 +454,20 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=3": 502,
-     "L=7": 448,
-     "L=1": 43
+     "L=3": 505,
+     "L=7": 451,
+     "L=1": 44
     }
    },
-   "verdict": "invalid_null_model",
+   "verdict": "pass",
    "n_recovered": 3,
    "label": "",
-   "n_T0": 25,
-   "n_searched": 975,
-   "searched_worst_rate": 0.01641025641025641,
+   "n_T0": 26,
+   "n_searched": 974,
+   "searched_worst_rate": 0.009240246406570842,
    "searched_worst_ci": [
-    0.009408219841936944,
-    0.026512739194480016
+    0.004233686467841858,
+    0.017468112745586222
    ]
   },
   {
@@ -461,7 +476,7 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "n_planned": 1000,
    "n_done": 1000,
    "n_positive": 8,
-   "n_failed": 13,
+   "n_failed": 11,
    "seeds": [
     300000,
     300001,
@@ -469,22 +484,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     300003,
     300004
    ],
-   "rate": 0.008105369807497468,
+   "rate": 0.008088978766430738,
    "ci": [
-    0.0035056305551665803,
-    0.015908049140209973
+    0.0034985285413397893,
+    0.01587600573645218
    ],
-   "worst_case_rate": 0.021,
+   "worst_case_rate": 0.019,
    "worst_case_ci": [
-    0.013045192290387683,
-    0.0319223351804155
+    0.011477036993100946,
+    0.0295124016250978
    ],
    "tiers": {
-    "T1": 724,
-    "T0": 274,
-    "invalid": 2
+    "T1": 725,
+    "T0": 275
    },
-   "wall_s": 1460.0,
+   "wall_s": 1529.0,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -548,12 +562,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.37275546064586107
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": -0.019745157286099397,
+       "null": 0.008171234273067922
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.33724128941781295,
+        0.5164425518064831,
+        0.34035073268047855
+       ],
+       "null": [
+        0.457065551745459,
+        0.6066121064242199,
+        0.4714263566398253
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
      "L=1": 9,
      "L=3": 6,
      "L=7": 8
+    },
+    "grid_dependence": {
+     "fitted_ac1": -0.019745157286099397,
+     "null_mean_ac1": -0.007054208727233611,
+     "fitted_cross": [
+      0.33724128941781295,
+      0.5164425518064831,
+      0.34035073268047855
+     ],
+     "null_mean_cross": [
+      0.3337143972242893,
+      0.5122603377169962,
+      0.34154699478303313
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -574,42 +622,17 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.34533824431764604
       ]
      ],
-     "ok": false,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.3632133628209186,
-       0.37589686529512767
-      ],
-      "cross_bands": [
-       [
-        -0.2133321223131498,
-        0.5741008657441822
-       ],
-       [
-        -0.05956102447511733,
-        0.6645020661199925
-       ],
-       [
-        -0.1947812380432713,
-        0.5970908412333429
-       ]
-      ]
-     }
+     "ok": true,
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.002,
-    "invalid_reason": "AGGREGATE_DEPENDENCE_NOT_PRESERVED",
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 2,
+    "guard_fail_rate": 0.0,
+    "invalid_reason": null,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
      "block_ac1": 0,
-     "cross_instrument": 2,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -618,20 +641,20 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=1": 784,
+     "L=1": 786,
      "L=3": 119,
      "L=7": 95
     }
    },
-   "verdict": "invalid_null_model",
+   "verdict": "pass",
    "n_recovered": 10,
    "label": "",
-   "n_T0": 274,
-   "n_searched": 726,
-   "searched_worst_rate": 0.028925619834710745,
+   "n_T0": 275,
+   "n_searched": 725,
+   "searched_worst_rate": 0.02620689655172414,
    "searched_worst_ci": [
-    0.01799268661652062,
-    0.0438772540848671
+    0.015850368253145182,
+    0.0406237526445681
    ]
   },
   {
@@ -639,8 +662,8 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "kind": "null",
    "n_planned": 1000,
    "n_done": 1000,
-   "n_positive": 3,
-   "n_failed": 4,
+   "n_positive": 4,
+   "n_failed": 0,
    "seeds": [
     400000,
     400001,
@@ -648,22 +671,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     400003,
     400004
    ],
-   "rate": 0.0030120481927710845,
+   "rate": 0.004,
    "ci": [
-    0.0006215880038488219,
-    0.008777030081934173
+    0.0010909079877259714,
+    0.010209664683929871
    ],
-   "worst_case_rate": 0.007,
+   "worst_case_rate": 0.004,
    "worst_case_ci": [
-    0.002818858759620524,
-    0.014369194978918632
+    0.0010909079877259714,
+    0.010209664683929871
    ],
    "tiers": {
-    "T1": 989,
-    "T0": 7,
-    "invalid": 4
+    "T1": 993,
+    "T0": 7
    },
-   "wall_s": 1417.4,
+   "wall_s": 1460.8,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -727,12 +749,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.28801484411463657
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.17428462643994658,
+       "null": 0.1549201041716031
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.5521197927365366,
+        0.5726065396825362,
+        0.5205994123655606
+       ],
+       "null": [
+        0.5521197927365367,
+        0.5726065396825363,
+        0.5205994123655607
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
-     "L=1": 3,
+     "L=1": 4,
      "L=3": 4,
-     "L=7": 5
+     "L=7": 6
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.17428462643994658,
+     "null_mean_ac1": 0.15436523687938802,
+     "fitted_cross": [
+      0.5521197927365366,
+      0.5726065396825362,
+      0.5205994123655606
+     ],
+     "null_mean_cross": [
+      0.552119792736549,
+      0.5726065396825232,
+      0.52059941236557
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -754,41 +810,16 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.0943634785474477,
-       0.3065531440000737
-      ],
-      "cross_bands": [
-       [
-        0.08716311587077756,
-        0.5403182470701771
-       ],
-       [
-        0.07006684589499212,
-        0.5638957073078157
-       ],
-       [
-        0.10770126140627595,
-        0.5325111297373667
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.004,
+    "guard_fail_rate": 0.0,
     "invalid_reason": null,
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 4,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
      "block_ac1": 0,
-     "cross_instrument": 4,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -797,7 +828,7 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=1": 976,
+     "L=1": 980,
      "L=7": 14,
      "L=3": 6
     }
@@ -807,10 +838,10 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "label": "",
    "n_T0": 7,
    "n_searched": 993,
-   "searched_worst_rate": 0.007049345417925478,
+   "searched_worst_rate": 0.004028197381671702,
    "searched_worst_ci": [
-    0.0028387618767474155,
-    0.014470109073624018
+    0.0010986055888245786,
+    0.010281409777837296
    ]
   },
   {
@@ -819,7 +850,7 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "n_planned": 1000,
    "n_done": 1000,
    "n_positive": 327,
-   "n_failed": 36,
+   "n_failed": 34,
    "seeds": [
     1100000,
     1100001,
@@ -827,10 +858,10 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     1100003,
     1100004
    ],
-   "rate": 0.3392116182572614,
+   "rate": 0.3385093167701863,
    "ci": [
-    0.3093361265840949,
-    0.3700731506088358
+    0.30868189908801363,
+    0.3693250230982214
    ],
    "worst_case_rate": 0.327,
    "worst_case_ci": [
@@ -838,11 +869,10 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     0.3570528972764215
    ],
    "tiers": {
-    "T0": 231,
-    "T1": 767,
-    "invalid": 2
+    "T0": 232,
+    "T1": 768
    },
-   "wall_s": 1331.4,
+   "wall_s": 1402.7,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -906,12 +936,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.288896489012328
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.002373027810941563,
+       "null": -0.005696456628217498
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.4546284333418333,
+        0.448125738712611,
+        0.36885154494765643
+       ],
+       "null": [
+        0.43295915916072947,
+        0.49545042092273023,
+        0.444559610167991
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
      "L=1": 361,
      "L=3": 348,
      "L=7": 304
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.002373027810941563,
+     "null_mean_ac1": -0.014308647211862213,
+     "fitted_cross": [
+      0.4546284333418333,
+      0.448125738712611,
+      0.36885154494765643
+     ],
+     "null_mean_cross": [
+      0.45201122707362074,
+      0.4438002196813772,
+      0.36701276603025257
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -933,41 +997,16 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.2677424562736512,
-       0.3563547044376841
-      ],
-      "cross_bands": [
-       [
-        -0.05421757720275688,
-        0.5601005680707473
-       ],
-       [
-        -0.035030323857534955,
-        0.547988070707258
-       ],
-       [
-        -0.1750076208644203,
-        0.4794438148962651
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.002,
+    "guard_fail_rate": 0.0,
     "invalid_reason": null,
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 2,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
      "block_ac1": 0,
-     "cross_instrument": 2,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -976,20 +1015,20 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=3": 469,
-     "L=7": 482,
+     "L=3": 470,
+     "L=7": 483,
      "L=1": 47
     }
    },
    "verdict": "fail",
    "n_recovered": 424,
    "label": "",
-   "n_T0": 231,
-   "n_searched": 769,
-   "searched_worst_rate": 0.42522756827048114,
+   "n_T0": 232,
+   "n_searched": 768,
+   "searched_worst_rate": 0.42578125,
    "searched_worst_ci": [
-    0.3899801772590262,
-    0.46105047618944006
+    0.39050274645009997,
+    0.46163175773831505
    ]
   },
   {
@@ -998,7 +1037,7 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "n_planned": 200,
    "n_done": 200,
    "n_positive": 96,
-   "n_failed": 9,
+   "n_failed": 8,
    "seeds": [
     4100000,
     4100001,
@@ -1006,10 +1045,10 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     4100003,
     4100004
    ],
-   "rate": 0.5026178010471204,
+   "rate": 0.5,
    "ci": [
-    0.4295375553238755,
-    0.5756155403646044
+    0.4271546933550074,
+    0.5728453066449926
    ],
    "worst_case_rate": 0.48,
    "worst_case_ci": [
@@ -1018,10 +1057,9 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    ],
    "tiers": {
     "T1": 173,
-    "T0": 26,
-    "invalid": 1
+    "T0": 27
    },
-   "wall_s": 265.3,
+   "wall_s": 307.2,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1085,12 +1123,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.23525821302111147
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.12755664694584193,
+       "null": -0.09652976332140926
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.5822643311603736,
+        0.391312253515749,
+        0.41776484020326843
+       ],
+       "null": [
+        0.6875790188499749,
+        0.5049977757522123,
+        0.4689865878142934
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
      "L=1": 100,
      "L=3": 101,
      "L=7": 94
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.12755664694584193,
+     "null_mean_ac1": -0.025040655584521912,
+     "fitted_cross": [
+      0.5822643311603736,
+      0.391312253515749,
+      0.41776484020326843
+     ],
+     "null_mean_cross": [
+      0.5781474324386024,
+      0.399396236668046,
+      0.4200018123106667
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -1112,40 +1184,15 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.36253055306107335,
-       0.24916272614606635
-      ],
-      "cross_bands": [
-       [
-        -0.003493819394146905,
-        0.6241933215374487
-       ],
-       [
-        -0.05799096158451616,
-        0.45566225399131655
-       ],
-       [
-        -0.13627160464506002,
-        0.5267893249751319
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.005,
+    "guard_fail_rate": 0.0,
     "invalid_reason": null,
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 1,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
-     "block_ac1": 1,
+     "block_ac1": 0,
      "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
@@ -1156,19 +1203,19 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     "all_T0": false,
     "chosen_block_len": {
      "L=3": 92,
-     "L=7": 76,
+     "L=7": 77,
      "L=1": 31
     }
    },
    "verdict": "fail",
    "n_recovered": 113,
    "label": "δ=0.2 noise×1.0 clusters=1600",
-   "n_T0": 26,
-   "n_searched": 174,
-   "searched_worst_rate": 0.5517241379310345,
+   "n_T0": 27,
+   "n_searched": 173,
+   "searched_worst_rate": 0.5549132947976878,
    "searched_worst_ci": [
-    0.4746168660929601,
-    0.6270390263622934
+    0.47757047067463965,
+    0.6303419974918443
    ]
   },
   {
@@ -1199,7 +1246,7 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     "T1": 190,
     "T0": 10
    },
-   "wall_s": 508.9,
+   "wall_s": 580.5,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1263,12 +1310,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.46784057158498593
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.09411843066890975,
+       "null": 0.016234887742433663
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.6467965389576839,
+        0.5969020066483463,
+        0.5896220642718007
+       ],
+       "null": [
+        0.7502308777934231,
+        0.5877433438033499,
+        0.6352493134664698
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
      "L=1": 149,
      "L=3": 147,
      "L=7": 141
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.09411843066890975,
+     "null_mean_ac1": -0.018646980133512694,
+     "fitted_cross": [
+      0.6467965389576839,
+      0.5969020066483463,
+      0.5896220642718007
+     ],
+     "null_mean_cross": [
+      0.6517742726705825,
+      0.5963489500887243,
+      0.595685379714954
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -1290,35 +1371,10 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.28129989299914904,
-       0.3197467386781529
-      ],
-      "cross_bands": [
-       [
-        0.1432708020972901,
-        0.6712883558036618
-       ],
-       [
-        0.1261430635922882,
-        0.6273644601980011
-       ],
-       [
-        0.08018787034846611,
-        0.6414123613446672
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
     "guard_fail_rate": 0.0,
     "invalid_reason": null,
-    "calibration_consistent_with_orig": true,
     "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
@@ -1354,8 +1410,8 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "kind": "power_sens",
    "n_planned": 200,
    "n_done": 200,
-   "n_positive": 112,
-   "n_failed": 16,
+   "n_positive": 115,
+   "n_failed": 9,
    "seeds": [
     4100000,
     4100001,
@@ -1363,22 +1419,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     4100003,
     4100004
    ],
-   "rate": 0.6086956521739131,
+   "rate": 0.6020942408376964,
    "ci": [
-    0.5341719115250574,
-    0.6796573889428255
+    0.528918260388816,
+    0.6720494073404496
    ],
-   "worst_case_rate": 0.56,
+   "worst_case_rate": 0.575,
    "worst_case_ci": [
-    0.48825026907469704,
-    0.6299444206609564
+    0.5033041318348098,
+    0.6444388227412944
    ],
    "tiers": {
-    "T0": 61,
-    "T1": 131,
-    "invalid": 8
+    "T0": 65,
+    "T1": 135
    },
-   "wall_s": 245.5,
+   "wall_s": 288.2,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1442,12 +1497,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.29717144277923047
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.12755664694584198,
+       "null": -0.09652976332140926
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.5822643311603736,
+        0.391312253515749,
+        0.4177648402032685
+       ],
+       "null": [
+        0.687579018849975,
+        0.5049977757522122,
+        0.46898658781429337
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
-     "L=1": 121,
-     "L=3": 118,
-     "L=7": 111
+     "L=1": 125,
+     "L=3": 122,
+     "L=7": 114
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.12755664694584198,
+     "null_mean_ac1": -0.025040655584521912,
+     "fitted_cross": [
+      0.5822643311603736,
+      0.391312253515749,
+      0.4177648402032685
+     ],
+     "null_mean_cross": [
+      0.5781474324386024,
+      0.399396236668046,
+      0.4200018123106667
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -1469,41 +1558,16 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.3625305530610733,
-       0.24916272614606635
-      ],
-      "cross_bands": [
-       [
-        -0.003493819394146877,
-        0.6241933215374486
-       ],
-       [
-        -0.05799096158451617,
-        0.45566225399131655
-       ],
-       [
-        -0.13627160464506002,
-        0.5267893249751318
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.04,
+    "guard_fail_rate": 0.0,
     "invalid_reason": null,
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 8,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
-     "block_ac1": 4,
-     "cross_instrument": 4,
+     "block_ac1": 0,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -1512,20 +1576,20 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=7": 94,
-     "L=3": 85,
+     "L=7": 100,
+     "L=3": 87,
      "L=1": 13
     }
    },
    "verdict": "fail",
-   "n_recovered": 115,
+   "n_recovered": 119,
    "label": "δ=0.2 noise×0.6 clusters=1600",
-   "n_T0": 61,
-   "n_searched": 139,
-   "searched_worst_rate": 0.8057553956834532,
+   "n_T0": 65,
+   "n_searched": 135,
+   "searched_worst_rate": 0.8518518518518519,
    "searched_worst_ci": [
-    0.7301128783642399,
-    0.8679167068723417
+    0.7805102651580698,
+    0.9070970565899277
    ]
   },
   {
@@ -1533,8 +1597,8 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "kind": "power_sens",
    "n_planned": 200,
    "n_done": 200,
-   "n_positive": 168,
-   "n_failed": 3,
+   "n_positive": 169,
+   "n_failed": 2,
    "seeds": [
     4100000,
     4100001,
@@ -1542,22 +1606,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     4100003,
     4100004
    ],
-   "rate": 0.8527918781725888,
+   "rate": 0.8535353535353535,
    "ci": [
-    0.7954740683059629,
-    0.8991430545788688
+    0.7964718365274299,
+    0.8996645032760584
    ],
-   "worst_case_rate": 0.84,
+   "worst_case_rate": 0.845,
    "worst_case_ci": [
-    0.7817009846486592,
-    0.8879125023541982
+    0.787262356784294,
+    0.8921905998959034
    ],
    "tiers": {
-    "T1": 172,
-    "T0": 27,
-    "invalid": 1
+    "T1": 173,
+    "T0": 27
    },
-   "wall_s": 515.6,
+   "wall_s": 572.9,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1621,12 +1684,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.48201158998019017
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.09411843066890979,
+       "null": 0.016234887742433677
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.646796538957684,
+        0.5969020066483463,
+        0.5896220642718009
+       ],
+       "null": [
+        0.7502308777934231,
+        0.5877433438033498,
+        0.63524931346647
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
-     "L=1": 170,
-     "L=3": 170,
-     "L=7": 168
+     "L=1": 171,
+     "L=3": 171,
+     "L=7": 169
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.09411843066890979,
+     "null_mean_ac1": -0.018646980133512688,
+     "fitted_cross": [
+      0.646796538957684,
+      0.5969020066483463,
+      0.5896220642718009
+     ],
+     "null_mean_cross": [
+      0.6517742726705825,
+      0.5963489500887245,
+      0.595685379714954
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -1648,40 +1745,15 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.28129989299914915,
-       0.31974673867815295
-      ],
-      "cross_bands": [
-       [
-        0.14327080209729,
-        0.6712883558036619
-       ],
-       [
-        0.12614306359228813,
-        0.6273644601980013
-       ],
-       [
-        0.08018787034846608,
-        0.6414123613446673
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.005,
+    "guard_fail_rate": 0.0,
     "invalid_reason": null,
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 1,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
-     "block_ac1": 1,
+     "block_ac1": 0,
      "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
@@ -1692,19 +1764,19 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     "all_T0": false,
     "chosen_block_len": {
      "L=3": 36,
-     "L=1": 122,
+     "L=1": 123,
      "L=7": 41
     }
    },
    "verdict": "insufficient",
-   "n_recovered": 166,
+   "n_recovered": 167,
    "label": "δ=0.2 noise×0.6 clusters=2400",
    "n_T0": 27,
    "n_searched": 173,
-   "searched_worst_rate": 0.9710982658959537,
+   "searched_worst_rate": 0.976878612716763,
    "searched_worst_ci": [
-    0.9338447052702621,
-    0.9905504452848978
+    0.9418607146767426,
+    0.9936650860937843
    ]
   },
   {
@@ -1712,8 +1784,8 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "kind": "power_sens",
    "n_planned": 200,
    "n_done": 200,
-   "n_positive": 90,
-   "n_failed": 21,
+   "n_positive": 94,
+   "n_failed": 8,
    "seeds": [
     4100000,
     4100001,
@@ -1721,22 +1793,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     4100003,
     4100004
    ],
-   "rate": 0.5027932960893855,
+   "rate": 0.4895833333333333,
    "ci": [
-    0.42724471595342967,
-    0.5782478472926174
+    0.41691646503371776,
+    0.5625767765045209
    ],
-   "worst_case_rate": 0.45,
+   "worst_case_rate": 0.47,
    "worst_case_ci": [
-    0.3797535899788847,
-    0.5217506890064616
+    0.39923294119711444,
+    0.541669499588525
    ],
    "tiers": {
-    "T0": 84,
-    "T1": 102,
-    "invalid": 14
+    "T0": 93,
+    "T1": 107
    },
-   "wall_s": 226.6,
+   "wall_s": 280.3,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1800,12 +1871,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.332476339489206
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.12755664694584193,
+       "null": -0.09652976332140926
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.5822643311603736,
+        0.391312253515749,
+        0.41776484020326843
+       ],
+       "null": [
+        0.6875790188499749,
+        0.5049977757522123,
+        0.4689865878142934
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
-     "L=1": 98,
-     "L=3": 96,
-     "L=7": 90
+     "L=1": 103,
+     "L=3": 101,
+     "L=7": 94
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.12755664694584193,
+     "null_mean_ac1": -0.025040655584521912,
+     "fitted_cross": [
+      0.5822643311603736,
+      0.391312253515749,
+      0.41776484020326843
+     ],
+     "null_mean_cross": [
+      0.5781474324386024,
+      0.399396236668046,
+      0.4200018123106667
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -1827,41 +1932,16 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.36253055306107335,
-       0.24916272614606635
-      ],
-      "cross_bands": [
-       [
-        -0.003493819394146905,
-        0.6241933215374487
-       ],
-       [
-        -0.05799096158451616,
-        0.45566225399131655
-       ],
-       [
-        -0.13627160464506002,
-        0.5267893249751319
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.07,
-    "invalid_reason": "GUARD_FAIL_RATE 0.070 > 0.05",
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 14,
+    "guard_fail_rate": 0.0,
+    "invalid_reason": null,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
-     "block_ac1": 8,
-     "cross_instrument": 6,
+     "block_ac1": 0,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -1870,20 +1950,20 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=7": 108,
-     "L=3": 75,
+     "L=7": 120,
+     "L=3": 77,
      "L=1": 3
     }
    },
-   "verdict": "invalid_null_model",
-   "n_recovered": 89,
+   "verdict": "fail",
+   "n_recovered": 94,
    "label": "δ=0.4 noise×1.0 clusters=1600",
-   "n_T0": 84,
-   "n_searched": 116,
-   "searched_worst_rate": 0.7758620689655172,
+   "n_T0": 93,
+   "n_searched": 107,
+   "searched_worst_rate": 0.8785046728971962,
    "searched_worst_ci": [
-    0.6890855706739115,
-    0.8480592205731532
+    0.801202872953096,
+    0.9336957874524169
    ]
   },
   {
@@ -1891,8 +1971,8 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "kind": "power_sens",
    "n_planned": 200,
    "n_done": 200,
-   "n_positive": 139,
-   "n_failed": 4,
+   "n_positive": 141,
+   "n_failed": 1,
    "seeds": [
     4100000,
     4100001,
@@ -1900,22 +1980,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     4100003,
     4100004
    ],
-   "rate": 0.7091836734693877,
+   "rate": 0.7085427135678392,
    "ci": [
-    0.6402133667923662,
-    0.7717033369898629
+    0.6401018441199158,
+    0.7706514302505901
    ],
-   "worst_case_rate": 0.695,
+   "worst_case_rate": 0.705,
    "worst_case_ci": [
-    0.6261321954662298,
-    0.7579805629764088
+    0.6365768666820897,
+    0.7672312157768753
    ],
    "tiers": {
-    "T1": 143,
-    "T0": 54,
-    "invalid": 3
+    "T1": 145,
+    "T0": 55
    },
-   "wall_s": 447.2,
+   "wall_s": 497.8,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1979,12 +2058,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.4942412936528484
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.09411843066890975,
+       "null": 0.016234887742433663
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.6467965389576839,
+        0.5969020066483463,
+        0.5896220642718007
+       ],
+       "null": [
+        0.7502308777934231,
+        0.5877433438033499,
+        0.6352493134664698
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
-     "L=1": 141,
-     "L=3": 141,
-     "L=7": 139
+     "L=1": 143,
+     "L=3": 143,
+     "L=7": 141
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.09411843066890975,
+     "null_mean_ac1": -0.018646980133512694,
+     "fitted_cross": [
+      0.6467965389576839,
+      0.5969020066483463,
+      0.5896220642718007
+     ],
+     "null_mean_cross": [
+      0.6517742726705825,
+      0.5963489500887243,
+      0.595685379714954
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -2006,41 +2119,16 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.28129989299914904,
-       0.3197467386781529
-      ],
-      "cross_bands": [
-       [
-        0.1432708020972901,
-        0.6712883558036618
-       ],
-       [
-        0.1261430635922882,
-        0.6273644601980011
-       ],
-       [
-        0.08018787034846611,
-        0.6414123613446672
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.015,
+    "guard_fail_rate": 0.0,
     "invalid_reason": null,
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 3,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
-     "block_ac1": 2,
-     "cross_instrument": 1,
+     "block_ac1": 0,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -2049,20 +2137,20 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=1": 101,
-     "L=3": 32,
-     "L=7": 64
+     "L=1": 102,
+     "L=3": 33,
+     "L=7": 65
     }
    },
    "verdict": "fail",
-   "n_recovered": 138,
+   "n_recovered": 139,
    "label": "δ=0.4 noise×1.0 clusters=2400",
-   "n_T0": 54,
-   "n_searched": 146,
-   "searched_worst_rate": 0.952054794520548,
+   "n_T0": 55,
+   "n_searched": 145,
+   "searched_worst_rate": 0.9724137931034482,
    "searched_worst_ci": [
-    0.9037108502118045,
-    0.9805089913595076
+    0.9308762019977,
+    0.9924336089215673
    ]
   },
   {
@@ -2070,8 +2158,8 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "kind": "power_sens",
    "n_planned": 200,
    "n_done": 200,
-   "n_positive": 18,
-   "n_failed": 104,
+   "n_positive": 27,
+   "n_failed": 0,
    "seeds": [
     4100000,
     4100001,
@@ -2079,22 +2167,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     4100003,
     4100004
    ],
-   "rate": 0.1875,
+   "rate": 0.135,
    "ci": [
-    0.1150779622212126,
-    0.2800462474267437
+    0.09088710175489777,
+    0.19030917268339836
    ],
-   "worst_case_rate": 0.09,
+   "worst_case_rate": 0.135,
    "worst_case_ci": [
-    0.054214254456096365,
-    0.13850820847382211
+    0.09088710175489777,
+    0.19030917268339836
    ],
    "tiers": {
-    "T0": 77,
-    "invalid": 104,
-    "T1": 19
+    "T0": 172,
+    "T1": 28
    },
-   "wall_s": 106.8,
+   "wall_s": 238.1,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2158,12 +2245,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.4739033888506034
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.12755664694584198,
+       "null": -0.09652976332140926
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.5822643311603736,
+        0.391312253515749,
+        0.4177648402032685
+       ],
+       "null": [
+        0.687579018849975,
+        0.5049977757522122,
+        0.46898658781429337
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
-     "L=1": 18,
-     "L=3": 18,
-     "L=7": 18
+     "L=1": 27,
+     "L=3": 27,
+     "L=7": 27
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.12755664694584198,
+     "null_mean_ac1": -0.025040655584521912,
+     "fitted_cross": [
+      0.5822643311603736,
+      0.391312253515749,
+      0.4177648402032685
+     ],
+     "null_mean_cross": [
+      0.5781474324386024,
+      0.399396236668046,
+      0.4200018123106667
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -2185,41 +2306,16 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.3625305530610733,
-       0.24916272614606635
-      ],
-      "cross_bands": [
-       [
-        -0.003493819394146877,
-        0.6241933215374486
-       ],
-       [
-        -0.05799096158451617,
-        0.45566225399131655
-       ],
-       [
-        -0.13627160464506002,
-        0.5267893249751318
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.52,
-    "invalid_reason": "GUARD_FAIL_RATE 0.520 > 0.05",
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 104,
+    "guard_fail_rate": 0.0,
+    "invalid_reason": null,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
-     "block_ac1": 48,
-     "cross_instrument": 80,
+     "block_ac1": 0,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -2228,19 +2324,19 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=7": 78,
-     "L=3": 18
+     "L=7": 169,
+     "L=3": 31
     }
    },
-   "verdict": "invalid_null_model",
-   "n_recovered": 15,
+   "verdict": "fail",
+   "n_recovered": 21,
    "label": "δ=0.4 noise×0.6 clusters=1600",
-   "n_T0": 77,
-   "n_searched": 123,
-   "searched_worst_rate": 0.14634146341463414,
+   "n_T0": 172,
+   "n_searched": 28,
+   "searched_worst_rate": 0.9642857142857143,
    "searched_worst_ci": [
-    0.0890976630218232,
-    0.22138825727517936
+    0.8165224024553763,
+    0.999096201244342
    ]
   },
   {
@@ -2248,8 +2344,8 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
    "kind": "power_sens",
    "n_planned": 200,
    "n_done": 200,
-   "n_positive": 40,
-   "n_failed": 85,
+   "n_positive": 50,
+   "n_failed": 1,
    "seeds": [
     4100000,
     4100001,
@@ -2257,22 +2353,21 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     4100003,
     4100004
    ],
-   "rate": 0.34782608695652173,
+   "rate": 0.25125628140703515,
    "ci": [
-    0.2614225964610953,
-    0.44227794610050253
+    0.19260374658281726,
+    0.31747866572672995
    ],
-   "worst_case_rate": 0.2,
+   "worst_case_rate": 0.25,
    "worst_case_ci": [
-    0.1468944882157588,
-    0.2622263645896002
+    0.19160716962258745,
+    0.315962833329869
    ],
    "tiers": {
-    "T1": 40,
-    "invalid": 85,
-    "T0": 75
+    "T1": 51,
+    "T0": 149
    },
-   "wall_s": 255.6,
+   "wall_s": 451.5,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2336,12 +2431,46 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
        0.5604804797098075
       ]
      },
+     "grid": {
+      "used": true,
+      "ac1": {
+       "fitted": 0.09411843066890979,
+       "null": 0.016234887742433677
+      },
+      "cross_instrument": {
+       "fitted": [
+        0.646796538957684,
+        0.5969020066483463,
+        0.5896220642718009
+       ],
+       "null": [
+        0.7502308777934231,
+        0.5877433438033498,
+        0.63524931346647
+       ]
+      }
+     },
      "ok": true
     },
     "positive_by_block_len": {
-     "L=1": 40,
-     "L=3": 40,
-     "L=7": 40
+     "L=1": 51,
+     "L=3": 51,
+     "L=7": 50
+    },
+    "grid_dependence": {
+     "fitted_ac1": 0.09411843066890979,
+     "null_mean_ac1": -0.018646980133512688,
+     "fitted_cross": [
+      0.646796538957684,
+      0.5969020066483463,
+      0.5896220642718009
+     ],
+     "null_mean_cross": [
+      0.6517742726705825,
+      0.5963489500887245,
+      0.595685379714954
+     ],
+     "ok": true
     },
     "dependence_aggregate": {
      "block_ac1": [
@@ -2363,41 +2492,16 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
       ]
      ],
      "ok": true,
-     "reference": {
-      "n_calib": 60,
-      "q": [
-       0.1,
-       99.9
-      ],
-      "ac1_band": [
-       -0.28129989299914915,
-       0.31974673867815295
-      ],
-      "cross_bands": [
-       [
-        0.14327080209729,
-        0.6712883558036619
-       ],
-       [
-        0.12614306359228813,
-        0.6273644601980013
-       ],
-       [
-        0.08018787034846608,
-        0.6414123613446673
-       ]
-      ]
-     }
+     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"
     },
-    "guard_fail_rate": 0.425,
-    "invalid_reason": "GUARD_FAIL_RATE 0.425 > 0.05",
-    "calibration_consistent_with_orig": true,
-    "n_invalid_null_model": 85,
+    "guard_fail_rate": 0.0,
+    "invalid_reason": null,
+    "n_invalid_null_model": 0,
     "guard_failures_by_check": {
      "cluster_layout": 0,
      "missing_layout": 0,
-     "block_ac1": 18,
-     "cross_instrument": 75,
+     "block_ac1": 0,
+     "cross_instrument": 0,
      "finite_diagnostics": 0,
      "icc": 0,
      "scale": 0,
@@ -2406,20 +2510,20 @@ GOAL-3 §7 的 P1 DoD「功效 ≥ 80%」按用户裁定改为「功效报告 + 
     },
     "all_T0": false,
     "chosen_block_len": {
-     "L=1": 18,
-     "L=7": 70,
-     "L=3": 27
+     "L=1": 20,
+     "L=3": 44,
+     "L=7": 136
     }
    },
-   "verdict": "invalid_null_model",
-   "n_recovered": 39,
+   "verdict": "fail",
+   "n_recovered": 47,
    "label": "δ=0.4 noise×0.6 clusters=2400",
-   "n_T0": 75,
-   "n_searched": 125,
-   "searched_worst_rate": 0.32,
+   "n_T0": 149,
+   "n_searched": 51,
+   "searched_worst_rate": 0.9803921568627451,
    "searched_worst_ci": [
-    0.23941939107066357,
-    0.40933746408180854
+    0.8955251036044829,
+    0.9995036955922623
    ]
   }
  ]
