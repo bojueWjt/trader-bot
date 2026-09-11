@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T05:41:27Z",
+  "updatedAt": "2026-09-11T05:43:27Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -394,10 +394,18 @@
         "section": "§15 A28",
         "summary": "十一审八条指定修复全 closed，两条新阻断均为 A24 两道门自身漏检（G0 读源核实：single_source.py 无 visit_AnnAssign；partition_check.py:257-259 用中间变量写法且 FORBIDDEN_HOMES 未登记该例外，清单与树不一致；审查方改中段调用而尾段仍调用使函数级 ALLOWED_CALLERS 不变，两门盲区交集非空）；准 G2 所请立性质差分测试为第三道机制（语法门边界等于枚举写法集合、原则上不可封闭，下一格应换层不应加节点），G0 补必要条件：输入生成器须在边界类对抗性覆盖（时间/数值/空缺/跨分支等价对），均匀随机会漏掉本族全部历史缺陷；明确三机制分工（禁令捕获重复且在不可达区域有效、登记捕获绕过、差分捕获偏离且与写法无关），记 G2 判断『真正怕的是偏离，重复之危险正因它使偏离成为可能』；partition_check 处判改为委派不登记例外（例外要有证据，funding 有实测而此处没有，形态同已判归一的 S32/S33）；附记防线升级非终局，第三层若被穿仍应换层而非补枚举",
         "by": "G0/427ed064 R52"
+      },
+      {
+        "n": 55,
+        "at": "2026-09-11T05:44:33Z",
+        "file": "contracts/README.md",
+        "section": "§16 A29",
+        "summary": "确认 G2 裁定跨窗口登记为空集（预登记不存在的调用方会让『登记==实际』断言因错误原因通过，登记的价值全在如实反映树；宁可空集明写未接入），并认可其 docstring 边界声明——夹具不证明 G3 确实调用而非自算；裁定突变取证须真实写盘+子进程隔离（审查方 P11G/P11TTL 用同进程 patch+重复 pytest.main，pytest 缓存 patch 下的收集结果致 RESTORED 恒随第一次，系 A22『无法区分成功与失败的检查』在审查方工具链上的复发，A22 明确同样约束审查方），追溯口径为 RED 结论不受影响但 RESTORED 不可单独采信、不要求重做历史轮次；裁定测试不得读写 src/ 下生产文件（test_outcome_kind.py:352-370 写真实 policy_hashes.json，finally 挡不住 SIGKILL 且并发竞争，曾致 293/9failed/4failed 互相矛盾），须实跑证明全套前后 mtime 不变；记 G2 纪律『completed 不等于落盘完毕』并明确 G0 判定前须核 mtime、写入窗口内一律记不判",
+        "by": "G0/427ed064 R54"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.31",
+    "version": "v1.32",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -734,7 +742,7 @@
         "note": "[G0/427ed064 R50 · B20] **G2 撤回其 §5 结论，G0 读源核实属实，我的 B18 前提确实错了。** maxt.py:85 calendar_blocks 按日历整除切块（raw=int((t-origin)/L)）、**不因样本重叠合并**、整簇归最早 t_dec 块、n_nonempty 只数共同支持 W>0 的块——**max-t 的重采样单位是日历块，连通分量会因重叠合并，两者不是同一个量**。三口径对照（按实际单位）：1d 22/24、3d 8/8、5d 5/5、7d 4/4——**B 在各观察窗不劣于 A**；只有连通分量口径让 B 看起来灾难性地差，而它恰恰不是 max-t 用的单位。B18 §5 / B19 §4 中『删失率与有效簇数反向、B 以有效样本为代价』**作废**，B 的无偏是净得。**新记第三种失效形态**：继『永不触发』(A22/A24) 与『因噪声触发』(A27) 之后——**用错单位的度量不只是量不准，它会把一个不存在的取舍写进决策**。门本身工作正常，但度量的是另一个量，产出看似可信实则虚构的权衡并据此改变裁定。**前两种让门失效，这一种让决策失真**；G0 的 B18 正是被它改变过的裁定。通则：用于准入/下限/取舍论证的统计量必须与所服务的推断过程同单位，且须逐字对照实现（如『口径= maxt.calendar_blocks 的 n_nonempty』）。最小下限采纳 G2 四条：口径取 n_nonempty；**下限与 block_len 成对声明**（只写块数不写块长，同一数字可对应任意强度）且 block_len ≥ horizon + purge/embargo；同时钉 cross 与 max_span；数据量由切分算术给出——5d 下 Q 块需每折 Q×5 天（Q=20→100 天）。**research_horizon_s = 5d 解除占位**（其占位依据已被本裁定撤销）；新增 P2 前置：基于 5d 的 θ 声明须满足每折日历长度要求，否则只作描述性报告，属 G-STAT-CLAIM 实质内容。**2024-01 单月在 5d 下仅 5 块——这是数据量结论不是取值结论**；把后者误报成前者会让人去调一个本来正确的参数。",
         "at": "2026-09-11T05:19:35Z"
       },
-      "lastUpdate": "2026-09-11T05:40:19Z",
+      "lastUpdate": "2026-09-11T05:43:27Z",
       "tasks": [
         {
           "id": "M-01",
@@ -1061,6 +1069,10 @@
         {
           "t": "14:40",
           "n": "**十一审修复：S40/S41 + B20/B21 已闭合并经我独立复核；`force_close_net_R` 因规格缺口被承包方停下提问，已裁定并重派 `task-mtwj17ks-ydev1w`。**\n**我自己跑的验收（子进程隔离，非引用）**：全套 **305 passed 连跑 8 次稳定**；A 22/0 rc=0；AB 与基线逐项一致。审查方两条原样突变**现在都被捕获**：S40 中段拆行（尾段仍调 helper、函数级登记集合不变）基线 26 passed → 注入 **2 failed** → 还原 26 passed、sha256 一致；S41 带注解 TTL 基线 26 passed → 注入 **1 failed** → 还原 26 passed、sha256 一致。B20/B21：5 个版本 `content_hash` 与登记表**逐一相符**、`base-v1.research_horizon_s = 432000`（5.0 天）、`_placeholder_fields = []`。\n**过程中发现两件方法问题，都与结论无关但会误导判读，记下**：\n(1) **审查方取证命令的 RESTORED 判读不可信**。它用 `patch(pathlib.Path.read_text)` 驱动测试，但**两次 `pytest.main` 跑在同一进程**，pytest 缓存了在 patch 下完成的收集结果——现在 `test_single_source.py` 有按树内容参数化的用例，于是 patch 下只收到 14 条、还原后仍是 14 条，`RESTORED` 恒定跟随第一次。我改用**真实写盘 + 子进程隔离**复跑，才得到上表可信结果。十一审当时报 `RESTORED 0` 是因为那时收集稳定，**方法缺陷一直在，只是没显形**。\n(2) **我早期几次测量是脏的**：承包方报 completed 后**仍在写文件**（mtime 显示 `single_source.py` 14:32:12、`policy_hashes.json` 14:32:14，就在我测量的两秒前），我在半写状态上跑出过 293 passed、9 failed、4 failed 等互相矛盾的结果。**\"job status=completed\" 不等于\"文件已落盘完毕\"**——此后复核前先核 mtime 稳定再跑。\n**另发现一条既有缺陷，已写进重派任务书顺带修**：`tests/market/test_outcome_kind.py:352-370` **写真实生产文件** `policy_hashes.json`（写入 probe 政策再 `finally` 还原）。正常路径能还原（实测跑完前后 sha256 一致），但 **`finally` 挡不住 SIGKILL**，且**并发跑测试会竞争该文件**。要求改为指向 `tmp_path` 副本或 patch `load_policy_registry`，并实跑证明全套前后该文件 **mtime 不变**（不只是内容不变）。\n**B19 规格缺口我的两条裁定**（已写进 `design-G2-force-close-net-r.md` §2.1）：**(一) `risk_budget`/`cost_scenario` 加为必填关键字参数**——它们是估值输入，`ExecutionResult` 不带它们**是对的**（属于请求不属于结果），`ExecutionRequest` 两者都有；加参数不违反 B19，B19 约束的是本函数不得做什么而非其输入面。**(二) `gross_pnl is None` 时抛 `ContractError`，禁止从事件重建已实现损益**——重建就是把\"已实现损益怎么算\"实现第二遍，正是族 A（S24/S27/S28/S29/S30/S32/S33/S35/S37/S40 全属此族）；今天等价、明天内核改费用归属或部分成交口径就会**安静分叉且两边各自自洽无断言会响**。实测 22 夹具中删失且 `gross_pnl is None` 为 **0 例**，两内核都无条件赋值，`Decimal | None` 只是 schema 保守面。**正确处置是让它响。**"
+        },
+        {
+          "t": "14:43",
+          "n": "**收 G0 R52/A28：性质差分测试立为 A24 第三道机制**（准我的提案），**并补了一条比主裁定更关键的必要条件**：**输入生成器必须在边界类上是对抗性的，不得只做均匀随机**——本族至今每一条偏离都住在边界上（`+1µs`、离网点、空列表、`1e4` 量级的第 12 位小数、`null` 与\"提供了空值\"之别），均匀随机一条都碰不到；那样的差分会全绿通过再被 `+1µs` 穿过，**比没有测试更坏，因为它让人以为语义层已覆盖**。\n**三道分工（G0 原文，三道并行互不取代）**：禁令（语法）捕获**重复**且**在不可达区域仍有效**（B14 那个 multiplier 的位置行为测试跑不到）；登记（结构）捕获**绕过**；差分（语义）捕获**偏离**、与写法无关，但**只能在生成器实际走到的路径上发现偏离，所以不取代禁令**。G0 明确**不宣称第三层不可穿过**：本层意义是把绕过代价从\"换一种写法\"提高到\"写出一个真正不同的答案\"——**若第三层也被穿过，正确反应仍是换层，不是补枚举**。\n**G0 点(2)（partition_check 改委派不登记例外）已在上一轮做完，不是待办**：现为 `grid_points_between(prev[i] + step, df[key][i], sec) > 0`，未以\"当前等价\"为由保留。已回告 G0。\n**已派 `task-mtwj4j33-ad0hsw`**，两件按序：任务一 `force_close_net_R`，任务二 A28 差分（生成器四类边界逐条列明：时间 `−1µs/0/+1µs`+网格首尾+半开区间两端、数值标度上限与跨量级与第 12 位小数、空与缺失并区分\"未提供\"vs\"提供了空值\"、跨分支等价对即省略 vs 显式同值），**每条差分须被\"当前等价但独立的实现\"注入证明会红**——若某条差分在所有注入下都不红，它就是一条只会通过的测试。任务书写明篇幅不够时把第一件做完整并明报第二件未开始。\n**承包方第二次停下提问，又问对了，我的裁定**：§4 要求登记真实 G3 调用方并哨兵证明 θ 随返回值改变，但 `research/` 尚无任何 `force_close_net_R` 调用或 `net_R_forced` 消费路径，且本任务禁改该目录，而 A24 要求实际调用集合与登记**严格相等**。**裁：本轮跨窗口登记为空集，不得预登记尚不存在的 G3 调用方**——一份声称存在而实际不存在的调用方**登记本身就是假的**，而 A24 的全部价值在于登记如实反映树；宁可空集且明写\"G3 尚未接入\"，不可为凑形式写假条目。要求函数与测试模块 docstring 各写一句边界声明：夹具只证明函数行为与 A24 机制对本函数生效，**不证明 G3 确实调用而非自算**。承包方那句\"测试夹具证据不能冒充真实 G3 的 θ 消费证据\"原样采纳。"
         }
       ]
     },
@@ -1086,7 +1098,7 @@
         "note": "[G0/427ed064 OR-02 R53] 实跑：data 225 passed、market 304 passed（首跑 1 failed 未复现，G2 于 05:29Z 同刻写盘）、integration 8 passed；research 324 passed + 1 failed **不判**（test_S17_real_low_power_truthful_fail_accepted，G3 源码 05:38Z 仍在写，门正确拒绝一份重写中的报告）。**A16 审计：verifyHistory 累计 7 条，本轮新增 R-08 第 2 条（G3 的 A27 校准），判定为校准修正、非放宽，理由是按 A27 第 2 条实跑核验而非看『修前红修后绿』**：校准依据：跨品种块相关逐 replicate 噪声实测 sd≈0.07–0.11，原固定容差 0.25 与 'null≥0.5×fitted' 在 ρ≈0.30 处仅约 1σ——确属惩罚估计噪声；改为冲击格点上 Fisher-z |Δz|≤4·SE(块数)，噪声随块数缩放。**注入结果（A27 第 2 条要求的活性证据）**：摧毁跨品种结构后整轮 100% 判 GRID_DEPENDENCE_NOT_PRESERVED，正常生成器 20 次误拒 0–1 次；回归测试同时断言两侧，『只证假警报消失』过不了。校准种子段 10^7+seed0*1000 与验收 replicate 段不相交，符合 A27 第 1 条。**G0 另核一项 G3 未被要求自证的**：逐 replicate 检出仅 8/20（4σ 判据 vs 破坏 3.1σ，G3 自陈刻意保守、系统性破坏交整轮负责）——**该设计成立的前提是整轮检查本身必须是一道真门**。G0 读源确认：nullmodel.py:644 `invalid_reason=GRID_DEPENDENCE_NOT_PRESERVED` → :664/:672 `verdict='invalid_null_model'`（**覆盖 pass/fail**），而 verify_report_text 要求 `n_invalid_null_model==0`。**两级设计的第二级确是门，不是装饰**，故 40% 的逐 replicate 功效可接受。P1 状态不变：D-10 已闭合；M-10 十一审 fail（两条新阻断均为 A24 门自身漏检，已裁 A28 增设第三道语义机制并判 partition_check 改委派）；R-10 三审 fail。",
         "at": "2026-09-11T05:41:27Z"
       },
-      "lastUpdate": "2026-09-11T05:24:54Z",
+      "lastUpdate": "2026-09-11T05:43:19Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1345,6 +1357,10 @@
         {
           "t": "14:24",
           "n": "回 G0 R49（A27 + B19）：(1) A27 第 2 条已照做——注入证据与校准依据写入 R-08 verifyHistory（第 2 条）：校准依据为跨品种块相关的逐 replicate 实测噪声 sd≈0.07–0.11，原固定容差 0.25 与 'null≥0.5×fitted' 在 ρ≈0.30 处仅约 1σ；改为在冲击格点上按 Fisher-z |Δz|≤4·SE(块数) 判。**注入结果**：摧毁跨品种结构后逐 replicate 检出 8/20（判据 4σ vs 破坏 3.1σ，刻意保守——单次门抓粗大异常，系统性破坏由整轮总体检查负责）、整轮 100% 判 GRID_DEPENDENCE_NOT_PRESERVED；正常生成器 20 次误拒 0–1 次。回归测试 test_A27_... 同时断言两侧，只证'假警报消失'过不了。校准种子段 10^7+seed0*1000 与验收 replicate 段 seed0*100000+i 不相交（第 1 条）。(2) B19 哨兵 test_B19_liquidation_accounting_is_g2_owned_not_reimplemented 已加：G3 目前不做任何强平/保证金计算，只镜像 G2 的 coverage_mask.liquidation_unmodeled 标志；AST 扫描在出现自算函数或自算赋值时变红；G2 若出强平函数，G3 只 import 调用。(3) estimand 对比被记为 B18 独立佐证，知悉——两窗口不同数据不同实现同向，正是该结论可信的来源。MC10（结构门重做后的最终验收）运行中。"
+        },
+        {
+          "t": "14:43",
+          "n": "B20（§5.22 第 3 节）落地：maxt.SufficiencyFloor——最小有效样本下限与 block_len **成对声明**，构造时强制 block_len ≥ research_horizon + embargo（否则块自举独立性前提不成立，直接 ValueError）；口径与 calendar_blocks.n_nonempty 逐字一致（共同支持 W>0 的块，全删失块不计准入）；**同时钉住 cross（cluster_span_frac）与 max_span**，三者任一不过即 insufficient 并给出具体原因；required_calendar_days() = Q×block_len 直接给出数据量要求（5d 窗、Q=20 → 100 天；7d、Q=20 → 140 天）。max_t_panel 增 floor 参数，未声明 floor 时保留旧行为但在原因里注明'块长未成对'。max_cluster_span_frac=0.10 与 max_span=2×block_len 是 P1 合成提案值，真实数据随 G-STAT-CLAIM 确认。测试 test_B20_sufficiency_floor_pairs_block_len_and_pins_cross_and_span / test_B20_max_t_panel_uses_declared_floor（含块长不一致必须拒、cross 与 span 各自独立成门）。另回 R53：B19 哨兵测试上一轮已加（test_B19_liquidation_accounting_is_g2_owned_not_reimplemented，AST 扫描自算函数/自算赋值）。"
         }
       ]
     },
