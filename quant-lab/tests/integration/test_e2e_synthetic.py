@@ -123,9 +123,60 @@ def test_seam_g3_feature_snapshot_respects_t_dec(episodes):
     assert f"validity_{h}" in snap.columns or any(c.startswith("validity_") for c in snap.columns)
 
 
-def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity):
-    """OR-04 主断言：θ 非空、账本 ≥1 行、损耗表 ≥5 层、quarantine 可读。"""
-    pytest.skip("OR-04 骨架：主断言待三窗口 P1 review 必修闭合后接通（见 G0 review note）")
+def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity, tmp_path):
+    """OR-04 主断言：θ 非空、账本 ≥1 行（本次 run 有 completed）、损耗表 ≥5 层、quarantine 可读。
+
+    真链路：G1 决策视图 → G2 build_request/simulate_batch（合成行情）→ G3 feature_snapshot + evaluate。
+    账本用临时 lockbox（research-schema §9.8 A6 / G0 R7 裁定：测试不得读写持久 data/lockbox）。
+    两臂同 policy（base-v1），θ 期望为 0 但必须非 None——"非空"是接缝断言，不是效应声明。
+    """
+    import glob
+
+    from quant_lab.data.api import loss_table
+    from quant_lab.research import synthetic
+    from quant_lab.research.ast import canonical_hash
+    from quant_lab.research.evaluator import evaluate
+    from quant_lab.research.features import feature_snapshot
+    from quant_lab.research.ledger import Ledger
+
+    # --- θ：特征快照 + 评估
+    ids = [i for i in opportunity.episode_ids if i in set(execution["episode_id"].to_list())]
+    assert ids, "机会集与执行结果无交集"
+    anchors = episodes.filter(pl.col("episode_id").is_in(ids)).select("episode_id", "instrument_id", "t_dec")
+    insts = tuple(anchors["instrument_id"].unique().sort().to_list())
+    t0 = anchors["t_dec"].min() - dt.timedelta(days=30)
+    # bars 必须覆盖全部 anchors 的 t_dec（否则 validity=False 触发 NAN_RATE 拒评，那是夹具问题不是模块问题）
+    span = anchors["t_dec"].max() - t0
+    n_bars = int(span / dt.timedelta(minutes=15)) + 200
+    bars = synthetic.fake_bars(insts, start=t0, n_bars=n_bars, interval="15m", seed=11)
+    ast = {"op": "Ref", "args": [{"field": "close"}], "params": {"lag": 1}}
+    feats = feature_snapshot([ast], anchors, bars=bars)
+    h = canonical_hash(ast)
+
+    ledger = Ledger(root=tmp_path / "lockbox", scope="or04-e2e")
+    attempt = ledger.reserve(origin="human", canonical_hash=h, params={"lag": 1}, fold_id="e2e-f0",
+                             visible_cutoff=anchors["t_dec"].max(), objective="theta",
+                             data_manifest=str(episodes["graph_version"][0]), seed=11, stage="outer",
+                             market_manifest=MANIFEST, graph_version=str(episodes["graph_version"][0]))
+    res = evaluate(ast, opportunity, features=feats, rule=lambda f: pl.Series([True] * f.height),
+                   execution=execution.filter(pl.col("episode_id").is_in(ids)), fold_id="e2e-f0",
+                   attempt_id=attempt, ledger=ledger)
+    assert res.status == "ok", f"evaluate 非 ok：status={res.status} reason={res.reason}"
+    assert res.theta is not None, "θ 为空 —— 静默为空算 fail"
+    assert res.n_evaluated > 0, "共同可评机会数为 0"
+
+    # --- 账本：本次 run 至少 1 行 completed
+    led = ledger.read()
+    assert led.height >= 1, "账本为空"
+    assert (led["status"] == "completed").sum() >= 1, f"账本无 completed 行：{led['status'].to_list()}"
+
+    # --- 损耗表 ≥5 层
+    loss = loss_table("latest")
+    assert loss.height > 0 and len(loss["layer"].unique()) >= 5, "损耗表层数 < 5"
+
+    # --- quarantine 可读
+    qs = sorted(glob.glob("data/quarantine/*.parquet"))
+    assert qs and all(len(pl.read_parquet(q).columns) > 0 for q in qs), "quarantine 不可读"
 
 
 def test_e2e_loss_table_and_quarantine_readable():
