@@ -72,7 +72,8 @@
           "enum": [
             "market",
             "limit",
-            "zone"
+            "zone",
+            "entry_batch"
           ]
         },
         "time_in_force": {
@@ -184,6 +185,17 @@
               },
               "limit_cap": {
                 "type": "number"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "market",
+                  "limit"
+                ]
+              },
+              "sizing_price": {
+                "type": "string",
+                "pattern": "^[0-9]+(\\.[0-9]+)?$"
               }
             }
           }
@@ -206,8 +218,57 @@
               "format": "date-time"
             }
           }
+        },
+        "batch_version": {
+          "type": "string",
+          "enum": [
+            "1"
+          ]
+        },
+        "estimated_stop_risk": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?$"
+        },
+        "entry_expires_at": {
+          "type": "string",
+          "format": "date-time"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "entry_batch"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "batch_version",
+              "side",
+              "tranches",
+              "stop_loss",
+              "estimated_stop_risk"
+            ],
+            "properties": {
+              "tranches": {
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "required": [
+                    "type",
+                    "sizing_price"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "execution": {
       "type": "object",

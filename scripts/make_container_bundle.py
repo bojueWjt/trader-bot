@@ -13,6 +13,11 @@ from pathlib import Path, PurePosixPath
 
 BUNDLE_FILES = (
     (
+        "entry_batch.py",
+        "packages/execution-domain/execution_domain/entry_batch.py",
+        "/app/execution_domain/entry_batch.py",
+    ),
+    (
         "intent_execution_planner.py",
         "services/nautilus-node/strategy/intent_execution_planner.py",
         "/app/strategy/intent_execution_planner.py",
@@ -249,6 +254,7 @@ REQUIRED_RUNTIME_BUNDLE_TARGETS = {
     "/app/data_client/approved_intent_client.py",
     "/app/execution_domain/__init__.py",
     "/app/execution_domain/account_execution_ledger.py",
+    "/app/execution_domain/entry_batch.py",
     "/app/execution_domain/idempotency.py",
     "/app/execution_domain/identifiers.py",
     "/app/persistence/nautilus_config.py",

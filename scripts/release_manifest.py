@@ -480,6 +480,11 @@ TRANSITION_RUNTIME_FILES = (
         "/app/execution_domain/idempotency.py",
     ),
     (
+        'entry_batch.py',
+        'packages/execution-domain/execution_domain/entry_batch.py',
+        '/app/execution_domain/entry_batch.py',
+    ),
+    (
         "identifiers.py",
         "packages/execution-domain/execution_domain/identifiers.py",
         "/app/execution_domain/identifiers.py",

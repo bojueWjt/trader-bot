@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "intent_id": "99999999-9999-4999-8999-999999999999",
+  "decision_id": "11111111-1111-4111-8111-111111111111",
+  "risk_decision_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "account_id": "acct-main",
+  "instrument_id": "BTCUSDT-PERP.BINANCE",
+  "action": "open_position",
+  "order_plan": {
+    "type": "entry_batch",
+    "side": "buy",
+    "batch_version": "1",
+    "estimated_stop_risk": "20",
+    "stop_loss": 80,
+    "tranches": [
+      {
+        "tranche_id": "e1",
+        "seq": 1,
+        "type": "market",
+        "price": 100,
+        "sizing_price": "100",
+        "quantity": "0.64"
+      },
+      {
+        "tranche_id": "e2",
+        "seq": 2,
+        "type": "limit",
+        "price": 90,
+        "sizing_price": "90",
+        "quantity": "0.711111"
+      }
+    ]
+  },
+  "risk_budget": {
+    "risk_fraction": 0.01,
+    "max_notional": 2500,
+    "max_leverage": 3
+  },
+  "target_position_id": null,
+  "valid_until": "2026-06-19T13:00:00Z",
+  "idempotency_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "approved_at": "2026-06-19T12:03:00Z"
+}

@@ -202,6 +202,10 @@ RELEASE_FILES = (
         "host/execution_domain/ownership_ledger.py",
     ),
     (
+        'packages/execution-domain/execution_domain/entry_batch.py',
+        'host/execution_domain/entry_batch.py',
+    ),
+    (
         "packages/execution-domain/execution_domain/idempotency.py",
         "host/execution_domain/idempotency.py",
     ),
@@ -349,7 +353,7 @@ REQUIRED_HERMES_RELEASE_PATHS = {
 }
 HERMES_FEEDER_SOURCE_PATH = "scripts/hermes_signal_feeder.py"
 HERMES_FEEDER_REQUIRED_SHA256 = (
-    "755883051da5f955432d431897df01c290469f78913c64dfddd254c9fe88a914"
+    "d50a97463adc8808863c5ddff9b6acd9a48aa6b703664b80119253309a7e4d4d"
 )
 REQUIRED_CONTROL_PLANE_HOST_RELEASE_PATHS = {
     "host/read_api.py",

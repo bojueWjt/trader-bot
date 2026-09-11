@@ -99,6 +99,25 @@ MANAGEMENT_CASES = (
 )
 
 
+def test_two_entries_are_one_cli_request(monkeypatch):
+    trade = _load_module('test_two_entry_trade', TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, '_call', _successful_call(calls))
+    monkeypatch.setattr(sys, 'argv', [
+        'v3_trade.py', 'open', 'ICPUSDT', 'long', '--sl', '2.58',
+        '--second-price', '2.662', '--channel', 'operator',
+        '--account', 'account-b', '--ref', 'operator-two-entry-test',
+        '--reason', 'two entries', '--no-wait',
+        '--authorized-by-type', 'user', '--authorized-by-id', 'test-user',
+        '--source-message-id', 'operator-two-entry-test',
+    ])
+    trade.main()
+    posts = [payload for method, path, payload in calls if method == 'POST']
+    assert len(posts) == 1
+    assert posts[0]['entry'] == {'type': 'market', 'second_price': 2.662}
+    assert posts[0]['client_ref'] == 'operator-two-entry-test'
+
+
 @pytest.fixture(autouse=True)
 def _clear_trading_db_path_env(monkeypatch):
     for name in (

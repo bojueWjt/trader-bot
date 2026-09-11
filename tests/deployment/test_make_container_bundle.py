@@ -21,6 +21,12 @@ SPEC.loader.exec_module(bundle)
 
 EXPECTED_REDIS_SCHEMA_EPOCH = "fenced-generation-namespace/v2"
 EXPECTED_RUNTIME_FILES = {
+    "entry_batch.py": "/app/execution_domain/entry_batch.py",
+    "account_execution_ledger.py": "/app/execution_domain/account_execution_ledger.py",
+    "execution_domain_init.py": "/app/execution_domain/__init__.py",
+    "idempotency.py": "/app/execution_domain/idempotency.py",
+    "identifiers.py": "/app/execution_domain/identifiers.py",
+    "owned_order_recovery.py": "/app/runtime/owned_order_recovery.py",
     "health_server.py": "/app/app/health_server.py",
     "run_node.py": "/app/app/run_node.py",
     "health.py": "/app/runtime/health.py",
@@ -46,6 +52,12 @@ EXPECTED_RUNTIME_FILES = {
     "redis_resp_client.py": "/app/persistence/redis_resp_client.py",
 }
 EXPECTED_BUNDLE_FILES = {
+    ("entry_batch.py", "packages/execution-domain/execution_domain/entry_batch.py", "/app/execution_domain/entry_batch.py"),
+    ("account_execution_ledger.py", "packages/execution-domain/execution_domain/account_execution_ledger.py", "/app/execution_domain/account_execution_ledger.py"),
+    ("execution_domain_init.py", "packages/execution-domain/execution_domain/__init__.py", "/app/execution_domain/__init__.py"),
+    ("idempotency.py", "packages/execution-domain/execution_domain/idempotency.py", "/app/execution_domain/idempotency.py"),
+    ("identifiers.py", "packages/execution-domain/execution_domain/identifiers.py", "/app/execution_domain/identifiers.py"),
+    ("owned_order_recovery.py", "services/nautilus-node/runtime/owned_order_recovery.py", "/app/runtime/owned_order_recovery.py"),
     (
         "intent_execution_planner.py",
         "services/nautilus-node/strategy/intent_execution_planner.py",

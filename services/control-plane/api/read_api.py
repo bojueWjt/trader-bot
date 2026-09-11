@@ -9,6 +9,7 @@ unavailable it returns 503 — never fixtures.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -44,6 +45,7 @@ for _module_path in (
 from execution_domain.control_plane import (  # noqa: E402
     portfolio_baseline_sha256,
 )
+from execution_domain.entry_batch import batch_reference_price, build_entry_batch
 from execution_domain.order_ownership import (  # noqa: E402
     client_order_id_from_row,
     row_is_robot_order,
@@ -566,6 +568,24 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
     a MARKET order with no entry price uses the live Binance mark price. Pass through if
     already in B's shape."""
     op = dict(order_plan or {})
+    if 'entry_batch' in op:
+        batch = op['entry_batch']
+        if not isinstance(batch, dict) or batch.get('version') != '1':
+            raise ValueError('unsupported entry batch version')
+        if batch.get('allocation') != 'equal_notional' or len(batch.get('tranches', [])) != 2:
+            raise ValueError('invalid entry batch')
+        out = {
+            'type': 'entry_batch', 'batch_version': '1',
+            'side': {'long': 'buy', 'short': 'sell'}.get(op.get('side'), op.get('side')),
+            'tranches': copy.deepcopy(batch['tranches']),
+            'estimated_stop_risk': batch['estimated_stop_risk'],
+            'stop_loss': op.get('stop_loss'), 'take_profits': op.get('take_profits') or [],
+        }
+        if op.get('expire_hours'):
+            out['expire_hours'] = op['expire_hours']
+        if op.get('entry_expires_at'):
+            out['entry_expires_at'] = op['entry_expires_at']
+        return _preserve_execution_order_plan_metadata(op, out)
     side = str(op.get("side") or "").lower()
     if op.get("type") and op.get("quantity") is not None and side in ("buy", "sell"):
         return op  # already B execution format
@@ -6987,6 +7007,27 @@ def _symbol_risk_ratio(symbol: str) -> float:
     return float(os.environ.get("OPERATOR_DEFAULT_RISK_RATIO", "0.01"))
 
 
+def _size_entry_batch(explicit_notional, symbol, account_id, side, first_type,
+                      first_price, second_price, stop_loss, leverage, caps,
+                      checks, risk_capital_addon):
+    if first_type == 'market':
+        first_price = _binance_mark_price(symbol)
+    try:
+        reference = batch_reference_price(first_price, second_price, stop_loss, side)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # One call applies the existing equity, risk, funds and leverage ceilings
+    # to the TOTAL notional, using the equal-notional stop-distance reference.
+    total = _size_open_order(
+        explicit_notional, symbol, account_id, side, 'limit', float(reference),
+        None, None, stop_loss, leverage, caps, checks, risk_capital_addon,
+    )
+    batch = build_entry_batch(first_type, first_price, second_price, total, stop_loss)
+    checks.append({'name': 'entry_batch_equal_notional', 'passed': True,
+                   'allocation': 'equal_notional', 'entry_batch': batch})
+    return total, batch
+
+
 def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
                      entry_price, entry_price_min, entry_price_max,
                      stop_loss, leverage, caps, checks,
@@ -7594,6 +7635,9 @@ def operator_order(
     entry_price = _op_num(entry.get("price"), "entry.price")
     entry_price_min = _op_num(entry.get("price_min"), "entry.price_min")
     entry_price_max = _op_num(entry.get("price_max"), "entry.price_max")
+    second_price = _op_num(entry.get('second_price'), 'entry.second_price')
+    if second_price is not None and (action != 'open_position' or entry_type not in ('market', 'limit')):
+        raise HTTPException(status_code=400, detail='second_price requires market/limit open_position')
     if entry_type == "limit" and entry_price is None:
         raise HTTPException(status_code=400, detail="limit entry requires entry.price")
     if entry_type == "zone" and (entry_price_min is None or entry_price_max is None):
@@ -7692,6 +7736,8 @@ def operator_order(
     canary_quantity = None
     canary_price = None
     if canary_open:
+        if second_price is not None:
+            raise HTTPException(status_code=400, detail='entry batch is not supported by canary permits')
         _canary_phase_for_account(account_id)
         if entry_type != "limit":
             raise HTTPException(
@@ -7849,6 +7895,7 @@ def operator_order(
         ]
 
     notional = None
+    entry_batch = False
     quantity = None
     canary_actual_notional = None
     protection_policy = None
@@ -7916,13 +7963,20 @@ def operator_order(
         if canary_open:
             sizing_caps = dict(caps)
             sizing_caps["_canary_explicit_notional_override"] = True
-        notional = _size_open_order(
-            explicit_notional,
-            symbol, account_id, side, entry_type,
-            entry_price, entry_price_min, entry_price_max,
-            stop_loss, leverage, sizing_caps, checks,
-            open_risk_capital_addon,
-        )
+        if second_price is not None:
+            notional, entry_batch = _size_entry_batch(
+                explicit_notional, symbol, account_id, side, entry_type,
+                entry_price, second_price, stop_loss, leverage, sizing_caps,
+                checks, open_risk_capital_addon,
+            )
+        else:
+            notional = _size_open_order(
+                explicit_notional,
+                symbol, account_id, side, entry_type,
+                entry_price, entry_price_min, entry_price_max,
+                stop_loss, leverage, sizing_caps, checks,
+                open_risk_capital_addon,
+            )
     elif action == "partial_close":
         quantity = _op_num(body.get("quantity"), "quantity", required=True)
 
@@ -7960,7 +8014,14 @@ def operator_order(
         }
         if protection_policy is not None:
             order_plan["protection_policy"] = protection_policy
-        if expire_hours and entry_type in ("limit", "zone"):
+        if entry_batch:
+            order_plan['entry_batch'] = entry_batch
+            order_plan['entry']['second_price'] = second_price
+            if expire_hours:
+                order_plan['entry_expires_at'] = (
+                    datetime.now(timezone.utc) + timedelta(hours=expire_hours)
+                ).isoformat()
+        if expire_hours and (entry_type in ("limit", "zone") or entry_batch):
             order_plan["expire_hours"] = expire_hours
         if quantity is not None:
             order_plan["quantity"] = str(quantity)

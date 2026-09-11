@@ -6,7 +6,8 @@
     "approved_trade_intent.open_stop_only.json",
     "approved_trade_intent.open_with_protection.json",
     "approved_trade_intent.zone_ladder_v11.json",
-    "approved_trade_intent.zone_wire_v10.json"
+    "approved_trade_intent.zone_wire_v10.json",
+    "approved_trade_intent.entry_batch.json"
   ],
   "execution_event_envelope": [
     "execution_event_envelope.node_heartbeat.json",

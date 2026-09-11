@@ -25,10 +25,16 @@ BUILD_ATTESTATION_SHA256 = "c" * 64
 REVIEWER_TRUST_PROOF_SHA256 = "d" * 64
 EXPECTED_SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0017_operator_query_projection_reads",
+    "db": "0018_projection_reliability",
     "redis": "fenced-generation-namespace/v2",
 }
 EXPECTED_TRANSITION_RUNTIME_FILES = {
+    "entry_batch.py": "/app/execution_domain/entry_batch.py",
+    "account_execution_ledger.py": "/app/execution_domain/account_execution_ledger.py",
+    "execution_domain_init.py": "/app/execution_domain/__init__.py",
+    "idempotency.py": "/app/execution_domain/idempotency.py",
+    "identifiers.py": "/app/execution_domain/identifiers.py",
+    "owned_order_recovery.py": "/app/runtime/owned_order_recovery.py",
     "health_server.py": "/app/app/health_server.py",
     "run_node.py": "/app/app/run_node.py",
     "health.py": "/app/runtime/health.py",

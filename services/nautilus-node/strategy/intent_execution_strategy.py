@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID, uuid4
 
 from execution_domain.account_execution_ledger import ReconciledExecutionState
+from execution_domain.entry_batch import batch_reference_price, owned_quantity, record_fill
 from execution_domain.order_ownership import (
     is_robot_client_order_id,
     object_client_order_id,
@@ -60,6 +61,7 @@ from strategy.intent_execution_planner import (
     _approved_max_notional,
     _rounded_down_positive,
     _rounded_positive,
+    _validate_position,
 )
 
 
@@ -990,7 +992,7 @@ class IntentExecutionStrategy(Strategy):
         if instrument is None:
             return False
         quantity = _round_down_positive(
-            _position_quantity(position),
+            self._protection_quantity(stash, position),
             instrument.quantity_increment,
         )
         if quantity is None:
@@ -2768,7 +2770,7 @@ class IntentExecutionStrategy(Strategy):
             existing_intent_ids=existing_intent_ids,
             reconciled_state=self._build_reconciled_state(instrument_id),
         )
-        if str(raw_order_plan.get("type", "")).lower() == "zone_ladder":
+        if str(raw_order_plan.get("type", "")).lower() in {'zone_ladder', 'entry_batch'}:
             self._handle_zone_ladder(
                 intent,
                 raw_order_plan,
@@ -2779,6 +2781,7 @@ class IntentExecutionStrategy(Strategy):
             )
             return
 
+        context = self._batch_management_context(intent, context)
         result = plan_intent_execution(intent, context)
         if isinstance(result, OrderDenied):
             self._record_denial(result)
@@ -3178,6 +3181,21 @@ class IntentExecutionStrategy(Strategy):
                 continue
             if str(other.get("entry_side")) != plan.side:
                 continue
+            if order_plan.get('type') == 'entry_batch' and not other.get('batch_entry_ids'):
+                self._record_denial(OrderDenied('entry_batch_conflicting_owner', key))
+                return False
+            if other.get('batch_entry_ids'):
+                if key == str(plan.intent_id):
+                    return True
+                if (
+                    not other.get('batch_closing')
+                    or owned_quantity(other['batch_fills']) > 0
+                    or self._batch_entries_pending(other)
+                ):
+                    self._record_denial(OrderDenied('entry_batch_active', key))
+                    return False
+                # Retain the zero-owned tombstone for late exchange fills.
+                continue
             other_authorization = _stash_protection_authorization(other)
             other_source_message_id = other_authorization.get("source_message_id")
             if other_source_message_id == source_message_id:
@@ -3212,6 +3230,13 @@ class IntentExecutionStrategy(Strategy):
             "tp_consumed": {},
             "pending_cancel_ids": (),
         }
+        if order_plan.get('type') == 'entry_batch':
+            stash = self._entry_protection_stash[str(plan.intent_id)]
+            stash['batch_entry_ids'] = [encode_client_order_id(plan.intent_id, seq) for seq in (1, 2)]
+            stash['batch_fills'] = {}
+            stash['batch_exit_ids'] = []
+            stash['entry_sequence_max'] = 2
+            stash['batch_expires_at'] = order_plan.get('entry_expires_at', '')
         return True
 
     def _queue_single_intent_submit(
@@ -3449,6 +3474,8 @@ class IntentExecutionStrategy(Strategy):
 
         if submitted:
             self._processed_intent_ids.add(str(plans[0].intent_id))
+            if order_plan.get('type') == 'entry_batch':
+                self._schedule_protection_sync(str(plans[0].intent_id))
         else:
             # Best-effort rollback of rungs already sent; KEEP the stash either way:
             # a rung that survives the cancel attempt and fills later must still get
@@ -3503,13 +3530,35 @@ class IntentExecutionStrategy(Strategy):
         else:
             return OrderDenied("unsupported_order_spec", f"side={side_raw}")
 
-        position_denial = _entry_position_denial(action, side, context.position, instrument_id)
+        is_batch = order_plan.get('type') == 'entry_batch'
+        if is_batch:
+            if order_plan.get('batch_version') != '1' or action != 'open_position':
+                return OrderDenied('unsupported_order_spec', 'entry_batch.version_or_action')
+            position_denial = _validate_position(action, side, context, instrument_id)
+        else:
+            position_denial = _entry_position_denial(action, side, context.position, instrument_id)
         if position_denial is not None:
             return position_denial
 
         tranches = order_plan.get("tranches")
-        if not isinstance(tranches, (list, tuple)) or len(tranches) != 3:
+        tranche_count = 3
+        if is_batch:
+            tranche_count = 2
+        if not isinstance(tranches, (list, tuple)) or len(tranches) != tranche_count:
             return OrderDenied("unsupported_order_spec", "zone_ladder.tranches")
+        if is_batch:
+            try:
+                first, second = tranches
+                batch_reference_price(
+                    first['sizing_price'], second['sizing_price'],
+                    order_plan['stop_loss'], 'long' if side == 'BUY' else 'short',
+                )
+                if order_plan.get('entry_expires_at'):
+                    expiry = datetime.fromisoformat(order_plan['entry_expires_at'])
+                    if expiry.tzinfo is None:
+                        raise ValueError('batch expiry requires timezone')
+            except (ValueError, TypeError, KeyError):
+                return OrderDenied('unsupported_order_spec', 'entry_batch.stop_or_expiry')
         approved_max_notional = _approved_max_notional(intent)
         if isinstance(approved_max_notional, OrderDenied):
             return approved_max_notional
@@ -3533,13 +3582,22 @@ class IntentExecutionStrategy(Strategy):
             )
             if isinstance(quantity, OrderDenied):
                 return quantity
-            price = _rounded_positive(
-                tranche.get("price"),
-                instrument.price_increment,
-                f"tranches[{index}].price",
-            )
-            if isinstance(price, OrderDenied):
-                return price
+            order_type = 'LIMIT'
+            time_in_force = 'GTC'
+            price = None
+            if is_batch:
+                kind = tranche.get('type')
+                if kind not in ('market', 'limit') or (index == 1 and kind != 'limit'):
+                    return OrderDenied('unsupported_order_spec', 'entry_batch.type')
+                if kind == 'market':
+                    order_type = 'MARKET'
+                    time_in_force = 'IOC'
+            if order_type == 'LIMIT':
+                price = _rounded_positive(
+                    tranche.get('price'), instrument.price_increment, f'tranches[{index}].price',
+                )
+                if isinstance(price, OrderDenied):
+                    return price
 
             plans.append(
                 OrderPlan(
@@ -3548,10 +3606,10 @@ class IntentExecutionStrategy(Strategy):
                     tags=tags,
                     instrument_id=instrument_id,
                     side=side,
-                    order_type="LIMIT",
+                    order_type=order_type,
                     quantity=quantity,
                     price=price,
-                    time_in_force="GTC",
+                    time_in_force=time_in_force,
                     approved_max_notional=format(
                         approved_max_notional,
                         "f",
@@ -3598,6 +3656,7 @@ class IntentExecutionStrategy(Strategy):
         self._confirm_live_canary_order_event(event)
 
     def on_order_filled(self, event: Any) -> None:
+        self._record_batch_fill(event)
         self._confirm_durable_intent_order_event(event)
         self._confirm_filled_order_event(event)
         self._confirm_live_canary_order_event(event)
@@ -3649,6 +3708,116 @@ class IntentExecutionStrategy(Strategy):
                 for key, other in tuple(self._entry_protection_stash.items()):
                     if str(other.get("instrument_id")) == instrument_id:
                         self._schedule_protection_sync(key)
+
+    def _batch_order_role(self, stash, client_order_id):
+        if not is_robot_client_order_id(client_order_id):
+            return False
+        if client_order_id in stash.get('batch_entry_ids', ()):
+            return 'entry'
+        if client_order_id in stash.get('batch_exit_ids', ()):
+            return 'exit'
+        trace = decode_client_order_id(client_order_id)
+        entry_id = decode_client_order_id(stash['batch_entry_ids'][0]).intent_id
+        if trace.intent_id == entry_id and trace.sequence >= 11:
+            return 'exit'
+        return False
+
+    def _record_batch_fill(self, event):
+        client_id = _event_client_order_id(event)
+        if not client_id:
+            return
+        for key, stash in tuple(self._entry_protection_stash.items()):
+            if not stash.get('batch_entry_ids'):
+                continue
+            role = self._batch_order_role(stash, client_id)
+            if not role:
+                continue
+            cumulative = False
+            for order in self._cache_orders_all(stash['instrument_id']):
+                if str(getattr(order, 'client_order_id', '')) == client_id:
+                    value = _positive_canary_decimal(getattr(order, 'filled_qty', None))
+                    if value is not None:
+                        cumulative = format(value, 'f')
+            if cumulative is False:
+                value = _positive_canary_decimal(getattr(event, 'filled_qty', None))
+                if value is not None:
+                    cumulative = format(value, 'f')
+            try:
+                record_fill(stash['batch_fills'], client_id, role,
+                            _event_last_qty(event), _event_text_field(event, 'trade_id') or '', cumulative)
+            except ValueError as exc:
+                self._record_denial(OrderDenied('batch_fill_evidence_invalid', f'{key}:{exc}'))
+                return
+            self._queue_entry_protection_stash_persist(
+                continuation={'kind': 'protection_schedule', 'intent_key': key},
+            )
+
+    def _protection_quantity(self, stash, position):
+        account_quantity = _position_quantity(position)
+        if not stash.get('batch_entry_ids'):
+            return account_quantity
+        # Cumulative cache evidence repairs missed/replayed notifications without
+        # adding last_qty twice. Manual order IDs never enter this calculation.
+        for order in self._cache_orders_all(stash['instrument_id']):
+            client_id = str(getattr(order, 'client_order_id', ''))
+            role = self._batch_order_role(stash, client_id)
+            quantity = _positive_canary_decimal(getattr(order, 'filled_qty', None))
+            if role and quantity is not None:
+                record_fill(stash['batch_fills'], client_id, role, None, '', format(quantity, 'f'))
+        owned = owned_quantity(stash['batch_fills'])
+        return format(min(owned, Decimal(account_quantity)), 'f')
+
+    def _batch_entries_pending(self, stash):
+        terminal = set(stash.get('batch_terminal_ids', ()))
+        for order in self._cache_orders_all(stash['instrument_id']):
+            client_id = str(getattr(order, 'client_order_id', ''))
+            if self._order_status_name(order) in self._PROTECTION_TERMINAL_STATUSES:
+                terminal.add(client_id)
+        return not set(stash['batch_entry_ids']).issubset(terminal)
+
+    def _cancel_batch_entries(self, stash):
+        expected = set(stash['batch_entry_ids'])
+        for order in self._cache_orders_all(stash['instrument_id']):
+            client_id = str(getattr(order, 'client_order_id', ''))
+            if client_id not in expected:
+                continue
+            status = self._order_status_name(order)
+            if status in self._PROTECTION_TERMINAL_STATUSES or status in self._PROTECTION_INFLIGHT_STATUSES:
+                continue
+            self._cancel_order_object(order)
+
+    def _batch_management_context(self, intent, context):
+        raw_action = getattr(intent, 'action', '')
+        action = str(getattr(raw_action, 'value', raw_action))
+        if action not in {
+            'close_position', 'partial_close', 'move_stop_loss', 'move_stop_to_entry',
+            'replace_take_profits',
+        }:
+            return context
+        authorization = _authorization_source(intent)
+        if isinstance(authorization, OrderDenied):
+            return context
+        stash = self._entry_protection_stash.get(authorization['parent_intent_id'])
+        if not stash or not stash.get('batch_entry_ids'):
+            return context
+        positions = []
+        candidates = context.positions
+        if not candidates and context.position is not None:
+            candidates = (context.position,)
+        for position in candidates:
+            expected_side = 'LONG'
+            if stash['entry_side'] == 'SELL':
+                expected_side = 'SHORT'
+            if position.side.upper() != expected_side:
+                continue
+            quantity = self._protection_quantity(stash, position)
+            positions.append(replace(position, quantity=quantity))
+        first = None
+        if positions:
+            first = positions[0]
+        orders = tuple(order for order in context.existing_orders
+                       if self._batch_order_role(stash, order.client_order_id))
+        return replace(context, position=first, positions=tuple(positions), existing_orders=orders)
 
     def _protection_role_for_order(
         self,
@@ -3925,6 +4094,16 @@ class IntentExecutionStrategy(Strategy):
             return
         if not is_robot_client_order_id(client_order_id):
             return
+        for key, stash in tuple(self._entry_protection_stash.items()):
+            if client_order_id not in stash.get('batch_entry_ids', ()):
+                continue
+            if _event_type_name(event) in {'OrderCanceled', 'OrderCancelled', 'OrderExpired', 'OrderRejected'}:
+                terminal = set(stash.get('batch_terminal_ids', ()))
+                terminal.add(client_order_id)
+                stash['batch_terminal_ids'] = sorted(terminal)
+                self._queue_entry_protection_stash_persist(
+                    continuation={'kind': 'protection_schedule', 'intent_key': key},
+                )
         instrument_id = self._pending_order_confirmations.pop(
             client_order_id,
             "",
@@ -4560,6 +4739,9 @@ class IntentExecutionStrategy(Strategy):
                 self._report_denial(intent, denial)
                 return
             self._commit_durable_entry_prepare()
+
+            if getattr(intent, 'order_plan', {}).get('type') == 'entry_batch':
+                self._schedule_protection_sync(str(intent.intent_id))
 
             live_canary = task.live_canary_execution
             if isinstance(
@@ -6059,6 +6241,29 @@ class IntentExecutionStrategy(Strategy):
             return
         sequence_start = int(stash.get("protection_sequence_start", 11))
         position = self._protection_position(instrument_id, str(stash["entry_side"]))
+        if stash.get('batch_entry_ids'):
+            quantity = self._protection_quantity(stash, position)
+            expired = False
+            if stash.get('batch_expires_at'):
+                expired = self._now() >= datetime.fromisoformat(stash['batch_expires_at'])
+            owned = owned_quantity(stash['batch_fills'])
+            if expired or (stash['batch_fills'] and owned == 0):
+                stash['batch_closing'] = True
+            if stash.get('batch_closing'):
+                self._cancel_batch_entries(stash)
+            if Decimal(quantity) == 0:
+                # Keep the ownership/SL tombstone: terminal notifications and
+                # fill notifications can race, and the other leg may be unknown.
+                if owned == 0:
+                    for order in self._live_protection_orders(instrument_id, intent_key, sequence_start):
+                        if self._order_status_name(order) not in self._PROTECTION_INFLIGHT_STATUSES:
+                            self._cancel_order_object(order)
+                self._queue_entry_protection_stash_persist()
+                if owned > 0 or self._batch_entries_pending(stash):
+                    self._schedule_protection_sync(intent_key, delay_seconds=30.0)
+                return
+            if self._batch_entries_pending(stash):
+                self._schedule_protection_sync(intent_key, delay_seconds=30.0)
         live = self._live_protection_orders(
             instrument_id,
             intent_key,
@@ -6088,7 +6293,7 @@ class IntentExecutionStrategy(Strategy):
             return
 
         quantity = _round_down_positive(
-            _position_quantity(position),
+            self._protection_quantity(stash, position),
             instrument.quantity_increment,
         )
         if quantity is None:
@@ -6722,6 +6927,9 @@ class IntentExecutionStrategy(Strategy):
         for order in self._cache_orders_all(instrument_id):
             oid = object_client_order_id(order)
             if not is_robot_client_order_id(oid):
+                continue
+            stash = self._entry_protection_stash.get(intent_key, {})
+            if stash.get('batch_entry_ids') and self._batch_order_role(stash, oid) != 'exit':
                 continue
             if oid in result:
                 continue
@@ -7816,6 +8024,10 @@ class IntentExecutionStrategy(Strategy):
                 order = order_rows[index]
                 quantity_raw = getattr(order, "quantity", None)
                 price_raw = getattr(order, "price", None)
+            if plan.order_type == 'MARKET':
+                price_raw = self._fresh_live_mark_price(plan.instrument_id)
+                if isinstance(price_raw, OrderDenied):
+                    return price_raw
             quantity = _positive_canary_decimal(quantity_raw)
             price = _positive_canary_decimal(price_raw)
             if quantity is None or price is None:
@@ -8564,6 +8776,17 @@ class IntentExecutionStrategy(Strategy):
                 )
             )
             return False
+        stash = self._entry_protection_stash.get(parent_intent_id)
+        if stash and stash.get('batch_entry_ids'):
+            stash['batch_exit_ids'] = sorted(set(stash['batch_exit_ids']) | {
+                str(order.client_order_id) for order in plan.orders
+            })
+            if plan.action == 'close_position':
+                stash['batch_closing'] = True
+            if not self._persist_entry_protection_stash():
+                return False
+            if stash.get('batch_closing'):
+                self._cancel_batch_entries(stash)
         if self._terminal_exchange_worker:
             return self._submit_management_plan_via_lane(
                 plan,
@@ -9473,6 +9696,14 @@ class IntentExecutionStrategy(Strategy):
         plan: ManagementPlan,
         stash: dict[str, Any],
     ) -> bool:
+        parent = _management_parent_intent_id(plan)
+        parent_stash = self._entry_protection_stash.get(parent)
+        if parent_stash and parent_stash.get('batch_entry_ids') and parent_stash is not stash:
+            return False
+        if stash.get('batch_entry_ids'):
+            batch_id = str(decode_client_order_id(stash['batch_entry_ids'][0]).intent_id)
+            if parent != batch_id:
+                return False
         if str(stash.get("instrument_id")) != str(plan.instrument_id):
             return False
         target_side = str(plan.target_position_side or "").upper()
