@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:23:03Z",
+  "updatedAt": "2026-09-11T03:25:25Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -234,10 +234,18 @@
         "section": "§9.10.13 A17",
         "summary": "验收门委托给模块函数须连带三义务：看板声明视同 verify 变更、必须有损坏产物的反例测试断言门失败、测试须从 taskList.json 读取 verify 串而非复写（该写法由 G3 发明，采纳推广）；补 A16 的信任边界迁移缺口。本轮 A16 审计：收紧 2 放宽 0，R-08 功效硬门移除属用户裁定的出口 A 非自行放宽",
         "by": "G0/427ed064 R27"
+      },
+      {
+        "n": 35,
+        "at": "2026-09-11T03:25:25Z",
+        "file": "contracts/execution-interface.md",
+        "section": "§5.15 B13",
+        "summary": "research_horizon_s 暂定 3 天为占位：认可 G2 排除 4h/12h（estimand 漂移/幸存偏差）与 7d（统计效率换边际删失率）的论证，但 G0 实测真实夹具 TP 距离中位 5.83%/最大 18.92% 远宽于曲线假设的 3%，括号越宽删失率越高、曲线右移，3 天很可能低估，须 P1 前在真实括号分布上重算；确立选窗原则：删失率与 t1 重叠/purge 损耗/独立机会数此消彼长，须同时看 n_evaluated 与折内有效簇数；记录同族第六七例（S22 合法假值被静默修补、partition_check or 0 把未知伪装成无缺失、S23 DF_DECIMAL 死常量）",
+        "by": "G0/427ed064 R29"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.11",
+    "version": "v1.12",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -535,10 +543,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R27] 六审终裁 fail：S01–S21 closed 12 / partial-P2 8 / open 2。两条 open 均属 G0 裁定的落实细节，非新缺陷类别：**S18 残余**——IOC 已命中规则④（主体已修），但 B10 第1条(b) 要求'未命中时抛 ContractError **并回报实际事件集合**'，无 closed 分支只抛错未回报事件集合，一般规则未完整落实。**S22 新增**——contract.py:358 `data.get('entry_fractions') or ef` 用真值性判断，把显式 `[]` 当作未提供并静默改成 (1,)，违反 B9'不等即拒、不得静默修补显式值'；审查方明确未证明可改变经济分配、不宣称哈希碰撞，克制准确。G0 归纳：这是同族第五个实例，**根因是用真值性（or/falsy）区分'未提供'与'提供了空值'**，须显式判 is None。实跑 market 242 passed。",
-        "at": "2026-09-11T03:18:25Z"
+        "note": "[G0/427ed064 R29] 六审两条 open 已修 + B11/B12 落地 + horizon 曲线提案，实跑 market+integration 259 passed。**B13 裁定**：research_horizon_s 暂定 3 天为占位。认可不取 4h/12h（删失 78.7%/48.9%，排除后 θ 只描述快速兑现子总体＝estimand 漂移）与不取 7d（3d→7d 仅多 2 样本却增 t1 重叠、purge 削训练样本）的论证。**但 G0 实测曲线基础与真实计划不符且偏差方向已知**：G2 用自编 1.5%/3% 括号，真实夹具 65 条实测 TP 距离中位 5.83%、最大 18.92%、最小 3.14%，SL 中位 1.70%——真实止盈距离约为假设两倍、尾部六倍；括号越宽触及越慢，同窗删失率只会更高，曲线右移，故 3 天很可能低估。要求 P1 前在真实括号分布上重算。确立选窗原则（采纳 G2 给 G3 的提醒）：删失率与 t1 重叠/purge 损耗/独立机会数此消彼长，须同时看 n_evaluated 与折内有效簇数，单看删失率会一路选到最长窗口赔光统计效率。同族第六七例记录：S22（合法假值被 or 兜底静默修补，G2 归纳为与 S17/S19/S20 同一枚硬币两面）、partition_check 的 or 0 把未知 expected_rows 填 0 使 missing=0 等于宣称一根不缺（or 兜底最危险形态：把不知道伪装成没问题）、S23 DF_DECIMAL 死常量。",
+        "at": "2026-09-11T03:25:25Z"
       },
-      "lastUpdate": "2026-09-11T03:22:54Z",
+      "lastUpdate": "2026-09-11T03:24:46Z",
       "tasks": [
         {
           "id": "M-01",
@@ -743,6 +751,10 @@
         {
           "t": "12:22",
           "n": "S23 已闭合（G0 常量新规则）：DF_DECIMAL 曾是死常量——execution.py 硬编码 pl.Decimal(38,12)，改契约常量不会改 schema，现改为从 DF_DECIMAL 派生；新增 tests/market/test_constants_effective.py 6 例，为 DF_DECIMAL / SETTLEMENT_QUANTUM / RATIO_QUANTUM / EXIT_LEG_ORDER / SPIKE_K / SPIKE_MIN_SAMPLES / INTERVAL_SECONDS / CENSOR_PRIORITY 各补一条\"断言其生效\"的测试，每条期望值都从常量推导，改常量而不改行为（或反之）都会立刻失败。EXIT_LEG_ORDER 那条专门验证输出按常量序而非事件时间序（E12 时间序 TP 在前、输出必须 sl 在前）。tests/market 251 passed；A 22/22；report rc=0。"
+        },
+        {
+          "t": "12:24",
+          "n": "七审已派 task-mtwe76h5-u96l6s（第 7 轮）。任务书注明与前几轮的关键差别：四审至六审期间契约在持续增补（B8/B9/B10/B11/B12），新 open 项多来自当轮新增接缝；本轮契约增补已停（G0 仅余 research_horizon_s 取值待定，属数值非机制），故新增面应已收敛——但明确要求不得因此放宽实证标准，并要它独立做同族穷举不采信 G2 自查结论。若本轮仍 fail 且新增项仍来自既有机制而非新接缝，将停止 review 轮次并请用户裁决收口方式。"
         }
       ]
     },
@@ -1476,6 +1488,12 @@
         "module": "market",
         "verdict": "issues",
         "note": "[G0/427ed064 R27] 六审终裁 fail：S01–S21 closed 12 / partial-P2 8 / open 2。两条 open 均属 G0 裁定的落实细节，非新缺陷类别：**S18 残余**——IOC 已命中规则④（主体已修），但 B10 第1条(b) 要求'未命中时抛 ContractError **并回报实际事件集合**'，无 closed 分支只抛错未回报事件集合，一般规则未完整落实。**S22 新增**——contract.py:358 `data.get('entry_fractions') or ef` 用真值性判断，把显式 `[]` 当作未提供并静默改成 (1,)，违反 B9'不等即拒、不得静默修补显式值'；审查方明确未证明可改变经济分配、不宣称哈希碰撞，克制准确。G0 归纳：这是同族第五个实例，**根因是用真值性（or/falsy）区分'未提供'与'提供了空值'**，须显式判 is None。实跑 market 242 passed。"
+      },
+      {
+        "at": "12:25",
+        "module": "market",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R29] 六审两条 open 已修 + B11/B12 落地 + horizon 曲线提案，实跑 market+integration 259 passed。**B13 裁定**：research_horizon_s 暂定 3 天为占位。认可不取 4h/12h（删失 78.7%/48.9%，排除后 θ 只描述快速兑现子总体＝estimand 漂移）与不取 7d（3d→7d 仅多 2 样本却增 t1 重叠、purge 削训练样本）的论证。**但 G0 实测曲线基础与真实计划不符且偏差方向已知**：G2 用自编 1.5%/3% 括号，真实夹具 65 条实测 TP 距离中位 5.83%、最大 18.92%、最小 3.14%，SL 中位 1.70%——真实止盈距离约为假设两倍、尾部六倍；括号越宽触及越慢，同窗删失率只会更高，曲线右移，故 3 天很可能低估。要求 P1 前在真实括号分布上重算。确立选窗原则（采纳 G2 给 G3 的提醒）：删失率与 t1 重叠/purge 损耗/独立机会数此消彼长，须同时看 n_evaluated 与折内有效簇数，单看删失率会一路选到最长窗口赔光统计效率。同族第六七例记录：S22（合法假值被 or 兜底静默修补，G2 归纳为与 S17/S19/S20 同一枚硬币两面）、partition_check 的 or 0 把未知 expected_rows 填 0 使 missing=0 等于宣称一根不缺（or 兜底最危险形态：把不知道伪装成没问题）、S23 DF_DECIMAL 死常量。"
       }
     ],
     "blockers": [
