@@ -17,6 +17,7 @@
 | 九审 | fail | closed 21 / partial-P2 8 / open 3（S29、S30、S31；G2-SC-01 已判 closed） | Codex job `task-mtwfvpbz-bg3a6m` rawOutput（原文"九审终裁：fail"，339 行、声明与终裁各唯一、无未完成标记）；`taskList.json` 看板 note |
 | 十审 | fail | closed 3（S30、A23-A/C/L）/ partial-P2 2 / open 8（S29、S31、S38、S39 阻断；S32、S33、S35、S37 同族未归一） | Codex job `task-mtwgpvh7-bifmsn` rawOutput（原文"十审终裁：fail"；文件 828 行，九审正文 339 行逐字保留，末尾四行符合 A21 追加制）；`taskList.json` 看板 note |
 | 十一审 | fail | 十审指定修复项**全部 closed**（S29/S31/S32/S33/S35/S37/S38/S39）；新增 open 2（S40、S41），两条均为 **A24 门自身的漏检**而非被守护代码的缺陷 | Codex job `task-mtwhxe7y-rc756b` rawOutput（原文"十一审终裁：fail"；文件 1678 行，十审段 487 行、九审段 339 行**经我逐行核对逐字保留**，末六行三组结尾符合 A21 追加制）；`taskList.json` 看板 note |
+| 十二审 | fail | 十一审指定项**全部 closed**（S40、S41、B19 `force_close_net_R`、A24 集合双向与使用次数、P1–P8 各模式自身可失败、A28 十条差分能失败）；新增 open 2（**S42** A28 离网生成器与三道门漏检、**S43** 消费接缝把离网行冒充完整网格）。**S43 是真实行为缺陷，不只是门的缺口。** | Codex job `task-mtwkpm4k-me6mtf` rawOutput（原文"十二审终裁：fail"；文件 9840 行，历史正文及各轮尾行完整保留，源码与测试 SHA256 及 mtime 均未变）；131 组三阶段突变取证；`taskList.json` 看板 note |
 
 ## 为什么需要这份台账（2026-09-11 的两次实际丢失）
 

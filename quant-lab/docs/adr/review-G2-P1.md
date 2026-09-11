@@ -1,3 +1,8162 @@
+## 十二审判定表
+
+审查日期：2026-09-11。独立审查方：Codex 主控。十二审判 **fail**；阻断项为 **S42、S43**。
+S29/S31/S32/S33/S35/S37/S38/S39 的指定落点以及十一审 S40/S41 原形均 closed；闭合不外推为整个家族永远无遗漏。
+本轮不修产品或测试。对源码的突变只发生在系统临时目录的真实副本中，基线、注入、还原各起新进程，并核对导入路径与内容 SHA256。
+
+### 测量时刻与完整性边界
+
+初测 14:27:06（UTC+8），kernel_a.py 最后写入为 14:25:05，间隔约121秒；当时不判状态。
+正式冻结测量 14:28:13（UTC+8），市场源码及测试最小 mtime age 为188.04秒，超过180秒稳定窗口。
+冻结时读取并存储全部 market 源码、tests/market、contracts 与既有报告的 SHA256 和 mtime_ns；测试加载环境为 Python 3.12.13 / pytest 9.1.1。
+用户转述的15:20:32基线晚于本机本轮首次测量；本报告只使用本轮亲跑结果，不以该转述作时间或状态证明。
+执行期间 contracts/README.md 由其他写入方于14:29:25追加 §18；本会话没有写它。14:35:02复核时该写入已超过180秒，确认追加内容讨论三道互补与无消费方边界。
+该文档追加没有改变本轮 market 源码、测试或冻结副本。§18 的互补原则认可；把 kernel 相邻比较也概括为全部可达输入恒等的依据不充分，具体反例见 S42。
+历史报告实际已有九审、十审、十一审三组结尾。全部原始字节保留，新章节放在前部，十二审两行追加在原文件全部内容之后；不删十一审以凑组数。
+唯一项目内写入为 docs/adr/review-G2-P1.md。临时副本、pytest 临时湖、XML、执行器和原始日志位于系统临时目录。
+未连交易所私有 API，未读 services/nautilus-node 配置，未 import services，未运行 codex --resume-last，未委派修复。
+
+### 命令约定
+
+以下命令的工作目录均为 quant-lab；全程环境 PYTHONDONTWRITEBYTECODE=1、PYTHONPATH=src。所有 pytest 执行均加 -p no:cacheprovider。
+M 表示本报告内嵌、可直接重跑的真实写盘隔离执行器；它从当前目录复制源树与测试，强制使用副本 pytest.ini 和副本 src，并断言实际导入路径。
+M 完整入口：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。指定单例时在尾部追加表内名称；下表简称仅用于阅读，完整逐例命令在突变附录。
+P12-B 最小只读行为复现：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_BEHAVIOR -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。该命令只在系统临时目录创建合成 parquet，不改任何项目文件。
+原十审 P10* 命令从历史反引号内逐字提取，shlex.split 后 subprocess.run；没有改写命令参数。执行目录为冻结副本，避免历史命令对真实树产生任何意外写入。
+历史命令中同进程 patch 的输出仅作原命令兼容性记录，不用作本轮 A29 还原证明；本轮闭合依据均另做真实写盘三阶段。
+
+| ID / 命题 | 状态 | 亲跑命令与真实输出摘要 | 阻断 P1 |
+|---|---|---|---|
+| S29 checker 离网覆盖、首缺、计数 | closed | P10N：混合组 expected=3/missing=0；纯离网 expected=3/missing=3；均 quarantined。M S29-first-gap/range-only/truncated-count 注入1/2/1个节点失败；P10G 375+25组通过。 | 否；不覆盖 S43 消费接缝 |
+| S31 B17 冲突门接线及诊断 | closed | M S31-remove-output-gate / sanitized-copy / redacted-version：每例2 failure→2 passed，baseline均2 passed。 | 否 |
+| S38 负 latency / 显式省略 | closed | P10C 原命令 exit1，ContractError latency_s必须非负；M S38-remove-domain / explicit-only 均1 failure→1 passed；A28-start各消费分支红后绿。 | 否 |
+| S39 loader 返回值控制覆盖 | closed | M S39-discard-return / inline-count / wrong-helper-value：各1 failure→1 passed；旧 P10D loader 哨兵仍 GREEN，未误用旧哨兵作闭合。 | 否；覆盖算法域见 S43 |
+| S32 build_request 第二处 latency | closed | P10I仅命中来源定义；M S32-build-start-bypass：2 failure→2 passed；A28-start-builder单独差分1 failure。 | 否 |
+| S33 vision 自写整除 | closed | M S33-wrong-expected：12 failure→12 passed；P12 funding/等价枚举14个period×9interval=126组分歧0。 | 否 |
+| S35 TTL 三解析与三到期 | closed | M S35-ttl-before/after/builder、expiry-A-timeline/A-entries/B 均红后绿；真实调用登记分别3处，TREE COUNT_EQUAL True。 | 否 |
+| S37 Kernel A 中尾网格 | closed | M S37-middle/tail 各1 failure→1 passed；P10I与TREE确认实际调用点；原形重复由禁令检出。 | 否；可达离网域另列 S42/S43 |
+| S40 拆行中段与局部调用次数 | closed | 原 P11G 的 old/new 原样写盘：baseline36 passed；注入2 failure/34 passed；还原36 passed、SHA一致。 | 否 |
+| S41 AnnAssign TTL | closed | 原 P11TTL 的追加函数原样写盘：baseline36 passed；注入1 failure/35 passed；还原36 passed、SHA一致。 | 否 |
+| A24 集合双向与使用次数 | closed | M real-caller-missing/extra、gate-missing/extra-disabled、S40 和 B19-M24 均红后绿；TREE集合差异[]、计数相等。 | 否；数量不证明返回值被消费 |
+| A24 P1–P8 各模式自身可失败 | closed | P1–P7 9种样例逐个注入、逐个停用；P8的mark与quote.mark不可达片段逐项红；附录给每节点对应例及三阶段输出。 | 否；不宣称AST完备 |
+| A24 homes/foreign 例外定位 | closed | TREE九个命中均对应登记；foreign-freeze注入1 failure；六个自身定义home与两个外窗位置逐条说明见后。 | 否；外窗语义未做 |
+| B19 只读 force_close_net_R | closed | M七种指定记账缺陷全部红；写net_R/增事件/改fill或censor或outcome、frozen破坏均红；gross缺失与无余仓分别1/2个节点失败。 | 否；G3未接入 |
+| A28 十条差分能失败 | closed | 24个针对消费方的A28注入全部 exit0→1→0；10条差分各自都有failure，不把静态门的失败计给差分。 | 否；对抗域完整性另判 S42 |
+| S34 funding 8h覆盖 | partial-P2 | P10I仍显示8h步进、60秒容差；P12-F 4h/8h各六个偏移实跑：≤60s接受，60s+1µs隔离。 | 否；保留裁定 |
+| S36 持仓截止三份 | partial-P2 | P10I和TREE仍显示A/B持仓截止表达；T相关hold/censor测试通过，AB分类未变。 | 否；不重复升级 |
+| S02/S04/S06/S07/S10/S11/S12/S13 | partial-P2 | T332 passed；AB与TREE输出四键P2_UNSUPPORTED，内容仍是settlement/深度版本/管理命令/版本湖；其他四项由历史边界承载。 | 否；不冒称全部P2已覆盖 |
+| S42 A28 离网生成器与三道门漏检 | open | M S42-kernel-truncate-open：36 passed→36 passed→36 passed；P12-B +1µs同输入由BAR_GAP变为LABEL_RIGHT_CENSORED。全T注入结果见附录。 | 是 |
+| S43 消费方离网行冒充完整网格 | open | P12-B 未突变：0s/59.999999s/120s，loader complete=True、quality=True，Kernel首缺None、公共simulate bars_ok=True；实际缺60s合法网格点。 | 是；S29同族在消费接缝复发 |
+
+### 指定验证 T / S / A / AB（原树）
+
+#### T：exit0
+`.venv-g2/bin/python -m pytest tests/market -q -p no:cacheprovider`
+```text
+........................................................................ [ 21%]
+........................................................................ [ 43%]
+........................................................................ [ 65%]
+........................................................................ [ 86%]
+............................................                             [100%]
+332 passed in 20.01s
+```
+
+#### S：exit0
+`.venv-g2/bin/python -m pytest tests/market/test_single_source.py -q -v -p no:cacheprovider`
+```text
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /Users/balen/projects/trader-bot/quant-lab
+configfile: pyproject.toml
+plugins: anyio-4.15.1
+collected 36 items
+
+tests/market/test_single_source.py ....................................  [100%]
+
+============================== 36 passed in 5.81s ==============================
+```
+
+#### A：exit0
+`.venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A`
+```text
+E01    ok  replay=True 
+E02    ok  replay=True 
+E03    ok  replay=True 
+E04a   ok  replay=True 
+E04b   ok  replay=True 
+E04c   ok  replay=True 
+E05    ok  replay=True 
+E06    ok  replay=True 
+E07    ok  replay=True 
+E08    ok  replay=True 
+E09    ok  replay=True 
+E10    ok  replay=True 
+E11    ok  replay=True 
+E12    ok  replay=True 
+E14a   ok  replay=True 
+E14b   ok  replay=True 
+E14c   ok  replay=True 
+E15a   ok  replay=True 
+E15b   ok  replay=True 
+E16    ok  replay=True 
+E17    ok  replay=True 
+E18    ok  replay=True 
+kernel=A passed=22 failed=0
+```
+
+#### AB：exit0
+`.venv-g2/bin/python -m quant_lab.market.nautilus_adapter report --reps 1`
+```text
+{"codes": {"MATCH": 12, "B_COMMAND_LATENCY": 3, "GAP_PRICE": 1, "SAME_TS_PRIORITY": 4, "GTD_BOUNDARY": 1, "B_LIQUIDITY_MODEL": 1}, "median_ms": {"A": 10.61141699028667, "B": 45.690667000599205}, "unsupported": {"S02": {"status": "unsupported", "capability": "real_settlement_time_U03_and_engine_balance", "owner": "G0 settlement contract + G2 P2"}, "S06": {"status": "unsupported", "capability": "bronze_depth_replay_and_multi_source_versions", "owner": "G1 lake + G2 P2"}, "S07": {"status": "unsupported", "capability": "management_commands_E13_C01_and_reservation_lifecycle", "owner": "G0 C01 + G2 P2"}, "S12": {"status": "unsupported", "capability": "versioned_lake_snapshot_resolution", "owner": "G1 lake + G0 identity contract"}}}
+```
+
+AB 六类合计22，未出现 UNEXPLAINED，故 UNEXPLAINED=0；单次median不作稳定性能证明。
+
+### 新必修 S42：第三道机制被明确要求的离网边界穿过
+
+落点：tests/market/test_single_source.py:test_differential_kernel_grid / test_differential_lake_grid；kernel_a.py:240 是独立突变位置。
+kernel 生成器只用 _grid(start,end) 的子集生成 bars；时间边界改变的是请求 start/end，bar.open_time 本身始终在精确网格上。
+lake 生成器同样只把区间内完整网格或其子集交给消费方；附加 start−1µs/end 位于窗口外，并不构成窗口内离网 bar 的对抗覆盖。
+partition 生成器确实覆盖了离网点，但另一个消费方的覆盖不能替代 kernel/lake 各自输入路径。
+把 KernelA._first_bar_gap 收集 opens 的生产表达改为 b.open_time.replace(microsecond=0)，不改测试、单一来源函数、调用方或次数登记。
+该注入属于族 B 的真实秒级截断，不是任意返回常数或注入异常；在当前差分生成器产生的全部 bar 上等价。
+三道门36条仍全绿；但公开 simulate 可接收的 +1µs bar 被静默向前归整，导致原本可定位的 BAR_GAP 消失。
+P12-B 使用的窗口：[2024-01-01T01:00:00Z, 01:03:00Z)，bar offsets=[0,60000001,120000000]微秒。
+未突变 FIRST_GAP=01:01:00，censor_reason=BAR_GAP，bars_ok=False；注入后 FIRST_GAP=None，censor_reason=LABEL_RIGHT_CENSORED，bars_ok=True。
+基线/注入/还原各新进程的行为输出和 SHA256逐项在下方；没有依赖同进程缓存，也没有把退出0当作还原。
+扩展副本T三阶段均330 passed、2 skipped，未检出；两条skip依赖未复制的真实湖，不计为通过或失败证据。原树T332 passed无skip。
+完整最小只读突变命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S42-kernel-truncate-open`。
+独立输入/输出命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_BEHAVIOR -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。
+这项不否认10条差分都能在其他注入上失败；本轮24个已选突变全部检出也不证明边界输入生成完整。
+它违反 A28 显式列出的离网边界义务，而非要求有限生成器证明不可穿过。修复验收须在真实消费路径上覆盖窗口内−1/0/+1µs离网类，并证明拒绝/隔离或行为偏离会红。
+按A28换层约束，应修订输入域/消费边界的保证与其差分义务，不把添加一条replace字符串禁令当作第三层已经修复。
+
+### 新必修 S43：未突变的消费接缝仍把离网 bar 计入覆盖
+
+落点：execution.py:214–218；kernel_a.py:240–254；contract.py:955 Bar 与 MarketView 输入边界。
+最小只读复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_BEHAVIOR -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。
+用 offsets=[0,59999999,120000000]微秒构造3根interval_s=60的Bar，模型验证及公共simulate均接受。窗口应有0/60/120秒三个网格点，60秒缺失，59.999999秒是离网点。
+loader 按 len(out)==grid_points_between(...) 认定完整，返回 bars_complete=True / bars_quality_ok=True。
+KernelA 的首点、相邻区间计数与尾段检查也未揭示该缺口：FIRST_GAP=None，公共simulate最终 LABEL_RIGHT_CENSORED、bars_ok=True。
+本例不使用 model_construct 绕过验证，不 monkeypatch 生产函数；输入是真实模型与临时 parquet。
+合成湖带已有测试工具生成的 check_status=ok、来源hash一致和质量列。这是消费边界的负向输入，不声称真实归档已出现该坏行，也不声称正常check_bars会把它放入silver。
+checker 已独立验证会隔离离网行，因此S29的checker落点保持closed；问题是公共显式MarketView和loader没有把同一合法网格性质落实在可观察覆盖上。
+如果设计要限定消费方只接收已验证精确网格，应让接缝拒收/保留验证证据，而不能在实际接受输入后报告bars_ok=True并以假定输入不可达解释差分空白。
+本项按同族完整性缺陷阻断P1；没有把 funding 的真实毫秒抖动纳入此规则。
+
+### 四条互补注入：结果复现，泛化范围修正
+
+| 注入 | 差分单独 | 三道合计 | 独立判读 |
+|---|---|---|---|
+| vision整秒整除 | 10 passed / exit0 | 33 passed, 3 failure / exit1 | 与三道分工一致 |
+| vision闭区间+1 | 9 passed, 1 failure / exit1 | 35 passed, 1 failure / exit1 | 与三道分工一致 |
+| partition相邻差 | 10 passed / exit0 | 34 passed, 2 failure / exit1 | 与三道分工一致 |
+| kernel相邻差 | 10 passed / exit0 | 34 passed, 2 failure / exit1 | 在已对齐输入上无分歧；kernel全部可达输入的泛化不成立 |
+
+差分单独1/4、三道合计4/4的测量结果独立复现。vision的14个period×9个interval=126组合分歧0；891个对齐相邻样本分歧0。
+partition已在相邻比较前过滤legal，故其可达相邻输入确实精确对齐；vision period_bounds提供对齐日/月边界。
+kernel没有相同的过滤/拒绝。反例 prev=01:00:59.999999、o=01:02:00、iv=60s：grid_points_between(prev+iv,o,60)>0为False，o-prev>iv为True。
+P12-B还证明该对比位于可成功构造并进入公共simulate的输入域；因此不能以对齐子集对拍证明kernel全部可达域恒等。
+三道分工声明本身诚实：禁令查重复（含不可达片段）、登记查结构绕过、差分查已生成路径上的行为偏离。S42是该声明的具体能力缺口，不是要求删除其中任何一道。
+
+### A24 登记、树级禁令与例外逐项核对
+
+TREE 实跑实际集合diff=[]、使用次数严格相等；force_close_net_R实际调用集合与次数均为空。不得登记不存在的G3调用方。
+S40原形保留尾段调用时，函数级集合依然相等；新增计数门和局部def-use禁令分别使其失败，实际2个失败节点证明两者检出。
+S41原AnnAssign追加被P7识别。Assign/AnnAssign/NamedExpr/AugAssign均有访问路径；Return、IfExp及comprehension内赋值也分别做了禁令停用突变。
+局部def-use仅支持所写的Name目标与单层Add/Sub，不宣称完整控制流、元组解包或别名分析。标准语法可被枚举遗漏这一理论事实本身不另立P1；本轮必修依据是S42可观察的三道共同漏检。
+| 模式/例外 | 本轮真实位置证据 | 判读 |
+|---|---|---|
+| P1 | derived_t_start | contract:263 latency timedelta，唯一来源自身 |
+| P2 | 空 | 无整秒截断许可；注入与禁用各红 |
+| P3 | _us | contract:237 微秒整数标尺，非秒截断 |
+| P4 | 空 | 无t_start or t_dec许可；注入与禁用各红 |
+| P5 | derived_window_s | contract:272 窗口长度定义，区别于入场时刻 |
+| P5 | entry_expiry_at | contract:285 入场到期自身定义 |
+| P6 | 空 | partition中段当前已委派；kernel中尾调用次数2 |
+| P7 | resolve_entry_ttl_s | contract:277/280 计划优先/None兜底两处读值 |
+| P8 | force_close_net_R | contract:671 mark−entry_avg_price唯一估值表达 |
+| FOREIGN P5 | research/api.py:build_inputs_from_synthetic | TREE实际命中616行；外窗窗口构造，所有权冻结 |
+| FOREIGN P3 | research/maxt.py:calendar_blocks | TREE实际命中157行；日历块长度，所有权冻结 |
+
+FOREIGN_HITS清单以位置冻结，未附真实数据语义等价证明；本轮只补足位置真实与已有用途，不为research的语义作G3验收。其行号从历史104变化到157不影响限定函数位置登记。
+funding未被错误归一。实跑4h与8h周期下0/+1/+2/+3ms/+60s均ok，+60s+1µs均quarantined，原因FUNDING_SCHEDULE_GAP。
+FORBIDDEN_HOMES没有伪造funding为bar单一来源home；当前funding表达不命中P1–P8，故未靠抑制异常来通过门。
+归档说明逐行测量89280条bar零离网、93条funding中15条偏移1/2/3ms，是已有文档证据。本轮未下载真实归档：只读审查不复建行情湖；不把合成容差测试冒称该历史统计的独立重测。
+例外导航仍可改进：funding实现注释未直接链接该归档说明；保留为非阻断文档风险。
+
+### B19 与测试证伪范围
+
+七条指定缺陷（漏平仓费、反向符号、漏funding、漏已实现、漏累计费、gross兜底0、无余仓返0）均由本轮真实写盘独立检出；不是引用修复方JSON。
+另独立破坏canonical_events、fill_status、censor_reason、outcome_kind、net_R、frozen返回体，目标测试均失败；还原SHA一致。
+gross_pnl=None仍抛ContractError，未按事件重建。无余仓在closed与unfilled两种夹具均返None。函数只是估值，不把right_censored改写成可观测平仓。
+夹具as-of/哨兵的两类突变明确区分：产品返回值/provenance突变证明产品返回被测试消费；仅测试侧fixture_consumer的未来bar选择/返回值绕过突变证明该夹具会红。
+后者发生在临时副本的测试文件中，均标明fixture-only；不冒称生产已有G3消费方，也不把夹具时钟行为升级成G3 θ验收。
+force_close_net_R函数与test_single_source模块均写明无消费方、不适用差分、G3接入时补哨兵和差分；空登记实跑为真。
+本轮未做G3接入或私有交易估值；原因是明确超出该窗口，义务随G3真实接入触发，不影响B19函数级闭合。
+B20/B21政策metadata修改回归也做了placeholder与provenance两次突变，均1 failure后还原1 passed。
+S30回归已使用tmp_path政策登记表；把它改回写生产登记表的临时副本突变会红，原树全套测试前后policy_hashes.json的SHA与mtime_ns不变。
+
+### 差分生成器的逐条范围与亲跑失败对应
+
+| 差分 | 明确覆盖的输入类别 | 单独检出的突变 | 未覆盖/限定 |
+|---|---|---|---|
+| partition_grid | 起止±1µs、月边界、空流、缺列/null、离网/缺首/缺尾 | partition-count/first/middle | checker性质不代替其他消费方 |
+| vision_count | 闰年日/月、9种interval、非bar返回None | vision-count | period接口只产生对齐端点 |
+| kernel_grid | 请求起止±1µs、首尾/内部缺失、空流 | kernel-first/middle/tail | 窗口内bar离网缺失，S42 |
+| lake_grid | 半开区间两侧、缺首尾、空流、质量缺列/null、Decimal边界 | lake-count | 窗口内bar离网缺失，S42/S43 |
+| start | 省略/None/显式同值、±1µs、零正负latency、多消费分支 | lake-start/start-validator/resolver/builder/lower-bound | 有限固定种子 |
+| window | policy/caller等价对、max界±1µs、缺省/None/显式hold | window-validator/builder/derived-validator | 有限固定种子 |
+| ttl | ABSENT/None/[]/0、plan对象/dict、期望值±1、Decimal风险数值 | ttl-before/validator/builder | 解析消费分支已实跑 |
+| expiry_timeline | TTL到期与horizon±1µs | expiry-timeline/timeline-bound | Kernel A事件路径 |
+| expiry_orders | TTL到期与horizon±1µs | expiry-orders | Kernel A真实订单deadline |
+| expiry_b | 真实B事件时钟、expiry与horizon±1µs | expiry-b/b-bound | B已知GTD优先级债务保留 |
+数值输入明确包含0.000000000001、10000.000000000001、24位整数及其第12位小数，lake实际parquet往返和risk字段断言均运行。
+空与缺失通过ABSENT对象区分None/[]/缺列；未发现将这些生成器简单合并成falsy or。
+有限生成器不保证不可穿过的声明诚实，不单独阻断P1；S42则是已明确列举边界类的实测漏检。
+
+### GOAL-2 §7 P1 DoD与保留风险
+
+M-03..M-09：本轮T/S/A/AB全部实跑通过；M-03真实网络下载未做，原因是只读范围与本轮指定本地验证边界，历史公开归档记录仅沿用既有裁定。未运行看板脚本，不声称全套看板verify重新通过。
+候选A ≥10个最小episode及不变量：22/0，22个replay=True；本地基线满足。
+A/B报告：实际出具22例分类，UNEXPLAINED=0；B定型仍在P2，不把具名差异抹成MATCH。
+Codex P1 review必修闭合：不满足。S42第三层边界漏检与S43消费网格覆盖反例均已独立实跑；十二审因此fail。
+S34/S36及八项既有partial-P2不重复升级。P2_UNSUPPORTED实际仅四键，不是十项P2状态全集；其内容与AB、实际snapshot拒绝/管理范围/归档结算边界相符。
+剩余风险：未检验真实全品种湖、真实settlement与B引擎余额；未做G3消费接线；静态门按函数+次数登记不证明数据依赖；行为差分仅覆盖实际生成的路径。
+
+### 逐条测试的杀伤对应（参数化节点，不按函数数混算）
+
+本轮检出的不同参数化节点数：77。每个节点在相同选择器的baseline与restored均通过；完整三阶段输出在后。
+没有十审前的完整测试快照可据以重建全部作者编辑史；该历史差分未做，原因是文件未提供且多为未跟踪文件。覆盖清单依据前审36节点、本轮具名新增/修改测试与现有证据脚本声明，未冒称git能证明精确编辑集合。
+| 测试节点 | 本轮注入并检出的例 |
+|---|---|
+| test_accounting_and_read_only[long-base-19.240000000000-1.320] | B19-M01 omit close_fee, B19-M02 reverse sign, B19-M04 omit funding, B19-M05 omit realized |
+| test_accounting_and_read_only[long-stress-19.051428571429-2.640] | B19-M01 omit close_fee, B19-M02 reverse sign, B19-M04 omit funding, B19-M05 omit realized |
+| test_accounting_and_read_only[short-base--15.045714285714-1.320] | B19-M01 omit close_fee, B19-M02 reverse sign, B19-M04 omit funding, B19-M05 omit realized |
+| test_accounting_and_read_only[short-stress--15.234285714286-2.640] | B19-M01 omit close_fee, B19-M02 reverse sign, B19-M04 omit funding, B19-M05 omit realized |
+| test_augmented_binary_patterns[duration-augmented] | augmented-duration-augmented |
+| test_augmented_binary_patterns[expiry-augmented] | augmented-expiry-augmented |
+| test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] | S31-remove-output-gate, S31-sanitized-copy, S31-redacted-version |
+| test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] | S31-remove-output-gate, S31-sanitized-copy, S31-redacted-version |
+| test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash | B20-placeholder, B21-provenance |
+| test_differential_expiry_b | A28-expiry-b, A28-expiry-b-bound |
+| test_differential_expiry_orders | A28-expiry-orders |
+| test_differential_expiry_timeline | A28-expiry-timeline, A28-expiry-timeline-bound |
+| test_differential_kernel_grid | A28-kernel-first, A28-kernel-middle, A28-kernel-tail |
+| test_differential_lake_grid | A28-lake-count |
+| test_differential_partition_grid | A28-partition-count, A28-partition-first, A28-partition-middle |
+| test_differential_start | A28-lake-start, A28-start-validator, A28-start-resolver, A28-start-builder |
+| test_differential_ttl | A28-ttl-before, A28-ttl-validator, A28-ttl-builder |
+| test_differential_vision_count | A28-vision-count, COMPLEMENT-vision-closed-diff, COMPLEMENT-vision-closed-all |
+| test_differential_window | A28-window-validator, A28-window-builder, A28-window-derived-validator |
+| test_fixture_asof_and_sentinel | B19-M03 future mark (fixture only), B19-M17 bypass fixture consumption, B19-M32 unclosed mark (fixture only), B19-fixture-return-value-product |
+| test_force_close_empty_registration | B19-M20 fake G3 caller registration, B19-M21 fake G3 count registration, B19-M22 new actual caller |
+| test_force_close_fixture_registration[bypass] | B19-M23 suppress registry bypass, B19-M30 inline bypass all registered uses |
+| test_force_close_fixture_registration[extra] | B19-M23 suppress registry extra |
+| test_force_close_fixture_registration[internal_bypass] | B19-M24 suppress use counts, B19-M29 inline bypass one registered use |
+| test_force_close_inline_ban_independent[mark] | B19-M25 suppress inline ban, B19-M26 allow inline outside owner |
+| test_force_close_inline_ban_independent[quote.mark] | B19-M25 suppress inline ban, B19-M26 allow inline outside owner |
+| test_foreign_hits_registry_is_exact | A24-foreign-freeze |
+| test_grid_local_definition[delta -= prev] | P6-defuse-delta -= prev |
+| test_grid_local_definition[delta = o - prev] | P6-defuse-delta = o - prev |
+| test_grid_local_definition[delta: int = o - prev] | P6-defuse-delta: int = o - prev |
+| test_grid_math_single_source_and_exact_to_microsecond | modified-existing-first-point-sentinel |
+| test_lint_gate_fails_on_injected_violation[duration-div] | A24-disable-pattern-duration-div |
+| test_lint_gate_fails_on_injected_violation[expiry-add] | A24-disable-pattern-expiry-add |
+| test_lint_gate_fails_on_injected_violation[int-seconds] | A24-disable-pattern-int-seconds |
+| test_lint_gate_fails_on_injected_violation[latency] | A24-disable-pattern-latency |
+| test_lint_gate_fails_on_injected_violation[middle-grid] | A24-disable-pattern-middle-grid |
+| test_lint_gate_fails_on_injected_violation[start-or] | A24-disable-pattern-start-or |
+| test_lint_gate_fails_on_injected_violation[tail-grid] | A24-disable-pattern-tail-grid |
+| test_lint_gate_fails_on_injected_violation[ttl-branches] | A24-disable-pattern-ttl-branches |
+| test_lint_gate_fails_on_injected_violation[ttl-expression] | A24-disable-pattern-ttl-expression |
+| test_missing_kernel_value_is_error[entry] | B19-M16 missing entry silently supplied |
+| test_missing_kernel_value_is_error[gross] | B19-M15 rebuild missing gross, B19-gross-zero |
+| test_no_inline_reexpression_of_single_sources_anywhere_in_src | A24-real-inline-latency, A24-real-inline-int-seconds, A24-real-inline-duration-div, A24-real-inline-start-or |
+| test_no_residual_is_none[closed] | B19-M14 zero instead of None |
+| test_no_residual_is_none[unfilled] | B19-M14 zero instead of None |
+| test_registry_gate_fails_when_mutated[extra] | A24-gate-extra-disabled |
+| test_registry_gate_fails_when_mutated[missing] | A24-gate-missing-disabled |
+| test_right_censor_routes_remain_reachable[hold_end] | B19-M18 disable hold censor |
+| test_right_censor_routes_remain_reachable[horizon] | B19-M19 change horizon censor |
+| test_s29_off_grid_never_covers_calendar[all-off-grid] | S29-range-only |
+| test_s29_off_grid_never_covers_calendar[mixed-off-grid] | S29-range-only |
+| test_s29_subsecond_calendar_start_has_no_false_first_gap | S29-first-gap |
+| test_s29_subsecond_end_includes_last_grid_point | S29-truncated-count |
+| test_s30_window_lower_bound_uses_derived_start_not_t_dec | B19-M27 S30 original missing latency, B19-M28 S30 real file write (isolated replica) |
+| test_s33_aligned_calendar_equivalence[2023-02-28-15m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2023-02-28-1m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-01-01-1-15m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-01-01-1-1m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-01-31-15m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-01-31-1m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-02-29-1-15m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-02-29-1-1m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-02-29-15m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-02-29-1m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-12-31-15m] | S33-wrong-expected |
+| test_s33_aligned_calendar_equivalence[2024-12-31-1m] | S33-wrong-expected |
+| test_s38_policy_rejects_negative_latency | S38-remove-domain |
+| test_s38_resolved_start_checked_for_both_spellings | S38-explicit-only |
+| test_s39_loader_grid_return_controls_coverage | S39-discard-return, S39-inline-count, S39-wrong-helper-value |
+| test_single_source_call_sites_match_registry | A24-real-caller-missing, A24-real-caller-extra, S32-build-start-bypass, S35-ttl-before |
+| test_single_source_use_counts_match_registry | S40-middle-split-bypass, COMPLEMENT-vision-int-all, COMPLEMENT-partition-adjacent-all, COMPLEMENT-kernel-adjacent-all |
+| test_ttl_standard_nodes[annotated] | P7-disable-annotated |
+| test_ttl_standard_nodes[augmented] | P7-disable-augmented |
+| test_ttl_standard_nodes[comprehension] | P7-disable-comprehension |
+| test_ttl_standard_nodes[named] | P7-disable-named |
+| test_ttl_standard_nodes[return-field] | P7-disable-return-field |
+| test_ttl_standard_nodes[return] | P7-disable-return |
+
+### 原十审命令：原样复跑真实输出
+
+#### P10M包含 / exit1
+`.venv-g2/bin/python -c 'exec("import ast,inspect,textwrap\nfrom unittest.mock import patch\nfrom tests.market import test_outcome_kind as t\nfrom tests.market import test_constants_effective as k\nfrom quant_lab.market import contract as c,execution as x,partition_check as pc,kernel_a as ka\ndef outcome(fn):\n    try:\n        fn()\n        return \"GREEN\"\n    except BaseException as e:\n        return \"RED \"+type(e).__name__+\" \"+str(e)[:160]\ndef mutant(fn,old,new):\n    src=textwrap.dedent(inspect.getsource(fn))\n    assert src.count(old)==1,(fn.__name__,src.count(old))\n    ns=dict(fn.__globals__);exec(compile(src.replace(old,new),\"<memory-mutant>\",\"exec\"),ns)\n    return ns[fn.__name__]\nold=t.test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain\nnew=t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes\nfor label,replacement in [(\"delete\",\"pass\")]:\n    fn=mutant(x.simulate_batch,\"check_policy_hash_consistency(df)\",replacement)\n    with patch.object(x,\"simulate_batch\",fn):\n        print(\"B17\",label,\"legacy\",outcome(old),\"new\",outcome(new))\nprint(\"B17 restored\",outcome(old),outcome(new))\nfn=mutant(pc.check_bars,\"first_gap = bool(df.height and grid_points_between(cal_from, df[key][0], sec) > 0)\",\"first_gap = bool(df.height and df[key][0] > cal_from)\")\nwith patch.object(pc,\"check_bars\",fn):\n    print(\"S29 old-first-gap\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\nfn=mutant(pc.check_bars,\"exp_n = grid_points_between(cal_from, cal_to, sec)\",\"exp_n = int((cal_to-cal_from).total_seconds() // sec)\")\nwith patch.object(pc,\"check_bars\",fn):\n    print(\"S29 old-count\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\nprint(\"S29 restored\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\n# bypass a delegation but preserve behavior through a captured binding\nfor label,fn,oldexpr,newexpr,owner,attr,test in [\n(\"A-grid\",ka.KernelA._first_bar_gap,\"first_grid_point(self.t_start, bars[0].interval_s)\",\"_captured(self.t_start, bars[0].interval_s)\",ka.KernelA,\"_first_bar_gap\",k.test_grid_math_single_source_and_exact_to_microsecond),\n(\"loader-grid\",x.load_market_from_lake,'"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"','"'"'_captured(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"',x,\"load_market_from_lake\",k.test_grid_math_single_source_and_exact_to_microsecond)]:\n    m=mutant(fn,oldexpr,newexpr)\n    m.__globals__[\"_captured\"]=c.first_grid_point if label==\"A-grid\" else c.grid_points_between\n    with patch.object(owner,attr,m):\n        print(label,\"bypass\",outcome(test))\n    print(label,\"restored\",outcome(test))\n")'`
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 17, in <module>
+AttributeError: module 'tests.market.test_outcome_kind' has no attribute 'test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain'
+```
+
+#### P10N包含 / exit0
+`.venv-g2/bin/python -c 'exec("import datetime as dt,inspect,textwrap\nfrom unittest.mock import patch\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nfrom tests.market import test_outcome_kind as t,test_constants_effective as k\nfrom quant_lab.market import contract as c,execution as x\nimport polars as pl\nfor offsets in [(0,1,60000000,120000000),(1,60000001,120000001)]:\n    df=bars(len(offsets)).with_columns(pl.Series(\"open_time\",[JAN+dt.timedelta(microseconds=u) for u in offsets]),pl.Series(\"close_time\",[JAN+dt.timedelta(microseconds=u,seconds=60) for u in offsets]))\n    out,qs,r=run(df,rules(JAN,JAN+dt.timedelta(seconds=180)))\n    print(\"offgrid\",offsets,\"expected\",r.expected_rows,\"missing\",r.missing,\"gaps\",r.gaps,\"flags\",out[\"gap_flag\"].to_list(),\"status\",r.status)\ndef outcome(fn):\n    try:\n        fn();return \"GREEN\"\n    except BaseException as e:\n        return \"RED \"+type(e).__name__+\" \"+str(e)[:140]\nsrc=inspect.getsource(x.simulate_batch).replace(\"check_policy_hash_consistency(df)\",'"'"'check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))'"'"')\nns=dict(x.__dict__);exec(compile(src,\"<memory-mutant>\",\"exec\"),ns)\nns[\"check_policy_hash_consistency\"]=lambda df:x.check_policy_hash_consistency(df)\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    print(\"B17 sanitized dynamic\",outcome(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n# rebuild the pydantic model in memory so validator substitutions actually execute\nsrc=inspect.getsource(c.ExecutionRequest).replace(\"if self.horizon_end <= exp_t_start:\",\"if self.horizon_end <= (self.t_start or self.t_dec):\")\nns=dict(c.__dict__);exec(compile(src,\"<memory-model-mutant>\",\"exec\"),ns)\nclass Registry:\n    def __init__(self): self.s=c.POLICY_HASH_REGISTRY.read_text()\n    def exists(self): return True\n    def read_text(self,**kw): return self.s\n    def write_text(self,s,**kw): self.s=s;return len(s)\nwith patch.object(c,\"POLICY_HASH_REGISTRY\",Registry()):\n    with patch.object(c,\"ExecutionRequest\",ns[\"ExecutionRequest\"]):\n        print(\"S30 old lower bound\",outcome(t.test_s30_window_lower_bound_uses_derived_start_not_t_dec))\n    print(\"S30 restored\",outcome(t.test_s30_window_lower_bound_uses_derived_start_not_t_dec))\nsrc=inspect.getsource(c.ExecutionRequest).replace(\"exp_t_start = derived_t_start(self.t_dec, pol)\",\"exp_t_start = self.t_dec + dt.timedelta(seconds=pol.latency_s)\")\nns=dict(c.__dict__);exec(compile(src,\"<memory-model-mutant>\",\"exec\"),ns)\nwith patch.object(c,\"ExecutionRequest\",ns[\"ExecutionRequest\"]):\n    print(\"start delegate bypass\",outcome(k.test_t_start_derivation_single_source))\nprint(\"start restored\",outcome(k.test_t_start_derivation_single_source))\n")'`
+```text
+offgrid (0, 1, 60000000, 120000000) expected 3 missing 0 gaps [] flags [False, False, False] status quarantined
+offgrid (1, 60000001, 120000001) expected 3 missing 3 gaps [{'from': '2024-01-01T00:00:00+00:00', 'to': '2024-01-01T00:03:00+00:00', 'n': 3}] flags [] status quarantined
+B17 sanitized dynamic RED TypeError test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes() missing 2 required positional arguments: 'monkeypatch' and 'later_versi
+S30 old lower bound RED TypeError test_s30_window_lower_bound_uses_derived_start_not_t_dec() missing 2 required positional arguments: 'tmp_path' and 'monkeypatch'
+S30 restored RED TypeError test_s30_window_lower_bound_uses_derived_start_not_t_dec() missing 2 required positional arguments: 'tmp_path' and 'monkeypatch'
+start delegate bypass RED Failed DID NOT RAISE ContractError
+start restored GREEN
+```
+
+#### P10C复现 / exit1
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom quant_lab.market import contract as c\nq,m=e03()\nfor latency in (-1,0,60):\n    p=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"audit-latency\",\"latency_s\":latency})\n    reg={**c.load_policy_registry(),p.version:p.content_hash}\n    with patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value=reg):\n        for explicit in (False,True):\n            try:\n                d={**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":q.t_dec+dt.timedelta(seconds=latency) if explicit else None}\n                r=c.ExecutionRequest.model_validate(d)\n                print(\"latency\",latency,\"explicit\",explicit,\"ACCEPT\",r.resolved_t_start(p))\n            except Exception as e: print(\"latency\",latency,\"explicit\",explicit,\"REJECT\",type(e).__name__,str(e))\n        for us in (-1,0,1):\n            try:\n                r=c.build_request(q.model_dump(),policy_version=p.version,policy_hash=p.content_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest,horizon_end=q.t_dec+dt.timedelta(seconds=latency,microseconds=us))\n                print(\"build caller\",latency,us,\"ACCEPT\")\n            except Exception as e: print(\"build caller\",latency,us,\"REJECT\",type(e).__name__)\nwith patch.object(c,\"derived_t_start\",side_effect=lambda t,p:t+dt.timedelta(seconds=7)):\n    try:\n        c.build_request(q.model_dump(),policy_version=q.policy_version,policy_hash=q.policy_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest)\n        print(\"build sentinel ACCEPT\")\n    except Exception as e: print(\"build sentinel\",type(e).__name__,str(e))\n")'`
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 7, in <module>
+  File "/private/tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/g2-review12/mirror/src/quant_lab/market/contract.py", line 330, in _latency_domain
+    raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+quant_lab.market.contract.ContractError: latency_s 必须非负：启动时刻不能早于决策时刻
+```
+
+#### P10D复现 / exit0
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom quant_lab.market import execution as x,contract as c\nfrom tests.market import test_constants_effective as k,test_outcome_kind as t\nfrom tests.market.test_review_p1 import e03\ndef result(fn):\n    try: fn();return \"GREEN\"\n    except BaseException as e: return \"RED \"+type(e).__name__+\" \"+str(e)[:100]\nsrc=inspect.getsource(x.load_market_from_lake)\nold='"'"'expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"'\nnew='"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"]); expected = 0'"'"'\nassert src.count(old)==1\nns=dict(x.__dict__);exec(compile(src.replace(old,new),\"<discard-grid-result>\",\"exec\"),ns)\nns[\"grid_points_between\"]=lambda *args:x.grid_points_between(*args)\nwith patch.object(x,\"load_market_from_lake\",ns[\"load_market_from_lake\"]):\n    print(\"loader discard return\",result(k.test_grid_math_single_source_and_exact_to_microsecond))\nprint(\"loader restored\",result(k.test_grid_math_single_source_and_exact_to_microsecond))\nsrc=inspect.getsource(x.simulate_batch)\nold=\"check_policy_hash_consistency(df)\"\nns=dict(x.__dict__);exec(compile(src.replace(old,'"'"'check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))'"'"'),\"<sanitize-gate-input>\",\"exec\"),ns)\nns[\"check_policy_hash_consistency\"]=lambda df:x.check_policy_hash_consistency(df)\nq,m=e03();q2=c.ExecutionRequest.model_validate({**q.model_dump(),\"episode_id\":\"merge\"})\noriginal=x.result_row\ndef inject(req,res):\n    row=original(req,res)\n    if req.episode_id==\"merge\": row[\"policy_hash\"]=\"0\"*64\n    return row\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    print(\"sanitized gate regression\",result(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n    ns[\"result_row\"]=inject\n    df=x.simulate_batch([q,q2],markets={m.manifest_id:m})\n    print(\"sanitized gate actual\",df.height,df[\"policy_hash\"].n_unique(),\"NO ContractError\")\nprint(\"gate restored\",result(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n")'`
+```text
+loader discard return GREEN
+loader restored GREEN
+sanitized gate regression RED TypeError test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes() missing 2 required positional a
+sanitized gate actual 2 2 NO ContractError
+gate restored RED TypeError test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes() missing 2 required positional a
+```
+
+#### P10I最小静态 / exit0
+`.venv-g2/bin/python -c 'exec("import pathlib,re\npatterns={\"S32\":(\"contract.py\",r\"return t_dec|horizon_end = t_dec\"),\"S33\":(\"vision.py\",r\"total_seconds\"),\"S34\":(\"execution.py\",r\"g = |while g|g \\+=|abs\\(\\(h - g\"),\"S35\":(\"contract.py\",r\"plan_ttl =|exp_ttl =|ttl = plan.expiry\"),\"S36A\":(\"kernel_a.py\",r\"self.hold_end = ts\"),\"S36B\":(\"nautilus_adapter.py\",r\"hold_end =|cutoff = min\"),\"S37\":(\"kernel_a.py\",r\"first_expected =|o - prev|return prev \\+|prev \\+ iv <\"),\"TTL-deadline-A\":(\"kernel_a.py\",r\"deadline =\"),\"TTL-deadline-B\":(\"nautilus_adapter.py\",r\"deadline =\")}\nfor label,(file,pattern) in patterns.items():\n    for i,line in enumerate((pathlib.Path(\"src/quant_lab/market\")/file).read_text().splitlines(),1):\n        if re.search(pattern,line):print(label,file+\":\"+str(i),line.strip())\n")'`
+```text
+S32 contract.py:263 return t_dec + dt.timedelta(seconds=policy.latency_s)
+S34 execution.py:236 g = a.replace(minute=0, second=0, microsecond=0)
+S34 execution.py:237 g = g.replace(hour=(g.hour // 8) * 8)
+S34 execution.py:239 while g <= b:
+S34 execution.py:240 if g >= a and not any(abs((h - g).total_seconds()) <= 60 for h in have):
+S34 execution.py:243 g += dt.timedelta(hours=8)
+S35 contract.py:277 ttl = plan.expiry.entry_ttl_s
+S35 contract.py:480 exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)
+S36A kernel_a.py:424 self.hold_end = ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+S36B nautilus_adapter.py:530 hold_end = min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+S36B nautilus_adapter.py:556 cutoff = min(cutoff, st["close_at"])
+S36B nautilus_adapter.py:558 cutoff = min(cutoff, st["censor_at"] - dt.timedelta(microseconds=1))
+S36B nautilus_adapter.py:560 cutoff = min(cutoff, st["open_at"] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1))
+S37 kernel_a.py:243 first_expected = first_grid_point(self.t_start, bars[0].interval_s)
+TTL-deadline-A kernel_a.py:222 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+TTL-deadline-A kernel_a.py:319 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+TTL-deadline-B nautilus_adapter.py:226 deadline = entry_expiry_at(t_start, req.entry_ttl_s)
+```
+
+#### P10L复现 / exit0
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom tests.market import test_outcome_kind as t\nfrom quant_lab.market import execution as x\ndef out(fn):\n    try:fn();return \"GREEN\"\n    except BaseException as e:return \"RED \"+type(e).__name__\nreal=inspect.getsource\nfor name,token in [(\"test_lint_forbidden_patterns_do_not_reappear\",'"'"'multiplier\"] or \"1\"'"'"'),(\"test_s27_s28_single_source_start_time_and_exact_grid\",\"(req.t_start or req.t_dec)\")]:\n    fn=getattr(t,name)\n    with patch.object(inspect,\"getsource\",side_effect=lambda obj:real(obj)+\"\\n# \"+token):\n        print(name,\"forbidden injected\",out(fn))\n    print(name,\"restored\",out(fn))\nsrc=real(x.check_policy_hash_consistency).replace(\"{r['"'"'policy_version'"'"']}\",\"REDACTED\")\nns=dict(x.__dict__);exec(compile(src,\"<missing-version-diagnostic>\",\"exec\"),ns)\nwith patch.object(x,\"check_policy_hash_consistency\",ns[\"check_policy_hash_consistency\"]):\n    print(\"B17 missing version diagnostic\",out(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\nprint(\"B17 restored\",out(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n")'`
+```text
+test_lint_forbidden_patterns_do_not_reappear forbidden injected RED AssertionError
+test_lint_forbidden_patterns_do_not_reappear restored GREEN
+test_s27_s28_single_source_start_time_and_exact_grid forbidden injected RED AssertionError
+test_s27_s28_single_source_start_time_and_exact_grid restored GREEN
+B17 missing version diagnostic RED TypeError
+B17 restored RED TypeError
+```
+
+#### P10G独立 / exit0
+`.venv-g2/bin/python -c 'exec("import datetime as dt,itertools\nfrom quant_lab.market import contract as c\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nimport polars as pl\ncount=0\nfor iv,base,au,bu in itertools.product((1,7,60,900,28800),(c.EPOCH-dt.timedelta(days=1),c.EPOCH,JAN),(-1,0,1,999999,60000001),(-1,0,1,999999,180000001)):\n    a=base+dt.timedelta(microseconds=au);b=base+dt.timedelta(microseconds=bu)\n    first=c.first_grid_point(a,iv)\n    points=[c.EPOCH+dt.timedelta(seconds=i*iv) for i in range(int((a-c.EPOCH).total_seconds()//iv)-2,int((b-c.EPOCH).total_seconds()//iv)+3)]\n    want=sum(a<=p<b for p in points)\n    assert c.grid_points_between(a,b,iv)==want\n    assert first>=a and first-a<dt.timedelta(seconds=iv) and (first-c.EPOCH)%dt.timedelta(seconds=iv)==dt.timedelta(0)\n    count+=1\nprint(\"helper brute\",count,\"PASS\")\nn=0\nfor au,bu in [(0,180000000),(1,180000000),(0,180000001)]:\n    a=JAN+dt.timedelta(microseconds=au);b=JAN+dt.timedelta(microseconds=bu)\n    expected=[i for i in range(4) if a<=JAN+dt.timedelta(seconds=i*60)<b]\n    for mask in range(1,1<<len(expected)):\n        keep=[i for j,i in enumerate(expected) if mask&(1<<j)]\n        df=bars(4).filter(pl.col(\"open_time\").is_in([JAN+dt.timedelta(seconds=i*60) for i in keep]))\n        out,qs,r=run(df,rules(a,b))\n        assert r.missing==len(expected)-len(keep),(au,bu,keep,r)\n        assert sum(g[\"n\"] for g in r.gaps)==r.missing,(au,bu,keep,r)\n        assert all(g[\"n\"]>0 for g in r.gaps)\n        n+=1\nprint(\"partition aligned subsets\",n,\"PASS\")\n")'`
+```text
+helper brute 375 PASS
+partition aligned subsets 25 PASS
+```
+
+#### P10F逐字段 / exit0
+`.venv-g2/bin/python -c 'exec("from quant_lab.market import contract as c\nfrom tests.market.test_review_p1 import e03\nq,m=e03()\nmodels=[(c.ExecutionRequest,q.model_dump()),(c.OrderPlan,q.order_plan.model_dump()),(c.ExecutionPolicy,c.resolve_policy(q.policy_version).model_dump()),(c.Entry,q.order_plan.entries[0].model_dump()),(c.Stop,q.order_plan.stop.model_dump()),(c.TakeProfit,q.order_plan.tps[0].model_dump()),(c.Sizing,q.order_plan.sizing.model_dump()),(c.Expiry,q.order_plan.expiry.model_dump()),(c.CostSpec,c.CostSpec().model_dump())]\nfor cls,base in models:\n    for name,f in cls.model_fields.items():\n        if f.is_required() and \"None\" not in str(f.annotation):\n            continue\n        results=[]\n        for tag,val in [(\"omit\",None),(\"None\",None),(\"False\",False),(\"0\",0),(\"emptystr\",\"\"),(\"emptylist\",[])]:\n            d=dict(base)\n            if tag==\"omit\": d.pop(name,None)\n            else: d[name]=val\n            try:\n                z=cls.model_validate(d)\n                results.append(tag+\"=\"+repr(getattr(z,name)))\n            except Exception: pass\n        print(cls.__name__+\".\"+name+\" | \"+(\"; \".join(results) or \"all reject\"))\n")'`
+```text
+ExecutionRequest.cost_scenario | omit='base'
+ExecutionRequest.path_scenario | omit='primary'
+ExecutionRequest.execution_contract_version | omit='g2-exec-v0'
+ExecutionRequest.seed | omit=0; False=0; 0=0
+ExecutionRequest.t_start | omit=None; None=None
+ExecutionRequest.position_mode | omit='one_way'
+ExecutionRequest.entry_ttl_s | omit=3600; None=3600
+ExecutionRequest.entry_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.tp_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.horizon_source | all reject
+OrderPlan.tps | omit=[]; emptylist=[]
+OrderPlan.reduce_only_exit | omit=True
+ExecutionPolicy.latency_s | omit=0; False=0; 0=0
+ExecutionPolicy.ladder_steps | omit=2; False=0; 0=0
+ExecutionPolicy.participation | omit=None; None=None; 0=Decimal('0')
+ExecutionPolicy.wallet | omit=Decimal('1000'); 0=Decimal('0')
+ExecutionPolicy.leverage | omit=Decimal('1'); 0=Decimal('0')
+ExecutionPolicy.mark_max_staleness_s | omit=120; False=0; 0=0
+ExecutionPolicy.settlement_quantum | omit=Decimal('1E-8'); 0=Decimal('0')
+ExecutionPolicy.max_horizon_s | omit=1209600; False=0; 0=0
+ExecutionPolicy.entry_ttl_s | omit=86400; False=0; 0=0
+ExecutionPolicy.entry_fraction_rule | omit='equal'
+ExecutionPolicy.tp_fraction_rule | omit='equal'
+ExecutionPolicy.tp_total_fraction | omit=Decimal('1'); 0=Decimal('0')
+Entry.fraction | omit=None; None=None
+Entry.tif | omit='GTC'
+Entry.post_only | omit=False; False=False; 0=False
+Stop.trigger | omit='mark'
+TakeProfit.fraction | omit=None; None=None; 0=Decimal('0')
+Sizing.qty | omit=None; None=None; 0=Decimal('0')
+Expiry.entry_ttl_s | omit=None; None=None
+Expiry.max_holding_s | omit=None; None=None
+CostSpec.maker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.taker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.slippage_ticks | omit=0; False=0; 0=0
+CostSpec.slippage_bps | omit=Decimal('0'); 0=Decimal('0')
+```
+
+#### P10S原样复现命令： / exit0
+`.venv-g2/bin/python -c 'exec("import ast,pathlib,re\nfor p in sorted(pathlib.Path(\"src/quant_lab/market\").glob(\"*.py\")):\n    tree=ast.parse(p.read_text())\n    for node in sorted(ast.walk(tree),key=lambda n:getattr(n,\"lineno\",0)):\n        if isinstance(node,(ast.Compare,ast.BinOp,ast.BoolOp)):\n            expr=ast.unparse(node)\n            if re.search(r\"t_start|t_dec|horizon|ttl|holding|hold_end|deadline|staleness|grid|cal_from|cal_to|gap_h|total_seconds|calc_time\",expr) and len(expr)<240:\n                print(str(p)+\":\"+str(node.lineno)+\" \"+expr)\n")'`
+```text
+src/quant_lab/market/asof.py:180 stale > max_staleness_s
+src/quant_lab/market/contract.py:263 t_dec + dt.timedelta(seconds=policy.latency_s)
+src/quant_lab/market/contract.py:272 entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)
+src/quant_lab/market/contract.py:278 ttl is not None
+src/quant_lab/market/contract.py:285 t_start + dt.timedelta(seconds=entry_ttl_s)
+src/quant_lab/market/contract.py:428 data.get('entry_ttl_s') is None and isinstance(plan, OrderPlan) and (pol is not None)
+src/quant_lab/market/contract.py:428 data.get('entry_ttl_s') is None
+src/quant_lab/market/contract.py:447 self.order_plan.expiry.entry_ttl_s is not None
+src/quant_lab/market/contract.py:463 exp_t_start < self.t_dec
+src/quant_lab/market/contract.py:465 self.horizon_end <= exp_t_start
+src/quant_lab/market/contract.py:470 self.entry_ttl_s is None
+src/quant_lab/market/contract.py:477 self.t_start is not None and self.t_start != exp_t_start
+src/quant_lab/market/contract.py:477 self.t_start is not None
+src/quant_lab/market/contract.py:477 self.t_start != exp_t_start
+src/quant_lab/market/contract.py:481 self.entry_ttl_s != exp_ttl
+src/quant_lab/market/contract.py:482 self.entry_ttl_source == 'plan'
+src/quant_lab/market/contract.py:487 self.horizon_end - exp_t_start
+src/quant_lab/market/contract.py:488 window > dt.timedelta(seconds=pol.max_horizon_s)
+src/quant_lab/market/contract.py:492 self.horizon_source == 'policy' and window != dt.timedelta(seconds=derived_s)
+src/quant_lab/market/contract.py:492 self.horizon_source == 'policy'
+src/quant_lab/market/contract.py:516 self.t_start is not None
+src/quant_lab/market/contract.py:537 horizon_end is not None
+src/quant_lab/market/contract.py:538 horizon_end is None
+src/quant_lab/market/contract.py:539 derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))
+src/quant_lab/market/contract.py:830 e.ts in settle_keys
+src/quant_lab/market/execution.py:153 req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)
+src/quant_lab/market/execution.py:240 g >= a and (not any((abs((h - g).total_seconds()) <= 60 for h in have)))
+src/quant_lab/market/execution.py:240 abs((h - g).total_seconds()) <= 60
+src/quant_lab/market/kernel_a.py:202 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:208 [p for p in m.last if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_last, self.policy.participation) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:208 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:209 [p for p in m.mark if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_mark, None) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:209 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:220 self.t_start <= f.calc_time <= end
+src/quant_lab/market/kernel_a.py:223 deadline <= end
+src/quant_lab/market/kernel_a.py:240 b.open_time >= self.t_start and b.open_time < end
+src/quant_lab/market/kernel_a.py:240 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:250 grid_points_between(prev + iv, o, interval_s) > 0
+src/quant_lab/market/kernel_a.py:253 grid_points_between(prev + iv, end, interval_s) > 0
+src/quant_lab/market/kernel_a.py:259 self.hold_end is not None and self.hold_end <= self.req.horizon_end and (self.hold_end not in self.moments)
+src/quant_lab/market/kernel_a.py:259 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:259 self.hold_end <= self.req.horizon_end
+src/quant_lab/market/kernel_a.py:259 self.hold_end not in self.moments
+src/quant_lab/market/kernel_a.py:262 self.hold_end is not None and self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:262 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:262 self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:423 self.plan.expiry.max_holding_s is not None
+src/quant_lab/market/kernel_a.py:424 ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+src/quant_lab/market/kernel_a.py:569 ts in self.settled_keys
+src/quant_lab/market/kernel_a.py:570 self.settled_keys[ts] != row.rate
+src/quant_lab/market/kernel_a.py:574 mp is None or (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:574 (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:592 r.effective_from and self.t_start < r.effective_from or (r.effective_to and self.t_start >= r.effective_to)
+src/quant_lab/market/kernel_a.py:592 r.effective_from and self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:592 r.effective_to and self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:592 self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:592 self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:596 not self.market.bars_complete and (self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None)
+src/quant_lab/market/kernel_a.py:596 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:596 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:597 self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:617 (mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)) and self.pos != 0
+src/quant_lab/market/kernel_a.py:617 mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)
+src/quant_lab/market/kernel_a.py:617 self.hold_end is not None and ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:617 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:617 ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:620 mo.horizon and self.pos != 0
+src/quant_lab/market/kernel_a.py:623 ts == self.t_start and (not self.orders)
+src/quant_lab/market/kernel_a.py:623 ts == self.t_start
+src/quant_lab/market/kernel_a.py:635 o.deadline is not None and o.deadline <= ts
+src/quant_lab/market/kernel_a.py:635 o.deadline is not None
+src/quant_lab/market/kernel_a.py:635 o.deadline <= ts
+src/quant_lab/market/kernel_a.py:656 self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:656 (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:673 self.hold_end is not None and self.pos != 0
+src/quant_lab/market/kernel_a.py:673 self.hold_end is not None
+src/quant_lab/market/nautilus_adapter.py:146 list(market.last) + [p for b in market.bars_last if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:146 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:148 list(market.mark) + [p for b in market.bars_mark if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:149 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:150 b.open_time < t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.path_step == 'C' and p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:153 market.funding and len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:153 len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:156 t_start <= p.ts <= end
+src/quant_lab/market/nautilus_adapter.py:237 deadline <= end
+src/quant_lab/market/nautilus_adapter.py:419 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:419 self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start or row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:426 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:442 st['pos'] != 0 and (st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s)
+src/quant_lab/market/nautilus_adapter.py:442 st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:442 (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:450 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= until and (st['pos'] != 0) and (not st['censor'])
+src/quant_lab/market/nautilus_adapter.py:450 self.funding_rows[self.fi].calc_time <= until
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start or row.calc_time in self.settled_at or row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 st['open_at'] or t_start
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:457 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from or (rules.effective_to and t_start >= rules.effective_to)
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_to and t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:499 t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:527 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:530 min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:531 e['ts'] < hold_end
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None and st['open_at'] is not None
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1)
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:561 {m.ts for m in marks if t_start <= m.ts <= cutoff} | {p.ts for p in lasts if p.ts <= cutoff}
+src/quant_lab/market/nautilus_adapter.py:561 t_start <= m.ts <= cutoff
+src/quant_lab/market/partition_check.py:246 cal_from <= t < cal_to and first_grid_point(t, sec) == t
+src/quant_lab/market/partition_check.py:246 cal_from <= t < cal_to
+src/quant_lab/market/partition_check.py:246 first_grid_point(t, sec) == t
+src/quant_lab/market/partition_check.py:259 [False] + [grid_points_between(prev[i] + step, df[key][i], sec) > 0 for i in range(1, df.height)]
+src/quant_lab/market/partition_check.py:259 grid_points_between(prev[i] + step, df[key][i], sec) > 0
+src/quant_lab/market/partition_check.py:263 df.height and grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:263 grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:277 grid_points_between(df[key][-1] + step, cal_to, sec) > 0
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite() & pl.col('low').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0)
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high'))
+src/quant_lab/market/partition_check.py:291 pl.col('low') <= pl.min_horizontal('open', 'close')
+src/quant_lab/market/partition_check.py:291 pl.max_horizontal('open', 'close') <= pl.col('high')
+src/quant_lab/market/partition_check.py:335 df.height - df['calc_time'].n_unique()
+src/quant_lab/market/single_source.py:200 't_start' in attrs and 't_dec' in attrs
+src/quant_lab/market/single_source.py:200 't_start' in attrs
+src/quant_lab/market/single_source.py:200 't_dec' in attrs
+src/quant_lab/market/single_source.py:210 name == 'int' and node.args and ('total_seconds()' in self._seg(node.args[0]))
+src/quant_lab/market/single_source.py:210 'total_seconds()' in self._seg(node.args[0])
+src/quant_lab/market/single_source.py:252 isinstance(n, ast.Attribute) and n.attr == 'entry_ttl_s'
+src/quant_lab/market/single_source.py:252 n.attr == 'entry_ttl_s'
+src/quant_lab/market/single_source.py:285 isinstance(node.op, (ast.FloorDiv, ast.Div)) and ('total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg)
+src/quant_lab/market/single_source.py:286 'total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg
+src/quant_lab/market/single_source.py:286 'total_seconds()' in seg
+src/quant_lab/market/single_source.py:289 isinstance(node.op, ast.Add) and 'entry_ttl_s' in seg
+src/quant_lab/market/single_source.py:289 'entry_ttl_s' in seg
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite() & pl.col('low').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0)
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high'))
+src/quant_lab/market/vision.py:262 pl.col('low') <= pl.min_horizontal('open', 'close')
+src/quant_lab/market/vision.py:262 pl.max_horizontal('open', 'close') <= pl.col('high')
+```
+
+#### S38最小命令： / exit1
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom quant_lab.market import contract as c\nfrom tests.market.test_review_p1 import e03\nq,_=e03()\np=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"negative-latency-audit\",\"latency_s\":-1})\nwith patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value={p.version:p.content_hash}):\n    for s in (None,q.t_dec-dt.timedelta(seconds=1)):\n        try:\n            r=c.ExecutionRequest.model_validate({**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":s})\n            print(s,\"ACCEPT\",r.resolved_t_start(p))\n        except c.ContractError as e:print(s,\"REJECT\",str(e))\n")'`
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 6, in <module>
+  File "/private/tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/g2-review12/mirror/src/quant_lab/market/contract.py", line 330, in _latency_domain
+    raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+quant_lab.market.contract.ContractError: latency_s 必须非负：启动时刻不能早于决策时刻
+```
+
+#### S39最小命令： / exit0
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom quant_lab.market import execution as x\nfrom tests.market.test_constants_effective import test_grid_math_single_source_and_exact_to_microsecond as test\nold='"'"'expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"'\nsrc=inspect.getsource(x.load_market_from_lake)\nassert src.count(old)==1\nns=dict(x.__dict__)\nexec(compile(src.replace(old,'"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"]); expected = 0'"'"'),\"<memory>\",\"exec\"),ns)\nns[\"grid_points_between\"]=lambda *args:x.grid_points_between(*args)\nwith patch.object(x,\"load_market_from_lake\",ns[\"load_market_from_lake\"]):\n    test();print(\"discarded result: GREEN\")\ntest();print(\"restored: GREEN\")\n")'`
+```text
+discarded result: GREEN
+restored: GREEN
+```
+
+P10M因已删除旧测试名AttributeError提前结束；P10N/D/L对新参数化B17回归的直接无fixture调用会TypeError，这些均不计作检出。
+P10C与S38最小命令在负latency政策构造时ContractError退出，是当前政策拒绝的证据，后续正/零latency另由差分实跑。
+P10D与S39最小命令旧loader哨兵仍绿；该旧测试已不验证loader返回值，当前S39回归的三个真实产品突变均另行检出。
+
+### TREE 与 funding/等价枚举真实输出
+
+TREE入口：读取single_source真实登记/命中/计数及全market表达位置；本轮亲跑原始输出如下。
+#### tree.log
+```text
+CALLERS {'check_policy_hash_consistency': {'market/execution.py:simulate_batch'}, 'resolve_entry_ttl_s': {'market/contract.py:ExecutionRequest._resolve_ttl', 'market/contract.py:ExecutionRequest._chk', 'market/contract.py:build_request'}, 'derived_window_s': {'market/contract.py:build_request', 'market/contract.py:ExecutionRequest._chk'}, 'entry_expiry_at': {'market/kernel_a.py:KernelA.timeline', 'market/kernel_a.py:KernelA.submit_entries', 'market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries'}, 'first_grid_point': {'market/kernel_a.py:KernelA._first_bar_gap', 'market/partition_check.py:check_bars'}, 'grid_points_between': {'market/kernel_a.py:KernelA._first_bar_gap', 'market/partition_check.py:check_bars', 'market/execution.py:load_market_from_lake.bars', 'market/vision.py:expected_rows'}, 'force_close_net_R': set(), 'derived_t_start': {'market/contract.py:ExecutionRequest.resolved_t_start', 'market/contract.py:ExecutionRequest._chk', 'market/contract.py:build_request'}}
+DIFF []
+COUNTS {'check_policy_hash_consistency': {'market/execution.py:simulate_batch': 1}, 'resolve_entry_ttl_s': {'market/contract.py:ExecutionRequest._resolve_ttl': 1, 'market/contract.py:ExecutionRequest._chk': 1, 'market/contract.py:build_request': 1}, 'derived_window_s': {'market/contract.py:ExecutionRequest._chk': 1, 'market/contract.py:build_request': 1}, 'entry_expiry_at': {'market/kernel_a.py:KernelA.timeline': 1, 'market/kernel_a.py:KernelA.submit_entries': 1, 'market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries': 1}, 'first_grid_point': {'market/kernel_a.py:KernelA._first_bar_gap': 3, 'market/partition_check.py:check_bars': 1}, 'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}, 'force_close_net_R': {}, 'derived_t_start': {'market/contract.py:ExecutionRequest._chk': 1, 'market/contract.py:ExecutionRequest.resolved_t_start': 1, 'market/contract.py:build_request': 1}}
+COUNT_EQUAL True
+HITS [('P3_duration_div', 237, 'market/contract.py:_us', '(t - EPOCH) // dt.timedelta(microseconds=1)'), ('P1_inline_latency', 263, 'market/contract.py:derived_t_start', 'dt.timedelta(seconds=policy.latency_s)'), ('P5_inline_entry_ttl', 272, 'market/contract.py:derived_window_s', 'entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)'), ('P7_inline_ttl_resolution', 277, 'market/contract.py:resolve_entry_ttl_s', 'ttl = plan.expiry.entry_ttl_s'), ('P7_inline_ttl_resolution', 280, 'market/contract.py:resolve_entry_ttl_s', 'return policy.entry_ttl_s'), ('P5_inline_entry_ttl', 285, 'market/contract.py:entry_expiry_at', 't_start + dt.timedelta(seconds=entry_ttl_s)'), ('P8_inline_force_close', 671, 'market/contract.py:force_close_net_R', 'mark - res.entry_avg_price'), ('P5_inline_entry_ttl', 616, 'research/api.py:build_inputs_from_synthetic', 'pl.col("t_dec") + pl.duration(seconds=pl.col("entry_ttl_s"))'), ('P3_duration_div', 157, 'research/maxt.py:calendar_blocks', '(max(v) - min(v)).total_seconds() / 86400')]
+VIOLATIONS []
+UNSUPPORTED {'S02': {'status': 'unsupported', 'capability': 'real_settlement_time_U03_and_engine_balance', 'owner': 'G0 settlement contract + G2 P2'}, 'S06': {'status': 'unsupported', 'capability': 'bronze_depth_replay_and_multi_source_versions', 'owner': 'G1 lake + G2 P2'}, 'S07': {'status': 'unsupported', 'capability': 'management_commands_E13_C01_and_reservation_lifecycle', 'owner': 'G0 C01 + G2 P2'}, 'S12': {'status': 'unsupported', 'capability': 'versioned_lake_snapshot_resolution', 'owner': 'G1 lake + G0 identity contract'}}
+asof.py 179 stale = (at - ct).total_seconds()
+contract.py 156 entry_ttl_s: int | None = Field(default=None, gt=0)
+contract.py 277 ttl = plan.expiry.entry_ttl_s
+contract.py 309 latency_s: int = 0
+contract.py 321 entry_ttl_s: int = 24 * 3600
+contract.py 414 entry_ttl_s: int | None = Field(default=None, gt=0)
+contract.py 536 ttl = resolve_entry_ttl_s(plan, policy)
+contract.py 609 entry_ttl_source: Literal['plan', 'policy'] = 'plan'
+contract.py 671 unrealized = (mark - res.entry_avg_price) * residual * sign * multiplier
+contract.py 263 t_dec + dt.timedelta(seconds=policy.latency_s)
+contract.py 272 entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)
+contract.py 285 t_start + dt.timedelta(seconds=entry_ttl_s)
+contract.py 480 exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)
+contract.py 671 (mark - res.entry_avg_price) * residual * sign * multiplier
+contract.py 428 data.get('entry_ttl_s') is None and isinstance(plan, OrderPlan) and (pol is not None)
+contract.py 429 data = {**data, 'entry_ttl_s': resolve_entry_ttl_s(plan, pol)}
+contract.py 470 self.entry_ttl_s is None
+contract.py 481 self.entry_ttl_s != exp_ttl
+contract.py 482 src = '计划' if self.entry_ttl_source == 'plan' else f'policy {self.policy_version}'
+contract.py 671 (mark - res.entry_avg_price) * residual * sign
+contract.py 428 data.get('entry_ttl_s') is None
+contract.py 447 self.order_plan.expiry.entry_ttl_s is not None
+contract.py 671 (mark - res.entry_avg_price) * residual
+contract.py 482 self.entry_ttl_source == 'plan'
+contract.py 671 mark - res.entry_avg_price
+execution.py 214 expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS['1m'])
+execution.py 240 g >= a and (not any((abs((h - g).total_seconds()) <= 60 for h in have)))
+execution.py 240 abs((h - g).total_seconds()) <= 60
+kernel_a.py 77 hold_end: bool = False
+kernel_a.py 122 self.hold_end: dt.datetime | None = None
+kernel_a.py 222 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+kernel_a.py 319 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+kernel_a.py 173 self.cash + (self.mark - avg) * self.pos * self.mult
+kernel_a.py 253 grid_points_between(prev + iv, end, interval_s) > 0
+kernel_a.py 259 self.hold_end is not None and self.hold_end <= self.req.horizon_end and (self.hold_end not in self.moments)
+kernel_a.py 260 self.moments[self.hold_end] = Moment(ts=self.hold_end, hold_end=True)
+kernel_a.py 574 mp is None or (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+kernel_a.py 173 (self.mark - avg) * self.pos * self.mult
+kernel_a.py 250 grid_points_between(prev + iv, o, interval_s) > 0
+kernel_a.py 259 self.hold_end is not None
+kernel_a.py 259 self.hold_end <= self.req.horizon_end
+kernel_a.py 259 self.hold_end not in self.moments
+kernel_a.py 262 self.hold_end is not None and self.hold_end in self.moments
+kernel_a.py 263 self.moments[self.hold_end].hold_end = True
+kernel_a.py 424 self.hold_end = ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+kernel_a.py 574 (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+kernel_a.py 173 (self.mark - avg) * self.pos
+kernel_a.py 262 self.hold_end is not None
+kernel_a.py 262 self.hold_end in self.moments
+kernel_a.py 617 (mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)) and self.pos != 0
+kernel_a.py 673 self.hold_end is not None and self.pos != 0
+kernel_a.py 679 pnl = self.realized + (self.mark - avg) * self.pos * self.mult
+kernel_a.py 173 self.mark - avg
+kernel_a.py 617 mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)
+kernel_a.py 656 self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+kernel_a.py 673 self.hold_end is not None
+kernel_a.py 679 self.realized + (self.mark - avg) * self.pos * self.mult
+kernel_a.py 617 self.hold_end is not None and ts >= self.hold_end
+kernel_a.py 656 (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+kernel_a.py 679 (self.mark - avg) * self.pos * self.mult
+kernel_a.py 617 self.hold_end is not None
+kernel_a.py 617 ts >= self.hold_end
+kernel_a.py 679 (self.mark - avg) * self.pos
+kernel_a.py 679 self.mark - avg
+nautilus_adapter.py 226 deadline = entry_expiry_at(t_start, req.entry_ttl_s)
+nautilus_adapter.py 442 st['pos'] != 0 and (st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s)
+nautilus_adapter.py 530 hold_end = min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+nautilus_adapter.py 531 kept = [e for e in st['events'] if e['ts'] < hold_end]
+nautilus_adapter.py 422 row.calc_time < t_start or row.calc_time in self.settled_at
+nautilus_adapter.py 426 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+nautilus_adapter.py 442 st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+nautilus_adapter.py 453 row.calc_time < t_start or row.calc_time in self.settled_at or row.calc_time < (st['open_at'] or t_start)
+nautilus_adapter.py 457 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+nautilus_adapter.py 426 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+nautilus_adapter.py 442 (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+nautilus_adapter.py 457 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+nautilus_adapter.py 531 e['ts'] < hold_end
+partition_check.py 244 exp_n = grid_points_between(cal_from, cal_to, sec)
+partition_check.py 258 gap_before = pl.Series([False] + [grid_points_between(prev[i] + step, df[key][i], sec) > 0 for i in range(1, df.height)], dtype=pl.Boolean)
+partition_check.py 263 first_gap = bool(df.height and grid_points_between(cal_from, df[key][0], sec) > 0)
+partition_check.py 269 n0 = grid_points_between(cal_from, df[key][0], sec)
+partition_check.py 277 grid_points_between(df[key][-1] + step, cal_to, sec) > 0
+partition_check.py 278 nt = grid_points_between(df[key][-1] + step, cal_to, sec)
+partition_check.py 259 [False] + [grid_points_between(prev[i] + step, df[key][i], sec) > 0 for i in range(1, df.height)]
+partition_check.py 263 df.height and grid_points_between(cal_from, df[key][0], sec) > 0
+partition_check.py 274 ni = grid_points_between(prev[i] + step, df[key][i], sec)
+partition_check.py 263 grid_points_between(cal_from, df[key][0], sec) > 0
+partition_check.py 259 grid_points_between(prev[i] + step, df[key][i], sec) > 0
+single_source.py 251 reads = [n for branch in values for n in ast.walk(branch) if isinstance(n, ast.Attribute) and n.attr == 'entry_ttl_s']
+single_source.py 210 name == 'int' and node.args and ('total_seconds()' in self._seg(node.args[0]))
+single_source.py 285 isinstance(node.op, (ast.FloorDiv, ast.Div)) and ('total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg)
+single_source.py 289 isinstance(node.op, ast.Add) and 'entry_ttl_s' in seg
+single_source.py 210 'total_seconds()' in self._seg(node.args[0])
+single_source.py 286 'total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg
+single_source.py 289 'entry_ttl_s' in seg
+single_source.py 208 kw.arg == 'seconds' and 'latency_s' in self._seg(kw.value)
+single_source.py 252 isinstance(n, ast.Attribute) and n.attr == 'entry_ttl_s'
+single_source.py 286 'total_seconds()' in seg
+single_source.py 208 'latency_s' in self._seg(kw.value)
+single_source.py 252 n.attr == 'entry_ttl_s'
+```
+#### funding.log
+```text
+4 0 rows 2 status ok codes []
+4 1000 rows 2 status ok codes []
+4 2000 rows 2 status ok codes []
+4 3000 rows 2 status ok codes []
+4 60000000 rows 2 status ok codes []
+4 60000001 rows 2 status quarantined codes ['FUNDING_SCHEDULE_GAP']
+8 0 rows 2 status ok codes []
+8 1000 rows 2 status ok codes []
+8 2000 rows 2 status ok codes []
+8 3000 rows 2 status ok codes []
+8 60000000 rows 2 status ok codes []
+8 60000001 rows 2 status quarantined codes ['FUNDING_SCHEDULE_GAP']
+VISION 14 periods 126 pairs 0 differences
+ALIGNED_ADJACENT 891 0
+```
+
+### P12-B 行为探针与 A29 三阶段回执
+
+下段为最小只读探针实现；只创建系统临时湖，既可用于原树，也可在隔离写盘突变的每一新进程执行。
+<!-- P12_BEHAVIOR -->
+```python
+import datetime as dt,tempfile,json
+from pathlib import Path
+from decimal import Decimal as D
+from quant_lab.market import contract as c,execution as ex,partition_check as pc,vision
+from quant_lab.market.kernel_a import KernelA
+from tests.market.test_review_p1 import e03
+from tests.market.test_single_source import _write_lake
+q,_=e03();start=q.t_dec;end=start+dt.timedelta(seconds=180)
+q=c.ExecutionRequest.model_validate({**q.model_dump(),'t_start':None,'horizon_end':end,'horizon_source':'caller'})
+for offsets in [[0,59999999,120000000],[0,60000001,120000000]]:
+ bars=[c.Bar(open_time=start+dt.timedelta(microseconds=x),o=D(100),h=D(100),l=D(100),c=D(100)) for x in offsets]
+ market=c.MarketView(manifest_id=q.market_manifest,bars_last=bars,bars_mark=bars)
+ k=KernelA(q,market);r=ex.simulate(q,market=market)
+ print('OFFSETS',offsets,'VALIDATED',len(bars),'FIRST_GAP',k._first_bar_gap(bars,end),'SIMULATE',r.censor_reason,'BARS_OK',r.coverage_mask.bars_ok)
+ prev,o=bars[1].open_time,bars[2].open_time;iv=dt.timedelta(seconds=60)
+ print('MIDDLE_GRID',c.grid_points_between(prev+iv,o,60)>0,'MIDDLE_ADJACENT',o-prev>iv)
+ with tempfile.TemporaryDirectory() as d:
+  _write_lake(Path(d),start,end,[b.open_time for b in bars]);loaded=ex.load_market_from_lake(q,lake_root=d)
+  print('LOADER',loaded.bars_complete,loaded.bars_quality_ok,[t.open_time.isoformat() for t in loaded.bars_last])
+```
+#### P12-B baseline / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+OFFSETS [0, 59999999, 120000000] VALIDATED 3 FIRST_GAP None SIMULATE LABEL_RIGHT_CENSORED BARS_OK True
+MIDDLE_GRID False MIDDLE_ADJACENT True
+LOADER True True ['2024-01-01T01:00:00+00:00', '2024-01-01T01:00:59.999999+00:00', '2024-01-01T01:02:00+00:00']
+OFFSETS [0, 60000001, 120000000] VALIDATED 3 FIRST_GAP 2024-01-01 01:01:00+00:00 SIMULATE BAR_GAP BARS_OK False
+MIDDLE_GRID False MIDDLE_ADJACENT False
+LOADER True True ['2024-01-01T01:00:00+00:00', '2024-01-01T01:01:00.000001+00:00', '2024-01-01T01:02:00+00:00']
+```
+#### P12-B injected / exit0
+SHA256 `7490bb82dbea6827c30da38441703686ffff774333735b4792000261504f3d6e`
+```text
+OFFSETS [0, 59999999, 120000000] VALIDATED 3 FIRST_GAP None SIMULATE LABEL_RIGHT_CENSORED BARS_OK True
+MIDDLE_GRID False MIDDLE_ADJACENT True
+LOADER True True ['2024-01-01T01:00:00+00:00', '2024-01-01T01:00:59.999999+00:00', '2024-01-01T01:02:00+00:00']
+OFFSETS [0, 60000001, 120000000] VALIDATED 3 FIRST_GAP None SIMULATE LABEL_RIGHT_CENSORED BARS_OK True
+MIDDLE_GRID False MIDDLE_ADJACENT False
+LOADER True True ['2024-01-01T01:00:00+00:00', '2024-01-01T01:01:00.000001+00:00', '2024-01-01T01:02:00+00:00']
+```
+#### P12-B restored / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+OFFSETS [0, 59999999, 120000000] VALIDATED 3 FIRST_GAP None SIMULATE LABEL_RIGHT_CENSORED BARS_OK True
+MIDDLE_GRID False MIDDLE_ADJACENT True
+LOADER True True ['2024-01-01T01:00:00+00:00', '2024-01-01T01:00:59.999999+00:00', '2024-01-01T01:02:00+00:00']
+OFFSETS [0, 60000001, 120000000] VALIDATED 3 FIRST_GAP 2024-01-01 01:01:00+00:00 SIMULATE BAR_GAP BARS_OK False
+MIDDLE_GRID False MIDDLE_ADJACENT False
+LOADER True True ['2024-01-01T01:00:00+00:00', '2024-01-01T01:01:00.000001+00:00', '2024-01-01T01:02:00+00:00']
+```
+
+### 可复跑真实写盘执行器与突变定义
+
+执行器只在系统临时副本写盘。测试側夹具突变的file字段为tests路径，其余为生产src；这一差别按实际路径保留。
+<!-- P12_RUNNER -->
+```python
+import hashlib,json,os,pathlib,shutil,subprocess,sys,tempfile
+root=pathlib.Path.cwd().resolve()
+report=(root/'docs/adr/review-G2-P1.md').read_text()
+items=json.loads(report.split('\n<!-- P12_CASES -->\n',1)[1].split('```json\n',1)[1].split('\n```',1)[0])
+selected=items
+if len(sys.argv)>1:
+ selected=[x for x in items if x['name'] in sys.argv[1:]]
+ assert selected,sys.argv[1:]
+originals={str(p): (hashlib.sha256(p.read_bytes()).hexdigest(),p.stat().st_mtime_ns) for folder in ['src/quant_lab/market','tests/market'] for p in (root/folder).rglob('*') if p.is_file() and '__pycache__' not in str(p)}
+for item in selected:
+ with tempfile.TemporaryDirectory(prefix='g2-p12-repro-') as tmp:
+  mirror=pathlib.Path(tmp)/'mirror'
+  for folder in ['src','tests/market','contracts','docs/adr']:
+   shutil.copytree(root/folder,mirror/folder,ignore=shutil.ignore_patterns('__pycache__','.pytest_cache'))
+  (mirror/'tests/__init__.py').write_text('')
+  (mirror/'pytest.ini').write_text('[pytest]\npythonpath = src\n')
+  target=mirror/item['file']; raw=target.read_bytes();source=raw.decode();old=item['old']
+  if old is not None:
+   assert old in source,(item['name'],'old expression absent')
+  mutant=source+item['new'] if old is None else source.replace(old,item['new'],1 if item.get('first') else -1)
+  assert mutant!=source
+  record={'name':item['name'],'file':item['file'],'tests':item['tests']}
+  try:
+   for phase in ['baseline','injected','restored']:
+    if phase=='injected':target.write_text(mutant)
+    if phase=='restored':target.write_bytes(raw)
+    code='import pathlib,sys,pytest;from quant_lab.market import contract,single_source;root=pathlib.Path.cwd();assert pathlib.Path(contract.__file__).resolve()==root/"src/quant_lab/market/contract.py";assert single_source.SRC==root/"src/quant_lab";print("IMPORT_ROOT",root,flush=True);sys.exit(pytest.main(sys.argv[1:]))'
+    command=[str(root/'.venv-g2/bin/python'),'-c',code,'-c',str(mirror/'pytest.ini'),*item['tests'],'-q','-p','no:cacheprovider','--tb=short']
+    result=subprocess.run(command,cwd=mirror,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1','PYTHONPATH':str(mirror/'src')},text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=240)
+    record[phase]={'rc':result.returncode,'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'output':result.stdout}
+  finally:target.write_bytes(raw)
+  record['sha_equal']=hashlib.sha256(raw).hexdigest()==hashlib.sha256(target.read_bytes()).hexdigest()
+  print(json.dumps(record,ensure_ascii=False,indent=2))
+  assert record['sha_equal'] and record['baseline']['rc']==0 and record['restored']['rc']==0
+  # 注入返回 0 是证据的一种，不能让执行器自行把它判为通过。
+for name,before in originals.items():
+ p=pathlib.Path(name)
+ assert (hashlib.sha256(p.read_bytes()).hexdigest(),p.stat().st_mtime_ns)==before,name
+print('ORIGINAL_SOURCE_TEST_SHA256_AND_MTIME_EQUAL True')
+```
+<!-- P12_CASES -->
+```json
+[
+  {
+    "name": "S29-first-gap",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_gap = bool(df.height and grid_points_between(cal_from, df[key][0], sec) > 0)",
+    "new": "first_gap = bool(df.height and df[key][0] > cal_from)",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap"
+    ]
+  },
+  {
+    "name": "S29-range-only",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "present = df.filter(legal)[key]",
+    "new": "present = df.filter((pl.col(key) >= cal_from) & (pl.col(key) < cal_to))[key]",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar"
+    ]
+  },
+  {
+    "name": "S29-truncated-count",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "exp_n = grid_points_between(cal_from, cal_to, sec)",
+    "new": "exp_n = int((cal_to - cal_from).total_seconds()) // sec",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point"
+    ]
+  },
+  {
+    "name": "S31-remove-output-gate",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "    check_policy_hash_consistency(df)\n",
+    "new": "",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S31-sanitized-copy",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "    check_policy_hash_consistency(df)\n",
+    "new": "    check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))\n",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S31-redacted-version",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "{r['policy_version']} →",
+    "new": "REDACTED →",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S38-remove-domain",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if value < 0:",
+    "new": "if False:",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency"
+    ]
+  },
+  {
+    "name": "S38-explicit-only",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if exp_t_start < self.t_dec:",
+    "new": "if self.t_start is not None and self.t_start < self.t_dec:",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings"
+    ]
+  },
+  {
+    "name": "S39-discard-return",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])",
+    "new": "grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])\n        expected = 0",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S39-inline-count",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])",
+    "new": "expected = int((min(b, dt.datetime.now(dt.UTC)) - a).total_seconds() // INTERVAL_SECONDS[\"1m\"])",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S39-wrong-helper-value",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return max(0, last_idx - first_idx + 1)",
+    "new": "return max(0, last_idx - first_idx + 1) + 7",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S33-wrong-expected",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return grid_points_between(a, b, INTERVAL_SECONDS[interval]) + 1",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence"
+    ]
+  },
+  {
+    "name": "modified-existing-first-point-sentinel",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "first_expected = first_grid_point(self.t_start, bars[0].interval_s)",
+    "new": "first_expected = self.t_start",
+    "tests": [
+      "tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond"
+    ]
+  },
+  {
+    "name": "A24-real-caller-missing",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds() // INTERVAL_SECONDS[interval])",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "A24-real-caller-extra",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _unregistered_grid_probe():\n    return grid_points_between(a, b, 60)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "A24-gate-missing-disabled",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        if missing:\n",
+    "new": "        if False:\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]"
+    ]
+  },
+  {
+    "name": "A24-gate-extra-disabled",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        if extra:\n",
+    "new": "        if False:\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-latency",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return t + dt.timedelta(seconds=policy.latency_s)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-latency",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P1_inline_latency\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-int-seconds",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return int((b - a).total_seconds())\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-int-seconds",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P2_int_total_seconds\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-duration-div",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return (b - a).total_seconds() // interval_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-duration-div",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P3_duration_div\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-start-or",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return req.t_start or req.t_dec\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-start-or",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P4_t_start_or_t_dec\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-expiry-add",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return t + dt.timedelta(seconds=req.entry_ttl_s)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-expiry-add",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P5_inline_entry_ttl\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-middle-grid",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return o - prev > iv\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-middle-grid",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P6_inline_grid_comparison\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-tail-grid",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return prev + iv < end\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-tail-grid",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P6_inline_grid_comparison\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-ttl-expression",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-ttl-expression",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-ttl-branches",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    ttl = plan.expiry.entry_ttl_s\n    if ttl is None:\n        ttl = policy.entry_ttl_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-ttl-branches",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]"
+    ]
+  },
+  {
+    "name": "A24-foreign-freeze",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        out.extend(lint.hits)",
+    "new": "        out.extend(hit for hit in lint.hits if not hit[2].startswith(\"research/\"))",
+    "tests": [
+      "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact"
+    ]
+  },
+  {
+    "name": "S32-build-start-bypass",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = t_dec + dt.timedelta(seconds=policy.latency_s + derived_window_s(plan, policy, ttl))",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-ttl-before",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\"entry_ttl_s\": resolve_entry_ttl_s(plan, pol)",
+    "new": "\"entry_ttl_s\": pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-ttl-after",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)",
+    "new": "exp_ttl = pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-ttl-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "ttl = resolve_entry_ttl_s(plan, policy)",
+    "new": "ttl = policy.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-expiry-A-timeline",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        if deadline <= end:",
+    "new": "deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)\n        if deadline <= end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-expiry-A-entries",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "new": "deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-expiry-B",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "deadline = entry_expiry_at(t_start, req.entry_ttl_s)",
+    "new": "deadline = t_start + dt.timedelta(seconds=req.entry_ttl_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S37-middle",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(prev + iv, o, interval_s) > 0:",
+    "new": "if o - prev > iv:",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S37-tail",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(prev + iv, end, interval_s) > 0:",
+    "new": "if prev + iv < end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A28-partition-count",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "exp_n = grid_points_between(cal_from, cal_to, sec)",
+    "new": "exp_n = max(0, int((cal_to - cal_from).total_seconds()) // sec)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-partition-first",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "int(t.timestamp()) % sec == 0",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-partition-middle",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "grid_points_between(prev[i] + step, df[key][i], sec) > 0",
+    "new": "grid_points_between(prev[i] + step, df[key][i], sec) >= 0",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-vision-count",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds()) // INTERVAL_SECONDS[interval] + 1",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_vision_count"
+    ]
+  },
+  {
+    "name": "A28-kernel-first",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "first_expected = first_grid_point(self.t_start, bars[0].interval_s)",
+    "new": "first_expected = dt.datetime.fromtimestamp(-(-int(self.t_start.timestamp()) // interval_s) * interval_s, dt.UTC)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-kernel-middle",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(prev + iv, o, interval_s) > 0:",
+    "new": "if grid_points_between(prev + iv, o, interval_s) >= 0:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-kernel-tail",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(prev + iv, end, interval_s) > 0:",
+    "new": "if grid_points_between(prev + iv, end, interval_s) >= 0:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-lake-count",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])",
+    "new": "expected = max(0, int((min(b, dt.datetime.now(dt.UTC)) - a).total_seconds()) // INTERVAL_SECONDS[\"1m\"])",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_grid"
+    ]
+  },
+  {
+    "name": "A28-lake-start",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "a = req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)",
+    "new": "a = (req.t_start or req.t_dec) - dt.timedelta(seconds=window_before_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_t_start = derived_t_start(self.t_dec, pol)",
+    "new": "exp_t_start = (self.t_dec + dt.timedelta(seconds=pol.latency_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-resolver",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return self.t_start if self.t_start is not None else derived_t_start(self.t_dec, policy)",
+    "new": "return self.t_start if self.t_start is not None else (self.t_dec + dt.timedelta(seconds=policy.latency_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = (t_dec + dt.timedelta(seconds=policy.latency_s)).replace(microsecond=0) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-lower-bound",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if self.horizon_end <= exp_t_start:",
+    "new": "if self.horizon_end < exp_t_start:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-window-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "window = self.horizon_end - exp_t_start",
+    "new": "window = dt.timedelta(seconds=int((self.horizon_end - exp_t_start).total_seconds()))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-window-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=ttl + (plan.expiry.max_holding_s or policy.max_horizon_s))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-window-derived-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "derived_s = derived_window_s(self.order_plan, pol, exp_ttl)",
+    "new": "derived_s = exp_ttl + (self.order_plan.expiry.max_holding_s or pol.max_horizon_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-ttl-before",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\"entry_ttl_s\": resolve_entry_ttl_s(plan, pol)",
+    "new": "\"entry_ttl_s\": pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-ttl-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)",
+    "new": "exp_ttl = pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-ttl-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "ttl = resolve_entry_ttl_s(plan, policy)",
+    "new": "ttl = policy.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-expiry-timeline",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        if deadline <= end:",
+    "new": "deadline = (self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)).replace(microsecond=0)\n        if deadline <= end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_timeline"
+    ]
+  },
+  {
+    "name": "A28-expiry-timeline-bound",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if deadline <= end:",
+    "new": "if deadline < end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_timeline"
+    ]
+  },
+  {
+    "name": "A28-expiry-orders",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "new": "deadline = (self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)).replace(microsecond=0)\n        for i, (e, p, q) in enumerate(legs):",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_orders"
+    ]
+  },
+  {
+    "name": "A28-expiry-b",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "deadline = entry_expiry_at(t_start, req.entry_ttl_s)",
+    "new": "deadline = (t_start + dt.timedelta(seconds=req.entry_ttl_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_b"
+    ]
+  },
+  {
+    "name": "A28-expiry-b-bound",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "TimeInForce.GTD if deadline <= end else TimeInForce.GTC",
+    "new": "TimeInForce.GTD if deadline < end else TimeInForce.GTC",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_b"
+    ]
+  },
+  {
+    "name": "B19-M01 omit close_fee",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "- res.fees - close_fee + res.funding",
+    "new": "- res.fees + res.funding",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M02 reverse sign",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if side == \"short\":",
+    "new": "if side == \"long\":",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M03 future mark (fixture only)",
+    "file": "tests/market/test_force_close_net_r.py",
+    "old": "if bar.open_time + dt.timedelta(seconds=bar.interval_s) <= horizon_end",
+    "new": "if True",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_fixture_asof_and_sentinel"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M04 omit funding",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "- close_fee + res.funding",
+    "new": "- close_fee",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M05 omit realized",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "net_forced = res.gross_pnl + unrealized",
+    "new": "net_forced = unrealized",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M06 omit accumulated fees",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "- res.fees - close_fee",
+    "new": "- close_fee",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M07 write net_R",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "    return ForceCloseValuation(",
+    "new": "    object.__setattr__(res, \"net_R\", Decimal(0))\n    return ForceCloseValuation(",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M08 append event",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "    return ForceCloseValuation(",
+    "new": "    res.canonical_events.append(res.canonical_events[0])\n    return ForceCloseValuation(",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M09 change fill_status",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "    return ForceCloseValuation(",
+    "new": "    object.__setattr__(res, \"fill_status\", \"partial\")\n    return ForceCloseValuation(",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M10 change censor",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "    return ForceCloseValuation(",
+    "new": "    object.__setattr__(res, \"censor_reason\", \"BAR_GAP\")\n    return ForceCloseValuation(",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M11 full filled qty as residual",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "residual = res.filled_qty - exited",
+    "new": "residual = res.filled_qty",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M12 omit multiplier",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "* residual * sign * multiplier",
+    "new": "* residual * sign",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M13 wrong fee scenario",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "policy.cost(cost_scenario).taker_fee * multiplier",
+    "new": "policy.cost(\"base\").taker_fee * multiplier",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M14 zero instead of None",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "    if residual == 0:\n        return None",
+    "new": "    if residual == 0:\n        return Decimal(0)",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_no_residual_is_none"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M15 rebuild missing gross",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "raise ContractError(\"内核未提供已实现损益 gross_pnl；禁止从事件重建\")",
+    "new": "object.__setattr__(res, \"gross_pnl\", sum((e.cash_delta or Decimal(0) for e in res.canonical_events), Decimal(0)))",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[gross]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M16 missing entry silently supplied",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "raise ContractError(\"余仓估值需要 entry_avg_price\")",
+    "new": "object.__setattr__(res, \"entry_avg_price\", mark)",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[entry]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M17 bypass fixture consumption",
+    "file": "tests/market/test_force_close_net_r.py",
+    "old": "    return c.force_close_net_R(res, **args)",
+    "new": "    return c.ForceCloseValuation(net_R_forced=D(\"19.24\"), mark=bar.c, mark_at=bar.open_time, mark_source=\"fixture-bars\", residual_qty=D(6), close_fee=D(\"1.32\"))",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_fixture_asof_and_sentinel"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M18 disable hold censor",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if (mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)) and self.pos != 0:",
+    "new": "if False:",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_right_censor_routes_remain_reachable[hold_end]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M19 change horizon censor",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if mo.horizon and self.pos != 0:\n                    self.censor_now(\"LABEL_RIGHT_CENSORED\")",
+    "new": "if mo.horizon and self.pos != 0:\n                    self.censor_now(\"BAR_GAP\")",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_right_censor_routes_remain_reachable[horizon]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M20 fake G3 caller registration",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "\"force_close_net_R\": set(),",
+    "new": "\"force_close_net_R\": {\"research/fake.py:theta\"},",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_empty_registration"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M21 fake G3 count registration",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "\"force_close_net_R\": {},",
+    "new": "\"force_close_net_R\": {\"research/fake.py:theta\": 1},",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_empty_registration"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M22 new actual caller",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\n__all__ = [",
+    "new": "\ndef unregistered_probe():\n    return force_close_net_R(res)\n\n__all__ = [",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_empty_registration"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M23 suppress registry extra",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "    return problems",
+    "new": "    return []",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[extra]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M23 suppress registry bypass",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "    return problems",
+    "new": "    return []",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[bypass]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M24 suppress use counts",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self.counts[name][where] += 1",
+    "new": "self.counts[name][where] = 2",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[internal_bypass]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M25 suppress inline ban",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P8_inline_force_close\", node)",
+    "new": "pass # injected missing P8",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M26 allow inline outside owner",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "\"P8_inline_force_close\": {\"market/contract.py:force_close_net_R\"}",
+    "new": "\"P8_inline_force_close\": {\"market/contract.py:force_close_net_R\", \"market/consumer.py:consumer\"}",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M27 S30 original missing latency",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if self.horizon_end <= exp_t_start:",
+    "new": "if self.horizon_end <= (self.t_start or self.t_dec):",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_s30_window_lower_bound_uses_derived_start_not_t_dec"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M28 S30 real file write (isolated replica)",
+    "file": "tests/market/test_outcome_kind.py",
+    "old": "reg = tmp_path / \"policy_hashes.json\"",
+    "new": "reg = original",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_s30_window_lower_bound_uses_derived_start_not_t_dec"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M29 inline bypass one registered use",
+    "file": "tests/market/test_force_close_net_r.py",
+    "old": "first = force_close_net_R(res)",
+    "new": "first = (mark - res.entry_avg_price)",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[internal_bypass]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M30 inline bypass all registered uses",
+    "file": "tests/market/test_force_close_net_r.py",
+    "old": "first = force_close_net_R(res)\\n    return force_close_net_R(res)",
+    "new": "first = (mark - res.entry_avg_price)\\n    return first",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[bypass]"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M31 inline expression real tree gate",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\n__all__ = [",
+    "new": "\ndef forbidden_valuation():\n    return (mark - res.entry_avg_price) * qty\n\n__all__ = [",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M32 unclosed mark (fixture only)",
+    "file": "tests/market/test_force_close_net_r.py",
+    "old": "bar.open_time + dt.timedelta(seconds=bar.interval_s) <= horizon_end",
+    "new": "bar.open_time <= horizon_end",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_fixture_asof_and_sentinel"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M33 mutable valuation",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "@dataclass(frozen=True)",
+    "new": "@dataclass(frozen=False)",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ],
+    "first": true
+  },
+  {
+    "name": "P7-disable-annotated",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]"
+    ]
+  },
+  {
+    "name": "P7-disable-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]"
+    ]
+  },
+  {
+    "name": "P7-disable-named",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[named]"
+    ]
+  },
+  {
+    "name": "P7-disable-return",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[return]"
+    ]
+  },
+  {
+    "name": "P7-disable-comprehension",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]"
+    ]
+  },
+  {
+    "name": "P7-disable-return-field",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta = o - prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta: int = o - prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta -= prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]"
+    ]
+  },
+  {
+    "name": "augmented-duration-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P3_duration_div\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]"
+    ]
+  },
+  {
+    "name": "augmented-expiry-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P5_inline_entry_ttl\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]"
+    ]
+  },
+  {
+    "name": "S40-middle-split-bypass",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(prev + iv, o, interval_s) > 0:",
+    "new": "delta = o - prev\n            if delta > iv:",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S41-annotated-ttl",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _audit_ttl(plan, policy):\n    ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n    return ttl\n",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "B19-gross-zero",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "raise ContractError(\"内核未提供已实现损益 gross_pnl；禁止从事件重建\")",
+    "new": "object.__setattr__(res, \"gross_pnl\", Decimal(0))",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[gross]"
+    ]
+  },
+  {
+    "name": "B19-outcome-mutation",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "    return ForceCloseValuation(",
+    "new": "    object.__setattr__(res, \"outcome_kind\", \"filled_closed\")\n    return ForceCloseValuation(",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_accounting_and_read_only"
+    ]
+  },
+  {
+    "name": "COMPLEMENT-vision-int-diff",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds()) // INTERVAL_SECONDS[interval]",
+    "tests": [
+      "tests/market/test_single_source.py",
+      "-k",
+      "differential"
+    ]
+  },
+  {
+    "name": "COMPLEMENT-vision-int-all",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds()) // INTERVAL_SECONDS[interval]",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "COMPLEMENT-vision-closed-diff",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return grid_points_between(a, b, INTERVAL_SECONDS[interval]) + 1",
+    "tests": [
+      "tests/market/test_single_source.py",
+      "-k",
+      "differential"
+    ]
+  },
+  {
+    "name": "COMPLEMENT-vision-closed-all",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return grid_points_between(a, b, INTERVAL_SECONDS[interval]) + 1",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "COMPLEMENT-partition-adjacent-diff",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "grid_points_between(prev[i] + step, df[key][i], sec) > 0",
+    "new": "df[key][i] - prev[i] > step",
+    "tests": [
+      "tests/market/test_single_source.py",
+      "-k",
+      "differential"
+    ]
+  },
+  {
+    "name": "COMPLEMENT-partition-adjacent-all",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "grid_points_between(prev[i] + step, df[key][i], sec) > 0",
+    "new": "df[key][i] - prev[i] > step",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "COMPLEMENT-kernel-adjacent-diff",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(prev + iv, o, interval_s) > 0:",
+    "new": "if o - prev > iv:",
+    "tests": [
+      "tests/market/test_single_source.py",
+      "-k",
+      "differential"
+    ]
+  },
+  {
+    "name": "COMPLEMENT-kernel-adjacent-all",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(prev + iv, o, interval_s) > 0:",
+    "new": "if o - prev > iv:",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S42-kernel-truncate-open",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "opens = sorted(b.open_time for b in bars if b.open_time >= self.t_start and b.open_time < end)",
+    "new": "opens = sorted(b.open_time.replace(microsecond=0) for b in bars if b.open_time >= self.t_start and b.open_time < end)",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S42-kernel-truncate-full-T",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "opens = sorted(b.open_time for b in bars if b.open_time >= self.t_start and b.open_time < end)",
+    "new": "opens = sorted(b.open_time.replace(microsecond=0) for b in bars if b.open_time >= self.t_start and b.open_time < end)",
+    "tests": [
+      "tests/market"
+    ]
+  },
+  {
+    "name": "B20-placeholder",
+    "file": "src/quant_lab/market/policy_hashes.json",
+    "old": "\"_placeholder_fields\": []",
+    "new": "\"_placeholder_fields\": [\"research_horizon_s\"]",
+    "tests": [
+      "tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash"
+    ],
+    "first": true
+  },
+  {
+    "name": "B21-provenance",
+    "file": "src/quant_lab/market/policy_hashes.json",
+    "old": "contracts.version",
+    "new": "policy_hash",
+    "tests": [
+      "tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-fixture-return-value-product",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "mark=mark, mark_at=mark_at, mark_source=mark_source,",
+    "new": "mark=mark + Decimal(1), mark_at=mark_at, mark_source=mark_source,",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_fixture_asof_and_sentinel"
+    ]
+  }
+]
+```
+
+### 每例基线 / 注入 / 还原：输出与 SHA256
+
+本轮共131组独立三阶段突变；每次完整运行各起新Python进程。文件SHA基线=还原，注入SHA不同；不存在collection error充当RED。M210的全套副本每阶段330 passed/2 skipped：缺失真实湖导致test_real_partition_mark_price_at与test_load_market_from_lake_and_simulate_real_bars跳过；该扩展结果不作为332条全检出的证明。所有用于closed的定向节点无skip。
+以下保留完整stdout/stderr合流输出，不以“exit1”单独代替测试failure。每例还原后节点集均与基线一致。
+#### M0 S29-first-gap
+文件：src/quant_lab/market/partition_check.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-first-gap`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-000
+.                                                                        [100%]
+1 passed in 0.40s
+```
+##### injected：1 failure / exit1
+SHA256 `c7c0cbe6c46d55054bf1ee2aa32e98fe3bcdbee1cb28bbec73d501b74028dc5e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-000
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_s29_subsecond_calendar_start_has_no_false_first_gap ___________
+tests/market/test_review_p1_round10.py:35: in test_s29_subsecond_calendar_start_has_no_false_first_gap
+    assert out["gap_flag"].to_list() == [False, False]
+E   assert [True, False] == [False, False]
+E     
+E     At index 0 diff: True != False
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-000::test_s29_subsecond_calendar_start_has_no_false_first_gap
+1 failed in 0.83s
+```
+##### restored：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-000
+.                                                                        [100%]
+1 passed in 0.32s
+```
+内容还原 SHA256 相等：True。
+
+#### M1 S29-range-only
+文件：src/quant_lab/market/partition_check.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-range-only`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-001
+..                                                                       [100%]
+2 passed in 0.41s
+```
+##### injected：2 failure / exit1
+SHA256 `0ce79f68208294b8711c813177ae11de1d5934b3980d78354b36858f03210957`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-001
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+___________ test_s29_off_grid_never_covers_calendar[mixed-off-grid] ____________
+tests/market/test_review_p1_round10.py:21: in test_s29_off_grid_never_covers_calendar
+    out, qs, report = run(df, rules(eff_from=JAN, eff_to=JAN + dt.timedelta(seconds=180)))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-review12/case-001/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+____________ test_s29_off_grid_never_covers_calendar[all-off-grid] _____________
+tests/market/test_review_p1_round10.py:21: in test_s29_off_grid_never_covers_calendar
+    out, qs, report = run(df, rules(eff_from=JAN, eff_to=JAN + dt.timedelta(seconds=180)))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-review12/case-001/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-001::test_s29_off_grid_never_covers_calendar[mixed-off-grid]
+FAILED ../../../../tmp/g2-review12/case-001::test_s29_off_grid_never_covers_calendar[all-off-grid]
+2 failed in 0.86s
+```
+##### restored：2 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-001
+..                                                                       [100%]
+2 passed in 0.31s
+```
+内容还原 SHA256 相等：True。
+
+#### M2 S29-truncated-count
+文件：src/quant_lab/market/partition_check.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-truncated-count`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-002
+.                                                                        [100%]
+1 passed in 0.40s
+```
+##### injected：1 failure / exit1
+SHA256 `f66016b2c89496f9d14377060b0bb2c774f3c692f02c3cfbee4cbfa817c77bc9`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-002
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_s29_subsecond_end_includes_last_grid_point ________________
+tests/market/test_review_p1_round10.py:39: in test_s29_subsecond_end_includes_last_grid_point
+    _, _, report = run(bars(2), rules(eff_from=JAN, eff_to=JAN + dt.timedelta(minutes=2, microseconds=1)))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-review12/case-002/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-002::test_s29_subsecond_end_includes_last_grid_point
+1 failed in 0.85s
+```
+##### restored：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-002
+.                                                                        [100%]
+1 passed in 0.32s
+```
+内容还原 SHA256 相等：True。
+
+#### M3 S31-remove-output-gate
+文件：src/quant_lab/market/execution.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-remove-output-gate`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-003
+..                                                                       [100%]
+2 passed in 0.46s
+```
+##### injected：2 failure / exit1
+SHA256 `281e11ac9570cf5beaa234c881853c1b95cf33be96a74f44082ed61da623a1d1`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-003
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-003::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED ../../../../tmp/g2-review12/case-003::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.88s
+```
+##### restored：2 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-003
+..                                                                       [100%]
+2 passed in 0.40s
+```
+内容还原 SHA256 相等：True。
+
+#### M4 S31-sanitized-copy
+文件：src/quant_lab/market/execution.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-sanitized-copy`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-004
+..                                                                       [100%]
+2 passed in 0.36s
+```
+##### injected：2 failure / exit1
+SHA256 `707736653bf9ec8fc1f24586468bfe7bf056bb803403dd20cd3b9f68b6ffff1f`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-004
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-004::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED ../../../../tmp/g2-review12/case-004::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.79s
+```
+##### restored：2 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-004
+..                                                                       [100%]
+2 passed in 0.39s
+```
+内容还原 SHA256 相等：True。
+
+#### M5 S31-redacted-version
+文件：src/quant_lab/market/execution.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-redacted-version`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-005
+..                                                                       [100%]
+2 passed in 0.35s
+```
+##### injected：2 failure / exit1
+SHA256 `85a3697289437167bf49b9f05ad391508349b92c36b3b2bd84d4568fa1c10d7b`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-005
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:313: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    assert "conflict-version-S31" in message
+E   assert 'conflict-version-S31' in "同一 policy_version 对应多个 policy_hash（版本串与内容不一一对应）：REDACTED → ['11111111111111111111111111111111111111111111111111111111...222222222222222222222222222222222222222222222222', '3333333333333333333333333333333333333333333333333333333333333333']"
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:313: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    assert "conflict-version-S31" in message
+E   assert 'conflict-version-S31' in "同一 policy_version 对应多个 policy_hash（版本串与内容不一一对应）：REDACTED → ['11111111111111111111111111111111111111111111111111111111...222222222222222222222222222222222222222222222222', '3333333333333333333333333333333333333333333333333333333333333333']"
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-005::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED ../../../../tmp/g2-review12/case-005::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.78s
+```
+##### restored：2 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-005
+..                                                                       [100%]
+2 passed in 0.40s
+```
+内容还原 SHA256 相等：True。
+
+#### M6 S38-remove-domain
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S38-remove-domain`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-006
+.                                                                        [100%]
+1 passed in 0.28s
+```
+##### injected：1 failure / exit1
+SHA256 `bec377394a4a4f1cb5f59eae789ac0042429f922fe69b1ce88aa9932191035a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-006
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________ test_s38_policy_rejects_negative_latency ___________________
+tests/market/test_review_p1_round10.py:46: in test_s38_policy_rejects_negative_latency
+    with pytest.raises(c.ContractError, match="启动时刻不能早于决策时刻"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-006::test_s38_policy_rejects_negative_latency
+1 failed in 0.44s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-006
+.                                                                        [100%]
+1 passed in 0.35s
+```
+内容还原 SHA256 相等：True。
+
+#### M7 S38-explicit-only
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S38-explicit-only`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-007
+.                                                                        [100%]
+1 passed in 0.28s
+```
+##### injected：1 failure / exit1
+SHA256 `e63aeff8c2c56a574da74c5e042ec08393dceabc280e25bd824d20e7f8b63aaf`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-007
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_s38_resolved_start_checked_for_both_spellings ______________
+tests/market/test_review_p1_round10.py:56: in test_s38_resolved_start_checked_for_both_spellings
+    with pytest.raises(c.ContractError, match="不能早于 t_dec"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-007::test_s38_resolved_start_checked_for_both_spellings
+1 failed in 0.52s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-007
+.                                                                        [100%]
+1 passed in 0.33s
+```
+内容还原 SHA256 相等：True。
+
+#### M8 S39-discard-return
+文件：src/quant_lab/market/execution.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-discard-return`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-008
+.                                                                        [100%]
+1 passed in 1.74s
+```
+##### injected：1 failure / exit1
+SHA256 `f7a236e91328ee7299ba27b32b2bd0721733f67d7995abb3c3f1fafcc1db34aa`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-008
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:79: in test_s39_loader_grid_return_controls_coverage
+    assert baseline.bars_complete and baseline.bars_quality_ok
+E   AssertionError: assert (False)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 0, 0, t...supported: S02 U03 real settlement time; archive calc_time only', 'klines 期望 0 根，实际 3', 'markPriceKlines 期望 0 根，实际 3']).bars_complete
+=============================== warnings summary ===============================
+../../../../tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/_pytest/pathlib.py:95
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/_pytest/pathlib.py:95: PytestWarning: (rm_rf) error removing /private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/garbage-034227b3-9051-48ff-89a3-e38024d0b092
+  <class 'OSError'>: [Errno 66] Directory not empty: '/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/garbage-034227b3-9051-48ff-89a3-e38024d0b092'
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-008::test_s39_loader_grid_return_controls_coverage
+1 failed, 1 warning in 0.34s
+```
+##### restored：1 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-008
+.                                                                        [100%]
+1 passed in 0.35s
+```
+内容还原 SHA256 相等：True。
+
+#### M9 S39-inline-count
+文件：src/quant_lab/market/execution.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-inline-count`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-009
+.                                                                        [100%]
+1 passed in 1.74s
+```
+##### injected：1 failure / exit1
+SHA256 `7258905df97aa26264cc6376eda969606cb4473789f0bfacba303040ab30fe27`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-009
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:89: in test_s39_loader_grid_return_controls_coverage
+    assert calls == [(JAN, request.horizon_end, 60)] * 2
+E   assert [] == [(datetime.da...one.utc), 60)]
+E     
+E     Right contains 2 more items, first extra item: (datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 0, 3, tzinfo=datetime.timezone.utc), 60)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-009::test_s39_loader_grid_return_controls_coverage
+1 failed in 0.34s
+```
+##### restored：1 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-009
+.                                                                        [100%]
+1 passed in 0.35s
+```
+内容还原 SHA256 相等：True。
+
+#### M10 S39-wrong-helper-value
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-wrong-helper-value`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-010
+.                                                                        [100%]
+1 passed in 1.74s
+```
+##### injected：1 failure / exit1
+SHA256 `646947e0a3cad07c44709ead9bb1792b1d95cd9f0ebe63de44d13f4948972d2d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-010
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:79: in test_s39_loader_grid_return_controls_coverage
+    assert baseline.bars_complete and baseline.bars_quality_ok
+E   AssertionError: assert (False)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 0, 0, t...pported: S02 U03 real settlement time; archive calc_time only', 'klines 期望 10 根，实际 3', 'markPriceKlines 期望 10 根，实际 3']).bars_complete
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-010::test_s39_loader_grid_return_controls_coverage
+1 failed in 0.34s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-010
+.                                                                        [100%]
+1 passed in 0.35s
+```
+内容还原 SHA256 相等：True。
+
+#### M11 S33-wrong-expected
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S33-wrong-expected`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：12 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-011
+............                                                             [100%]
+12 passed in 0.26s
+```
+##### injected：12 failure / exit1
+SHA256 `621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-011
+FFFFFFFFFFFF                                                             [100%]
+=================================== FAILURES ===================================
+____________ test_s33_aligned_calendar_equivalence[2024-01-01-1-1m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 1441 == ((1 * 86400) // 60)
+E    +  where 1441 = <function expected_rows at 0x10cfd5080>('klines', '1m', '2024-01-01')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+___________ test_s33_aligned_calendar_equivalence[2024-01-01-1-15m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 97 == ((1 * 86400) // 900)
+E    +  where 97 = <function expected_rows at 0x10cfd5080>('klines', '15m', '2024-01-01')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-02-29-1-1m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 1441 == ((1 * 86400) // 60)
+E    +  where 1441 = <function expected_rows at 0x10cfd5080>('klines', '1m', '2024-02-29')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+___________ test_s33_aligned_calendar_equivalence[2024-02-29-1-15m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 97 == ((1 * 86400) // 900)
+E    +  where 97 = <function expected_rows at 0x10cfd5080>('klines', '15m', '2024-02-29')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-01-31-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 44641 == ((31 * 86400) // 60)
+E    +  where 44641 = <function expected_rows at 0x10cfd5080>('klines', '1m', '2024-01')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-01-31-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2977 == ((31 * 86400) // 900)
+E    +  where 2977 = <function expected_rows at 0x10cfd5080>('klines', '15m', '2024-01')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-02-29-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 41761 == ((29 * 86400) // 60)
+E    +  where 41761 = <function expected_rows at 0x10cfd5080>('klines', '1m', '2024-02')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-02-29-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2785 == ((29 * 86400) // 900)
+E    +  where 2785 = <function expected_rows at 0x10cfd5080>('klines', '15m', '2024-02')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2023-02-28-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 40321 == ((28 * 86400) // 60)
+E    +  where 40321 = <function expected_rows at 0x10cfd5080>('klines', '1m', '2023-02')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2023-02-28-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2689 == ((28 * 86400) // 900)
+E    +  where 2689 = <function expected_rows at 0x10cfd5080>('klines', '15m', '2023-02')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-12-31-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 44641 == ((31 * 86400) // 60)
+E    +  where 44641 = <function expected_rows at 0x10cfd5080>('klines', '1m', '2024-12')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-12-31-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2977 == ((31 * 86400) // 900)
+E    +  where 2977 = <function expected_rows at 0x10cfd5080>('klines', '15m', '2024-12')
+E    +    where <function expected_rows at 0x10cfd5080> = v.expected_rows
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-01-31-1m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-01-31-15m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-02-29-1m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-02-29-15m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2023-02-28-1m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2023-02-28-15m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-12-31-1m]
+FAILED ../../../../tmp/g2-review12/case-011::test_s33_aligned_calendar_equivalence[2024-12-31-15m]
+12 failed in 0.37s
+```
+##### restored：12 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-011
+............                                                             [100%]
+12 passed in 0.30s
+```
+内容还原 SHA256 相等：True。
+
+#### M12 modified-existing-first-point-sentinel
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' modified-existing-first-point-sentinel`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-012
+.                                                                        [100%]
+1 passed in 0.30s
+```
+##### injected：1 failure / exit1
+SHA256 `ee86ed956ce784f73818398c486e49e2230c6ccb5f5ad13ca4a9b4e702a2076d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-012
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_grid_math_single_source_and_exact_to_microsecond _____________
+tests/market/test_constants_effective.py:133: in test_grid_math_single_source_and_exact_to_microsecond
+    assert moved != real, "_first_bar_gap 未真正委派给 first_grid_point（换哨兵后行为不变）"
+E   AssertionError: _first_bar_gap 未真正委派给 first_grid_point（换哨兵后行为不变）
+E   assert datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc) != datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-012::test_grid_math_single_source_and_exact_to_microsecond
+1 failed in 0.28s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-012
+.                                                                        [100%]
+1 passed in 0.30s
+```
+内容还原 SHA256 相等：True。
+
+#### M13 A24-real-caller-missing
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-caller-missing`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-013
+.                                                                        [100%]
+1 passed in 0.48s
+```
+##### injected：1 failure / exit1
+SHA256 `86e7c48d7c1030eaa15df9e9fb247369b569ba5a825999ae8e93bccb76ee6d85`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-013
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "grid_points_between：登记的调用方 ['market/vision.py:expected_rows'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-013::test_single_source_call_sites_match_registry
+1 failed in 0.92s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-013
+.                                                                        [100%]
+1 passed in 0.50s
+```
+内容还原 SHA256 相等：True。
+
+#### M14 A24-real-caller-extra
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-caller-extra`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-014
+.                                                                        [100%]
+1 passed in 0.47s
+```
+##### injected：1 failure / exit1
+SHA256 `52e4bf1dd6077f5123c85bc8da687a150f9883f18a0403aea120f3a20653598c`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-014
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...则单一来源的使用面不可知'] == []
+E     
+E     Left contains one more item: "grid_points_between：出现**未登记**的调用方 ['market/vision.py:_unregistered_grid_probe']——新调用方必须登记，否则单一来源的使用面不可知"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-014::test_single_source_call_sites_match_registry
+1 failed in 0.93s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-014
+.                                                                        [100%]
+1 passed in 0.49s
+```
+内容还原 SHA256 相等：True。
+
+#### M15 A24-gate-missing-disabled
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-gate-missing-disabled`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-015
+.                                                                        [100%]
+1 passed in 0.27s
+```
+##### injected：1 failure / exit1
+SHA256 `cf6a417f520df235e049d1bef8b7f727b1c8339eee71888cdb3fadd0638ba231`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-015
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_registry_gate_fails_when_mutated[missing] ________________
+tests/market/test_single_source.py:52: in test_registry_gate_fails_when_mutated
+    assert len(message) == 1
+E   assert 0 == 1
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-015::test_registry_gate_fails_when_mutated[missing]
+1 failed in 0.25s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-015
+.                                                                        [100%]
+1 passed in 0.30s
+```
+内容还原 SHA256 相等：True。
+
+#### M16 A24-gate-extra-disabled
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-gate-extra-disabled`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-016
+.                                                                        [100%]
+1 passed in 0.25s
+```
+##### injected：1 failure / exit1
+SHA256 `a7facaf86542485bb3ddb684c7c3975b383925d000d91f70e547c9795fc5dbd1`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-016
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_registry_gate_fails_when_mutated[extra] _________________
+tests/market/test_single_source.py:52: in test_registry_gate_fails_when_mutated
+    assert len(message) == 1
+E   assert 0 == 1
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-016::test_registry_gate_fails_when_mutated[extra]
+1 failed in 0.34s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-016
+.                                                                        [100%]
+1 passed in 0.30s
+```
+内容还原 SHA256 相等：True。
+
+#### M17 A24-real-inline-latency
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-latency`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-017
+.                                                                        [100%]
+1 passed in 1.08s
+```
+##### injected：1 failure / exit1
+SHA256 `348df56392200c54a60c20b9d25b12a93cd0266881a2a1c69fca21048312ed90`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-017
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P1_inline_....latency_s)')] == []
+E     
+E     Left contains one more item: ('P1_inline_latency', 566, 'market/vision.py:_inline_probe', 'dt.timedelta(seconds=policy.latency_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-017::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.00s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-017
+.                                                                        [100%]
+1 passed in 1.15s
+```
+内容还原 SHA256 相等：True。
+
+#### M18 A24-disable-pattern-latency
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-latency`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-018
+.                                                                        [100%]
+1 passed in 0.26s
+```
+##### injected：1 failure / exit1
+SHA256 `2ae9c5acdf75db8734b6cf7eace3ea3277995cd7333cc23536dd0d63bbc17bf8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-018
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_lint_gate_fails_on_injected_violation[latency] ______________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P1_inline_latency'}
+E     
+E     Extra items in the right set:
+E     'P1_inline_latency'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-018::test_lint_gate_fails_on_injected_violation[latency]
+1 failed in 0.28s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-018
+.                                                                        [100%]
+1 passed in 0.26s
+```
+内容还原 SHA256 相等：True。
+
+#### M19 A24-real-inline-int-seconds
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-int-seconds`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-019
+.                                                                        [100%]
+1 passed in 1.12s
+```
+##### injected：1 failure / exit1
+SHA256 `cb0f44ee75eaf94eea519b7308e278c21d048dc871cf77ca9a1ee935ea160cd0`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-019
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P2_int_tot..._seconds())')] == []
+E     
+E     Left contains one more item: ('P2_int_total_seconds', 566, 'market/vision.py:_inline_probe', 'int((b - a).total_seconds())')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-019::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.15s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-019
+.                                                                        [100%]
+1 passed in 1.07s
+```
+内容还原 SHA256 相等：True。
+
+#### M20 A24-disable-pattern-int-seconds
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-int-seconds`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-020
+.                                                                        [100%]
+1 passed in 0.26s
+```
+##### injected：1 failure / exit1
+SHA256 `94420a7e9070d85e68b4a7aeed3c95563c9288ebfb9df93a1fe0a84b8327aa11`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-020
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[int-seconds] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P2_int_total_seconds'}
+E     
+E     Extra items in the right set:
+E     'P2_int_total_seconds'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-020::test_lint_gate_fails_on_injected_violation[int-seconds]
+1 failed in 0.28s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-020
+.                                                                        [100%]
+1 passed in 0.26s
+```
+内容还原 SHA256 相等：True。
+
+#### M21 A24-real-inline-duration-div
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-duration-div`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-021
+.                                                                        [100%]
+1 passed in 1.14s
+```
+##### injected：1 failure / exit1
+SHA256 `d7c8ff9a7f9e099896722f51a74945f546b80b64f535f2b7ca0262f5b190d020`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-021
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P3_duratio... interval_s')] == []
+E     
+E     Left contains one more item: ('P3_duration_div', 566, 'market/vision.py:_inline_probe', '(b - a).total_seconds() // interval_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-021::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.15s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-021
+.                                                                        [100%]
+1 passed in 1.23s
+```
+内容还原 SHA256 相等：True。
+
+#### M22 A24-disable-pattern-duration-div
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-duration-div`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-022
+.                                                                        [100%]
+1 passed in 0.25s
+```
+##### injected：1 failure / exit1
+SHA256 `2d3b766c3d41813660e230ae12e477ca491dd63882e1843fd8f42b4537bbfee0`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-022
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[duration-div] ___________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P3_duration_div'}
+E     
+E     Extra items in the right set:
+E     'P3_duration_div'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-022::test_lint_gate_fails_on_injected_violation[duration-div]
+1 failed in 0.35s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-022
+.                                                                        [100%]
+1 passed in 0.29s
+```
+内容还原 SHA256 相等：True。
+
+#### M23 A24-real-inline-start-or
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-start-or`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-023
+.                                                                        [100%]
+1 passed in 1.06s
+```
+##### injected：1 failure / exit1
+SHA256 `5b2f0731ed9f91e922c98b649a6e41bdfd509920164d76f5ff00c3048d5fdf46`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-023
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P4_t_start...r req.t_dec')] == []
+E     
+E     Left contains one more item: ('P4_t_start_or_t_dec', 566, 'market/vision.py:_inline_probe', 'req.t_start or req.t_dec')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-023::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.23s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-023
+.                                                                        [100%]
+1 passed in 1.14s
+```
+内容还原 SHA256 相等：True。
+
+#### M24 A24-disable-pattern-start-or
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-start-or`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-024
+.                                                                        [100%]
+1 passed in 0.28s
+```
+##### injected：1 failure / exit1
+SHA256 `b33989272f6fffd60b5c219097ed2e872c7fdbe4e91cac85274fe9300eb2aebb`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-024
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_lint_gate_fails_on_injected_violation[start-or] _____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P4_t_start_or_t_dec'}
+E     
+E     Extra items in the right set:
+E     'P4_t_start_or_t_dec'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-024::test_lint_gate_fails_on_injected_violation[start-or]
+1 failed in 0.28s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-024
+.                                                                        [100%]
+1 passed in 0.41s
+```
+内容还原 SHA256 相等：True。
+
+#### M25 A24-real-inline-expiry-add
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-expiry-add`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-025
+.                                                                        [100%]
+1 passed in 1.13s
+```
+##### injected：1 failure / exit1
+SHA256 `11ffbd653ff7bdac251f76e2190cbd0dbe25fdba295441b5f2271266e7ee7e4d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-025
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P5_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains one more item: ('P5_inline_entry_ttl', 566, 'market/vision.py:_inline_probe', 't + dt.timedelta(seconds=req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-025::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.18s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-025
+.                                                                        [100%]
+1 passed in 1.02s
+```
+内容还原 SHA256 相等：True。
+
+#### M26 A24-disable-pattern-expiry-add
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-expiry-add`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-026
+.                                                                        [100%]
+1 passed in 0.28s
+```
+##### injected：1 failure / exit1
+SHA256 `c563792dda4656930375effe4c86dee3039a39276a1d931c7deec9c1a7243a1b`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-026
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_lint_gate_fails_on_injected_violation[expiry-add] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P5_inline_entry_ttl'}
+E     
+E     Extra items in the right set:
+E     'P5_inline_entry_ttl'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-026::test_lint_gate_fails_on_injected_violation[expiry-add]
+1 failed in 0.26s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-026
+.                                                                        [100%]
+1 passed in 0.30s
+```
+内容还原 SHA256 相等：True。
+
+#### M27 A24-real-inline-middle-grid
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-middle-grid`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-027
+.                                                                        [100%]
+1 passed in 1.10s
+```
+##### injected：1 failure / exit1
+SHA256 `4a82ee5c698d826bbbf35216129bb26d80475ea0f21428fe544bda713fbd29f0`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-027
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_...- prev > iv')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 566, 'market/vision.py:_inline_probe', 'o - prev > iv')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-027::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.14s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-027
+.                                                                        [100%]
+1 passed in 1.14s
+```
+内容还原 SHA256 相等：True。
+
+#### M28 A24-disable-pattern-middle-grid
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-middle-grid`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-028
+.                                                                        [100%]
+1 passed in 0.23s
+```
+##### injected：1 failure / exit1
+SHA256 `05100c415a2d5ddd7f14318a08001e920292d539bf5c5045f54823e35097c568`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-028
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[middle-grid] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-028::test_lint_gate_fails_on_injected_violation[middle-grid]
+1 failed in 0.31s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-028
+.                                                                        [100%]
+1 passed in 0.31s
+```
+内容还原 SHA256 相等：True。
+
+#### M29 A24-real-inline-tail-grid
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-tail-grid`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-029
+.                                                                        [100%]
+1 passed in 1.12s
+```
+##### injected：1 failure / exit1
+SHA256 `09cd1de0e6648ef44383e0d9c2c080be58406ae600ba395cd47ee05142dd651f`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-029
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_... + iv < end')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 566, 'market/vision.py:_inline_probe', 'prev + iv < end')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-029::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.29s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-029
+.                                                                        [100%]
+1 passed in 1.07s
+```
+内容还原 SHA256 相等：True。
+
+#### M30 A24-disable-pattern-tail-grid
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-tail-grid`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-030
+.                                                                        [100%]
+1 passed in 0.32s
+```
+##### injected：1 failure / exit1
+SHA256 `05100c415a2d5ddd7f14318a08001e920292d539bf5c5045f54823e35097c568`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-030
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_lint_gate_fails_on_injected_violation[tail-grid] _____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-030::test_lint_gate_fails_on_injected_violation[tail-grid]
+1 failed in 0.46s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-030
+.                                                                        [100%]
+1 passed in 0.28s
+```
+内容还原 SHA256 相等：True。
+
+#### M31 A24-real-inline-ttl-expression
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-ttl-expression`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-031
+.                                                                        [100%]
+1 passed in 1.25s
+```
+##### injected：1 failure / exit1
+SHA256 `3be936d956d379b3cae352064b6f9173708ec17e03782987ef4a6238f612fdbd`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-031
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_inline_probe', 'ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-031::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.21s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-031
+.                                                                        [100%]
+1 passed in 1.01s
+```
+内容还原 SHA256 相等：True。
+
+#### M32 A24-disable-pattern-ttl-expression
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-ttl-expression`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-032
+.                                                                        [100%]
+1 passed in 0.31s
+```
+##### injected：1 failure / exit1
+SHA256 `158bcf86478a83cff0b12fd714404f12cfe18b7dd0dc0456f526b53b2de1fc0d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-032
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________ test_lint_gate_fails_on_injected_violation[ttl-expression] __________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-032::test_lint_gate_fails_on_injected_violation[ttl-expression]
+1 failed in 0.26s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-032
+.                                                                        [100%]
+1 passed in 0.28s
+```
+内容还原 SHA256 相等：True。
+
+#### M33 A24-real-inline-ttl-branches
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-ttl-branches`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-033
+.                                                                        [100%]
+1 passed in 1.07s
+```
+##### injected：1 failure / exit1
+SHA256 `fcb5b81a0c9ddfdbfecb860ff52782f451d40845e2dfe85a94aaf5805cacb992`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-033
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_inline_probe', 'ttl = plan.expiry.entry_ttl_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-033::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.10s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-033
+.                                                                        [100%]
+1 passed in 1.20s
+```
+内容还原 SHA256 相等：True。
+
+#### M34 A24-disable-pattern-ttl-branches
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-ttl-branches`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-034
+.                                                                        [100%]
+1 passed in 0.25s
+```
+##### injected：1 failure / exit1
+SHA256 `158bcf86478a83cff0b12fd714404f12cfe18b7dd0dc0456f526b53b2de1fc0d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-034
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[ttl-branches] ___________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-034::test_lint_gate_fails_on_injected_violation[ttl-branches]
+1 failed in 0.25s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-034
+.                                                                        [100%]
+1 passed in 0.27s
+```
+内容还原 SHA256 相等：True。
+
+#### M35 A24-foreign-freeze
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-foreign-freeze`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-035
+.                                                                        [100%]
+1 passed in 1.06s
+```
+##### injected：1 failure / exit1
+SHA256 `2486f397f3cb23fee43e05cbf916a0614a2cb1118ff6a7ce58d7c9738cbd7577`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-035
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_foreign_hits_registry_is_exact ______________________
+tests/market/test_single_source.py:36: in test_foreign_hits_registry_is_exact
+    assert hits == gate.FOREIGN_HITS
+E   AssertionError: assert set() == {('P3_duratio...m_synthetic')}
+E     
+E     Extra items in the right set:
+E     ('P3_duration_div', 'research/maxt.py:calendar_blocks')
+E     ('P5_inline_entry_ttl', 'research/api.py:build_inputs_from_synthetic')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-035::test_foreign_hits_registry_is_exact
+1 failed in 1.26s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-035
+.                                                                        [100%]
+1 passed in 1.13s
+```
+内容还原 SHA256 相等：True。
+
+#### M36 S32-build-start-bypass
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S32-build-start-bypass`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-036
+..                                                                       [100%]
+2 passed in 1.44s
+```
+##### injected：2 failure / exit1
+SHA256 `fd317f283fa9d07b2219b787acdcd05999415bb5f919731984cfe5603a68d1fe`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-036
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['derived_t_s...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "derived_t_start：登记的调用方 ['market/contract.py:build_request'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P1_inline_...licy, ttl))')] == []
+E     
+E     Left contains one more item: ('P1_inline_latency', 539, 'market/contract.py:build_request', 'dt.timedelta(seconds=policy.latency_s + derived_window_s(plan, policy, ttl))')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-036::test_single_source_call_sites_match_registry
+FAILED ../../../../tmp/g2-review12/case-036::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 1.42s
+```
+##### restored：2 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-036
+..                                                                       [100%]
+2 passed in 1.68s
+```
+内容还原 SHA256 相等：True。
+
+#### M37 S35-ttl-before
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-before`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-037
+.                                                                        [100%]
+1 passed in 0.60s
+```
+##### injected：1 failure / exit1
+SHA256 `1312d1bef00a4d96f05405da8cf45a5285de16747a5ffd259cab18f30ba6d779`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-037
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:ExecutionRequest._resolve_ttl'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-037::test_single_source_call_sites_match_registry
+1 failed in 0.65s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-037
+.                                                                        [100%]
+1 passed in 0.50s
+```
+内容还原 SHA256 相等：True。
+
+#### M38 S35-ttl-after
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-after`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-038
+.                                                                        [100%]
+1 passed in 0.58s
+```
+##### injected：1 failure / exit1
+SHA256 `022b09ee012b3dec87b75ac8408d150f527774d9801d76a8e2a6f99ef84cc938`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-038
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:ExecutionRequest._chk'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-038::test_single_source_call_sites_match_registry
+1 failed in 0.55s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-038
+.                                                                        [100%]
+1 passed in 0.86s
+```
+内容还原 SHA256 相等：True。
+
+#### M39 S35-ttl-builder
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-builder`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-039
+.                                                                        [100%]
+1 passed in 0.79s
+```
+##### injected：1 failure / exit1
+SHA256 `d6a3b1f6d83c1614da7be656ba99fd451e76477565a8d16c74f9435211fa1660`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-039
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:build_request'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-039::test_single_source_call_sites_match_registry
+1 failed in 0.47s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-039
+.                                                                        [100%]
+1 passed in 0.58s
+```
+内容还原 SHA256 相等：True。
+
+#### M40 S35-expiry-A-timeline
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-A-timeline`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-040
+..                                                                       [100%]
+2 passed in 1.65s
+```
+##### injected：2 failure / exit1
+SHA256 `8071e84e2eac51ffd677e124af98a293577ebfd840123d099b10b54ab3bb393e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-040
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/kernel_a.py:KernelA.timeline'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 222, 'market/kernel_a.py:KernelA.timeline', 'deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-040::test_single_source_call_sites_match_registry
+FAILED ../../../../tmp/g2-review12/case-040::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 1.52s
+```
+##### restored：2 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-040
+..                                                                       [100%]
+2 passed in 1.36s
+```
+内容还原 SHA256 相等：True。
+
+#### M41 S35-expiry-A-entries
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-A-entries`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-041
+..                                                                       [100%]
+2 passed in 1.43s
+```
+##### injected：2 failure / exit1
+SHA256 `3c9a3d7434a76180e04c294aae3ce96cc69e79a4b1a945e3ed408036939557a4`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-041
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/kernel_a.py:KernelA.submit_entries'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 319, 'market/kernel_a.py:KernelA.submit_entries', 'deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-041::test_single_source_call_sites_match_registry
+FAILED ../../../../tmp/g2-review12/case-041::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 1.48s
+```
+##### restored：2 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-041
+..                                                                       [100%]
+2 passed in 1.52s
+```
+内容还原 SHA256 相等：True。
+
+#### M42 S35-expiry-B
+文件：src/quant_lab/market/nautilus_adapter.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-B`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-042
+..                                                                       [100%]
+2 passed in 1.51s
+```
+##### injected：2 failure / exit1
+SHA256 `abca157a7613de5e72286335d295ec1ea02a3a6bc4d26fe1b039a221f4b9430c`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-042
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 226, 'market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries', 'deadline = t_start + dt.timedelta(seconds=req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-042::test_single_source_call_sites_match_registry
+FAILED ../../../../tmp/g2-review12/case-042::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 1.46s
+```
+##### restored：2 passed / exit0
+SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-042
+..                                                                       [100%]
+2 passed in 1.83s
+```
+内容还原 SHA256 相等：True。
+
+#### M43 S37-middle
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-middle`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-043
+.                                                                        [100%]
+1 passed in 1.17s
+```
+##### injected：1 failure / exit1
+SHA256 `62464dbb13327eae36eb8de3b078bb5e335d40f7ba57a9a7c5651de56445d2e9`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-043
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_...- prev > iv')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 250, 'market/kernel_a.py:KernelA._first_bar_gap', 'o - prev > iv')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-043::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.13s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-043
+.                                                                        [100%]
+1 passed in 1.72s
+```
+内容还原 SHA256 相等：True。
+
+#### M44 S37-tail
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-tail`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-044
+.                                                                        [100%]
+1 passed in 1.57s
+```
+##### injected：1 failure / exit1
+SHA256 `4d2c900f1ce1fd6a484d860f70c90ae4f75bfacf610d98f844489a44d4dfbabb`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-044
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_... + iv < end')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 253, 'market/kernel_a.py:KernelA._first_bar_gap', 'prev + iv < end')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-044::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.32s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-044
+.                                                                        [100%]
+1 passed in 1.14s
+```
+内容还原 SHA256 相等：True。
+
+#### M45 A28-partition-count
+文件：src/quant_lab/market/partition_check.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-count`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-045
+.                                                                        [100%]
+1 passed in 4.21s
+```
+##### injected：1 failure / exit1
+SHA256 `9ce967bc18a2cae92142e68b3767d6cefd3321e76c8382657b16b33ac0dd5fba`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-045
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:218: in test_differential_partition_grid
+    out, quarantines, report = pc.check_bars(
+/tmp/g2-review12/case-045/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-045::test_differential_partition_grid
+1 failed in 1.91s
+```
+##### restored：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-045
+.                                                                        [100%]
+1 passed in 4.44s
+```
+内容还原 SHA256 相等：True。
+
+#### M46 A28-partition-first
+文件：src/quant_lab/market/partition_check.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-first`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-046
+.                                                                        [100%]
+1 passed in 4.34s
+```
+##### injected：1 failure / exit1
+SHA256 `8c612fd9703614f287dd01afc9fa2977cc5d53dcd914dc06c74133707c395bcc`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-046
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:218: in test_differential_partition_grid
+    out, quarantines, report = pc.check_bars(
+/tmp/g2-review12/case-046/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-046::test_differential_partition_grid
+1 failed in 0.39s
+```
+##### restored：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-046
+.                                                                        [100%]
+1 passed in 4.54s
+```
+内容还原 SHA256 相等：True。
+
+#### M47 A28-partition-middle
+文件：src/quant_lab/market/partition_check.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-middle`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-047
+.                                                                        [100%]
+1 passed in 4.40s
+```
+##### injected：1 failure / exit1
+SHA256 `f62b408fc41ee6159e9a1c240e520ba7dc761bfe23177afb43ef991ee6b3aaae`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-047
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:238: in test_differential_partition_grid
+    assert out['gap_flag'].to_list() == flags
+E   assert [False, True, True, True] == [False, False, False, False]
+E     
+E     At index 1 diff: True != False
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-047::test_differential_partition_grid
+1 failed in 2.00s
+```
+##### restored：1 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-047
+.                                                                        [100%]
+1 passed in 4.34s
+```
+内容还原 SHA256 相等：True。
+
+#### M48 A28-vision-count
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-vision-count`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-048
+.                                                                        [100%]
+1 passed in 0.34s
+```
+##### injected：1 failure / exit1
+SHA256 `7b958775ba0a60c66fc580244dad71d04d60dd887eccba4273d9cc57ae1b06ee`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-048
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:258: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x10a7d9e40>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x10a7d9e40> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x108e29120>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x108e29120> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-048::test_differential_vision_count
+1 failed in 0.47s
+```
+##### restored：1 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-048
+.                                                                        [100%]
+1 passed in 0.28s
+```
+内容还原 SHA256 相等：True。
+
+#### M49 A28-kernel-first
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-first`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-049
+.                                                                        [100%]
+1 passed in 0.33s
+```
+##### injected：1 failure / exit1
+SHA256 `2e3018eea6bae286ecc99ca1f770c9552933bada76615b43a60e40528d384cef`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-049
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:281: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc) == None
+E    +  where datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 59, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10d1af290>._first_bar_gap
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-049::test_differential_kernel_grid - ...
+1 failed in 0.36s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-049
+.                                                                        [100%]
+1 passed in 0.64s
+```
+内容还原 SHA256 相等：True。
+
+#### M50 A28-kernel-middle
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-middle`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-050
+.                                                                        [100%]
+1 passed in 0.35s
+```
+##### injected：1 failure / exit1
+SHA256 `42f34262d4c4cc6082b3a21c63357cd190ae67d9c03870ce9f9c764fb5d71b49`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-050
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:281: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc) == None
+E    +  where datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10c574c80>._first_bar_gap
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-050::test_differential_kernel_grid - ...
+1 failed in 0.35s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-050
+.                                                                        [100%]
+1 passed in 0.33s
+```
+内容还原 SHA256 相等：True。
+
+#### M51 A28-kernel-tail
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-tail`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-051
+.                                                                        [100%]
+1 passed in 0.56s
+```
+##### injected：1 failure / exit1
+SHA256 `087e6399bc0a0f64aea96e45c56f19fbe596dc9f43c6d0acfd268e900902e51d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-051
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:281: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 4, tzinfo=datetime.timezone.utc) == None
+E    +  where datetime.datetime(2024, 2, 1, 0, 4, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x1084b3e30>._first_bar_gap
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-051::test_differential_kernel_grid - ...
+1 failed in 0.35s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-051
+.                                                                        [100%]
+1 passed in 0.29s
+```
+内容还原 SHA256 相等：True。
+
+#### M52 A28-lake-count
+文件：src/quant_lab/market/execution.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-lake-count`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-052
+.                                                                        [100%]
+1 passed in 2.47s
+```
+##### injected：1 failure / exit1
+SHA256 `74441fbb9fef51b3c19ba1eb9babb0f1a97b48c075562eb043fdeec00fa3094f`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-052
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________________ test_differential_lake_grid __________________________
+tests/market/test_single_source.py:333: in test_differential_lake_grid
+    assert market.bars_complete == (len(opens) == c.grid_points_between(start, end, 60))
+E   AssertionError: assert False == (5 == 5)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59... 'markPriceKlines 期望 4 根，实际 5', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete
+E    +  and   5 = len([datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=date...ime(2024, 2, 1, 0, 2, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc)])
+E    +  and   5 = <function grid_points_between at 0x108a35120>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc), 60)
+E    +    where <function grid_points_between at 0x108a35120> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-052::test_differential_lake_grid - As...
+1 failed in 0.87s
+```
+##### restored：1 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-052
+.                                                                        [100%]
+1 passed in 2.14s
+```
+内容还原 SHA256 相等：True。
+
+#### M53 A28-lake-start
+文件：src/quant_lab/market/execution.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-lake-start`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-053
+.                                                                        [100%]
+1 passed in 3.51s
+```
+##### injected：1 failure / exit1
+SHA256 `24cc5d8ea30b26387eb651e1affee9460ac925ae3bff406d735e03eb1595e2e5`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-053
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:375: in test_differential_start
+    assert actual.bars_complete
+E   AssertionError: assert False
+E    +  where False = MarketView(manifest_id='a28', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=da... 'markPriceKlines 期望 4 根，实际 3', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-053::test_differential_start - Assert...
+1 failed in 1.45s
+```
+##### restored：1 passed / exit0
+SHA256 `9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-053
+.                                                                        [100%]
+1 passed in 3.53s
+```
+内容还原 SHA256 相等：True。
+
+#### M54 A28-start-validator
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-validator`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-054
+.                                                                        [100%]
+1 passed in 3.10s
+```
+##### injected：1 failure / exit1
+SHA256 `8ea17a005807e65aed3bd46f78f358ac4819eba895c3a754aa617c4605c8fbff`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-054
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:361: in test_differential_start
+    req = _build(_plan(), t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-review12/case-054/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/tmp/g2-review12/case-054/src/quant_lab/market/contract.py:464: in _chk
+    raise ContractError("t_start 不能早于 t_dec（解析后的启动时刻）")
+E   quant_lab.market.contract.ContractError: t_start 不能早于 t_dec（解析后的启动时刻）
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-054::test_differential_start - quant_...
+1 failed in 0.70s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-054
+.                                                                        [100%]
+1 passed in 3.47s
+```
+内容还原 SHA256 相等：True。
+
+#### M55 A28-start-resolver
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-resolver`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-055
+.                                                                        [100%]
+1 passed in 2.71s
+```
+##### injected：1 failure / exit1
+SHA256 `c40f524bee263789741033c27ea28de36f18c8dee6a4111394d53d2ee4aac406`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-055
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:362: in test_differential_start
+    assert req.resolved_t_start(policy) == start
+E   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 58, 59, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 31, 23, 58, 59, tzinfo=datetime.timezone.utc) = resolved_t_start(ExecutionPolicy(version='a28-input', latency_s=0, ladder_steps=2, costs={'base': CostSpec(maker_fee=Decimal('0'), take...zon_s=432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')))
+E    +    where resolved_t_start = ExecutionRequest(episode_id='E03', graph_version='gv-fixture', decision_snapshot_hash='dsh-E03', t_dec=datetime.dateti...e='one_way', entry_ttl_s=86400, entry_fractions=(Decimal('1'),), tp_fractions=(Decimal('1'),), horizon_source='policy').resolved_t_start
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-055::test_differential_start - Assert...
+1 failed in 0.70s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-055
+.                                                                        [100%]
+1 passed in 3.03s
+```
+内容还原 SHA256 相等：True。
+
+#### M56 A28-start-builder
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-builder`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-056
+.                                                                        [100%]
+=============================== warnings summary ===============================
+../../../../tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/_pytest/pathlib.py:95
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/_pytest/pathlib.py:95: PytestWarning: (rm_rf) error removing /private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/garbage-41df114e-926b-4847-b0bb-233bc8e4d8b6
+  <class 'OSError'>: [Errno 66] Directory not empty: '/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/garbage-41df114e-926b-4847-b0bb-233bc8e4d8b6'
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 2.86s
+```
+##### injected：1 failure / exit1
+SHA256 `81646fe0a454a8618f21b60a00544669d01d6fb2d48096711338b4f2b6a4df49`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-056
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:361: in test_differential_start
+    req = _build(_plan(), t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-review12/case-056/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/tmp/g2-review12/case-056/src/quant_lab/market/contract.py:493: in _chk
+    raise ContractError(f"horizon_source=policy 但 horizon_end 与推导值不一致：窗口 {window} != {dt.timedelta(seconds=derived_s)}"
+E   quant_lab.market.contract.ContractError: horizon_source=policy 但 horizon_end 与推导值不一致：窗口 5 days, 23:59:59.000001 != 6 days, 0:00:00（自选观察窗请显式标 horizon_source='caller'，它会进 trace_hash 并由 G3 记入尝试账本）
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-056::test_differential_start - quant_...
+1 failed in 1.65s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-056
+.                                                                        [100%]
+1 passed in 3.02s
+```
+内容还原 SHA256 相等：True。
+
+#### M57 A28-start-lower-bound
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-lower-bound`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-057
+.                                                                        [100%]
+1 passed in 3.51s
+```
+##### injected：1 failure / exit1
+SHA256 `768120656a9322045e611c190679803e23f525f06ebe881ec6f7071ca3adce8a`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-057
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:384: in test_differential_start
+    assert _accepts(data) == (valid_spelling and data['horizon_end'] > start)
+E   AssertionError: assert True == ((True and datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) > datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc)))
+E    +  where True = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-057::test_differential_start - Assert...
+1 failed in 1.00s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-057
+.                                                                        [100%]
+1 passed in 3.31s
+```
+内容还原 SHA256 相等：True。
+
+#### M58 A28-window-validator
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-validator`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-058
+.                                                                        [100%]
+1 passed in 0.44s
+```
+##### injected：1 failure / exit1
+SHA256 `14ea2d9571c48ecc28fe8322a7487b968265b06ba529fa11bee8e9835bb8a5c9`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-058
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:410: in test_differential_window
+    assert _accepts(data) == want
+E   AssertionError: assert True == False
+E    +  where True = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-058::test_differential_window - Asser...
+1 failed in 0.33s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-058
+.                                                                        [100%]
+1 passed in 0.43s
+```
+内容还原 SHA256 相等：True。
+
+#### M59 A28-window-builder
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-builder`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-059
+.                                                                        [100%]
+1 passed in 0.43s
+```
+##### injected：1 failure / exit1
+SHA256 `92333ef2358c55d985b8bd8264524a3f2758f3db8d40d07718536cd6dc1755e7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-059
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:399: in test_differential_window
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-review12/case-059/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/tmp/g2-review12/case-059/src/quant_lab/market/contract.py:489: in _chk
+    raise ContractError(f"观察窗 {window} 超过 policy {self.policy_version} 的安全上限 "
+E   quant_lab.market.contract.ContractError: 观察窗 4 days, 15:07:40 超过 policy a28-input 的安全上限 max_horizon_s=400000s（亚秒偏移同样超限）
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-059::test_differential_window - quant...
+1 failed in 0.32s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-059
+.                                                                        [100%]
+1 passed in 0.42s
+```
+内容还原 SHA256 相等：True。
+
+#### M60 A28-window-derived-validator
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-derived-validator`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-060
+.                                                                        [100%]
+1 passed in 0.44s
+```
+##### injected：1 failure / exit1
+SHA256 `98c2f9718e5072b8c3ab9e23befdf09942c6b52d734069a82df5d4ee2df158f6`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-060
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:399: in test_differential_window
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-review12/case-060/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/tmp/g2-review12/case-060/src/quant_lab/market/contract.py:493: in _chk
+    raise ContractError(f"horizon_source=policy 但 horizon_end 与推导值不一致：窗口 {window} != {dt.timedelta(seconds=derived_s)}"
+E   quant_lab.market.contract.ContractError: horizon_source=policy 但 horizon_end 与推导值不一致：窗口 0:03:03 != 4 days, 15:07:40（自选观察窗请显式标 horizon_source='caller'，它会进 trace_hash 并由 G3 记入尝试账本）
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-060::test_differential_window - quant...
+1 failed in 0.30s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-060
+.                                                                        [100%]
+1 passed in 0.36s
+```
+内容还原 SHA256 相等：True。
+
+#### M61 A28-ttl-before
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-before`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-061
+.                                                                        [100%]
+1 passed in 0.28s
+```
+##### injected：1 failure / exit1
+SHA256 `1312d1bef00a4d96f05405da8cf45a5285de16747a5ffd259cab18f30ba6d779`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-061
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:435: in test_differential_ttl
+    assert _accepts(data) == want
+E   AssertionError: assert False == True
+E    +  where False = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-061::test_differential_ttl - Assertio...
+1 failed in 0.26s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-061
+.                                                                        [100%]
+1 passed in 0.29s
+```
+内容还原 SHA256 相等：True。
+
+#### M62 A28-ttl-validator
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-validator`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-062
+.                                                                        [100%]
+1 passed in 0.31s
+```
+##### injected：1 failure / exit1
+SHA256 `022b09ee012b3dec87b75ac8408d150f527774d9801d76a8e2a6f99ef84cc938`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-062
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:426: in test_differential_ttl
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-review12/case-062/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/tmp/g2-review12/case-062/src/quant_lab/market/contract.py:483: in _chk
+    raise ContractError(f"entry_ttl_s 与{src}解析值不一致：{self.entry_ttl_s} != {exp_ttl}")
+E   quant_lab.market.contract.ContractError: entry_ttl_s 与计划解析值不一致：1 != 321
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-062::test_differential_ttl - quant_la...
+1 failed in 0.36s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-062
+.                                                                        [100%]
+1 passed in 0.30s
+```
+内容还原 SHA256 相等：True。
+
+#### M63 A28-ttl-builder
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-builder`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-063
+.                                                                        [100%]
+1 passed in 0.25s
+```
+##### injected：1 failure / exit1
+SHA256 `d6a3b1f6d83c1614da7be656ba99fd451e76477565a8d16c74f9435211fa1660`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-063
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:426: in test_differential_ttl
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-review12/case-063/src/quant_lab/market/contract.py:540: in build_request
+    return ExecutionRequest(
+/tmp/g2-review12/case-063/src/quant_lab/market/contract.py:483: in _chk
+    raise ContractError(f"entry_ttl_s 与{src}解析值不一致：{self.entry_ttl_s} != {exp_ttl}")
+E   quant_lab.market.contract.ContractError: entry_ttl_s 与计划解析值不一致：321 != 1
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-063::test_differential_ttl - quant_la...
+1 failed in 0.32s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-063
+.                                                                        [100%]
+1 passed in 0.28s
+```
+内容还原 SHA256 相等：True。
+
+#### M64 A28-expiry-timeline
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-timeline`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-064
+.                                                                        [100%]
+1 passed in 0.32s
+```
+##### injected：1 failure / exit1
+SHA256 `dc5bf4c0875af9d850441b4c81a74dffa1f1be872c712cf3c3ec2b54014041fa`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-064
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_differential_expiry_timeline _______________________
+tests/market/test_single_source.py:467: in test_differential_expiry_timeline
+    assert [moment.ts for moment in moments if moment.expiry] == expected
+E   assert [datetime.dat...timezone.utc)] == []
+E     
+E     Left contains one more item: datetime.datetime(2024, 2, 1, 0, 1, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-064::test_differential_expiry_timeline
+1 failed in 0.33s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-064
+.                                                                        [100%]
+1 passed in 0.26s
+```
+内容还原 SHA256 相等：True。
+
+#### M65 A28-expiry-timeline-bound
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-timeline-bound`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-065
+.                                                                        [100%]
+1 passed in 0.20s
+```
+##### injected：1 failure / exit1
+SHA256 `1dcf30cd475fba869cef9f02ac0113858291cf055ca72163f6ad5b64c7081834`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-065
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_differential_expiry_timeline _______________________
+tests/market/test_single_source.py:467: in test_differential_expiry_timeline
+    assert [moment.ts for moment in moments if moment.expiry] == expected
+E   assert [] == [datetime.dat...timezone.utc)]
+E     
+E     Right contains one more item: datetime.datetime(2024, 2, 1, 0, 1, 0, 999999, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-065::test_differential_expiry_timeline
+1 failed in 0.40s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-065
+.                                                                        [100%]
+1 passed in 0.29s
+```
+内容还原 SHA256 相等：True。
+
+#### M66 A28-expiry-orders
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-orders`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-066
+.                                                                        [100%]
+1 passed in 0.36s
+```
+##### injected：1 failure / exit1
+SHA256 `46fe6c547e34396ebc73f793f75ff57ea677b5fdd5451898fb5c23dea9f511cb`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-066
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_expiry_orders ________________________
+tests/market/test_single_source.py:477: in test_differential_expiry_orders
+    assert [order.deadline for order in orders] == [expiry] * len(orders)
+E   assert [datetime.dat...timezone.utc)] == [datetime.dat...timezone.utc)]
+E     
+E     At index 0 diff: datetime.datetime(2024, 2, 1, 0, 1, tzinfo=datetime.timezone.utc) != datetime.datetime(2024, 2, 1, 0, 1, 0, 999999, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-066::test_differential_expiry_orders
+1 failed in 0.32s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-066
+.                                                                        [100%]
+1 passed in 0.35s
+```
+内容还原 SHA256 相等：True。
+
+#### M67 A28-expiry-b
+文件：src/quant_lab/market/nautilus_adapter.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-b`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-067
+.                                                                        [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 38 warnings in 2.41s
+```
+##### injected：1 failure / exit1
+SHA256 `93508dd01932ee32e33966c8fb8d6220995c1c0e55245a7106def6830e4b8bd6`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-067
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________ test_differential_expiry_b __________________________
+tests/market/test_single_source.py:502: in test_differential_expiry_b
+    assert expired[0].reason == 'horizon_end'
+E   AssertionError: assert 'entry_ttl' == 'horizon_end'
+E     
+E     - horizon_end
+E     + entry_ttl
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-067::test_differential_expiry_b - Ass...
+1 failed, 4 warnings in 1.94s
+```
+##### restored：1 passed / exit0
+SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-067
+.                                                                        [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 38 warnings in 2.13s
+```
+内容还原 SHA256 相等：True。
+
+#### M68 A28-expiry-b-bound
+文件：src/quant_lab/market/nautilus_adapter.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-b-bound`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-068
+.                                                                        [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 38 warnings in 1.66s
+```
+##### injected：1 failure / exit1
+SHA256 `4074659c55f2818731864050c5c15d5cfda38b9137a541b1ae42e64111f32fe1`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-068
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________ test_differential_expiry_b __________________________
+tests/market/test_single_source.py:500: in test_differential_expiry_b
+    assert expired[0].reason == 'entry_ttl'
+E   AssertionError: assert 'horizon_end' == 'entry_ttl'
+E     
+E     - entry_ttl
+E     + horizon_end
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+::test_differential_expiry_b
+::test_differential_expiry_b
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-068::test_differential_expiry_b - Ass...
+1 failed, 6 warnings in 1.92s
+```
+##### restored：1 passed / exit0
+SHA256 `580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-068
+.                                                                        [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 38 warnings in 1.72s
+```
+内容还原 SHA256 相等：True。
+
+#### M69 B19-M01 omit close_fee
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M01 omit close_fee'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-069
+....                                                                     [100%]
+4 passed in 0.05s
+```
+##### injected：4 failure / exit1
+SHA256 `de63f2cb0fb3d50bd369ba34f45b32e776d9efb4424f3dba428dfff96fab41c6`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-069
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('19.428571428571') == Decimal('19.240000000000')
+E    +  where Decimal('19.428571428571') = ForceCloseValuation(net_R_forced=Decimal('19.428571428571'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.240000000000') = D('19.240000000000')
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('19.428571428571') == Decimal('19.051428571429')
+E    +  where Decimal('19.428571428571') = ForceCloseValuation(net_R_forced=Decimal('19.428571428571'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.051428571429') = D('19.051428571429')
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-14.857142857143') == Decimal('-15.045714285714')
+E    +  where Decimal('-14.857142857143') = ForceCloseValuation(net_R_forced=Decimal('-14.857142857143'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.045714285714') = D('-15.045714285714')
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-14.857142857143') == Decimal('-15.234285714286')
+E    +  where Decimal('-14.857142857143') = ForceCloseValuation(net_R_forced=Decimal('-14.857142857143'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.234285714286') = D('-15.234285714286')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-069::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-069::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-069::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-069::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.08s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-069
+....                                                                     [100%]
+4 passed in 0.07s
+```
+内容还原 SHA256 相等：True。
+
+#### M70 B19-M02 reverse sign
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M02 reverse sign'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-070
+....                                                                     [100%]
+4 passed in 0.07s
+```
+##### injected：4 failure / exit1
+SHA256 `55298b0087b7deedc05d6a971724f210d10f003e3eb5317d03a10fc28b3a2bf1`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-070
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-15.045714285714') == Decimal('19.240000000000')
+E    +  where Decimal('-15.045714285714') = ForceCloseValuation(net_R_forced=Decimal('-15.045714285714'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.240000000000') = D('19.240000000000')
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-15.234285714286') == Decimal('19.051428571429')
+E    +  where Decimal('-15.234285714286') = ForceCloseValuation(net_R_forced=Decimal('-15.234285714286'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.051428571429') = D('19.051428571429')
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('19.240000000000') == Decimal('-15.045714285714')
+E    +  where Decimal('19.240000000000') = ForceCloseValuation(net_R_forced=Decimal('19.240000000000'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.045714285714') = D('-15.045714285714')
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('19.051428571429') == Decimal('-15.234285714286')
+E    +  where Decimal('19.051428571429') = ForceCloseValuation(net_R_forced=Decimal('19.051428571429'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.234285714286') = D('-15.234285714286')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-070::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-070::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-070::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-070::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.09s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-070
+....                                                                     [100%]
+4 passed in 0.04s
+```
+内容还原 SHA256 相等：True。
+
+#### M71 B19-M03 future mark (fixture only)
+文件：tests/market/test_force_close_net_r.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M03 future mark (fixture only)'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例属于fixture/test-side方法证伪，不作生产消费方证明。
+##### baseline：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-071
+.                                                                        [100%]
+1 passed in 0.06s
+```
+##### injected：1 failure / exit1
+SHA256 `e4e458a4a80afb090971fed2b78afcef94f89acd850b26e01b3976d81bab9329`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-071
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_fixture_asof_and_sentinel ________________________
+tests/market/test_force_close_net_r.py:110: in test_fixture_asof_and_sentinel
+    assert val.mark_at == T0 + dt.timedelta(minutes=1)
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 0, 3, tzinfo=datetime.timezone.utc) == (datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=60))
+E    +  where datetime.datetime(2024, 1, 1, 0, 3, tzinfo=datetime.timezone.utc) = ForceCloseValuation(net_R_forced=Decimal('1541.716000000000'), mark=Decimal('999'), mark_at=datetime.datetime(2024, 1,...e.utc), mark_source='fixture-bars', residual_qty=Decimal('6.0'), close_fee=Decimal('11.9880'), estimand='forced_close').mark_at
+E    +  and   datetime.timedelta(seconds=60) = <class 'datetime.timedelta'>(minutes=1)
+E    +    where <class 'datetime.timedelta'> = dt.timedelta
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-071::test_fixture_asof_and_sentinel
+1 failed in 0.06s
+```
+##### restored：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-071
+.                                                                        [100%]
+1 passed in 0.04s
+```
+内容还原 SHA256 相等：True。
+
+#### M72 B19-M04 omit funding
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M04 omit funding'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-072
+....                                                                     [100%]
+4 passed in 0.06s
+```
+##### injected：4 failure / exit1
+SHA256 `e8bf2c3f18d44a6c546e8cbc3db84374b7894978c46a77f210b5b9ccc020a885`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-072
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('18.954285714286') == Decimal('19.240000000000')
+E    +  where Decimal('18.954285714286') = ForceCloseValuation(net_R_forced=Decimal('18.954285714286'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.240000000000') = D('19.240000000000')
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('18.765714285714') == Decimal('19.051428571429')
+E    +  where Decimal('18.765714285714') = ForceCloseValuation(net_R_forced=Decimal('18.765714285714'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.051428571429') = D('19.051428571429')
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-15.331428571429') == Decimal('-15.045714285714')
+E    +  where Decimal('-15.331428571429') = ForceCloseValuation(net_R_forced=Decimal('-15.331428571429'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.045714285714') = D('-15.045714285714')
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-15.520000000000') == Decimal('-15.234285714286')
+E    +  where Decimal('-15.520000000000') = ForceCloseValuation(net_R_forced=Decimal('-15.520000000000'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.234285714286') = D('-15.234285714286')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-072::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-072::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-072::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-072::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.14s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-072
+....                                                                     [100%]
+4 passed in 0.05s
+```
+内容还原 SHA256 相等：True。
+
+#### M73 B19-M05 omit realized
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M05 omit realized'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-073
+....                                                                     [100%]
+4 passed in 0.07s
+```
+##### injected：4 failure / exit1
+SHA256 `7b79afd58de992faf81e352c330f14404daef433f679d8e7dd5b7c69e2dbe2e8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-073
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('16.811428571429') == Decimal('19.240000000000')
+E    +  where Decimal('16.811428571429') = ForceCloseValuation(net_R_forced=Decimal('16.811428571429'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.240000000000') = D('19.240000000000')
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('16.622857142857') == Decimal('19.051428571429')
+E    +  where Decimal('16.622857142857') = ForceCloseValuation(net_R_forced=Decimal('16.622857142857'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.051428571429') = D('19.051428571429')
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-17.474285714286') == Decimal('-15.045714285714')
+E    +  where Decimal('-17.474285714286') = ForceCloseValuation(net_R_forced=Decimal('-17.474285714286'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.045714285714') = D('-15.045714285714')
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-17.662857142857') == Decimal('-15.234285714286')
+E    +  where Decimal('-17.662857142857') = ForceCloseValuation(net_R_forced=Decimal('-17.662857142857'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.234285714286') = D('-15.234285714286')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-073::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-073::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-073::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-073::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.07s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-073
+....                                                                     [100%]
+4 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M74 B19-M06 omit accumulated fees
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M06 omit accumulated fees'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-074
+....                                                                     [100%]
+4 passed in 0.07s
+```
+##### injected：4 failure / exit1
+SHA256 `033f5c9b8480ea7184835cc5f6c2364f45abff4fb988f2535db650e9c9fcf2bb`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-074
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('19.668571428571') == Decimal('19.240000000000')
+E    +  where Decimal('19.668571428571') = ForceCloseValuation(net_R_forced=Decimal('19.668571428571'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.240000000000') = D('19.240000000000')
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('19.480000000000') == Decimal('19.051428571429')
+E    +  where Decimal('19.480000000000') = ForceCloseValuation(net_R_forced=Decimal('19.480000000000'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.051428571429') = D('19.051428571429')
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-14.617142857143') == Decimal('-15.045714285714')
+E    +  where Decimal('-14.617142857143') = ForceCloseValuation(net_R_forced=Decimal('-14.617142857143'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.045714285714') = D('-15.045714285714')
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-14.805714285714') == Decimal('-15.234285714286')
+E    +  where Decimal('-14.805714285714') = ForceCloseValuation(net_R_forced=Decimal('-14.805714285714'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.234285714286') = D('-15.234285714286')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-074::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-074::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-074::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-074::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.12s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-074
+....                                                                     [100%]
+4 passed in 0.04s
+```
+内容还原 SHA256 相等：True。
+
+#### M75 B19-M07 write net_R
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M07 write net_R'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-075
+....                                                                     [100%]
+4 passed in 0.06s
+```
+##### injected：4 failure / exit1
+SHA256 `331463708e35a3ff6c25268e05faecfa9c2fdbab8bb59ffbab142581fffeb130`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-075
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:73: in test_accounting_and_read_only
+    assert res.net_R is None and val.net_R_forced is not None
+E   AssertionError: assert (Decimal('0') is None)
+E    +  where Decimal('0') = ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy').net_R
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:73: in test_accounting_and_read_only
+    assert res.net_R is None and val.net_R_forced is not None
+E   AssertionError: assert (Decimal('0') is None)
+E    +  where Decimal('0') = ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy').net_R
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:73: in test_accounting_and_read_only
+    assert res.net_R is None and val.net_R_forced is not None
+E   AssertionError: assert (Decimal('0') is None)
+E    +  where Decimal('0') = ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy').net_R
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:73: in test_accounting_and_read_only
+    assert res.net_R is None and val.net_R_forced is not None
+E   AssertionError: assert (Decimal('0') is None)
+E    +  where Decimal('0') = ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy').net_R
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-075::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-075::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-075::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-075::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.10s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-075
+....                                                                     [100%]
+4 passed in 0.05s
+```
+内容还原 SHA256 相等：True。
+
+#### M76 B19-M08 append event
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M08 append event'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-076
+....                                                                     [100%]
+4 passed in 0.04s
+```
+##### injected：4 failure / exit1
+SHA256 `c02429a892de53e46d78388b008704180cf78906a4a60b0ed3a3c4d196e32d4e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-076
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:70: in test_accounting_and_read_only
+    assert res.canonical_events is events and len(events) == count
+E   AssertionError: assert ([CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] is [CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] and 9 == 8)
+E    +  where [CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] = ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy').canonical_events
+E    +  and   9 = len([CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...])
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:70: in test_accounting_and_read_only
+    assert res.canonical_events is events and len(events) == count
+E   AssertionError: assert ([CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] is [CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] and 9 == 8)
+E    +  where [CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] = ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy').canonical_events
+E    +  and   9 = len([CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...])
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:70: in test_accounting_and_read_only
+    assert res.canonical_events is events and len(events) == count
+E   AssertionError: assert ([CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] is [CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] and 9 == 8)
+E    +  where [CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] = ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy').canonical_events
+E    +  and   9 = len([CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...])
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:70: in test_accounting_and_read_only
+    assert res.canonical_events is events and len(events) == count
+E   AssertionError: assert ([CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] is [CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] and 9 == 8)
+E    +  where [CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...] = ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy').canonical_events
+E    +  and   9 = len([CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), kind='filled', order_id='...one', price=None, qty=Decimal('6'), fee=None, reason=None, bar_open_time=None, path_step='none', cash_delta=None), ...])
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-076::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-076::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-076::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-076::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.13s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-076
+....                                                                     [100%]
+4 passed in 0.04s
+```
+内容还原 SHA256 相等：True。
+
+#### M77 B19-M09 change fill_status
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M09 change fill_status'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-077
+....                                                                     [100%]
+4 passed in 0.06s
+```
+##### injected：4 failure / exit1
+SHA256 `dfdaeb94bc646d36b4b95482944401f51928b658a85c925bbaa0c1e5b892ca9d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-077
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:71: in test_accounting_and_read_only
+    assert (res.fill_status, res.outcome_kind, res.censor_reason) == state
+E   AssertionError: assert ('partial', '...GHT_CENSORED') == ('filled', 'r...GHT_CENSORED')
+E     
+E     At index 0 diff: 'partial' != 'filled'
+E     Use -v to get more diff
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:71: in test_accounting_and_read_only
+    assert (res.fill_status, res.outcome_kind, res.censor_reason) == state
+E   AssertionError: assert ('partial', '...GHT_CENSORED') == ('filled', 'r...GHT_CENSORED')
+E     
+E     At index 0 diff: 'partial' != 'filled'
+E     Use -v to get more diff
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:71: in test_accounting_and_read_only
+    assert (res.fill_status, res.outcome_kind, res.censor_reason) == state
+E   AssertionError: assert ('partial', '...GHT_CENSORED') == ('filled', 'r...GHT_CENSORED')
+E     
+E     At index 0 diff: 'partial' != 'filled'
+E     Use -v to get more diff
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:71: in test_accounting_and_read_only
+    assert (res.fill_status, res.outcome_kind, res.censor_reason) == state
+E   AssertionError: assert ('partial', '...GHT_CENSORED') == ('filled', 'r...GHT_CENSORED')
+E     
+E     At index 0 diff: 'partial' != 'filled'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-077::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-077::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-077::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-077::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.09s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-077
+....                                                                     [100%]
+4 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M78 B19-M10 change censor
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M10 change censor'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-078
+....                                                                     [100%]
+4 passed in 0.04s
+```
+##### injected：4 failure / exit1
+SHA256 `73df05b167e3375562e8632aa067daa4429a142efc0eec93d74a38052ad1c3e9`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-078
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:71: in test_accounting_and_read_only
+    assert (res.fill_status, res.outcome_kind, res.censor_reason) == state
+E   AssertionError: assert ('filled', 'u...e', 'BAR_GAP') == ('filled', 'r...GHT_CENSORED')
+E     
+E     At index 1 diff: 'unevaluable' != 'right_censored'
+E     Use -v to get more diff
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:71: in test_accounting_and_read_only
+    assert (res.fill_status, res.outcome_kind, res.censor_reason) == state
+E   AssertionError: assert ('filled', 'u...e', 'BAR_GAP') == ('filled', 'r...GHT_CENSORED')
+E     
+E     At index 1 diff: 'unevaluable' != 'right_censored'
+E     Use -v to get more diff
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:71: in test_accounting_and_read_only
+    assert (res.fill_status, res.outcome_kind, res.censor_reason) == state
+E   AssertionError: assert ('filled', 'u...e', 'BAR_GAP') == ('filled', 'r...GHT_CENSORED')
+E     
+E     At index 1 diff: 'unevaluable' != 'right_censored'
+E     Use -v to get more diff
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:71: in test_accounting_and_read_only
+    assert (res.fill_status, res.outcome_kind, res.censor_reason) == state
+E   AssertionError: assert ('filled', 'u...e', 'BAR_GAP') == ('filled', 'r...GHT_CENSORED')
+E     
+E     At index 1 diff: 'unevaluable' != 'right_censored'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-078::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-078::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-078::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-078::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.10s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-078
+....                                                                     [100%]
+4 passed in 0.05s
+```
+内容还原 SHA256 相等：True。
+
+#### M79 B19-M11 full filled qty as residual
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M11 full filled qty as residual'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-079
+....                                                                     [100%]
+4 passed in 0.04s
+```
+##### injected：4 failure / exit1
+SHA256 `1eb44fa655f822fc7cb1a5af64d6adb75ef19f957f23be67b499d4732f4eca78`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-079
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('30.542857142857') == Decimal('19.240000000000')
+E    +  where Decimal('30.542857142857') = ForceCloseValuation(net_R_forced=Decimal('30.542857142857'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1..., mark_source='fixture-mark-manifest', residual_qty=Decimal('10'), close_fee=Decimal('2.200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.240000000000') = D('19.240000000000')
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('30.228571428571') == Decimal('19.051428571429')
+E    +  where Decimal('30.228571428571') = ForceCloseValuation(net_R_forced=Decimal('30.228571428571'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1..., mark_source='fixture-mark-manifest', residual_qty=Decimal('10'), close_fee=Decimal('4.400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.051428571429') = D('19.051428571429')
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-26.600000000000') == Decimal('-15.045714285714')
+E    +  where Decimal('-26.600000000000') = ForceCloseValuation(net_R_forced=Decimal('-26.600000000000'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ..., mark_source='fixture-mark-manifest', residual_qty=Decimal('10'), close_fee=Decimal('2.200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.045714285714') = D('-15.045714285714')
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-26.914285714286') == Decimal('-15.234285714286')
+E    +  where Decimal('-26.914285714286') = ForceCloseValuation(net_R_forced=Decimal('-26.914285714286'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ..., mark_source='fixture-mark-manifest', residual_qty=Decimal('10'), close_fee=Decimal('4.400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.234285714286') = D('-15.234285714286')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-079::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-079::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-079::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-079::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.09s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-079
+....                                                                     [100%]
+4 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M80 B19-M12 omit multiplier
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M12 omit multiplier'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-080
+....                                                                     [100%]
+4 passed in 0.06s
+```
+##### injected：4 failure / exit1
+SHA256 `4a081eae722955972d0749c317fecca63ba76fb41aa98baf83e64b6bba695925`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-080
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('10.668571428571') == Decimal('19.240000000000')
+E    +  where Decimal('10.668571428571') = ForceCloseValuation(net_R_forced=Decimal('10.668571428571'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.240000000000') = D('19.240000000000')
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('10.480000000000') == Decimal('19.051428571429')
+E    +  where Decimal('10.480000000000') = ForceCloseValuation(net_R_forced=Decimal('10.480000000000'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.051428571429') = D('19.051428571429')
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-6.474285714286') == Decimal('-15.045714285714')
+E    +  where Decimal('-6.474285714286') = ForceCloseValuation(net_R_forced=Decimal('-6.474285714286'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.045714285714') = D('-15.045714285714')
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-6.662857142857') == Decimal('-15.234285714286')
+E    +  where Decimal('-6.662857142857') = ForceCloseValuation(net_R_forced=Decimal('-6.662857142857'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('2.6400'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.234285714286') = D('-15.234285714286')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-080::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-080::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-080::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-080::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.09s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-080
+....                                                                     [100%]
+4 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M81 B19-M13 wrong fee scenario
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M13 wrong fee scenario'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-081
+....                                                                     [100%]
+4 passed in 0.06s
+```
+##### injected：2 passed, 2 failure / exit1
+SHA256 `318b99401efe0019cc180a7bd372a245367bb662ec1cb63b966e2222bc695a50`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-081
+.F.F                                                                     [100%]
+=================================== FAILURES ===================================
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('19.240000000000') == Decimal('19.051428571429')
+E    +  where Decimal('19.240000000000') = ForceCloseValuation(net_R_forced=Decimal('19.240000000000'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('19.051428571429') = D('19.051428571429')
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:62: in test_accounting_and_read_only
+    assert val.net_R_forced == D(expected)
+E   AssertionError: assert Decimal('-15.045714285714') == Decimal('-15.234285714286')
+E    +  where Decimal('-15.045714285714') = ForceCloseValuation(net_R_forced=Decimal('-15.045714285714'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, ...mark_source='fixture-mark-manifest', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').net_R_forced
+E    +  and   Decimal('-15.234285714286') = D('-15.234285714286')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-081::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-081::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+2 failed, 2 passed in 0.12s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-081
+....                                                                     [100%]
+4 passed in 0.08s
+```
+内容还原 SHA256 相等：True。
+
+#### M82 B19-M14 zero instead of None
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M14 zero instead of None'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-082
+..                                                                       [100%]
+2 passed in 0.05s
+```
+##### injected：2 failure / exit1
+SHA256 `116ee71fd59d017cbd5cfda8fba8d36762c96bf6bc1435ff2fccc6040b674e7c`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-082
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_______________________ test_no_residual_is_none[closed] _______________________
+tests/market/test_force_close_net_r.py:83: in test_no_residual_is_none
+    assert c.force_close_net_R(res, **inputs()) is None
+E   AssertionError: assert Decimal('0') is None
+E    +  where Decimal('0') = <function force_close_net_R at 0x106f0a160>(ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy'), **{'mark': Decimal('110'), 'mark_at': datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), 'mark_source': ...432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')), ...})
+E    +    where <function force_close_net_R at 0x106f0a160> = c.force_close_net_R
+E    +    and   {'mark': Decimal('110'), 'mark_at': datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), 'mark_source': ...432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')), ...} = inputs()
+______________________ test_no_residual_is_none[unfilled] ______________________
+tests/market/test_force_close_net_r.py:83: in test_no_residual_is_none
+    assert c.force_close_net_R(res, **inputs()) is None
+E   AssertionError: assert Decimal('0') is None
+E    +  where Decimal('0') = <function force_close_net_R at 0x106f0a160>(ExecutionResult(canonical_events=[], fill_status='filled', filled_qty=Decimal('0'), fees=Decimal('3'), funding=Decimal...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy'), **{'mark': Decimal('110'), 'mark_at': datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), 'mark_source': ...432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')), ...})
+E    +    where <function force_close_net_R at 0x106f0a160> = c.force_close_net_R
+E    +    and   {'mark': Decimal('110'), 'mark_at': datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), 'mark_source': ...432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')), ...} = inputs()
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-082::test_no_residual_is_none[closed]
+FAILED ../../../../tmp/g2-review12/case-082::test_no_residual_is_none[unfilled]
+2 failed in 0.11s
+```
+##### restored：2 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-082
+..                                                                       [100%]
+2 passed in 0.08s
+```
+内容还原 SHA256 相等：True。
+
+#### M83 B19-M15 rebuild missing gross
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M15 rebuild missing gross'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-083
+.                                                                        [100%]
+1 passed in 0.05s
+```
+##### injected：1 failure / exit1
+SHA256 `6e12f307090cb0fc926d3fe598b14f604f27c9529b3d25d8217272bb8a2758a8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-083
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________ test_missing_kernel_value_is_error[gross] ___________________
+tests/market/test_force_close_net_r.py:91: in test_missing_kernel_value_is_error
+    with pytest.raises(c.ContractError, match=message):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-083::test_missing_kernel_value_is_error[gross]
+1 failed in 0.10s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-083
+.                                                                        [100%]
+1 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M84 B19-M16 missing entry silently supplied
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M16 missing entry silently supplied'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-084
+.                                                                        [100%]
+1 passed in 0.04s
+```
+##### injected：1 failure / exit1
+SHA256 `aa846552fe2c8ef746bbde039cd96540919f2d249b4ae20e3949c2389d4dcde3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-084
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________ test_missing_kernel_value_is_error[entry] ___________________
+tests/market/test_force_close_net_r.py:91: in test_missing_kernel_value_is_error
+    with pytest.raises(c.ContractError, match=message):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-084::test_missing_kernel_value_is_error[entry]
+1 failed in 0.08s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-084
+.                                                                        [100%]
+1 passed in 0.05s
+```
+内容还原 SHA256 相等：True。
+
+#### M85 B19-M17 bypass fixture consumption
+文件：tests/market/test_force_close_net_r.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M17 bypass fixture consumption'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例属于fixture/test-side方法证伪，不作生产消费方证明。
+##### baseline：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-085
+.                                                                        [100%]
+1 passed in 0.06s
+```
+##### injected：1 failure / exit1
+SHA256 `7cc63c222602b37c98e9d5fb45c7184892976fb9d0b29cd651fa4df3ea7f6e46`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-085
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_fixture_asof_and_sentinel ________________________
+tests/market/test_force_close_net_r.py:115: in test_fixture_asof_and_sentinel
+    assert fixture_consumer(res, bars, horizon).net_R_forced == D("123.456")
+E   AssertionError: assert Decimal('19.24') == Decimal('123.456')
+E    +  where Decimal('19.24') = ForceCloseValuation(net_R_forced=Decimal('19.24'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1, 0, 1, tz...mezone.utc), mark_source='fixture-bars', residual_qty=Decimal('6'), close_fee=Decimal('1.32'), estimand='forced_close').net_R_forced
+E    +    where ForceCloseValuation(net_R_forced=Decimal('19.24'), mark=Decimal('110'), mark_at=datetime.datetime(2024, 1, 1, 0, 1, tz...mezone.utc), mark_source='fixture-bars', residual_qty=Decimal('6'), close_fee=Decimal('1.32'), estimand='forced_close') = fixture_consumer(ExecutionResult(canonical_events=[CanonicalEvent(seq=0, ts=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezon...sition_close_at=None, mae_R=None, mfe_R=None, entry_ttl_source='plan', fraction_source='plan', horizon_source='policy'), [Bar(open_time=datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('999'), h=Decimal('999'), l=Decimal('999'), c=Decimal('999'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 0, 2, tzinfo=datetime.timezone.utc))
+E    +  and   Decimal('123.456') = D('123.456')
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-085::test_fixture_asof_and_sentinel
+1 failed in 0.10s
+```
+##### restored：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-085
+.                                                                        [100%]
+1 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M86 B19-M18 disable hold censor
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M18 disable hold censor'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-086
+.                                                                        [100%]
+1 passed in 0.09s
+```
+##### injected：1 failure / exit1
+SHA256 `77faf45c8cd1973244d7ced28e6acf9a4ffc43ebccbd261b9d75ab5b758c9f47`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-086
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_right_censor_routes_remain_reachable[hold_end] ______________
+tests/market/test_force_close_net_r.py:138: in test_right_censor_routes_remain_reachable
+    assert reached == [req.resolved_t_start(c.POLICIES[req.policy_version]) + dt.timedelta(seconds=30)]
+E   assert [datetime.dat...timezone.utc)] == [datetime.dat...timezone.utc)]
+E     
+E     At index 0 diff: datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc) != datetime.datetime(2024, 1, 1, 1, 0, 30, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-086::test_right_censor_routes_remain_reachable[hold_end]
+1 failed in 0.10s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-086
+.                                                                        [100%]
+1 passed in 0.11s
+```
+内容还原 SHA256 相等：True。
+
+#### M87 B19-M19 change horizon censor
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M19 change horizon censor'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-087
+.                                                                        [100%]
+1 passed in 0.11s
+```
+##### injected：1 failure / exit1
+SHA256 `b26078805aba2ebeaa7456ed3f2ebfa5654fab5b427f22ee9289d4f87abb5e02`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-087
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_right_censor_routes_remain_reachable[horizon] ______________
+tests/market/test_force_close_net_r.py:136: in test_right_censor_routes_remain_reachable
+    assert len(reached) == 1
+E   assert 0 == 1
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-087::test_right_censor_routes_remain_reachable[horizon]
+1 failed in 0.10s
+```
+##### restored：1 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-087
+.                                                                        [100%]
+1 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M88 B19-M20 fake G3 caller registration
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M20 fake G3 caller registration'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-088
+.                                                                        [100%]
+1 passed in 0.71s
+```
+##### injected：1 failure / exit1
+SHA256 `98f156204445f3987411fa0def6944a46989394ae27ce5b7b988b6f1fa4e99b4`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-088
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_force_close_empty_registration ______________________
+tests/market/test_force_close_net_r.py:149: in test_force_close_empty_registration
+    assert gate.ALLOWED_CALLERS["force_close_net_R"] == set()
+E   AssertionError: assert {'research/fake.py:theta'} == set()
+E     
+E     Extra items in the left set:
+E     'research/fake.py:theta'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-088::test_force_close_empty_registration
+1 failed in 0.08s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-088
+.                                                                        [100%]
+1 passed in 0.54s
+```
+内容还原 SHA256 相等：True。
+
+#### M89 B19-M21 fake G3 count registration
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M21 fake G3 count registration'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-089
+.                                                                        [100%]
+1 passed in 0.78s
+```
+##### injected：1 failure / exit1
+SHA256 `ed11043a17c23a75b9d23fa8830573d4c7c5a2a7564428fdd0e67c93df26d2d7`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-089
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_force_close_empty_registration ______________________
+tests/market/test_force_close_net_r.py:150: in test_force_close_empty_registration
+    assert gate.ALLOWED_CALL_COUNTS["force_close_net_R"] == {}
+E   AssertionError: assert {'research/fake.py:theta': 1} == {}
+E     
+E     Left contains 1 more item:
+E     {'research/fake.py:theta': 1}
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-089::test_force_close_empty_registration
+1 failed in 0.08s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-089
+.                                                                        [100%]
+1 passed in 0.51s
+```
+内容还原 SHA256 相等：True。
+
+#### M90 B19-M22 new actual caller
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M22 new actual caller'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-090
+.                                                                        [100%]
+1 passed in 0.90s
+```
+##### injected：1 failure / exit1
+SHA256 `9d32002e8d592d580e23dacdce8941b4ce951f15cc1edb548d3e086c45666f0f`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-090
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_force_close_empty_registration ______________________
+tests/market/test_force_close_net_r.py:151: in test_force_close_empty_registration
+    assert gate.collect_call_sites(gate.SRC, {"force_close_net_R"}) == {"force_close_net_R": set()}
+E   AssertionError: assert {'force_close...tered_probe'}} == {'force_close_net_R': set()}
+E     
+E     Differing items:
+E     {'force_close_net_R': {'market/contract.py:unregistered_probe'}} != {'force_close_net_R': set()}
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-090::test_force_close_empty_registration
+1 failed in 0.32s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-090
+.                                                                        [100%]
+1 passed in 0.53s
+```
+内容还原 SHA256 相等：True。
+
+#### M91 B19-M23 suppress registry extra
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M23 suppress registry extra'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-091
+.                                                                        [100%]
+1 passed in 0.88s
+```
+##### injected：1 failure / exit1
+SHA256 `048cb4e75601e82a32d4462786ee59e5dcc12ad0f54b702a518a6a77a519351d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-091
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_force_close_fixture_registration[extra] _________________
+tests/market/test_force_close_net_r.py:177: in test_force_close_fixture_registration
+    assert gate.diff_call_sites(declared, gate.collect_call_sites(root, set(declared)))
+E   AssertionError: assert []
+E    +  where [] = <function diff_call_sites at 0x10af08040>({'force_close_net_R': {'market/consumer.py:consumer'}}, {'force_close_net_R': {'market/consumer.py:consumer', 'market/consumer.py:unregistered'}})
+E    +    where <function diff_call_sites at 0x10af08040> = gate.diff_call_sites
+E    +    and   {'force_close_net_R': {'market/consumer.py:consumer', 'market/consumer.py:unregistered'}} = <function collect_call_sites at 0x10ae63e20>(PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1169/test_force_close_fixture_regis0/quant_lab'), {'force_close_net_R'})
+E    +      where <function collect_call_sites at 0x10ae63e20> = gate.collect_call_sites
+E    +      and   {'force_close_net_R'} = set({'force_close_net_R': {'market/consumer.py:consumer'}})
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-091::test_force_close_fixture_registration[extra]
+1 failed in 0.09s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-091
+.                                                                        [100%]
+1 passed in 0.47s
+```
+内容还原 SHA256 相等：True。
+
+#### M92 B19-M23 suppress registry bypass
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M23 suppress registry bypass'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-092
+.                                                                        [100%]
+1 passed in 0.47s
+```
+##### injected：1 failure / exit1
+SHA256 `048cb4e75601e82a32d4462786ee59e5dcc12ad0f54b702a518a6a77a519351d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-092
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_force_close_fixture_registration[bypass] _________________
+tests/market/test_force_close_net_r.py:177: in test_force_close_fixture_registration
+    assert gate.diff_call_sites(declared, gate.collect_call_sites(root, set(declared)))
+E   AssertionError: assert []
+E    +  where [] = <function diff_call_sites at 0x1069d4040>({'force_close_net_R': {'market/consumer.py:consumer'}}, {'force_close_net_R': set()})
+E    +    where <function diff_call_sites at 0x1069d4040> = gate.diff_call_sites
+E    +    and   {'force_close_net_R': set()} = <function collect_call_sites at 0x10692be20>(PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1175/test_force_close_fixture_regis0/quant_lab'), {'force_close_net_R'})
+E    +      where <function collect_call_sites at 0x10692be20> = gate.collect_call_sites
+E    +      and   {'force_close_net_R'} = set({'force_close_net_R': {'market/consumer.py:consumer'}})
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-092::test_force_close_fixture_registration[bypass]
+1 failed in 0.10s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-092
+.                                                                        [100%]
+1 passed in 0.09s
+```
+内容还原 SHA256 相等：True。
+
+#### M93 B19-M24 suppress use counts
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M24 suppress use counts'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-093
+.                                                                        [100%]
+1 passed in 0.47s
+```
+##### injected：1 failure / exit1
+SHA256 `634bda17bcaa99c42984589fb30e4e4eccadc63154a19b22187f2c94a4e8ea14`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-093
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_force_close_fixture_registration[internal_bypass] ____________
+tests/market/test_force_close_net_r.py:178: in test_force_close_fixture_registration
+    assert gate.collect_call_counts(root, set(declared)) != counts
+E   AssertionError: assert {'force_close_net_R': {'market/consumer.py:consumer': 2}} != {'force_close_net_R': {'market/consumer.py:consumer': 2}}
+E    +  where {'force_close_net_R': {'market/consumer.py:consumer': 2}} = <function collect_call_counts at 0x10a291580>(PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-1176/test_force_close_fixture_regis0/quant_lab'), {'force_close_net_R'})
+E    +    where <function collect_call_counts at 0x10a291580> = gate.collect_call_counts
+E    +    and   {'force_close_net_R'} = set({'force_close_net_R': {'market/consumer.py:consumer'}})
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-093::test_force_close_fixture_registration[internal_bypass]
+1 failed in 0.10s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-093
+.                                                                        [100%]
+1 passed in 0.09s
+```
+内容还原 SHA256 相等：True。
+
+#### M94 B19-M25 suppress inline ban
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M25 suppress inline ban'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-094
+..                                                                       [100%]
+2 passed in 0.47s
+```
+##### injected：2 failure / exit1
+SHA256 `ff03e42b24a92fc9d09763363c2b2c91c59758de0a60216f3b145a25a000b3cc`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-094
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+________________ test_force_close_inline_ban_independent[mark] _________________
+tests/market/test_force_close_net_r.py:191: in test_force_close_inline_ban_independent
+    assert len(bad) == 1 and bad[0][0] == "P8_inline_force_close"
+E   assert (0 == 1)
+E    +  where 0 = len([])
+_____________ test_force_close_inline_ban_independent[quote.mark] ______________
+tests/market/test_force_close_net_r.py:191: in test_force_close_inline_ban_independent
+    assert len(bad) == 1 and bad[0][0] == "P8_inline_force_close"
+E   assert (0 == 1)
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-094::test_force_close_inline_ban_independent[mark]
+FAILED ../../../../tmp/g2-review12/case-094::test_force_close_inline_ban_independent[quote.mark]
+2 failed in 0.09s
+```
+##### restored：2 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-094
+..                                                                       [100%]
+2 passed in 0.09s
+```
+内容还原 SHA256 相等：True。
+
+#### M95 B19-M26 allow inline outside owner
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M26 allow inline outside owner'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：2 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-095
+..                                                                       [100%]
+2 passed in 0.06s
+```
+##### injected：2 failure / exit1
+SHA256 `9138f2127ffc95602864a3dcc924bee989ef7e56f742b3f0322f6316256f4435`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-095
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+________________ test_force_close_inline_ban_independent[mark] _________________
+tests/market/test_force_close_net_r.py:191: in test_force_close_inline_ban_independent
+    assert len(bad) == 1 and bad[0][0] == "P8_inline_force_close"
+E   assert (0 == 1)
+E    +  where 0 = len([])
+_____________ test_force_close_inline_ban_independent[quote.mark] ______________
+tests/market/test_force_close_net_r.py:191: in test_force_close_inline_ban_independent
+    assert len(bad) == 1 and bad[0][0] == "P8_inline_force_close"
+E   assert (0 == 1)
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-095::test_force_close_inline_ban_independent[mark]
+FAILED ../../../../tmp/g2-review12/case-095::test_force_close_inline_ban_independent[quote.mark]
+2 failed in 0.14s
+```
+##### restored：2 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-095
+..                                                                       [100%]
+2 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M96 B19-M27 S30 original missing latency
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M27 S30 original missing latency'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-096
+.                                                                        [100%]
+1 passed in 0.32s
+```
+##### injected：1 failure / exit1
+SHA256 `97eacb0a43eaed73e1c0e416857c1b4e00cb90da59cef3fcb421cba058b93c19`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-096
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_s30_window_lower_bound_uses_derived_start_not_t_dec ___________
+tests/market/test_outcome_kind.py:366: in test_s30_window_lower_bound_uses_derived_start_not_t_dec
+    with pytest.raises(c.ContractError, match="horizon_end"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-096::test_s30_window_lower_bound_uses_derived_start_not_t_dec
+1 failed in 0.35s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-096
+.                                                                        [100%]
+=============================== warnings summary ===============================
+../../../../tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/_pytest/pathlib.py:95
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/_pytest/pathlib.py:95: PytestWarning: (rm_rf) error removing /private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/garbage-7124be26-90b4-42cd-9b64-6b30f06202f3
+  <class 'OSError'>: [Errno 66] Directory not empty: '/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/garbage-7124be26-90b4-42cd-9b64-6b30f06202f3'
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 0.38s
+```
+内容还原 SHA256 相等：True。
+
+#### M97 B19-M28 S30 real file write (isolated replica)
+文件：tests/market/test_outcome_kind.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M28 S30 real file write (isolated replica)'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例属于fixture/test-side方法证伪，不作生产消费方证明。
+##### baseline：1 passed / exit0
+SHA256 `48ee85e46be4a7bf6fe558584c00357a008dab21561c371e6772ecd404210b89`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-097
+.                                                                        [100%]
+1 passed in 0.31s
+```
+##### injected：1 failure / exit1
+SHA256 `bfd1f0801dc7556f1b40df8692122de3863e79c9941ce5ab055c47da37640821`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-097
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_s30_window_lower_bound_uses_derived_start_not_t_dec ___________
+tests/market/test_outcome_kind.py:370: in test_s30_window_lower_bound_uses_derived_start_not_t_dec
+    assert original.stat().st_mtime_ns == before
+E   AssertionError: assert 1789108269462317742 == 1789105045832099622
+E    +  where 1789108269462317742 = os.stat_result(st_mode=33188, st_ino=172201408, st_dev=16777231, st_nlink=1, st_uid=501, st_gid=0, st_size=1177, st_atime=1789108269, st_mtime=1789108269, st_ctime=1789108269).st_mtime_ns
+E    +    where os.stat_result(st_mode=33188, st_ino=172201408, st_dev=16777231, st_nlink=1, st_uid=501, st_gid=0, st_size=1177, st_atime=1789108269, st_mtime=1789108269, st_ctime=1789108269) = stat()
+E    +      where stat = PosixPath('/tmp/g2-review12/case-097/src/quant_lab/market/policy_hashes.json').stat
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-097::test_s30_window_lower_bound_uses_derived_start_not_t_dec
+1 failed in 0.34s
+```
+##### restored：1 passed / exit0
+SHA256 `48ee85e46be4a7bf6fe558584c00357a008dab21561c371e6772ecd404210b89`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-097
+.                                                                        [100%]
+1 passed in 0.37s
+```
+内容还原 SHA256 相等：True。
+
+#### M98 B19-M29 inline bypass one registered use
+文件：tests/market/test_force_close_net_r.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M29 inline bypass one registered use'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例属于fixture/test-side方法证伪，不作生产消费方证明。
+##### baseline：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-098
+.                                                                        [100%]
+1 passed in 0.06s
+```
+##### injected：1 failure / exit1
+SHA256 `2792b07242fee03756f3fc3d401c7544a128c04be11f73a8c59d5d6b61fc39fa`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-098
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_force_close_fixture_registration[internal_bypass] ____________
+tests/market/test_force_close_net_r.py:166: in test_force_close_fixture_registration
+    assert gate.collect_call_counts(root, set(declared)) == counts
+E   AssertionError: assert {'force_close...consumer': 1}} == {'force_close...consumer': 2}}
+E     
+E     Differing items:
+E     {'force_close_net_R': {'market/consumer.py:consumer': 1}} != {'force_close_net_R': {'market/consumer.py:consumer': 2}}
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-098::test_force_close_fixture_registration[internal_bypass]
+1 failed in 0.07s
+```
+##### restored：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-098
+.                                                                        [100%]
+1 passed in 0.05s
+```
+内容还原 SHA256 相等：True。
+
+#### M99 B19-M30 inline bypass all registered uses
+文件：tests/market/test_force_close_net_r.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M30 inline bypass all registered uses'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例属于fixture/test-side方法证伪，不作生产消费方证明。
+##### baseline：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-099
+.                                                                        [100%]
+1 passed in 0.05s
+```
+##### injected：1 failure / exit1
+SHA256 `4b01acc1511fa18283720c9b43e10f7b8a565176a124920cc01bfa6ea04b983f`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-099
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_force_close_fixture_registration[bypass] _________________
+tests/market/test_force_close_net_r.py:165: in test_force_close_fixture_registration
+    assert gate.diff_call_sites(declared, gate.collect_call_sites(root, set(declared))) == []
+E   assert ['force_close...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "force_close_net_R：登记的调用方 ['market/consumer.py:consumer'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-099::test_force_close_fixture_registration[bypass]
+1 failed in 0.07s
+```
+##### restored：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-099
+.                                                                        [100%]
+1 passed in 0.05s
+```
+内容还原 SHA256 相等：True。
+
+#### M100 B19-M31 inline expression real tree gate
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M31 inline expression real tree gate'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-100
+.                                                                        [100%]
+1 passed in 1.37s
+```
+##### injected：1 failure / exit1
+SHA256 `37010faaff40e4fba95d9e2125b9e0a3dc76996d3ec7e733cc87823039146ab8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-100
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P8_inline_...y_avg_price')] == []
+E     
+E     Left contains one more item: ('P8_inline_force_close', 1100, 'market/contract.py:forbidden_valuation', 'mark - res.entry_avg_price')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-100::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.06s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-100
+.                                                                        [100%]
+1 passed in 2.10s
+```
+内容还原 SHA256 相等：True。
+
+#### M101 B19-M32 unclosed mark (fixture only)
+文件：tests/market/test_force_close_net_r.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M32 unclosed mark (fixture only)'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例属于fixture/test-side方法证伪，不作生产消费方证明。
+##### baseline：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-101
+.                                                                        [100%]
+1 passed in 0.08s
+```
+##### injected：1 failure / exit1
+SHA256 `f13020c7b3385b71faf076f6eaeb246492d389199f924ad1270be351b4f29856`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-101
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_fixture_asof_and_sentinel ________________________
+tests/market/test_force_close_net_r.py:110: in test_fixture_asof_and_sentinel
+    assert val.mark_at == T0 + dt.timedelta(minutes=1)
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 0, 1, 1, tzinfo=datetime.timezone.utc) == (datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=60))
+E    +  where datetime.datetime(2024, 1, 1, 0, 1, 1, tzinfo=datetime.timezone.utc) = ForceCloseValuation(net_R_forced=Decimal('36.365714285714'), mark=Decimal('120'), mark_at=datetime.datetime(2024, 1, 1...ne.utc), mark_source='fixture-bars', residual_qty=Decimal('6.0'), close_fee=Decimal('1.4400'), estimand='forced_close').mark_at
+E    +  and   datetime.timedelta(seconds=60) = <class 'datetime.timedelta'>(minutes=1)
+E    +    where <class 'datetime.timedelta'> = dt.timedelta
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-101::test_fixture_asof_and_sentinel
+1 failed in 0.08s
+```
+##### restored：1 passed / exit0
+SHA256 `24dd32fa7b661c74c2eca75b37ad01daa264d2cca6eb402b888d78664fc6591e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-101
+.                                                                        [100%]
+1 passed in 0.05s
+```
+内容还原 SHA256 相等：True。
+
+#### M102 B19-M33 mutable valuation
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M33 mutable valuation'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-102
+....                                                                     [100%]
+4 passed in 0.07s
+```
+##### injected：4 failure / exit1
+SHA256 `71e6f26819fed199492ff5bb5591d9526155ab129a7b9c3aeefd216654f0c4ef`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-102
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:68: in test_accounting_and_read_only
+    with pytest.raises(FrozenInstanceError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE FrozenInstanceError
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:68: in test_accounting_and_read_only
+    with pytest.raises(FrozenInstanceError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE FrozenInstanceError
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:68: in test_accounting_and_read_only
+    with pytest.raises(FrozenInstanceError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE FrozenInstanceError
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:68: in test_accounting_and_read_only
+    with pytest.raises(FrozenInstanceError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE FrozenInstanceError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-102::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-102::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-102::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-102::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.08s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-102
+....                                                                     [100%]
+4 passed in 0.06s
+```
+内容还原 SHA256 相等：True。
+
+#### M103 P7-disable-annotated
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-annotated`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-103
+.                                                                        [100%]
+1 passed in 0.31s
+```
+##### injected：1 failure / exit1
+SHA256 `158bcf86478a83cff0b12fd714404f12cfe18b7dd0dc0456f526b53b2de1fc0d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-103
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_ttl_standard_nodes[annotated] ______________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-103::test_ttl_standard_nodes[annotated]
+1 failed in 0.36s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-103
+.                                                                        [100%]
+1 passed in 0.25s
+```
+内容还原 SHA256 相等：True。
+
+#### M104 P7-disable-augmented
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-augmented`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-104
+.                                                                        [100%]
+1 passed in 0.28s
+```
+##### injected：1 failure / exit1
+SHA256 `158bcf86478a83cff0b12fd714404f12cfe18b7dd0dc0456f526b53b2de1fc0d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-104
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_ttl_standard_nodes[augmented] ______________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-104::test_ttl_standard_nodes[augmented]
+1 failed in 0.96s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-104
+.                                                                        [100%]
+1 passed in 0.31s
+```
+内容还原 SHA256 相等：True。
+
+#### M105 P7-disable-named
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-named`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-105
+.                                                                        [100%]
+1 passed in 0.25s
+```
+##### injected：1 failure / exit1
+SHA256 `158bcf86478a83cff0b12fd714404f12cfe18b7dd0dc0456f526b53b2de1fc0d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-105
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_ttl_standard_nodes[named] ________________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-105::test_ttl_standard_nodes[named]
+1 failed in 0.38s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-105
+.                                                                        [100%]
+1 passed in 0.28s
+```
+内容还原 SHA256 相等：True。
+
+#### M106 P7-disable-return
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-return`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-106
+.                                                                        [100%]
+1 passed in 0.33s
+```
+##### injected：1 failure / exit1
+SHA256 `158bcf86478a83cff0b12fd714404f12cfe18b7dd0dc0456f526b53b2de1fc0d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-106
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_ttl_standard_nodes[return] ________________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-106::test_ttl_standard_nodes[return]
+1 failed in 0.32s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-106
+.                                                                        [100%]
+1 passed in 0.29s
+```
+内容还原 SHA256 相等：True。
+
+#### M107 P7-disable-comprehension
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-comprehension`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-107
+.                                                                        [100%]
+1 passed in 0.29s
+```
+##### injected：1 failure / exit1
+SHA256 `158bcf86478a83cff0b12fd714404f12cfe18b7dd0dc0456f526b53b2de1fc0d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-107
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________ test_ttl_standard_nodes[comprehension] ____________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-107::test_ttl_standard_nodes[comprehension]
+1 failed in 0.36s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-107
+.                                                                        [100%]
+1 passed in 0.24s
+```
+内容还原 SHA256 相等：True。
+
+#### M108 P7-disable-return-field
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-return-field`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-108
+.                                                                        [100%]
+1 passed in 0.28s
+```
+##### injected：1 failure / exit1
+SHA256 `158bcf86478a83cff0b12fd714404f12cfe18b7dd0dc0456f526b53b2de1fc0d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-108
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________ test_ttl_standard_nodes[return-field] _____________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-108::test_ttl_standard_nodes[return-field]
+1 failed in 0.34s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-108
+.                                                                        [100%]
+1 passed in 0.24s
+```
+内容还原 SHA256 相等：True。
+
+#### M109 P6-defuse-delta = o - prev
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta = o - prev'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-109
+.                                                                        [100%]
+1 passed in 0.24s
+```
+##### injected：1 failure / exit1
+SHA256 `ce8df2d64f9042748accbadda1d1d11aed8478ffa30c81e299411a417b357cfe`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-109
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_grid_local_definition[delta = o - prev] _________________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-109::test_grid_local_definition[delta = o - prev]
+1 failed in 0.38s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-109
+.                                                                        [100%]
+1 passed in 0.17s
+```
+内容还原 SHA256 相等：True。
+
+#### M110 P6-defuse-delta: int = o - prev
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta: int = o - prev'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-110
+.                                                                        [100%]
+1 passed in 0.27s
+```
+##### injected：1 failure / exit1
+SHA256 `ce8df2d64f9042748accbadda1d1d11aed8478ffa30c81e299411a417b357cfe`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-110
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_grid_local_definition[delta: int = o - prev] _______________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-110::test_grid_local_definition[delta: int = o - prev]
+1 failed in 0.22s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-110
+.                                                                        [100%]
+1 passed in 0.30s
+```
+内容还原 SHA256 相等：True。
+
+#### M111 P6-defuse-delta -= prev
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta -= prev'`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-111
+.                                                                        [100%]
+1 passed in 0.27s
+```
+##### injected：1 failure / exit1
+SHA256 `ce8df2d64f9042748accbadda1d1d11aed8478ffa30c81e299411a417b357cfe`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-111
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________ test_grid_local_definition[delta -= prev] ___________________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-111::test_grid_local_definition[delta -= prev]
+1 failed in 0.30s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-111
+.                                                                        [100%]
+1 passed in 0.32s
+```
+内容还原 SHA256 相等：True。
+
+#### M112 augmented-duration-augmented
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' augmented-duration-augmented`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-112
+.                                                                        [100%]
+1 passed in 0.29s
+```
+##### injected：1 failure / exit1
+SHA256 `2d3b766c3d41813660e230ae12e477ca491dd63882e1843fd8f42b4537bbfee0`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-112
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_augmented_binary_patterns[duration-augmented] ______________
+tests/market/test_single_source.py:115: in test_augmented_binary_patterns
+    assert {p for p, _, _, _ in lint.hits} == {pattern}
+E   AssertionError: assert set() == {'P3_duration_div'}
+E     
+E     Extra items in the right set:
+E     'P3_duration_div'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-112::test_augmented_binary_patterns[duration-augmented]
+1 failed in 0.31s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-112
+.                                                                        [100%]
+1 passed in 0.26s
+```
+内容还原 SHA256 相等：True。
+
+#### M113 augmented-expiry-augmented
+文件：src/quant_lab/market/single_source.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' augmented-expiry-augmented`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-113
+.                                                                        [100%]
+1 passed in 0.29s
+```
+##### injected：1 failure / exit1
+SHA256 `c563792dda4656930375effe4c86dee3039a39276a1d931c7deec9c1a7243a1b`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-113
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_augmented_binary_patterns[expiry-augmented] _______________
+tests/market/test_single_source.py:115: in test_augmented_binary_patterns
+    assert {p for p, _, _, _ in lint.hits} == {pattern}
+E   AssertionError: assert set() == {'P5_inline_entry_ttl'}
+E     
+E     Extra items in the right set:
+E     'P5_inline_entry_ttl'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-113::test_augmented_binary_patterns[expiry-augmented]
+1 failed in 0.31s
+```
+##### restored：1 passed / exit0
+SHA256 `3a41ddbf19682ac89c1c28f93849f82643aba1b9836478c4af17d58404aa81f3`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-113
+.                                                                        [100%]
+1 passed in 0.24s
+```
+内容还原 SHA256 相等：True。
+
+#### M114 S40-middle-split-bypass
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S40-middle-split-bypass`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：36 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-114
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 13.39s
+```
+##### injected：34 passed, 2 failure / exit1
+SHA256 `686fe05503e6c6fe841bb64a2bb301ab27f98a7f81cce8611061dd61cae85e2f`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-114
+.F............F.....................                                     [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_...'delta > iv')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 251, 'market/kernel_a.py:KernelA._first_bar_gap', 'delta > iv')
+E     Use -v to get more diff
+_________________ test_single_source_use_counts_match_registry _________________
+tests/market/test_single_source.py:79: in test_single_source_use_counts_match_registry
+    assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E   AssertionError: assert {'derived_t_s...est': 1}, ...} == {'force_close...est': 1}, ...}
+E     
+E     Omitting 7 identical items, use -vv to show
+E     Differing items:
+E     {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}} != {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}}
+E     Use -v to get more diff
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-114::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+FAILED ../../../../tmp/g2-review12/case-114::test_single_source_use_counts_match_registry
+2 failed, 34 passed, 38 warnings in 13.40s
+```
+##### restored：36 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-114
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 19.12s
+```
+内容还原 SHA256 相等：True。
+
+#### M115 S41-annotated-ttl
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S41-annotated-ttl`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：36 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-115
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 13.68s
+```
+##### injected：35 passed, 1 failure / exit1
+SHA256 `7be204eac4b97c9c03a3756daf28fa91f311f4ff78770ce8cbd9b03419a9dc6d`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-115
+.F..................................                                     [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_audit_ttl', 'ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s')
+E     Use -v to get more diff
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-115::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed, 35 passed, 38 warnings in 11.90s
+```
+##### restored：36 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-115
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 16.03s
+```
+内容还原 SHA256 相等：True。
+
+#### M116 B19-gross-zero
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' B19-gross-zero`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-116
+.                                                                        [100%]
+1 passed in 0.07s
+```
+##### injected：1 failure / exit1
+SHA256 `13abf016dad9ad2f8bf717d9ef22dc2d14bdff88bd67fa9fc7a9d47762ee5150`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-116
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________ test_missing_kernel_value_is_error[gross] ___________________
+tests/market/test_force_close_net_r.py:91: in test_missing_kernel_value_is_error
+    with pytest.raises(c.ContractError, match=message):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-116::test_missing_kernel_value_is_error[gross]
+1 failed in 0.08s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-116
+.                                                                        [100%]
+1 passed in 0.04s
+```
+内容还原 SHA256 相等：True。
+
+#### M117 B19-outcome-mutation
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' B19-outcome-mutation`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-117
+....                                                                     [100%]
+4 passed in 0.05s
+```
+##### injected：4 failure / exit1
+SHA256 `0b0b856555d71a07d592a7a53b511dab83a0af440a6d94f8b1c424ca3bb9755b`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-117
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________ test_accounting_and_read_only[long-base-19.240000000000-1.320] ________
+tests/market/test_force_close_net_r.py:61: in test_accounting_and_read_only
+    val = c.force_close_net_R(res, **args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-review12/case-117/src/quant_lab/market/contract.py:674: in force_close_net_R
+    object.__setattr__(res, "outcome_kind", "filled_closed")
+E   AttributeError: property 'outcome_kind' of 'ExecutionResult' object has no setter
+_______ test_accounting_and_read_only[long-stress-19.051428571429-2.640] _______
+tests/market/test_force_close_net_r.py:61: in test_accounting_and_read_only
+    val = c.force_close_net_R(res, **args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-review12/case-117/src/quant_lab/market/contract.py:674: in force_close_net_R
+    object.__setattr__(res, "outcome_kind", "filled_closed")
+E   AttributeError: property 'outcome_kind' of 'ExecutionResult' object has no setter
+_______ test_accounting_and_read_only[short-base--15.045714285714-1.320] _______
+tests/market/test_force_close_net_r.py:61: in test_accounting_and_read_only
+    val = c.force_close_net_R(res, **args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-review12/case-117/src/quant_lab/market/contract.py:674: in force_close_net_R
+    object.__setattr__(res, "outcome_kind", "filled_closed")
+E   AttributeError: property 'outcome_kind' of 'ExecutionResult' object has no setter
+______ test_accounting_and_read_only[short-stress--15.234285714286-2.640] ______
+tests/market/test_force_close_net_r.py:61: in test_accounting_and_read_only
+    val = c.force_close_net_R(res, **args)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-review12/case-117/src/quant_lab/market/contract.py:674: in force_close_net_R
+    object.__setattr__(res, "outcome_kind", "filled_closed")
+E   AttributeError: property 'outcome_kind' of 'ExecutionResult' object has no setter
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-117::test_accounting_and_read_only[long-base-19.240000000000-1.320]
+FAILED ../../../../tmp/g2-review12/case-117::test_accounting_and_read_only[long-stress-19.051428571429-2.640]
+FAILED ../../../../tmp/g2-review12/case-117::test_accounting_and_read_only[short-base--15.045714285714-1.320]
+FAILED ../../../../tmp/g2-review12/case-117::test_accounting_and_read_only[short-stress--15.234285714286-2.640]
+4 failed in 0.13s
+```
+##### restored：4 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-117
+....                                                                     [100%]
+4 passed in 0.05s
+```
+内容还原 SHA256 相等：True。
+
+#### M118 COMPLEMENT-vision-int-diff
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' COMPLEMENT-vision-int-diff`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：10 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-118
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 10.74s
+```
+##### injected：10 passed / exit0
+SHA256 `c9e4017faa256079dbc2c157f70171c9ccb177d0df31cf2df96b4b9357dbaf15`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-118
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 13.40s
+```
+##### restored：10 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-118
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 14.00s
+```
+内容还原 SHA256 相等：True。
+
+#### M119 COMPLEMENT-vision-int-all
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' COMPLEMENT-vision-int-all`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：36 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-119
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 12.14s
+```
+##### injected：33 passed, 3 failure / exit1
+SHA256 `c9e4017faa256079dbc2c157f70171c9ccb177d0df31cf2df96b4b9357dbaf15`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-119
+FF............F.....................                                     [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "grid_points_between：登记的调用方 ['market/vision.py:expected_rows'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P3_duratio..._seconds())')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P3_duration_div', 319, 'market/vision.py:expected_rows', 'int((b - a).total_seconds()) // INTERVAL_SECONDS[interval]')
+E     Use -v to get more diff
+_________________ test_single_source_use_counts_match_registry _________________
+tests/market/test_single_source.py:79: in test_single_source_use_counts_match_registry
+    assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E   AssertionError: assert {'check_polic...est': 1}, ...} == {'force_close...est': 1}, ...}
+E     
+E     Omitting 7 identical items, use -vv to show
+E     Differing items:
+E     {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 7}} != {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}}
+E     Use -v to get more diff
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-119::test_single_source_call_sites_match_registry
+FAILED ../../../../tmp/g2-review12/case-119::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+FAILED ../../../../tmp/g2-review12/case-119::test_single_source_use_counts_match_registry
+3 failed, 33 passed, 38 warnings in 11.90s
+```
+##### restored：36 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-119
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 16.03s
+```
+内容还原 SHA256 相等：True。
+
+#### M120 COMPLEMENT-vision-closed-diff
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' COMPLEMENT-vision-closed-diff`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：10 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-120
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 15.08s
+```
+##### injected：9 passed, 1 failure / exit1
+SHA256 `621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-120
+.F........                                                               [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:258: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x10aed9d00>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x10aed9d00> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x1095a1120>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x1095a1120> = c.grid_points_between
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-120::test_differential_vision_count
+1 failed, 9 passed, 26 deselected, 38 warnings in 14.01s
+```
+##### restored：10 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-120
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 14.46s
+```
+内容还原 SHA256 相等：True。
+
+#### M121 COMPLEMENT-vision-closed-all
+文件：src/quant_lab/market/vision.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' COMPLEMENT-vision-closed-all`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：36 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-121
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 16.66s
+```
+##### injected：35 passed, 1 failure / exit1
+SHA256 `621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-121
+...........................F........                                     [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:258: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x108cd9d00>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x108cd9d00> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x107399120>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x107399120> = c.grid_points_between
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-121::test_differential_vision_count
+1 failed, 35 passed, 38 warnings in 17.78s
+```
+##### restored：36 passed / exit0
+SHA256 `30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-121
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 17.43s
+```
+内容还原 SHA256 相等：True。
+
+#### M122 COMPLEMENT-partition-adjacent-diff
+文件：src/quant_lab/market/partition_check.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' COMPLEMENT-partition-adjacent-diff`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：10 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-122
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 13.27s
+```
+##### injected：10 passed / exit0
+SHA256 `256194eb4d22aef3d6718332a0968b601c603706c0e9bc3801cf2e698ffaaea1`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-122
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 14.02s
+```
+##### restored：10 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-122
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 14.46s
+```
+内容还原 SHA256 相等：True。
+
+#### M123 COMPLEMENT-partition-adjacent-all
+文件：src/quant_lab/market/partition_check.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' COMPLEMENT-partition-adjacent-all`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：36 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-123
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 18.27s
+```
+##### injected：34 passed, 2 failure / exit1
+SHA256 `256194eb4d22aef3d6718332a0968b601c603706c0e9bc3801cf2e698ffaaea1`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-123
+.F............F.....................                                     [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_...v[i] > step')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 259, 'market/partition_check.py:check_bars', 'df[key][i] - prev[i] > step')
+E     Use -v to get more diff
+_________________ test_single_source_use_counts_match_registry _________________
+tests/market/test_single_source.py:79: in test_single_source_use_counts_match_registry
+    assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E   AssertionError: assert {'entry_expir...ows': 1}, ...} == {'force_close...est': 1}, ...}
+E     
+E     Omitting 7 identical items, use -vv to show
+E     Differing items:
+E     {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 6, 'market/vision.py:expected_rows': 1}} != {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}}
+E     Use -v to get more diff
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-123::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+FAILED ../../../../tmp/g2-review12/case-123::test_single_source_use_counts_match_registry
+2 failed, 34 passed, 38 warnings in 18.19s
+```
+##### restored：36 passed / exit0
+SHA256 `1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-123
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 14.84s
+```
+内容还原 SHA256 相等：True。
+
+#### M124 COMPLEMENT-kernel-adjacent-diff
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' COMPLEMENT-kernel-adjacent-diff`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：10 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-124
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 12.60s
+```
+##### injected：10 passed / exit0
+SHA256 `62464dbb13327eae36eb8de3b078bb5e335d40f7ba57a9a7c5651de56445d2e9`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-124
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 10.38s
+```
+##### restored：10 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-124
+..........                                                               [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+10 passed, 26 deselected, 38 warnings in 9.37s
+```
+内容还原 SHA256 相等：True。
+
+#### M125 COMPLEMENT-kernel-adjacent-all
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' COMPLEMENT-kernel-adjacent-all`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：36 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-125
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 13.35s
+```
+##### injected：34 passed, 2 failure / exit1
+SHA256 `62464dbb13327eae36eb8de3b078bb5e335d40f7ba57a9a7c5651de56445d2e9`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-125
+.F............F.....................                                     [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_...- prev > iv')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 250, 'market/kernel_a.py:KernelA._first_bar_gap', 'o - prev > iv')
+E     Use -v to get more diff
+_________________ test_single_source_use_counts_match_registry _________________
+tests/market/test_single_source.py:79: in test_single_source_use_counts_match_registry
+    assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E   AssertionError: assert {'force_close...ows': 1}, ...} == {'force_close...est': 1}, ...}
+E     
+E     Omitting 7 identical items, use -vv to show
+E     Differing items:
+E     {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}} != {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}}
+E     Use -v to get more diff
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-125::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+FAILED ../../../../tmp/g2-review12/case-125::test_single_source_use_counts_match_registry
+2 failed, 34 passed, 38 warnings in 9.97s
+```
+##### restored：36 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-125
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 9.35s
+```
+内容还原 SHA256 相等：True。
+
+#### M200 S42-kernel-truncate-open
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S42-kernel-truncate-open`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：36 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-200
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 16.63s
+```
+##### injected：36 passed / exit0
+SHA256 `7490bb82dbea6827c30da38441703686ffff774333735b4792000261504f3d6e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-200
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 15.13s
+```
+##### restored：36 passed / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-200
+....................................                                     [100%]
+=============================== warnings summary ===============================
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+::test_differential_expiry_b
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 38 warnings in 19.63s
+```
+内容还原 SHA256 相等：True。
+
+#### M210 S42-kernel-truncate-full-T
+文件：src/quant_lab/market/kernel_a.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S42-kernel-truncate-full-T`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：330 passed, 2 skipped / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-210
+..........s................................s............................ [ 21%]
+........................................................................ [ 43%]
+........................................................................ [ 65%]
+........................................................................ [ 86%]
+............................................                             [100%]
+=============================== warnings summary ===============================
+test_execution_api.py::test_simulate_requires_market_and_checks_manifest
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+test_execution_api.py::test_simulate_requires_market_and_checks_manifest
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+test_execution_api.py: 2 warnings
+test_funding.py: 2 warnings
+test_nautilus_adapter.py: 56 warnings
+test_review_fixes.py: 748 warnings
+test_review_p1.py: 10 warnings
+test_review_p1_round2.py: 6 warnings
+test_review_p1_round3.py: 6 warnings
+test_single_source.py: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+test_execution_api.py::test_simulate_batch_schema_and_pairing
+  /private/tmp/g2-review12/case-210/tests/market/test_execution_api.py:47: DeprecationWarning: In Polars 2.0, the default behavior for `empty_as_null` will change to `False`. To keep the current behavior, explicitly set `empty_as_null=True`.
+    ev = df.filter(pl.col("episode_id") == "E01").select(pl.col("canonical_events").explode()).unnest("canonical_events")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+330 passed, 2 skipped, 869 warnings in 32.22s
+```
+##### injected：330 passed, 2 skipped / exit0
+SHA256 `7490bb82dbea6827c30da38441703686ffff774333735b4792000261504f3d6e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-210
+..........s................................s............................ [ 21%]
+........................................................................ [ 43%]
+........................................................................ [ 65%]
+........................................................................ [ 86%]
+............................................                             [100%]
+=============================== warnings summary ===============================
+test_execution_api.py::test_simulate_requires_market_and_checks_manifest
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+test_execution_api.py::test_simulate_requires_market_and_checks_manifest
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+test_execution_api.py: 2 warnings
+test_funding.py: 2 warnings
+test_nautilus_adapter.py: 56 warnings
+test_review_fixes.py: 748 warnings
+test_review_p1.py: 10 warnings
+test_review_p1_round2.py: 6 warnings
+test_review_p1_round3.py: 6 warnings
+test_single_source.py: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+test_execution_api.py::test_simulate_batch_schema_and_pairing
+  /private/tmp/g2-review12/case-210/tests/market/test_execution_api.py:47: DeprecationWarning: In Polars 2.0, the default behavior for `empty_as_null` will change to `False`. To keep the current behavior, explicitly set `empty_as_null=True`.
+    ev = df.filter(pl.col("episode_id") == "E01").select(pl.col("canonical_events").explode()).unnest("canonical_events")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+330 passed, 2 skipped, 869 warnings in 28.24s
+```
+##### restored：330 passed, 2 skipped / exit0
+SHA256 `d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-210
+..........s................................s............................ [ 21%]
+........................................................................ [ 43%]
+........................................................................ [ 65%]
+........................................................................ [ 86%]
+............................................                             [100%]
+=============================== warnings summary ===============================
+test_execution_api.py::test_simulate_requires_market_and_checks_manifest
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+test_execution_api.py::test_simulate_requires_market_and_checks_manifest
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    period: pd.Timedelta = pd.Timedelta(days=1),
+
+test_execution_api.py: 2 warnings
+test_funding.py: 2 warnings
+test_nautilus_adapter.py: 56 warnings
+test_review_fixes.py: 748 warnings
+test_review_p1.py: 10 warnings
+test_review_p1_round2.py: 6 warnings
+test_review_p1_round3.py: 6 warnings
+test_single_source.py: 36 warnings
+  /tmp/g2-review12/mirror/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    result = Timedelta(r, unit)
+
+test_execution_api.py::test_simulate_batch_schema_and_pairing
+  /private/tmp/g2-review12/case-210/tests/market/test_execution_api.py:47: DeprecationWarning: In Polars 2.0, the default behavior for `empty_as_null` will change to `False`. To keep the current behavior, explicitly set `empty_as_null=True`.
+    ev = df.filter(pl.col("episode_id") == "E01").select(pl.col("canonical_events").explode()).unnest("canonical_events")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+330 passed, 2 skipped, 869 warnings in 28.46s
+```
+内容还原 SHA256 相等：True。
+
+#### M211 B20-placeholder
+文件：src/quant_lab/market/policy_hashes.json
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' B20-placeholder`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-211
+.                                                                        [100%]
+1 passed in 0.27s
+```
+##### injected：1 failure / exit1
+SHA256 `c3e3e2fec8fac65da74cfb628b4b0832f485fc1edea9e47ad7e0792e496d2e5e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-211
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________ test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash ___________
+tests/market/test_review_p1_round2.py:103: in test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash
+    assert meta["_placeholder_fields"] == []
+E   AssertionError: assert ['research_horizon_s'] == []
+E     
+E     Left contains one more item: 'research_horizon_s'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-211::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash
+1 failed in 0.31s
+```
+##### restored：1 passed / exit0
+SHA256 `a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-211
+.                                                                        [100%]
+1 passed in 0.26s
+```
+内容还原 SHA256 相等：True。
+
+#### M212 B21-provenance
+文件：src/quant_lab/market/policy_hashes.json
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' B21-provenance`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-212
+.                                                                        [100%]
+1 passed in 0.27s
+```
+##### injected：1 failure / exit1
+SHA256 `9cc0f4973844023b04d6ad033aecea4562fdc981f0ee79f6a434ae2d968b472e`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-212
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________ test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash ___________
+tests/market/test_review_p1_round2.py:104: in test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash
+    assert all(term in meta["_note"] for term in ("432000", "B16", "曲线 v2", "B20", "B21", "contracts.version", "changeLog", "哈希不可区分"))
+E   assert False
+E    +  where False = all(<generator object test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash.<locals>.<genexpr> at 0x10cd7c580>)
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-212::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash
+1 failed in 0.32s
+```
+##### restored：1 passed / exit0
+SHA256 `a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-212
+.                                                                        [100%]
+1 passed in 0.27s
+```
+内容还原 SHA256 相等：True。
+
+#### M213 B19-fixture-return-value-product
+文件：src/quant_lab/market/contract.py
+复现命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P12_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' B19-fixture-return-value-product`。
+注入替换 old/new 与目标选择器见上方同名定义；此例修改隔离副本生产文件。
+##### baseline：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-213
+.                                                                        [100%]
+1 passed in 0.04s
+```
+##### injected：1 failure / exit1
+SHA256 `0e2238beb719a411955e2ab94b1d0785bec96f3bc4c3df84950a32c15db6211c`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-213
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_fixture_asof_and_sentinel ________________________
+tests/market/test_force_close_net_r.py:111: in test_fixture_asof_and_sentinel
+    assert val.mark == D(110) and val.mark_source == "fixture-bars"
+E   AssertionError: assert (Decimal('111') == Decimal('110'))
+E    +  where Decimal('111') = ForceCloseValuation(net_R_forced=Decimal('19.240000000000'), mark=Decimal('111'), mark_at=datetime.datetime(2024, 1, 1...ne.utc), mark_source='fixture-bars', residual_qty=Decimal('6.0'), close_fee=Decimal('1.3200'), estimand='forced_close').mark
+E    +  and   Decimal('110') = D(110)
+=========================== short test summary info ============================
+FAILED ../../../../tmp/g2-review12/case-213::test_fixture_asof_and_sentinel
+1 failed in 0.07s
+```
+##### restored：1 passed / exit0
+SHA256 `f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291`
+```text
+IMPORT_ROOT /private/tmp/g2-review12/case-213
+.                                                                        [100%]
+1 passed in 0.08s
+```
+内容还原 SHA256 相等：True。
+
+### 原树与历史文本完整性复核
+
+market源码与测试/夹具清单文件数 81；每文件SHA256和mtime_ns与14:28:13冻结值一致。
+清单SHA256（按相对路径排序的JSON，记录sha和mtime_ns）：`2af4c25757688f0a35905736d6f66a01f85432c1ebb753812a8bc121e9b6a538`。
+policy_hashes.json 原值：`{"mtime_ns": 1789105045832099622, "sha": "a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65"}`；全套测试后与最终复核均未变。
+历史报告原始字节数 189664，SHA256 `1ea1507df93c634a733b3eba1c7cdd75bfa3eb6d0b47d4e3dba031a0f167b6e8`；其完整原文紧随本轮章节，不改任何历史行。
+本轮结论范围内每项均有亲跑证据；真实网络下载、G3接入及外窗语义验收明确未做，不计入closed证明。
+
+---
+
+
+### 补充原样复跑与报告内嵌命令验收
+
+#### P29最小只读复现 / exit0
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nfor au,bu,first,n in [(0,180000000,0,3),(1,180000000,60,2),(0,180000001,0,4)]:\n    a=JAN+dt.timedelta(microseconds=au);b=JAN+dt.timedelta(microseconds=bu)\n    out,qs,r=run(bars(n,start=JAN+dt.timedelta(seconds=first)),rules(a,b))\n    print(au,bu,r.expected_rows,r.missing,out[\"gap_flag\"].to_list(),r.gaps)\n")'`
+```text
+0 180000000 3 0 [False, False, False] []
+1 180000000 2 0 [False, False] []
+0 180000001 4 0 [False, False, False, False] []
+```
+
+#### P30最小只读复现 / exit0
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom quant_lab.market import contract as c,execution as x\nq,m=e03();t=q.t_dec\np=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"audit-latency\",\"latency_s\":60})\nreg=c.load_policy_registry();reg[p.version]=p.content_hash\nwith patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value=reg):\n    for us in (-1,0,1):\n        for explicit in (False,True):\n            start=None\n            if explicit:\n                start=t+dt.timedelta(seconds=60)\n            try:\n                r=c.ExecutionRequest.model_validate({**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":start,\"horizon_source\":\"caller\",\"horizon_end\":t+dt.timedelta(seconds=60,microseconds=us)})\n                print(us,explicit,\"ACCEPT\",r.horizon_end-r.resolved_t_start(p))\n                if us==-1:\n                    for k in (\"A\",\"B\"):\n                        try:\n                            z=x.simulate(r,kernel=k,market=m);print(k,z.net_pnl,[e.kind for e in z.canonical_events])\n                        except Exception as e:\n                            print(k,type(e).__name__,str(e))\n            except c.ContractError as e:\n                print(us,explicit,\"REJECT\",str(e))\n")'`
+```text
+-1 False REJECT horizon_end 必须晚于 t_start（推导值 2024-01-01 01:01:00+00:00，latency_s=60）
+-1 True REJECT horizon_end 必须晚于 t_start（推导值 2024-01-01 01:01:00+00:00，latency_s=60）
+0 False REJECT horizon_end 必须晚于 t_start（推导值 2024-01-01 01:01:00+00:00，latency_s=60）
+0 True REJECT horizon_end 必须晚于 t_start（推导值 2024-01-01 01:01:00+00:00，latency_s=60）
+1 False ACCEPT 0:00:00.000001
+1 True ACCEPT 0:00:00.000001
+```
+
+#### P31最小只读突变复现 / exit1
+`.venv-g2/bin/python -c 'exec("import ast,inspect\nfrom unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom tests.market.test_outcome_kind import test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain as test\nfrom quant_lab.market import contract as c,execution as x\nq,m=e03();q2=c.ExecutionRequest.model_validate({**q.model_dump(),\"episode_id\":\"merge\"})\nold=x.result_row\ndef inject(req,res):\n    row=old(req,res)\n    if req.episode_id==\"merge\":\n        row[\"policy_hash\"]=\"0\"*64\n    return row\nfor strict in (True,False):\n    with patch.object(x,\"result_row\",side_effect=inject):\n        try:\n            x.simulate_batch([q,q2],markets={m.manifest_id:m},strict=strict)\n        except c.ContractError as e:\n            print(\"gate\",strict,str(e),\"hashes_listed\",q.policy_hash in str(e) and \"0\"*64 in str(e))\ntest();print(\"original PASS\")\ntree=ast.parse(inspect.getsource(x.simulate_batch));f=tree.body[0]\nremove=[n for n in f.body if isinstance(n,ast.If) and any(isinstance(z,ast.Name) and z.id==\"conflict\" for z in ast.walk(n))]\nassert len(remove)==1\nf.body=[n for n in f.body if n not in remove]\nns=dict(x.__dict__);exec(compile(ast.fix_missing_locations(tree),\"<memory-B17-mutant>\",\"exec\"),ns)\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    test();print(\"deleted gate: existing test PASS\")\nns[\"result_row\"]=inject\ndf=ns[\"simulate_batch\"]([q,q2],markets={m.manifest_id:m})\nprint(\"mutant output\",df.height,df[\"policy_hash\"].n_unique())\ntest();print(\"restored PASS\")\n")'`
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 4, in <module>
+ImportError: cannot import name 'test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain' from 'tests.market.test_outcome_kind' (/private/tmp/g2-review12/mirror/tests/market/test_outcome_kind.py)
+```
+
+#### P11B：零/正延迟、构造委派、funding边界实跑 / exit0
+`.venv-g2/bin/python -c 'exec("import datetime as dt,polars as pl\nfrom unittest.mock import patch\nfrom quant_lab.market import contract as c,partition_check as pc\nfrom tests.market.test_partition_check import JAN,INST\nfrom tests.market.test_review_p1 import e03\nq,m=e03()\nfor latency in (0,60):\n p=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"audit-positive\",\"latency_s\":latency})\n with patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value={p.version:p.content_hash}):\n  for us in (-1,0,1):\n   outcomes=[]\n   for explicit in (None,q.t_dec+dt.timedelta(seconds=latency)):\n    try:\n     r=c.ExecutionRequest.model_validate({**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":explicit,\"horizon_end\":q.t_dec+dt.timedelta(seconds=latency,microseconds=us),\"horizon_source\":\"caller\"})\n     outcomes.append(\"ACCEPT\")\n    except c.ContractError: outcomes.append(\"REJECT\")\n   print(\"latency\",latency,\"offset_us\",us,outcomes)\n   assert outcomes==([\"ACCEPT\"]*2 if us>0 else [\"REJECT\"]*2)\nwith patch.object(c,\"derived_t_start\",side_effect=lambda t,p:t+dt.timedelta(seconds=7)):\n r=c.build_request(q.model_dump(),policy_version=q.policy_version,policy_hash=q.policy_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest)\n print(\"build+7\",\"ACCEPT\",r.horizon_end,r.resolved_t_start(c.resolve_policy(r.policy_version)))\nfor micros in (0,1000,2000,3000,60000000,60000001):\n df=pl.DataFrame({\"calc_time\":[JAN,JAN+dt.timedelta(hours=8,microseconds=micros)],\"funding_interval_hours\":[8,8],\"funding_rate\":[0.,0.]})\n out,qs,rep=pc.check_funding(df,pid=\"p\",inst=INST,period=\"2024-01\")\n print(\"funding jitter_us\",micros,\"rows\",out.height,\"status\",rep.status,\"codes\",[x[\"reason_code\"] for x in qs])\n assert bool(qs)==(micros>60000000)\ndf=pl.DataFrame({\"calc_time\":[JAN,JAN+dt.timedelta(hours=4,microseconds=3000)],\"funding_interval_hours\":[8,4],\"funding_rate\":[0.,0.]})\nprint(\"funding-variable\",pc.check_funding(df,pid=\"p\",inst=INST,period=\"2024-01\")[2].status)\nprint(\"P2_UNSUPPORTED\",c.P2_UNSUPPORTED)\n")'`
+```text
+latency 0 offset_us -1 ['REJECT', 'REJECT']
+latency 0 offset_us 0 ['REJECT', 'REJECT']
+latency 0 offset_us 1 ['ACCEPT', 'ACCEPT']
+latency 60 offset_us -1 ['REJECT', 'REJECT']
+latency 60 offset_us 0 ['REJECT', 'REJECT']
+latency 60 offset_us 1 ['ACCEPT', 'ACCEPT']
+build+7 ACCEPT 2024-01-06 02:00:07+00:00 2024-01-01 01:00:07+00:00
+funding jitter_us 0 rows 2 status ok codes []
+funding jitter_us 1000 rows 2 status ok codes []
+funding jitter_us 2000 rows 2 status ok codes []
+funding jitter_us 3000 rows 2 status ok codes []
+funding jitter_us 60000000 rows 2 status ok codes []
+funding jitter_us 60000001 rows 2 status quarantined codes ['FUNDING_SCHEDULE_GAP']
+funding-variable ok
+P2_UNSUPPORTED {'S02': {'status': 'unsupported', 'capability': 'real_settlement_time_U03_and_engine_balance', 'owner': 'G0 settlement contract + G2 P2'}, 'S06': {'status': 'unsupported', 'capability': 'bronze_depth_replay_and_multi_source_versions', 'owner': 'G1 lake + G2 P2'}, 'S07': {'status': 'unsupported', 'capability': 'management_commands_E13_C01_and_reservation_lifecycle', 'owner': 'G0 C01 + G2 P2'}, 'S12': {'status': 'unsupported', 'capability': 'versioned_lake_snapshot_resolution', 'owner': 'G1 lake + G0 identity contract'}}
+```
+
+P29三组当前expected分别3/2/4且missing均0；P30两表达在−1/0µs拒绝、+1µs接受。P31旧测试名已删除，ImportError发生在注入前，不能计作门被删除后变红。P11B补跑验证零/正latency、构造启动哨兵和4h资金费变化。
+
+#### 报告内嵌入口 B：按报告命令shlex.split原样运行 / exit0
+```text
+OFFSETS [0, 59999999, 120000000] VALIDATED 3 FIRST_GAP None SIMULATE LABEL_RIGHT_CENSORED BARS_OK True
+MIDDLE_GRID False MIDDLE_ADJACENT True
+LOADER True True ['2024-01-01T01:00:00+00:00', '2024-01-01T01:00:59.999999+00:00', '2024-01-01T01:02:00+00:00']
+OFFSETS [0, 60000001, 120000000] VALIDATED 3 FIRST_GAP 2024-01-01 01:01:00+00:00 SIMULATE BAR_GAP BARS_OK False
+MIDDLE_GRID False MIDDLE_ADJACENT False
+LOADER True True ['2024-01-01T01:00:00+00:00', '2024-01-01T01:01:00.000001+00:00', '2024-01-01T01:02:00+00:00']
+```
+
+#### 报告内嵌入口 M-S42：按报告命令shlex.split原样运行 / exit0
+```text
+{
+  "name": "S42-kernel-truncate-open",
+  "file": "src/quant_lab/market/kernel_a.py",
+  "tests": [
+    "tests/market/test_single_source.py"
+  ],
+  "baseline": {
+    "rc": 0,
+    "sha256": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+    "output": "IMPORT_ROOT /private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p12-repro-y1z0l1nm/mirror\n....................................                                     [100%]\n=============================== warnings summary ===============================\n::test_differential_expiry_b\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    period: pd.Timedelta = pd.Timedelta(days=1),\n\n::test_differential_expiry_b\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    period: pd.Timedelta = pd.Timedelta(days=1),\n\n: 36 warnings\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    result = Timedelta(r, unit)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n36 passed, 38 warnings in 6.52s\n"
+  },
+  "injected": {
+    "rc": 0,
+    "sha256": "7490bb82dbea6827c30da38441703686ffff774333735b4792000261504f3d6e",
+    "output": "IMPORT_ROOT /private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p12-repro-y1z0l1nm/mirror\n....................................                                     [100%]\n=============================== warnings summary ===============================\n::test_differential_expiry_b\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    period: pd.Timedelta = pd.Timedelta(days=1),\n\n::test_differential_expiry_b\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    period: pd.Timedelta = pd.Timedelta(days=1),\n\n: 36 warnings\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    result = Timedelta(r, unit)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n36 passed, 38 warnings in 8.17s\n"
+  },
+  "restored": {
+    "rc": 0,
+    "sha256": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+    "output": "IMPORT_ROOT /private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/g2-p12-repro-y1z0l1nm/mirror\n....................................                                     [100%]\n=============================== warnings summary ===============================\n::test_differential_expiry_b\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:825: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    period: pd.Timedelta = pd.Timedelta(days=1),\n\n::test_differential_expiry_b\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/nautilus_trader/persistence/catalog/parquet.py:891: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    period: pd.Timedelta = pd.Timedelta(days=1),\n\n: 36 warnings\n  /Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/pandas/core/tools/timedeltas.py:233: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.\n    result = Timedelta(r, unit)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n36 passed, 38 warnings in 5.83s\n"
+  },
+  "sha_equal": true
+}
+ORIGINAL_SOURCE_TEST_SHA256_AND_MTIME_EQUAL True
+```
+
+#### 最终测量回执
+```text
+MEASURE 2026-09-11T14:44:19.256544+08:00
+CRITICAL_FILE_COUNT 81
+MIN_MTIME_AGE_SECONDS 1153.979
+SOURCE_TEST_CONTENT_AND_MTIME_CHANGED []
+HISTORICAL_SHA256 1ea1507df93c634a733b3eba1c7cdd75bfa3eb6d0b47d4e3dba031a0f167b6e8
+HISTORICAL_BYTES_EQUAL True
+NEW_UNFINISHED_MARKERS 0
+PROJECT_WRITES_BY_THIS_REVIEW ["docs/adr/review-G2-P1.md"]
+```
+
+131组中126组注入被检出，5组注入仍绿（3组互补性等价原形、S42定向门、S42全套副本）；各自性质按正文区分，不用统一RED率替代判定。
+
 ## 十一审判定表
 
 审查日期：2026-09-11。独立审查方：Codex 主控；只出具报告，不承担修复。
@@ -1676,3 +9835,6 @@ PY
 十审终裁：fail
 证据完整性：完成
 十一审终裁：fail
+
+证据完整性：完成
+十二审终裁：fail
