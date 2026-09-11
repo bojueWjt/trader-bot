@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:44:26Z",
+  "updatedAt": "2026-09-11T03:47:56Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -266,10 +266,18 @@
         "section": "§5.17 B15",
         "summary": "七审两条 open 裁定：(1) B12 推导式实现漏 entry_ttl 项（契约110s vs 实现50s，同行情下标签由 tp_hit/net5 翻为 right_censored/netNone），且现有两条 horizon 测试把错式子写成期望故不构成合规证据；(2) research_horizon_s 宣告必填却可省略并静默补 14 天，必填即必填、占位须显式登记政策版本；(3) S25 亚秒绕过属 G0 规格漏洞——B9 逐值相等与 B12 封顶在秒粒度比较，亚秒被 int 截断，裁定一律在完整时间戳分辨率精确比较禁止截断；另记编号冲突消歧：审查方编号与窗口自查编号不得共用序列",
         "by": "G0/427ed064 R32"
+      },
+      {
+        "n": 39,
+        "at": "2026-09-11T03:47:48Z",
+        "file": "contracts/execution-interface.md",
+        "section": "§5.18 B16",
+        "summary": "research_horizon_s 定为 5 天（曲线 v2 用真实括号重算，3d 删失率 4.3%→15.3% 证实 B13 预测；5d 6.0% 与 v1 可接受量级同级，7d 边际不划算）；记录 G2 的解释：40/67 为三档止盈梯且需打满三档才算平仓，故曲线形状由梯子档数支配；由此要求 G2+G3 就『部分出场是否整条删失 vs 观察终点强制平仓』两种 estimand 联合提案（属 G-STAT-CLAIM）；答 B4 占位期问题：PAIR_KEY 缺 policy_hash 是实质缺陷（同名不同内容会静默配错两臂），须先补，补齐后占位期可只迁移登记表、定稿时一次性 bump",
+        "by": "G0/427ed064 R33"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.15",
+    "version": "v1.16",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -578,7 +586,7 @@
         "note": "[G0/427ed064 R32] 七审终裁 fail：S01–S23 closed 15 / partial-P2 8 / **open 0**，两条新 open 均指向 G0 裁定，已裁入契约 v1.15 §5.17 B15。(1) B12 推导式实现漏 entry_ttl 项（contract.py:263/418/471 只用 research_horizon_s）——反例决定性：policy(ttl60/research50/max200) 下契约 110s vs 实现 50s，同一行情 50s→right_censored/netNone、110s→tp_hit/net5，**标签翻转**；且现有两条 horizon 测试把漏 TTL 的式子写成期望，按 A17 不构成合规证据。(2) research_horizon_s 宣告必填却可省略并静默补 14d——同族又一例，裁定必填即必填、占位须显式登记政策版本进 content_hash。(3) S25 亚秒绕过属**G0 规格漏洞**：B9 逐值相等与 B12 封顶在秒粒度比较，+1µs 至 +999999µs 均放行；裁定一律在完整时间戳分辨率精确比较、禁止截断——降精度比较等于给出每次小于一秒的免费额度。另记编号冲突：'S24' 被 G2 自查的 multiplier 项与七审的 B12 项同时占用，自此窗口自查项须加前缀（如 G2-SC-01）。实跑 market 251 passed；data/research/integration 本轮不判——G1 的 Codex 写任务正在改树（12:40 写入），新代码读旧 gold 导致 dec_audit_stratum 列缺失，属写入中间态。",
         "at": "2026-09-11T03:44:26Z"
       },
-      "lastUpdate": "2026-09-11T03:26:36Z",
+      "lastUpdate": "2026-09-11T03:47:56Z",
       "tasks": [
         {
           "id": "M-01",
@@ -791,6 +799,14 @@
         {
           "t": "12:26",
           "n": "G0 通则（真值性区分\"未提供\"与\"提供了空值\"）全模块自查完成，读代码不改树（第七轮 task-mtwe76h5-u96l6s 正在读树）。结论：src/quant_lab/market 全部 or 兜底、if not X、真值性守卫逐个核过，多数安全且有理由——datetime 永不为假（t_start or t_dec）；by or [] 的 None 与空列表语义相同；if not bars / if gaps / if eq.height 的空集合正是要表达的含义。**发现一处真的，记 S24（待修，排在终审后）**：execution.load_market_from_lake 用 Decimal(rr[\"multiplier\"] or \"1\") 把未知乘数静默当成 1，而 rules_known 的校验清单里恰恰漏了 multiplier（查了 tick/step/min_notional/status/区间重叠，唯独没查它）。S08 之后 multiplier 缩放全部经济量（PnL/费用/资金费/滑点/预留），未知当 1 属于典型的\"未知伪装成默认\"。今天不可达——rules_from_manifests 与 rules_from_exchange_info 都硬写 \"1\"——但 instrument_rules 的 multiplier 是可空 Utf8 列，任何真实/手写规则表都能留空。修法：multiplier 纳入 rules_known 校验清单（未知即 RULE_HISTORY_MISSING），并去掉 or 兜底改显式 is None；min_notional 的 or \"0\" 虽因前置 is not None 校验而不可达，一并清掉同款写法。"
+        },
+        {
+          "t": "12:44",
+          "n": "七审终裁 fail（第 300 行）closed 15 / partial-P2 8 / open 2，新增 S24（B12 推导漏加 TTL + research_horizon_s 必填字段仍有默认值）、S25（亚秒偏移被 int() 截断，绕过逐值对账与安全上限）。两条已修，另修我自查的 S26（未知 multiplier 被 or 兜底成 1，而它缩放全部经济量；已纳入 rules_known 校验清单）。**S24 的成因是我自己犯了刚总结过的错**：推导式有 validator 与 build_request 两处实现，我只改了一处——已抽成单一来源 derived_window_s，两处共用，结构上不可能再分叉。曲线 v2 已用 G1 真实括号重算并写入 report-G2-research-horizon-proposal.md §6：真实 67 条括号中 40 条是三档止盈梯（要打满三档才全平），多空 57:10；删失率 4h 75.7% / 1d 38.2% / 2d 22.3% / 3d 15.3% / 5d 6.0% / 7d 3.4%——G0 判断被证实，3d 从 4.3% 升到 15.3%，低估了窗口。**修正提案 research_horizon_s = 5 天**。tests/market 253 passed；A 22/22；report rc=0。"
+        },
+        {
+          "t": "12:47",
+          "n": "八审已派 task-mtwf0gbr-4vtswg。七审两条 open（S24 推导漏加 TTL + 必填字段有默认值、S25 int 截断使亚秒绕过对账与安全上限）与自查 S26（未知 multiplier 当 1）均已修，S23 亦已闭合；tests/market 253 passed、A 22/22、report rc=0。本轮任务书重点：S24 根因是同一规则两处实现只改一处，已抽成单一来源 derived_window_s 两处共用，并要求审查方独立排查其它\"同一侧内部重复实现\"（明确排除 A/B 两内核有意不共享的对拍设计，那不算缺陷）；另明确 research_horizon_s 取值本身是 G0 待裁数值，不属实现缺陷，不得据此判 fail。操作教训：用 bash 派发含反引号的任务书会被 zsh 命令替换吞掉片段（本次丢了三个标识符名，核心指令完好），后续派发一律避免反引号或改用文件传参。"
         }
       ]
     },
