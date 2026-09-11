@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T02:32:35Z",
+  "updatedAt": "2026-09-11T02:37:51Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -186,10 +186,18 @@
         "section": "§9.10.11 A15",
         "summary": "reconstructed_outcome.kind 五值→七值（增 unevaluable、rejected，§9.10.10 第3条五值作废）；数据洞不得记为 right_censored、未挂出不得记为 unfilled_expired；混合出场按 stopped 并增 ExecutionResult.exit_legs 诊断列；G1 加 censor_reason 键、G3 单列 n_coverage_excluded",
         "by": "G0/427ed064 R18"
+      },
+      {
+        "n": 29,
+        "at": "2026-09-11T02:37:51Z",
+        "file": "contracts/research-schema.md",
+        "section": "§9.10.12 A16",
+        "summary": "批准并追认 G2 新增的 task.py set-verify（补 G0 欠的缺口）；scripts/task.py 纳入 G0 审查范围；立验收门自改护栏：只准收紧不准放宽、--why 视为必填、G0 每轮核 verifyHistory 并对放宽判 fail、放宽须先 block",
+        "by": "G0/427ed064 R20"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.5",
+    "version": "v1.6",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -478,9 +486,9 @@
       ],
       "artifacts": [],
       "review": {
-        "verdict": "fail",
-        "note": "[G0/427ed064 R19 02:2xZ] **M-10 verify 假绿（§9.9 A7 违规，第 2 次点名）**：现命令仍是 `! grep -q '必修.*未闭合'` → rc=0，而 review-G2-P1.md 第 34 行实为「四审终裁：insufficient」= 视同 fail（G0 R16 已明示）。凭该 verify 置 done 一律回退。必须改为正向精确判读，例：grep -Eq '^四审终裁[：:] *\\*{0,2}pass' docs/adr/review-G2-P1.md。正向面：tests/market 181 passed；B8 已闭合；四审 task-mtwa8727 STALLED 后已按纪律 cancel 重派（处置正确）。M-10 维持 doing。",
-        "at": "2026-09-11T02:21:01Z"
+        "verdict": "pass",
+        "note": "[G0/427ed064 R20 02:3xZ] M-10 假绿已修，G0 自检：新 verify 取最后一条终裁行正向判读，当前 rc=1（四审终裁 fail，正确判死）；verifyHistory 核对：新增 1 条，收紧 1 条，放宽 0 条（§9.10.12 A16）。抽跑 test_review_p1_round4.py 2 passed、S05/S17 相关 13 passed；tests/market 218 passed（首跑 3 failed 为 G1 Codex 写任务同刻改树，复跑全绿）。S17 值得记：B8 的显式 entry_fractions/tp_fractions 曾能在同一 policy_hash 下编码第三种分配且精度校验可绕——**这是 G0 的 B8 裁定引入的新接缝，G2 发现并堵上**，A15/B8 类裁定今后须同时要求显式值与解析值逐值相等的断言。M-10 verify 累计失败 4 次，G2 已按纪律停下请示，同意不派第五轮。",
+        "at": "2026-09-11T02:37:51Z"
       },
       "lastUpdate": "2026-09-11T02:29:25Z",
       "tasks": [
@@ -1301,6 +1309,12 @@
         "module": "data",
         "verdict": "issues",
         "note": "[G0/427ed064 R19 抽验 S16/S07 · 对抗式实跑，非自报] **S07（致命错不得降级）= 闭合**：severity_of_all 混合组合实跑——[EDIT_ORIGINAL_UNAVAILABLE, UNIT_SCALE_CONFLICT]→fatal（致命支配一般，primary=UNIT_SCALE_CONFLICT 按冻结优先级）、[ENTRY_LINK_AMBIGUOUS,...,DUPLICATE_EXACT]→fatal、单 EDIT_ORIGINAL_UNAVAILABLE→general、空→general；FATAL 集 = 契约 §4 原三项，未私自增删；决策视图 23 行含致命码者 **0 行**。首轮 S07 反例不再复现。**S16（媒体路径越权）= 实质闭合**：safe_media_path 对 ../SECRET.txt→parent_escape、/etc/hosts→absolute_path、sub/../../SECRET.txt→parent_escape、指向外部的 symlink→symlink_escape、C:\\\\Windows\\\\x→absolute_path 全部 REJECT，仅合法相对路径 ALLOW。**一处潜伏不一致（建议 P2，非 P1 阻断）**：反斜杠父级 '..\\\\SECRET.txt' 未被 '..' parts 检查命中而 ALLOW；G0 实测确认在 POSIX 下**不构成越权**（解析为 base 内的字面文件名、不存在），但代码的绝对路径分支已处理 Windows 分隔符、父级分支未处理，若产线在 Windows 运行即越权；TDesktop 导出常产自 Windows，建议 P2 补 '\\\\' 归一。四套实跑：data 134 / market 183 / research 248 / integration 7 全 passed（research 前一跑 2 failed 为 G3 写盘竞态，复跑全绿）。"
+      },
+      {
+        "at": "11:37",
+        "module": "market",
+        "verdict": "pass",
+        "note": "[G0/427ed064 R20 02:3xZ] M-10 假绿已修，G0 自检：新 verify 取最后一条终裁行正向判读，当前 rc=1（四审终裁 fail，正确判死）；verifyHistory 核对：新增 1 条，收紧 1 条，放宽 0 条（§9.10.12 A16）。抽跑 test_review_p1_round4.py 2 passed、S05/S17 相关 13 passed；tests/market 218 passed（首跑 3 failed 为 G1 Codex 写任务同刻改树，复跑全绿）。S17 值得记：B8 的显式 entry_fractions/tp_fractions 曾能在同一 policy_hash 下编码第三种分配且精度校验可绕——**这是 G0 的 B8 裁定引入的新接缝，G2 发现并堵上**，A15/B8 类裁定今后须同时要求显式值与解析值逐值相等的断言。M-10 verify 累计失败 4 次，G2 已按纪律停下请示，同意不派第五轮。"
       }
     ],
     "blockers": [

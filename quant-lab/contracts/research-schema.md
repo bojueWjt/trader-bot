@@ -334,3 +334,17 @@ G2 按 §9.10.10 第 3 条做映射表时报 2 处不满射 + 1 处歧义并 `bl
 `reconstructed_outcome.kind` = `{filled_closed, unfilled_expired, stopped, tp_hit, right_censored, unevaluable, rejected}`（七值）。
 
 **验收**：`quant_lab.market.contract.outcome_kind(res)` 对全部 22 个夹具 + `test_review_p1*` 反例逐一命中恰好一条规则；枚举覆盖测试断言七值全部可达（不可达值须在报告里说明原因）；`simulate_batch` 输出 `outcome_kind` 与 `exit_legs` 两列；映射表由 G2 写进 `execution-interface` §3。G1 侧 `censor_reason` 键与 G3 侧 `n_coverage_excluded` 各加一条断言测试。
+
+### §9.10.12 裁定 A16：`task.py set-verify` 批准 + 验收门自改护栏（G0 R20，changeLog #29）
+
+G2 为修 M-10 假绿，给 `scripts/task.py` 增了 `set-verify` 子命令（同一目录锁 + 原子替换 + `verifyHistory` 留痕，纯标准库，向后兼容）。该缺口是 G1 在 D-01 就提出、G0 应做而未做的（看板铁律禁止手改 JSON，但 CLI 没有改 verify 的入口，窗口自己改不了）。**G0 批准该实现并追认**；`scripts/task.py` 自此与 `contracts/` 同属 G0 审查范围，窗口修改需在看板 note 声明。
+
+**但它打开了一个新风险面**：窗口现在能改自己的验收门。审查压力下"把门改松"比"把代码改对"容易得多，且不留下红灯。故立护栏：
+
+1. **只准收紧或修正判读口径，不准放宽覆盖面。** 允许：负向 grep → 正向判读、模糊匹配 → 精确文件名、补断言、提高阈值。禁止：删断言、降阈值、缩小夹具范围、把实跑换成文件存在性检查。
+2. **`--why` 视为必填**（当前 CLI 可选）。理由须写清"原命令为何不可靠"，不接受"调整"这类无信息说明。
+3. **G0 每轮评审必须核 `verifyHistory` 全量新增项**，逐条判定属收紧还是放宽；放宽或理由不充分的**一律回退并判该模块 fail**。
+4. **放宽性变更须先 `block` 给 G0 裁定**，不得自行执行。
+5. 凭被放宽的 verify 置 done 的任务，发现即回退到 `doing`（§9.9 A7 同款处置）。
+
+**验收**：`verifyHistory` 每条含 `at / old / why`；G0 评审 note 出现 "verifyHistory 核对：新增 N 条，收紧 N 条，放宽 0 条" 一行。

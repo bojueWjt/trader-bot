@@ -130,6 +130,24 @@ def cmd_done(a):
     print(f"ok: 完成 {a.task}")
 
 
+def cmd_set_verify(a):
+    """改自己模块某任务的 verify 命令（走同一目录锁 + 原子替换；禁止手改 JSON）。
+
+    用途：把负向 grep（`! grep -q '未闭合'`，报告变了就假绿）改成正向精确判读（契约 §9.9 A7）。
+    """
+    def fn(d):
+        for t in d["modules"][a.module]["tasks"]:
+            if t["id"] == a.task:
+                t.setdefault("verifyHistory", []).append({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                                          "old": t.get("verify", ""), "why": a.why or ""})
+                t["verify"] = a.cmd
+                _touch(a.module, d)
+                return
+        sys.exit(f"!! 未找到任务 {a.task}（在 {a.module} 下）")
+    _rmw(fn)
+    print(f"ok: {a.module} {a.task} verify 已更新")
+
+
 def cmd_block(a):
     def fn(d):
         d["modules"][a.module]["blockers"].append(a.on)
@@ -170,6 +188,7 @@ def main():
     s = sub.add_parser("report"); s.add_argument("module", choices=MODULES); s.add_argument("--status"); s.add_argument("--progress", type=float); s.add_argument("--note"); s.set_defaults(f=cmd_report)
     s = sub.add_parser("claim"); s.add_argument("module", choices=MODULES); s.add_argument("task"); s.set_defaults(f=cmd_claim)
     s = sub.add_parser("done"); s.add_argument("module", choices=MODULES); s.add_argument("task"); s.set_defaults(f=cmd_done)
+    s = sub.add_parser("set-verify"); s.add_argument("module", choices=MODULES); s.add_argument("task"); s.add_argument("--cmd", required=True); s.add_argument("--why"); s.set_defaults(f=cmd_set_verify)
     s = sub.add_parser("block"); s.add_argument("module", choices=MODULES); s.add_argument("--on", required=True); s.set_defaults(f=cmd_block)
     s = sub.add_parser("unblock"); s.add_argument("module", choices=MODULES); s.set_defaults(f=cmd_unblock)
     s = sub.add_parser("review"); s.add_argument("module", choices=MODULES); s.add_argument("--verdict", required=True, choices=["pass", "issues", "fail"]); s.add_argument("--note"); s.set_defaults(f=cmd_review)
