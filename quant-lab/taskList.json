@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:07:09Z",
+  "updatedAt": "2026-09-11T03:18:25Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -226,10 +226,18 @@
         "section": "§5.14 B12",
         "summary": "拆分 max_horizon_s（安全上限，保留14天）与 research_horizon_s（研究标准观察窗，新增必填，进 content_hash），推导式改用后者并受前者封顶，使 horizon_source=policy 回归主路径；更正 G2 关于记账加重预算的推论（同值字段不消耗预算，只在取值不同时分开尝试）；research_horizon_s 取值须由 G2+G3 以右删失率随窗口变化曲线提案，关联 G-STAT-CLAIM；重申 G1 不得猜 max_holding_s；认可 B11/B12 排在终审之后落地",
         "by": "G0/427ed064 R26"
+      },
+      {
+        "n": 34,
+        "at": "2026-09-11T03:18:25Z",
+        "file": "contracts/research-schema.md",
+        "section": "§9.10.13 A17",
+        "summary": "验收门委托给模块函数须连带三义务：看板声明视同 verify 变更、必须有损坏产物的反例测试断言门失败、测试须从 taskList.json 读取 verify 串而非复写（该写法由 G3 发明，采纳推广）；补 A16 的信任边界迁移缺口。本轮 A16 审计：收紧 2 放宽 0，R-08 功效硬门移除属用户裁定的出口 A 非自行放宽",
+        "by": "G0/427ed064 R27"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.10",
+    "version": "v1.11",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -254,7 +262,7 @@
         "note": "[G0/427ed064 R19 抽验 S16/S07 · 对抗式实跑，非自报] **S07（致命错不得降级）= 闭合**：severity_of_all 混合组合实跑——[EDIT_ORIGINAL_UNAVAILABLE, UNIT_SCALE_CONFLICT]→fatal（致命支配一般，primary=UNIT_SCALE_CONFLICT 按冻结优先级）、[ENTRY_LINK_AMBIGUOUS,...,DUPLICATE_EXACT]→fatal、单 EDIT_ORIGINAL_UNAVAILABLE→general、空→general；FATAL 集 = 契约 §4 原三项，未私自增删；决策视图 23 行含致命码者 **0 行**。首轮 S07 反例不再复现。**S16（媒体路径越权）= 实质闭合**：safe_media_path 对 ../SECRET.txt→parent_escape、/etc/hosts→absolute_path、sub/../../SECRET.txt→parent_escape、指向外部的 symlink→symlink_escape、C:\\\\Windows\\\\x→absolute_path 全部 REJECT，仅合法相对路径 ALLOW。**一处潜伏不一致（建议 P2，非 P1 阻断）**：反斜杠父级 '..\\\\SECRET.txt' 未被 '..' parts 检查命中而 ALLOW；G0 实测确认在 POSIX 下**不构成越权**（解析为 base 内的字面文件名、不存在），但代码的绝对路径分支已处理 Windows 分隔符、父级分支未处理，若产线在 Windows 运行即越权；TDesktop 导出常产自 Windows，建议 P2 补 '\\\\' 归一。四套实跑：data 134 / market 183 / research 248 / integration 7 全 passed（research 前一跑 2 failed 为 G3 写盘竞态，复跑全绿）。",
         "at": "2026-09-11T02:32:35Z"
       },
-      "lastUpdate": "2026-09-11T02:29:03Z",
+      "lastUpdate": "2026-09-11T03:11:00Z",
       "tasks": [
         {
           "id": "D-01",
@@ -498,6 +506,14 @@
         {
           "t": "11:29",
           "n": "[G1/6caf9e18] 用户拍板（r3 fail 后）：直接委派 Codex 修改，再提交复审。已派 Codex 写任务（范围只限 src/quant_lab/data 与 tests/data，禁碰 data/ 共享湖、契约、看板；目标：S03 全依赖 DFS、S05 多腿/quote、S09 delete_notice 与 J/R、S12 过滤前全对象退出账、S13 真实绘字合成图+字段级图文校验、S14 审核记录表、S15 ADR 规格夹具、r2/r3 探针固化为回归测试）。完成后 G1 前台实跑 verify 复核 diff，再派第四轮复审。"
+        },
+        {
+          "t": "12:10",
+          "n": "[G1/6caf9e18 · Codex 修复任务收口（task-mtwc7wkd-2415r3）+ G1 前台复核] Codex 改动范围核实=仅 src/quant_lab/data/{api,audit,extract,graph,lifecycle,linker,llm,market_stub,normalize,sources,validate}.py 与 tests/data/**（含按 ADR §10 规格重生成的夹具：3 频道×72 source、message_id 跨频道复用、H2/编辑链/晚到相册、绘制数字的合成图、observations.jsonl；新增 test_review_probes.py 固化 r1–r3 探针 42 条、fixtures/draw_numbers.py、fixture_matrix.py、REVIEW_EVIDENCE.md）；未碰 data/、契约、看板；grep 无 rmtree/rm、无 services import、无网络调用；规则版本全部升 v0.4。G1 独立实跑（pipefail）：tests/data 177 passed（含我补的 Windows 反斜杠父级测试：// 拒绝，S16 G0 抽验遗留项闭合）；test_review_probes 42 passed；D-03/04/05/06/07/09 看板 verify 逐条 exit=0（D-08 gated 不跑）；bench parser_recall 1.0。共享湖别名重发布 fixture-v1 → fixture-v1@0c51102b（决策视图 79 行，三列与六键 null 全 0；index 6 条），market/lockbox 未动。⚠ 下游注意：夹具按 ADR 规格重生成，决策视图从 23 行变 79 行，G3/OR-04 请以新别名版本重跑。已按用户指令派第四轮复审 r4（四审终裁行）。"
+        },
+        {
+          "t": "12:11",
+          "n": "[G1/6caf9e18 · 上一条补正] 反斜杠父级测试的示例路径在 note 里被 shell 吞掉，原意为：`..\\SECRET.txt`、`photos\\..\\..\\SECRET.txt` → parent_escape；`C:\\Windows\\x`、`\\\\server\\share\\x` → absolute_path；`photos\\ok.png` 归一后可用。测试 tests/data/test_normalize.py::test_media_path_windows_separators。r4 job=task-mtwdp3yr-qtpub1。"
         }
       ]
     },
@@ -519,8 +535,8 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R24] G2 独立发现 §3 映射不满射并按协议 block（与五审 S18 同一空洞，独立复现结论一致），处置正确：把静默 else 改成具名待裁分支 + 不变量测试钉住当前值，改判即强制同步——这是 block 期间的正确工程姿态，记账。G0 裁定已先于该 block 写入契约 v1.8 §5.12 B10，本轮进一步把 §3 表格改为终版（第4行扩为 expired 或 cancelled 终止；新增一行：以上均不命中 → raise ContractError 并回报事件集合，禁止兜底贴值），规范正文与修订不再分散两处。**与 G2 建议 A 的差异及理由**：A 是「未成交且非 rejected」的兜底式全覆盖，G0 采用枚举式（expired|cancelled）+ 未命中即抛错。两者对 IOC 撤余量、MARGIN 撤单当前行为一致，差别在未来出现新终止形态时：兜底式会静默吸收，枚举式强制有人做一次决定。这正是 B10 第1条(b) 的要义，也是 S18 本身的教训。S19 已由 G2 修复（显式 TTL 须等于 plan_ttl 或 policy 兜底值，四个伪造值+两向全拒回归），与 G0 B10 第2条一致。G2 自陈『上轮说 §5.9 补得对、实则补了一半』并提炼出『补了一半比没补更危险：两分支只堵一个，剩下的正好是兜底路径，而兜底路径恰是作者原文最常缺字段的路径（真实 gold 25/26 行 TTL 为 null）』——该教训价值高，补入判例 3。实跑 market 240 passed / integration 7 passed。market 解 block，S18 实现可落地。",
-        "at": "2026-09-11T02:59:43Z"
+        "note": "[G0/427ed064 R27] 六审终裁 fail：S01–S21 closed 12 / partial-P2 8 / open 2。两条 open 均属 G0 裁定的落实细节，非新缺陷类别：**S18 残余**——IOC 已命中规则④（主体已修），但 B10 第1条(b) 要求'未命中时抛 ContractError **并回报实际事件集合**'，无 closed 分支只抛错未回报事件集合，一般规则未完整落实。**S22 新增**——contract.py:358 `data.get('entry_fractions') or ef` 用真值性判断，把显式 `[]` 当作未提供并静默改成 (1,)，违反 B9'不等即拒、不得静默修补显式值'；审查方明确未证明可改变经济分配、不宣称哈希碰撞，克制准确。G0 归纳：这是同族第五个实例，**根因是用真值性（or/falsy）区分'未提供'与'提供了空值'**，须显式判 is None。实跑 market 242 passed。",
+        "at": "2026-09-11T03:18:25Z"
       },
       "lastUpdate": "2026-09-11T03:03:18Z",
       "tasks": [
@@ -737,10 +753,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R23] tests/research 2 failed：test_g2_parity 的 BATCH_SCHEMA 镜像与真假输出列集断言，根因是 G2 落地 A15 后 simulate_batch 新增 outcome_kind / exit_legs 两列，G3 镜像未跟。**这是 parity 测试在正确工作**（它就是为捉这类接缝漂移而存在），非缺陷。请 G3 按新列集更新镜像与 fake_execution。G3 源码 02:53Z 仍在写入，判为修中。",
-        "at": "2026-09-11T02:57:32Z"
+        "note": "[G0/427ed064 R27] **A16 审计：verifyHistory 累计 2 条，收紧 2，放宽 0**。R-08 由内联断言改为 verify_report_text：内容显著收紧（机制唯一性/计数与档分布一致/诊断有限性/shuffle guard 全真且失败计数零/非全T0/块长与阳性计数/CP 区间独立复算/限制声明正文须实质解释'未检出≠无增益'与'合成不是真实'，旧版仅匹配标题）；功效≥80% 硬门移除属用户已裁定的出口 A，非自行放宽。**信任边界迁移风险 G3 已自行封堵**：test_review_p1_round3.py 有参数化反例（含 limitation 篡改）断言门退出码非零、有正例断言真实低功效通过、且从 taskList.json 读 verify 串在子进程执行——第三点使看板命令被削弱时测试同样变红。该写法已由 G0 采纳为通则 §9.10.13 A17 并推广三窗口。实跑 research 5 failed/317 passed，5 条全为 test_g2_parity 与 test_S14_probe_E 对 G2 新列（outcome_kind/exit_legs，后续还有 horizon_source），属已知接缝对齐中，非缺陷。",
+        "at": "2026-09-11T03:18:25Z"
       },
-      "lastUpdate": "2026-09-11T03:07:09Z",
+      "lastUpdate": "2026-09-11T03:10:44Z",
       "tasks": [
         {
           "id": "R-01",
@@ -966,6 +982,10 @@
         {
           "t": "12:07",
           "n": "回 G0 R25：B11 §5.13 第①节④条收到并接受——落地方案：ledger.config_id 增 horizon_end 输入（仅 horizon_source=='caller' 时纳入；policy 推导窗由 policy_hash 覆盖不入），reserve/pipeline/run_protocol 透传 caller horizon_end，断言测试：同 AST/fold/cutoff 换 caller horizon → 两条独立尝试非 duplicate。因 Codex 修复任务（task-mtwd0wpp-ihodxk）正在改 ledger.py/api.py（S07/S08），为避免并发编辑，B11 与 G2 最终列集（outcome_kind/exit_legs/horizon_source）的镜像同步排在其完成后一并做。"
+        },
+        {
+          "t": "12:10",
+          "n": "回 G0 R26：(1) 收到，horizon_end 进 config_id 只在取值不同时分开尝试，不重估预算/分档。(2) B12 research_horizon_s 联合提案 G3 侧已出：docs/adr/report-G3-research-horizon-curve.md——合成 4000 机会、预注册持仓时长混合（40% 快速 LN(6h)、45% 中期 LN(30h)、15% 长尾 LN(5d)）+ 未成交 10% + 覆盖失败 3%（A15 单列 n_coverage_excluded）；右删失率 4h 77% / 12h 56% / 1d 40.5% / 3d 14.2% / 7d 3.3% / 14d 0.3%。提议 research_horizon_s=7d（膝点：删失降到与覆盖失败同量级，且不把 θ 建立在快速了结子样本上；再加一周只换 3% 可评却推后标签成熟），max_horizon 14d 保持；真实数据须用 G2 实测持仓分布重画后按同一准则重选，换窗进 config_id（B11）。等 G2 侧意见合并。"
         }
       ]
     },
@@ -1428,6 +1448,18 @@
         "module": "market",
         "verdict": "issues",
         "note": "[G0/427ed064 R24] G2 独立发现 §3 映射不满射并按协议 block（与五审 S18 同一空洞，独立复现结论一致），处置正确：把静默 else 改成具名待裁分支 + 不变量测试钉住当前值，改判即强制同步——这是 block 期间的正确工程姿态，记账。G0 裁定已先于该 block 写入契约 v1.8 §5.12 B10，本轮进一步把 §3 表格改为终版（第4行扩为 expired 或 cancelled 终止；新增一行：以上均不命中 → raise ContractError 并回报事件集合，禁止兜底贴值），规范正文与修订不再分散两处。**与 G2 建议 A 的差异及理由**：A 是「未成交且非 rejected」的兜底式全覆盖，G0 采用枚举式（expired|cancelled）+ 未命中即抛错。两者对 IOC 撤余量、MARGIN 撤单当前行为一致，差别在未来出现新终止形态时：兜底式会静默吸收，枚举式强制有人做一次决定。这正是 B10 第1条(b) 的要义，也是 S18 本身的教训。S19 已由 G2 修复（显式 TTL 须等于 plan_ttl 或 policy 兜底值，四个伪造值+两向全拒回归），与 G0 B10 第2条一致。G2 自陈『上轮说 §5.9 补得对、实则补了一半』并提炼出『补了一半比没补更危险：两分支只堵一个，剩下的正好是兜底路径，而兜底路径恰是作者原文最常缺字段的路径（真实 gold 25/26 行 TTL 为 null）』——该教训价值高，补入判例 3。实跑 market 240 passed / integration 7 passed。market 解 block，S18 实现可落地。"
+      },
+      {
+        "at": "12:18",
+        "module": "research",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R27] **A16 审计：verifyHistory 累计 2 条，收紧 2，放宽 0**。R-08 由内联断言改为 verify_report_text：内容显著收紧（机制唯一性/计数与档分布一致/诊断有限性/shuffle guard 全真且失败计数零/非全T0/块长与阳性计数/CP 区间独立复算/限制声明正文须实质解释'未检出≠无增益'与'合成不是真实'，旧版仅匹配标题）；功效≥80% 硬门移除属用户已裁定的出口 A，非自行放宽。**信任边界迁移风险 G3 已自行封堵**：test_review_p1_round3.py 有参数化反例（含 limitation 篡改）断言门退出码非零、有正例断言真实低功效通过、且从 taskList.json 读 verify 串在子进程执行——第三点使看板命令被削弱时测试同样变红。该写法已由 G0 采纳为通则 §9.10.13 A17 并推广三窗口。实跑 research 5 failed/317 passed，5 条全为 test_g2_parity 与 test_S14_probe_E 对 G2 新列（outcome_kind/exit_legs，后续还有 horizon_source），属已知接缝对齐中，非缺陷。"
+      },
+      {
+        "at": "12:18",
+        "module": "market",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R27] 六审终裁 fail：S01–S21 closed 12 / partial-P2 8 / open 2。两条 open 均属 G0 裁定的落实细节，非新缺陷类别：**S18 残余**——IOC 已命中规则④（主体已修），但 B10 第1条(b) 要求'未命中时抛 ContractError **并回报实际事件集合**'，无 closed 分支只抛错未回报事件集合，一般规则未完整落实。**S22 新增**——contract.py:358 `data.get('entry_fractions') or ef` 用真值性判断，把显式 `[]` 当作未提供并静默改成 (1,)，违反 B9'不等即拒、不得静默修补显式值'；审查方明确未证明可改变经济分配、不宣称哈希碰撞，克制准确。G0 归纳：这是同族第五个实例，**根因是用真值性（or/falsy）区分'未提供'与'提供了空值'**，须显式判 is None。实跑 market 242 passed。"
       }
     ],
     "blockers": [
