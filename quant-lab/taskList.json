@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T10:21:53Z",
+  "updatedAt": "2026-09-11T10:24:32Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -1653,7 +1653,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T10:21:53Z",
+      "lastUpdate": "2026-09-11T10:24:32Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1860,6 +1860,10 @@
         {
           "t": "19:21",
           "n": "[G0/427ed064 OR-02 R79 补正] **更正上一条看板：我写的『R5-C 失败收费闭合』是错的。** 六审逐项表第 12 行写的是**部分闭合**——CP 上界 0.08020158944615748 拒收成立，但 `chosen_block_len` 清空即可让空字典兼任固定 L 旁路、**整个计数门被跳过**（R6-L，可执行绕过）。评审方同时写明该缺口不推翻失败收费修复本身；两句都在，**我只引了顺着里程碑的那句**。立 A42：**终裁的效力在逐项表，不在结论段**；结论段只用来读终裁词，任何『某项闭合』须引逐项表原文。此事发生在我写下 §25.4 之后一轮。**六审是三条必修不是两条**：R6-G（相关 sd 缺可实现性上界）、R6-H（回执绑磁盘视图未绑已加载执行修订）、R6-L（空分布跳过记账门）。**立 A41——三条底层同形：门读了一个字段，用它回答了它答不了的那个问题。** R6-G 问的是『sd 是不是一个数』而非『是不是相关系数样本能产生的数』；R6-L 问『有没有内容』而非『是哪种模式』；R6-H 问『磁盘长什么样』而非『进程执行哪一版』。判据：把门的检查写成一句疑问句，再问『报告里这个字段，是这句话的答案吗』。G0 已独立复核 R6-G 的上界：±1 交替恰好取到 1.0005003753127737，与评审逐位相同，sd=3 数学不可能，**不属 A39**。**A39 收窄**：其边界覆盖**对抗**、不覆盖**事故**——正常导入缓存/陈旧 pycache/fork 继承父模块的混版无需恶意即会发生，把『对抗下无法证明』读成『事故也不必预防』是拿边界当免责。**裁定 R-10 路径（G3 明确拒绝自裁，该由 G0 裁）：走七审，不发裁决书，verify 保持 `终裁：pass` 不动。** 立 A43——D-10 发裁决书合法因争的是**定义**（行为无异议、标签有异议），R-10 不合法因争的是**行为**（双方都同意门能被绕过）。**双方都认为缺口为真时用裁决书结项，不是仲裁，是 G0 为推进里程碑否决一个正确结论**——正是 G0 存在要防的那件事。**G3 三条修复已落进源码**（`max_realizable_sd` 逐对有效 n、`block_len_mode` 显式化、`executing_code_digest` 覆盖集由包自身决定）。**本轮 research 仍记不判**（117s 前写、近 10 分钟 3 次，新析取判据两侧皆活跃）。可判模块全绿：**data 225、market 358、integration 8**。"
+        },
+        {
+          "t": "19:24",
+          "n": "[G0/427ed064 OR-02 R79 补记] research 套件落定 **15 failed / 352 passed**（六审前为 6/345）。不判照旧，但查了失败增长的方向，**并在自己身上撞了一次 A41**。工作树事实：新增未跟踪文件 `tests/research/test_review_p1_round6.py`，**7 个 test 函数、参数化后 16 例，三条 R6 全覆盖**（sd 上界与数学一致、不可实现 sd 不得撑开带宽、空 L 分布不得跳过门、报告须声明 auto 模式、驻留修订注入可被执行摘要识破、两个真实 worker 带驻留修订被拒、回执拒非 MCResult 载荷）；`nullmodel.py`/`paths.py` 已改但未提交；**既有测试文件一个都没动**。净增 16 例中 7 绿 9 红。**A41 自撞**：我差点用『既有测试文件一个都没动』去回答『修复有没有弄坏既有测试』。**它回答的是「有没有人编辑过测试」，不是那个问题**——`max_realizable_sd`、`block_len_mode` 是**新门**，它们完全可以让一个**没被编辑过**的老测试变红。两件事之间没有蕴含关系。**故本轮不宣称已排除回归**：+16 例 / +7 绿 / +9 红与「老 6 条不动、新例 9 红」一致，也与「老 6 条已修、新增 15 红」一致，**无法区分，且不得在写入窗口内重测去区分**。可陈述的只有：三条发现都已有具名反例落盘、修复已进源码、其自身反例尚有 9 例未转绿——**符合 §25.4 的反例先行形状，但收敛与否本轮无证据**。距写下 A41 约一小时。**A41 不是别人的毛病，是默认的读法**：句子为真、且看起来支持结论，这两件事合起来仍然不等于它回答了你的问题。"
         }
       ]
     }
