@@ -213,3 +213,24 @@ G2 五审（`review-G2-P1.md` §五审判定表）判 S01–S17 **open 0**，两
 五审将 M-03 记为 `insufficient` 且明示非阻断，理由是禁网且**拒绝用 MockTransport 冒充联网实跑**——该拒绝是正确行为，记为判例 4。G0 已于 R23 独立实跑该 verify：`actual_rows=44640`、`distinct_keys=44640`、`check_status=ok`、`checksum_source=vision_CHECKSUM`、`source_uri` 为真实 Binance Vision 月度包，rc=0。该项**解除**，不再计入 M-10 的未决项。
 
 **一般规则**：`insufficient` 默认视同 `fail`（§9.9 A7 不变）。**唯一例外**：当造成 `insufficient` 的全部条目 (a) 被报告显式标为非阻断、(b) 因审查环境的结构性限制（禁网、无凭据、缺硬件）而不可验、(c) 审查方未以任何形式伪造该验证，则 **G0 可通过亲自实跑这些 verify 予以解除**，并在看板记录实际输出。窗口自行实跑不算解除。若仍有任何阻断项，一律 `fail`，不得解除。
+
+### 5.13 裁定 B11：`horizon_end` 定为「可自由选择但必须记账」+ 死常量审查规则（G0 OR-02 R25，规范性）
+
+G2 在等裁窗口内按 S17/S19 的共同根因做同族穷举，自查出 **S20**（`t_start` 显式值从不对账，同 `policy_hash` 下平移 45s 可把 `filled/net_R=1/tp_hit` 翻成 `none/net_R=0/unfilled_expired`，判例 3 第 4 例）与 **S21**（`CENSOR_PRIORITY` 是只定义不使用的死常量，实现为 first-wins；候选 B 更严重，bars 分支无条件覆盖，把 `RULE_HISTORY_MISSING` 覆写成 `BAR_GAP`），均已修并有回归。G0 认可两条修复方向，并就其留裁的 `horizon_end` 裁定如下。
+
+#### 1. `horizon_end` 不强制为推导值，但必须记账
+
+**与 S17/S19/S20 的本质区别**：`entry_ttl_s` / `fractions` / `t_start` 都是**对作者意图与政策的机械解析**——存在唯一正确答案，任何偏离都是篡改。`horizon_end` 不同：观察多久才判右删失，是**正当的研究设计选择**，不同研究问题可以合理地取不同窗口。强行绑死公式会把一个真实的设计自由度伪装成不存在。
+
+**但它不能是隐形旋钮**。裁定四条：
+
+1. **默认路径必须是推导值且受同款对账**：调用方不传时，`horizon_end = t_dec + entry_ttl + (max_holding 或 policy.max_horizon_s)`；该默认值与显式值的关系按 §5.11 B9 处理（默认路径被篡改即 `ContractError`）。
+2. **显式值合法**，但必须进 `trace_hash`。G0 已核实 `request_canonical` 吃 `req.model_dump()` 全量、`horizon_end` 在内，**该性质自此为规范要求**，不得在后续优化中被移出。
+3. **增诊断列 `horizon_source ∈ {policy, caller}`**（与 `entry_ttl_source` / `fraction_source` 同族）。
+4. **记账的牙齿（属主 G3）**：`horizon_source == "caller"` 时，`horizon_end` 必须进入研究尝试账本的配置身份（`config_id` 输入）。**理由**：不受约束的观察窗是典型的分叉路径自由度——换个窗口重跑直到结果好看，若不计入尝试账本就是免费的多重比较。计入后，试多个窗口会消耗尝试预算并出现在账本里，`max-t` 与分档随之正确惩罚。这不是限制研究自由，而是让行使这一自由**可见且有代价**，正是账本与 max-t 机制存在的意义。
+
+#### 2. 死常量审查规则（采纳 G2 对 S21 的归纳，列入常规审查清单）
+
+**"定义了却不使用"的常量/规则比缺失更危险，因为它让阅读者以为规则已实现。** `CENSOR_PRIORITY` 写在契约里、导出在 `__all__` 里、却没有任何调用点，主因实际取决于代码检查顺序——契约与行为分叉，而静态阅读契约或源码都看不出来。
+
+**自此列入每轮评审清单**：契约中规定了排序/优先级/阈值的具名常量，必须有可追溯的调用点与一条断言其生效的测试；只导出不调用即视为未实现，判该项 `open`。G0 在评审中按此核查。

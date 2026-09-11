@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T02:59:43Z",
+  "updatedAt": "2026-09-11T03:03:18Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -210,10 +210,18 @@
         "section": "§5.12 B10",
         "summary": "修补 A15 自身两处漏洞：S18 扩 §3 第4条覆盖 cancelled 终止并禁止兜底伪装（未命中规则必须抛 ContractError）；S19 明确 B9 逐值相等为对称要求，计划 null 时须比 policy 解析值；M-03 联网 verify 由 G0 独立实跑解除，并确立 insufficient 的唯一解除路径（全部非阻断+环境不可验+未伪造，且必须 G0 亲跑）；审查方拒绝用 MockTransport 冒充联网记判例 4",
         "by": "G0/427ed064 R23"
+      },
+      {
+        "n": 32,
+        "at": "2026-09-11T03:05:49Z",
+        "file": "contracts/execution-interface.md",
+        "section": "§5.13 B11",
+        "summary": "horizon_end 裁为正当研究设计自由度（区别于 t_start/TTL/fractions 的机械解析）：默认路径须推导且受 B9 对账、显式值合法但必须留在 trace_hash（规范化该性质）、增 horizon_source 诊断列、caller 值须进 G3 尝试账本 config_id 使换窗口消耗预算而非免费多重比较；另采纳 G2 对 S21 的归纳，确立死常量审查规则（定义未使用比缺失更危险，只导出不调用即判 open）",
+        "by": "G0/427ed064 R25"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.8",
+    "version": "v1.9",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -488,7 +496,7 @@
     "market": {
       "owner": "G2",
       "status": "in_progress",
-      "progress": 0.96,
+      "progress": 0.97,
       "blockers": [],
       "provides": [
         "data/lake/market/{bronze,silver,_manifest}",
@@ -506,7 +514,7 @@
         "note": "[G0/427ed064 R24] G2 独立发现 §3 映射不满射并按协议 block（与五审 S18 同一空洞，独立复现结论一致），处置正确：把静默 else 改成具名待裁分支 + 不变量测试钉住当前值，改判即强制同步——这是 block 期间的正确工程姿态，记账。G0 裁定已先于该 block 写入契约 v1.8 §5.12 B10，本轮进一步把 §3 表格改为终版（第4行扩为 expired 或 cancelled 终止；新增一行：以上均不命中 → raise ContractError 并回报事件集合，禁止兜底贴值），规范正文与修订不再分散两处。**与 G2 建议 A 的差异及理由**：A 是「未成交且非 rejected」的兜底式全覆盖，G0 采用枚举式（expired|cancelled）+ 未命中即抛错。两者对 IOC 撤余量、MARGIN 撤单当前行为一致，差别在未来出现新终止形态时：兜底式会静默吸收，枚举式强制有人做一次决定。这正是 B10 第1条(b) 的要义，也是 S18 本身的教训。S19 已由 G2 修复（显式 TTL 须等于 plan_ttl 或 policy 兜底值，四个伪造值+两向全拒回归），与 G0 B10 第2条一致。G2 自陈『上轮说 §5.9 补得对、实则补了一半』并提炼出『补了一半比没补更危险：两分支只堵一个，剩下的正好是兜底路径，而兜底路径恰是作者原文最常缺字段的路径（真实 gold 25/26 行 TTL 为 null）』——该教训价值高，补入判例 3。实跑 market 240 passed / integration 7 passed。market 解 block，S18 实现可落地。",
         "at": "2026-09-11T02:59:43Z"
       },
-      "lastUpdate": "2026-09-11T02:59:43Z",
+      "lastUpdate": "2026-09-11T03:03:18Z",
       "tasks": [
         {
           "id": "M-01",
@@ -695,6 +703,10 @@
         {
           "t": "11:57",
           "n": "五审终裁：fail（review-G2-P1.md 第 260 行，唯一终裁行）；closed 9 / partial-P2 8 / open 2，新增 S18、S19。处置：**S19 已修**——与 S17 同型（契约判例 3）：作者 TTL=null 时显式 entry_ttl_s 未与 policy 兜底值对账，同一 policy_hash 下 86400 与 1 都被接受，把同一笔交易从 filled/net5/tp_hit 翻成 none/net0/unfilled_expired；现改为显式值必须等于 plan_ttl（作者给值）或 policy.entry_ttl_s（作者留空），回归 test_s19_explicit_ttl_cannot_bypass_policy_fallback（四个伪造值 + 作者给值两向均拒）。**S18 = 我在五审出结果前已自行发现并 block 给 G0 的同一空洞**（复核独立复现，见 report-G2-outcome-kind-mapping.md §6）：契约 §3 七条规则不覆盖'挂出后未成交却非到期'（IOC 撤余量/MARGIN 撤单）；代码里已把静默 else 兜底改成具名待裁分支并注明 block，行为维持建议 A，测试钉住。**S18 需 G0 裁定契约后才能真正闭合，第六轮复核在裁定前必然再判 fail，故暂不派。** tests/market 240 passed；A 22/22；report rc=0。M-10 verify 累计失败 5 次。"
+        },
+        {
+          "t": "12:03",
+          "n": "G0 v1.8 §5.12 B10 裁定已落地，另附两条自查新发现：S18 规则④改枚举 expired|cancelled、未命中一律 raise 并回报事件集合（删兜底分支）；S19 entry_ttl_s 对称对账（计划给值比计划、计划 null 比 policy）；**S20（自查新发现，A 族穷举）**：t_start 契约语义是 policy 决定的解析记录却从不对账，同一 policy_hash 下平移 45s 即把 filled/net_R=1/tp_hit 翻成 none/net_R=0/unfilled_expired——现要求等于 t_dec+policy.latency_s，要平移须改 policy.latency_s（进 content_hash）；**S21（自查新发现，B 族穷举）**：CENSOR_PRIORITY 是只定义不使用的死常量，主因取决于代码检查顺序，候选 B 更严重（bars 分支无条件覆盖，把 RULE_HISTORY_MISSING 覆写成 BAR_GAP）——两内核改为按契约优先级选主因。回归 test_s18/test_s19/test_s21 + test_request_validation；tests/market 242 passed；A 22/22；report rc=0。自查覆盖面与剩余问题（horizon_end 是否也应由推导决定）见 report-G2-outcome-kind-mapping.md §7。下一步派第六轮终审。"
         }
       ]
     },
@@ -720,7 +732,7 @@
         "note": "[G0/427ed064 R23] tests/research 2 failed：test_g2_parity 的 BATCH_SCHEMA 镜像与真假输出列集断言，根因是 G2 落地 A15 后 simulate_batch 新增 outcome_kind / exit_legs 两列，G3 镜像未跟。**这是 parity 测试在正确工作**（它就是为捉这类接缝漂移而存在），非缺陷。请 G3 按新列集更新镜像与 fake_execution。G3 源码 02:53Z 仍在写入，判为修中。",
         "at": "2026-09-11T02:57:32Z"
       },
-      "lastUpdate": "2026-09-11T02:58:23Z",
+      "lastUpdate": "2026-09-11T03:02:58Z",
       "tasks": [
         {
           "id": "R-01",
@@ -768,7 +780,14 @@
           "id": "R-08",
           "title": "共同日历块 max-t bootstrap + 空模型（整块残差重采样）+ FPR/功效验收（合成 T1 规模 1000 次全流程）",
           "status": "done",
-          "verify": ".venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py -q && .venv-g3/bin/python -c \"import json;from scipy.stats import beta;t=open('docs/adr/report-G3-null-model.md',encoding='utf-8').read();assert '## 3.2 限制声明' in t and '不能**把' in t or '限制声明' in t;j=json.loads(t[t.rindex(chr(96)*3+'json')+7:t.rindex(chr(96)*3)]);R=j['results'];MECH={'common_shock','cluster_heavy_tail','nonuniform_density','circular_shift'}\ndef cp(x,n):\n    return (0.0 if x==0 else float(beta.ppf(0.025,x,n-x+1)), 1.0 if x==n else float(beta.ppf(0.975,x+1,n-x)))\nN={r['mechanism']:r for r in R if r['kind']=='null'};assert set(N)==MECH,set(N)\nfor m,r in N.items():\n    ns=r['n_done']-r['tiers'].get('T0',0);assert r['n_done']==r['n_planned']>=1000 and r['diagnostics']['n_invalid_null_model']==0 and ns>=500 and ns>r['n_done']/2,(m,ns)\n    hi=cp(r['n_positive']+r['n_failed'],ns)[1];assert hi<=0.07 and r['verdict']=='pass',(m,hi,r['verdict'])\nP=[r for r in R if r['kind']=='power'];assert len(P)>=1\nfor r in P:\n    ns=r['n_done']-r['tiers'].get('T0',0);assert r['n_done']==r['n_planned']>=1000 and r['diagnostics']['n_invalid_null_model']==0 and ns>=500;lo=cp(r['n_positive'],ns)[0];print('POWER(reported, limitation statement applies)',r['mechanism'],r['n_positive'],ns,round(lo,4),r['verdict'])\nassert '## 3.2 限制声明' in t, 'limitation statement missing'\nprint('FPR',[(m,round(cp(r['n_positive']+r['n_failed'],r['n_done']-r['tiers'].get('T0',0))[1],4)) for m,r in N.items()])\""
+          "verify": ".venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py tests/research/test_review_p1_round3.py -q && .venv-g3/bin/python -c \"from quant_lab.research.nullmodel import verify_report_text; verify_report_text(open('docs/adr/report-G3-null-model.md',encoding='utf-8').read())\"",
+          "verifyHistory": [
+            {
+              "at": "2026-09-11T03:02:58Z",
+              "old": ".venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py -q && .venv-g3/bin/python -c \"import json;from scipy.stats import beta;t=open('docs/adr/report-G3-null-model.md',encoding='utf-8').read();assert '## 3.2 限制声明' in t and '不能**把' in t or '限制声明' in t;j=json.loads(t[t.rindex(chr(96)*3+'json')+7:t.rindex(chr(96)*3)]);R=j['results'];MECH={'common_shock','cluster_heavy_tail','nonuniform_density','circular_shift'}\ndef cp(x,n):\n    return (0.0 if x==0 else float(beta.ppf(0.025,x,n-x+1)), 1.0 if x==n else float(beta.ppf(0.975,x+1,n-x)))\nN={r['mechanism']:r for r in R if r['kind']=='null'};assert set(N)==MECH,set(N)\nfor m,r in N.items():\n    ns=r['n_done']-r['tiers'].get('T0',0);assert r['n_done']==r['n_planned']>=1000 and r['diagnostics']['n_invalid_null_model']==0 and ns>=500 and ns>r['n_done']/2,(m,ns)\n    hi=cp(r['n_positive']+r['n_failed'],ns)[1];assert hi<=0.07 and r['verdict']=='pass',(m,hi,r['verdict'])\nP=[r for r in R if r['kind']=='power'];assert len(P)>=1\nfor r in P:\n    ns=r['n_done']-r['tiers'].get('T0',0);assert r['n_done']==r['n_planned']>=1000 and r['diagnostics']['n_invalid_null_model']==0 and ns>=500;lo=cp(r['n_positive'],ns)[0];print('POWER(reported, limitation statement applies)',r['mechanism'],r['n_positive'],ns,round(lo,4),r['verdict'])\nassert '## 3.2 限制声明' in t, 'limitation statement missing'\nprint('FPR',[(m,round(cp(r['n_positive']+r['n_failed'],r['n_done']-r['tiers'].get('T0',0))[1],4)) for m,r in N.items()])\"",
+              "why": "三审 D1/E/G 证明原判读不可靠：字典覆盖重复机制、功效只打印未核 pass flag、诊断 false 与失败计数未核验，限制声明仅匹配标题；改为唯一性与完整计数校验、区间复算、诊断一致性和有效限制内容校验，保留出口 A 的真实低功效 fail。"
+            }
+          ]
         },
         {
           "id": "R-09",
