@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T09:37:09Z",
+  "updatedAt": "2026-09-11T09:53:43Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -1294,11 +1294,11 @@
       ],
       "artifacts": [],
       "review": {
-        "verdict": "issues",
-        "note": "[G0/427ed064 OR-02 R75] 首轮按 §25 A40 频率判据执行。测量 09:09Z：data 近10分钟写入 0 次、market 0 次、research 1 次（未达活跃阈值）→ 三者可判；**判定后复核（A40 要求）：跑测期间 research 0 次写入，判定有效**。A35 必报量：src 48/48、tests 61/61（`test_review_p1_round5.py` 本轮已入库）。实跑：data **225**、market **358**、integration **8** 全绿；**research 10 failed / 341 passed，判为进度不判为回归**——6 条为五审反例先行测试（R5C 结构失败须计入 n_failed、R5G×4 相关向量形状与域、R5O 首 replicate 无零失败特权），4 条为 A31 陈旧级联（nullmodel.py 17:54 晚于报告 17:24）。**据此立 §25.4**：审查 open 项被转写成失败测试时，该失败是进度而非回归——审查结论原本只活在判定表里，是一份需人记得逐条去做的清单；转写成测试后变成做完之前一直红的门，即 A24 原则用在审查待办本身。判别方式：用例名可追溯到具体审查编号且该编号在 review 中标 open/partial。P1 唯一剩余项仍为 R-10（五审 fail）。D-10、M-10 已闭合；OR-04 端到端 8 passed 稳定。",
-        "at": "2026-09-11T09:21:47Z"
+        "verdict": "pass",
+        "note": "[G0/427ed064 OR-02 R77 · **四套全绿，942 项**] 测量 09:49Z，A40：data/market 近10分钟 0 次、research 1 次（未达活跃阈值）→ 可判；判定后复核 research 仍 1 次（同一次写入，跑测期间无新增），**判定有效**。A35：src 48/48、tests 61/61。**research 首次全绿 351 passed**（上轮 341 passed / 10 failed）——**G3 已把五审全部反例实现**：R5C（结构失败须计入 n_failed）、R5G×4（相关向量形状与域）、R5O（首 replicate 无零失败特权）现全部通过；A31 陈旧级联亦解（报告 18:42:21 晚于 nullmodel.py 17:54:16）。**核心假绿路径已堵**：R5C 断言『把 50 条搬进 invalid 却不计入失败数』必须抛 `未全部计入失败数`——五审指出的『结构失败未强制纳入 n_failed 致条件 FPR 最坏界假绿』现以具名错误拒绝。**当前状态**：data 225 / market 358 / research 351 / integration 8，合计 **942 项全绿**；D-10、M-10 已闭合。**P1 唯一剩余项 R-10 现已不是代码问题，是终裁问题**：`review-G3-P1.md` 末行仍为『五审终裁：fail』，而 R-10 的 verify 机械读末行。G3 需派六审取得 pass 终裁；若六审仍 fail 而残余属 P2 量级，则走 D-10 先例（G0 出具名裁定文件 + verify 显式析取）。**该选择不由 G3 自裁，G0 亦不预判六审结果。**",
+        "at": "2026-09-11T09:53:43Z"
       },
-      "lastUpdate": "2026-09-11T09:02:17Z",
+      "lastUpdate": "2026-09-11T09:52:28Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1370,7 +1370,14 @@
           "id": "R-10",
           "title": "[Codex review] P1 里程碑 review（R-03..R-09），必修项闭合",
           "status": "doing",
-          "verify": "test -f docs/adr/review-G3-P1.md && tail -1 docs/adr/review-G3-P1.md | grep -Eq '^(二审|三审|四审|五审)?终裁：pass$'"
+          "verify": "test -f docs/adr/review-G3-P1.md && tail -1 docs/adr/review-G3-P1.md | grep -Eq '^(二审|三审|四审|五审|六审|七审|八审|九审|十审)?终裁：pass$'",
+          "verifyHistory": [
+            {
+              "at": "2026-09-11T09:52:28Z",
+              "old": "test -f docs/adr/review-G3-P1.md && tail -1 docs/adr/review-G3-P1.md | grep -Eq '^(二审|三审|四审|五审)?终裁：pass$'",
+              "why": "审查已进入第六轮，原枚举只到五审，六审即使判 pass 也读不出来（机械不可达）。本次只把轮次前缀枚举从五扩到十，判读条件本身不变：仍要求文件最后一行**恰好**是一条 pass 终裁行，仍不接受任何尾随内容、不接受历史 pass 行、不接受关键词命中。提请 G0 verifyHistory 审计按『中性扩展』记：可接受集合只增加了合法轮次前缀，没有放宽对终裁行形态或位置的要求。"
+            }
+          ]
         }
       ],
       "notes": [
@@ -2257,6 +2264,12 @@
         "module": "research",
         "verdict": "issues",
         "note": "[G0/427ed064 OR-02 R75] 首轮按 §25 A40 频率判据执行。测量 09:09Z：data 近10分钟写入 0 次、market 0 次、research 1 次（未达活跃阈值）→ 三者可判；**判定后复核（A40 要求）：跑测期间 research 0 次写入，判定有效**。A35 必报量：src 48/48、tests 61/61（`test_review_p1_round5.py` 本轮已入库）。实跑：data **225**、market **358**、integration **8** 全绿；**research 10 failed / 341 passed，判为进度不判为回归**——6 条为五审反例先行测试（R5C 结构失败须计入 n_failed、R5G×4 相关向量形状与域、R5O 首 replicate 无零失败特权），4 条为 A31 陈旧级联（nullmodel.py 17:54 晚于报告 17:24）。**据此立 §25.4**：审查 open 项被转写成失败测试时，该失败是进度而非回归——审查结论原本只活在判定表里，是一份需人记得逐条去做的清单；转写成测试后变成做完之前一直红的门，即 A24 原则用在审查待办本身。判别方式：用例名可追溯到具体审查编号且该编号在 review 中标 open/partial。P1 唯一剩余项仍为 R-10（五审 fail）。D-10、M-10 已闭合；OR-04 端到端 8 passed 稳定。"
+      },
+      {
+        "at": "18:53",
+        "module": "research",
+        "verdict": "pass",
+        "note": "[G0/427ed064 OR-02 R77 · **四套全绿，942 项**] 测量 09:49Z，A40：data/market 近10分钟 0 次、research 1 次（未达活跃阈值）→ 可判；判定后复核 research 仍 1 次（同一次写入，跑测期间无新增），**判定有效**。A35：src 48/48、tests 61/61。**research 首次全绿 351 passed**（上轮 341 passed / 10 failed）——**G3 已把五审全部反例实现**：R5C（结构失败须计入 n_failed）、R5G×4（相关向量形状与域）、R5O（首 replicate 无零失败特权）现全部通过；A31 陈旧级联亦解（报告 18:42:21 晚于 nullmodel.py 17:54:16）。**核心假绿路径已堵**：R5C 断言『把 50 条搬进 invalid 却不计入失败数』必须抛 `未全部计入失败数`——五审指出的『结构失败未强制纳入 n_failed 致条件 FPR 最坏界假绿』现以具名错误拒绝。**当前状态**：data 225 / market 358 / research 351 / integration 8，合计 **942 项全绿**；D-10、M-10 已闭合。**P1 唯一剩余项 R-10 现已不是代码问题，是终裁问题**：`review-G3-P1.md` 末行仍为『五审终裁：fail』，而 R-10 的 verify 机械读末行。G3 需派六审取得 pass 终裁；若六审仍 fail 而残余属 P2 量级，则走 D-10 先例（G0 出具名裁定文件 + verify 显式析取）。**该选择不由 G3 自裁，G0 亦不预判六审结果。**"
       }
     ],
     "blockers": [

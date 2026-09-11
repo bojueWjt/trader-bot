@@ -714,13 +714,24 @@ def test_R4V_verify_aligns_guard_fail_rate_with_run_mc_and_recomputes_reason():
         q = copy.deepcopy(payload); mutate(q["results"][0]); return text[:start] + _json.dumps(q) + text[end:]
 
     def set_guard(r, k, *, reason="auto"):
-        """把 k 个 replicate 记成逐 replicate 结构门失败——与 run_mc 同源地同时写四处计数。
-        （T1→invalid 搬运保持 n_done/n_failed/T0 与全部 CP 复算量不变，隔离出判定口径本身。）"""
+        """把 k 个 replicate 记成逐 replicate 结构门失败——与 run_mc 同源地写**全部**相关计数。
+
+        五审 R5-C 指出本 helper 原来只搬 tiers、不付失败费，等于容许一份 run_mc 产生不出来的记录；
+        现在同时付 n_failed、重算三分母 CP、并把主 L 分布收缩到真正进过流水线的 replicate。
+        """
+        from quant_lab.research.nullmodel import clopper_pearson
         d = r["diagnostics"]; n = r["n_done"]
         d["n_invalid_null_model"] = k
         d["guard_fail_rate"] = k / n
         d["guard_failures_by_check"] = {c: (k if c == "icc" else 0) for c in d["shuffle_guard"]["checks"]}
         r["tiers"]["invalid"] = k; r["tiers"]["T1"] -= k
+        d["chosen_block_len"] = {"L=3": n - k}
+        r["n_failed"] += k
+        x, failed, ns = r["n_positive"], r["n_failed"], r["n_searched"]
+        r["rate"] = x / (n - failed); r["ci"] = list(clopper_pearson(x, n - failed))
+        w = x + failed
+        r["worst_case_rate"] = w / n; r["worst_case_ci"] = list(clopper_pearson(w, n))
+        r["searched_worst_rate"] = w / ns; r["searched_worst_ci"] = list(clopper_pearson(w, ns))
         if reason == "auto":
             reason = f"GUARD_FAIL_RATE {k / n:.3f} > {GUARD_FAIL_RATE_MAX}" if k / n > GUARD_FAIL_RATE_MAX else None
         d["invalid_reason"] = reason
