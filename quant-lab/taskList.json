@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T06:54:29Z",
+  "updatedAt": "2026-09-11T07:12:32Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -450,10 +450,18 @@
         "section": "§21 A35",
         "summary": "G2 自报其 sha256 还原检查的基线是 case 开工时读到的内容而非已提交基线，故只证明本 case 无残骸、对早于开工的污染完全失明；立一般规则——基线必须先于它所认证的过程、不得由该过程自己采集；并记明该盲区在 bef5750 前无法修复，故 §20.3 的入库是护栏成立的前提；G2 落 tree_guard.py 四脚本批前批后断言并先自证会红（追加→DirtyTree、checkout→洁净），记为 A33(2)/A34 同批活性口径的正确应用，另要求 tree_guard.py 自身入库（实测不在树内）；裁定跟踪率立为每轮必报量而非 pytest 断言（新文件到提交前合法未跟踪，常驻断言会持续假红而假警报终被关掉），G0 每轮报 src/tests 跟踪率与未跟踪清单并在三窗口出写入窗口时提交（本轮 src 48/48、tests 56/58，两个为 G2 在途验证脚本）；采纳 G2 结构性观察——『是否入库』在被使用前不可观测，故按 A24 记为依赖人记得的机制失效而非 G0 两次疏忽，与 A30 同一处理，事实不变提交义务仍在 G0",
         "by": "G0/427ed064 R63"
+      },
+      {
+        "n": 62,
+        "at": "2026-09-11T07:14:17Z",
+        "file": "contracts/README.md",
+        "section": "§22 A36",
+        "summary": "十二审 fail（阻断 S42/S43），独立复做突变并逐条验证十条差分各自能失败、明确不把静态门失败计给差分，认可 A32 互补原则但指出 kernel 相邻比较概括为全可达输入恒等依据不足；S42 实质是 A28 义务未履行而非 A28 被穿过——kernel/lake 生成器只产精确网格上的 bar，时间边界只改请求 start/end，窗口内离网 bar 从未生成，partition 的覆盖不能替代其他消费方输入路径；注入为族 B 真实秒级截断（open_time.replace(microsecond=0)），在现生成器全部 bar 上等价故 36 条全绿，而公开 simulate 可收 +1µs bar 致 BAR_GAP 静默变为 LABEL_RIGHT_CENSORED，属 A15 同族（我们的事实被改写为世界的事实）；裁定修复须在输入域覆盖窗口内 −1/0/+1µs 离网类并证明会红，不得以 replace 字符串禁令冒充（那是退回第二层）；立一般规则——A28 每个边界类须各配一条只有该类能捕获的突变并证明变红，未给出者视为未覆盖，是『门须自证会红』向下再走一层：一个能红的门配一个到不了的输入合起来仍是绿的；采信十二审两处克制（闭合不外推为家族无遗漏、检出率不反推覆盖率）",
+        "by": "G0/427ed064 R65"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.38",
+    "version": "v1.39",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -790,7 +798,7 @@
         "note": "[G0/427ed064 R50 · B20] **G2 撤回其 §5 结论，G0 读源核实属实，我的 B18 前提确实错了。** maxt.py:85 calendar_blocks 按日历整除切块（raw=int((t-origin)/L)）、**不因样本重叠合并**、整簇归最早 t_dec 块、n_nonempty 只数共同支持 W>0 的块——**max-t 的重采样单位是日历块，连通分量会因重叠合并，两者不是同一个量**。三口径对照（按实际单位）：1d 22/24、3d 8/8、5d 5/5、7d 4/4——**B 在各观察窗不劣于 A**；只有连通分量口径让 B 看起来灾难性地差，而它恰恰不是 max-t 用的单位。B18 §5 / B19 §4 中『删失率与有效簇数反向、B 以有效样本为代价』**作废**，B 的无偏是净得。**新记第三种失效形态**：继『永不触发』(A22/A24) 与『因噪声触发』(A27) 之后——**用错单位的度量不只是量不准，它会把一个不存在的取舍写进决策**。门本身工作正常，但度量的是另一个量，产出看似可信实则虚构的权衡并据此改变裁定。**前两种让门失效，这一种让决策失真**；G0 的 B18 正是被它改变过的裁定。通则：用于准入/下限/取舍论证的统计量必须与所服务的推断过程同单位，且须逐字对照实现（如『口径= maxt.calendar_blocks 的 n_nonempty』）。最小下限采纳 G2 四条：口径取 n_nonempty；**下限与 block_len 成对声明**（只写块数不写块长，同一数字可对应任意强度）且 block_len ≥ horizon + purge/embargo；同时钉 cross 与 max_span；数据量由切分算术给出——5d 下 Q 块需每折 Q×5 天（Q=20→100 天）。**research_horizon_s = 5d 解除占位**（其占位依据已被本裁定撤销）；新增 P2 前置：基于 5d 的 θ 声明须满足每折日历长度要求，否则只作描述性报告，属 G-STAT-CLAIM 实质内容。**2024-01 单月在 5d 下仅 5 块——这是数据量结论不是取值结论**；把后者误报成前者会让人去调一个本来正确的参数。",
         "at": "2026-09-11T05:19:35Z"
       },
-      "lastUpdate": "2026-09-11T06:50:04Z",
+      "lastUpdate": "2026-09-11T07:03:29Z",
       "tasks": [
         {
           "id": "M-01",
@@ -1157,6 +1165,14 @@
         {
           "t": "15:50",
           "n": "**收 G0 R61/A34。第 (3) 条是重大发现，且它暴露了我自己取证证据的一个我没意识到的弱点。**\n**G0 发现 quant-lab 的 `src`/`tests` 从未入过 git**：src 48 个 `.py` 只跟踪 3 个、tests 56 个只跟踪 2 个，7.2 MB 三个窗口的全部实现从未 `add` 过（也没被 `.gitignore` 排除）。已于 `bef5750` 一次性入库（219 文件 / 45747 行，三窗口均出写入窗口时）。G0 自陈这是 R38 的**第二次同形发生、两次都是它**：**两次都是提交了谈论 X 的东西，没提交 X。**\n**它暴露的我方弱点（我自己没意识到，现在说清楚）**：我此前每条突变都报\"还原 sha256 一致\"，但那个比对的基线是**我在该 case 开始时读到的内容**，不是**已提交基线**。所以它只能证明\"这条 case 没留下残骸\"，**证明不了\"开工时树上没有上一批的残骸\"**——若前一批留下了突变，后续每条 case 都会**忠实地保留它并照样报\"一致\"**。**一个只与自己开工时刻比对的检查，对早于开工的污染完全失明。** 这正是 A22 那一族在我的取证器上的一个变体。\n**已按 A34(2) 把护栏接上**（scratchpad `tree_guard.py`，四个取证脚本 `mutate.py`/`mutate_forceclose.py`/`mutate_a28.py`/`verify_s40_s41.py` 均已接入）：**批前批后各断言一次工作树与已提交基线一致**，不一致即抛 `DirtyTree` 并列出残骸文件，拒绝在脏树上开工。**并按 A33 同批活性口径自证了这道护栏本身**：故意 `echo >> vision.py` 弄脏 → 护栏**拒绝**并列出 `M quant-lab/src/quant_lab/market/vision.py`；`git checkout` 还原 → 护栏通过（`工作树 == HEAD(cdb8c9e)`）。**护栏自己先证明会红，再用它去认证别的批次。**\n**(1) A33(2) 同批活性口径已采纳**：每批须在同批内含至少一条已知必红的对照注入；**仅当全批皆绿**时才回退批前检验且须重跑。我三批各含 RED，不需补跑。G0 点出我那三条 GREEN 能站住**正是靠同批第 2 行那条 RED**——若那批全绿，按新口径应**整批作废**而非采信\"三条抓不到\"。\n**(2) 每种取证方法须显式声明失效面与护栏**：副本法失效面=隔离链断裂，护栏=路径归属断言；**真实树法失效面=残骸，护栏=批前批后与已提交基线比对**。我拒绝把\"我的方法没有那个失效面\"当成更安全，G0 立成规则。\n**(4) 判例 5 已补我那半句**：那份被作废的证据**当时没有任何人在看**；A20 的撤回是在被质疑之后，这个是**无人质疑时自己发起的**；区别在**触发源**——**机制能强制前者，强制不了后者**。\n**基线核对（测量时刻 15:48:36）**：`bef5750` 15:43:43 入库，早于我的修复任务派发（~15:47），基线干净；src 48/48、tests 56/56 全部跟踪；当前工作树与 HEAD **差异 0 个文件**。"
+        },
+        {
+          "t": "15:58",
+          "n": "**收 G0 R63/A35。三件事：接受裁定、`tree_guard.py` 已入树待提交、以及报告我自己刚犯的一个错。**\n**(1) A35 一般形式我接受**：**基线必须先于它所认证的过程，不能由该过程自己采集**。由被认证过程在自身起点采集的基线，**对早于该起点的污染完全失明**——它回答的是\"我没弄坏什么\"，不是\"开始时是好的\"。G0 并记明：该盲区在 `bef5750` 之前**无法修复**，因不存在可比对基线，故 §20.3 入库是我那条护栏能成立的**前提**而非顺手发现。\n**(2) `tree_guard.py` 已按 §20.3/A35 放入 `quant-lab/scripts/tree_guard.py`**（**认证链上的工具与它认证的对象同列，否则那条链的最后一环没有基线**）。放 `scripts/` 而非 `tests/market/`，是因为在途修复任务的写范围是 `src/quant_lab/market/**` 与 `tests/market/**`，`scripts/` 在其范围外，不会撞写。**提交需用户明确授权，我不自行提交**；文件已就位，请 G0 在下轮入库时一并纳入。\n**(3) 我刚犯了一个错，且正是我一直在要求别人不要做的那类。** 我做护栏活性自检时，用的探针是「**追加一行到 `src/quant_lab/market/vision.py`，再 `git checkout` 还原**」。当时**后台修复任务 `task-mtwlgayi-tl1y91` 正在改这棵树**（`phase=editing`）。若它恰好在写同一个文件，我的 `checkout` 会**直接毁掉它的工作**——这与我上一轮要求承包方修掉\"测试写生产文件\"时给的理由**是同一条**（`finally` 挡不住 SIGKILL、并发会竞争）。\n**实测未造成损坏**：`vision.py` 与 HEAD 差异 0、探针残留 0 处；该文件不在修复任务的在途清单内，是运气不是设计。\n**已修**：活性探针改为**新建一个护栏自己拥有的未跟踪临时文件**（`.tree_guard_liveness_probe`），它同样能让 `git status` 非空并触发报警，但**不修改任何既有内容**，与任何在途任务都不冲突；用完 `unlink(missing_ok=True)`。在途树上实跑：`活性自检 ✓ 护栏在脏树上确实报警`，且探针已清除、在途文件不受影响。\n**(4) 跟踪率裁定我认同不立为 pytest 断言**：新文件从创建到提交之间**合法处于未跟踪状态**，常驻断言会对正常在途工作持续报红，而 A26 已述其归宿——**假警报最终会被人关掉**。改为 G0 每轮评审必报 `src`/`tests` 跟踪率与未跟踪清单。G0 的判词记下自用：**断言要求它恒为真，必报量只要求它恒可见——缺的是后者**；R38 与 §20.3 的失效不在无人检查，而在**从未有人看**。"
+        },
+        {
+          "t": "16:03",
+          "n": "**十二审两条阻断已闭合并经我独立复核（测量时刻 15:59:45）。已派十三审 `task-mtwm08j6-54w9yy`。**\n**我亲跑的验收**：`tests/market` **344 passed**（+12）；`test_single_source.py` **48 passed**（+12）；A `passed=22 failed=0`；AB 逐项与基线一致、UNEXPLAINED 0。\n**S43（真实行为缺陷）修法**：`execution.py` 改为按**合法唯一网格点身份**核对覆盖并记录离网证据；`kernel_a.py:234-253` 改为**逐点匹配身份、离网行不能推动覆盖游标**（`for opened in opens: if opened != expected: ...`）。原样复现从 `FIRST_GAP=None`/`LABEL_RIGHT_CENSORED`/`bars_ok=True` 变为 `FIRST_GAP=01:01:00Z`/`BAR_GAP`/`bars_ok=False`；loader 从 complete/quality 均 True 变为均 False 且保留离网时间证据。\n**S42 修法**：扩充两个生成器 + 12 个公共路径用例，**未增加 `replace` 禁令**——按我任务书里的禁止条款，没有把语义缺口退回语法层。\n**真实归档未被误伤（这条最要紧）**：`bars_last` 44640 行离网 0、31/31 窗口 complete；`bars_mark` 同；**`fundingRate` 93 行 jitter 15 行 `retained=True`、`funding_complete=True`**——毫秒抖动**被保留而非隔离**，严格网格规则确实只套在 bar 流上。\n**我自己跑的突变（A29 真实写盘+子进程隔离；A33 同批活性；A34/A35 批前快照护栏）**：同批活性对照（`expected_rows` +1）→ **1 failed**；S42 原样 `replace(microsecond=0)` → **3 failed**；S43 逐点身份改回按条数 → **5 failed**；**批后 106 个文件逐一回到批前快照 ✓**。批前基线 `HEAD=254e3ad`、与 HEAD 差异 9 个文件（修复已完成尚未提交，属合法差异，已随证据记录）。\n**护栏本身的两处改进**：(1) 加 `snapshot()`/`assert_matches()`——工作树合法地不等于 HEAD 时（修复完成未提交），用**整批开工前采集一次**的快照做基线并**显式记录它与 HEAD 的差异**；这与 A35 不冲突，A35 禁的是**逐案在自身起点采集**的基线（对早于该起点的污染失明），而整批开工前采集一次且差异可复核，\"开始时是什么样\"是可查的、不是被悄悄当成了干净。(2) 活性探针改为**新建护栏自己拥有的未跟踪临时文件**，不修改任何既有内容——修正我先前\"追加到 `vision.py` 再 checkout 还原\"那个在后台任务改树时可能毁掉其工作的做法。\n十三审判据已含：S43 原样复现不得再出现 `bars_complete=True`+`bars_ok=True`；S42 原样注入必须 RED；生成器须**每个消费方各自**覆盖窗口内 −1/0/+1µs 离网类而非靠另一消费方顶替；核 funding 抖动确被保留；核 A32 三件套（理由/债主/触发事件）是否齐备；核 A34/A35 两条是否被**实际执行**而不只是被声明。"
         }
       ]
     },
@@ -1475,7 +1491,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T06:38:40Z",
+      "lastUpdate": "2026-09-11T07:12:32Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1650,6 +1666,10 @@
         {
           "t": "15:38",
           "n": "[G0/427ed064 OR-02 R59 · 三模块均出写入窗口，全部可判] 测量时刻 06:30Z；data 距今 128 分钟、market 5 分钟、research 28 分钟。实跑：**data 225 / market 332 / integration 8 全绿**；research 2 failed 为已知同源——A31 关系仍未满足（report-G3-null-model.md 15:00:03 早于 nullmodel.py 15:01:48），报告待用当前代码重生成。G3 未被阻塞（blockers 空），已落地 B20 与 A31，仅差重生成。**G0 实跑核验 G3 的 B20 实现，四条要求全部满足**：`maxt.SufficiencyFloor` 为 frozen dataclass；口径逐字对齐 `calendar_blocks.n_nonempty`（共同支持 W=mask×weight>0）；**下限与 block_len 成对声明**且构造时强制 `block_len_days ≥ research_horizon_days + embargo_days`——反例 `block_len=5 / horizon=5 / embargo=1` 实测抛 `ValueError: 块自举的独立性前提不成立（B20 §3.2）` ✓；**同时钉 cross 与 max_span** ✓；`required_calendar_days()` 实测 `block_len=6, Q=20 → 120 天` ✓。**该实现把 B20 第 2 条做成了构造期不可绕过的约束**，而非事后检查——与 A24『让缺陷不可表达』同向：写不出一个块长小于观察窗的下限声明。P1 缺项：M-10（十一审 fail，十二审 task-mtwkpm4k-me6mtf 已派，要求独立重做突变并对『三道互补』独立判断）、R-10（三审 fail）、report 重生成。D-10 已闭合；OR-04 端到端 8 passed 稳定。"
+        },
+        {
+          "t": "16:12",
+          "n": "[G0/427ed064 OR-02 R64 · 按 A30 分模块判定 + A35 必报量] 测量时刻 07:09Z。**判定资格**：data 写入距今 166 分钟、market 7 分钟 → 可判；**research 距今 42 秒，在写入窗口内 → 本轮不判**（07:12 复核仍在写，16:11:54）。**实跑**：data **225 passed**、market **344 passed**（332→344，G2 的 S42/S43 已落）、integration **8 passed**（附注：integration 依赖 research，本跑绿但 research 处于写入中）。**A35 必报量 · 入库状态**：`src` 跟踪 **48/48**；`tests` 跟踪 **56/58**，未跟踪两个为 G2 在途的 `verify_s42_s43.py` 与 `verify_s43_archive.py`。工作树相对 HEAD 有 market 4 个、research 2 个文件已改，属在途工作。**本轮按 §20.3/§21.3 的时序要求推迟提交**：规则是『三窗口均出写入窗口时提交当轮新增』，而 research 在窗口内——**提交一棵半写的树正是 §10 A22 记过的那件事（入库固化损坏状态）**，故不因'手头有改动'而破例。待下轮三窗口同时空闲时一并提交。P1 缺项仍为 M-10 与 R-10 两项；D-10 已闭合，OR-04 端到端 8 passed 稳定。"
         }
       ]
     }
