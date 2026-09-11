@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:28:22Z",
+  "updatedAt": "2026-09-11T03:36:44Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -250,10 +250,18 @@
         "section": "§5.16 B14",
         "summary": "S24 核实属实（rules_known 漏查 multiplier + or \"1\" 使未知乘数静默当 1，而乘数缩放全部经济量）；确立同族严重度准则：产出看似合理的错误数值高于放过非法输入；确立一般规则：证据完备性判定必须覆盖其解锁的每个经济量参数、缺失即判定为假并加断言测试；明确不可达不是不修的理由（区别于 B9 对合法枚举值不可达的处理）",
         "by": "G0/427ed064 R30"
+      },
+      {
+        "n": 37,
+        "at": "2026-09-11T03:36:44Z",
+        "file": "contracts/research-schema.md",
+        "section": "§9.10.14 A18",
+        "summary": "V01 核实：落盘 dtype 合规但值经 extract.py/validate.py 绕回 float，当前夹具因全是短小数看不见（147 样本 0 残留），实测 BTC 量级第 12 位小数确被改写；裁定声明精度的字段路径禁止有损中间转换，全程 Decimal 或字符串；声明类型是保真度承诺，绕经 float 后契约看似遵守实已违反且下游不可分辨，按 B14 最重档定级；指认为同一元模式第三个上下文（兜底贴标签/假值静默修补/有损转换：用看似合理的值悄悄替换真实值且不发信号）",
+        "by": "G0/427ed064 R31"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.13",
+    "version": "v1.14",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -275,10 +283,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R19 抽验 S16/S07 · 对抗式实跑，非自报] **S07（致命错不得降级）= 闭合**：severity_of_all 混合组合实跑——[EDIT_ORIGINAL_UNAVAILABLE, UNIT_SCALE_CONFLICT]→fatal（致命支配一般，primary=UNIT_SCALE_CONFLICT 按冻结优先级）、[ENTRY_LINK_AMBIGUOUS,...,DUPLICATE_EXACT]→fatal、单 EDIT_ORIGINAL_UNAVAILABLE→general、空→general；FATAL 集 = 契约 §4 原三项，未私自增删；决策视图 23 行含致命码者 **0 行**。首轮 S07 反例不再复现。**S16（媒体路径越权）= 实质闭合**：safe_media_path 对 ../SECRET.txt→parent_escape、/etc/hosts→absolute_path、sub/../../SECRET.txt→parent_escape、指向外部的 symlink→symlink_escape、C:\\\\Windows\\\\x→absolute_path 全部 REJECT，仅合法相对路径 ALLOW。**一处潜伏不一致（建议 P2，非 P1 阻断）**：反斜杠父级 '..\\\\SECRET.txt' 未被 '..' parts 检查命中而 ALLOW；G0 实测确认在 POSIX 下**不构成越权**（解析为 base 内的字面文件名、不存在），但代码的绝对路径分支已处理 Windows 分隔符、父级分支未处理，若产线在 Windows 运行即越权；TDesktop 导出常产自 Windows，建议 P2 补 '\\\\' 归一。四套实跑：data 134 / market 183 / research 248 / integration 7 全 passed（research 前一跑 2 failed 为 G3 写盘竞态，复跑全绿）。",
-        "at": "2026-09-11T02:32:35Z"
+        "note": "[G0/427ed064 R31] **四套全绿**：data 177 / market 251 / research 323 / integration 8（G3 已完成对 G2 新列的 parity 对齐）。**S16/S07 抽验（对抗式实跑，非采信回执）：两条均闭合**。S07：混合原因码致命支配一般、主因按冻结优先级、FATAL 集与契约 §4 三项一致未增删。S16：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC \\\\\\\\srv\\\\share、sub/../../、外指 symlink 全部 REJECT 且理由分类正确——上轮我报的反斜杠父级已补上。**V01 实地核实（结论比属实更细）**：落盘 dtype 全为 decimal128(38,12) 合规；但 extract.py:643-644 与 validate.py:99-100 把 stop/tps.level/fraction 绕经 float；当前夹具 147 个 TP 取值中小数位>4 的为 0（全是解析自文本的短小数，float 可精确表示）故看不见；但 G0 实测 Decimal('64094.879166666667') 经 float 往返变 64094.879166666666，**第 12 位被改写**——BTC 量级 float64 只剩约 11 位小数而 schema 宣称 12 位。已裁定入契约 v1.14 §9.10.14 A18：声明精度的字段路径禁止有损中间转换。**四轮 fail 的处置建议已上报用户**：G1 自陈 open 项全为有界反例、无设计规模项，倾向再一轮 Codex 修改 + r5，而非动用分类闭合标准。",
+        "at": "2026-09-11T03:36:44Z"
       },
-      "lastUpdate": "2026-09-11T03:28:22Z",
+      "lastUpdate": "2026-09-11T03:32:10Z",
       "tasks": [
         {
           "id": "D-01",
@@ -534,6 +542,10 @@
         {
           "t": "12:28",
           "n": "[G1/6caf9e18 · r4 结果] r4（task-mtwdp3yr-qtpub1 → docs/adr/review-G1-P1-r4.md，325 行）四审终裁 fail：S closed 6/16（S01/S02/S04/S06/S07/S16）、T 2/4（T02/T04）、U 1/1；新增必修 V01–V04（V01 Decimal 落盘前绕回 float 改写合法 12 位数；V02 默认决策视图把同文重发拆成不同簇违反 A12；V03 审核历史按可改 audit_plan_version 分桶导致重验次数可重置；V04 reopen 谱系绕过品种/作者守卫）。open 项残余均为具体反例：S03 父帖相册媒体未进递归闭包；S05 A12 同簇；S08=V01；S09 明确撤回被当 analysis、replay_required 未置；S10 仅 edit 时刻变（内容同）折成 1 版；S11/T01 manifest.counts 与实际行数不核对；S12 层 2 缺 5 条 service 的退出账、review+excluded 未入累计集合；S13 缺/非法 bbox 后仍 entry_proposal 且 reasons=[]、同数值跨品种图文判 match；S14=V03；S15 固化期望接受 edit-only 丢版、T03 漏断言；T03 无 bbox 数字未拒收。全部为有界修复项，无设计规模项。D-10 已四轮 fail，停下请示用户。"
+        },
+        {
+          "t": "12:32",
+          "n": "[G1/6caf9e18] 用户拍板（r4 fail 后）：再一轮 Codex 修改 + r5。已派第二轮 Codex 写任务（范围只限 src/quant_lab/data 与 tests/data，禁碰 data/、契约、看板），任务书逐条列 V01–V04 与 r4 open 残余（S03 父帖相册媒体入闭包、S09 撤回/纠错 R 语义、S10 edit-only 版本证据、S11/T01 counts 核对实际行数、S12 层 2 service 退出账与 review/excluded 入累计、S13/T03 无 bbox 数字拒收与同品种同方向才算 match、S15 固化期望按报告口径）。完成后 G1 前台 diff/verify 复核，再派 r5；r5 仍 fail 则改走 G0 分类闭合标准（用户已明示）。"
         }
       ]
     },
@@ -796,7 +808,7 @@
         "note": "[G0/427ed064 R27] **A16 审计：verifyHistory 累计 2 条，收紧 2，放宽 0**。R-08 由内联断言改为 verify_report_text：内容显著收紧（机制唯一性/计数与档分布一致/诊断有限性/shuffle guard 全真且失败计数零/非全T0/块长与阳性计数/CP 区间独立复算/限制声明正文须实质解释'未检出≠无增益'与'合成不是真实'，旧版仅匹配标题）；功效≥80% 硬门移除属用户已裁定的出口 A，非自行放宽。**信任边界迁移风险 G3 已自行封堵**：test_review_p1_round3.py 有参数化反例（含 limitation 篡改）断言门退出码非零、有正例断言真实低功效通过、且从 taskList.json 读 verify 串在子进程执行——第三点使看板命令被削弱时测试同样变红。该写法已由 G0 采纳为通则 §9.10.13 A17 并推广三窗口。实跑 research 5 failed/317 passed，5 条全为 test_g2_parity 与 test_S14_probe_E 对 G2 新列（outcome_kind/exit_legs，后续还有 horizon_source），属已知接缝对齐中，非缺陷。",
         "at": "2026-09-11T03:18:25Z"
       },
-      "lastUpdate": "2026-09-11T03:10:44Z",
+      "lastUpdate": "2026-09-11T03:36:05Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1026,6 +1038,14 @@
         {
           "t": "12:10",
           "n": "回 G0 R26：(1) 收到，horizon_end 进 config_id 只在取值不同时分开尝试，不重估预算/分档。(2) B12 research_horizon_s 联合提案 G3 侧已出：docs/adr/report-G3-research-horizon-curve.md——合成 4000 机会、预注册持仓时长混合（40% 快速 LN(6h)、45% 中期 LN(30h)、15% 长尾 LN(5d)）+ 未成交 10% + 覆盖失败 3%（A15 单列 n_coverage_excluded）；右删失率 4h 77% / 12h 56% / 1d 40.5% / 3d 14.2% / 7d 3.3% / 14d 0.3%。提议 research_horizon_s=7d（膝点：删失降到与覆盖失败同量级，且不把 θ 建立在快速了结子样本上；再加一周只换 3% 可评却推后标签成熟），max_horizon 14d 保持；真实数据须用 G2 实测持仓分布重画后按同一准则重选，换窗进 config_id（B11）。等 G2 侧意见合并。"
+        },
+        {
+          "t": "12:31",
+          "n": "Codex 修复（task-mtwd0wpp-ihodxk）验收：8 项全改 + 73 条三审回归（tests/research/test_review_p1_round3.py），diff 严格在授权范围（research 的 features/api/ledger/nullmodel/synthetic + 5 个测试文件 + taskList 仅经 set-verify 改 R-08 并留 verifyHistory）。G3 主控实跑：tests/research 323 passed；R-05/R-07/R-08/R-09 verify 全 rc=0（R-08 新判读：5 条唯一主记录、计数/诊断/区间复算一致，低功效如实 fail）。另落地两项契约义务：G2 新增 horizon_source（44 列）→ 桩镜像逐列逐序对齐、fake_execution 产出 exit_legs/horizon_source；B11 §5.13——config_id 纳入 caller 指定 horizon_end（policy 推导窗不入，由 policy_hash 覆盖），reserve/pipeline/final/执行批次全链透传，账本增 caller_horizon_end 列，断言测试 test_B11_caller_horizon_end_enters_config_id（同窗 duplicate、换窗独立尝试）。MC8 重跑中（新结构门下的 FPR/功效），落盘后派四审。"
+        },
+        {
+          "t": "12:36",
+          "n": "回 G0 R27/R29：(1) A17 采纳知悉——从 taskList 读 verify 串在子进程执行的写法已是 test_review_p1_round3 的固定模式，继续保持。(2) parity 已一次对齐 G2 最终版（44 列同序含 outcome_kind/exit_legs/horizon_source，policy_hash 全换后 7 passed）。(3) B13 重算完成：docs/adr/report-G3-research-horizon-curve.md v2——真实括号（G1 gold fixture n=67：SL 中位 1.75%、末档 TP 中位 5.71%、max 25.75%）+ 真实波动（G2 silver 1m 实测 BTC σ=3.18%/日）→ 首达时中位 11.1h；删失率 1d 23.1% / 2d 10.8% / 3d 6.3% / 5d 2.9% / 7d 1.7% / 14d 0.3%（G2 的 3d=4.3% 确实偏低，真实括号下是 6.3%，但曲线右移有限）。**按 G0/G2 要求同时给出折内有效簇数：K_min 在 5d 达峰（662）后回落（7d 650 / 10d 625 / 14d 587）**——单看删失率会选到 14d 并赔掉 11% 有效簇。三组敏感性（alt 波动 ×2.0、换 seed、6h 簇窗）峰值均在 3d–5d。提议 research_horizon_s=5d（432000s），3d 亦可辩护（K 差 ≤2%，分歧在成熟延迟偏好），不建议 ≥7d。限制：波动只有 BTC 一个月实测、首达时模型无波动聚集、K 轴依赖当前切分参数。"
         }
       ]
     },
@@ -1516,6 +1536,12 @@
         "module": "market",
         "verdict": "issues",
         "note": "[G0/427ed064 R30] S24 G0 实地核实属实：execution.py:234 rules_known 查了 tick/step/min_notional/status/区间，唯独漏 multiplier；:239 multiplier=Decimal(rr['multiplier'] or '1') 未知静默当 1，而 S08 后 multiplier 缩放全部经济量。裁定入契约 v1.13 §5.16 B14：(1) 同族严重度准则——『产出看似合理的错误数值』高于『放过非法输入』，因前者与正确答案在下游不可区分、会一路进 θ 与最终声明（采纳 G2 对 S22 vs S24 的对比）；(2) 一般规则——证据完备性判定（rules_known/bars_complete/funding_schedule_complete）必须覆盖其解锁的每个参与经济计算的参数，缺失即判定为假，判定项与参数集逐一对应并加断言测试；(3) 不可达不是不修的理由：S24 今日不可达仅因两个生产者硬写 '1'，但列可空，接入第三数据源即触发；依赖生产者永不改变是把正确性寄托于契约之外的巧合。与 B9 对 filled_closed 的处理不矛盾——那里不可达的是合法枚举值，这里不可达的是缺陷。排期（终审后修）认可。实跑 market+integration 259 passed。"
+      },
+      {
+        "at": "12:36",
+        "module": "data",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R31] **四套全绿**：data 177 / market 251 / research 323 / integration 8（G3 已完成对 G2 新列的 parity 对齐）。**S16/S07 抽验（对抗式实跑，非采信回执）：两条均闭合**。S07：混合原因码致命支配一般、主因按冻结优先级、FATAL 集与契约 §4 三项一致未增删。S16：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC \\\\\\\\srv\\\\share、sub/../../、外指 symlink 全部 REJECT 且理由分类正确——上轮我报的反斜杠父级已补上。**V01 实地核实（结论比属实更细）**：落盘 dtype 全为 decimal128(38,12) 合规；但 extract.py:643-644 与 validate.py:99-100 把 stop/tps.level/fraction 绕经 float；当前夹具 147 个 TP 取值中小数位>4 的为 0（全是解析自文本的短小数，float 可精确表示）故看不见；但 G0 实测 Decimal('64094.879166666667') 经 float 往返变 64094.879166666666，**第 12 位被改写**——BTC 量级 float64 只剩约 11 位小数而 schema 宣称 12 位。已裁定入契约 v1.14 §9.10.14 A18：声明精度的字段路径禁止有损中间转换。**四轮 fail 的处置建议已上报用户**：G1 自陈 open 项全为有界反例、无设计规模项，倾向再一轮 Codex 修改 + r5，而非动用分类闭合标准。"
       }
     ],
     "blockers": [
