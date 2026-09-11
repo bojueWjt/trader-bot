@@ -302,3 +302,35 @@ docs/adr/review-G<N>-P1.md 中最后一条「终裁」/「二审终裁」行的�
 2. **`claimed_outcome.kind` 冻结** = `{close_claimed, cancel, expire}`，与 §2 状态机映射：`close_claimed → author_claim_state=claimed_closed`；`cancel → author_plan_state=cancelled`；`expire → author_plan_state=expired`。
 3. **`reconstructed_outcome.kind` 冻结** = `{filled_closed, unfilled_expired, stopped, tp_hit, right_censored}`（属主 G1 写列，取值来源 G2 `ExecutionResult`）。**G2 义务**：`execution-interface` 的结果终态标签集必须能无损映射到这五值，映射表写进 `ExecutionResult` 文档并加一条枚举覆盖测试；映射不满射或多对一有歧义时 block 给 G0。
 4. **别名解析语义**：`load_episodes('fixture-v1')` 解析到 `gold/_manifest/_alias.json` 当前指向的**最新不可变版本**（现 `fixture-v1@f5191444`）；显式 `name@hash` 固定旧版；同名时以 `_alias.json` 为准。消费方（G3、OR-04）缓存键必须用解析后的不可变版本名，不得用别名。
+
+### §9.10.11 裁定 A15：`reconstructed_outcome.kind` 扩为七值 + 混合出场诊断（G0 R18，changeLog #28）
+
+G2 按 §9.10.10 第 3 条做映射表时报 2 处不满射 + 1 处歧义并 `block`（`docs/adr/report-G2-outcome-kind-mapping.md`），流程正确。逐条裁定如下，**§9.10.10 第 3 条的五值集合作废，以本节七值为准**。
+
+#### A（不满射，准）：增 `unevaluable`
+
+`censor_reason ∈ {MARK_STALE, BAR_GAP, FUNDING_SCHEDULE_GAP, RULE_HISTORY_MISSING, SYMBOL_TIME_INVALID}` → `kind=unevaluable`，**不得映射为 `right_censored`**。
+
+理由：`right_censored` 的语义是"数据齐全，标签尚未成熟"，是关于**世界**的事实；上述五种是"我们没有看世界所需的数据"，是关于**我们**的事实。二者合并会让行情湖的缺口在损耗表里伪装成正常的标签未成熟，缺口越大看起来越像"很多仓位还没走完"——这正是 §9.8 A6 与合并稿 C.3"损耗可数、原因互斥"要堵的静默损坏。
+
+**配套义务（G1）**：`reconstructed_outcome` struct 增 `censor_reason string?` 键，原样保留 G2 的取值，使损耗表能按互斥原因分别计数；`kind=unevaluable` 时该键非空。
+
+**配套义务（G3）**：`kind=unevaluable` 的机会按**覆盖失败**从分母中剔除并单独计数（`n_coverage_excluded`），**不得**并入 `n_censored_excluded`。两者混记会让 θ 的有效样本量来源不可审计。
+
+#### B（不满射，准）：增 `rejected`
+
+`fill_status == none` 且事件含 `rejected`（PRICE_FILTER / LOT_SIZE / MIN_NOTIONAL / MARGIN / POST_ONLY_CROSS）→ `kind=rejected`，**不得归入 `unfilled_expired`**。
+
+理由：`unfilled_expired` 是"挂出去了，市场没来"，是策略信息；`rejected` 是"根本没挂出去"，是计划质量或账户约束信息。合并后，一批系统性不可执行的计划（档位不合法、名义额不足）会呈现为正常的未成交率，计划缺陷被市场噪声吸收。诊断细分用 `canonical_events` 的 `rejected.reason`，不再拆枚举。
+
+#### C（歧义，采纳 G2 提案并补诊断）：止损参与即 `stopped`
+
+先部分 TP 后 SL 平余仓（E12）→ `kind=stopped`。保守口径：标签偏向不利结局，避免把"吃到一档 TP 后被打掉"记成胜局。
+
+**但不得丢信息**：`ExecutionResult` 增诊断列 `exit_legs`（出场成交实际参与的 leg 集合，排序去重，如 `("sl",)` / `("sl","tp")` / `("tp",)`），进 `RESULT_SCALAR_COLS`。`{sl}` 与 `{sl,tp}` 由此可分，G1 的作者声称比对与 G3 的分层都能还原混合出场，不必为此再扩枚举。
+
+#### 冻结结果
+
+`reconstructed_outcome.kind` = `{filled_closed, unfilled_expired, stopped, tp_hit, right_censored, unevaluable, rejected}`（七值）。
+
+**验收**：`quant_lab.market.contract.outcome_kind(res)` 对全部 22 个夹具 + `test_review_p1*` 反例逐一命中恰好一条规则；枚举覆盖测试断言七值全部可达（不可达值须在报告里说明原因）；`simulate_batch` 输出 `outcome_kind` 与 `exit_legs` 两列；映射表由 G2 写进 `execution-interface` §3。G1 侧 `censor_reason` 键与 G3 侧 `n_coverage_excluded` 各加一条断言测试。

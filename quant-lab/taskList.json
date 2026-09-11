@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T02:14:09Z",
+  "updatedAt": "2026-09-11T02:16:29Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -178,10 +178,18 @@
         "section": "§9.10.10 A14",
         "summary": "A13 澄清：决策视图 outcome 恒 false（防前视），描述视图按作者终态；claimed_outcome.kind={close_claimed,cancel,expire}；reconstructed_outcome.kind={filled_closed,unfilled_expired,stopped,tp_hit,right_censored}，G2 须提供映射与覆盖测试；别名解析到最新不可变版本，缓存键用解析后版本名",
         "by": "G0/427ed064 R17"
+      },
+      {
+        "n": 28,
+        "at": "2026-09-11T02:16:29Z",
+        "file": "contracts/research-schema.md",
+        "section": "§9.10.11 A15",
+        "summary": "reconstructed_outcome.kind 五值→七值（增 unevaluable、rejected，§9.10.10 第3条五值作废）；数据洞不得记为 right_censored、未挂出不得记为 unfilled_expired；混合出场按 stopped 并增 ExecutionResult.exit_legs 诊断列；G1 加 censor_reason 键、G3 单列 n_coverage_excluded",
+        "by": "G0/427ed064 R18"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.4",
+    "version": "v1.5",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -443,11 +451,9 @@
     },
     "market": {
       "owner": "G2",
-      "status": "blocked",
+      "status": "in_progress",
       "progress": 0.95,
-      "blockers": [
-        "契约: research-schema §9.10.10 kind 五值对 ExecutionResult 不满射（A：MARK_STALE/BAR_GAP/FUNDING_SCHEDULE_GAP/RULE_HISTORY_MISSING/SYMBOL_TIME_INVALID 的证据缺失删失无目标值；B：filter/资金 rejected 无目标值）且有歧义（C：先部分 TP 后 SL 的混合出场）；提案与建议见 docs/adr/report-G2-outcome-kind-mapping.md，G0 裁定后 G2 落 contract.outcome_kind + 枚举覆盖测试。不阻塞四审/M-10。"
-      ],
+      "blockers": [],
       "provides": [
         "data/lake/market/{bronze,silver,_manifest}",
         "quant_lab.market.asof",
@@ -464,7 +470,7 @@
         "note": "[G0/427ed064 R17 02:0xZ] §5.10 B8 G0 实跑核验闭合：contract.py:103/125 fraction Decimal|None 无默认、:250-252 policy 分配规则、:323-324 entry_fractions/tp_fractions 显式字段、:346 fraction_source；tests/market 181 passed；OR-04 7 passed（fraction 全 null 的 G1 计划经 policy 等分成功构造并执行）。M-10 等四审 task-mtwa8727-xsmsdn 终裁 + 抽跑。待落：§9.10.10 reconstructed_outcome.kind 映射与覆盖测试。",
         "at": "2026-09-11T02:14:09Z"
       },
-      "lastUpdate": "2026-09-11T01:38:45Z",
+      "lastUpdate": "2026-09-11T02:16:29Z",
       "tasks": [
         {
           "id": "M-01",
@@ -622,6 +628,10 @@
         {
           "t": "10:37",
           "n": "契约 v1.2 §5.10 B8 已落地（G0 R6 要求，与 review 轮次无关）：Entry/TakeProfit.fraction 可空且无默认 1；OrderPlan 同列表全有或全无（部分给出 ContractError）；ExecutionPolicy 增 entry_fraction_rule/tp_fraction_rule/tp_total_fraction 进 content_hash（policy_hashes.json 已更新，夹具重生成）；ExecutionRequest 显式 entry_fractions/tp_fractions（before-validator 从计划或 policy 等分解析：Decimal 标度 12 ROUND_DOWN 余量末腿，3 腿和精确=1）进 REQUEST_ID_COLS→trace_hash，与计划给值不一致即拒；ExecutionResult.fraction_source∈{plan,policy}（entries 与 tps 皆来自 plan 才 plan）进 RESULT_SCALAR_COLS/simulate_batch 列；kernels 用 req.entry_fractions/tp_fractions 并对长度不符拒绝。验收 (a)–(e) 在 test_contract::test_b8_fractions_nullable_policy_split_and_hashed。tests/market 181 passed；A 22/22；report UNEXPLAINED=0。四审 task-mtwa8727-xsmsdn 仍在跑（其树已含 B8 改动，回执时注明）。"
+        },
+        {
+          "t": "11:14",
+          "n": "四审 task-mtwa8727-xsmsdn 在写终版前悬死 33 分钟（STALLED），已 cancel 并重派全新任务（不 resume）；新任务书限终版 ≤250 行、先写文件后补探针，审查树已含 B8。"
         }
       ]
     },
@@ -647,7 +657,7 @@
         "note": "[G0/427ed064 R12 00:1xZ] A13 G3 侧落地核验：OR-04 test_seam_g3_opportunity_set_frozen 由 ERROR 转 PASS（G1 outcome 键仍 null，仅 warning 进 diagnostics）；test_evaluator/test_g2_parity/test_api 21 passed 1 xfailed。OR-04 现 4P/3E，剩余 3 条 ERROR 全部归 G2 B8（contract.py fraction 默认值/必填）。",
         "at": "2026-09-11T00:09:42Z"
       },
-      "lastUpdate": "2026-09-11T01:31:33Z",
+      "lastUpdate": "2026-09-11T02:15:54Z",
       "tasks": [
         {
           "id": "R-01",
@@ -822,6 +832,14 @@
         {
           "t": "10:31",
           "n": "R-10 三审已派：Codex task-mtwa5whv-4s50pc（只核二审 12 条工程闭合 + S17 工程部分/限制声明如实性；追加'三审终裁'行到 review-G3-P1.md），Monitor 监控中；终裁 pass 后按 R-10 正向 verify（只读最后一行）置 done。"
+        },
+        {
+          "t": "11:14",
+          "n": "R-10 三审首派 task-mtwa5whv-4s50pc 在 01:38Z 后 35 分钟无日志（STALLED，turn 悬死签名），已 companion cancel（status=cancelled，review 文件未被追加），按纪律重派全新任务 task-mtwbp40g-dx0ch9（不 --resume-last），Monitor 监控中。"
+        },
+        {
+          "t": "11:15",
+          "n": "回 G0：G2 §5.10 已落地（fraction_source + entry_fractions/tp_fractions），G3 侧同步：synthetic.BATCH_SCHEMA 镜像与 G2 逐列逐序一致，fake_execution 按 policy 'equal' 规则填 entry/tp_fractions；parity 测试 CONTRACT_PENDING_G2 清空、xfail 撤销、真实路径改喂含 fraction=null 的计划并断言 fraction_source 两种来源与 entry_fractions 和=1。用户已于 02:2xZ 裁定 P1 出口 A 并放行三审（task-mtwbp40g-dx0ch9 运行中）。"
         }
       ]
     },
@@ -844,7 +862,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T02:14:09Z",
+      "lastUpdate": "2026-09-11T02:16:29Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -987,6 +1005,10 @@
         {
           "t": "11:14",
           "n": "[G0/427ed064 R17 02:0xZ OR-04 首次全绿] G2 B8 于 01:34Z 落地后，tests/integration 7 passed（主断言 skip 已解、真跑）。链路 G1 load_episodes(fixture-v1@c469d020) → G2 build_request/simulate_batch(kernel A, 合成行情) → G3 feature_snapshot/evaluate，账本用临时 lockbox。数值：requests=23 exec_rows=23 fraction_source=[{'fraction_source': 'policy', 'count': 23}] opp=23/23簇 theta=0.0 se=0.0 n_eval=18 censored=5 nan_rate=0.000 status=ok ledger_rows=1 completed=1。θ=0 是两臂同 policy 的预期值，本断言只证接缝非空，不是效应声明。OR-04 verify 实跑通过 → 置 done。P1 里程碑仍未达标：三份 Codex review 未闭合（G1 r3 verifying、G2 四审 running、G3 二审 fail 待用户标准）。"
+        },
+        {
+          "t": "11:16",
+          "n": "[G0/427ed064 R18] G2 的 outcome_kind block 已裁（契约 v1.5 §9.10.11 A15）：kind 五值→七值，增 unevaluable（证据缺失删失，禁映 right_censored）与 rejected（从未挂出，禁映 unfilled_expired）；混合出场按 stopped 并增 ExecutionResult.exit_legs 诊断列；G1 加 reconstructed_outcome.censor_reason 键；G3 的 unevaluable 走 n_coverage_excluded 不并入 n_censored_excluded。§9.10.10 第 3 条五值集合作废。三窗口已通知，market 解 block。"
         }
       ]
     }
