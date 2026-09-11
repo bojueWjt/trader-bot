@@ -188,3 +188,27 @@ v0 无政策平仓腿（ADR C06 留 P2），任何完整平仓都会先命中 `s
 第 2 条是 S17 暴露的第二个口子：`.5000000000001` 能进请求、批表截断到标度 12、而 `trace_hash` 用的是未截断的原值 —— 输出无法忠实复原参与哈希的输入，可复算性在"看起来都对"的情况下静默破裂。
 
 **根因归属**：这是 G0 的 B8 裁定引入的新接缝（要求显式字段进 `trace_hash` 却未规定其域校验），由 G2 在四审中发现并堵上。记为判例 3。
+
+### 5.12 裁定 B10：修补 A15 规格的两处自身漏洞（G0 OR-02 R23，规范性）
+
+G2 五审（`review-G2-P1.md` §五审判定表）判 S01–S17 **open 0**，两条新 open **S18/S19 均是 G0 规格或其落实的缺陷，不是 G2 的工程问题**。逐条裁定，实现随后由 G2 落地。
+
+#### 1. S18：`unfilled_expired` 的兜底伪装 —— G0 规格漏洞，必修
+
+**事实**：`contract.py:547` 为 `return "rejected" if "rejected" in kinds else "unfilled_expired"`。零成交的 IOC 订单事件为 `submitted/accepted/cancelled/closed`，**不含 `expired`**，却被 else 分支贴上 `unfilled_expired`。§3 映射表第 4 条写的是"未成交且事件含 `expired`"，该状态**不命中任何一条规则**，实现用兜底把它伪装成到期。
+
+**裁定 (a)**：§3 第 4 条**扩为**"未成交且订单以 `expired` 或 `cancelled` 终止（TTL 到期、TIF=IOC/FOK 的立即撤销）→ `unfilled_expired`"。合并的正当性：两者的经济事实同一（挂出去了、从未成交、订单已终结、无仓位无盈亏），差别只是终止机制，而机制在 `canonical_events` 里完整保留。这与 `right_censored`/`unevaluable`（世界的事实 vs 我们的事实）、`rejected`/`unfilled_expired`（从未挂出 vs 挂出未成）不同——后两组是**不同的现实**，必须分开；本组是**同一现实的两种机制**。
+
+**裁定 (b)（一般规则，比 (a) 重要）**：**禁止用兜底分支把函数补成全函数**。`outcome_kind` 及今后任何标签映射，未命中任何规则时必须 `raise ContractError` 并回报实际事件集合，**不得**返回某个"看起来合理"的值。理由与 §9.8 A6、§9.10.11 A15 一脉：静默贴一个似是而非的标签，比抛错难发现得多——S18 正是靠对抗审查才暴露，而它已经在生产标签了。
+
+#### 2. S19：显式 `entry_ttl_s` 可绕过 policy —— B9 第 1 条未被对称落实，必修
+
+**事实**：`contract.py:391–393` 仅在 `plan_ttl is not None` 时比对。作者 TTL 为 `null` 时，调用方可在**同一 `policy_hash`** 下传入任意 `entry_ttl_s`（实测 86400 与 1 分别得到 `filled/net5/tp_hit` 与 `none/net0/unfilled_expired`），政策兜底形同虚设。
+
+**裁定**：§5.11 B9 第 1 条"显式值与 `resolve_*(plan, policy)` 的解析结果逐值相等"是**对称要求**，两条分支都要查：计划给值时比计划，计划为 `null` 时比 **policy 解析值**。单边比对不构成合规。`entry_ttl_s`、`entry_fractions`、`tp_fractions` 一并适用，并各加一条"计划 null + 显式值篡改 → `ContractError`"的反例测试。
+
+#### 3. M-03 联网 verify 由 G0 独立实跑解除
+
+五审将 M-03 记为 `insufficient` 且明示非阻断，理由是禁网且**拒绝用 MockTransport 冒充联网实跑**——该拒绝是正确行为，记为判例 4。G0 已于 R23 独立实跑该 verify：`actual_rows=44640`、`distinct_keys=44640`、`check_status=ok`、`checksum_source=vision_CHECKSUM`、`source_uri` 为真实 Binance Vision 月度包，rc=0。该项**解除**，不再计入 M-10 的未决项。
+
+**一般规则**：`insufficient` 默认视同 `fail`（§9.9 A7 不变）。**唯一例外**：当造成 `insufficient` 的全部条目 (a) 被报告显式标为非阻断、(b) 因审查环境的结构性限制（禁网、无凭据、缺硬件）而不可验、(c) 审查方未以任何形式伪造该验证，则 **G0 可通过亲自实跑这些 verify 予以解除**，并在看板记录实际输出。窗口自行实跑不算解除。若仍有任何阻断项，一律 `fail`，不得解除。
