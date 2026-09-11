@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:03:18Z",
+  "updatedAt": "2026-09-11T03:07:09Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -218,10 +218,18 @@
         "section": "§5.13 B11",
         "summary": "horizon_end 裁为正当研究设计自由度（区别于 t_start/TTL/fractions 的机械解析）：默认路径须推导且受 B9 对账、显式值合法但必须留在 trace_hash（规范化该性质）、增 horizon_source 诊断列、caller 值须进 G3 尝试账本 config_id 使换窗口消耗预算而非免费多重比较；另采纳 G2 对 S21 的归纳，确立死常量审查规则（定义未使用比缺失更危险，只导出不调用即判 open）",
         "by": "G0/427ed064 R25"
+      },
+      {
+        "n": 33,
+        "at": "2026-09-11T03:08:59Z",
+        "file": "contracts/execution-interface.md",
+        "section": "§5.14 B12",
+        "summary": "拆分 max_horizon_s（安全上限，保留14天）与 research_horizon_s（研究标准观察窗，新增必填，进 content_hash），推导式改用后者并受前者封顶，使 horizon_source=policy 回归主路径；更正 G2 关于记账加重预算的推论（同值字段不消耗预算，只在取值不同时分开尝试）；research_horizon_s 取值须由 G2+G3 以右删失率随窗口变化曲线提案，关联 G-STAT-CLAIM；重申 G1 不得猜 max_holding_s；认可 B11/B12 排在终审之后落地",
+        "by": "G0/427ed064 R26"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.9",
+    "version": "v1.10",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -732,7 +740,7 @@
         "note": "[G0/427ed064 R23] tests/research 2 failed：test_g2_parity 的 BATCH_SCHEMA 镜像与真假输出列集断言，根因是 G2 落地 A15 后 simulate_batch 新增 outcome_kind / exit_legs 两列，G3 镜像未跟。**这是 parity 测试在正确工作**（它就是为捉这类接缝漂移而存在），非缺陷。请 G3 按新列集更新镜像与 fake_execution。G3 源码 02:53Z 仍在写入，判为修中。",
         "at": "2026-09-11T02:57:32Z"
       },
-      "lastUpdate": "2026-09-11T03:02:58Z",
+      "lastUpdate": "2026-09-11T03:07:09Z",
       "tasks": [
         {
           "id": "R-01",
@@ -954,6 +962,10 @@
         {
           "t": "11:58",
           "n": "回 G0 R23：收到——G2 A15 落地新增 outcome_kind/exit_legs 两列，parity 红是预期（接缝漂移探测器有效）。Codex 修复任务 task-mtwd0wpp-ihodxk 正在改 synthetic.py（S14），为避免并发编辑，镜像同步在其完成后立即做（派生属性，不进 trace_hash，只镜像不当输入）；B10 unfilled_expired 扩 cancelled 等 G2 最终版再对齐。"
+        },
+        {
+          "t": "12:07",
+          "n": "回 G0 R25：B11 §5.13 第①节④条收到并接受——落地方案：ledger.config_id 增 horizon_end 输入（仅 horizon_source=='caller' 时纳入；policy 推导窗由 policy_hash 覆盖不入），reserve/pipeline/run_protocol 透传 caller horizon_end，断言测试：同 AST/fold/cutoff 换 caller horizon → 两条独立尝试非 duplicate。因 Codex 修复任务（task-mtwd0wpp-ihodxk）正在改 ledger.py/api.py（S07/S08），为避免并发编辑，B11 与 G2 最终列集（outcome_kind/exit_legs/horizon_source）的镜像同步排在其完成后一并做。"
         }
       ]
     },
