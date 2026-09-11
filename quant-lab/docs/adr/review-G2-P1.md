@@ -1,3 +1,851 @@
+## 十一审判定表
+
+审查日期：2026-09-11。独立审查方：Codex 主控；只出具报告，不承担修复。
+十一审判 fail，阻断项为 S40、S41：A24 对已有拆行网格表达和普通带注解 TTL 赋值存在可实跑的漏检。
+十审的 S29、S31、S38、S39 原缺陷及指定回归均闭合；不把机制漏口冒称为当前交易结果已经错误。
+S32、S33、S35、S37 的具名生产落点已归一，指定原形突变能够被检查识别。
+修复方 45 个突变定义经本轮独立内存注入，覆盖 36 个 pytest 参数化节点，全部目标节点 RED→GREEN。
+上述数量由本轮 pytest call 阶段结果计算，未使用 mutation_evidence.json 的红绿结果作为证明。
+所有 closed 仅覆盖表中的具体命题；不是对整个缺陷族的无限外推。
+
+| ID | 状态 | 本轮亲跑命令与真实输出摘要 | 阻断 P1 |
+|---|---|---|---|
+| S29 离网覆盖、首缺与计数 | closed | P10N 原命令：混合组 expected=3/missing=0，纯离网组 expected=3/missing=3，均 quarantined；M 的 S29-first-gap/range-only/truncated-count 共4节点红后绿；P10G 375+25组 PASS | 否；其余网格表达的机制遗漏见 S40 |
+| S31 B17 真门、输入和诊断 | closed | M 的 S31-remove-output-gate、S31-sanitized-copy、S31-redacted-version，各2 failed→2 passed；真实 result_row 注入，版本串与三个完整 hash 均由测试断言 | 否 |
+| S38 负延迟与显式/省略 | closed | P10C 原命令在政策层 ContractError，exit1；M 两项各1 failed→1 passed；P11B 对 latency=0/60、窗口−1/0/+1µs 两表达一致 | 否 |
+| S39 loader 返回值生效 | closed | M 的 discard-return、inline-count、wrong-helper-value 各1 failed→1 passed；控制湖下 expected+7 会影响覆盖判定 | 否 |
+| S32 build_request 第二处 latency | closed | P10I 仅余 derived_t_start 内加法；M S32-build-start-bypass 两个门都红后绿；P11B build+7 ACCEPT，启动与 horizon 同移7秒 | 否 |
+| S33 vision 网格整除 | closed | P10I 不再打印 vision total_seconds；M S33-wrong-expected 的12个日/月×interval节点全红后绿；A/AB分类不变 | 否 |
+| S35 TTL解析及入场到期 | closed | P11I 实际3处 resolve_entry_ttl_s、3处 entry_expiry_at 登记相等；M before/after/builder/A-timeline/A-entries/B 全红后绿 | 否；P7语法覆盖缺口另列 S41 |
+| S37 A中尾网格 | closed | P10I 不再打印旧比较；M S37-middle、S37-tail 各1 failed→1 passed；A 22/0 | 否；同函数只绕过一处的拆行形态见 S40 |
+| A24 调用方集合双向门 | closed | M real-caller-missing/extra 均红；停用 missing/extra 分支，相应机制回归均红；恢复均绿 | 否；只证明函数级集合，未证明每个 Call 位置 |
+| A24 P1–P7 逐模式可失败 | closed | M 9个表达分别插入真实生产文本均红；9次分别停用真实 _hit 路径，对应回归均红；恢复均绿 | 否；只证明列出的9种表达 |
+| A24 例外位置真实性 | closed | P11I 实跑7个命中：5个单一来源定义处、2个 foreign，violations=[]；foreign-freeze 突变1 failed→1 passed | 否；证据与语义边界逐条见下文 |
+| S34 funding固定8h边界 | partial-P2 | P10I 仍打印 hour//8、8h步进、60s容差；P11B +1/+2/+3ms与60s接受、60s+1µs隔离；AB S02 unsupported | 否；保留既有裁定，不要求改为精确bar网格 |
+| S36 持仓截止重复 | partial-P2 | P10I 仍定位 A 424、B 530/560；T 相关 hold/exposure 回归通过，AB分类不变 | 否；既有 S04/S16范围 |
+| S02/S04/S06/S07/S10/S11/S12/S13 | partial-P2 | T 293 passed；AB 输出4个具名 unsupported，P11B直接打印同一字典；其余项目边界见下文 | 否；不重新升级历史P2 |
+| S40 P6漏掉已有拆行中段网格表达 | open | P11I 当前 partition_check:258–259 自写 delta>step，lint HITS=[]；P11G 将 A中段恢复同形表达，S 14 passed→14 passed，SHA256_EQUAL True | 是；A24门对树里已有同族表达不完整 |
+| S41 P7忽略 AnnAssign | open | P11TTL 向生产文本加入带 int 注解的原 TTL 选择式，S 14 passed→14 passed，SHA256_EQUAL True | 是；普通类型注解即可使已规定的TTL禁令失效 |
+| S29生产非负断言的性质分类 | closed | 附加突变：单删断言2 passed；off-grid+删非负断言2 failed于另一个生产不变量；再删缺口一致性断言2 failed于测试第25行；还原2 passed | 否；认可冗余防御分类，修正证据中的失败归因 |
+
+### 审查边界、运行方式与证据身份
+
+命令工作目录均为 quant-lab。
+全程设置 PYTHONDONTWRITEBYTECODE=1；产品导入设 PYTHONPATH=src。
+所有 pytest 调用都包含 -p no:cacheprovider；未生成仓库 pytest cache 或新字节码。
+唯一持久写入为本报告；pytest 的临时湖与机制注入样例位于系统临时目录。
+没有连接交易所私有 API，没有读取 services/nautilus-node 配置，没有 import services 模块。
+没有恢复其他 Codex 会话，没有调用修复代理，没有进行任何生产操作。
+工程规则已读取 AGENTS.md 和 /Users/balen/.codex/GROK.md。
+本任务为独立终审，本轮证伪与裁判均由主控执行。
+
+修复方 mutation_round10.py 的 main 会 write_text 生产源码并 write_bytes 还原。
+本轮没有运行该 main；通过 runpy.run_path 只读取 CASES 定义。
+注入器同时替换 SourceFileLoader.get_code 和 Path.read_text，前者让真实产品模块执行突变，后者让 AST 门看到同一突变。
+Pydantic 模型在新进程首次加载时编译，未把旧 validator 缓存当成突变成功。
+每例突变、每例基线各起独立子进程，收集 pytest 节点 call 阶段 failed/passed。
+没有把 collection error、fixture TypeError 或单独的 exit1 算作 RED。
+本轮45例的全部目标节点均是 call/failed，恢复后均为 call/passed。
+Path.write_text 对政策登记表的写入转到内存；其他 src/tests 写入被包装器拒绝。
+Path.read_bytes 仍读取真实磁盘，用于每个子进程前后的 SHA256 比较。
+hash/版本身份读取真实磁盘不是突变行为证据；本轮变红依据均是行为/AST断言。
+完整源码与测试集合的最终摘要见后文。
+所有原始源码文件、测试文件、22个 episode 文件在本审开始与结束之间字节一致。
+该事实只证明本轮没有改夹具，不冒称从未提供的十审前快照证明修复方未改夹具。
+
+### 指定验证 T / S / A / AB
+
+| 验证 | 实际执行 | 真实输出 |
+|---|---|---|
+| T | pytest tests/market -q -p no:cacheprovider；政策登记表内存保护包装 | 293 passed in 15.27s；exit0；SOURCE_TEST_SHA256_EQUAL True |
+| S | .venv-g2/bin/python -m pytest tests/market/test_single_source.py -q -v -p no:cacheprovider | 14 passed in 1.23s；exit0 |
+| A | .venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A | 22个 replay=True；kernel=A passed=22 failed=0；exit0 |
+| AB | .venv-g2/bin/python -m quant_lab.market.nautilus_adapter report --reps 1 | exit0；MATCH12/B_COMMAND_LATENCY3/GAP_PRICE1/SAME_TS_PRIORITY4/GTD_BOUNDARY1/B_LIQUIDITY_MODEL1 |
+| AB解释门 | 上一命令实际 codes | UNEXPLAINED=0，A_GOLD_FAIL=0，NOT_RUN=0；合计22 |
+
+T 不是裸跑：test_s30_window_lower_bound_uses_derived_start_not_t_dec 仍会临时 write_text 真实 policy_hashes.json。
+为遵守只写报告的边界，上述写入用内存读写替身承接；没有改测试断言或政策校验逻辑。
+AB 实测 median_ms：A=8.624166992376558、B=36.70199999760371。
+单次计时不作为性能稳定性结论。
+M-03 真实网络下载未做：本轮没有下载或改湖，历史 G0 公开归档证据仅作为既有裁定依据。
+taskList 看板 verify 命令未做：用户指定本轮验证为 T/S/A/AB，本轮不宣称另行跑过看板。
+这些未做事项不是本轮判 fail 的新增理由；阻断来自实跑的 S40/S41。
+
+### 十审原命令：抽取、原样复跑及失效解释
+
+从历史十审相应命令段第一对反引号抽取原字符串，shlex.split 后交给 subprocess.run。
+命令内容未改写；环境统一继承禁字节码与 PYTHONPATH。
+抽取定位最终使用 P10M包含/P10N包含/P10C复现/P10D复现等命令段标题。
+初次宽匹配错误地落到前部叙述，误取 S38最小命令；该探索输出未计入以下证据，随后已按精确标题重跑全部9条。
+P10M 原命令引用已删除的旧B16测试名，提前 AttributeError；没有发生它后续的 first_gap/删门突变。
+P10N/P10D/P10L 直接调用新B17测试时缺 monkeypatch/later_version，TypeError 不计为红。
+P10C 在负延迟政策构造层即抛错；这是政策域修复的证据，后续零/正延迟由 P11B 独立补跑。
+P10D 的 loader旧哨兵仍 GREEN：该旧测试已删除 loader 部分，仅保留 A首点测试，不能拿它判新 loader 回归无效。
+新 loader 回归的三个生产突变均在 M 中独立红后绿。
+P10D 的 sanitized 实际批量仍输出2行2hash且不抛错，这是注入后的故意缺陷；未突变产品的 B17 回归已红绿证成。
+各原命令的真实 stdout/stderr 逐条保留在后面的证据附录，包括非零退出。
+P10I/P10S 是静态定位证据，不把表达位置本身当作经济数值错误。
+P10G 的375组 helper独立枚举与25组对齐网格子集实际全过。
+P10F 可空/缺省字段六输入枚举已复跑；其完整输出附后。
+
+### S40 必修：清单声称禁中尾自写比较，当前树仍存在同形表达
+
+位置：src/quant_lab/market/partition_check.py:258–259；single_source.py:_Lint.visit_Compare。
+现有生产表达是 delta = (df[key] - prev)，然后 gap_before = (delta > step).fill_null(False)。
+它仍独立判定相邻 bar 是否跨过缺口；并未向 grid_points_between 委派这个布尔结果。
+输入被 legal 过滤后，该表达在当前受支持数据上与网格判断等价；本轮不宣称当前 missing 算错。
+问题在于 P6 的说明“中尾网格不得用相邻时间差/步长比较重写”与当前树不一致，且没有登记此位置为例外。
+visit_Compare 只在比较操作数本身为 Add/Sub 时命中；中间变量使它遗漏。
+这不是任意别名或混淆：恰是当前生产文件已经使用的常规拆行写法，也符合项目鼓励单步变量的风格。
+
+进一步将 KernelA._first_bar_gap 中段的 grid_points_between 调用改成同形两行。
+尾段仍调用该 helper，所以函数级 ALLOWED_CALLERS 集合完全不变。
+P6 同时漏检拆行比较，两道门合跑14 passed；还原14 passed。
+这准确复现“登记函数仍有其他调用，某一个使用点已经绕过”的缺口。
+函数级登记集合在其字面定义下是真实的，但不足以声称所有表达位置已受登记保护。
+本项阻断 A24 的机制验收，不按任意复杂语义等价要求扩张扫描器。
+验收应覆盖树里这个已知拆行形态，并明确每个实际表达位置或有证据的差异规则。
+不得仅新增一个字符串样例而继续保留当前生产遗漏。
+不得把 funding 的独立容差规则一起强制精确归一。
+
+P11G最小只读复现命令：
+`.venv-g2/bin/python -c 'exec("import pathlib,hashlib,sys,json,pytest\nfrom unittest.mock import patch\nitem=json.loads(sys.argv[1])\np=pathlib.Path(\"src/quant_lab/market\")/item[\"file\"]\nraw=p.read_bytes();source=raw.decode();original=pathlib.Path.read_text\nif item[\"old\"] is None:\n mutated=source+item[\"new\"]\nelse:\n assert source.count(item[\"old\"])==1\n mutated=source.replace(item[\"old\"],item[\"new\"])\ndef read(path,*a,**kw):\n if path.resolve()==p.resolve():\n  return mutated\n return original(path,*a,**kw)\nwith patch.object(pathlib.Path,\"read_text\",read):\n rc=pytest.main([\"tests/market/test_single_source.py\",\"-q\",\"-p\",\"no:cacheprovider\"])\nprint(\"INJECTED\",rc)\nrc=pytest.main([\"tests/market/test_single_source.py\",\"-q\",\"-p\",\"no:cacheprovider\"])\nprint(\"RESTORED\",rc,\"SHA256_EQUAL\",hashlib.sha256(raw).digest()==hashlib.sha256(p.read_bytes()).digest())\n")' '{"name":"S40-middle-split-bypass","file":"kernel_a.py","old":"if grid_points_between(prev + iv, o, interval_s) > 0:","new":"delta = o - prev\n            if delta > iv:","tests":["tests/market/test_single_source.py"]}'`
+
+真实输出摘要：注入14 passed in 1.20s / INJECTED 0；恢复14 passed in 1.20s / RESTORED 0 SHA256_EQUAL True。
+命令仅替换 Path.read_text 返回值以驱动真实 A24 测试，不写源文件。
+另向 vision.py 内存文本新增同形拆行函数，S同样14 passed；说明不仅是现有调用方登记粒度问题。
+
+### S41 必修：相同 TTL 选择式加类型注解即逃过 P7
+
+位置：single_source.py:_Lint.visit_Assign；缺少对 ast.AnnAssign 的同类值检查。
+P7 声称 TTL计划/政策选择必须经过 resolve_entry_ttl_s。
+把样例 ttl = plan.expiry.entry_ttl_s if ... else policy.entry_ttl_s 改为 ttl: int = 同一个选择式。
+字段名、选择条件、fallback 和经济语义完全未变，只增加普通类型注解。
+该样例放入 vision.py 的内存源码，S仍14 passed，恢复14 passed，SHA256一致。
+新增函数不调用 helper，调用方收集无法“发现一个从来没有调用过的调用方”。
+因此负向禁令是这种新增表达的唯一保护，而它恰好未访问 AnnAssign。
+这不是要求解决别名分析或混淆语义；AST提供独立标准赋值节点，条件值沿用已登记测试样例。
+当前三个具名TTL解析点确实已归一，本项不撤销 S35 的具体落点结论。
+本项阻断 A24 的强制机制验收；应对普通 Assign/AnnAssign 的同一值模式补足有效门及各自注入自证。
+
+P11TTL最小只读复现命令：
+`.venv-g2/bin/python -c 'exec("import pathlib,hashlib,sys,json,pytest\nfrom unittest.mock import patch\nitem=json.loads(sys.argv[1])\np=pathlib.Path(\"src/quant_lab/market\")/item[\"file\"]\nraw=p.read_bytes();source=raw.decode();original=pathlib.Path.read_text\nif item[\"old\"] is None:\n mutated=source+item[\"new\"]\nelse:\n assert source.count(item[\"old\"])==1\n mutated=source.replace(item[\"old\"],item[\"new\"])\ndef read(path,*a,**kw):\n if path.resolve()==p.resolve():\n  return mutated\n return original(path,*a,**kw)\nwith patch.object(pathlib.Path,\"read_text\",read):\n rc=pytest.main([\"tests/market/test_single_source.py\",\"-q\",\"-p\",\"no:cacheprovider\"])\nprint(\"INJECTED\",rc)\nrc=pytest.main([\"tests/market/test_single_source.py\",\"-q\",\"-p\",\"no:cacheprovider\"])\nprint(\"RESTORED\",rc,\"SHA256_EQUAL\",hashlib.sha256(raw).digest()==hashlib.sha256(p.read_bytes()).digest())\n")' '{"name":"S41-annotated-ttl","file":"vision.py","old":null,"new":"\ndef _audit_ttl(plan, policy):\n    ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n    return ttl\n","tests":["tests/market/test_single_source.py"]}'`
+
+真实输出摘要：注入14 passed in 1.16s / INJECTED 0；恢复14 passed in 1.13s / RESTORED 0 SHA256_EQUAL True。
+没有要求“任何别名、任意改写都必然能识别”；本项只要求相同选择表达式的正常带注解赋值被覆盖。
+
+### A24 的有效部分与例外证据逐项核对
+
+ALLOWED_CALLERS 的7个键，本轮实际函数位置数分别为3、2、3、2、3、4、1。
+对应 derived_t_start、derived_window_s、entry_expiry_at、first_grid_point、resolve_entry_ttl_s、grid_points_between、check_policy_hash_consistency。
+P11I 实际调用集合与清单相等，diff=[]。
+真实移除 vision.expected_rows 的唯一网格调用会红；新增另一真实调用方也会红。
+停用 diff_call_sites 的 missing 或 extra 分支，相应机制自测会红。
+此结论不等于每个函数内的每一个 Call 都被独立登记，S40 已实跑限定其能力。
+
+| 清单条目 | 本轮实跑证据 | 判读 |
+|---|---|---|
+| P1 home derived_t_start | P11I contract:262 timedelta(seconds=policy.latency_s) | 正是该单一来源定义；M停用P1后回归红 |
+| P3 home _us | P11I contract:236 timedelta除1µs；P10G375组含负epoch与亚秒边界全过 | 精确整数微秒尺度，不是秒截断 |
+| P5 home derived_window_s | P11I contract:271 TTL+持仓/研究段 | 观察窗长度定义，区别于入场到期时间 |
+| P5 home entry_expiry_at | P11I contract:284 start+TTL | 入场到期单一来源定义 |
+| P7 home resolve_entry_ttl_s | P11I contract:276 计划TTL读取；M三个绕过点均红 | 作者值优先、None才政策兜底 |
+| P2 empty homes | P11I全树无此命中；M int-seconds 插入与停用均红 | 未声明截秒豁免 |
+| P4 empty homes | P11I全树无此命中；M start-or 插入与停用均红 | 未声明显式/省略回退豁免 |
+| P6 empty homes | P11I visitor无命中，但另枚举发现 partition delta>step | 清单宣称的禁止范围不实；S40 |
+| FOREIGN P5 research/api.py:build_inputs_from_synthetic | P11I真实命中line616：pl.col("t_dec")+pl.duration(seconds=pl.col("entry_ttl_s")) | 冻结外窗位置确实存在；是所有权边界，不证明这段已归一或其语义正确 |
+| FOREIGN P3 research/maxt.py:calendar_blocks | P11I真实命中line104：(max(v)-min(v)).total_seconds()/86400 | G3日历块长度用途；不是G2 bar覆盖计数，冻结位置证据属实 |
+
+FOREIGN_HITS 的精确集合测试实跑通过；把所有 research 命中从真实 lint_tree 输出删掉，该测试会红。
+外窗冻结注释有所有权说明，未附独立历史内容hash或语义验收链接；本轮通过实际 AST命中补足位置证据。
+不得把“2个位置存在”扩大成“2段外窗代码所有行为均正确”。
+本轮未修改 research，也未据外窗残余另开P1。
+五个 home 的证据来自本轮真实 AST位置与代码表达，不是无理由地许可其他定义。
+
+### funding 例外：不同规则，未被错误归一
+
+docs/adr/note-G2-archive-timestamp-grid.md 的公开归档记录已阅读。
+它记载 BTCUSDT 2024-01：klines/markPriceKlines各44640行离网0；fundingRate93行中15行偏移1/2/3ms。
+这些真实网络观测是该文的历史证据，本轮未重新下载，不冒称本轮亲跑89280行。
+本轮亲跑的是合成但真实 check_funding 入口的容差边界。
+0、1000、2000、3000、60000000µs偏移：rows=2/status=ok/codes=[]。
+60000001µs偏移：status=quarantined/codes=['FUNDING_SCHEDULE_GAP']。
+行内周期从8h变为4h且偏移3ms：check_funding 返回ok。
+生产 check_funding 仍比较 abs(gap-timedelta(hours=ih[i])) > timedelta(seconds=60)。
+旧浮点小时换算改成直接 timedelta，没有变为 first_grid_point(t)==t。
+loader仍保留8h步进和60秒覆盖容差；这也是 S34/S02 的固定周期边界。
+P11I funding没有P1–P7命中，也没有伪造一个“已经精确对齐”的例外条目。
+因此确认没有把实际funding结算毫秒抖动按bar脏行规则隔离。
+当前代码未在该容差注释直接链接归档说明，属于证据导航改善项，不构成本轮方向错误或新增P1。
+在未来加强P6/P3时，应保留这里的差异语义及具名依据。
+
+### 冗余非负断言：独立叠加突变的裁判
+
+单删 assert rep.missing >= 0，两个新离网测试仍绿。
+仅把 present 改成范围过滤，两个测试均红；mixed组在非负生产断言处失败。
+再叠加删除非负断言，两组仍红，但当前树的实际拦截者是“缺口清单与 missing 必须一致”生产断言。
+故 G2 自述“这两项叠加后由测试显式期望值抓到”不符合本轮当前源码的实际失败顺序。
+本轮第三步同时删除这两条生产不变量后，两个测试明确在 test_review_p1_round10.py:25 变红。
+mixed组 assert -1 == 0；all-off-grid组 assert 0 == 3。
+还原后2 passed；每步SHA256一致。
+因此最终分类认可：它是冗余的防御断言，不是 S31/S39 那种原缺陷注入后回归仍无法失败。
+准确说法是“正确实现下断言的失败分支不可达”，不是“断言语句本身不可达”。
+只删一条冗余检查不要求测试必红；必须检查被保护性质在禁用相关保护后仍由独立行为断言锁住。
+这项原则不豁免契约唯一门：S31必须在删真门时红，已在本轮两组参数上证成。
+本轮证据支持G0采用该区分，并建议保留真实失败归因，不能把生产不变量误记成测试断言。
+
+### 45个生产源码突变：本轮独立结果
+
+M 为下节内存执行器。它读取 CASES 的 old/new/选择器，不读取修复方红绿结果。
+表内每例均亲跑突变和原源码基线；所有 SHA256_before/after 相等。
+“红节点数”按参数化 nodeid 计，不按函数定义数计。
+每例绿色运行中同一选择器的全部节点均 passed，无 skip/xfail/error。
+完整执行器会输出每个 nodeid、call阶段状态、失败消息与 sha_equal。
+可传表中名称单独复跑；不传参数依次重跑全部45例。
+
+| 序号 | M选择名称 | 红节点数/rc | 绿节点数/rc | SHA256 |
+|---|---|---|---|---|
+| 1 | S29-first-gap | 1/1 | 1/0 | 一致 |
+| 2 | S29-range-only | 2/1 | 2/0 | 一致 |
+| 3 | S29-truncated-count | 1/1 | 1/0 | 一致 |
+| 4 | S31-remove-output-gate | 2/1 | 2/0 | 一致 |
+| 5 | S31-sanitized-copy | 2/1 | 2/0 | 一致 |
+| 6 | S31-redacted-version | 2/1 | 2/0 | 一致 |
+| 7 | S38-remove-domain | 1/1 | 1/0 | 一致 |
+| 8 | S38-explicit-only | 1/1 | 1/0 | 一致 |
+| 9 | S39-discard-return | 1/1 | 1/0 | 一致 |
+| 10 | S39-inline-count | 1/1 | 1/0 | 一致 |
+| 11 | S39-wrong-helper-value | 1/1 | 1/0 | 一致 |
+| 12 | S33-wrong-expected | 12/1 | 12/0 | 一致 |
+| 13 | modified-existing-first-point-sentinel | 1/1 | 1/0 | 一致 |
+| 14 | A24-real-caller-missing | 1/1 | 1/0 | 一致 |
+| 15 | A24-real-caller-extra | 1/1 | 1/0 | 一致 |
+| 16 | A24-gate-missing-disabled | 1/1 | 1/0 | 一致 |
+| 17 | A24-gate-extra-disabled | 1/1 | 1/0 | 一致 |
+| 18 | A24-real-inline-latency | 1/1 | 1/0 | 一致 |
+| 19 | A24-disable-pattern-latency | 1/1 | 1/0 | 一致 |
+| 20 | A24-real-inline-int-seconds | 1/1 | 1/0 | 一致 |
+| 21 | A24-disable-pattern-int-seconds | 1/1 | 1/0 | 一致 |
+| 22 | A24-real-inline-duration-div | 1/1 | 1/0 | 一致 |
+| 23 | A24-disable-pattern-duration-div | 1/1 | 1/0 | 一致 |
+| 24 | A24-real-inline-start-or | 1/1 | 1/0 | 一致 |
+| 25 | A24-disable-pattern-start-or | 1/1 | 1/0 | 一致 |
+| 26 | A24-real-inline-expiry-add | 1/1 | 1/0 | 一致 |
+| 27 | A24-disable-pattern-expiry-add | 1/1 | 1/0 | 一致 |
+| 28 | A24-real-inline-middle-grid | 1/1 | 1/0 | 一致 |
+| 29 | A24-disable-pattern-middle-grid | 1/1 | 1/0 | 一致 |
+| 30 | A24-real-inline-tail-grid | 1/1 | 1/0 | 一致 |
+| 31 | A24-disable-pattern-tail-grid | 1/1 | 1/0 | 一致 |
+| 32 | A24-real-inline-ttl-expression | 1/1 | 1/0 | 一致 |
+| 33 | A24-disable-pattern-ttl-expression | 1/1 | 1/0 | 一致 |
+| 34 | A24-real-inline-ttl-branches | 1/1 | 1/0 | 一致 |
+| 35 | A24-disable-pattern-ttl-branches | 1/1 | 1/0 | 一致 |
+| 36 | A24-foreign-freeze | 1/1 | 1/0 | 一致 |
+| 37 | S32-build-start-bypass | 2/1 | 2/0 | 一致 |
+| 38 | S35-ttl-before | 1/1 | 1/0 | 一致 |
+| 39 | S35-ttl-after | 1/1 | 1/0 | 一致 |
+| 40 | S35-ttl-builder | 1/1 | 1/0 | 一致 |
+| 41 | S35-expiry-A-timeline | 2/1 | 2/0 | 一致 |
+| 42 | S35-expiry-A-entries | 2/1 | 2/0 | 一致 |
+| 43 | S35-expiry-B | 2/1 | 2/0 | 一致 |
+| 44 | S37-middle | 1/1 | 1/0 | 一致 |
+| 45 | S37-tail | 1/1 | 1/0 | 一致 |
+
+### 36条新增/修改测试的逐条杀伤对应
+
+下面逐节点列出本轮真正令它失败的一项生产突变。
+每个节点随后以同一选择器、原源码独立进程恢复为 passed。
+参数化测试不以“其中一个失败”代替其余参数自证。
+没有把单纯注入测试自身的 assert 当成生产突变证据。
+
+| 测试节点（相对 tests/market） | 本轮杀死它的生产突变 | 突变/恢复 |
+|---|---|---|
+| test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap | S29-first-gap | failed / passed |
+| test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[mixed-off-grid] | S29-range-only | failed / passed |
+| test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[all-off-grid] | S29-range-only | failed / passed |
+| test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point | S29-truncated-count | failed / passed |
+| test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] | S31-remove-output-gate | failed / passed |
+| test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] | S31-remove-output-gate | failed / passed |
+| test_review_p1_round10.py::test_s38_policy_rejects_negative_latency | S38-remove-domain | failed / passed |
+| test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings | S38-explicit-only | failed / passed |
+| test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage | S39-discard-return | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-1m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-15m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-15m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-1m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-15m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-1m] | S33-wrong-expected | failed / passed |
+| test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-15m] | S33-wrong-expected | failed / passed |
+| test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond | modified-existing-first-point-sentinel | failed / passed |
+| test_single_source.py::test_single_source_call_sites_match_registry | A24-real-caller-missing | failed / passed |
+| test_single_source.py::test_registry_gate_fails_when_mutated[missing] | A24-gate-missing-disabled | failed / passed |
+| test_single_source.py::test_registry_gate_fails_when_mutated[extra] | A24-gate-extra-disabled | failed / passed |
+| test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src | A24-real-inline-latency | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[latency] | A24-disable-pattern-latency | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds] | A24-disable-pattern-int-seconds | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div] | A24-disable-pattern-duration-div | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or] | A24-disable-pattern-start-or | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add] | A24-disable-pattern-expiry-add | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid] | A24-disable-pattern-middle-grid | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid] | A24-disable-pattern-tail-grid | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression] | A24-disable-pattern-ttl-expression | failed / passed |
+| test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches] | A24-disable-pattern-ttl-branches | failed / passed |
+| test_single_source.py::test_foreign_hits_registry_is_exact | A24-foreign-freeze | failed / passed |
+
+### M：可复跑内存生产突变执行器
+
+此代码块是本轮实际执行器，增加了可选名称筛选；不写 src/tests。
+执行方式：读取本报告具名块并在内存 exec。
+默认逐例运行45个定义；参数可选择任一表内名称。
+SourceFileLoader 与 Path.read_text 同时覆盖，同一突变对产品导入和树级AST门均可见。
+运行时失败栈的磁盘源码行展示可能与内存行号错位；判读使用实际异常消息、call阶段状态和测试断言。
+附加 S40/S41 的最小命令不依赖该工具或修复方定义，已在上文直接给出。
+
+<!-- P11-MUTATION-RUNNER -->
+```python
+import runpy,subprocess,sys,json,os
+cases=runpy.run_path("tests/market/mutation_round10.py")["CASES"]
+child="\nimport os,sys,pathlib,hashlib,json,importlib.machinery\nfrom unittest.mock import patch\nos.environ[\"PYTHONDONTWRITEBYTECODE\"]=\"1\"\nsys.dont_write_bytecode=True\nroot=pathlib.Path.cwd()\npaths=list((root/\"src/quant_lab/market\").rglob(\"*\"))+list((root/\"tests/market\").rglob(\"*\"))\nbefore={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.is_file()}\nrd=pathlib.Path.read_text\nwr=pathlib.Path.write_text\ngc=importlib.machinery.SourceFileLoader.get_code\noverlay={}\ndef read(p,*a,**kw):\n    key=str(p.resolve())\n    if key in overlay:\n        return overlay[key]\n    return rd(p,*a,**kw)\ndef write(p,s,*a,**kw):\n    key=str(p.resolve())\n    if key.endswith(\"policy-hashes.json\") or \"policy\" in p.name and str(root/\"src\") in key:\n        overlay[key]=s\n        return len(s)\n    if str(root/\"src\") in key or str(root/\"tests\") in key:\n        raise RuntimeError(\"review prohibits write \"+key)\n    return wr(p,s,*a,**kw)\ndef code(loader,name):\n    key=str(pathlib.Path(loader.path).resolve())\n    if key in overlay:\n        return compile(overlay[key],loader.path,\"exec\")\n    return gc(loader,name)\n\nitem=json.loads(sys.argv[1])\nif item:\n    target=root/\"src/quant_lab/market\"/item[\"file\"]\n    source=rd(target)\n    if item[\"old\"] is None:\n        changed=source+item[\"new\"]\n    else:\n        assert source.count(item[\"old\"])==1,(item[\"name\"],source.count(item[\"old\"]))\n        changed=source.replace(item[\"old\"],item[\"new\"])\n    overlay[str(target.resolve())]=changed\nimport pytest\nclass Results:\n    def __init__(self):\n        self.rows=[]\n    def pytest_runtest_logreport(self,report):\n        if report.when==\"call\" or report.failed:\n            self.rows.append([report.nodeid,report.when,report.outcome,str(report.longrepr)[-1700:] if report.failed else \"\"])\nplugin=Results()\nwith patch.object(pathlib.Path,\"read_text\",read),patch.object(pathlib.Path,\"write_text\",write),patch.object(importlib.machinery.SourceFileLoader,\"get_code\",code):\n    rc=pytest.main(json.loads(sys.argv[2])+[\"-q\",\"-p\",\"no:cacheprovider\"],plugins=[plugin])\nafter={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.is_file()}\nprint(\"AUDIT_RESULT=\"+json.dumps(dict(rc=rc,rows=plugin.rows,sha_equal=before==after),ensure_ascii=False))\n"
+for item in cases:
+ if len(sys.argv)>1 and item["name"] not in sys.argv[1:]:
+  continue
+ outputs=[]
+ for mutation in (item,{}):
+  p=subprocess.run([sys.executable,"-c",child,json.dumps(mutation),json.dumps(item["tests"])],capture_output=True,text=True,env=dict(os.environ,PYTHONDONTWRITEBYTECODE="1",PYTHONPATH="src"))
+  marker="AUDIT_RESULT="
+  if marker not in p.stdout:
+   print(json.dumps(dict(name=item["name"],error=p.stdout+p.stderr)),flush=True)
+   raise SystemExit(2)
+  outputs.append(json.loads(p.stdout.split(marker)[-1]))
+ print(json.dumps(dict(name=item["name"],tests=item["tests"],red=outputs[0],green=outputs[1]),ensure_ascii=False),flush=True)
+
+```
+
+M全部复跑命令：`.venv-g2/bin/python -c 'import pathlib; f=chr(96)*3; exec(pathlib.Path("docs/adr/review-G2-P1.md").read_text().split("<!-- P11-MUTATION-RUNNER -->",1)[1].split(f+"python\n",1)[1].split("\n"+f,1)[0])'`
+M单项示例命令：`.venv-g2/bin/python -c 'import pathlib; f=chr(96)*3; exec(pathlib.Path("docs/adr/review-G2-P1.md").read_text().split("<!-- P11-MUTATION-RUNNER -->",1)[1].split(f+"python\n",1)[1].split("\n"+f,1)[0])' S31-sanitized-copy`
+
+### P11I：树、调用点、例外的实跑命令与输出
+
+`.venv-g2/bin/python -c 'exec("import ast,pathlib,json\nfrom quant_lab.market import single_source as g\nactual=g.collect_call_sites(g.SRC,set(g.ALLOWED_CALLERS))\nprint(\"registry\",json.dumps({k:sorted(v) for k,v in actual.items()},sort_keys=True))\nprint(\"diff\",g.diff_call_sites(g.ALLOWED_CALLERS,actual))\nhits=g.lint_tree(g.SRC)\nprint(\"HITS\",json.dumps(hits,ensure_ascii=False))\nprint(\"violations\",g.violations(hits))\nfor snippet in [\"def f():\\n    delta = o - prev\\n    return delta > step\\n\",\"def f():\\n    ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\\n\"]:\n lint=g._Lint(\"market/probe.py\",snippet);lint.visit(ast.parse(snippet));print(\"INJECT\",repr(snippet),\"HITS\",lint.hits)\np=pathlib.Path(\"src/quant_lab/market/partition_check.py\")\nfor i,l in enumerate(p.read_text().splitlines(),1):\n if \"delta =\" in l or \"delta > step\" in l:\n  print(\"ACTUAL\",i,l.strip())\n")'`
+
+```text
+registry {"check_policy_hash_consistency": ["market/execution.py:simulate_batch"], "derived_t_start": ["market/contract.py:ExecutionRequest._chk", "market/contract.py:ExecutionRequest.resolved_t_start", "market/contract.py:build_request"], "derived_window_s": ["market/contract.py:ExecutionRequest._chk", "market/contract.py:build_request"], "entry_expiry_at": ["market/kernel_a.py:KernelA.submit_entries", "market/kernel_a.py:KernelA.timeline", "market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries"], "first_grid_point": ["market/kernel_a.py:KernelA._first_bar_gap", "market/partition_check.py:check_bars"], "grid_points_between": ["market/execution.py:load_market_from_lake.bars", "market/kernel_a.py:KernelA._first_bar_gap", "market/partition_check.py:check_bars", "market/vision.py:expected_rows"], "resolve_entry_ttl_s": ["market/contract.py:ExecutionRequest._chk", "market/contract.py:ExecutionRequest._resolve_ttl", "market/contract.py:build_request"]}
+diff []
+HITS [["P3_duration_div", 236, "market/contract.py:_us", "(t - EPOCH) // dt.timedelta(microseconds=1)"], ["P1_inline_latency", 262, "market/contract.py:derived_t_start", "dt.timedelta(seconds=policy.latency_s)"], ["P5_inline_entry_ttl", 271, "market/contract.py:derived_window_s", "entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)"], ["P7_inline_ttl_resolution", 276, "market/contract.py:resolve_entry_ttl_s", "ttl = plan.expiry.entry_ttl_s"], ["P5_inline_entry_ttl", 284, "market/contract.py:entry_expiry_at", "t_start + dt.timedelta(seconds=entry_ttl_s)"], ["P5_inline_entry_ttl", 616, "research/api.py:build_inputs_from_synthetic", "pl.col(\"t_dec\") + pl.duration(seconds=pl.col(\"entry_ttl_s\"))"], ["P3_duration_div", 104, "research/maxt.py:calendar_blocks", "(max(v) - min(v)).total_seconds() / 86400"]]
+violations []
+INJECT 'def f():\n    delta = o - prev\n    return delta > step\n' HITS []
+INJECT 'def f():\n    ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n' HITS []
+ACTUAL 258 delta = (df[key] - prev)
+ACTUAL 259 gap_before = (delta > step).fill_null(False)
+```
+
+### P11B：零/正延迟、构造委派、funding边界实跑
+
+`.venv-g2/bin/python -c 'exec("import datetime as dt,polars as pl\nfrom unittest.mock import patch\nfrom quant_lab.market import contract as c,partition_check as pc\nfrom tests.market.test_partition_check import JAN,INST\nfrom tests.market.test_review_p1 import e03\nq,m=e03()\nfor latency in (0,60):\n p=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"audit-positive\",\"latency_s\":latency})\n with patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value={p.version:p.content_hash}):\n  for us in (-1,0,1):\n   outcomes=[]\n   for explicit in (None,q.t_dec+dt.timedelta(seconds=latency)):\n    try:\n     r=c.ExecutionRequest.model_validate({**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":explicit,\"horizon_end\":q.t_dec+dt.timedelta(seconds=latency,microseconds=us),\"horizon_source\":\"caller\"})\n     outcomes.append(\"ACCEPT\")\n    except c.ContractError: outcomes.append(\"REJECT\")\n   print(\"latency\",latency,\"offset_us\",us,outcomes)\n   assert outcomes==([\"ACCEPT\"]*2 if us>0 else [\"REJECT\"]*2)\nwith patch.object(c,\"derived_t_start\",side_effect=lambda t,p:t+dt.timedelta(seconds=7)):\n r=c.build_request(q.model_dump(),policy_version=q.policy_version,policy_hash=q.policy_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest)\n print(\"build+7\",\"ACCEPT\",r.horizon_end,r.resolved_t_start(c.resolve_policy(r.policy_version)))\nfor micros in (0,1000,2000,3000,60000000,60000001):\n df=pl.DataFrame({\"calc_time\":[JAN,JAN+dt.timedelta(hours=8,microseconds=micros)],\"funding_interval_hours\":[8,8],\"funding_rate\":[0.,0.]})\n out,qs,rep=pc.check_funding(df,pid=\"p\",inst=INST,period=\"2024-01\")\n print(\"funding jitter_us\",micros,\"rows\",out.height,\"status\",rep.status,\"codes\",[x[\"reason_code\"] for x in qs])\n assert bool(qs)==(micros>60000000)\ndf=pl.DataFrame({\"calc_time\":[JAN,JAN+dt.timedelta(hours=4,microseconds=3000)],\"funding_interval_hours\":[8,4],\"funding_rate\":[0.,0.]})\nprint(\"funding-variable\",pc.check_funding(df,pid=\"p\",inst=INST,period=\"2024-01\")[2].status)\nprint(\"P2_UNSUPPORTED\",c.P2_UNSUPPORTED)\n")'`
+
+```text
+latency 0 offset_us -1 ['REJECT', 'REJECT']
+latency 0 offset_us 0 ['REJECT', 'REJECT']
+latency 0 offset_us 1 ['ACCEPT', 'ACCEPT']
+latency 60 offset_us -1 ['REJECT', 'REJECT']
+latency 60 offset_us 0 ['REJECT', 'REJECT']
+latency 60 offset_us 1 ['ACCEPT', 'ACCEPT']
+build+7 ACCEPT 2024-01-06 02:00:07+00:00 2024-01-01 01:00:07+00:00
+funding jitter_us 0 rows 2 status ok codes []
+funding jitter_us 1000 rows 2 status ok codes []
+funding jitter_us 2000 rows 2 status ok codes []
+funding jitter_us 3000 rows 2 status ok codes []
+funding jitter_us 60000000 rows 2 status ok codes []
+funding jitter_us 60000001 rows 2 status quarantined codes ['FUNDING_SCHEDULE_GAP']
+funding-variable ok
+P2_UNSUPPORTED {'S02': {'status': 'unsupported', 'capability': 'real_settlement_time_U03_and_engine_balance', 'owner': 'G0 settlement contract + G2 P2'}, 'S06': {'status': 'unsupported', 'capability': 'bronze_depth_replay_and_multi_source_versions', 'owner': 'G1 lake + G2 P2'}, 'S07': {'status': 'unsupported', 'capability': 'management_commands_E13_C01_and_reservation_lifecycle', 'owner': 'G0 C01 + G2 P2'}, 'S12': {'status': 'unsupported', 'capability': 'versioned_lake_snapshot_resolution', 'owner': 'G1 lake + G0 identity contract'}}
+```
+
+### 四个缺陷族的本轮覆盖与剩余范围
+
+族A：对照7个调用登记键、7个禁令族和两类例外，实际调用函数集合等于登记。
+已归一的S32/S33/S35/S37没有在原落点残留十审原表达。
+清单对应的全树“表达”范围并不完整：partition中段拆行公式既存在又未登记豁免，S40为直接反例。
+P7已覆盖原分支赋值与三元选择式，但忽略同一值的AnnAssign，S41为直接反例。
+本轮不接受把这两项缩写成“任意混淆表达无法证明”的笼统免责。
+
+族B：P10G375组独立枚举保留微秒，P10I移除vision整秒整除后12种日/月回归变异可红。
+P10S全market AST枚举的当前时间表达完整输出附后。
+funding直接timedelta比较已用60秒两侧边界验证，不把funding时间抖动当bar精确网格。
+本轮没有证成新的当前秒截断数值错误。
+
+族C：P10F枚举可缺省/可空字段的 omit/None/False/0/空串/空列表；没有把合法显式字段的拒绝算作默默改写。
+P10N恢复旧观察窗下界及请求启动自写加法均使既有测试红，恢复绿。
+P11B对零/正latency的显式与省略逐值一致；负latency在政策层拒绝。
+TTL解析仍使用None分支；原三处统一到helper，S35各绕过点由M独立证伪。
+本轮没有证明新的falsy-or请求分叉。
+
+族D：45例对36个节点的call阶段失败、原源码恢复成功已逐条登记。
+A24原9个表达模式并非“从不命中”：分别注入及分别停用真实实现均能使测试失败。
+但样例红绿不能替代对已知语法族的完整覆盖，S40/S41注入时两道门都绿。
+S29非负断言按叠加突变归为冗余防御，不误报为无效检查。
+
+### 历史 partial-P2 支持声明的核对
+
+P2_UNSUPPORTED 实际只有S02/S06/S07/S12四个键，不是十条历史状态的机器编码全集。
+AB和P11B均亲自打印这个字典，内容一致，没有隐去这四项unsupported。
+S02为真实settlement/U03与引擎余额：checker支持行内周期不等于loader能处理任意真实结算时间。
+S34固定8h覆盖推断保留，因此S02/S34不升级也不宣称已闭合。
+S06为bronze深度重放与多来源版本：本轮合成湖/active silver路径不构成这些能力的验证。
+S07为管理命令E13/C01及reservation生命周期：22个episode未新增该全套能力，仍按既有unsupported。
+S12为版本化湖快照解析：实际字典仍明确unsupported，不用policy哈希测试代替历史湖版本能力。
+S04/S36/S16的持仓截止与B暴露定型债务由原状态和实际A/B分类承载，没有凭四键字典声称其全闭合。
+S10未知差异不能洗白、S11报告/场景矩阵、S13规范事件精度相关既有回归均包含在T的293通过内。
+这些项目沿用历史partial-P2，不把T全绿当作P2真实数据/完整定型验收。
+本轮未做外窗研究实现的语义验收，不宣称FOREIGN_HITS内代码已通过G3终审。
+
+### GOAL-2 §7 P1 DoD判读与未做事项
+
+M-03..M-09：本轮用户指定的本地T/S/A/AB均实际通过；M-03历史真实网络证据沿用G0既有裁定。
+本轮未重新执行真实下载及看板verify，原因是本轮只读范围及指定验证边界；不另构成新增否决。
+候选A ≥10最小episode与不变量：本轮22/0且22个replay=True，达到该本地数量与重放要求。
+A/B报告：实际报告摘要含22例分类，六类计数逐项等于用户给出的基线；B定型仍在P2。
+Codex P1 review必修闭合：未满足。S40/S41证明A24强制机制仍有具体可复现的漏检。
+因此本轮不能判pass；无需把历史P2项重新升级才能得出fail。
+
+“AST门只覆盖已知语法族，不能证明任意别名或混淆表达的语义等价”作为一般边界是诚实的。
+单纯存在这个理论边界不阻断P1，本轮也不要求完备的语义等价证明。
+但当前漏检包括树里已有的普通拆行，以及原选择式加一个类型注解；二者有直接实跑反例。
+把这些具体已知输入遗漏藏在一般边界描述后面不足以通过A24。
+剩余风险还包括：函数级集合无法计数同函数内各个Call、外窗冻结只有位置证据、测试仍有真实登记表写入习惯。
+本轮对登记表采用内存保护；未修改这一测试行为，未据此另开阻断项。
+本轮没有声明对实时交易、真实账户、全品种资金费或生产服务做过验证。
+
+### 十审9条原命令的真实输出附录
+
+历史正文中的原命令逐字保留，可从相应P10标题下直接取出。
+本附录为本轮shlex.split + subprocess.run的实际输出，不是十审旧输出。
+stderr非空时单列；空stdout明确记为“空输出”。
+
+#### P10M：exit 1
+
+stdout：
+
+```text
+空输出
+```
+
+stderr：
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 17, in <module>
+AttributeError: module 'tests.market.test_outcome_kind' has no attribute 'test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain'
+```
+
+#### P10N：exit 0
+
+stdout：
+
+```text
+offgrid (0, 1, 60000000, 120000000) expected 3 missing 0 gaps [] flags [False, False, False] status quarantined
+offgrid (1, 60000001, 120000001) expected 3 missing 3 gaps [{'from': '2024-01-01T00:00:00+00:00', 'to': '2024-01-01T00:03:00+00:00', 'n': 3}] flags [] status quarantined
+B17 sanitized dynamic RED TypeError test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes() missing 2 required positional arguments: 'monkeypatch' and 'later_versi
+S30 old lower bound RED Failed DID NOT RAISE ContractError
+S30 restored GREEN
+start delegate bypass RED Failed DID NOT RAISE ContractError
+start restored GREEN
+```
+
+#### P10C：exit 1
+
+stdout：
+
+```text
+空输出
+```
+
+stderr：
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 7, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py", line 329, in _latency_domain
+    raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+quant_lab.market.contract.ContractError: latency_s 必须非负：启动时刻不能早于决策时刻
+```
+
+#### P10D：exit 0
+
+stdout：
+
+```text
+loader discard return GREEN
+loader restored GREEN
+sanitized gate regression RED TypeError test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes() missing 2 required positional a
+sanitized gate actual 2 2 NO ContractError
+gate restored RED TypeError test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes() missing 2 required positional a
+```
+
+#### P10I：exit 0
+
+stdout：
+
+```text
+S32 contract.py:262 return t_dec + dt.timedelta(seconds=policy.latency_s)
+S34 execution.py:236 g = a.replace(minute=0, second=0, microsecond=0)
+S34 execution.py:237 g = g.replace(hour=(g.hour // 8) * 8)
+S34 execution.py:239 while g <= b:
+S34 execution.py:240 if g >= a and not any(abs((h - g).total_seconds()) <= 60 for h in have):
+S34 execution.py:243 g += dt.timedelta(hours=8)
+S35 contract.py:276 ttl = plan.expiry.entry_ttl_s
+S35 contract.py:479 exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)
+S36A kernel_a.py:424 self.hold_end = ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+S36B nautilus_adapter.py:530 hold_end = min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+S36B nautilus_adapter.py:556 cutoff = min(cutoff, st["close_at"])
+S36B nautilus_adapter.py:558 cutoff = min(cutoff, st["censor_at"] - dt.timedelta(microseconds=1))
+S36B nautilus_adapter.py:560 cutoff = min(cutoff, st["open_at"] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1))
+S37 kernel_a.py:243 first_expected = first_grid_point(self.t_start, bars[0].interval_s)
+TTL-deadline-A kernel_a.py:222 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+TTL-deadline-A kernel_a.py:319 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+TTL-deadline-B nautilus_adapter.py:226 deadline = entry_expiry_at(t_start, req.entry_ttl_s)
+```
+
+#### P10L：exit 0
+
+stdout：
+
+```text
+test_lint_forbidden_patterns_do_not_reappear forbidden injected RED AssertionError
+test_lint_forbidden_patterns_do_not_reappear restored GREEN
+test_s27_s28_single_source_start_time_and_exact_grid forbidden injected RED AssertionError
+test_s27_s28_single_source_start_time_and_exact_grid restored GREEN
+B17 missing version diagnostic RED TypeError
+B17 restored RED TypeError
+```
+
+#### P10G：exit 0
+
+stdout：
+
+```text
+helper brute 375 PASS
+partition aligned subsets 25 PASS
+```
+
+#### P10F：exit 0
+
+stdout：
+
+```text
+ExecutionRequest.cost_scenario | omit='base'
+ExecutionRequest.path_scenario | omit='primary'
+ExecutionRequest.execution_contract_version | omit='g2-exec-v0'
+ExecutionRequest.seed | omit=0; False=0; 0=0
+ExecutionRequest.t_start | omit=None; None=None
+ExecutionRequest.position_mode | omit='one_way'
+ExecutionRequest.entry_ttl_s | omit=3600; None=3600
+ExecutionRequest.entry_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.tp_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.horizon_source | all reject
+OrderPlan.tps | omit=[]; emptylist=[]
+OrderPlan.reduce_only_exit | omit=True
+ExecutionPolicy.latency_s | omit=0; False=0; 0=0
+ExecutionPolicy.ladder_steps | omit=2; False=0; 0=0
+ExecutionPolicy.participation | omit=None; None=None; 0=Decimal('0')
+ExecutionPolicy.wallet | omit=Decimal('1000'); 0=Decimal('0')
+ExecutionPolicy.leverage | omit=Decimal('1'); 0=Decimal('0')
+ExecutionPolicy.mark_max_staleness_s | omit=120; False=0; 0=0
+ExecutionPolicy.settlement_quantum | omit=Decimal('1E-8'); 0=Decimal('0')
+ExecutionPolicy.max_horizon_s | omit=1209600; False=0; 0=0
+ExecutionPolicy.entry_ttl_s | omit=86400; False=0; 0=0
+ExecutionPolicy.entry_fraction_rule | omit='equal'
+ExecutionPolicy.tp_fraction_rule | omit='equal'
+ExecutionPolicy.tp_total_fraction | omit=Decimal('1'); 0=Decimal('0')
+Entry.fraction | omit=None; None=None
+Entry.tif | omit='GTC'
+Entry.post_only | omit=False; False=False; 0=False
+Stop.trigger | omit='mark'
+TakeProfit.fraction | omit=None; None=None; 0=Decimal('0')
+Sizing.qty | omit=None; None=None; 0=Decimal('0')
+Expiry.entry_ttl_s | omit=None; None=None
+Expiry.max_holding_s | omit=None; None=None
+CostSpec.maker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.taker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.slippage_ticks | omit=0; False=0; 0=0
+CostSpec.slippage_bps | omit=Decimal('0'); 0=Decimal('0')
+```
+
+#### P10S：exit 0
+
+stdout：
+
+```text
+src/quant_lab/market/asof.py:180 stale > max_staleness_s
+src/quant_lab/market/contract.py:262 t_dec + dt.timedelta(seconds=policy.latency_s)
+src/quant_lab/market/contract.py:271 entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)
+src/quant_lab/market/contract.py:277 ttl is not None
+src/quant_lab/market/contract.py:284 t_start + dt.timedelta(seconds=entry_ttl_s)
+src/quant_lab/market/contract.py:427 data.get('entry_ttl_s') is None and isinstance(plan, OrderPlan) and (pol is not None)
+src/quant_lab/market/contract.py:427 data.get('entry_ttl_s') is None
+src/quant_lab/market/contract.py:446 self.order_plan.expiry.entry_ttl_s is not None
+src/quant_lab/market/contract.py:462 exp_t_start < self.t_dec
+src/quant_lab/market/contract.py:464 self.horizon_end <= exp_t_start
+src/quant_lab/market/contract.py:469 self.entry_ttl_s is None
+src/quant_lab/market/contract.py:476 self.t_start is not None and self.t_start != exp_t_start
+src/quant_lab/market/contract.py:476 self.t_start is not None
+src/quant_lab/market/contract.py:476 self.t_start != exp_t_start
+src/quant_lab/market/contract.py:480 self.entry_ttl_s != exp_ttl
+src/quant_lab/market/contract.py:481 self.entry_ttl_source == 'plan'
+src/quant_lab/market/contract.py:486 self.horizon_end - exp_t_start
+src/quant_lab/market/contract.py:487 window > dt.timedelta(seconds=pol.max_horizon_s)
+src/quant_lab/market/contract.py:491 self.horizon_source == 'policy' and window != dt.timedelta(seconds=derived_s)
+src/quant_lab/market/contract.py:491 self.horizon_source == 'policy'
+src/quant_lab/market/contract.py:515 self.t_start is not None
+src/quant_lab/market/contract.py:536 horizon_end is not None
+src/quant_lab/market/contract.py:537 horizon_end is None
+src/quant_lab/market/contract.py:538 derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))
+src/quant_lab/market/contract.py:778 e.ts in settle_keys
+src/quant_lab/market/execution.py:153 req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)
+src/quant_lab/market/execution.py:240 g >= a and (not any((abs((h - g).total_seconds()) <= 60 for h in have)))
+src/quant_lab/market/execution.py:240 abs((h - g).total_seconds()) <= 60
+src/quant_lab/market/kernel_a.py:202 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:208 [p for p in m.last if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_last, self.policy.participation) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:208 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:209 [p for p in m.mark if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_mark, None) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:209 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:220 self.t_start <= f.calc_time <= end
+src/quant_lab/market/kernel_a.py:223 deadline <= end
+src/quant_lab/market/kernel_a.py:240 b.open_time >= self.t_start and b.open_time < end
+src/quant_lab/market/kernel_a.py:240 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:250 grid_points_between(prev + iv, o, interval_s) > 0
+src/quant_lab/market/kernel_a.py:253 grid_points_between(prev + iv, end, interval_s) > 0
+src/quant_lab/market/kernel_a.py:259 self.hold_end is not None and self.hold_end <= self.req.horizon_end and (self.hold_end not in self.moments)
+src/quant_lab/market/kernel_a.py:259 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:259 self.hold_end <= self.req.horizon_end
+src/quant_lab/market/kernel_a.py:259 self.hold_end not in self.moments
+src/quant_lab/market/kernel_a.py:262 self.hold_end is not None and self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:262 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:262 self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:423 self.plan.expiry.max_holding_s is not None
+src/quant_lab/market/kernel_a.py:424 ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+src/quant_lab/market/kernel_a.py:569 ts in self.settled_keys
+src/quant_lab/market/kernel_a.py:570 self.settled_keys[ts] != row.rate
+src/quant_lab/market/kernel_a.py:574 mp is None or (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:574 (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:592 r.effective_from and self.t_start < r.effective_from or (r.effective_to and self.t_start >= r.effective_to)
+src/quant_lab/market/kernel_a.py:592 r.effective_from and self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:592 r.effective_to and self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:592 self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:592 self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:596 not self.market.bars_complete and (self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None)
+src/quant_lab/market/kernel_a.py:596 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:596 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:597 self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:617 (mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)) and self.pos != 0
+src/quant_lab/market/kernel_a.py:617 mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)
+src/quant_lab/market/kernel_a.py:617 self.hold_end is not None and ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:617 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:617 ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:620 mo.horizon and self.pos != 0
+src/quant_lab/market/kernel_a.py:623 ts == self.t_start and (not self.orders)
+src/quant_lab/market/kernel_a.py:623 ts == self.t_start
+src/quant_lab/market/kernel_a.py:635 o.deadline is not None and o.deadline <= ts
+src/quant_lab/market/kernel_a.py:635 o.deadline is not None
+src/quant_lab/market/kernel_a.py:635 o.deadline <= ts
+src/quant_lab/market/kernel_a.py:656 self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:656 (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:673 self.hold_end is not None and self.pos != 0
+src/quant_lab/market/kernel_a.py:673 self.hold_end is not None
+src/quant_lab/market/nautilus_adapter.py:146 list(market.last) + [p for b in market.bars_last if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:146 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:148 list(market.mark) + [p for b in market.bars_mark if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:149 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:150 b.open_time < t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.path_step == 'C' and p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:153 market.funding and len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:153 len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:156 t_start <= p.ts <= end
+src/quant_lab/market/nautilus_adapter.py:237 deadline <= end
+src/quant_lab/market/nautilus_adapter.py:419 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:419 self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start or row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:426 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:442 st['pos'] != 0 and (st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s)
+src/quant_lab/market/nautilus_adapter.py:442 st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:442 (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:450 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= until and (st['pos'] != 0) and (not st['censor'])
+src/quant_lab/market/nautilus_adapter.py:450 self.funding_rows[self.fi].calc_time <= until
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start or row.calc_time in self.settled_at or row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 st['open_at'] or t_start
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:457 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from or (rules.effective_to and t_start >= rules.effective_to)
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_to and t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:499 t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:527 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:530 min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:531 e['ts'] < hold_end
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None and st['open_at'] is not None
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1)
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:561 {m.ts for m in marks if t_start <= m.ts <= cutoff} | {p.ts for p in lasts if p.ts <= cutoff}
+src/quant_lab/market/nautilus_adapter.py:561 t_start <= m.ts <= cutoff
+src/quant_lab/market/partition_check.py:246 cal_from <= t < cal_to and first_grid_point(t, sec) == t
+src/quant_lab/market/partition_check.py:246 cal_from <= t < cal_to
+src/quant_lab/market/partition_check.py:246 first_grid_point(t, sec) == t
+src/quant_lab/market/partition_check.py:261 df.height and grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:261 grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:275 grid_points_between(df[key][-1] + step, cal_to, sec) > 0
+src/quant_lab/market/partition_check.py:289 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite() & pl.col('low').is_finite()
+src/quant_lab/market/partition_check.py:289 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite()
+src/quant_lab/market/partition_check.py:289 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite()
+src/quant_lab/market/partition_check.py:289 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0)
+src/quant_lab/market/partition_check.py:289 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high'))
+src/quant_lab/market/partition_check.py:289 pl.col('low') <= pl.min_horizontal('open', 'close')
+src/quant_lab/market/partition_check.py:289 pl.max_horizontal('open', 'close') <= pl.col('high')
+src/quant_lab/market/partition_check.py:333 df.height - df['calc_time'].n_unique()
+src/quant_lab/market/single_source.py:177 't_start' in attrs and 't_dec' in attrs
+src/quant_lab/market/single_source.py:177 't_start' in attrs
+src/quant_lab/market/single_source.py:177 't_dec' in attrs
+src/quant_lab/market/single_source.py:187 name == 'int' and node.args and ('total_seconds()' in self._seg(node.args[0]))
+src/quant_lab/market/single_source.py:187 'total_seconds()' in self._seg(node.args[0])
+src/quant_lab/market/single_source.py:207 isinstance(n, ast.Attribute) and n.attr == 'entry_ttl_s'
+src/quant_lab/market/single_source.py:207 n.attr == 'entry_ttl_s'
+src/quant_lab/market/single_source.py:214 isinstance(node.op, (ast.FloorDiv, ast.Div)) and ('total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg)
+src/quant_lab/market/single_source.py:215 'total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg
+src/quant_lab/market/single_source.py:215 'total_seconds()' in seg
+src/quant_lab/market/single_source.py:218 isinstance(node.op, ast.Add) and 'entry_ttl_s' in seg
+src/quant_lab/market/single_source.py:218 'entry_ttl_s' in seg
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite() & pl.col('low').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0)
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high'))
+src/quant_lab/market/vision.py:262 pl.col('low') <= pl.min_horizontal('open', 'close')
+src/quant_lab/market/vision.py:262 pl.max_horizontal('open', 'close') <= pl.col('high')
+```
+
+
+### 补充原样复跑与B17双strict生产基线
+
+S38/S39最小命令及P29/P30/P31最小命令也经shlex.split原样复跑。
+P31在导入已删除旧测试名时即失败，不能据此声称执行了删门。
+P29第三组实际expected=4正确，不能沿用历史括注中的3。
+
+#### S38最小命令：exit 1
+
+```text
+stdout为空
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 6, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/.venv-g2/lib/python3.12/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py", line 329, in _latency_domain
+    raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+quant_lab.market.contract.ContractError: latency_s 必须非负：启动时刻不能早于决策时刻
+```
+
+#### S39最小命令：exit 0
+
+```text
+discarded result: GREEN
+restored: GREEN
+
+```
+
+#### P29最小：exit 0
+
+```text
+0 180000000 3 0 [False, False, False] []
+1 180000000 2 0 [False, False] []
+0 180000001 4 0 [False, False, False, False] []
+
+```
+
+#### P30最小：exit 0
+
+```text
+-1 False REJECT horizon_end 必须晚于 t_start（推导值 2024-01-01 01:01:00+00:00，latency_s=60）
+-1 True REJECT horizon_end 必须晚于 t_start（推导值 2024-01-01 01:01:00+00:00，latency_s=60）
+0 False REJECT horizon_end 必须晚于 t_start（推导值 2024-01-01 01:01:00+00:00，latency_s=60）
+0 True REJECT horizon_end 必须晚于 t_start（推导值 2024-01-01 01:01:00+00:00，latency_s=60）
+1 False ACCEPT 0:00:00.000001
+1 True ACCEPT 0:00:00.000001
+
+```
+
+#### P31最小：exit 1
+
+```text
+stdout为空
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 4, in <module>
+ImportError: cannot import name 'test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain' from 'tests.market.test_outcome_kind' (/Users/balen/projects/trader-bot/quant-lab/tests/market/test_outcome_kind.py)
+```
+
+独立B17双strict命令：`.venv-g2/bin/python -c 'exec("from unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom quant_lab.market import contract as c,execution as x\nq,m=e03()\nq2=c.ExecutionRequest.model_validate({**q.model_dump(),\"episode_id\":\"audit-second\"})\noriginal=x.result_row\ndef inject(req,res):\n row=original(req,res)\n if req.episode_id==\"audit-second\":\n  row[\"policy_hash\"]=\"0\"*64\n return row\nfor strict in (True,False):\n with patch.object(x,\"result_row\",side_effect=inject):\n  try:\n   x.simulate_batch([q,q2],markets={m.manifest_id:m},strict=strict)\n  except c.ContractError as e:\n   print(\"strict\",strict,str(e))\n   assert q.policy_version in str(e) and q.policy_hash in str(e) and \"0\"*64 in str(e)\n  else:\n   raise AssertionError(\"gate did not reject\")\nprint(\"B17_BOTH_STRICT_PASS\")\n")'`
+
+```text
+strict True 同一 policy_version 对应多个 policy_hash（版本串与内容不一一对应）：fixture-zero-v1 → ['0000000000000000000000000000000000000000000000000000000000000000', '12ca10ebb10ef27d10873584ee42a224c44efdf99e9b55c7656e8a838c58cd1d']
+strict False 同一 policy_version 对应多个 policy_hash（版本串与内容不一一对应）：fixture-zero-v1 → ['0000000000000000000000000000000000000000000000000000000000000000', '12ca10ebb10ef27d10873584ee42a224c44efdf99e9b55c7656e8a838c58cd1d']
+B17_BOTH_STRICT_PASS
+```
+
+### 本轮文件与SHA256审计
+
+集合摘要算法：按quant-lab相对路径排序，拼接“路径:sha256\\n”，再SHA256；包括检查时已存在的文件，不声称原子快照。
+
+```text
+FILE_COUNT 91 ALL_EQUAL True
+CHANGED []
+src/quant_lab/market 22 67c3754c99e552a460aaa5567e2324768a7ecfb6adb6408847bd7701a6f89158
+tests/market 69 42ea957cd0e202d6a7198e3cef662de90b15f6aa1bb1dde86d2496fb8d6c93f8
+tests/market/fixtures/episodes 22 a21f4c6f89acb4744007a3309584c3dc1bb5b2d1d299eeb901c5defd1b3b0576
+partition_check.py ad1250d8eca7361d780c64a6d3cbfedd066c860e18608f51b69172d41a527b2b
+execution.py 9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7
+single_source.py e274fb5cd78fb301c5f157931bc80fb7742915166f4b6aa227e00aa66c140d3f
+vision.py 30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8
+nautilus_adapter.py 580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650
+__init__.py 70149b449a03075ef4218d03921491270426af8851fce59d942d8966fca8f80f
+quarantine.py abdacaba0e7be23d1741a79f01ad0ca77132b68b1f7594121e3563426dfb0662
+contract.py 318bd84a80829ac70394b614027d6b1665659d3ce93db477454b1d2a63e8b2cd
+asof.py 91e35abd6dd83199af7b47fa253b2d2121fea15bc428b50e7724e3321a2ec090
+kernel_a.py d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82
+HISTORY_SHA256 732c7b3f4dedc149ece0b6cc6cea9cd2ddfce9d0a6fcca0156b1469e8d5e3c90
+```
+
+历史报告原始字节SHA256为上述HISTORY_SHA256。
+十一审章节只加在前部；历史整个字节串保留，不改写旧轮正文或旧终裁。
+文件最末在原四行之后追加本轮两行。
+本轮全部结论的实跑依据、失效命令原因、未做事项及适用范围均已明列。
+
+---
+
 ## 十审判定表
 
 审查日期：2026-09-11。独立审查方：Codex 主控；本轮不承担修复。
@@ -826,3 +1674,5 @@ PY
 九审终裁：fail
 证据完整性：完成
 十审终裁：fail
+证据完整性：完成
+十一审终裁：fail
