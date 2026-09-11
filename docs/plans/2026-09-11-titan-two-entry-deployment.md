@@ -30,6 +30,10 @@ jp-24 `/srv`、`/root`、`/var/lib` 搜索未发现可用的 `capacity-evidence.
 
 ## 生产状态与后续
 
-未进入 execute；未 HALT、未停止/重建节点、未替换生产执行代码、未切换生产 feeder/skill、未 RESUME、未新增或补交易订单。预检后 A–D 均仍 ACTIVE，心跳新鲜。
+未进入 execute；本任务未发送 HALT、未停止/重建节点、未替换生产执行代码、未切换生产 feeder/skill、未 RESUME、未新增或补交易订单。preflight 刚结束时 A–D 均 ACTIVE，心跳新鲜。
+
+最终复核出现额外运行事件：D 在旧镜像上出现交易所查询超时、控制面心跳超时及自动重启，随后短暂因旧 Redis 租约 held 循环重启。租约老化后进程自动启动成功，fencing token 为 1319；ready=true、reconciliation=healthy、心跳恢复，但 trading_state=HALTED，halt_reason=resume_command_rejected。A–C 保持 ACTIVE。未发现本任务新增 operator_command；最后一条仍为前一天。已单独请求用户明确授权核验后恢复 D，未发送 RESUME。不能把本次恢复的进程健康写成 D 已恢复交易，也未断言超时与预检负载无关。
+
+生产计划文档已同步至 `/srv/hermes/profiles/trader/plans/titan-two-entry.md`，本地与线上 SHA256 一致：`37814b8c6469dd5024ad5a28be834305fba24042074305250a517fd7c08439d0`；状态明确为待部署生效。发布分支已推送到 origin。
 
 后续需先恢复可信的 Redis 冷备份/容量基线及实际发布身份，或单独设计并审查适用于“只更新运行时代码、不迁移 Redis”的正式部署路径。不能跳过当前门禁，也不能为凑证据直接运行 empty-volume Redis rebaseline。完整恢复材料和门禁通过后再执行此次候选版本。
