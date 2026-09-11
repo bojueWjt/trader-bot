@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T04:05:35Z",
+  "updatedAt": "2026-09-11T04:07:26Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -322,9 +322,9 @@
       ],
       "artifacts": [],
       "review": {
-        "verdict": "issues",
-        "note": "[G0/427ed064 R31] **四套全绿**：data 177 / market 251 / research 323 / integration 8（G3 已完成对 G2 新列的 parity 对齐）。**S16/S07 抽验（对抗式实跑，非采信回执）：两条均闭合**。S07：混合原因码致命支配一般、主因按冻结优先级、FATAL 集与契约 §4 三项一致未增删。S16：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC \\\\\\\\srv\\\\share、sub/../../、外指 symlink 全部 REJECT 且理由分类正确——上轮我报的反斜杠父级已补上。**V01 实地核实（结论比属实更细）**：落盘 dtype 全为 decimal128(38,12) 合规；但 extract.py:643-644 与 validate.py:99-100 把 stop/tps.level/fraction 绕经 float；当前夹具 147 个 TP 取值中小数位>4 的为 0（全是解析自文本的短小数，float 可精确表示）故看不见；但 G0 实测 Decimal('64094.879166666667') 经 float 往返变 64094.879166666666，**第 12 位被改写**——BTC 量级 float64 只剩约 11 位小数而 schema 宣称 12 位。已裁定入契约 v1.14 §9.10.14 A18：声明精度的字段路径禁止有损中间转换。**四轮 fail 的处置建议已上报用户**：G1 自陈 open 项全为有界反例、无设计规模项，倾向再一轮 Codex 修改 + r5，而非动用分类闭合标准。",
-        "at": "2026-09-11T03:36:44Z"
+        "verdict": "pass",
+        "note": "[G0/427ed064 R37] A18 三项 G0 独立核验闭合：(1) 别名→fixture-v1@70379151（80 行），order_plan.stop = Struct{price: Decimal(38,12)}，经济量列同；(2) grep 'float(' 于 lifecycle/validate/extract 的 stop|level|price|fraction|qty|entries|tps 路径 → 空；(3) test_a18_verbatim_source_string_reaches_gold 实跑 1 passed（逐字断言：64094.879166666667 / 63000.123456789123 / 65500.000000000001 走完产线后 str(gold) 与源串相等）。G0 另做独立核验：真实 gold 147 个 TP 取值中小数位>6 的为 0——夹具值全是短小数、无法从产物侧区分是否经过 float，故该项以 G1 的高精度专用夹具测试 + 结构性核查（dtype + 路径无 float）共同认定，记录此局限。**OR-04 在 80 行新夹具上 8 passed 全绿**（含 R28 新增的非退化门）：80 请求零错误、fill 50 partial/28 filled/2 none、outcome 65 tp_hit/13 right_censored/2 rejected。逐字断言这一形式已证明有价值：它不依赖挑对量级，而往返测试要靠运气挑中 float 表示不了的值——这正是 V01 躲过前四轮的原因。",
+        "at": "2026-09-11T04:07:26Z"
       },
       "lastUpdate": "2026-09-11T04:04:05Z",
       "tasks": [
@@ -614,7 +614,7 @@
         "note": "[G0/427ed064 R36 · 更正 R34] 八审**实际终裁为 fail**（319 行，未完成标记 0，G0 已复核）；R34 记的 insufficient 是写作中途快照，该记载作废。A19 不撤销——中途状态确实短暂存在，verify 可能正好在那一刻跑。A20 裁定：裸词「占位」不入标记集（正文两处为合法业务词，纳入会让门永远红在错误原因上）；自九审起 review 报告须带『证据完整性：完成|待回填』显式声明，verify 先读声明再判终裁行，关键词清单降为兜底，缺失视同待回填。**verifyHistory 审计：累计 3 条，收紧 3，放宽 0**。新增的 M-10 变更把标记检查与终裁判读串联，属收紧；G2 已按 B17 做突变自证（基线 fail→rc1、改 pass→rc0、pass+注入标记→rc1、insufficient→rc1），四例齐全。G2 主动撤回其此前『两族都横扫了一遍』的不实陈述并在真正横扫后揪出两处漏网（validator 第二处 t_start 推导、loader 取整的期望 bar 数），已抽成单一来源 derived_t_start/derived_window_s/first_grid_point。撤回行为已列为规范。实跑 tests/market 253→G2 报 257。",
         "at": "2026-09-11T04:05:35Z"
       },
-      "lastUpdate": "2026-09-11T04:02:43Z",
+      "lastUpdate": "2026-09-11T04:06:56Z",
       "tasks": [
         {
           "id": "M-01",
@@ -674,7 +674,7 @@
           "id": "M-10",
           "title": "[Codex review] P1 里程碑 review（M-03..M-09），必修项闭合",
           "status": "doing",
-          "verify": "test -f docs/adr/review-G2-P1.md && ! grep -Eq \"稍后回填|待回填|暂承接|待本轮独立核验|待补充证据|^[[:space:]]*TODO\" docs/adr/review-G2-P1.md && grep -E \"终裁[：:]\" docs/adr/review-G2-P1.md | tail -1 | grep -Eq \"终裁[：:][[:space:]]*\\*{0,2}pass\\*{0,2}[[:space:]]*$\"",
+          "verify": "test -f docs/adr/review-G2-P1.md && grep -Eq \"^证据完整性[：:][[:space:]]*完成[[:space:]]*$\" docs/adr/review-G2-P1.md && ! grep -Eq \"稍后回填|待回填|暂承接|待本轮独立核验|待补充证据|^[[:space:]]*TODO\" docs/adr/review-G2-P1.md && grep -E \"终裁[：:]\" docs/adr/review-G2-P1.md | tail -1 | grep -Eq \"终裁[：:][[:space:]]*\\*{0,2}pass\\*{0,2}[[:space:]]*$\"",
           "verifyHistory": [
             {
               "at": "2026-09-11T02:25:50Z",
@@ -685,6 +685,11 @@
               "at": "2026-09-11T04:02:30Z",
               "old": "test -f docs/adr/review-G2-P1.md && grep -E \"终裁[：:]\" docs/adr/review-G2-P1.md | tail -1 | grep -Eq \"终裁[：:][[:space:]]*\\*{0,2}pass\\*{0,2}[[:space:]]*$\"",
               "why": "契约 §9.10.15 A19：含未完成标记的报告终裁行无效，review 类 verify 须把标记检查与终裁正向判读串联。注意：不能用裸词『占位』作标记——它在本项目报告里是合法业务词（占位政策取值/占位 Rules），用作标记会让门永远红在错误原因上；故只匹配明确表示工作未完成的词。本次为收紧。"
+            },
+            {
+              "at": "2026-09-11T04:06:56Z",
+              "old": "test -f docs/adr/review-G2-P1.md && ! grep -Eq \"稍后回填|待回填|暂承接|待本轮独立核验|待补充证据|^[[:space:]]*TODO\" docs/adr/review-G2-P1.md && grep -E \"终裁[：:]\" docs/adr/review-G2-P1.md | tail -1 | grep -Eq \"终裁[：:][[:space:]]*\\*{0,2}pass\\*{0,2}[[:space:]]*$\"",
+              "why": "契约 §9.10.16 A20：判定条件应由被判定方显式声明，不由判定方从自然语言推断。改为三段串联——先读机器可判读声明『证据完整性：完成』（缺失视同待回填），再关键词兜底，最后终裁行正向判读。本次为收紧（新增声明必须存在这一必要条件）。"
             }
           ]
         },
@@ -1629,6 +1634,12 @@
         "module": "market",
         "verdict": "issues",
         "note": "[G0/427ed064 R36 · 更正 R34] 八审**实际终裁为 fail**（319 行，未完成标记 0，G0 已复核）；R34 记的 insufficient 是写作中途快照，该记载作废。A19 不撤销——中途状态确实短暂存在，verify 可能正好在那一刻跑。A20 裁定：裸词「占位」不入标记集（正文两处为合法业务词，纳入会让门永远红在错误原因上）；自九审起 review 报告须带『证据完整性：完成|待回填』显式声明，verify 先读声明再判终裁行，关键词清单降为兜底，缺失视同待回填。**verifyHistory 审计：累计 3 条，收紧 3，放宽 0**。新增的 M-10 变更把标记检查与终裁判读串联，属收紧；G2 已按 B17 做突变自证（基线 fail→rc1、改 pass→rc0、pass+注入标记→rc1、insufficient→rc1），四例齐全。G2 主动撤回其此前『两族都横扫了一遍』的不实陈述并在真正横扫后揪出两处漏网（validator 第二处 t_start 推导、loader 取整的期望 bar 数），已抽成单一来源 derived_t_start/derived_window_s/first_grid_point。撤回行为已列为规范。实跑 tests/market 253→G2 报 257。"
+      },
+      {
+        "at": "13:07",
+        "module": "data",
+        "verdict": "pass",
+        "note": "[G0/427ed064 R37] A18 三项 G0 独立核验闭合：(1) 别名→fixture-v1@70379151（80 行），order_plan.stop = Struct{price: Decimal(38,12)}，经济量列同；(2) grep 'float(' 于 lifecycle/validate/extract 的 stop|level|price|fraction|qty|entries|tps 路径 → 空；(3) test_a18_verbatim_source_string_reaches_gold 实跑 1 passed（逐字断言：64094.879166666667 / 63000.123456789123 / 65500.000000000001 走完产线后 str(gold) 与源串相等）。G0 另做独立核验：真实 gold 147 个 TP 取值中小数位>6 的为 0——夹具值全是短小数、无法从产物侧区分是否经过 float，故该项以 G1 的高精度专用夹具测试 + 结构性核查（dtype + 路径无 float）共同认定，记录此局限。**OR-04 在 80 行新夹具上 8 passed 全绿**（含 R28 新增的非退化门）：80 请求零错误、fill 50 partial/28 filled/2 none、outcome 65 tp_hit/13 right_censored/2 rejected。逐字断言这一形式已证明有价值：它不依赖挑对量级，而往返测试要靠运气挑中 float 表示不了的值——这正是 V01 躲过前四轮的原因。"
       }
     ],
     "blockers": [
