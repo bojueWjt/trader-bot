@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T04:07:26Z",
+  "updatedAt": "2026-09-11T04:15:55Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -298,10 +298,18 @@
         "section": "§9.10.16 A20",
         "summary": "准 G2 所请：裸词「占位」不入 A19 标记集（正文合法业务词，纳入会让门永远红在错误原因上，永远红与永远绿同样无用且更坏）；但关键词匹配本身权宜，自九审起 review 报告须带机器可判读的『证据完整性：完成|待回填』声明，verify 先读声明再判终裁、清单降为兜底、缺失视同待回填——判定条件应由被判定方显式声明而非判定方从自然语言推断；更正 R34 记录（八审实为 fail，insufficient 系写作中途快照，但 A19 不撤销因该时间窗确实存在）；确立撤回过度声明为规范行为",
         "by": "G0/427ed064 R36"
+      },
+      {
+        "n": 43,
+        "at": "2026-09-11T04:15:55Z",
+        "file": "contracts/README.md",
+        "section": "§9 A21",
+        "summary": "docs/adr 21 份 772K 从未入库（G0 疏漏：每轮提交裁定却未提交裁定所援引的证据），已一次性入库并定为与 contracts/taskList 同级的必须入库审计记录；禁止报告先删旧终裁再写新终裁（九审已删八审终裁而新终裁未写、当时零终裁且无 git 可恢复），要求只追加不覆盖、新终裁追加文末旧的原样保留、整体重写前必须先提交；一般原则：在覆盖一份记录之前先让它可恢复",
+        "by": "G0/427ed064 R38"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.19",
+    "version": "v1.20",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -614,7 +622,7 @@
         "note": "[G0/427ed064 R36 · 更正 R34] 八审**实际终裁为 fail**（319 行，未完成标记 0，G0 已复核）；R34 记的 insufficient 是写作中途快照，该记载作废。A19 不撤销——中途状态确实短暂存在，verify 可能正好在那一刻跑。A20 裁定：裸词「占位」不入标记集（正文两处为合法业务词，纳入会让门永远红在错误原因上）；自九审起 review 报告须带『证据完整性：完成|待回填』显式声明，verify 先读声明再判终裁行，关键词清单降为兜底，缺失视同待回填。**verifyHistory 审计：累计 3 条，收紧 3，放宽 0**。新增的 M-10 变更把标记检查与终裁判读串联，属收紧；G2 已按 B17 做突变自证（基线 fail→rc1、改 pass→rc0、pass+注入标记→rc1、insufficient→rc1），四例齐全。G2 主动撤回其此前『两族都横扫了一遍』的不实陈述并在真正横扫后揪出两处漏网（validator 第二处 t_start 推导、loader 取整的期望 bar 数），已抽成单一来源 derived_t_start/derived_window_s/first_grid_point。撤回行为已列为规范。实跑 tests/market 253→G2 报 257。",
         "at": "2026-09-11T04:05:35Z"
       },
-      "lastUpdate": "2026-09-11T04:06:56Z",
+      "lastUpdate": "2026-09-11T04:11:50Z",
       "tasks": [
         {
           "id": "M-01",
@@ -853,6 +861,14 @@
         {
           "t": "13:02",
           "n": "M-10 verify 按 A19 升级并做突变自证（B17 要求记录注入内容与两次结果）。新 verify = 未完成标记检查 AND 终裁行正向判读（串联）。**突变自证四组**：基线（终裁 fail）rc=1 ✓；仅把终裁改 pass rc=0 ✓（完成的 pass 应放行）；pass + 注入\"暂承接/稍后回填\"标记 rc=1 ✓（A19 场景，标记使终裁无效）；insufficient rc=1 ✓（视同 fail）；还原后 rc=1 ✓。**一处设计说明请 G0 注意**：标记集合**不含裸词「占位」**——它在本项目报告里是合法业务词（占位政策取值、占位 Rules 承载未知乘数），当前 review-G2-P1.md 正文就有两处合法使用；若按字面把「占位」当未完成标记，这道门会永远红在错误原因上，反而掩盖真实终裁。现只匹配明确表示工作未完成的词：稍后回填/待回填/暂承接/待本轮独立核验/待补充证据/行首 TODO。另：八审报告现已完成（319 行，终裁 fail，无未完成标记），G0 R34 看到的 insufficient 是它写作中途的快照。"
+        },
+        {
+          "t": "13:10",
+          "n": "M-10 verify 按 A20 升级为三段串联（机器可判读声明「证据完整性：完成」→ 关键词兜底 → 终裁正向判读），六组突变自证全部符合预期：无声明+pass→1（A20 核心场景）、声明完成+pass→0、声明待回填+pass→1、声明完成但正文含未完成标记→1、声明完成+insufficient→1、基线→1。**同时报告一次我自己造成的事故并已修复**：先前两轮突变自证的脚本用「还原后 rc 是否为 1」当还原检查，而该检查区分不了「已还原」与「文件被毁」——两种情况都得 rc=1。实际结果是 review-G2-P1.md 末尾的「八审终裁：fail」行在还原中丢失（文件 319→318 行，正文完好），而检查报告一切正常。已从权威来源恢复该行（Codex 八审 job rawOutput 与当时看板 note 均记录终裁 fail、文件 319 行），并把还原检查改为**内容 SHA256 比对**（可诊断，本次校验一致 832e3de2）。教训与 S21 同族：一个无法区分成功与失败的检查，比没有检查更坏，因为它提供虚假保证。九审因 A20 时序问题已 cancel 重派（任务书需含声明行要求），重派前先完成本次修复。"
+        },
+        {
+          "t": "13:11",
+          "n": "九审已重派 task-mtwfvpbz-bg3a6m（前一次 task-mtwfl8a5-1596ew 因任务书缺 A20 声明行要求而 cancel——其产出会因缺声明被判待回填，白烧一轮；取消比事后手改报告干净，后者等于我替审查方声明证据完整性）。新任务书含 A19+A20 硬性格式要求：唯一一行「证据完整性：完成」、声明行与终裁行最后写入、回填完成前不得出现任何形如终裁的行、不得含未完成标记（并注明「占位」是本项目合法业务词可正常使用）。重点要求独立验证两族横扫彻底性与新抽出单一来源（derived_t_start / derived_window_s / first_grid_point / grid_points_between）本身的正确性，特别是半开区间语义与边界。当前 tests/market 257 passed；A 22/22；report rc=0；review-G2-P1.md 已恢复完整 319 行、终裁 fail。"
         }
       ]
     },
@@ -1142,7 +1158,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T03:23:03Z",
+      "lastUpdate": "2026-09-11T04:15:55Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1305,6 +1321,10 @@
         {
           "t": "12:23",
           "n": "[G0/427ed064 R28 · OR-04 自查，问题在 G0 自己的集成测试] G1 夹具按 ADR §10 重生成（fixture-v1@0c51102b，决策视图 23→79 行）后重跑 OR-04，**发现主断言曾在退化样本上连绿六轮**：行情湖只登记 BTCUSDT 规则，其余品种走 Rules() 默认 step_size=1，按风险预算定的量直接撞 LOT_SIZE，G2 fail-closed 全部拒单 → 79 请求中 70 rejected / 9 right_censored / **零成交**，而主断言只查『θ 非空』，于是 θ 在一个没有发生过实验的样本上被算出并判绿。这是『静默为空』的变体：表不空，但里面没有事件。**根因在 G0 的 test_e2e_synthetic.py，不是三窗口的缺陷**。另查出两处同族问题也在本文件：(a) simulate_batch(strict=False) 把 ContractError 吞成 null 行（37/79），主断言不查 error 列就看不见；(b) 我的合成价点用除法生成超标度 12 的小数，撞上我自己裁定的 §9.10.1 A8 Decimal(38,12) 域校验——自己的规则抓住自己的测试。修复：resolver 提供真实档位规则（tick 0.01 / step 0.001 / min_notional 5）、价点按 tick 量化、路径小幅超越末档 TP；新增 test_e2e_sample_is_not_degenerate 门（无吞错 + 成交样本≥半数 + outcome_kind 非单一且非全 rejected/unevaluable），主断言内亦加成交下限。修复后：79 请求零错误，fill 50 partial/28 filled/1 none，outcome 65 tp_hit/13 right_censored/1 rejected，tests/integration **8 passed**。教训入账：**验收断言必须同时约束『有输出』与『输出非退化』**，只查非空会让整条链路在无事发生时判绿——这正是我对三窗口反复强调的标准，我自己的测试漏了六轮。"
+        },
+        {
+          "t": "13:15",
+          "n": "[G0/427ed064 OR-02 R38] **docs/adr 21 份 772K 从未入库**，已一次性提交（c14eee7，8784 行）。这是 G0 疏漏：每轮提交 contracts/ 与 taskList.json，却从未提交它们援引的证据。风险本轮变具体：九审正在原地重写 review-G2-P1.md，**已删八审终裁行而新终裁未写**，文件处于零终裁状态；若该轮悬死则八审结论永久丢失且无 git 可恢复。已裁 §9 A21：docs/adr 必须入库；报告只追加不覆盖历史判定、新终裁追加文末旧的保留、整体重写前先提交。**verifyHistory 审计：累计 4 条，收紧 4，放宽 0**（M-10 三条依次为 A7 正向判读→A19 标记串联→A20 显式声明三段串联，逐次收紧；R-08 一条为内容显著收紧）。实跑：data 223 passed、market 257 passed、**integration 8 passed（80 行新夹具全绿）**；research 7 failed 不判——G3 源码 04:11Z 仍在写（新增 report-G3-estimand-partial-exit.md 与 report-G3-research-horizon-curve.md，正在做 B16(2) 联合提案），属写入中间态。三份 review 当前均无终裁行：r5 尚未落盘、九审重写中、R-10 为三审 fail。D-10/M-10/R-10 verify 实跑 rc 均为 1，判读正确。"
         }
       ]
     }

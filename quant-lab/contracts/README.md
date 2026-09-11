@@ -138,3 +138,25 @@ RESUME/开闸只凭用户明示；不碰、不撤销、不针对用户手工单�
 | 4 | `mark_price_at` 没有数据来源参数 | G2 (M-01) | 签名 `mark_price_at(at, instrument_id, *, max_staleness_s=120)` 不带 bars/manifest/lake 路径，等于隐式全局状态，破坏可复算与 `market_manifest` 版本钉死 | 补显式来源参数（如 `*, bars: pl.DataFrame` 或 `market_manifest: str`），或明确它是绑定 manifest 的类方法 |
 
 补充事实（G0 于 2026-09-11 实测）：`quant_lab.data.codes` 的 `ReasonCode` 与 `research-schema.md` §4 的 28 个原因码**逐字一致**（missing 0 / extra 0），`FATAL_REASONS` 与契约的三个致命码一致，`TimeGrade / PlanState / ClaimState / LinkMethod / QuarantineStatus / LabelStatus` 均与契约一致 —— G1 侧枚举接缝已对齐，无需再谈。
+
+
+## 9. 裁定 A21：审计记录必须入库，报告不得先删旧终裁再写新终裁（G0 OR-02 R38，changeLog #43）
+
+### 9.1 `docs/adr/` 必须纳入版本控制
+
+**事实**：截至 R38，`quant-lab/docs/adr/` 的 **21 份文件、772K** 从未进入 git——三份引擎 ADR、G1/G2/G3 的全部审查轮次、闭合表、观察窗与 estimand 提案，全部只存在于工作区磁盘上。它们**未被 `.gitignore` 排除**，只是从未 `add`。
+
+**这是 G0 的疏漏**：每轮都在提交 `contracts/` 与 `taskList.json`，却从未提交它们所**援引的证据**——裁定被版本化了，裁定所依据的材料没有。已于 R38 一次性入库（commit `c14eee7`）。
+
+**裁定**：`docs/adr/**` 与 `contracts/**`、`taskList.json` 同级，属**必须入库**的审计记录。任何窗口产出新的 ADR、审查报告或提案后，由 G0 在当轮评审中提交。
+
+### 9.2 报告不得"先删旧终裁、再写新终裁"
+
+**风险在本轮变成具体的**：九审正在原地重写 `review-G2-P1.md`，**已删除八审终裁行而新终裁尚未写入**，文件当时处于"零终裁"状态。若该轮悬死（前若干轮确实多次悬死），八审结论将**永久丢失**，且当时无 git 历史可恢复。
+
+**裁定**：
+1. 审查报告**只追加、不覆盖历史轮次的判定文字**（G2 此前"历史轮次原文保留"的做法是对的，应保持）；
+2. 新一轮的终裁行**追加在文末**，旧轮终裁行**原样保留**并以轮次名区分；review 类 verify 按 §9.9 A7 取**最后一条**，行为不受影响；
+3. 确需整体重写（如 G2 曾把正文外移为 `rounds-1-2.md` 快照）时，**必须先提交当前版本入库**，再重写。
+
+**一般原则**：**在覆盖一份记录之前，先让它可恢复。** 这与 §9.10.2 的"published 不可原地变更"、§9.8 A6 的"改门须同时发布制品"是同一条纪律在文档上的体现——G1 曾因同名原地改写 parquet 触发判例 2，本条防的是同一件事发生在审计记录上。
