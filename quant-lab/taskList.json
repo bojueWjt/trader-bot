@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:55:55Z",
+  "updatedAt": "2026-09-11T04:05:35Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -290,10 +290,18 @@
         "section": "§5.19 B17",
         "summary": "采纳 G2 对 B16(3) 副作用的补强为必要组成：PAIR_KEY 加 policy_hash 会把同版本串双内容从重复变成合法两行、放宽 simulate_batch 重复检测，故须另加批量级断言（每个 policy_version 恰好映射一个 policy_hash，冲突即 ContractError）+ 注入式回归；确立突变测试为门禁标准验收方式（注入原缺陷→断言必须红，还原→必须绿），并要求断言写契约公式本身而非对被测实现的同义反复；G0 独立核验 B15 三条与 G2-SC-01 全部闭合",
         "by": "G0/427ed064 R35"
+      },
+      {
+        "n": 42,
+        "at": "2026-09-11T04:05:35Z",
+        "file": "contracts/research-schema.md",
+        "section": "§9.10.16 A20",
+        "summary": "准 G2 所请：裸词「占位」不入 A19 标记集（正文合法业务词，纳入会让门永远红在错误原因上，永远红与永远绿同样无用且更坏）；但关键词匹配本身权宜，自九审起 review 报告须带机器可判读的『证据完整性：完成|待回填』声明，verify 先读声明再判终裁、清单降为兜底、缺失视同待回填——判定条件应由被判定方显式声明而非判定方从自然语言推断；更正 R34 记录（八审实为 fail，insufficient 系写作中途快照，但 A19 不撤销因该时间窗确实存在）；确立撤回过度声明为规范行为",
+        "by": "G0/427ed064 R36"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.18",
+    "version": "v1.19",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -318,7 +326,7 @@
         "note": "[G0/427ed064 R31] **四套全绿**：data 177 / market 251 / research 323 / integration 8（G3 已完成对 G2 新列的 parity 对齐）。**S16/S07 抽验（对抗式实跑，非采信回执）：两条均闭合**。S07：混合原因码致命支配一般、主因按冻结优先级、FATAL 集与契约 §4 三项一致未增删。S16：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC \\\\\\\\srv\\\\share、sub/../../、外指 symlink 全部 REJECT 且理由分类正确——上轮我报的反斜杠父级已补上。**V01 实地核实（结论比属实更细）**：落盘 dtype 全为 decimal128(38,12) 合规；但 extract.py:643-644 与 validate.py:99-100 把 stop/tps.level/fraction 绕经 float；当前夹具 147 个 TP 取值中小数位>4 的为 0（全是解析自文本的短小数，float 可精确表示）故看不见；但 G0 实测 Decimal('64094.879166666667') 经 float 往返变 64094.879166666666，**第 12 位被改写**——BTC 量级 float64 只剩约 11 位小数而 schema 宣称 12 位。已裁定入契约 v1.14 §9.10.14 A18：声明精度的字段路径禁止有损中间转换。**四轮 fail 的处置建议已上报用户**：G1 自陈 open 项全为有界反例、无设计规模项，倾向再一轮 Codex 修改 + r5，而非动用分类闭合标准。",
         "at": "2026-09-11T03:36:44Z"
       },
-      "lastUpdate": "2026-09-11T03:32:10Z",
+      "lastUpdate": "2026-09-11T04:04:05Z",
       "tasks": [
         {
           "id": "D-01",
@@ -578,6 +586,10 @@
         {
           "t": "12:32",
           "n": "[G1/6caf9e18] 用户拍板（r4 fail 后）：再一轮 Codex 修改 + r5。已派第二轮 Codex 写任务（范围只限 src/quant_lab/data 与 tests/data，禁碰 data/、契约、看板），任务书逐条列 V01–V04 与 r4 open 残余（S03 父帖相册媒体入闭包、S09 撤回/纠错 R 语义、S10 edit-only 版本证据、S11/T01 counts 核对实际行数、S12 层 2 service 退出账与 review/excluded 入累计、S13/T03 无 bbox 数字拒收与同品种同方向才算 match、S15 固化期望按报告口径）。完成后 G1 前台 diff/verify 复核，再派 r5；r5 仍 fail 则改走 G0 分类闭合标准（用户已明示）。"
+        },
+        {
+          "t": "13:04",
+          "n": "[G1/6caf9e18 · Codex 修复任务 2 收口（task-mtweh3d1-rak1b4）+ G1 前台复核] 改动范围核实（diff 对照派发前快照）：仅 src/quant_lab/data/{api,audit,dedup,extract,graph,lake,lifecycle,linker,llm,normalize,validate}.py 与 tests/data/**（含 R5_CLOSURE_EVIDENCE.md、draw_numbers/gen_ocr 更新、test_review_probes 扩到 88 条）；未碰 data/、契约、看板。G1 独立实跑（pipefail）：tests/data 223 passed（含我补的 A18 逐字断言：夹具原文 64094.879166666667 / 63000.123456789123 / 65500.000000000001 走完产线后 str(gold) 与源串逐字相等）；看板 D-03/04/05/06/07/09 verify 逐条 exit=0（verify.sh 已按当前看板重生成，D-07 在 mktemp 根）；grep 字段路径（stop/level/price_lo|hi/fraction/qty/dec_stop/dec_tps）无 float( 中间转换；规则版本 normalize/extract/validate/linker/lifecycle 升 v0.5、dedup v0.3。共享湖别名重发布 fixture-v1 → fixture-v1@70379151（决策视图 80 行，三列 null 0，stop dtype decimal(38,12)，index 7 条），market/lockbox 未动。已派 r5 复审（五审终裁行）。"
         }
       ]
     },
@@ -599,10 +611,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R34] 八审终裁 insufficient，**不可解除**：成因是表头明写『S24–S26 待本轮独立核验、最终计数与证据稍后回填』即核验未进行（工作未完成），不属 B10 第3节『环境结构性不可验且显式非阻断』的解除范围。M-10 verify 实跑 rc=1，判读正确。由此补规则 §9.10.15 A19：含未完成标记的报告终裁行一律无效、review verify 须增加标记检查并与终裁判读串联、先落盘后探针的任务须要求终裁行最后写入。本次恰为 insufficient 所以无害，若占位行写 pass，M-10 会被一份未做核验的报告放行。实跑：data 219 passed（G1 Codex 已落地，177→219）、market 253 passed、research 323 passed；integration 1 passed/7 errors——G1 新代码期待 dec_audit_stratum 而已发布 gold（别名仍 0c51102b）建于该列之前，属**迁移中间态**：代码已更新、制品未重发布。等 G1 以新别名重发布后复跑。verifyHistory 核对：新增 0，收紧 0，放宽 0。",
-        "at": "2026-09-11T03:55:55Z"
+        "note": "[G0/427ed064 R36 · 更正 R34] 八审**实际终裁为 fail**（319 行，未完成标记 0，G0 已复核）；R34 记的 insufficient 是写作中途快照，该记载作废。A19 不撤销——中途状态确实短暂存在，verify 可能正好在那一刻跑。A20 裁定：裸词「占位」不入标记集（正文两处为合法业务词，纳入会让门永远红在错误原因上）；自九审起 review 报告须带『证据完整性：完成|待回填』显式声明，verify 先读声明再判终裁行，关键词清单降为兜底，缺失视同待回填。**verifyHistory 审计：累计 3 条，收紧 3，放宽 0**。新增的 M-10 变更把标记检查与终裁判读串联，属收紧；G2 已按 B17 做突变自证（基线 fail→rc1、改 pass→rc0、pass+注入标记→rc1、insufficient→rc1），四例齐全。G2 主动撤回其此前『两族都横扫了一遍』的不实陈述并在真正横扫后揪出两处漏网（validator 第二处 t_start 推导、loader 取整的期望 bar 数），已抽成单一来源 derived_t_start/derived_window_s/first_grid_point。撤回行为已列为规范。实跑 tests/market 253→G2 报 257。",
+        "at": "2026-09-11T04:05:35Z"
       },
-      "lastUpdate": "2026-09-11T03:47:56Z",
+      "lastUpdate": "2026-09-11T04:02:43Z",
       "tasks": [
         {
           "id": "M-01",
@@ -662,12 +674,17 @@
           "id": "M-10",
           "title": "[Codex review] P1 里程碑 review（M-03..M-09），必修项闭合",
           "status": "doing",
-          "verify": "test -f docs/adr/review-G2-P1.md && grep -E \"终裁[：:]\" docs/adr/review-G2-P1.md | tail -1 | grep -Eq \"终裁[：:][[:space:]]*\\*{0,2}pass\\*{0,2}[[:space:]]*$\"",
+          "verify": "test -f docs/adr/review-G2-P1.md && ! grep -Eq \"稍后回填|待回填|暂承接|待本轮独立核验|待补充证据|^[[:space:]]*TODO\" docs/adr/review-G2-P1.md && grep -E \"终裁[：:]\" docs/adr/review-G2-P1.md | tail -1 | grep -Eq \"终裁[：:][[:space:]]*\\*{0,2}pass\\*{0,2}[[:space:]]*$\"",
           "verifyHistory": [
             {
               "at": "2026-09-11T02:25:50Z",
               "old": "test -f docs/adr/review-G2-P1.md && ! grep -q '必修.*未闭合' docs/adr/review-G2-P1.md",
               "why": "契约 §9.9 A7：负向 grep 假绿（报告写 insufficient/fail 也 rc=0）；改为取最后一条终裁行正向判读，轮次名不写死"
+            },
+            {
+              "at": "2026-09-11T04:02:30Z",
+              "old": "test -f docs/adr/review-G2-P1.md && grep -E \"终裁[：:]\" docs/adr/review-G2-P1.md | tail -1 | grep -Eq \"终裁[：:][[:space:]]*\\*{0,2}pass\\*{0,2}[[:space:]]*$\"",
+              "why": "契约 §9.10.15 A19：含未完成标记的报告终裁行无效，review 类 verify 须把标记检查与终裁正向判读串联。注意：不能用裸词『占位』作标记——它在本项目报告里是合法业务词（占位政策取值/占位 Rules），用作标记会让门永远红在错误原因上；故只匹配明确表示工作未完成的词。本次为收紧。"
             }
           ]
         },
@@ -823,6 +840,14 @@
         {
           "t": "12:47",
           "n": "八审已派 task-mtwf0gbr-4vtswg。七审两条 open（S24 推导漏加 TTL + 必填字段有默认值、S25 int 截断使亚秒绕过对账与安全上限）与自查 S26（未知 multiplier 当 1）均已修，S23 亦已闭合；tests/market 253 passed、A 22/22、report rc=0。本轮任务书重点：S24 根因是同一规则两处实现只改一处，已抽成单一来源 derived_window_s 两处共用，并要求审查方独立排查其它\"同一侧内部重复实现\"（明确排除 A/B 两内核有意不共享的对拍设计，那不算缺陷）；另明确 research_horizon_s 取值本身是 G0 待裁数值，不属实现缺陷，不得据此判 fail。操作教训：用 bash 派发含反引号的任务书会被 zsh 命令替换吞掉片段（本次丢了三个标识符名，核心指令完好），后续派发一律避免反引号或改用文件传参。"
+        },
+        {
+          "t": "12:58",
+          "n": "八审终裁 fail（review-G2-P1.md，closed 18 / partial-P2 8 / open 2），新增 S27（loader 第三次推导启动时刻、省略 t_start 时漏 policy.latency_s，与 contract/kernel 分叉）、S28（缺口网格按整秒取模，t_start 带亚秒时完整行情被误判 BAR_GAP）。两条已修：S27 改用唯一来源 req.resolved_t_start(policy)；S28 网格对齐改精确微秒，与 expand_bar 精度一致。**两条都是我已修过的同一族的第二次复发**——S27 是\"同一规则多处实现\"（S24 同族），S28 是\"亚秒截断\"（S25 同族），说明我此前两次都只修了发现处、没做同族横扫。另落地 B16：research_horizon_s 定 5 天（曲线 v2 依据），PAIR_KEY 加 policy_hash 并**额外加一条批量级断言**（同一 policy_version 必须恰好一个 policy_hash，合并数据集时当场炸而非悄悄配对——仅按裁定加键会把该检测放宽），policy_hashes.json 按 B4 豁免条件标注占位状态与待定依据（元数据键与版本查找分离，避免 _note 被当版本名）。编号按 G0 约定改 G2-SC-01。tests/market 255 passed；A 22/22；report rc=0。"
+        },
+        {
+          "t": "13:02",
+          "n": "M-10 verify 按 A19 升级并做突变自证（B17 要求记录注入内容与两次结果）。新 verify = 未完成标记检查 AND 终裁行正向判读（串联）。**突变自证四组**：基线（终裁 fail）rc=1 ✓；仅把终裁改 pass rc=0 ✓（完成的 pass 应放行）；pass + 注入\"暂承接/稍后回填\"标记 rc=1 ✓（A19 场景，标记使终裁无效）；insufficient rc=1 ✓（视同 fail）；还原后 rc=1 ✓。**一处设计说明请 G0 注意**：标记集合**不含裸词「占位」**——它在本项目报告里是合法业务词（占位政策取值、占位 Rules 承载未知乘数），当前 review-G2-P1.md 正文就有两处合法使用；若按字面把「占位」当未完成标记，这道门会永远红在错误原因上，反而掩盖真实终裁。现只匹配明确表示工作未完成的词：稍后回填/待回填/暂承接/待本轮独立核验/待补充证据/行首 TODO。另：八审报告现已完成（319 行，终裁 fail，无未完成标记），G0 R34 看到的 insufficient 是它写作中途的快照。"
         }
       ]
     },
@@ -1598,6 +1623,12 @@
         "module": "market",
         "verdict": "issues",
         "note": "[G0/427ed064 R34] 八审终裁 insufficient，**不可解除**：成因是表头明写『S24–S26 待本轮独立核验、最终计数与证据稍后回填』即核验未进行（工作未完成），不属 B10 第3节『环境结构性不可验且显式非阻断』的解除范围。M-10 verify 实跑 rc=1，判读正确。由此补规则 §9.10.15 A19：含未完成标记的报告终裁行一律无效、review verify 须增加标记检查并与终裁判读串联、先落盘后探针的任务须要求终裁行最后写入。本次恰为 insufficient 所以无害，若占位行写 pass，M-10 会被一份未做核验的报告放行。实跑：data 219 passed（G1 Codex 已落地，177→219）、market 253 passed、research 323 passed；integration 1 passed/7 errors——G1 新代码期待 dec_audit_stratum 而已发布 gold（别名仍 0c51102b）建于该列之前，属**迁移中间态**：代码已更新、制品未重发布。等 G1 以新别名重发布后复跑。verifyHistory 核对：新增 0，收紧 0，放宽 0。"
+      },
+      {
+        "at": "13:05",
+        "module": "market",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R36 · 更正 R34] 八审**实际终裁为 fail**（319 行，未完成标记 0，G0 已复核）；R34 记的 insufficient 是写作中途快照，该记载作废。A19 不撤销——中途状态确实短暂存在，verify 可能正好在那一刻跑。A20 裁定：裸词「占位」不入标记集（正文两处为合法业务词，纳入会让门永远红在错误原因上）；自九审起 review 报告须带『证据完整性：完成|待回填』显式声明，verify 先读声明再判终裁行，关键词清单降为兜底，缺失视同待回填。**verifyHistory 审计：累计 3 条，收紧 3，放宽 0**。新增的 M-10 变更把标记检查与终裁判读串联，属收紧；G2 已按 B17 做突变自证（基线 fail→rc1、改 pass→rc0、pass+注入标记→rc1、insufficient→rc1），四例齐全。G2 主动撤回其此前『两族都横扫了一遍』的不实陈述并在真正横扫后揪出两处漏网（validator 第二处 t_start 推导、loader 取整的期望 bar 数），已抽成单一来源 derived_t_start/derived_window_s/first_grid_point。撤回行为已列为规范。实跑 tests/market 253→G2 报 257。"
       }
     ],
     "blockers": [
