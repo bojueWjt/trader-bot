@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T04:26:05Z",
+  "updatedAt": "2026-09-11T04:29:00Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -355,8 +355,8 @@
       "artifacts": [],
       "review": {
         "verdict": "pass",
-        "note": "[G0/427ed064 R37] A18 三项 G0 独立核验闭合：(1) 别名→fixture-v1@70379151（80 行），order_plan.stop = Struct{price: Decimal(38,12)}，经济量列同；(2) grep 'float(' 于 lifecycle/validate/extract 的 stop|level|price|fraction|qty|entries|tps 路径 → 空；(3) test_a18_verbatim_source_string_reaches_gold 实跑 1 passed（逐字断言：64094.879166666667 / 63000.123456789123 / 65500.000000000001 走完产线后 str(gold) 与源串相等）。G0 另做独立核验：真实 gold 147 个 TP 取值中小数位>6 的为 0——夹具值全是短小数、无法从产物侧区分是否经过 float，故该项以 G1 的高精度专用夹具测试 + 结构性核查（dtype + 路径无 float）共同认定，记录此局限。**OR-04 在 80 行新夹具上 8 passed 全绿**（含 R28 新增的非退化门）：80 请求零错误、fill 50 partial/28 filled/2 none、outcome 65 tp_hit/13 right_censored/2 rejected。逐字断言这一形式已证明有价值：它不依赖挑对量级，而往返测试要靠运气挑中 float 表示不了的值——这正是 V01 躲过前四轮的原因。",
-        "at": "2026-09-11T04:07:26Z"
+        "note": "[G0/427ed064 R42 · 按分类闭合标准裁 D-10] **五类必闭合项 G0 对抗式实跑核验，全部闭合**（不采信回执）：**前视**：load_episode_events 决策投影 81 条事件中 edge_available_at > t_dec 的 = **0**；**致命降级**：混合原因码下致命支配一般（[EDIT_ORIGINAL_UNAVAILABLE,UNIT_SCALE_CONFLICT]→fatal、主因按冻结优先级），FATAL 集与契约 §4 三项一致未私增，决策视图 80 行含致命码 = **0**；**安全越权**：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC、a/../../、外指 symlink **全部 REJECT** 且理由分类正确；**可复算性**：经济量叶列全为 decimal128(38,12)（两处『非 decimal』经核为 eligibility 的 price_check 布尔字段，属 G0 过滤器按字段名匹配的假阳性，非缺陷）；**幸存偏差**：quarantine telegram 745 行 / market 171 行均可读未删除，损耗表 1–6 层齐全 61 行。旁证：tests/data 225 passed；别名 fixture-v1@25d8e4ca（80 行）；**OR-04 端到端 8 passed 全绿**（含非退化门）。**G0 判定：按分类闭合标准，D-10 够格 done**；残余项须在 INTEGRATION_REPORT 的已知缺口表中带声明列出（W01–W03 根因『录制 LLM 数值路径与正式标签空值』已由 G1 直接修并实跑闭合）。**provenance 注记**：本次适用分类标准的依据是 G1 转述的用户裁定（『r5 仍 fail 改走 G0 分类闭合标准』），G0 未直接收到该指令；任务状态由 G1 自行标记，G0 只出判定。若用户口径不同请告知，G0 可撤回本判定。",
+        "at": "2026-09-11T04:29:00Z"
       },
       "lastUpdate": "2026-09-11T04:25:23Z",
       "tasks": [
@@ -1725,6 +1725,12 @@
         "module": "market",
         "verdict": "issues",
         "note": "[G0/427ed064 R41] **九审落盘（A19/A20 首次完整生效）**：`证据完整性：完成` 在 338 行、`九审终裁：fail` 在 339 行末，M-10 verify 实跑 rc=1 判读正确。计数：**S01–S28 closed 20 / partial-P2 8 / open 0**（此前全部收口），新增 S29–S31 阻断 P1。三条各为已裁族的**第三次复发**：S29=一式多处实现第三处（partition_check 自行实现网格，完整两 bar 首 bar gap=True，右界+1µs 时 **missing=−1**）；S30=一支查另一支没查第三处（窗口下界用 t_start or t_dec，未对解析后启动时刻校验，省略时 −1µs/0 均接受而显式同值则拒）；**S31=无法失败的检查第三处，且对象是 G0 B17 强制要求的那条回归**——测试本地重实现 group_by 只断言 conflict.height>0，从未把冲突输入送进真实门，审查方内存删除该门后测试仍 PASS。已裁 §12 A24：契约强制新增的门其回归必须以『删除/停用真实门→回归必须红』完成突变自证，突变对象须是生产代码真实门、测试内重实现视同 A23 无效；横扫连续三次漏站点故不再要求再横扫，改为树级负向模式禁令（A23 的 lint 从单文件扩到全 src）+ 单一来源调用点登记并断言集合相等。**一般原则：同族第三次出现时，正确反应不是更仔细地找，而是让它不可表达**——前两次可归因疏忽，第三次说明依赖人去记得的机制已失效。"
+      },
+      {
+        "at": "13:29",
+        "module": "data",
+        "verdict": "pass",
+        "note": "[G0/427ed064 R42 · 按分类闭合标准裁 D-10] **五类必闭合项 G0 对抗式实跑核验，全部闭合**（不采信回执）：**前视**：load_episode_events 决策投影 81 条事件中 edge_available_at > t_dec 的 = **0**；**致命降级**：混合原因码下致命支配一般（[EDIT_ORIGINAL_UNAVAILABLE,UNIT_SCALE_CONFLICT]→fatal、主因按冻结优先级），FATAL 集与契约 §4 三项一致未私增，决策视图 80 行含致命码 = **0**；**安全越权**：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC、a/../../、外指 symlink **全部 REJECT** 且理由分类正确；**可复算性**：经济量叶列全为 decimal128(38,12)（两处『非 decimal』经核为 eligibility 的 price_check 布尔字段，属 G0 过滤器按字段名匹配的假阳性，非缺陷）；**幸存偏差**：quarantine telegram 745 行 / market 171 行均可读未删除，损耗表 1–6 层齐全 61 行。旁证：tests/data 225 passed；别名 fixture-v1@25d8e4ca（80 行）；**OR-04 端到端 8 passed 全绿**（含非退化门）。**G0 判定：按分类闭合标准，D-10 够格 done**；残余项须在 INTEGRATION_REPORT 的已知缺口表中带声明列出（W01–W03 根因『录制 LLM 数值路径与正式标签空值』已由 G1 直接修并实跑闭合）。**provenance 注记**：本次适用分类标准的依据是 G1 转述的用户裁定（『r5 仍 fail 改走 G0 分类闭合标准』），G0 未直接收到该指令；任务状态由 G1 自行标记，G0 只出判定。若用户口径不同请告知，G0 可撤回本判定。"
       }
     ],
     "blockers": [
