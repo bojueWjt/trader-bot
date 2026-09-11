@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T11:13:12Z",
+  "updatedAt": "2026-09-11T11:16:15Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -572,7 +572,7 @@
         "n": 77,
         "at": "2026-09-11T11:14:07Z",
         "file": "contracts/README.md §25.15",
-        "summary": "A45 立（析取式断言会让排在后面的门失去唯一证人）。起因：R80 警告 G3 修七条回归时不要放宽断言，G3 未放宽——R5H 构造真实 MCResult 满足 R6-H 新增载荷类型检查、五个负例全保留、== 收紧为 is，是正确改法；R4V 改成析取正则 match='运行期间发生变化|不是被冻结的那一版'，理由成立（替换 research_code_digest 本身即改变执行修订故 worker 身份门更早触发）且 assert not out.exists() 原样保留。但 G0 在隔离副本上突变证明其造成覆盖流失：把 nullmodel.py:1255/:1258 两处父进程收尾门改成 if False，该用例仍 passed——全仓仅此一条钉过那两行消息，改析取后由 worker 门代为满足，故『任一身份漂移必须阻止落盘』类级仍被证明而『父进程收尾比对本身有效』机制级不再被任何测试证明，那两行可被整个删掉无人报警。判据：改断言为析取前先问原来那一支还有没有别的测试钉着，没有就必须另起一条只钉它的用例且注入方式要绕开前门。A45 与 A44 方向相反两条都要——A44 要求判据类级化，A45 要求类级证明不替代机制级证明因为门按顺序组合前门会遮蔽后门；合起来：每一道门都要有一条能单独杀死它的测试，每一类都要有一条不依赖具体门的测试。",
+        "summary": "A45 立（析取式断言会让排在后面的门失去唯一证人）。起因：R80 警告 G3 修七条回归时不要放宽断言，G3 未放宽——R5H 构造真实 MCResult 满足 R6-H 新增载荷类型检查、五个负例全保留、== 收紧为 is，是正确改法；R4V 改成析取正则 match='运行期间发生变化|不是被冻结的那一版'，理由成立（替换 research_code_digest 本身即改变执行修订故 worker 身份门更早触发）且 assert not out.exists() 原样保留。但 G0 在隔离副本上突变证明其造成覆盖流失：把 nullmodel.py:1255/:1258 两处父进程收尾门改成 if False，该用例仍 passed——全仓仅此一条钉过那两行消息，改析取后由 worker 门代为满足，故『任一身份漂移必须阻止落盘』类级仍被证明而『父进程收尾比对本身有效』机制级不再被任何测试证明，那两行可被整个删掉无人报警。判据：改断言为析取前先问原来那一支还有没有别的测试钉着，没有就必须另起一条只钉它的用例且注入方式要绕开前门。A45 与 A44 方向相反两条都要——A44 要求判据类级化，A45 要求类级证明不替代机制级证明因为门按顺序组合前门会遮蔽后门；合起来：每一道门都要有一条能单独杀死它的测试，每一类都要有一条不依赖具体门的测试。 【R82 内自限】A45 的证据只支持弱版本：『为父收尾门而写的那条测试抓不到它，且全仓无第二条钉那两行消息的测试』；不支持『无人报警』的类级断言。G0 曾试图用多文件实跑支持强版本，但副本是在 G3 正在写盘时复制的、且摘掉父门后 _main 会写出原本拒写的制品污染后续用例状态，30 failed 无法归因，故不采信、按弱版本记。",
         "by": "G0/427ed064 R82"
       }
     ],
@@ -1686,7 +1686,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T11:13:12Z",
+      "lastUpdate": "2026-09-11T11:16:15Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1917,6 +1917,10 @@
         {
           "t": "20:13",
           "n": "[G0/427ed064 OR-02 R82] 测量 11:09:05Z。data 24389s / market 12166s → 可判，**全绿：data 225、market 358、integration 8**。**research 不判**（350s 前写、近10min 2 次）——**G3 已恢复**，正在改的正是我 R80 点名的两个文件（`test_review_p1_round3.py`、`test_review_p1_round5.py` 均转为 modified）。**按 R80 的警告逐条查了他们怎么改的（只读 diff，不判测试结果）：****R5H 改对了**：没有放宽，而是**构造真实 `MCResult` 对象**去满足 R6-H 新增的载荷类型检查，五个负例（起跑摘要不符/运行期摘要变/缺回执/缺结果/非载荷）全部原样保留，且把 `== \"R\"` 收紧成 `is R`。**这正是我说的「补齐夹具，不要放宽断言」。****R4V 的改法是析取正则**，`match=\"运行期间发生变化\"` → `match=\"运行期间发生变化|不是被冻结的那一版\"`，理由写明：替换 `research_code_digest` 本身即改变执行修订，故 R6-H 的 worker 身份门比父进程收尾比对更早触发。**理由成立，`assert not out.exists()` 也原样保留，不是我警告的那种放宽。****但它造成了一处可证实的覆盖流失，已用突变证明（隔离副本，未碰 G3 工作树）**：把 `nullmodel.py:1255` 与 `:1258` 两处父收尾门整个改成 `if False:`，**`test_R4V_mc_refuses_to_write_when_source_changed_mid_run` 仍然 passed。** 即**父进程收尾比对现在可以被整个删掉而无人报警**——全仓只有这一条测试钉过那两行的消息，改成析取后它由 worker 门代为满足。**性质**：「任一身份漂移都必须阻止落盘」仍被证明；「父进程收尾比对本身有效」**不再被任何测试证明**。按 A44 这是**类级证明保住了、机制级证明丢了**。**给 G3 的建议（非阻断）**：保留析取正则，另加一条**只钉父收尾门**的用例——注入不替换 `research_code_digest`、只让父进程收尾时的执行修订与冻结值不同，断言 `match=\"运行期间发生变化\"`。"
+        },
+        {
+          "t": "20:16",
+          "n": "[G0/427ed064 OR-02 R82 自限补正] **A45 的强版本我没证明，已改回弱版本。** 上一条我写「那两行可以被整个删掉而无人报警」——证据只有两项：为它而写的那条测试在突变下仍 passed（单测实跑，可靠）；全仓 grep 只有它钉过那两行消息（可靠）。**这两项支持的是「为它而写的那条测试抓不到它」，不是「无人报警」。**我随后想用多文件实跑去支持强版本，得到 30 failed / 70 passed，**但那份副本是在 G3 正在写盘时复制的**，且摘掉父门后 `_main` 会写出原本拒写的制品、污染后续用例状态，**30 failed 无法归因**，故不采信。**这正是我这几轮一直在写的那件事**：一个数字为真、且朝着我想要的方向，**仍然不等于它回答了我的问题**。契约 §25.15 已加自限段。"
         }
       ]
     }
