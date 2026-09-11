@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:36:44Z",
+  "updatedAt": "2026-09-11T03:44:26Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -258,10 +258,18 @@
         "section": "§9.10.14 A18",
         "summary": "V01 核实：落盘 dtype 合规但值经 extract.py/validate.py 绕回 float，当前夹具因全是短小数看不见（147 样本 0 残留），实测 BTC 量级第 12 位小数确被改写；裁定声明精度的字段路径禁止有损中间转换，全程 Decimal 或字符串；声明类型是保真度承诺，绕经 float 后契约看似遵守实已违反且下游不可分辨，按 B14 最重档定级；指认为同一元模式第三个上下文（兜底贴标签/假值静默修补/有损转换：用看似合理的值悄悄替换真实值且不发信号）",
         "by": "G0/427ed064 R31"
+      },
+      {
+        "n": 38,
+        "at": "2026-09-11T03:44:26Z",
+        "file": "contracts/execution-interface.md",
+        "section": "§5.17 B15",
+        "summary": "七审两条 open 裁定：(1) B12 推导式实现漏 entry_ttl 项（契约110s vs 实现50s，同行情下标签由 tp_hit/net5 翻为 right_censored/netNone），且现有两条 horizon 测试把错式子写成期望故不构成合规证据；(2) research_horizon_s 宣告必填却可省略并静默补 14 天，必填即必填、占位须显式登记政策版本；(3) S25 亚秒绕过属 G0 规格漏洞——B9 逐值相等与 B12 封顶在秒粒度比较，亚秒被 int 截断，裁定一律在完整时间戳分辨率精确比较禁止截断；另记编号冲突消歧：审查方编号与窗口自查编号不得共用序列",
+        "by": "G0/427ed064 R32"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.14",
+    "version": "v1.15",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -567,8 +575,8 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R30] S24 G0 实地核实属实：execution.py:234 rules_known 查了 tick/step/min_notional/status/区间，唯独漏 multiplier；:239 multiplier=Decimal(rr['multiplier'] or '1') 未知静默当 1，而 S08 后 multiplier 缩放全部经济量。裁定入契约 v1.13 §5.16 B14：(1) 同族严重度准则——『产出看似合理的错误数值』高于『放过非法输入』，因前者与正确答案在下游不可区分、会一路进 θ 与最终声明（采纳 G2 对 S22 vs S24 的对比）；(2) 一般规则——证据完备性判定（rules_known/bars_complete/funding_schedule_complete）必须覆盖其解锁的每个参与经济计算的参数，缺失即判定为假，判定项与参数集逐一对应并加断言测试；(3) 不可达不是不修的理由：S24 今日不可达仅因两个生产者硬写 '1'，但列可空，接入第三数据源即触发；依赖生产者永不改变是把正确性寄托于契约之外的巧合。与 B9 对 filled_closed 的处理不矛盾——那里不可达的是合法枚举值，这里不可达的是缺陷。排期（终审后修）认可。实跑 market+integration 259 passed。",
-        "at": "2026-09-11T03:28:20Z"
+        "note": "[G0/427ed064 R32] 七审终裁 fail：S01–S23 closed 15 / partial-P2 8 / **open 0**，两条新 open 均指向 G0 裁定，已裁入契约 v1.15 §5.17 B15。(1) B12 推导式实现漏 entry_ttl 项（contract.py:263/418/471 只用 research_horizon_s）——反例决定性：policy(ttl60/research50/max200) 下契约 110s vs 实现 50s，同一行情 50s→right_censored/netNone、110s→tp_hit/net5，**标签翻转**；且现有两条 horizon 测试把漏 TTL 的式子写成期望，按 A17 不构成合规证据。(2) research_horizon_s 宣告必填却可省略并静默补 14d——同族又一例，裁定必填即必填、占位须显式登记政策版本进 content_hash。(3) S25 亚秒绕过属**G0 规格漏洞**：B9 逐值相等与 B12 封顶在秒粒度比较，+1µs 至 +999999µs 均放行；裁定一律在完整时间戳分辨率精确比较、禁止截断——降精度比较等于给出每次小于一秒的免费额度。另记编号冲突：'S24' 被 G2 自查的 multiplier 项与七审的 B12 项同时占用，自此窗口自查项须加前缀（如 G2-SC-01）。实跑 market 251 passed；data/research/integration 本轮不判——G1 的 Codex 写任务正在改树（12:40 写入），新代码读旧 gold 导致 dec_audit_stratum 列缺失，属写入中间态。",
+        "at": "2026-09-11T03:44:26Z"
       },
       "lastUpdate": "2026-09-11T03:26:36Z",
       "tasks": [
@@ -1542,6 +1550,12 @@
         "module": "data",
         "verdict": "issues",
         "note": "[G0/427ed064 R31] **四套全绿**：data 177 / market 251 / research 323 / integration 8（G3 已完成对 G2 新列的 parity 对齐）。**S16/S07 抽验（对抗式实跑，非采信回执）：两条均闭合**。S07：混合原因码致命支配一般、主因按冻结优先级、FATAL 集与契约 §4 三项一致未增删。S16：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC \\\\\\\\srv\\\\share、sub/../../、外指 symlink 全部 REJECT 且理由分类正确——上轮我报的反斜杠父级已补上。**V01 实地核实（结论比属实更细）**：落盘 dtype 全为 decimal128(38,12) 合规；但 extract.py:643-644 与 validate.py:99-100 把 stop/tps.level/fraction 绕经 float；当前夹具 147 个 TP 取值中小数位>4 的为 0（全是解析自文本的短小数，float 可精确表示）故看不见；但 G0 实测 Decimal('64094.879166666667') 经 float 往返变 64094.879166666666，**第 12 位被改写**——BTC 量级 float64 只剩约 11 位小数而 schema 宣称 12 位。已裁定入契约 v1.14 §9.10.14 A18：声明精度的字段路径禁止有损中间转换。**四轮 fail 的处置建议已上报用户**：G1 自陈 open 项全为有界反例、无设计规模项，倾向再一轮 Codex 修改 + r5，而非动用分类闭合标准。"
+      },
+      {
+        "at": "12:44",
+        "module": "market",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R32] 七审终裁 fail：S01–S23 closed 15 / partial-P2 8 / **open 0**，两条新 open 均指向 G0 裁定，已裁入契约 v1.15 §5.17 B15。(1) B12 推导式实现漏 entry_ttl 项（contract.py:263/418/471 只用 research_horizon_s）——反例决定性：policy(ttl60/research50/max200) 下契约 110s vs 实现 50s，同一行情 50s→right_censored/netNone、110s→tp_hit/net5，**标签翻转**；且现有两条 horizon 测试把漏 TTL 的式子写成期望，按 A17 不构成合规证据。(2) research_horizon_s 宣告必填却可省略并静默补 14d——同族又一例，裁定必填即必填、占位须显式登记政策版本进 content_hash。(3) S25 亚秒绕过属**G0 规格漏洞**：B9 逐值相等与 B12 封顶在秒粒度比较，+1µs 至 +999999µs 均放行；裁定一律在完整时间戳分辨率精确比较、禁止截断——降精度比较等于给出每次小于一秒的免费额度。另记编号冲突：'S24' 被 G2 自查的 multiplier 项与七审的 B12 项同时占用，自此窗口自查项须加前缀（如 G2-SC-01）。实跑 market 251 passed；data/research/integration 本轮不判——G1 的 Codex 写任务正在改树（12:40 写入），新代码读旧 gold 导致 dec_audit_stratum 列缺失，属写入中间态。"
       }
     ],
     "blockers": [
