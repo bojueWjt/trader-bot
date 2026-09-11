@@ -1,37 +1,56 @@
-# G2 P1 八审（终审）
-## 八审判定表
-2026-09-11，GPT-6 独立八审；先落盘再探针。S01–S26：closed 18 / partial-P2 8 / open 0；新增 S27/S28 后：**closed 18 / partial-P2 8 / open 2**。历史轮次判定原文保留，当前以本表为准。
+# G2 P1 九审（终审）
+## 九审判定表
+2026-09-11，GPT-6独立九审。按表行计：**closed 21 / partial-P2 8 / open 3**（含G2-SC-01，其与S26为同一缺陷的两个编号）；S01–S28为closed20/partial-P2 8/open0，新增S29–S31阻断P1。历史轮次正文与判定保留，当前以本表为准。
 
 | ID | 状态 | 复现命令与输出摘要 | 是否阻断 P1 |
 |---|---|---|---|
-| S01 TP 当前可成交性 | closed | T:test_s01_* 通过；当前 last 不满足 TP 时不成交，A 22/22。 | 否 |
-| S02 funding 证据与账务 | partial-P2 | T:test_funding.py 与 test_c2_loader_missing_funding_and_unknown_rules 通过；AB 保留 U03/引擎余额 unsupported。 | 否；U03、变周期完整性、引擎余额留 P2。 |
-| S03 分钟内部启动 | closed | T:test_s03_* 与 test_c3_s03_b_mark_bars_filtered_by_t_start 通过，启动 bar 不参与。 | 否 |
-| S04 持仓截止/TP 余量 | partial-P2 | T:test_c1_s04_hold_end_precedes_funding_and_b_truncates、T:test_s16_exposure_uses_observation_boundary 通过。 | 否；B 账户/资金事件独立证明仍 P2。 |
-| S05 覆盖/规则入口 | closed | T:test_s05_loader_unknown_quality、test_s05_partition_unknown_ohlc_is_quarantined 通过，缺列/null/false 拒绝。 | 否；四审未知质量反例闭合。 |
-| S06 入湖冲突/bronze | partial-P2 | T:test_s06_* 与 test_s14_revised_source_supersedes_old_silver_days 通过，未知重复隔离、旧日分区失效。 | 否；bronze 深度重放、多来源版本化仍 P2。 |
-| S07 队列/post-only/账户 | partial-P2 | T:test_s07_*、T:test_s07_management_stream_rejected_at_request_boundary 通过，管理流显式拒绝。 | 否；C01/E13、完整预留生命周期仍 P2。 |
-| S08 multiplier | closed | T:test_s08_multiplier_scales_pnl_fees_exposure 与 test_c1_s08_public_simulate_multiplier 通过。 | 否 |
-| S09 as-of 等号/null/序号 | closed | T:test_s09_* 与 test_c1_s09_same_name_sequence_columns 通过，等号 null 不回退。 | 否 |
-| S10 A/B 解释门禁 | partial-P2 | T:test_s10_* 通过；AB 无未知码，余额证据仍 not_run。 | 否；独立逐事件经济证明、B 定型仍 P2。 |
-| S11 测试/CLI 门禁 | partial-P2 | T 253 passed；指定R 89 passed；A22/22；B与AB报告见八审证据。 | 否；原P2边界保留，全绿不豁免新反例。 |
-| S12 不可变输入/构建身份 | partial-P2 | T:test_s12_*、test_replay.py通过；当前登记5/5匹配；历史迁移证据限度保持。 | 否；版本化湖/供应链及历史不可变登记仍P2。 |
-| S13 事件因果/精度/step | partial-P2 | T:test_s13_*、R 两事件精度回归通过；静态 order_rank 死表归旧序列化残余。 | 否；共享容量/当前价/预留独立重放仍 P2。 |
-| S14 源修订及逐行来源 | closed | T:test_s14_* 与 R 质量入口通过；来源缺列/null/旧 SHA 保持拒绝。 | 否 |
-| S15 双流缺口/质量优先级 | closed | T:test_review_p1_round3.py 全5项通过，两流最早缺口、首尾缺及质量优先不退化。 | 否 |
-| S16 B hold 暴露窗口 | closed | T:test_s16_exposure_uses_observation_boundary 与 horizon 等号共5项通过。 | 否；仅闭合该暴露反例，不扩大 B 验收。 |
-| S17 显式 fraction 一致性/精度 | closed | T:test_s17_explicit_fractions_cannot_bypass_policy_or_precision 通过；独立162分配组合18接受/144拒绝。 | 否；合法推导值保持接受。 |
-| S18 A15 无 expired 仍映到期 | closed | 原样 P18 exit1/ContractError，含完整实际事件集合；独立映射2688组合、160异常均回报集合。 | 否；三条未命中分支均闭合。 |
-| S19 显式 TTL 绕过 policy | closed | T:test_s19_explicit_ttl_cannot_bypass_policy_fallback 通过；两来源16项独立探针6接受/10拒绝。 | 否；缺省/相等合法，偏离与非法域被拒。 |
-| S20 t_start 推导对账 | closed | T:test_contract.py::test_request_validation 通过；直接 datetime 比较拒绝显式偏移。 | 否；观察窗的新截断问题另列 S25。 |
-| S21 删失优先级落实 | closed | T:test_s21_primary_censor_follows_contract_priority_not_check_order 通过，A/B 均 RULE_HISTORY_MISSING、两 coverage 位 false。 | 否；常量推导主因断言同过。 |
-| S22 显式空 entry 分配被当缺省 | closed | 原样 P22 exit1/ContractError（长度不符）；空entry/非空TP的空分配均拒绝，无TP时空元组合法。 | 否；不再静默修补显式空分配。 |
-| S23 DF_DECIMAL 常量生效 | closed | T:test_constants_effective.py 6项通过；内存改(30,10)并重载，batch/event schema 同变，常量推导断言通过。 | 否；DF_DECIMAL 已真实接入。 |
-| S24 B12 推导/必填未落实 | closed | 原样P24：259260.0 259260 True；小政策无hold110/有hold160；省略research字段实际拒绝。 | 否；构造与校验共用derived_window_s。 |
-| S25 horizon 亚秒绕过 | closed | 原样P25：exit1/ContractError；补54次模型校验及999999个亚秒比较域验证。 | 否；逐值对账与封顶均精确比较timedelta。 |
-| S26 未知 multiplier | closed | P26真实调用loader及simulate(A/B)：None→rules_known=False/RULE_HISTORY_MISSING/netNone；已知1→net5。 | 否；未知不再静默当1执行。 |
-| S27 loader启动时间重复推导 | open | P27：同一resolved_t_start，省略t_start→unevaluable；显式写相同值→tp_hit/net5。 | **是**；loader漏latency，与contract/kernel分叉。 |
-| S28 A首bar网格亚秒截断 | open | P28：完整行情，整分钟+1至999999µs误判BAR_GAP；0及+1s对照tp_hit/net5。 | **是**；同侧展开与缺口计算精度不一致。 |
+| S01 TP 当前可成交性 | closed | T:test_s01_tp_fill_requires_current_last_to_satisfy_limit 通过；A22/22，历史触及不授权回撤后成交。 | 否 |
+| S02 funding 证据与账务 | partial-P2 | T:test_funding.py、test_c2_loader_missing_funding_and_unknown_rules 通过；AB仍声明U03/引擎余额unsupported。 | 否；变周期完整性与引擎账务留P2 |
+| S03 分钟内部启动 | closed | T:test_s03_intra_bar_start_begins_at_next_bar_open、test_c3_s03_b_mark_bars_filtered_by_t_start 通过；P28五点通过。 | 否 |
+| S04 持仓截止/TP 余量 | partial-P2 | T:test_c1_s04_hold_end_precedes_funding_and_b_truncates、test_s16_exposure_uses_observation_boundary 通过。 | 否；B账户/资金事件独立证明仍P2 |
+| S05 覆盖/规则入口 | closed | T:test_s05_loader_unknown_quality、test_s05_partition_unknown_ohlc_is_quarantined 通过；缺列/null/false拒绝。 | 否；生命周期网格新反例单列S29 |
+| S06 入湖冲突/bronze | partial-P2 | T:test_s06_conflicting_keys_quarantined_and_bronze_retained、test_s14_revised_source_supersedes_old_silver_days 通过。 | 否；深度重放/多来源版本化留P2 |
+| S07 队列/post-only/账户 | partial-P2 | T:test_s07_post_only_cross_rejected_and_price_priority_and_margin_recheck、test_s07_management_stream_rejected_at_request_boundary 通过。 | 否；管理流/完整预留生命周期留P2 |
+| S08 multiplier | closed | T:test_s08_multiplier_scales_pnl_fees_exposure、test_c1_s08_public_simulate_multiplier 通过。 | 否 |
+| S09 as-of 等号/null/序号 | closed | T:test_s09_equal_candidate_null_kept、test_c1_s09_same_name_sequence_columns 通过；等号null不回退。 | 否 |
+| S10 A/B 解释门禁 | partial-P2 | T:test_s10_classifier_exc_first_and_predicate_bound 通过；AB无未知码，余额证据仍not_run。 | 否；独立经济证明/B定型仍P2 |
+| S11 测试/CLI 门禁 | partial-P2 | T 257 passed；R 44 passed；A22/22；B12/22；AB exit0，不能豁免P29–P31反例。 | 否；保持原P2边界 |
+| S12 不可变输入/构建身份 | partial-P2 | T:test_s12_hash_sensitivity_and_stale_policy_hash_rejected、test_replay.py 通过；当前登记5/5匹配。 | 否；历史不可变登记/版本化湖仍P2 |
+| S13 事件因果/精度/step | partial-P2 | T:test_c1_s13_closed_causality_precision_and_step、test_s13_event_precision_checked_by_invariants 通过。 | 否；独立容量/预留重放仍P2 |
+| S14 源修订及逐行来源 | closed | T:test_s14_loader_unverifiable_source_rows_fail_closed、test_s14_revised_source_supersedes_old_silver_days 通过。 | 否 |
+| S15 双流缺口/质量优先级 | closed | T:test_review_p1_round3.py 全5项通过；两流最早缺口、首尾缺和质量优先保持。 | 否；S29为分区体检新接缝 |
+| S16 B hold 暴露窗口 | closed | T:test_s16_exposure_uses_observation_boundary、test_s16_horizon_equal_mark_does_not_extend_exposure 通过。 | 否；不扩大B定型验收 |
+| S17 显式 fraction 一致性/精度 | closed | T:test_s17_explicit_fractions_cannot_bypass_policy_or_precision 通过；独立162组合18接受/144拒绝。 | 否 |
+| S18 A15 无 expired 仍映到期 | closed | P18原样exit1/ContractError含完整事件集合；R:test_s18_all_non_match_branches_report_actual_event_set 通过。 | 否 |
+| S19 显式 TTL 绕过 policy | closed | R:test_s19_explicit_ttl_cannot_bypass_policy_fallback 通过；独立16项6接受/10拒绝。 | 否 |
+| S20 t_start 推导对账 | closed | R:test_request_validation 通过；显式启动偏移拒绝，推导值一致；观察窗下界另列S30。 | 否 |
+| S21 删失优先级落实 | closed | R:test_s21_primary_censor_follows_contract_priority_not_check_order 通过；A/B均规则缺失优先、两coverage位false。 | 否 |
+| S22 显式空 entry 分配被当缺省 | closed | P22原样exit1/ContractError长度不符；R:test_s22_explicit_empty_allocation_is_rejected_not_silently_filled 通过。 | 否 |
+| S23 DF_DECIMAL 常量生效 | closed | R:test_constants_effective.py 8项通过；内存改DF_DECIMAL为(30,10)并reload，batch/event均随之变化。 | 否 |
+| S24 B12 推导/必填未落实 | closed | P24原样输出432060.0/432060/True；合成政策无hold110、有hold160，缺research字段ValidationError。 | 否 |
+| S25 horizon 亚秒绕过 | closed | P25原样exit1/ContractError；独立54次模型校验确认推导逐值对账与封顶精确。 | 否；下界另列S30 |
+| S26 未知 multiplier | closed | P26采用P27内存表改multiplier=None/1：loader未知→A/B unevaluable/netNone；已知1→tp_hit/net5。 | 否；与G2-SC-01同一缺陷的审查编号 |
+| S27 loader启动时间重复推导 | closed | P27原样exit0；省略/显式同一t_start均rules_known=True、bars_complete=True、tp_hit/net5。 | 否；仅闭合原loader反例 |
+| S28 A首bar网格亚秒截断 | closed | P28原样exit0；0/1/500000/999999/1000000µs均无删失、tp_hit/net5、14事件。 | 否；同族遗漏另列S29 |
+| G2-SC-01 未知乘数证据门 | closed | P26实调loader+simulate(A/B)通过；与S26交叉对应，不重复宣称两个独立修复。 | 否 |
+| S29 分区体检网格仍重复且降精度 | open | P29：完整两bar却首行gap=True/n=0；右界+1µs时expected3/actual4/missing−1。 | 是；M-04同族漏网，完整输入会被删失 |
+| S30 观察窗下界漏推导启动时刻 | open | P30：latency60且省略t_start，窗口−1µs/0均接受；显式同值均拒绝；A产net0/B报错。 | 是；公共请求边界随表达方式分叉 |
+| S31 B17 冲突门回归及诊断不完整 | open | P31：真实门会拒双哈希但不列冲突哈希；内存删除该门后现有test_b16仍PASS。 | 是；B17注入式回归/冲突取值要求未落实 |
+## 九审独立证据与新增必修
+命令目录quant-lab；全程PYTHONDONTWRITEBYTECODE=1，探针/CLI另设PYTHONPATH=src，pytest加-p no:cacheprovider。T=`.venv-g2/bin/python -m pytest tests/market -q`：257 passed/15.17s/exit0；R=`.venv-g2/bin/python -m pytest tests/market/test_constants_effective.py tests/market/test_outcome_kind.py tests/market/test_contract.py -q -v`：44 passed/1.78s/exit0，无skip/xfail。A/B=`.venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A`（B换末参数）：22/0/exit0、12/10/exit1，双方22例replay=True；AB=`.venv-g2/bin/python -m quant_lab.market.nautilus_adapter report --reps 1`：exit0，MATCH12/命令延迟3/跳空1/同刻优先4/GTD1/流动性1，未知码/NOT_RUN/A_GOLD_FAIL均0，不写AB文件。
+P27/P28从下方八审正文抽取反引号内原命令，用shlex.split+subprocess.run原样复跑，结果见表。P18/P22/P24/P25同法复跑。P26只把P27内存合成表multiplier改None/1，并分别调用A/B：未知均unevaluable/netNone，已知均tp_hit/net5；文件读取替身不冒充真实湖或联网证据。小政策ttl60/research50/max200/latency60，hold=None/100分别110/160秒；两分支×推导/封顶policy/封顶caller×偏移{−1,0,1,2,123456,500000,999998,999999,1000000}µs=54次完整model_validate，全符独立期望；缺research字段实际ValidationError。
+B16独立核验：5个登记政策research_horizon_s均432000，content_hash逐条匹配；PAIR_KEY含policy_hash且用于simulate_batch重复检测，G3既有_ARM_KEYS含hash。登记表_placeholder_fields与_note明示占位及14d→3d→5d依据，最终bump义务保留。实际批量门在strict=True/False都拒双哈希；不把任意pl.concat自动视为已验收，B17未闭合部分见S31。数值取舍和部分出场estimand依用户范围交G0，不据此否决。
+新helper数学：first_grid_point为ceil(a_us/iv_us)，grid_points_between为max(0,floor((b_us−1)/iv_us)−ceil(a_us/iv_us)+1)，b≤a返回0；半开区间端点正确。独立逐点枚举6000对：interval={1,7,60,180,300,900,1800,3600,28800,86400}，负epoch/epoch/2024基点、UTC/+09、边界前后1µs/999999µs、空/反向区间，计数及首点均无差异。初次探针把epoch秒误当网格索引导致OverflowError；修正探针输入后完成上述穷举，不计作产品失败。kernel_a._first_bar_gap和loader确实调用helper；全族并未统一，见S29。
+S29（P1）：partition_check.py:240、250、255–260仍用时长整除及首bar>cal_from，自行实现网格而未调用新helper。上市在00:00:00.000001、完整bar为00:01/00:02、下线00:03：expected2/missing0，却首bar gap=True并生成n=0的BAR_GAP；起点整齐、右界00:03:00.000001、完整四bar时expected3/missing−1。补链路用check_bars真实输出作内存loader输入（规则有效至00:04，bar60/120/180，请求窗1µs至180s），loader=False/quality=True，A/B均BAR_GAP/netNone/事件0。此为族B的第三处且沿用重复公式；不是helper公式本身错误。验收须日历首点、半开计数、首尾缺口共用精确网格，并钉住非负missing与完整网格无gap。
+P29最小只读复现（输出依次为对照3/0/全false；2/0/[true,false]/n0；3/−1/全false）：`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nfor au,bu,first,n in [(0,180000000,0,3),(1,180000000,60,2),(0,180000001,0,4)]:\n    a=JAN+dt.timedelta(microseconds=au);b=JAN+dt.timedelta(microseconds=bu)\n    out,qs,r=run(bars(n,start=JAN+dt.timedelta(seconds=first)),rules(a,b))\n    print(au,bu,r.expected_rows,r.missing,out[\"gap_flag\"].to_list(),r.gaps)\n")'`。
+S30（P1）：contract.py:441仍用horizon_end<=(self.t_start or self.t_dec)，后续:466只查上限/推导对账，caller下界未对resolved_t_start检查。P30正常模型验证：latency60、省略t_start，horizon=T+60−1µs或T+60均接受；显式T+60均ContractError；+1µs两者皆合法。负窗进入A得到net0及唯一closed（早于启动），B报ValueError(start was > end)；不把A该异常事件序列宣称合法标签。build_request的caller路径同受此验证器影响。验收须对解析启动时刻要求window>0，并覆盖省略/显式与−1/0/+1µs。
+P30最小只读复现（政策仅进程内登记，不用model_copy绕过请求校验）：`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom quant_lab.market import contract as c,execution as x\nq,m=e03();t=q.t_dec\np=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"audit-latency\",\"latency_s\":60})\nreg=c.load_policy_registry();reg[p.version]=p.content_hash\nwith patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value=reg):\n    for us in (-1,0,1):\n        for explicit in (False,True):\n            start=None\n            if explicit:\n                start=t+dt.timedelta(seconds=60)\n            try:\n                r=c.ExecutionRequest.model_validate({**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":start,\"horizon_source\":\"caller\",\"horizon_end\":t+dt.timedelta(seconds=60,microseconds=us)})\n                print(us,explicit,\"ACCEPT\",r.horizon_end-r.resolved_t_start(p))\n                if us==-1:\n                    for k in (\"A\",\"B\"):\n                        try:\n                            z=x.simulate(r,kernel=k,market=m);print(k,z.net_pnl,[e.kind for e in z.canonical_events])\n                        except Exception as e:\n                            print(k,type(e).__name__,str(e))\n            except c.ContractError as e:\n                print(us,explicit,\"REJECT\",str(e))\n")'`。
+S31（P1）：execution.py:109–115真实批量断言存在，合成双哈希输出在strict两值下均ContractError，但错误仅列版本名，没有B17要求的冲突哈希取值。test_outcome_kind.py:279–295先跑正常batch，随后对本地split重复实现group_by，最后只assert conflict.height>0，从未将冲突输入送入真实门并断言抛错。P31仅内存AST删除simulate_batch的conflict块：原测试PASS→删除门仍PASS→恢复PASS；删除门后的注入输出确为2行/2hash。故新增门回归无法捕获它声称防止的退化，违反B17(1)(3)/(2)，不能用现有全绿收口。验收应对实际门注入双hash并断言ContractError含版本及两hash，删除门则回归必须红。
+P31最小只读突变复现（只改子进程函数绑定/AST，源文件与测试文件未改）：`.venv-g2/bin/python -c 'exec("import ast,inspect\nfrom unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom tests.market.test_outcome_kind import test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain as test\nfrom quant_lab.market import contract as c,execution as x\nq,m=e03();q2=c.ExecutionRequest.model_validate({**q.model_dump(),\"episode_id\":\"merge\"})\nold=x.result_row\ndef inject(req,res):\n    row=old(req,res)\n    if req.episode_id==\"merge\":\n        row[\"policy_hash\"]=\"0\"*64\n    return row\nfor strict in (True,False):\n    with patch.object(x,\"result_row\",side_effect=inject):\n        try:\n            x.simulate_batch([q,q2],markets={m.manifest_id:m},strict=strict)\n        except c.ContractError as e:\n            print(\"gate\",strict,str(e),\"hashes_listed\",q.policy_hash in str(e) and \"0\"*64 in str(e))\ntest();print(\"original PASS\")\ntree=ast.parse(inspect.getsource(x.simulate_batch));f=tree.body[0]\nremove=[n for n in f.body if isinstance(n,ast.If) and any(isinstance(z,ast.Name) and z.id==\"conflict\" for z in ast.walk(n))]\nassert len(remove)==1\nf.body=[n for n in f.body if n not in remove]\nns=dict(x.__dict__);exec(compile(ast.fix_missing_locations(tree),\"<memory-B17-mutant>\",\"exec\"),ns)\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    test();print(\"deleted gate: existing test PASS\")\nns[\"result_row\"]=inject\ndf=ns[\"simulate_batch\"]([q,q2],markets={m.manifest_id:m})\nprint(\"mutant output\",df.height,df[\"policy_hash\"].n_unique())\ntest();print(\"restored PASS\")\n")'`。
+其余同族：20个请求字段逐项核对，原始输入全进request_canonical；两来源×entry/tp各9输入（省略/None/[]/()/[1]/[.5]/False/0/空串）162项=18接受/144拒绝，TTL两来源×8项=6接受/10拒绝。4终止位×3出场腿位×3成交状态×7删失值=2688选择器组合，差异0、160未命中异常均含完整实际事件集合；七值仅在选择器合成域可达，真实22夹具仍六值，C06不可达保持，不用异常对象充当金标。
+静态横扫全部9个market Python模块101处or及时间转换/常量使用：derived_t_start被validator/resolved_t_start共用，但build_request:520仍另写latency加法（当前等价），下界残余见S30；derived_window_s两调用点同源，TTL在before/after/build三处当前一致。vision.expected_rows整日/月且支持interval整除日，未证实亚秒错误；B _ns保留微秒，funding 8h网格仍独立且属于S02既有变周期限制。DF_DECIMAL在内存改(30,10)并reload后batch/event均变；其余阈值/优先级/量化常量有调用和R生效测试。BAR_COLUMNS/FUNDING_COLUMNS/_KEY是旧描述残余，B order_rank归S13；未将死表谎称为已实现规则。check_decimal仍硬写38/12，与当前固定契约一致。
+偏差与DoD：S29会系统性排除完整样本，S30使同语义请求的可评估性依表达方式而变；未发现本轮新helper引入未来决策特征、幸存品种筛选或凭据入口。八项partial-P2（S02/S04/S06/S07/S10/S11/S12/S13）原回归未见退化、不升级。GOAL-2 §7：M-03按G0亲跑解除；M-04–M-09现有本地测试、A≥10金标/不变量、AB报告有实跑，但M-04独立网格反例及M-06请求边界、B17门禁仍未闭合，P1 DoD不满足；不以B既有10例差异或G0数值/部分出场裁定否决。
+证据身份与范围：HEAD=081f1468d366efec9421a6f649808c1eb6c09d43；market顶层*.*、tests/market递归*.py、fixtures/episodes/*.json及execution-interface/GOAL-2共54文件，按仓库相对路径排序连接“路径:sha256\n”，审前审后SHA256同为4d41651e8866dff79ff3e77fe137cd7598646ed3de81d3ec12a225fbba2432de（非原子快照）。必读文档/全部market模块/指定测试及AGENTS/GROK已读；主控GPT-6独立审查，不联网、不调用其他/收费模型、不触生产；只编辑本文件，pytest临时产物由tmp_path管理。八审至一审历史正文284行逐字保留，SHA256=cf948f92e0ea6941c420ce18386f5381c762ab6941d753a9d753a4bea07c728d。
 ## 八审证据与新增必修
 命令目录 quant-lab；均设 PYTHONDONTWRITEBYTECODE=1，探针/CLI 另设 PYTHONPATH=src；pytest 加 -p no:cacheprovider。T=`.venv-g2/bin/python -m pytest tests/market -q`：253 passed/13.65s/exit0；R=`.venv-g2/bin/python -m pytest tests/market/{test_outcome_kind,test_constants_effective,test_contract,test_review_fixes}.py -q -v`：89 passed/4.92s/exit0，无 skip/xfail。A/B replay 原命令：A22/0/exit0、B12/10/exit1，双方22例 replay=True；nautilus_adapter report --reps 1：exit0，MATCH12/命令延迟3/跳空1/同刻优先4/GTD1/流动性1，无 UNEXPLAINED/NOT_RUN/A_GOLD_FAIL，未写 AB 报告。
 P24 原样从七审正文抽取命令执行：exit0，259260.0 259260 True；无 hold 窗口确为60+259200。另以进程内登记政策 ttl60/research50/max200 独立核算，无hold=110、有hold100=160，build_request 与正常 model_validate 一致；缺 research_horizon_s 实际抛 ValidationError(missing)，没有默认值（不把模型层 ValidationError 误述成 ContractError）。构造与对账均调用 contract.derived_window_s。
@@ -316,3 +335,5 @@ PY
 
 一审 fail（closed 0 / partial 0 / open 13）；二审 fail（closed 1 / partial 12 / open 1）；三审 fail（S01–S14：closed 4 / partial-P2 8 / open 2，另列 S15/P1、S16/P2）；正文以 docs/adr/review-G2-P1.rounds-1-2.md 快照与本文件旧版 git 历史为准，不再内嵌全文。
 
+证据完整性：完成
+九审终裁：fail
