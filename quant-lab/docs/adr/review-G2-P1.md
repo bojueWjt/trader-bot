@@ -1,3 +1,490 @@
+## 十审判定表
+
+审查日期：2026-09-11。独立审查方：Codex 主控；本轮不承担修复。
+本轮判 fail。九审三条中：S29 open、S30 closed（限定原反例）、S31 open。
+阻断项为 S29、S31、S38、S39；重复公式另列 S32–S37，不把当前等价的公式重复冒称为已发生的经济错误。
+表中 closed 仅覆盖明确写出的命题，不表示整个缺陷族已经消失。
+历史各轮文字及九审结尾保留；本轮结论优先于历史状态。
+
+| ID | 状态 | 亲跑命令与输出摘要 | 是否阻断 P1 |
+|---|---|---|---|
+| S29 分区网格及其回归 | open | 原 P29 exit0：3/0、2/0、4/0，全部 gap_flag=false；P10N 加一个离网点后 missing=-1；P10M 恢复旧 first_gap 后新测试 GREEN。 | 是；非负门槛及原缺陷注入回归未满足 |
+| S30 观察窗下界 | closed | 原 P30 exit0：latency60，省略/显式均在 -1µs、0 REJECT，在 +1µs ACCEPT；P10C caller 三点一致；P10N 原下界突变 RED、恢复 GREEN。 | 否；同族第2处 build_request 仍在，单列 S32；负延迟另列 S38 |
+| S31 B17 冲突门 | open | 原 P31 在旧 AST 匹配断言处退出，未删门；P10M 真删门：旧 B16 GREEN、新 B17 RED；P10D 改传入哈希后新 B17 GREEN、真实批量2行2hash不拒绝。 | 是；真实双哈希批量的注入回归仍不足 |
+| S32 build_request 启动公式第二处 | open | P10I 打印 contract:262/522 两份 latency 加法；P10C 改唯一来源为+7秒，build_request 抛推导对账 ContractError。 | 否；当前公式等价，但单一来源目标尚未完成 |
+| S33 vision 独立网格计数 | open | P10I 打印 vision:318 的 total_seconds 整除；T 中 interval_seconds 测试通过。 | 否；受支持整日/月、整除日周期内未证实数值错算 |
+| S34 funding 8h 独立网格 | partial-P2 | P10I 打印 execution:236–243 的 hour//8、闭右界和60秒容差；AB 明示 S02 unsupported。 | 否；与既有 S02 同一变周期/真实结算边界，不重复升级 |
+| S35 TTL 解析三份与到期三份 | open | P10I：contract:408/410、462/463、519；deadline 在 A:222/318、B:226；T 的 S19 通过。 | 否；当前 None 分支一致，尚未归一 |
+| S36 持仓截止三份 | partial-P2 | P10I：A:423、B:530/560；T 的 hold/exposure 回归通过，AB仍保留 B 定型边界。 | 否；当前精确 timedelta，属于既有 S04/S16 及复用债务 |
+| S37 A 中尾网格独立公式 | open | P10I：A:242 首点委派，但249–253仍自行比较 o-prev 和 prev+iv；P10G 对齐网格子集25组通过。 | 否；未把首点委派扩大成全族已归一 |
+| S38 负 latency 使显式/省略分叉 | open | P10C：latency=-1，policy 正常 model_validate；隐式 ACCEPT 00:59:59，显式同值 REJECT「t_start 不能早于 t_dec」。 | 是；同语义请求不同验收且允许决策前启动 |
+| S39 loader 哨兵仅证明调用 | open | P10D：保留 helper 调用但令 expected=0，test_grid_math 单测 GREEN；恢复 GREEN。 | 是；A23 正向委派未证明返回值实际影响覆盖门 |
+| A23-A 首点委派断言 | closed | P10M 捕获旧函数绕开可替换 helper：RED AssertionError；恢复 GREEN。 | 否；同族其余调用逐个核对，loader残余单列 S39，中尾数学单列 S37 |
+| A23-C 请求启动委派断言 | closed | P10N 模型内恢复自写 latency 加法：RED「DID NOT RAISE」；恢复 GREEN。 | 否；同族第2处构造函数未归一，单列 S32 |
+| A23-L 两处负向 lint | closed | P10L 注入两个禁止字符串：两条均 RED AssertionError；恢复均 GREEN；docstring均标「非行为证据」。 | 否；不把源码字符串检查算作行为证明 |
+
+## 十审独立证据与新增必修
+
+### 执行边界与命令约定
+
+所有命令在 quant-lab 目录执行。
+所有 Python 子进程继承 PYTHONDONTWRITEBYTECODE=1；导入产品的探针另设 PYTHONPATH=src。
+pytest 参数均含 -p no:cacheprovider。
+未连接网络、交易所私有 API 或生产服务，未读取账户配置，未 import services 模块。
+未调用其他模型或续接历史会话。
+唯一持久修改是本报告；测试临时湖由 pytest 临时目录承载。
+S30 测试会调用 POLICY_HASH_REGISTRY.write_text，裸跑指定 T/R 会临时改产品文件。
+因此 T/R 通过内存 Path.read_text/write_text 替身执行同一 pytest 参数，仅政策登记表的读写转到内存。
+这项适配没有删测试、修改断言或绕过产品 validator；登记表初值取真实文件，finally 的恢复也在内存执行。
+不能将这两次结果描述成未经适配的裸命令实跑。
+探针中的 AST/类重建/函数 patch 均仅存在于子进程；模型突变通过重建 pydantic 类保证验证器真正换成突变版本。
+
+### 指定验证结果
+
+| 名称 | 运行内容 | 真实结果 |
+|---|---|---|
+| T | pytest tests/market -q -p no:cacheprovider，内存登记表包装 | 260 passed in 17.26s，exit0 |
+| R | pytest tests/market/test_review_p1_round4.py tests/market/test_outcome_kind.py tests/market/test_contract.py tests/market/test_partition_check.py -q -v -p no:cacheprovider，同包装 | collected 54；54 passed in 3.73s，exit0 |
+| A | .venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A | passed=22 failed=0，22个 replay=True，exit0 |
+| AB | .venv-g2/bin/python -m quant_lab.market.nautilus_adapter report --reps 1 | MATCH12、B_COMMAND_LATENCY3、GAP_PRICE1、SAME_TS_PRIORITY4、GTD_BOUNDARY1、B_LIQUIDITY_MODEL1，exit0 |
+| AB 未解释门 | 上述实际 codes 汇总22例 | UNEXPLAINED=0；未输出 NOT_RUN/A_GOLD_FAIL；未写 AB 报告文件 |
+
+AB 单次 median_ms 为 A=12.615667001227848、B=83.15900000161491，仅记事实，不据一次计时定性能门槛。
+旧 S01–S28 的测试都包含在 T 中；本轮没有逐条重新声明全部历史独立探针已运行。
+历史 partial-P2 的支持边界保持；不能用全量单测绿替代本轮反例。
+M-03 真实网络下载未做：本轮只读审查不下载或写湖，历史 G0 网络证据未冒充本轮实跑。
+M-03..M-09 的看板脚本未做：本轮执行的是用户列明的本地验证，不改看板和外部状态。
+B 单独 replay 未做：本轮已执行要求的 A 与 AB，没有额外宣称 B 金标全过。
+
+### 原 P29/P30/P31 的原样复跑
+
+原命令从原报告以 P29最小、P30最小、P31最小 开头的行取出第一对反引号内容。
+用 shlex.split 后 subprocess.run(capture_output=True,text=True) 执行；没有改写原命令。
+原报告 SHA256 为 7214421ee0502a46f911f8273cc261d0309d4b3a6b8a62fd4e1b1ce71a2d8fca。
+
+P29 第一组：0 180000000 3 0 [False, False, False] []。
+P29 第二组：1 180000000 2 0 [False, False] []。
+P29 第三组：0 180000001 4 0 [False, False, False, False] []。
+任务书第三组 expected=3 是口径笔误：半开区间 [0,180秒+1µs) 包含 0/60/120/180 四个点；实际4是正确答案。
+P10G 独立逐点枚举375组 helper 输入全部 PASS；不是拿 helper 自己计算期望。
+P10G 另跑三个原边界的全部非空对齐网格子集，共25组，missing与缺口总数逐一相等。
+
+P30 的 -1µs、0，两种 t_start 表达均 REJECT，错误含推导启动时刻与 latency_s=60。
+P30 的 +1µs，两种表达均 ACCEPT，窗口都为 0:00:00.000001。
+P10C 独立经过 build_request 的 caller 路径，latency=0/60均重复得到 REJECT/REJECT/ACCEPT。
+S30 原反例闭合；同族其余成员逐个核对后，第2处构造公式仍在 S32，负延迟域漏检仍在 S38。
+
+P31 真实 strict=True/False 门都报 ContractError，输出含 fixture-zero-v1 和两个完整64位哈希，hashes_listed=True。
+P31 随后打印 original PASS，在 assert len(remove)==1 处 AssertionError，rc=1。
+原因是门已从旧 conflict 条件块改为具名函数调用，旧 AST 定位器找不到目标。
+这个 rc=1 不是测试因删门变红；删门动作尚未发生。
+P10M 用当前函数调用作精确替换目标，要求仅一处，再在内存重编译，完成有效删门。
+有效删门结果：旧 B16 仍 GREEN，新 B17 因 called=[] 变 RED，恢复两条 GREEN。
+
+### S29 必修：离网行数仍被当作网格覆盖；新测试未杀死原首行错误
+
+位置：partition_check.py:244–245，present 仅按时间范围过滤，随后 n_unique 直接抵扣网格点数。
+没有将 present 与期望网格取交集，也没有先拒绝离网时间。
+P10N 保持每行 close_time=open_time+60秒，输入偏移为 0、1µs、60秒、120秒。
+窗口为 [0,180秒)，实际输出 expected=3、missing=-1、gaps=[]、所有 gap_flag=false、status=gap。
+另一组为 1µs、60秒+1µs、120秒+1µs：expected=3、missing=0、首 gap 的 n=1、status=ok。
+后一组证明问题不只是负数显示：数量看似完整，却一个期望分钟点都没有，缺口清单和总数也自相矛盾。
+这些是内存合成非法时间网格输入；结论是入口未正确识别它，不声称公开归档普遍存在这种输入。
+验收应先明确离网行隔离/拒绝规则，再按合法网格计算 present，确保 missing恒非负且缺口与计数一致。
+P10M 仅将 first_gap 改回 df首时间>cal_from，现有新 S29 测试仍 GREEN。
+同测试对旧 exp_n 整秒截断能 RED，说明不是整个测试无效，而是原亚秒下界分支未覆盖。
+应补原 P29 第二组，确认恢复旧 first_gap 时测试失败。
+原三组输入及当前对齐子集正确，不足以判 S29 closed。
+
+### S31 必修：门本身正确，但批量冲突注入及诊断断言仍有洞
+
+位置：test_outcome_kind.py:287–317、345–359；execution.py:125具名门调用。
+新增 B17 测试确实把 split DataFrame送入门本身，并检查两个hash取值。
+新增哨兵用正常三行batch，只记录 df.height，未把双hash送入 simulate_batch 的真实输出路径。
+旧 B16 仍只在测试内重复 group_by 数学，删门不红。
+P10D 将真实门调用的输入改成同高度、hash全部为sanitized的表，输出df本身仍保留原值。
+新 B17 测试 GREEN；同进程通过 result_row 注入真实冲突，simulate_batch返回2行2hash且 NO ContractError。
+这说明测试不能区分“检查了正确输出”与“检查了另外一张同高度表”。
+应在真实 result_row/批量输出边界注入双hash，断言正常门拒绝，并在删门后确认该条行为测试失败。
+P10L 将诊断版本串替换为 REDACTED，新 B17 仍 GREEN：当前代码含版本，但新测试未断言版本名。
+验收还应断言版本名及该版本全部冲突hash，至少覆盖两个版本之一冲突，不依赖首行所属版本。
+真实代码当前并没有sanitized替换；这里是标准门禁突变证据，不混称为当前生产放行漏洞。
+
+### S38 新必修：负延迟触发同族显式值分叉
+
+位置：ExecutionPolicy.latency_s（contract.py:295）没有非负域约束；ExecutionRequest:439只对显式t_start检查不得早于t_dec。
+P10C 用 ExecutionPolicy.model_validate 正常构造并内存登记 latency=-1政策，未用 model_copy绕过请求验证。
+同一policy/hash，t_start=None被接受并推导为t_dec-1秒；显式给这个推导值却被拒绝。
+caller的+1µs观察窗也能在该负启动点后被接受。
+此为S20/S30族的另一个边界，不改变对正延迟S30原反例的闭合判断。
+修复应在政策域拒绝负延迟，并使“不得早于决策”作用于推导值；合法零/正延迟两路径仍一致。
+现有登记政策并未发现负延迟；这里证明公共模型可正常接受新政策的非法时间域，风险在新增政策入口。
+
+### S39 新必修：loader委派测试只证明调用次数
+
+位置：test_constants_effective.py:134–144。
+哨兵向called追加参数并返回0，随后对/nonexistent-lake-for-delegation-probe调用，异常被捕获，最终仅assert called。
+P10M 绕开helper调用会RED，所以调用存在确有检查。
+但P10D 保留该调用、丢弃其返回值并固定expected=0，测试仍GREEN。
+应使用受控完整内存湖，将网格helper返回值变化传递到bars_complete/quality_notes等可观察输出并断言。
+同族A首点哨兵和请求validator哨兵已分别经原行为绕过突变证实会RED；不能把这两条结果移用给loader。
+
+### 族 A：五条规则的全部已定位表达位置
+
+1. 启动时刻规范公式在contract.derived_t_start:262。
+2. validator:446调用derived_t_start，随后下界、对账和窗长均使用exp_t_start。
+3. resolved_t_start:499对显式值返回记录，对省略值委派derived_t_start。
+4. loader:153、A:93、B:127消费resolved_t_start，不再自己退回t_dec。
+5. build_request:522仍自行把latency加进horizon_end：S32。
+6. 观察窗长度规范公式仅derived_window_s:271，validator:474与build:522均调用。
+7. window=horizon_end-exp_t_start在contract:470；上限:471、policy对账:475为精确timedelta比较。
+8. build_request docstring:508仍把max_horizon_s写作研究段，与实际research_horizon_s不符；为S32附近文档残余，不作为独立经济故障。
+9. 网格原语为contract.first_grid_point:239与grid_points_between:249，共用精确微秒时间尺度；两函数分别解决首点与计数。
+10. partition:242/252/258/263/267均调用grid_points_between；并未直接导入first_grid_point，首点存在性通过计数判断。
+11. partition:250仍以delta>step判断中间gap_flag；该前提依赖输入时间已对齐，离网漏洞见S29。
+12. loader:214期望bar数调用grid_points_between；返回值生效回归不足见S39。
+13. vision:318仍自行total_seconds整除：S33。
+14. funding loader:236–243仍hour//8、加8h、闭右界并容差60秒：S34。
+15. funding partition:328–330以行内interval_hours比较相邻差，容差60秒；与loader固定8h不同，归S34/S02。
+16. A首点:242调用first_grid_point；中段和尾段:249–253独立距离公式，单列S37。
+17. B质量门复用A的首缺定位逻辑，没有新增另一套网格计数。
+18. TTL解析在before:408/410、after:462/463、build:519共三处，S35。
+19. TTL到期在A:222、A:318、B:226各自计算start+ttl，亦归S35。
+20. 持仓截止在A:423、B:530、B:560共三处，S36。
+21. B:560减1µs用来表达截止前的暴露样本；A在截止时刻前先删失，当前测试未证明两者新分叉。
+22. 派生观察窗使用max_holding或research_horizon作为长度，并不等于首次成交后的实际持仓截止，不能将两种规则混并。
+
+S32/S33/S35/S37 为明确尚未归一的open清单，但本轮没有把纯重复自动升级成P1功能故障。
+S34/S36与既有P2边界重叠，保持partial-P2。
+上述每处均由P10I/P10S实际源码枚举定位；静态证据只证明表达存在，数值正确性以行为探针为限。
+
+### 族 B：截断、整除与时长比较静态穷举
+
+AST横扫9个market Python模块，所有FloorDiv及total_seconds调用均逐个读取。
+contract:236为timedelta除1µs，保留Python datetime全部微秒；254/255是整数ceil/floor，P10G覆盖负epoch及边界。
+vision:318是唯一带int的total_seconds网格路径，单列S33；没有其他int(total_seconds())隐藏位置。
+execution:237的hour//8是固定funding网格，单列S34。
+nautilus_adapter:51有两处//，分别纳秒分秒和余数纳秒降微秒；符合当前事件datetime微秒接口，不声称支持亚微秒。
+asof:179的total_seconds服务staleness；判定在180用>阈值，没有int截断。
+A:573/655的total_seconds判mark过旧，没有int截断。
+B:426/442/457的total_seconds判mark过旧，没有int截断。
+execution:240用abs(total_seconds)<=60做funding容差，没有先整秒截断。
+partition:328 total_seconds/3600、330乘回3600再比较60秒，为浮点容差路径，未归一成精确timedelta。
+A/B的horizon、deadline、hold_end比较已逐项定位在P10S附录；主体使用datetime/timedelta关系运算。
+vision:215的int(float(v))用于外部时间戳；当前现代毫秒/微秒范围在2^53以内，不将超范围假设认定为当前反例。
+vision:221的int(timestamp())仅处理严格秒格式字符串；带小数的字符串会解析失败，不是静默丢亚秒。
+vision:254/273的int(float(...))用于trades与funding_interval_hours，不是观察窗长度。
+B:_ns对非零microsecond分开计算整秒和微秒，未用int(total_seconds())。
+价格/数量floor_step和分配ROUND_DOWN为契约明确量化，不算时间截断问题。
+未做全年份/任意大时间戳/任意间隔域穷举；当前结论限于源码定位、指定实跑和P10G输入域。
+
+### 族 C：可空与默认字段逐项枚举
+
+P10F通过model_fields枚举ExecutionRequest/OrderPlan/ExecutionPolicy及其嵌套模型所有非必填或可空字段。
+每字段用省略、None、False、0、空字符串、空列表六种输入，基底为E03/fixture-zero-v1，逐次正常model_validate。
+下面逐行只列接受的输入及实际值；未列的输入均拒绝。不是对任意策略域的全排列证明。
+ExecutionPolicy的research_horizon_s为必填非空字段，不在默认/可空表；T包含其必填回归。
+Request的horizon_source省略会取policy，但E03实际是caller短窗，因此该基底下六种探针全部拒绝，符合对账规则。
+Sizing.qty表用risk_budget模式，qty允许存在但此模式不取它；fixed_qty分支另有正数校验。
+TakeProfit.fraction单模型的0可解析，OrderPlan总入口随后check_decimal拒绝；不能把子模型结果冒充整个请求接受。
+政策数值多数没有范围validator；本轮确认能造成时间一致性错误的是S38，其他零值仅记录接受事实。
+以下是P10F真实输出：
+
+```text
+ExecutionRequest.cost_scenario | omit='base'
+ExecutionRequest.path_scenario | omit='primary'
+ExecutionRequest.execution_contract_version | omit='g2-exec-v0'
+ExecutionRequest.seed | omit=0; False=0; 0=0
+ExecutionRequest.t_start | omit=None; None=None
+ExecutionRequest.position_mode | omit='one_way'
+ExecutionRequest.entry_ttl_s | omit=3600; None=3600
+ExecutionRequest.entry_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.tp_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.horizon_source | all reject
+OrderPlan.tps | omit=[]; emptylist=[]
+OrderPlan.reduce_only_exit | omit=True
+ExecutionPolicy.latency_s | omit=0; False=0; 0=0
+ExecutionPolicy.ladder_steps | omit=2; False=0; 0=0
+ExecutionPolicy.participation | omit=None; None=None; 0=Decimal('0')
+ExecutionPolicy.wallet | omit=Decimal('1000'); 0=Decimal('0')
+ExecutionPolicy.leverage | omit=Decimal('1'); 0=Decimal('0')
+ExecutionPolicy.mark_max_staleness_s | omit=120; False=0; 0=0
+ExecutionPolicy.settlement_quantum | omit=Decimal('1E-8'); 0=Decimal('0')
+ExecutionPolicy.max_horizon_s | omit=1209600; False=0; 0=0
+ExecutionPolicy.entry_ttl_s | omit=86400; False=0; 0=0
+ExecutionPolicy.entry_fraction_rule | omit='equal'
+ExecutionPolicy.tp_fraction_rule | omit='equal'
+ExecutionPolicy.tp_total_fraction | omit=Decimal('1'); 0=Decimal('0')
+Entry.fraction | omit=None; None=None
+Entry.tif | omit='GTC'
+Entry.post_only | omit=False; False=False; 0=False
+Stop.trigger | omit='mark'
+TakeProfit.fraction | omit=None; None=None; 0=Decimal('0')
+Sizing.qty | omit=None; None=None; 0=Decimal('0')
+Expiry.entry_ttl_s | omit=None; None=None
+Expiry.max_holding_s | omit=None; None=None
+CostSpec.maker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.taker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.slippage_ticks | omit=0; False=0; 0=0
+CostSpec.slippage_bps | omit=Decimal('0'); 0=Decimal('0')
+```
+
+此轮未发现Request中的None被falsy-or改成另一个显式合法分配值。
+t_start使用is not None区分；TTL before仅在None兜底，after逐值比较；fraction before同样保留空序列供后续拒绝。
+OrderPlan.tps缺省空列表合法，reduce_only_exit固定True；Entry.tif和Stop.trigger受Literal约束。
+参与率None与0在政策模型中区分，0不是无限容量；钱包/杠杆0不因or被改成默认值。
+状态中open_at or t_start、eff_to or b的左项为datetime或None，没有合法falsy datetime。
+输入可空字段的域漏检与“or改写”不同：S38虽没有or，仍因显式专用的先验检查造成分叉。
+
+### 族 D：新门的突变矩阵
+
+| 门/断言 | 注入内容 | 突变结果 | 恢复结果 | 结论 |
+|---|---|---|---|---|
+| S29计数 | exp_n恢复整秒整除 | RED AssertionError | GREEN | 此分支回归有效 |
+| S29首行 | first_gap恢复首时间>cal_from | GREEN | GREEN | 原下界反例未钉住 |
+| S30下界 | 恢复self.t_start or self.t_dec | RED Failed: DID NOT RAISE ContractError | GREEN | 原下界回归有效 |
+| B17旧B16 | 删除具名门调用 | GREEN | GREEN | 旧断言仍是自证数学 |
+| B17新测试 | 删除具名门调用 | RED called=[] | GREEN | 能证明调用存在 |
+| B17新测试 | 向门传同高度但统一hash表 | GREEN，且实际冲突批量返回 | GREEN | 未证明检查真实批量输出 |
+| B17诊断 | 去掉版本名 | GREEN | GREEN | 版本名要求未被回归钉住 |
+| A首点委派 | 调用捕获的旧helper绕过可替换绑定 | RED moved==real | GREEN | 返回值行为已证明 |
+| Request启动委派 | validator自行计算latency | RED DID NOT RAISE | GREEN | 原委派行为已证明 |
+| loader委派 | 绕过可替换helper调用 | RED called为空 | GREEN | 仅调用存在检查有效 |
+| loader委派 | 保留调用但丢弃返回值 | GREEN | GREEN | 返回值生效证据不完整 |
+| multiplier lint | 源码字符串含禁止表达 | RED AssertionError | GREEN | 仅lint，不是行为证据 |
+| t_start lint | 源码字符串含旧回退表达 | RED AssertionError | GREEN | 仅lint，不是行为证据 |
+
+首次探索的sanitize突变复制模块globals，意外固定旧门绑定，使哨兵无法生效，得到伪RED。
+该探索结果不计为验收；P10D改为动态转发到x.check_policy_hash_consistency，再跑得到上述真实GREEN。
+每条RED都检查具体异常/断言位置，没有将子进程rc=1笼统当作成功。
+测试内临时写真实登记表的做法未在本轮修复；后续普通裸跑仍有并发读写风险，应改进程内patch或独立临时登记文件。
+
+### 新增P1必修的最小只读复现
+
+S38最小命令：`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom quant_lab.market import contract as c\nfrom tests.market.test_review_p1 import e03\nq,_=e03()\np=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"negative-latency-audit\",\"latency_s\":-1})\nwith patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value={p.version:p.content_hash}):\n    for s in (None,q.t_dec-dt.timedelta(seconds=1)):\n        try:\n            r=c.ExecutionRequest.model_validate({**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":s})\n            print(s,\"ACCEPT\",r.resolved_t_start(p))\n        except c.ContractError as e:print(s,\"REJECT\",str(e))\n")'`。
+实际输出：None ACCEPT 2024-01-01 00:59:59+00:00；显式同值REJECT t_start不能早于t_dec。
+
+S39最小命令：`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom quant_lab.market import execution as x\nfrom tests.market.test_constants_effective import test_grid_math_single_source_and_exact_to_microsecond as test\nold='"'"'expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"'\nsrc=inspect.getsource(x.load_market_from_lake)\nassert src.count(old)==1\nns=dict(x.__dict__)\nexec(compile(src.replace(old,'"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"]); expected = 0'"'"'),\"<memory>\",\"exec\"),ns)\nns[\"grid_points_between\"]=lambda *args:x.grid_points_between(*args)\nwith patch.object(x,\"load_market_from_lake\",ns[\"load_market_from_lake\"]):\n    test();print(\"discarded result: GREEN\")\ntest();print(\"restored: GREEN\")\n")'`。
+实际输出：discarded result: GREEN；restored: GREEN。
+
+### 可直接复跑的只读命令
+
+以下命令均为本轮实际执行脚本的单行封装，继承本节开头环境；不用另建脚本文件。
+P10M包含删门、S29两种原缺陷及A/loader调用绕过：
+`.venv-g2/bin/python -c 'exec("import ast,inspect,textwrap\nfrom unittest.mock import patch\nfrom tests.market import test_outcome_kind as t\nfrom tests.market import test_constants_effective as k\nfrom quant_lab.market import contract as c,execution as x,partition_check as pc,kernel_a as ka\ndef outcome(fn):\n    try:\n        fn()\n        return \"GREEN\"\n    except BaseException as e:\n        return \"RED \"+type(e).__name__+\" \"+str(e)[:160]\ndef mutant(fn,old,new):\n    src=textwrap.dedent(inspect.getsource(fn))\n    assert src.count(old)==1,(fn.__name__,src.count(old))\n    ns=dict(fn.__globals__);exec(compile(src.replace(old,new),\"<memory-mutant>\",\"exec\"),ns)\n    return ns[fn.__name__]\nold=t.test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain\nnew=t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes\nfor label,replacement in [(\"delete\",\"pass\")]:\n    fn=mutant(x.simulate_batch,\"check_policy_hash_consistency(df)\",replacement)\n    with patch.object(x,\"simulate_batch\",fn):\n        print(\"B17\",label,\"legacy\",outcome(old),\"new\",outcome(new))\nprint(\"B17 restored\",outcome(old),outcome(new))\nfn=mutant(pc.check_bars,\"first_gap = bool(df.height and grid_points_between(cal_from, df[key][0], sec) > 0)\",\"first_gap = bool(df.height and df[key][0] > cal_from)\")\nwith patch.object(pc,\"check_bars\",fn):\n    print(\"S29 old-first-gap\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\nfn=mutant(pc.check_bars,\"exp_n = grid_points_between(cal_from, cal_to, sec)\",\"exp_n = int((cal_to-cal_from).total_seconds() // sec)\")\nwith patch.object(pc,\"check_bars\",fn):\n    print(\"S29 old-count\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\nprint(\"S29 restored\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\n# bypass a delegation but preserve behavior through a captured binding\nfor label,fn,oldexpr,newexpr,owner,attr,test in [\n(\"A-grid\",ka.KernelA._first_bar_gap,\"first_grid_point(self.t_start, bars[0].interval_s)\",\"_captured(self.t_start, bars[0].interval_s)\",ka.KernelA,\"_first_bar_gap\",k.test_grid_math_single_source_and_exact_to_microsecond),\n(\"loader-grid\",x.load_market_from_lake,'"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"','"'"'_captured(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"',x,\"load_market_from_lake\",k.test_grid_math_single_source_and_exact_to_microsecond)]:\n    m=mutant(fn,oldexpr,newexpr)\n    m.__globals__[\"_captured\"]=c.first_grid_point if label==\"A-grid\" else c.grid_points_between\n    with patch.object(owner,attr,m):\n        print(label,\"bypass\",outcome(test))\n    print(label,\"restored\",outcome(test))\n")'`
+
+P10N包含S29离网输入、S30原下界突变、请求启动委派突变；登记表为内存对象：
+`.venv-g2/bin/python -c 'exec("import datetime as dt,inspect,textwrap\nfrom unittest.mock import patch\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nfrom tests.market import test_outcome_kind as t,test_constants_effective as k\nfrom quant_lab.market import contract as c,execution as x\nimport polars as pl\nfor offsets in [(0,1,60000000,120000000),(1,60000001,120000001)]:\n    df=bars(len(offsets)).with_columns(pl.Series(\"open_time\",[JAN+dt.timedelta(microseconds=u) for u in offsets]),pl.Series(\"close_time\",[JAN+dt.timedelta(microseconds=u,seconds=60) for u in offsets]))\n    out,qs,r=run(df,rules(JAN,JAN+dt.timedelta(seconds=180)))\n    print(\"offgrid\",offsets,\"expected\",r.expected_rows,\"missing\",r.missing,\"gaps\",r.gaps,\"flags\",out[\"gap_flag\"].to_list(),\"status\",r.status)\ndef outcome(fn):\n    try:\n        fn();return \"GREEN\"\n    except BaseException as e:\n        return \"RED \"+type(e).__name__+\" \"+str(e)[:140]\nsrc=inspect.getsource(x.simulate_batch).replace(\"check_policy_hash_consistency(df)\",'"'"'check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))'"'"')\nns=dict(x.__dict__);exec(compile(src,\"<memory-mutant>\",\"exec\"),ns)\nns[\"check_policy_hash_consistency\"]=lambda df:x.check_policy_hash_consistency(df)\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    print(\"B17 sanitized dynamic\",outcome(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n# rebuild the pydantic model in memory so validator substitutions actually execute\nsrc=inspect.getsource(c.ExecutionRequest).replace(\"if self.horizon_end <= exp_t_start:\",\"if self.horizon_end <= (self.t_start or self.t_dec):\")\nns=dict(c.__dict__);exec(compile(src,\"<memory-model-mutant>\",\"exec\"),ns)\nclass Registry:\n    def __init__(self): self.s=c.POLICY_HASH_REGISTRY.read_text()\n    def exists(self): return True\n    def read_text(self,**kw): return self.s\n    def write_text(self,s,**kw): self.s=s;return len(s)\nwith patch.object(c,\"POLICY_HASH_REGISTRY\",Registry()):\n    with patch.object(c,\"ExecutionRequest\",ns[\"ExecutionRequest\"]):\n        print(\"S30 old lower bound\",outcome(t.test_s30_window_lower_bound_uses_derived_start_not_t_dec))\n    print(\"S30 restored\",outcome(t.test_s30_window_lower_bound_uses_derived_start_not_t_dec))\nsrc=inspect.getsource(c.ExecutionRequest).replace(\"exp_t_start = derived_t_start(self.t_dec, pol)\",\"exp_t_start = self.t_dec + dt.timedelta(seconds=pol.latency_s)\")\nns=dict(c.__dict__);exec(compile(src,\"<memory-model-mutant>\",\"exec\"),ns)\nwith patch.object(c,\"ExecutionRequest\",ns[\"ExecutionRequest\"]):\n    print(\"start delegate bypass\",outcome(k.test_t_start_derivation_single_source))\nprint(\"start restored\",outcome(k.test_t_start_derivation_single_source))\n")'`
+
+P10C复现S32、S38及build_request caller边界：
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom quant_lab.market import contract as c\nq,m=e03()\nfor latency in (-1,0,60):\n    p=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"audit-latency\",\"latency_s\":latency})\n    reg={**c.load_policy_registry(),p.version:p.content_hash}\n    with patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value=reg):\n        for explicit in (False,True):\n            try:\n                d={**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":q.t_dec+dt.timedelta(seconds=latency) if explicit else None}\n                r=c.ExecutionRequest.model_validate(d)\n                print(\"latency\",latency,\"explicit\",explicit,\"ACCEPT\",r.resolved_t_start(p))\n            except Exception as e: print(\"latency\",latency,\"explicit\",explicit,\"REJECT\",type(e).__name__,str(e))\n        for us in (-1,0,1):\n            try:\n                r=c.build_request(q.model_dump(),policy_version=p.version,policy_hash=p.content_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest,horizon_end=q.t_dec+dt.timedelta(seconds=latency,microseconds=us))\n                print(\"build caller\",latency,us,\"ACCEPT\")\n            except Exception as e: print(\"build caller\",latency,us,\"REJECT\",type(e).__name__)\nwith patch.object(c,\"derived_t_start\",side_effect=lambda t,p:t+dt.timedelta(seconds=7)):\n    try:\n        c.build_request(q.model_dump(),policy_version=q.policy_version,policy_hash=q.policy_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest)\n        print(\"build sentinel ACCEPT\")\n    except Exception as e: print(\"build sentinel\",type(e).__name__,str(e))\n")'`
+
+P10D复现S31真实冲突漏检突变、S39返回值丢弃突变：
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom quant_lab.market import execution as x,contract as c\nfrom tests.market import test_constants_effective as k,test_outcome_kind as t\nfrom tests.market.test_review_p1 import e03\ndef result(fn):\n    try: fn();return \"GREEN\"\n    except BaseException as e: return \"RED \"+type(e).__name__+\" \"+str(e)[:100]\nsrc=inspect.getsource(x.load_market_from_lake)\nold='"'"'expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"'\nnew='"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"]); expected = 0'"'"'\nassert src.count(old)==1\nns=dict(x.__dict__);exec(compile(src.replace(old,new),\"<discard-grid-result>\",\"exec\"),ns)\nns[\"grid_points_between\"]=lambda *args:x.grid_points_between(*args)\nwith patch.object(x,\"load_market_from_lake\",ns[\"load_market_from_lake\"]):\n    print(\"loader discard return\",result(k.test_grid_math_single_source_and_exact_to_microsecond))\nprint(\"loader restored\",result(k.test_grid_math_single_source_and_exact_to_microsecond))\nsrc=inspect.getsource(x.simulate_batch)\nold=\"check_policy_hash_consistency(df)\"\nns=dict(x.__dict__);exec(compile(src.replace(old,'"'"'check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))'"'"'),\"<sanitize-gate-input>\",\"exec\"),ns)\nns[\"check_policy_hash_consistency\"]=lambda df:x.check_policy_hash_consistency(df)\nq,m=e03();q2=c.ExecutionRequest.model_validate({**q.model_dump(),\"episode_id\":\"merge\"})\noriginal=x.result_row\ndef inject(req,res):\n    row=original(req,res)\n    if req.episode_id==\"merge\": row[\"policy_hash\"]=\"0\"*64\n    return row\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    print(\"sanitized gate regression\",result(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n    ns[\"result_row\"]=inject\n    df=x.simulate_batch([q,q2],markets={m.manifest_id:m})\n    print(\"sanitized gate actual\",df.height,df[\"policy_hash\"].n_unique(),\"NO ContractError\")\nprint(\"gate restored\",result(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n")'`
+
+P10I最小静态复现S32–S37及TTL deadline全部残余：
+`.venv-g2/bin/python -c 'exec("import pathlib,re\npatterns={\"S32\":(\"contract.py\",r\"return t_dec|horizon_end = t_dec\"),\"S33\":(\"vision.py\",r\"total_seconds\"),\"S34\":(\"execution.py\",r\"g = |while g|g \\+=|abs\\(\\(h - g\"),\"S35\":(\"contract.py\",r\"plan_ttl =|exp_ttl =|ttl = plan.expiry\"),\"S36A\":(\"kernel_a.py\",r\"self.hold_end = ts\"),\"S36B\":(\"nautilus_adapter.py\",r\"hold_end =|cutoff = min\"),\"S37\":(\"kernel_a.py\",r\"first_expected =|o - prev|return prev \\+|prev \\+ iv <\"),\"TTL-deadline-A\":(\"kernel_a.py\",r\"deadline =\"),\"TTL-deadline-B\":(\"nautilus_adapter.py\",r\"deadline =\")}\nfor label,(file,pattern) in patterns.items():\n    for i,line in enumerate((pathlib.Path(\"src/quant_lab/market\")/file).read_text().splitlines(),1):\n        if re.search(pattern,line):print(label,file+\":\"+str(i),line.strip())\n")'`
+
+P10L复现两条lint红绿及B17缺版本诊断漏检：
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom tests.market import test_outcome_kind as t\nfrom quant_lab.market import execution as x\ndef out(fn):\n    try:fn();return \"GREEN\"\n    except BaseException as e:return \"RED \"+type(e).__name__\nreal=inspect.getsource\nfor name,token in [(\"test_lint_forbidden_patterns_do_not_reappear\",'"'"'multiplier\"] or \"1\"'"'"'),(\"test_s27_s28_single_source_start_time_and_exact_grid\",\"(req.t_start or req.t_dec)\")]:\n    fn=getattr(t,name)\n    with patch.object(inspect,\"getsource\",side_effect=lambda obj:real(obj)+\"\\n# \"+token):\n        print(name,\"forbidden injected\",out(fn))\n    print(name,\"restored\",out(fn))\nsrc=real(x.check_policy_hash_consistency).replace(\"{r['"'"'policy_version'"'"']}\",\"REDACTED\")\nns=dict(x.__dict__);exec(compile(src,\"<missing-version-diagnostic>\",\"exec\"),ns)\nwith patch.object(x,\"check_policy_hash_consistency\",ns[\"check_policy_hash_consistency\"]):\n    print(\"B17 missing version diagnostic\",out(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\nprint(\"B17 restored\",out(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n")'`
+
+P10G独立网格数学与25组分区子集：
+`.venv-g2/bin/python -c 'exec("import datetime as dt,itertools\nfrom quant_lab.market import contract as c\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nimport polars as pl\ncount=0\nfor iv,base,au,bu in itertools.product((1,7,60,900,28800),(c.EPOCH-dt.timedelta(days=1),c.EPOCH,JAN),(-1,0,1,999999,60000001),(-1,0,1,999999,180000001)):\n    a=base+dt.timedelta(microseconds=au);b=base+dt.timedelta(microseconds=bu)\n    first=c.first_grid_point(a,iv)\n    points=[c.EPOCH+dt.timedelta(seconds=i*iv) for i in range(int((a-c.EPOCH).total_seconds()//iv)-2,int((b-c.EPOCH).total_seconds()//iv)+3)]\n    want=sum(a<=p<b for p in points)\n    assert c.grid_points_between(a,b,iv)==want\n    assert first>=a and first-a<dt.timedelta(seconds=iv) and (first-c.EPOCH)%dt.timedelta(seconds=iv)==dt.timedelta(0)\n    count+=1\nprint(\"helper brute\",count,\"PASS\")\nn=0\nfor au,bu in [(0,180000000),(1,180000000),(0,180000001)]:\n    a=JAN+dt.timedelta(microseconds=au);b=JAN+dt.timedelta(microseconds=bu)\n    expected=[i for i in range(4) if a<=JAN+dt.timedelta(seconds=i*60)<b]\n    for mask in range(1,1<<len(expected)):\n        keep=[i for j,i in enumerate(expected) if mask&(1<<j)]\n        df=bars(4).filter(pl.col(\"open_time\").is_in([JAN+dt.timedelta(seconds=i*60) for i in keep]))\n        out,qs,r=run(df,rules(a,b))\n        assert r.missing==len(expected)-len(keep),(au,bu,keep,r)\n        assert sum(g[\"n\"] for g in r.gaps)==r.missing,(au,bu,keep,r)\n        assert all(g[\"n\"]>0 for g in r.gaps)\n        n+=1\nprint(\"partition aligned subsets\",n,\"PASS\")\n")'`
+
+P10F逐字段六输入枚举：
+`.venv-g2/bin/python -c 'exec("from quant_lab.market import contract as c\nfrom tests.market.test_review_p1 import e03\nq,m=e03()\nmodels=[(c.ExecutionRequest,q.model_dump()),(c.OrderPlan,q.order_plan.model_dump()),(c.ExecutionPolicy,c.resolve_policy(q.policy_version).model_dump()),(c.Entry,q.order_plan.entries[0].model_dump()),(c.Stop,q.order_plan.stop.model_dump()),(c.TakeProfit,q.order_plan.tps[0].model_dump()),(c.Sizing,q.order_plan.sizing.model_dump()),(c.Expiry,q.order_plan.expiry.model_dump()),(c.CostSpec,c.CostSpec().model_dump())]\nfor cls,base in models:\n    for name,f in cls.model_fields.items():\n        if f.is_required() and \"None\" not in str(f.annotation):\n            continue\n        results=[]\n        for tag,val in [(\"omit\",None),(\"None\",None),(\"False\",False),(\"0\",0),(\"emptystr\",\"\"),(\"emptylist\",[])]:\n            d=dict(base)\n            if tag==\"omit\": d.pop(name,None)\n            else: d[name]=val\n            try:\n                z=cls.model_validate(d)\n                results.append(tag+\"=\"+repr(getattr(z,name)))\n            except Exception: pass\n        print(cls.__name__+\".\"+name+\" | \"+(\"; \".join(results) or \"all reject\"))\n")'`
+
+T/R内存保护包装体如下，以python -后接相同pytest参数执行；不替换其他文件读写：
+```python
+import pathlib,sys,pytest
+from unittest.mock import patch
+target=pathlib.Path("src/quant_lab/market/policy_hashes.json").resolve()
+rd=pathlib.Path.read_text; wr=pathlib.Path.write_text
+mem=[rd(target)]
+def read(p,*a,**kw):
+    if p.resolve()==target:
+        return mem[0]
+    return rd(p,*a,**kw)
+def write(p,data,*a,**kw):
+    if p.resolve()==target:
+        mem[0]=data
+        return len(data)
+    return wr(p,data,*a,**kw)
+with patch.object(pathlib.Path,"read_text",read),patch.object(pathlib.Path,"write_text",write):
+    sys.exit(pytest.main(sys.argv[1:]))
+```
+
+### P1 DoD判定与剩余风险
+
+GOAL-2 §7的候选A≥10金标与不变量条件：本轮A22/22、T通过，满足本地证据部分。
+A/B报告条件：本轮AB已实际出具22例分类，无未解释项；B定型继续留P2。
+M-03..M-09全部verify：本轮没有重新运行真实网络M-03和独立看板脚本，不能新增“逐条全部重验”的声明。
+Codex P1 review必修闭合条件：不满足，阻断S29/S31/S38/S39。
+因此无论历史M-03状态如何，本轮都不能判pass。
+剩余非阻断风险：S32/S33/S35/S37结构重复仍open；S34/S36与既有P2范围重叠。
+未做产品修复、测试修复、真实湖全年体检及B资金账户独立定型：这些都超出本轮只写审查报告的范围。
+本轮证据完整性指上述判定、反例和边界均有亲跑/源码枚举依据，不表示所有工程能力已完成。
+
+### 源码时长表达审查附录
+
+以下为P10S实际AST输出的时间相关行，保留定位，去除无关OHLC比较；长表达另经rg定位。
+相同语句的父子AST节点会同时出现，不将它们误计为多份产品公式。
+P10S原样复现命令：`.venv-g2/bin/python -c 'exec("import ast,pathlib,re\nfor p in sorted(pathlib.Path(\"src/quant_lab/market\").glob(\"*.py\")):\n    tree=ast.parse(p.read_text())\n    for node in sorted(ast.walk(tree),key=lambda n:getattr(n,\"lineno\",0)):\n        if isinstance(node,(ast.Compare,ast.BinOp,ast.BoolOp)):\n            expr=ast.unparse(node)\n            if re.search(r\"t_start|t_dec|horizon|ttl|holding|hold_end|deadline|staleness|grid|cal_from|cal_to|gap_h|total_seconds|calc_time\",expr) and len(expr)<240:\n                print(str(p)+\":\"+str(node.lineno)+\" \"+expr)\n")'`
+
+```text
+src/quant_lab/market/asof.py:180 stale > max_staleness_s
+src/quant_lab/market/contract.py:262 t_dec + dt.timedelta(seconds=policy.latency_s)
+src/quant_lab/market/contract.py:271 entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)
+src/quant_lab/market/contract.py:407 data.get('entry_ttl_s') is None and isinstance(plan, OrderPlan)
+src/quant_lab/market/contract.py:407 data.get('entry_ttl_s') is None
+src/quant_lab/market/contract.py:409 plan_ttl is None and pol is not None
+src/quant_lab/market/contract.py:409 plan_ttl is None
+src/quant_lab/market/contract.py:429 self.order_plan.expiry.entry_ttl_s is not None
+src/quant_lab/market/contract.py:439 self.t_start is not None and self.t_start < self.t_dec
+src/quant_lab/market/contract.py:439 self.t_start is not None
+src/quant_lab/market/contract.py:439 self.t_start < self.t_dec
+src/quant_lab/market/contract.py:447 self.horizon_end <= exp_t_start
+src/quant_lab/market/contract.py:452 self.entry_ttl_s is None
+src/quant_lab/market/contract.py:459 self.t_start is not None and self.t_start != exp_t_start
+src/quant_lab/market/contract.py:459 self.t_start is not None
+src/quant_lab/market/contract.py:459 self.t_start != exp_t_start
+src/quant_lab/market/contract.py:463 plan_ttl is not None
+src/quant_lab/market/contract.py:464 self.entry_ttl_s != exp_ttl
+src/quant_lab/market/contract.py:465 plan_ttl is not None
+src/quant_lab/market/contract.py:470 self.horizon_end - exp_t_start
+src/quant_lab/market/contract.py:471 window > dt.timedelta(seconds=pol.max_horizon_s)
+src/quant_lab/market/contract.py:475 self.horizon_source == 'policy' and window != dt.timedelta(seconds=derived_s)
+src/quant_lab/market/contract.py:475 self.horizon_source == 'policy'
+src/quant_lab/market/contract.py:499 self.t_start is not None
+src/quant_lab/market/contract.py:519 plan.expiry.entry_ttl_s is not None
+src/quant_lab/market/contract.py:520 horizon_end is not None
+src/quant_lab/market/contract.py:521 horizon_end is None
+src/quant_lab/market/contract.py:522 t_dec + dt.timedelta(seconds=policy.latency_s + derived_window_s(plan, policy, ttl))
+src/quant_lab/market/contract.py:522 policy.latency_s + derived_window_s(plan, policy, ttl)
+src/quant_lab/market/contract.py:762 e.ts in settle_keys
+src/quant_lab/market/execution.py:153 req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)
+src/quant_lab/market/execution.py:240 g >= a and (not any((abs((h - g).total_seconds()) <= 60 for h in have)))
+src/quant_lab/market/execution.py:240 abs((h - g).total_seconds()) <= 60
+src/quant_lab/market/kernel_a.py:202 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:208 [p for p in m.last if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_last, self.policy.participation) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:208 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:209 [p for p in m.mark if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_mark, None) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:209 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:220 self.t_start <= f.calc_time <= end
+src/quant_lab/market/kernel_a.py:222 self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)
+src/quant_lab/market/kernel_a.py:223 deadline <= end
+src/quant_lab/market/kernel_a.py:239 b.open_time >= self.t_start and b.open_time < end
+src/quant_lab/market/kernel_a.py:239 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:258 self.hold_end is not None and self.hold_end <= self.req.horizon_end and (self.hold_end not in self.moments)
+src/quant_lab/market/kernel_a.py:258 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:258 self.hold_end <= self.req.horizon_end
+src/quant_lab/market/kernel_a.py:258 self.hold_end not in self.moments
+src/quant_lab/market/kernel_a.py:261 self.hold_end is not None and self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:261 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:261 self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:318 self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)
+src/quant_lab/market/kernel_a.py:422 self.plan.expiry.max_holding_s is not None
+src/quant_lab/market/kernel_a.py:423 ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+src/quant_lab/market/kernel_a.py:568 ts in self.settled_keys
+src/quant_lab/market/kernel_a.py:569 self.settled_keys[ts] != row.rate
+src/quant_lab/market/kernel_a.py:573 mp is None or (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:573 (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:591 r.effective_from and self.t_start < r.effective_from or (r.effective_to and self.t_start >= r.effective_to)
+src/quant_lab/market/kernel_a.py:591 r.effective_from and self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:591 r.effective_to and self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:591 self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:591 self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:595 not self.market.bars_complete and (self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None)
+src/quant_lab/market/kernel_a.py:595 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:595 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:596 self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:616 (mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)) and self.pos != 0
+src/quant_lab/market/kernel_a.py:616 mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)
+src/quant_lab/market/kernel_a.py:616 self.hold_end is not None and ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:616 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:616 ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:619 mo.horizon and self.pos != 0
+src/quant_lab/market/kernel_a.py:622 ts == self.t_start and (not self.orders)
+src/quant_lab/market/kernel_a.py:622 ts == self.t_start
+src/quant_lab/market/kernel_a.py:634 o.deadline is not None and o.deadline <= ts
+src/quant_lab/market/kernel_a.py:634 o.deadline is not None
+src/quant_lab/market/kernel_a.py:634 o.deadline <= ts
+src/quant_lab/market/kernel_a.py:655 self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:655 (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:672 self.hold_end is not None and self.pos != 0
+src/quant_lab/market/kernel_a.py:672 self.hold_end is not None
+src/quant_lab/market/nautilus_adapter.py:146 list(market.last) + [p for b in market.bars_last if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:146 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:148 list(market.mark) + [p for b in market.bars_mark if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:149 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:150 b.open_time < t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.path_step == 'C' and p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:153 market.funding and len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:153 len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:156 t_start <= p.ts <= end
+src/quant_lab/market/nautilus_adapter.py:226 t_start + dt.timedelta(seconds=req.entry_ttl_s)
+src/quant_lab/market/nautilus_adapter.py:237 deadline <= end
+src/quant_lab/market/nautilus_adapter.py:419 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:419 self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start or row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:426 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:442 st['pos'] != 0 and (st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s)
+src/quant_lab/market/nautilus_adapter.py:442 st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:442 (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:450 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= until and (st['pos'] != 0) and (not st['censor'])
+src/quant_lab/market/nautilus_adapter.py:450 self.funding_rows[self.fi].calc_time <= until
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start or row.calc_time in self.settled_at or row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 st['open_at'] or t_start
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:457 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from or (rules.effective_to and t_start >= rules.effective_to)
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_to and t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:499 t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:527 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:530 min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:531 e['ts'] < hold_end
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None and st['open_at'] is not None
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1)
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:561 {m.ts for m in marks if t_start <= m.ts <= cutoff} | {p.ts for p in lasts if p.ts <= cutoff}
+src/quant_lab/market/nautilus_adapter.py:561 t_start <= m.ts <= cutoff
+src/quant_lab/market/partition_check.py:244 (pl.col(key) >= cal_from) & (pl.col(key) < cal_to)
+src/quant_lab/market/partition_check.py:244 pl.col(key) >= cal_from
+src/quant_lab/market/partition_check.py:244 pl.col(key) < cal_to
+src/quant_lab/market/partition_check.py:252 df.height and grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:252 grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:266 df[key][-1] + step < cal_to
+src/quant_lab/market/partition_check.py:321 df.height - df['calc_time'].n_unique()
+src/quant_lab/market/partition_check.py:328 (ct[i] - ct[i - 1]).total_seconds() / 3600
+src/quant_lab/market/partition_check.py:330 abs(gap_h - ih[i]) * 3600 > 60
+src/quant_lab/market/partition_check.py:330 abs(gap_h - ih[i]) * 3600
+src/quant_lab/market/partition_check.py:330 gap_h - ih[i]
+src/quant_lab/market/vision.py:318 (b - a).total_seconds() // INTERVAL_SECONDS[interval]
+```
+
+### 本轮文件完整性
+
+审前审后逐文件SHA256对比：market顶层文件及tests/market递归文件共72个，差异0。
+该集合不包含本报告；不是原子文件系统快照，不对其他会话的仓库改动作归属判断。
+原报告339行整体作为连续字节块保留，原SHA256见上；仅在其前增加十审章节，并在原末尾追加两行十审结语。
+最后四行按用户A21修正规则保持九审两行、十审两行顺序，中间没有新章节或空行。
+
 # G2 P1 九审（终审）
 ## 九审判定表
 2026-09-11，GPT-6独立九审。按表行计：**closed 21 / partial-P2 8 / open 3**（含G2-SC-01，其与S26为同一缺陷的两个编号）；S01–S28为closed20/partial-P2 8/open0，新增S29–S31阻断P1。历史轮次正文与判定保留，当前以本表为准。
@@ -337,3 +824,5 @@ PY
 
 证据完整性：完成
 九审终裁：fail
+证据完整性：完成
+十审终裁：fail
