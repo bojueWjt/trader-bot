@@ -183,7 +183,8 @@ class Ledger:
             "attempt_id": attempt_id, "run_id": self.run_id, "owner_pid": str(os.getpid()), "owner_host": socket.gethostname(),
             **self.lineage, "origin": origin, "parent_id": parent_id, "canonical_hash": canonical_hash,
             "params": _json(params or {}), "caller_horizon_end": (caller_horizon_end.isoformat() if hasattr(caller_horizon_end, "isoformat") else caller_horizon_end), "fold_id": fold_id, "visible_cutoff": visible_cutoff.isoformat() if hasattr(visible_cutoff, "isoformat") else visible_cutoff,
-            "code_version": hashlib.sha256(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py")))).hexdigest(), "model_version": model_version, "data_manifest": data_manifest, "seed": int(seed),
+            # R4-L：递归覆盖 backends/ 的统一代码摘要，与报告内嵌哈希同源
+            "code_version": paths.research_code_digest(), "model_version": model_version, "data_manifest": data_manifest, "seed": int(seed),
             "cost": _json(cost or {"wall_seconds": 0.0, "cpu_seconds": 0.0, "peak_bytes": 0, "api_cost": 0.0}), "objective": objective, "stage": stage, "raw_input_hash": raw_input_hash, "rule_hash": rule_hash,
             "market_manifest": market_manifest, "graph_version": graph_version, "backend_version": backend_version, "scope": self.scope,
             "config_id": cid, "created_at": _now(), "finished_at": None, "reason_code": None, "duplicate_of": None, "invalidated_by": None,
@@ -197,7 +198,10 @@ class Ledger:
             dup = None
             if proj.height:
                 same = proj.filter((pl.col("config_id") == cid) & (pl.col("fold_id") == fold_id) & (pl.col("stage") == stage)
-                                   & (pl.col("visible_cutoff") == base["visible_cutoff"]) & (pl.col("status") == "completed"))
+                                   & (pl.col("visible_cutoff") == base["visible_cutoff"]) & (pl.col("status") == "completed")
+                                   # R4-L：代码/后端身份进复用判据——实现变了，旧结果不是"同一次计算"，不得当 duplicate 复用
+                                   & (pl.col("code_version") == base["code_version"])
+                                   & (pl.col("backend_version").fill_null("") == (base["backend_version"] or "")))
                 if same.height:
                     dup = same["attempt_id"][0]
             if dup is not None and recompute_of is None:

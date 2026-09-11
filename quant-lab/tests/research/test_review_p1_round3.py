@@ -592,3 +592,185 @@ def test_A31_report_must_be_generated_by_current_code():
     with pytest.raises(ValueError, match="制品陈旧"):
         verify_report_text(stale)
     assert research_code_digest() == digest                    # 哈希稳定（同一份源码重复计算一致）
+
+
+# ================================================================ 四审 R4-L / R4-V 闭合回归
+@pytest.mark.parametrize("disk", [False, True])
+def test_R4L_code_lineage_covers_backends_and_backend_version_recorded(tmp_path, disk):
+    """R4-L：账本 code_version 必须递归覆盖 backends/（否则后端实现改动审计看不见），并记录实际 backend_version；
+    仅改后端实现时，旧 completed 记录不得被当作当前实现的 duplicate 复用。内存与磁盘两条路径同测。"""
+    import datetime as dt
+    from pathlib import Path as _P
+    from unittest.mock import patch
+    from quant_lab.research.ledger import Ledger, MemoryLedger
+    from quant_lab.research.paths import research_code_digest
+
+    def new_ledger(sub):
+        return Ledger(root=tmp_path / sub) if disk else MemoryLedger()
+
+    kw = dict(origin="human", canonical_hash="h", params={}, fold_id="f", visible_cutoff=dt.datetime(2024, 1, 1, tzinfo=dt.UTC),
+              objective="feature_snapshot", data_manifest="m", seed=1, backend_version="polars/0.2")
+    base = new_ledger("a")
+    a = base.reserve(**kw)
+    base.mark(a, "completed", objective=0.0, result_hash="r0")
+    row_a = base._row(a)
+    assert row_a["code_version"] == research_code_digest() and row_a["backend_version"] == "polars/0.2"
+    assert row_a["data_manifest"] == "m" and row_a["seed"] == 1        # 血缘字段没有在补摘要时被吃掉
+
+    dup = base.reserve(**kw)                                           # 同代码同配置：仍按 duplicate 记账
+    assert base._row(dup)["status"] == "duplicate"
+
+    original = _P.read_bytes
+    def changed(self):                                                 # 只改后端实现的字节，别的都不动
+        b = original(self)
+        return b + b"\n# changed backend bytes\n" if self.as_posix().endswith("/research/backends/polars.py") else b
+    with patch.object(_P, "read_bytes", changed):
+        assert research_code_digest() != row_a["code_version"], "后端字节变化未改变递归摘要（R4-L 反例复发）"
+        after = base.reserve(**kw)
+        row_b = base._row(after)
+        assert row_b["code_version"] != row_a["code_version"], "后端字节变化未改变账本血缘（R4-L 反例复发）"
+        assert row_b["status"] != "duplicate", "实现已变，旧结果仍被当作当前实现的 duplicate 复用"
+
+
+def test_R4L_backend_identity_names_the_backend_not_just_a_version():
+    """R4-L：账本里的后端身份要能认出是哪个后端——光写版本号分不开 polars 与 polars_ta。"""
+    from quant_lab.research import api
+
+    assert api._backend_identity("polars") == "polars/" + api.get_backend("polars").version
+    assert api._backend_identity("polars") != api._backend_identity("polars_ta")
+
+
+def _restamped_report() -> tuple[str, dict, int, int]:
+    """取盘上报告并把内嵌代码哈希换成当前摘要——A31 陈旧门另有专测，这里只隔离结构门。"""
+    import json as _json
+    from pathlib import Path as _P
+    from quant_lab.research.nullmodel import research_code_digest
+
+    text = _P("docs/adr/report-G3-null-model.md").read_text(encoding="utf-8")
+    old = _json.loads(text[text.rindex("```json") + 7:text.rindex("```")])["meta"]["research_code_sha256"]
+    text = text.replace(old, research_code_digest())
+    start, end = text.rindex("```json") + 7, text.rindex("```")
+    return text, _json.loads(text[start:end]), start, end
+
+
+def test_R4V_verify_rejects_tampered_structure_diagnostics():
+    """R4-V(1)：只改一个新结构诊断字段（其余计数/区间/哈希/限制声明照旧），R-08 判读必须拒收。"""
+    import copy, json as _json
+    from quant_lab.research.nullmodel import verify_report_text
+
+    text, payload, start, end = _restamped_report()
+    verify_report_text(text)                                               # 基线（仅换哈希）通过
+    damages = {
+        "grid_false": lambda d: d["grid_dependence"].__setitem__("ok", False),
+        "grid_missing": lambda d: d.pop("grid_dependence"),
+        "grid_field_missing": lambda d: d["grid_dependence"].pop("fitted_cross"),
+        "grid_nan": lambda d: d["grid_dependence"].__setitem__("fitted_ac1", float("nan")),
+        "aggregate_false": lambda d: d["dependence_aggregate"].__setitem__("ok", False),
+        "invalid_reason": lambda d: d.__setitem__("invalid_reason", "GRID_DEPENDENCE_NOT_PRESERVED"),
+        "guard_rate": lambda d: d.__setitem__("guard_fail_rate", 1.0),
+    }
+    for name, damage in damages.items():
+        q = copy.deepcopy(payload)
+        damage(q["results"][0]["diagnostics"])
+        with pytest.raises(ValueError):
+            verify_report_text(text[:start] + _json.dumps(q) + text[end:])
+
+
+@pytest.mark.parametrize("case", ["old_hash", "missing_hash"])
+def test_R4V_rebuild_preserves_source_code_digest(tmp_path, case):
+    """R4-V(2)：--rebuild 只重排版、不重跑 MC，必须保留源报告的生成哈希——否则旧结果会换到新身份。"""
+    import json as _json
+    from quant_lab.research import nullmodel as NM
+
+    text, payload, start, end = _restamped_report()
+    if case == "old_hash":
+        payload["meta"]["research_code_sha256"] = "0" * 64                   # 冒充旧代码生成的结果
+        expect = "0" * 64
+    else:
+        payload["meta"].pop("research_code_sha256")                          # 根本没有生成哈希
+        expect = NM.MISSING_GENERATING_DIGEST
+    stale = tmp_path / "stale.md"
+    stale.write_text(text[:start] + _json.dumps(payload) + text[end:], encoding="utf-8")
+
+    out = tmp_path / "rebuilt.md"
+    NM._main(["--rebuild", str(stale), "--out", str(out)])
+    rebuilt = out.read_text(encoding="utf-8")
+    meta = _json.loads(rebuilt[rebuilt.rindex("```json") + 7:rebuilt.rindex("```")])["meta"]
+    assert meta["research_code_sha256"] == expect, "rebuild 重新盖章，旧结果获得了新身份（R4-V 反例复发）"
+    assert meta["renderer_code_sha256"] == NM.research_code_digest()         # 排版器身份另记，不冒充生成身份
+    assert expect in rebuilt                                                 # 正文与 JSON 同源
+    with pytest.raises(ValueError, match="制品陈旧"):
+        NM.verify_report_text(rebuilt)
+
+
+def test_R4V_verify_aligns_guard_fail_rate_with_run_mc_and_recomputes_reason():
+    """R4-V：判读口径与 run_mc 同源——≤5% 设计误拒率可接受，>5% 必须判废，三处计数与 invalid_reason 须自洽重算。"""
+    import copy, json as _json
+    from quant_lab.research.nullmodel import GUARD_FAIL_RATE_MAX, verify_report_text
+
+    text, payload, start, end = _restamped_report()
+
+    def rendered(mutate):
+        q = copy.deepcopy(payload); mutate(q["results"][0]); return text[:start] + _json.dumps(q) + text[end:]
+
+    def set_guard(r, k, *, reason="auto"):
+        """把 k 个 replicate 记成逐 replicate 结构门失败——与 run_mc 同源地同时写四处计数。
+        （T1→invalid 搬运保持 n_done/n_failed/T0 与全部 CP 复算量不变，隔离出判定口径本身。）"""
+        d = r["diagnostics"]; n = r["n_done"]
+        d["n_invalid_null_model"] = k
+        d["guard_fail_rate"] = k / n
+        d["guard_failures_by_check"] = {c: (k if c == "icc" else 0) for c in d["shuffle_guard"]["checks"]}
+        r["tiers"]["invalid"] = k; r["tiers"]["T1"] -= k
+        if reason == "auto":
+            reason = f"GUARD_FAIL_RATE {k / n:.3f} > {GUARD_FAIL_RATE_MAX}" if k / n > GUARD_FAIL_RATE_MAX else None
+        d["invalid_reason"] = reason
+        if reason:
+            r["verdict"] = "invalid_null_model"
+
+    n_done = payload["results"][0]["n_done"]
+    verify_report_text(rendered(lambda r: set_guard(r, 1)))                   # 设计误拒率带内：与 run_mc 一致地接受
+    with pytest.raises(ValueError, match="空模型无效"):                        # 超出误拒率带：判废，不得当作通过记录
+        verify_report_text(rendered(lambda r: set_guard(r, int(GUARD_FAIL_RATE_MAX * n_done) + 10)))
+    with pytest.raises(ValueError, match="invalid_reason 与重算不符"):          # 超限却仍宣称有效
+        verify_report_text(rendered(lambda r: set_guard(r, int(GUARD_FAIL_RATE_MAX * n_done) + 10, reason=None)))
+    with pytest.raises(ValueError, match="verdict 与 invalid 判定不一致"):       # 判废却仍挂原 verdict
+        verify_report_text(rendered(lambda r: (set_guard(r, int(GUARD_FAIL_RATE_MAX * n_done) + 10), r.__setitem__("verdict", "pass"))))
+
+    for name, mutate in {                                                     # 单字段篡改：四处计数彼此互证，改一处即露
+        "rate_only": lambda r: r["diagnostics"].__setitem__("guard_fail_rate", 0.01),
+        "count_only": lambda r: r["diagnostics"].__setitem__("n_invalid_null_model", 1),
+        "tiers_only": lambda r: r["tiers"].__setitem__("invalid", 1),
+        "check_only": lambda r: r["diagnostics"]["guard_failures_by_check"].__setitem__("icc", 1),
+        "grid_ok_flipped": lambda r: r["diagnostics"]["grid_dependence"].__setitem__("ok", False),
+        "reason_forged": lambda r: r["diagnostics"].__setitem__("invalid_reason", "GRID_DEPENDENCE_NOT_PRESERVED"),
+        "grid_cross_zeroed": lambda r: r["diagnostics"]["grid_dependence"].__setitem__("null_mean_cross",
+                                                                                       [0.0] * len(r["diagnostics"]["grid_dependence"]["fitted_cross"])),
+    }.items():
+        with pytest.raises(ValueError):
+            verify_report_text(rendered(mutate))
+
+
+def test_R4V_mc_refuses_to_write_when_source_changed_mid_run(tmp_path, monkeypatch):
+    """R4-V：MC 起跑冻结生成身份、收尾确认源码未变——运行期改过源码就不得落盘，
+    否则结果由旧代码算出却盖上新哈希，A31 的陈旧检测会被绕过。"""
+    from quant_lab.research import nullmodel as NM
+
+    out = tmp_path / "report.md"
+    argv = ["--out", str(out), "--n-rep", "2", "--no-ext", "--jobs", "1", "--B", "50",
+            "--n-clusters", "200", "--mechanisms", "common_shock", "--power-mechanisms", ""]
+
+    real = NM.research_code_digest
+    calls = {"n": 0}
+
+    def drifting():
+        calls["n"] += 1
+        return real() if calls["n"] == 1 else "f" * 64      # 运行期源码被改动
+    monkeypatch.setattr(NM, "research_code_digest", drifting)
+
+    with pytest.raises(SystemExit, match="运行期间发生变化"):
+        NM._main(argv)
+    assert not out.exists(), "源码在 MC 运行期间变动，却仍落盘了制品"
+
+    monkeypatch.setattr(NM, "research_code_digest", real)   # 源码稳定：同一组参数正常落盘
+    NM._main(argv)
+    assert out.exists() and real() in out.read_text(encoding="utf-8")

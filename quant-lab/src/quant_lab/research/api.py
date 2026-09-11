@@ -24,6 +24,7 @@ import polars as pl
 
 from quant_lab.research import paths
 from quant_lab.research.ast import canonical_hash, lint
+from quant_lab.research.backends import get_backend
 from quant_lab.research.evaluator import NAN_RATE_MAX, freeze_opportunity_set, pair_arms
 from quant_lab.research.features import SnapshotContext, feature_snapshot
 from quant_lab.research.grammar import enumerate_grammar
@@ -100,6 +101,7 @@ class PanelInputs:
     policy_version: str = "panel-supplied"
     policy_hash: str = ""
     caller_horizon_end: object | None = None   # §5.13 B11：调用方自选观察终点（horizon_source=="caller" 时非空），进尝试配置身份
+    backend_version: str | None = None         # R4-L：实际计算后端身份（get_backend(name).version），进账本血缘
     shock_grid: object | None = None           # 空模型生成时实际使用的 (day × instrument) 冲击格点；结构诊断在此测量（不进流水线）
 
     @property
@@ -209,11 +211,17 @@ def _close_family(ledger, aids, reason: str) -> None:
             ledger.mark(aid, "failed", reason=reason[:200])
 
 
-def _reserve_generic(ledger, *, canonical_hash, params, objective, data_manifest, seed, graph_version, raw_input_hash=None, stage="search", fold_id="snapshot", visible_cutoff="none", recompute_of=None, caller_horizon_end=None) -> str:
+def _backend_identity(name: str) -> str:
+    """R4-L：账本里的后端身份必须能认出**是哪个后端**的哪一版，光有版本号分不开 polars / polars_ta。"""
+    b = get_backend(name)
+    return f"{b.name}/{b.version}"
+
+
+def _reserve_generic(ledger, *, canonical_hash, params, objective, data_manifest, seed, graph_version, raw_input_hash=None, stage="search", fold_id="snapshot", visible_cutoff="none", recompute_of=None, caller_horizon_end=None, backend_version=None) -> str:
     """非候选阶段（执行批次 / 快照）的预留：预算豁免；重复 → recompute_of 关联原尝试（重算计计算调用）。"""
     kw = dict(origin="enumeration", canonical_hash=canonical_hash, params=params, fold_id=fold_id, visible_cutoff=visible_cutoff, objective=objective,
               data_manifest=data_manifest, seed=seed, stage=stage, raw_input_hash=raw_input_hash, graph_version=graph_version, budget_exempt=True,
-              recompute_of=recompute_of, caller_horizon_end=caller_horizon_end)
+              recompute_of=recompute_of, caller_horizon_end=caller_horizon_end, backend_version=backend_version)
     aid = ledger.reserve(**kw)
     if ledger.status_of(aid) == "duplicate":
         aid = ledger.reserve(**(kw | {"recompute_of": aid}))
@@ -251,7 +259,8 @@ def _reserve(ledger, c: Candidate, *, fold_id: str, cutoff, stage: str, cfg: Pip
     kw = dict(origin="enumeration" if c.ast else "human", canonical_hash=c.canonical_hash or c.feature_key,
               params={"rule": c.rule.rule_id, "param": c.rule.param}, fold_id=fold_id, visible_cutoff=cutoff, objective=objective,
               data_manifest=inputs.data_manifest, seed=cfg.seed, stage=stage, rule_hash=c.rule.rule_hash, graph_version=inputs.graph_version,
-              caller_horizon_end=inputs.caller_horizon_end)          # §5.13 B11：caller 观察窗进配置身份
+              caller_horizon_end=inputs.caller_horizon_end,          # §5.13 B11：caller 观察窗进配置身份
+              backend_version=inputs.backend_version)                # R4-L：实际后端身份进账本血缘
     aid = ledger.reserve(**kw)
     if ledger.status_of(aid) == "duplicate":
         dup = aid
@@ -490,11 +499,13 @@ def run_pipeline(inputs: PanelInputs, cands: list[Candidate], cfg: PipelineConfi
     final = {}
     faid = ledger.reserve(origin="enumeration", canonical_hash="pipeline", params={"pool_hash": report["candidate_pool"]["pool_hash"]}, fold_id="final",
                           visible_cutoff=folds[-1].test_end, objective="theta_final", data_manifest=inputs.data_manifest, seed=cfg.seed, stage="final",
-                          graph_version=inputs.graph_version, budget_exempt=True, caller_horizon_end=inputs.caller_horizon_end)
+                          graph_version=inputs.graph_version, budget_exempt=True, caller_horizon_end=inputs.caller_horizon_end,
+                          backend_version=inputs.backend_version)
     if ledger.status_of(faid) == "duplicate":
         faid = ledger.reserve(origin="enumeration", canonical_hash="pipeline", params={"pool_hash": report["candidate_pool"]["pool_hash"]}, fold_id="final",
                               visible_cutoff=folds[-1].test_end, objective="theta_final", data_manifest=inputs.data_manifest, seed=cfg.seed, stage="final",
-                              graph_version=inputs.graph_version, recompute_of=faid, budget_exempt=True, caller_horizon_end=inputs.caller_horizon_end)
+                              graph_version=inputs.graph_version, recompute_of=faid, budget_exempt=True, caller_horizon_end=inputs.caller_horizon_end,
+                              backend_version=inputs.backend_version)
     with _Stage(ledger, faid) as st:
         oof = pl.DataFrame(oof_rows, schema={"episode_id": pl.Utf8, "cluster_id": pl.Utf8, "t_dec": UTC_US, "weight": pl.Float64, "m": pl.Boolean,
                                              "pipeline": pl.Float64, "fold_id": pl.Utf8, "take": pl.Boolean})
@@ -634,7 +645,8 @@ def build_inputs_from_synthetic(cfg: dict, *, ledger=None) -> tuple[PanelInputs,
             if ledger is not None:
                 aid = _reserve_generic(ledger, canonical_hash=None, params={"stage": "snapshot", "raw_input_hash": raw_hash},
                                        objective="feature_snapshot", data_manifest=f"synthetic:{seed}", seed=seed,
-                                       graph_version=gv, raw_input_hash=raw_hash, recompute_of=first_attempt.get(raw_hash))
+                                       graph_version=gv, raw_input_hash=raw_hash, recompute_of=first_attempt.get(raw_hash),
+                                       backend_version=_backend_identity(cfg.get("backend", "polars")))    # R4-L：算特征的后端身份进血缘
                 snap_aids.append(aid)
                 first_attempt.setdefault(raw_hash, aid)
             try:
@@ -672,6 +684,8 @@ def build_inputs_from_synthetic(cfg: dict, *, ledger=None) -> tuple[PanelInputs,
                          policy_version=ex.get("policy_version", "policy-synth-base"),
                          policy_hash=synthetic._policy_identity(ex.get("policy_version", "policy-synth-base"))[0],
                          caller_horizon_end=(str(ex["horizon_end"]) if ex.get("horizon_end") else None),   # §5.13 B11
+                         backend_version=_backend_identity(cfg.get("backend", "polars")),                     # R4-L
+
                          data_manifest=f"synthetic:{seed}", graph_version=s.get("graph_version", "gv-synth-0001"),
                          exclusion_kind=np.array([k if k else None for k in kinds], dtype=object))
     meta = {"n_episodes": eps.height, "n_eligible": len(ids), "n_asts": len(asts), "n_rules": len(rules), "bars_rows": bars.height,

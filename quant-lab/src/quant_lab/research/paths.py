@@ -30,9 +30,25 @@ def feature_cache_dir() -> Path:
     return lockbox_dir() / "feature_cache"
 
 
+def research_code_digest() -> str:
+    """研究代码血缘摘要：**递归**覆盖 src/quant_lab/research/**/*.py（路径 + NUL + 字节，按路径排序）。
+
+    唯一来源——账本的 `code_version`、报告内嵌的 `research_code_sha256` 都用它（review-G3-P1 四审 R4-L：
+    原先账本只 glob 顶层 *.py，backends/ 的实现改动不改血缘，等于审计看不见后端算子的变化）。
+    """
+    import hashlib
+    root = Path(__file__).resolve().parent
+    h = hashlib.sha256()
+    for f in sorted(root.rglob("*.py")):
+        if "__pycache__" in f.parts:
+            continue
+        h.update(str(f.relative_to(root)).encode()); h.update(b"\0"); h.update(f.read_bytes()); h.update(b"\0")
+    return h.hexdigest()
+
+
 def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
-__all__ = ["ENV_DATA_ROOT", "REPO_ROOT", "data_root", "ensure_dir", "feature_cache_dir", "ledger_path", "lockbox_dir"]
+__all__ = ["ENV_DATA_ROOT", "REPO_ROOT", "data_root", "ensure_dir", "research_code_digest", "feature_cache_dir", "ledger_path", "lockbox_dir"]

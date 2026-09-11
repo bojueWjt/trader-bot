@@ -266,6 +266,7 @@ def _kurt(x: np.ndarray) -> float:
 CORRELATION_TOLERANCE = 0.25
 #: 逐 replicate 结构门的失败率上限：超过即认定不是估计噪声而是结构破坏（设计误拒率约 1–2%）
 GUARD_FAIL_RATE_MAX = 0.05
+MISSING_GENERATING_DIGEST = "missing-generating-digest"   # 源报告没有生成哈希时的显式占位：绝不回落到当前源码摘要
 
 
 def _grid_cross_corr(grid, block_len_days: int) -> list[float]:
@@ -487,20 +488,9 @@ def assert_not_episode_shuffle(orig: PanelInputs, null: PanelInputs, day: np.nda
 
 # ---------------------------------------------------------------- MC 验收
 def research_code_digest() -> str:
-    """生成本报告的那版研究代码的 sha256（research-schema §9.10.18 A31 推荐的内嵌哈希变体）。
-
-    覆盖 src/quant_lab/research/**/*.py 全部内容（路径 + NUL + 字节，按路径排序）。制品内嵌它、verify 侧重算比对，
-    直接回答"这份制品由哪一版代码生成"——mtime 会被 touch/复制/检出顺序改变，哈希不会。
-    任何改变判定结果的门变更都会使旧报告失配并让 verify 变红，不依赖人记得重跑。
-    """
-    import hashlib
-    root = Path(__file__).resolve().parent
-    h = hashlib.sha256()
-    for f in sorted(root.rglob("*.py")):
-        if "__pycache__" in f.parts:
-            continue
-        h.update(str(f.relative_to(root)).encode()); h.update(b"\0"); h.update(f.read_bytes()); h.update(b"\0")
-    return h.hexdigest()
+    """转发到唯一实现（quant_lab.research.paths），使账本血缘与报告内嵌哈希同源（R4-L）。"""
+    from quant_lab.research.paths import research_code_digest as _d
+    return _d()
 
 
 def clopper_pearson(x: int, n: int, alpha: float = 0.05) -> tuple[float, float]:
@@ -746,13 +736,39 @@ def verify_report_text(text: str) -> dict:
         require(r["n_T0"] == tiers.get("T0", 0) and r["n_searched"] == ns, "搜索计数不一致")
         diag = r["diagnostics"]
         require(finite_tree(diag), "非有限诊断")
-        require(count(diag["n_invalid_null_model"]) == 0 and count(diag.get("n_invalid", 0)) == 0
-                and count(r.get("n_invalid", 0)) == 0, "invalid null model")
+        require(count(diag.get("n_invalid", 0)) == 0 and count(r.get("n_invalid", 0)) == 0, "未知 invalid 计数字段")
+        # R4-V：结构门判读必须从**原始诊断重算**，并与 invalid_reason / verdict / 各失败计数互相对账。
+        # 只核 ok 标志时，篡改任一字段都能让总体门失效而计数、区间、哈希、§3.2 全部照旧。
+        gridd = diag.get("grid_dependence")
+        require(isinstance(gridd, dict), "grid_dependence 缺失")
+        require(all(k in gridd for k in ("fitted_cross", "null_mean_cross", "fitted_ac1", "null_mean_ac1", "ok")), "grid_dependence 字段不完整")
+        fc, mc_ = gridd["fitted_cross"], gridd["null_mean_cross"]
+        require(isinstance(fc, list) and isinstance(mc_, list) and bool(fc) and len(fc) == len(mc_), "grid_dependence 跨品种向量不成对")
+        agg_ok = all((not math.isfinite(m)) or _correlation_preserved(f, m) for f, m in zip(fc, mc_))   # 与 run_mc 同一判据，独立重算
+        require(gridd["ok"] is agg_ok, "grid_dependence.ok 与重算不符")
+        require((diag.get("dependence_aggregate") or {}).get("ok") is agg_ok, "dependence_aggregate.ok 与重算不符")
+
         guard = diag["shuffle_guard"]
         require(guard["ok"] is True and bool(guard["checks"]) and all(v is True for v in guard["checks"].values()), "guard 失败")
         failures = diag["guard_failures_by_check"]
-        require(set(guard["checks"]) <= set(failures) and all(count(v) == 0 for v in failures.values()), "guard 失败计数")
-        require(not diag.get("all_T0") and tiers.get("invalid", 0) == 0, "全部 T0 或 invalid")
+        require(set(guard["checks"]) <= set(failures), "guard 失败计数缺 check")
+        n_invalid = count(diag["n_invalid_null_model"])
+        per_check = [count(v) for v in failures.values()]
+        # 一次 replicate 可同时命中多个 check，故 max ≤ n_invalid ≤ sum；三处计数必须同源
+        require(max(per_check, default=0) <= n_invalid <= sum(per_check), "guard 失败计数与 invalid 数不自洽")
+        require(count(tiers.get("invalid", 0)) == n_invalid, "tiers.invalid 与 n_invalid_null_model 不一致")
+        rate = diag.get("guard_fail_rate")
+        require(isinstance(rate, (int, float)) and not isinstance(rate, bool) and math.isfinite(rate), "guard_fail_rate 非数")
+        close(rate, n_invalid / n)
+        # 与 run_mc **同一口径**：≤ GUARD_FAIL_RATE_MAX 是设计误拒率带，不是零失败；单次失败已按保守方向计进最坏界。
+        expected_reason = None if agg_ok else "GRID_DEPENDENCE_NOT_PRESERVED"
+        if expected_reason is None and rate > GUARD_FAIL_RATE_MAX:
+            expected_reason = f"GUARD_FAIL_RATE {rate:.3f} > {GUARD_FAIL_RATE_MAX}"
+        require((diag.get("invalid_reason") or None) == expected_reason,
+                f"invalid_reason 与重算不符：记录 {diag.get('invalid_reason')!r} vs 重算 {expected_reason!r}")
+        require((r["verdict"] == "invalid_null_model") == bool(expected_reason), "verdict 与 invalid 判定不一致")
+        require(expected_reason is None, f"空模型无效：{expected_reason}")
+        require(not diag.get("all_T0"), "全部 T0")
         require(len(diag.get("errors", [])) <= failed and tiers.get("error", 0) <= failed, "错误计数不一致")
         chosen = diag.get("chosen_block_len", {})
         require(not chosen or sum(count(v) for v in chosen.values()) == n - len(diag.get("errors", [])), "块长计数不一致")
@@ -784,7 +800,15 @@ def verify_report_text(text: str) -> dict:
     return data
 
 
-def write_report(results: list[MCResult], out: Path, *, meta: dict) -> None:
+def _grid_pairs(gd: dict) -> str:
+    f, m = gd.get("fitted_cross") or [], gd.get("null_mean_cross") or []
+    return "、".join(f"{a_:.3f}→{b_:.3f}" for a_, b_ in zip(f, m)) or "—"
+
+
+def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest: str | None = None) -> None:
+    """code_digest=None 表示"本次由当前代码生成"；--rebuild 传入**源报告的**哈希，
+    因为重排版不重跑 MC，结果的来源仍是旧代码——重新盖章会让旧结果换到新身份（R4-V 反例）。"""
+    digest = research_code_digest() if code_digest is None else code_digest
     def ci_s(c):
         return "—" if c is None else f"[{100 * c[0]:.2f}%, {100 * c[1]:.2f}%]"
     nulls = [r for r in results if r.kind == "null"]
@@ -792,7 +816,7 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict) -> None:
     lines = [
         "# report-G3-null-model：空模型 FPR / 功效验收（合成 T1 规模，synthetic_validation）",
         "",
-        f"生成本报告的研究代码 sha256：`{research_code_digest()}`（A31：制品须由不旧于门代码的版本生成，R-08 verify 机械比对）。",
+        f"生成本报告的研究代码 sha256：`{digest}`（A31：制品须由不旧于门代码的版本生成，R-08 verify 机械比对）。",
         "",
         f"日期：{dt.datetime.now(dt.UTC):%Y-%m-%d %H:%M} UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。",
         "依据：合并稿 D.5、ADR-G3 §10、Claude 验收 R03（按档分级：T1/T2 各机制 1000 次；T3 200 次预注册更宽精确区间）。",
@@ -880,17 +904,31 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict) -> None:
         "",
         "## 4. 空模型诊断（块内相关是否保留）",
         "",
-        "| 机制 | 训练窗天数 / 观测 | 块均值 lag-1 自相关 | 跨品种格点相关 | 块 ICC orig / null / 逐 episode 洗牌 | 通过 |",
-        "|---|---|---:|---:|---|---|",
+        "| 机制 | 训练窗天数 / 观测 | 块均值 lag-1 自相关 | 跨品种格点相关 | 块 ICC orig / null / 逐 episode 洗牌 | 逐 replicate 门 | 格点总体门：拟合 → null 均值（判定依据） |",
+        "|---|---|---:|---:|---|---|---|",
     ]
     for r in nulls:
         rm = r.diagnostics.get("residual_model", {}); sg = r.diagnostics.get("shuffle_guard", {})
         b = sg.get("block_icc", {})
         lines.append(f"| {r.mechanism} | {rm.get('train_days')} / {rm.get('n_train_obs')}（未成熟排除 {rm.get('n_immature_excluded')}） | {rm.get('block_mean_ac1', float('nan')):.3f} | {rm.get('cross_inst_corr', float('nan')):.3f} | "
-                     f"{b.get('orig', float('nan')):.4f} / {b.get('null', float('nan')):.4f} / {b.get('episode_shuffle', float('nan')):.4f} | {sg.get('ok')}（逐 replicate 诊断失败 {r.diagnostics.get('n_invalid_null_model', 0)} 次） |")
+                     f"{b.get('orig', float('nan')):.4f} / {b.get('null', float('nan')):.4f} / {b.get('episode_shuffle', float('nan')):.4f} | "
+                     f"失败 {r.diagnostics.get('n_invalid_null_model', 0)} / {r.n_done} = {100 * r.diagnostics.get('guard_fail_rate', 0.0):.2f}%（带 ≤ {100 * GUARD_FAIL_RATE_MAX:.0f}%） | "
+                     f"{_grid_pairs(r.diagnostics.get('grid_dependence', {}))} → **{r.diagnostics.get('grid_dependence', {}).get('ok')}**（invalid_reason={r.diagnostics.get('invalid_reason')}） |")
     lines += [
         "",
-        "每个 replicate 都跑块 ICC 诊断；任一失败计入失败最坏界并使该机制 verdict=invalid_null_model（不得 pass）；全部落 T0 的机制标 not_run_T0（cap=0 无搜索，FPR 平凡为 0，不作 T1 验收替身）。",
+        "**两个门，口径不同，不得混称**（R4-V）：",
+        "",
+        f"1. **逐 replicate 结构门**（冲击格点上的 Fisher-z 判据）有设计误拒率，按校准带约 1–2%。单次失败的 replicate 直接计失败，"
+        f"并按保守方向进最坏界（空机制计阳性、功效计未检出），**但不单独使整轮判废**——那等于拿估计噪声当结构破坏。"
+        f"只有失败率 > {100 * GUARD_FAIL_RATE_MAX:.0f}%（远超设计误拒率）才判 invalid_null_model。",
+        "2. **格点总体门**（上表末列）比较拟合格点与全 replicate 均值的跨品种相关：均值比单次稳，是真正的判定依据。"
+        "它失败即整轮 invalid_null_model，与逐 replicate 失败次数是否为零无关。",
+        "",
+        "R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断重算**这两条，并要求 "
+        "`grid_dependence.ok` / `dependence_aggregate.ok` / `invalid_reason` / `verdict` / `tiers.invalid` / "
+        "`n_invalid_null_model` / `guard_fail_rate` / `guard_failures_by_check` 八处彼此自洽——单改任意一处即被拒收。",
+        "",
+        "全部落 T0 的机制标 not_run_T0（cap=0 无搜索，FPR 平凡为 0，不作 T1 验收替身）。",
         "",
         "## 5. 总判定（synthetic_validation）",
         "",
@@ -907,7 +945,7 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict) -> None:
         "## 附：原始结果 JSON",
         "",
         "```json",
-        json.dumps({"meta": meta | {"research_code_sha256": research_code_digest()}, "results": [r.to_dict() for r in results]},
+        json.dumps({"meta": meta | {"research_code_sha256": digest}, "results": [r.to_dict() for r in results]},
                    ensure_ascii=False, indent=1, default=str),   # 不截断：本块是机器可读载荷，截断会让 verify/复核无法解析
         "```",
     ]
@@ -937,9 +975,15 @@ def _main(argv=None):  # pragma: no cover - CLI
         j = json.loads(t[t.rindex(chr(96) * 3 + "json") + 7:t.rindex(chr(96) * 3)])
         fields = {f for f in MCResult.__dataclass_fields__}
         results = [MCResult(**{k: (tuple(v) if isinstance(v, list) and k in ("ci", "worst_case_ci") else v) for k, v in d.items() if k in fields}) for d in j["results"]]
-        write_report(results, Path(a.out), meta=j["meta"])
-        print("rebuilt", a.out, "from", a.rebuild)
+        src_digest = (j.get("meta") or {}).get("research_code_sha256") or MISSING_GENERATING_DIGEST
+        meta = dict(j["meta"]); meta["research_code_sha256"] = src_digest
+        meta["renderer_code_sha256"] = research_code_digest()                        # 排版器身份另记，不冒充生成身份
+        write_report(results, Path(a.out), meta=meta, code_digest=src_digest)        # 保留源哈希：重排版没有重跑 MC
+        print("rebuilt", a.out, "from", a.rebuild, "| preserved generating sha256:", str(src_digest)[:12],
+              "| renderer:", meta["renderer_code_sha256"][:12])
         return
+    frozen_digest = research_code_digest()          # A31：MC 起跑即冻结生成身份，结束时确认源码未在运行期变动
+    print("generating code sha256 (frozen at start):", frozen_digest, flush=True)
     wc = WorldConfig(n_clusters=a.n_clusters)
     pc = PipelineConfig(B=a.B, block_len_days=None)      # 主 L 由每 replicate 首折训练窗残差诊断预注册（1/3/7）
     results: list[MCResult] = []
@@ -983,8 +1027,12 @@ def _main(argv=None):  # pragma: no cover - CLI
     meta = {"command": " ".join(["python -m quant_lab.research.nullmodel"] + (argv or [])), "world": str(wc), "n_candidates": len(default_candidates(wc.n_candidates)),
             "candidates": "12 独立特征 × 规则 {gt_q30, lt_q30, gt_q70}（36 提交，T1 cap=12 → 按规范顺序前 12 个 = f00..f03 × 3 规则，含植入候选 f00:gt_q30）", "pipeline": str(pc), "B": pc.B, "alpha": pc.alpha,
             "L": "auto(1/3/7 训练诊断)" if pc.block_len_days is None else pc.block_len_days, "delta": a.delta, "pi": wc.pi}
-    write_report(results, Path(a.out), meta=meta)
-    print("written", a.out)
+    end_digest = research_code_digest()
+    if end_digest != frozen_digest:                 # 运行期改过源码 → 结果与任何单一代码身份都不对应，拒绝落盘
+        raise SystemExit(f"研究代码在 MC 运行期间发生变化（起 {frozen_digest[:12]} / 止 {end_digest[:12]}）："
+                         f"结果与代码身份不再一一对应，必须在稳定源码上重跑，不得落盘")
+    write_report(results, Path(a.out), meta=meta, code_digest=frozen_digest)
+    print("written", a.out, "| generating code sha256:", frozen_digest[:12])
 
 
 if __name__ == "__main__":  # pragma: no cover

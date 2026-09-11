@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T08:24:49Z",
+  "updatedAt": "2026-09-11T08:31:34Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -490,10 +490,18 @@
         "section": "§24.5",
         "summary": "G0 按 §24.3 自审 test_e2e_synthetic.py：自证会红通过（注入 R28 原缺陷→2 failed，清理后 8 passed）；判别性检查查出自身缺陷——构造『有成交但无人走完结局』突变（价格恒为入场中值）两门全绿，实际分布 right_censored 78/rejected 2，而断言写的是 len(kinds)>=2，两个零星 rejected 即满足，声称检查『样本非退化』实际检查『至少两种标签』，与 G0 反复裁给他人的形态同一（断言字面与声称意图不符、零星取值即满足字面）；修正为断言走完结局样本（tp_hit/stopped/filled_closed）占比≥1/4，修正后同一突变下非退化门 RED 主断言 GREEN，对角线成立，基线 8 passed；记明 §24.3 立于上轮而其作者下轮即被它查出自身缺陷，佐证立规时注意力不在自己手里的工具上",
         "by": "G0/427ed064 R69"
+      },
+      {
+        "n": 67,
+        "at": "2026-09-11T08:31:34Z",
+        "file": "contracts/research-schema.md",
+        "section": "§9.10.18 补充",
+        "summary": "四审 S17 指 A31 有绕过口（--rebuild 可洗掉旧生成哈希），G0 读源核实 G3 已按四审自身 R4-V 反例修好：--rebuild 传入源报告哈希不重新盖章、生成身份 research_code_sha256 与排版器身份 renderer_code_sha256 分列、MISSING_GENERATING_DIGEST 显式占位绝不回落到当前摘要、MC 起跑冻结生成身份并于结束确认源码未在运行期变动；立为 A31 规范补充——一份制品经多道处理时每道身份须分列不得后覆前，排版器改了不代表结果重算，与 B21『每个身份字段只回答它自己那个问题』同源；第四项另堵 A31 原文未覆盖的窗口：长时 MC 运行期间源码变动时两端一致也不代表结果由该版产生",
+        "by": "G0/427ed064 R71"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.43",
+    "version": "v1.44",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -830,7 +838,7 @@
         "note": "[G0/427ed064 R70 · M-10 闭合核验，三份审查第二份收口] 测量 08:23Z，market 写入距今 2223 秒、出写入窗口，**可判**。**M-10 status=done，verify 原样前台实跑 rc=0**。A19/A20 三项逐项核：`证据完整性：完成` 存在；**未完成标记 0 处**；六条终裁行按时序完整保留（九→十四），最后一条为 **十四审终裁：pass**——A21 追加制自九审起连续六轮正确。**按 A24/A33/A38 对该门做突变自证（沙箱副本，未碰真实文件），六种情形全部正确响应**：基线 rc=0；终裁改 fail→1；改 insufficient→1；完整性声明改待回填→1；注入未完成标记→1；删除完整性声明→1。**该门确实能因它意图防止的每一种退化而失败。****G0 亲跑 tests/market 358 passed**。十四审证据：103 组独立磁盘突变、29 个新增/修改测试节点均证明可失败、还原 SHA256 相等、A36 四条对角线与 A37 十项优先级回归闭合、审查方未改产品代码与测试。**核 G2 按 §24.3 自审后新增的 scripts/mutation_batch.py**：`ControlNotRed` 已定义；`run_batch` 签名 `*, selectors, control: tuple[str,str,str,str], cases, declared_diff=None`——**control 为必填位置外关键字、无默认值**，符合 §24.1『对照必须在本批实际选择器下变红』。其自审查出『四个突变脚本没有一个内建活性对照』，已改为机制强制。**A19 边界四项如实记录**：(1) G3 未接入，force_close_net_R 跨窗口登记与使用点计数均为空集（裁定结果），差分列『无消费方，不适用』且三件套齐全，义务完整在 G3 侧；(2) 真实归档验证范围仅 BTCUSDT 2024-01；(3) 10 项 partial-P2 保留既有边界、P2_UNSUPPORTED 四键如实声明；(4) **M-11 为 gated 任务按用户指令不做，market 停在 0.91 是有意的**——INTEGRATION_REPORT 须按『gated 未启动』记，不得按『进行中』记。**P1 缺项现仅剩 R-10 一项。** D-10 与 M-10 均已闭合，OR-04 端到端 8 passed。",
         "at": "2026-09-11T08:24:49Z"
       },
-      "lastUpdate": "2026-09-11T07:55:13Z",
+      "lastUpdate": "2026-09-11T08:25:34Z",
       "tasks": [
         {
           "id": "M-01",
@@ -1229,6 +1237,10 @@
         {
           "t": "16:55",
           "n": "**M-10 已 done（看板已落）。十四审终裁 pass，P1 阻断项无。** 测量时刻 16:52:57，G2 范围内工作树差异 0，HEAD=955f62c，写入窗口已关闭。\n**看板 verify 原样前台实跑 rc=0**，并逐条拆解不只看返回码：文件存在 ✓；`证据完整性：完成` **6 条**（九审至十四审各一）；**未完成标记 0 处**；最后一条终裁 = `十四审终裁：pass`；**六条终裁行按时序完整保留**（A21 追加制自九审起连续六轮正确）。\n**我亲跑的全量验收**：`tests/market` **358 passed**；A `kernel=A passed=22 failed=0`；AB rc=0、`MATCH 12 / B_COMMAND_LATENCY 3 / GAP_PRICE 1 / SAME_TS_PRIORITY 4 / GTD_BOUNDARY 1 / B_LIQUIDITY_MODEL 1`、UNEXPLAINED 0。其余里程碑 verify 抽查全绿：vision 11 / partition_check 13 / asof 11 / contract 19 / kernel_a 72 / execution_api 6。\n**十四审证据**：103 组独立磁盘突变；**29 个新增/修改测试节点均证明可失败**、还原 SHA256 相等；A36 四条对角线与 A37 十项删失优先级回归均闭合；**审查方未修改产品代码与测试**。\n**十四轮的形状值得记一句**：一至八审在找同族缺陷的**新站点**；九至十一审转为**\"我的门自身无效\"**；十二至十三审转为**\"门的输入域没覆盖到\"**；**十四审是第一轮既无新缺陷也无新门缺口**。**收敛不是因为找得更细，是因为每一轮都把上一轮的失效模式变成了一道会自动变红的机制。**\n**按 A19 明确写出未做与边界，不留悬空**：(1) **G3 未接入**——`force_close_net_R` 的跨窗口调用登记与使用点计数均为空集（裁定结果，**不得预登记不存在的调用方**），差分列\"无消费方，不适用\"，**义务顺延至 G3 接入时以哨兵证明 θ 随返回值改变**；按 A32 该记录已含理由/债主/触发事件三件。(2) **真实归档验证范围仅 BTCUSDT 2024-01**。(3) 10 项 partial-P2（S02/S04/S06/S07/S10/S11/S12/S13/S34/S36）保留既有边界，`P2_UNSUPPORTED` 四键如实声明。(4) **M-11 是 gated 任务，按用户指令不做**——market 通道因此停在 0.91，这是**有意的**，不是未完成。\n**G2 剩余交付均已落盘**：`report-G2-partial-exit-estimand.md`（B16(2)，主口径 B + A 作强制敏感性）、`report-G2-research-horizon-proposal.md`（`research_horizon_s=5d` 已解除占位）、`note-G2-archive-timestamp-grid.md`（bar 严格网格 / funding 容差的实测依据）、`design-G2-force-close-net-r.md`、`evidence-G2-mutation-round10.md`、`review-G2-P1-verdicts.md`（十四轮终裁台账）。"
+        },
+        {
+          "t": "17:25",
+          "n": "**G0 已独立核验并判 M-10 闭合（R70）。GOAL-2 全部非 gated 任务完成。**\nG0 按裁 D-10 时的同一标准实跑：verify 原样 rc=0；`证据完整性：完成` 在；未完成标记 0 处；六条终裁行按时序完整保留（九→十四），末条 `十四审终裁：pass`。并**按 A24/A33/A38 突变了这道门本身**（沙箱副本，未碰真实文件）：基线 0；终裁改 fail→1；改 insufficient→1；完整性声明改待回填→1；注入未完成标记→1；删除完整性声明→1——**六种情形全部正确响应，它确实能因它意图防止的每一种退化而失败**。G0 亲跑 `tests/market` 358 passed。\nG0 已看过 `scripts/mutation_batch.py`，确认 `control` 是无默认值的必填关键字、符合 A38，并把我那次自审记为要点：**四个突变脚本没有一个内建活性对照，每次靠手工塞一条再自己看颜色——已从\"依赖人记得\"改成\"机制强制\"**。\n**M-11 的记法 G0 已确认**：按 **\"gated 未启动\"** 记入 INTEGRATION_REPORT，**不按\"进行中\"记**。理由值得留档：**把有意的边界记成未完成，会让读者去追一个根本不该动的任务。** market 停在 0.91 是有意的。\n**当前 P1 缺项只剩 R-10（G3 窗口）**；D-10 与 M-10 均闭合，OR-04 端到端 8 passed 稳定。\n**G2 侧无剩余工作项。** 唯一顺延义务在 G3：`force_close_net_R` 接入时须以哨兵证明 θ 随返回值改变（跨窗口登记与使用点计数现为空集，按裁定不得预登记不存在的调用方；该记录已含理由/债主/触发事件三件）。"
         }
       ]
     },
@@ -1250,9 +1262,9 @@
       ],
       "artifacts": [],
       "review": {
-        "verdict": "pass",
-        "note": "[G0/427ed064 OR-02 R62 · A34 基线首次投用即见效] 测量时刻 06:53Z。**research 首次全绿 328 passed**：G3 已于 15:43:01 重生成 null-model 报告，**A31 关系现已满足**（报告 15:43:01 晚于 nullmodel.py 15:01:48），此前两条同源失败（test_S17_real_low_power_truthful_fail_accepted 与 test_A31_report_must_be_generated_by_current_code）**均已消失**。data 225 passed、integration 8 passed。**market 记不判**：首跑 2 failed/330 passed，复跑 0 failed；源码最近写入 15:52:48（距测量 67 秒，**在写入窗口内**）。**A34 的批前基线在本轮第一次派上用场，且正是它让『残骸』与『在干活』可分**：`git status quant-lab/src quant-lab/tests` 显示 market 5 个文件已改，并列出 `tests/market/.s42-s43-5m8x1o4q/`、`s42-s43-mutation-evidence.json`、`verify_s42_s43.py`——**是 S42/S43 的突变取证正在进行，带证据文件，不是残骸**。**若无 R61 的入库，本轮我只会看到『2 条失败 + 5 个文件被改』而无从判断是故意还是残骸**——这正是 A34 §20.2 真实树法护栏要挡的那一面。记为该护栏的首个实例。P1 缺项收窄至两项：M-10（十二审进行中；S42/S43 修复取证中）与 R-10（三审 fail，但其阻断性失败已随报告重生成消失，待重派）。D-10 已闭合；OR-04 端到端 8 passed 稳定。",
-        "at": "2026-09-11T06:54:29Z"
+        "verdict": "issues",
+        "note": "[G0/427ed064 OR-02 R71] 测量 08:25Z，三模块均出写入窗口。A35 必报量：**src 48/48、tests 60/60**。**四套全绿，共 926 项**：data 225 / market 358 / research **335** / integration 8。**research 的 A31 陈旧对已解**（G3 以当前代码重生成报告）。**D-10 与 M-10 均 done；P1 唯一剩余项为 R-10**（四审终裁 fail，verify rc=1）。四审判定为 **已闭合 17 / 部分闭合 2（S08、S17）/ 未闭合 0**——fail 源于两项部分闭合，非新缺陷。**S17 指 A31 有绕过口『--rebuild 可洗掉旧生成哈希』，G0 读源核实：G3 已按四审自身的 R4-V 反例修好**，且做法已立为 A31 规范补充（§9.10.18 补充 / changeLog #67）：`--rebuild` 传入源报告哈希不重新盖章；生成身份与排版器身份分列（`renderer_code_sha256` 不冒充生成身份）；`MISSING_GENERATING_DIGEST` 显式占位、**绝不回落到当前源码摘要**（拒绝本项目反复裁过的 or 兜底）；**MC 起跑冻结生成身份、结束确认源码未在运行期变动**——该项堵的是 A31 原文未覆盖的窗口：长时 MC 中途改码时，制品与当前代码两端一致也不代表结果由那一版产生。**S08 残余**：backend bytes 变化时 ledger `code_version` 不变、`backend_version=None`，版本血缘仍缺，待 G3 处置。两项部分闭合看来均已在代码中处置，待 G3 派五审确认。",
+        "at": "2026-09-11T08:31:34Z"
       },
       "lastUpdate": "2026-09-11T07:38:20Z",
       "tasks": [
@@ -2173,6 +2185,12 @@
         "module": "market",
         "verdict": "pass",
         "note": "[G0/427ed064 R70 · M-10 闭合核验，三份审查第二份收口] 测量 08:23Z，market 写入距今 2223 秒、出写入窗口，**可判**。**M-10 status=done，verify 原样前台实跑 rc=0**。A19/A20 三项逐项核：`证据完整性：完成` 存在；**未完成标记 0 处**；六条终裁行按时序完整保留（九→十四），最后一条为 **十四审终裁：pass**——A21 追加制自九审起连续六轮正确。**按 A24/A33/A38 对该门做突变自证（沙箱副本，未碰真实文件），六种情形全部正确响应**：基线 rc=0；终裁改 fail→1；改 insufficient→1；完整性声明改待回填→1；注入未完成标记→1；删除完整性声明→1。**该门确实能因它意图防止的每一种退化而失败。****G0 亲跑 tests/market 358 passed**。十四审证据：103 组独立磁盘突变、29 个新增/修改测试节点均证明可失败、还原 SHA256 相等、A36 四条对角线与 A37 十项优先级回归闭合、审查方未改产品代码与测试。**核 G2 按 §24.3 自审后新增的 scripts/mutation_batch.py**：`ControlNotRed` 已定义；`run_batch` 签名 `*, selectors, control: tuple[str,str,str,str], cases, declared_diff=None`——**control 为必填位置外关键字、无默认值**，符合 §24.1『对照必须在本批实际选择器下变红』。其自审查出『四个突变脚本没有一个内建活性对照』，已改为机制强制。**A19 边界四项如实记录**：(1) G3 未接入，force_close_net_R 跨窗口登记与使用点计数均为空集（裁定结果），差分列『无消费方，不适用』且三件套齐全，义务完整在 G3 侧；(2) 真实归档验证范围仅 BTCUSDT 2024-01；(3) 10 项 partial-P2 保留既有边界、P2_UNSUPPORTED 四键如实声明；(4) **M-11 为 gated 任务按用户指令不做，market 停在 0.91 是有意的**——INTEGRATION_REPORT 须按『gated 未启动』记，不得按『进行中』记。**P1 缺项现仅剩 R-10 一项。** D-10 与 M-10 均已闭合，OR-04 端到端 8 passed。"
+      },
+      {
+        "at": "17:31",
+        "module": "research",
+        "verdict": "issues",
+        "note": "[G0/427ed064 OR-02 R71] 测量 08:25Z，三模块均出写入窗口。A35 必报量：**src 48/48、tests 60/60**。**四套全绿，共 926 项**：data 225 / market 358 / research **335** / integration 8。**research 的 A31 陈旧对已解**（G3 以当前代码重生成报告）。**D-10 与 M-10 均 done；P1 唯一剩余项为 R-10**（四审终裁 fail，verify rc=1）。四审判定为 **已闭合 17 / 部分闭合 2（S08、S17）/ 未闭合 0**——fail 源于两项部分闭合，非新缺陷。**S17 指 A31 有绕过口『--rebuild 可洗掉旧生成哈希』，G0 读源核实：G3 已按四审自身的 R4-V 反例修好**，且做法已立为 A31 规范补充（§9.10.18 补充 / changeLog #67）：`--rebuild` 传入源报告哈希不重新盖章；生成身份与排版器身份分列（`renderer_code_sha256` 不冒充生成身份）；`MISSING_GENERATING_DIGEST` 显式占位、**绝不回落到当前源码摘要**（拒绝本项目反复裁过的 or 兜底）；**MC 起跑冻结生成身份、结束确认源码未在运行期变动**——该项堵的是 A31 原文未覆盖的窗口：长时 MC 中途改码时，制品与当前代码两端一致也不代表结果由那一版产生。**S08 残余**：backend bytes 变化时 ledger `code_version` 不变、`backend_version=None`，版本血缘仍缺，待 G3 处置。两项部分闭合看来均已在代码中处置，待 G3 派五审确认。"
       }
     ],
     "blockers": [
