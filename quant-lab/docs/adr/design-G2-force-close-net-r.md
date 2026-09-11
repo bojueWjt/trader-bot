@@ -21,10 +21,24 @@ def force_close_net_R(
     mark_at: dt.datetime,          # 该 bar 的 open_time（证据出处，不是 horizon_end）
     mark_source: str,              # manifest_id / 显式点，供追溯
     policy: ExecutionPolicy,
+    risk_budget: Decimal,          # 见 §2.1 裁定一
+    cost_scenario: CostScenario,   # 见 §2.1 裁定一
     side: Side,
     multiplier: Decimal,
 ) -> ForceCloseValuation | None      # 无余仓 → None（不是 0：0 会与"平了但不赚不亏"混淆）
 ```
+
+### 2.1 两条实现期裁定（修复方提问，G2 答，2026-09-11）
+
+**裁定一：`risk_budget` 与 `cost_scenario` 加为必填关键字参数。** 二者是估值公式的输入（前者做 R 化的分母，后者定 taker 费档），而 `ExecutionResult` 不携带它们——**这是对的，它们属于请求不属于结果**。`ExecutionRequest` 同时带这两个字段（`contract.py:404/405`），调用方手上必然有请求，显式传入使估值的全部输入可审计。加参数不违反 B19：B19 约束的是本函数**不得做什么**（碰执行记录），不是它的输入面。
+
+**裁定二：`gross_pnl` 为 `None` 时 `raise ContractError`，禁止从事件重建已实现损益。**
+
+理由是本项目十一轮审查的核心教训：**从事件重建已实现损益，就是把"已实现损益怎么算"这条规则实现第二遍**——正是族 A（一式多处实现），S24/S27/S28/S29/S30/S32/S33/S35/S37/S40 全部属于它。第二份实现今天与内核等价，明天内核改了费用归属或部分成交口径，两份就会安静地分叉，而**两边各自自洽、没有断言会响**。
+
+实测：22 个夹具中**删失且 `gross_pnl is None` 的为 0 例**；两个内核都无条件赋值（`kernel_a.py:696` 的 `gross = quantize_money(self.realized)`、`nautilus_adapter.py:600`）。字段类型写成 `Decimal | None` 是 schema 的保守面，不是实际可达状态。
+
+因此正确处置是**让它响**：`gross_pnl is None` 说明内核没算出已实现损益，那么**这条样本就不该被强平估值**，应抛 `ContractError` 指出内核未提供已实现损益，而不是由估值函数替内核补算一份。
 
 **硬约束（B19 三条，逐条对应断言）**
 
