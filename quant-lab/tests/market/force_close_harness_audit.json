@@ -1,0 +1,31 @@
+{
+  "scope": "isolated replicas; G3 not integrated",
+  "cases": [
+    {
+      "case": "M01 omit close_fee",
+      "target": "src/quant_lab/market/contract.py",
+      "test": "tests/market/test_force_close_net_r.py::test_accounting_and_read_only",
+      "old": "- res.fees - close_fee + res.funding",
+      "new": "- res.fees + res.funding",
+      "sha256_before": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "sha256_mutant": "de63f2cb0fb3d50bd369ba34f45b32e776d9efb4424f3dba428dfff96fab41c6",
+      "injected": {
+        "exit": 0,
+        "output": "....                                                                     [100%]\n4 passed in 0.11s\n"
+      },
+      "sha256_after": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "SHA256_EQUAL": true,
+      "restored": {
+        "exit": 0,
+        "output": "....                                                                     [100%]\n4 passed in 0.10s\n"
+      }
+    }
+  ],
+  "harness_overlay": {
+    "exit": 0,
+    "output": "....                                                                     [100%]\n4 passed in 0.09s\n",
+    "sha256_before": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+    "sha256_after": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291"
+  },
+  "diagnosis": "A26 叠加仍绿：隔离副本继承祖先 pyproject.toml pythonpath=真实 src，未执行突变模块。属验证器路径错误，修复为隔离 pytest.ini，并在每次 subprocess 启动断言模块 __file__ 位于副本。此记录不是通过证据。"
+}
