@@ -4,3 +4,4 @@ TA-Lib==0.7.1
 arch==8.0.0
 deap==1.4.4
 scikit-learn>=1.6
+PyYAML==6.0.3  # G3：run_protocol 冻结配置（tests/research/fixtures/protocol_synthetic.yaml）

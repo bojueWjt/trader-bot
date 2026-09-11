@@ -1,0 +1,33 @@
+COMMAND: PYTHONDONTWRITEBYTECODE=1 .venv-g2/bin/python -c 'exec("import pathlib,hashlib,sys,json,pytest\nfrom unittest.mock import patch\nitem=json.loads(sys.argv[1])\np=pathlib.Path(\"src/quant_lab/market\")/item[\"file\"]\nraw=p.read_bytes();source=raw.decode();original=pathlib.Path.read_text\nif item[\"old\"] is None:\n mutated=source+item[\"new\"]\nelse:\n assert source.count(item[\"old\"])==1\n mutated=source.replace(item[\"old\"],item[\"new\"])\ndef read(path,*a,**kw):\n if path.resolve()==p.resolve():\n  return mutated\n return original(path,*a,**kw)\nwith patch.object(pathlib.Path,\"read_text\",read):\n rc=pytest.main([\"tests/market/test_single_source.py\",\"-q\",\"-p\",\"no:cacheprovider\"])\nprint(\"INJECTED\",rc)\nrc=pytest.main([\"tests/market/test_single_source.py\",\"-q\",\"-p\",\"no:cacheprovider\"])\nprint(\"RESTORED\",rc,\"SHA256_EQUAL\",hashlib.sha256(raw).digest()==hashlib.sha256(p.read_bytes()).digest())\n")' '{"name":"S40-middle-split-bypass","file":"kernel_a.py","old":"if grid_points_between(prev + iv, o, interval_s) > 0:","new":"delta = o - prev\n            if delta > iv:","tests":["tests/market/test_single_source.py"]}'
+.F............F...........                                               [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+
+    def test_no_inline_reexpression_of_single_sources_anywhere_in_src():
+>       assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E       AssertionError: assert [('P6_inline_...'delta > iv')] == []
+E         
+E         Left contains one more item: ('P6_inline_grid_comparison', 251, 'market/kernel_a.py:KernelA._first_bar_gap', 'delta > iv')
+E         Use -v to get more diff
+
+tests/market/test_single_source.py:13: AssertionError
+_________________ test_single_source_use_counts_match_registry _________________
+
+    def test_single_source_use_counts_match_registry():
+>       assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E       AssertionError: assert {'entry_expir...ows': 1}, ...} == {'check_polic...ies': 1}, ...}
+E         
+E         Omitting 6 identical items, use -vv to show
+E         Differing items:
+E         {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}} != {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}}
+E         Use -v to get more diff
+
+tests/market/test_single_source.py:61: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+FAILED tests/market/test_single_source.py::test_single_source_use_counts_match_registry
+2 failed, 24 passed in 1.81s
+INJECTED 1
+..........................                                               [100%]
+26 passed in 1.74s
+RESTORED 0 SHA256_EQUAL True

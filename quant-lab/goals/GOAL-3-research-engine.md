@@ -46,7 +46,7 @@ python scripts/task.py block research --on "契约: feature-snapshot §4 缺 wei
 ```
 
 ## 7. DoD
-- P1：R-03..R-09 verify 实跑通过；18 算子契约全过；空模型报告 FPR/功效达标；`run_protocol` 在合成配置上出 tier/θ/账本；Codex P1 review 必修闭合。
+- P1：R-03..R-09 verify 实跑通过；18 算子契约全过；空模型报告 FPR 达标，功效**如实报告并附限制声明**（用户 2026-09-11 裁定出口 A：合成 T1 规模 δ=0.2R 功效约 39% 未达 80%，见 report-G3-null-model.md §3.2，未达标记录保留）；`run_protocol` 在合成配置上出 tier/θ/账本；Codex P1 review 必修闭合。
 - P2：接入 G1 决策图与 G2 真实 ExecutionResult，分档按实测 K；DEAP 只在达档后接入（8b）。
 
 ## 8. 验证命令

@@ -1,0 +1,410 @@
+[
+  {
+    "id": "partition-count",
+    "file": "src/quant_lab/market/partition_check.py",
+    "test": "tests/market/test_single_source.py::test_differential_partition_grid",
+    "old": "exp_n = grid_points_between(cal_from, cal_to, sec)",
+    "new": "exp_n = max(0, int((cal_to - cal_from).total_seconds()) // sec)",
+    "baseline": {
+      "sha256": "1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\n.                                                                        [100%]\n1 passed in 2.99s\n"
+    },
+    "mutant": {
+      "sha256": "9ce967bc18a2cae92142e68b3767d6cefd3321e76c8382657b16b33ac0dd5fba",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n_______________________ test_differential_partition_grid _______________________\ntests/market/test_single_source.py:213: in test_differential_partition_grid\n    out, quarantines, report = pc.check_bars(\nsrc/quant_lab/market/partition_check.py:253: in check_bars\n    assert rep.missing >= 0, \"present 必须是期望网格的子集\"\n           ^^^^^^^^^^^^^^^^\nE   AssertionError: present 必须是期望网格的子集\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_partition_grid\n1 failed in 1.38s\n"
+    },
+    "restored": {
+      "sha256": "1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\n.                                                                        [100%]\n1 passed in 2.87s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "partition-first",
+    "file": "src/quant_lab/market/partition_check.py",
+    "test": "tests/market/test_single_source.py::test_differential_partition_grid",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "int(t.timestamp()) % sec == 0",
+    "baseline": {
+      "sha256": "1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\n.                                                                        [100%]\n1 passed in 3.02s\n"
+    },
+    "mutant": {
+      "sha256": "8c612fd9703614f287dd01afc9fa2977cc5d53dcd914dc06c74133707c395bcc",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n_______________________ test_differential_partition_grid _______________________\ntests/market/test_single_source.py:213: in test_differential_partition_grid\n    out, quarantines, report = pc.check_bars(\nsrc/quant_lab/market/partition_check.py:284: in check_bars\n    assert sum(g[\"n\"] for g in rep.gaps) == rep.missing, \"缺口清单与 missing 必须一致\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   AssertionError: 缺口清单与 missing 必须一致\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_partition_grid\n1 failed in 0.17s\n"
+    },
+    "restored": {
+      "sha256": "1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\n.                                                                        [100%]\n1 passed in 3.27s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "partition-middle",
+    "file": "src/quant_lab/market/partition_check.py",
+    "test": "tests/market/test_single_source.py::test_differential_partition_grid",
+    "old": "grid_points_between(prev[i] + step, df[key][i], sec) > 0",
+    "new": "grid_points_between(prev[i] + step, df[key][i], sec) >= 0",
+    "baseline": {
+      "sha256": "1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\n.                                                                        [100%]\n1 passed in 3.13s\n"
+    },
+    "mutant": {
+      "sha256": "f62b408fc41ee6159e9a1c240e520ba7dc761bfe23177afb43ef991ee6b3aaae",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n_______________________ test_differential_partition_grid _______________________\ntests/market/test_single_source.py:233: in test_differential_partition_grid\n    assert out['gap_flag'].to_list() == flags\nE   assert [False, True, True, True] == [False, False, False, False]\nE     \nE     At index 1 diff: True != False\nE     Use -v to get more diff\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_partition_grid\n1 failed in 1.45s\n"
+    },
+    "restored": {
+      "sha256": "1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/partition_check.py\n.                                                                        [100%]\n1 passed in 2.97s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "vision-count",
+    "file": "src/quant_lab/market/vision.py",
+    "test": "tests/market/test_single_source.py::test_differential_vision_count",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds()) // INTERVAL_SECONDS[interval] + 1",
+    "baseline": {
+      "sha256": "30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/vision.py\n.                                                                        [100%]\n1 passed in 0.06s\n"
+    },
+    "mutant": {
+      "sha256": "7b958775ba0a60c66fc580244dad71d04d60dd887eccba4273d9cc57ae1b06ee",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/vision.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n________________________ test_differential_vision_count ________________________\ntests/market/test_single_source.py:253: in test_differential_vision_count\n    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(\nE   AssertionError: assert 8353 == 8352\nE    +  where 8353 = <function expected_rows at 0x10c84c720>('indexPriceKlines', '5m', '2024-02')\nE    +    where <function expected_rows at 0x10c84c720> = vision.expected_rows\nE    +  and   8352 = <function grid_points_between at 0x10c7d8f40>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)\nE    +    where <function grid_points_between at 0x10c7d8f40> = c.grid_points_between\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_vision_count - A...\n1 failed in 0.08s\n"
+    },
+    "restored": {
+      "sha256": "30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/vision.py\n.                                                                        [100%]\n1 passed in 0.05s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "kernel-first",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "test": "tests/market/test_single_source.py::test_differential_kernel_grid",
+    "old": "first_expected = first_grid_point(self.t_start, bars[0].interval_s)",
+    "new": "first_expected = dt.datetime.fromtimestamp(-(-int(self.t_start.timestamp()) // interval_s) * interval_s, dt.UTC)",
+    "baseline": {
+      "sha256": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\n.                                                                        [100%]\n1 passed in 0.18s\n"
+    },
+    "mutant": {
+      "sha256": "2e3018eea6bae286ecc99ca1f770c9552933bada76615b43a60e40528d384cef",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n________________________ test_differential_kernel_grid _________________________\ntests/market/test_single_source.py:276: in test_differential_kernel_grid\n    assert kernel._first_bar_gap(bars, end) == want\nE   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc) == None\nE    +  where datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 59, 999999, tzinfo=datetime.timezone.utc))\nE    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10ad3d250>._first_bar_gap\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...\n1 failed in 0.24s\n"
+    },
+    "restored": {
+      "sha256": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\n.                                                                        [100%]\n1 passed in 0.19s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "kernel-middle",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "test": "tests/market/test_single_source.py::test_differential_kernel_grid",
+    "old": "if grid_points_between(prev + iv, o, interval_s) > 0:",
+    "new": "if grid_points_between(prev + iv, o, interval_s) >= 0:",
+    "baseline": {
+      "sha256": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\n.                                                                        [100%]\n1 passed in 0.19s\n"
+    },
+    "mutant": {
+      "sha256": "42f34262d4c4cc6082b3a21c63357cd190ae67d9c03870ce9f9c764fb5d71b49",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n________________________ test_differential_kernel_grid _________________________\ntests/market/test_single_source.py:276: in test_differential_kernel_grid\n    assert kernel._first_bar_gap(bars, end) == want\nE   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc) == None\nE    +  where datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))\nE    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10ba26960>._first_bar_gap\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...\n1 failed in 0.22s\n"
+    },
+    "restored": {
+      "sha256": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\n.                                                                        [100%]\n1 passed in 0.22s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "kernel-tail",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "test": "tests/market/test_single_source.py::test_differential_kernel_grid",
+    "old": "if grid_points_between(prev + iv, end, interval_s) > 0:",
+    "new": "if grid_points_between(prev + iv, end, interval_s) >= 0:",
+    "baseline": {
+      "sha256": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\n.                                                                        [100%]\n1 passed in 0.19s\n"
+    },
+    "mutant": {
+      "sha256": "087e6399bc0a0f64aea96e45c56f19fbe596dc9f43c6d0acfd268e900902e51d",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n________________________ test_differential_kernel_grid _________________________\ntests/market/test_single_source.py:276: in test_differential_kernel_grid\n    assert kernel._first_bar_gap(bars, end) == want\nE   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 4, tzinfo=datetime.timezone.utc) == None\nE    +  where datetime.datetime(2024, 2, 1, 0, 4, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))\nE    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10aa41760>._first_bar_gap\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...\n1 failed in 0.23s\n"
+    },
+    "restored": {
+      "sha256": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/kernel_a.py\n.                                                                        [100%]\n1 passed in 0.19s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "lake-count",
+    "file": "src/quant_lab/market/execution.py",
+    "test": "tests/market/test_single_source.py::test_differential_lake_grid",
+    "old": "expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])",
+    "new": "expected = max(0, int((min(b, dt.datetime.now(dt.UTC)) - a).total_seconds()) // INTERVAL_SECONDS[\"1m\"])",
+    "baseline": {
+      "sha256": "9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/execution.py\n.                                                                        [100%]\n1 passed in 2.23s\n"
+    },
+    "mutant": {
+      "sha256": "74441fbb9fef51b3c19ba1eb9babb0f1a97b48c075562eb043fdeec00fa3094f",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/execution.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n_________________________ test_differential_lake_grid __________________________\ntests/market/test_single_source.py:328: in test_differential_lake_grid\n    assert market.bars_complete == (len(opens) == c.grid_points_between(start, end, 60))\nE   AssertionError: assert False == (5 == 5)\nE    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59... 'markPriceKlines 期望 4 根，实际 5', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete\nE    +  and   5 = len([datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=date...ime(2024, 2, 1, 0, 2, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc)])\nE    +  and   5 = <function grid_points_between at 0x10b943d80>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc), 60)\nE    +    where <function grid_points_between at 0x10b943d80> = c.grid_points_between\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_lake_grid - Asse...\n1 failed in 1.01s\n"
+    },
+    "restored": {
+      "sha256": "9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/execution.py\n.                                                                        [100%]\n1 passed in 1.78s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "lake-start",
+    "file": "src/quant_lab/market/execution.py",
+    "test": "tests/market/test_single_source.py::test_differential_start",
+    "old": "a = req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)",
+    "new": "a = (req.t_start or req.t_dec) - dt.timedelta(seconds=window_before_s)",
+    "baseline": {
+      "sha256": "9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/execution.py\n.                                                                        [100%]\n1 passed in 2.50s\n"
+    },
+    "mutant": {
+      "sha256": "24cc5d8ea30b26387eb651e1affee9460ac925ae3bff406d735e03eb1595e2e5",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/execution.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________________ test_differential_start ____________________________\ntests/market/test_single_source.py:370: in test_differential_start\n    assert actual.bars_complete\nE   AssertionError: assert False\nE    +  where False = MarketView(manifest_id='a28', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=da... 'markPriceKlines 期望 4 根，实际 3', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_start - Assertio...\n1 failed in 0.62s\n"
+    },
+    "restored": {
+      "sha256": "9e5f278e994af1beb9736420cbc79c53322f43620056b6ea4e46a7567fba80a7",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/execution.py\n.                                                                        [100%]\n1 passed in 2.12s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "start-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "test": "tests/market/test_single_source.py::test_differential_start",
+    "old": "exp_t_start = derived_t_start(self.t_dec, pol)",
+    "new": "exp_t_start = (self.t_dec + dt.timedelta(seconds=pol.latency_s)).replace(microsecond=0)",
+    "baseline": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 2.19s\n"
+    },
+    "mutant": {
+      "sha256": "8ea17a005807e65aed3bd46f78f358ac4819eba895c3a754aa617c4605c8fbff",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________________ test_differential_start ____________________________\ntests/market/test_single_source.py:356: in test_differential_start\n    req = _build(_plan(), t_dec, policy)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests/market/test_single_source.py:165: in _build\n    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,\nsrc/quant_lab/market/contract.py:540: in build_request\n    return ExecutionRequest(\nsrc/quant_lab/market/contract.py:464: in _chk\n    raise ContractError(\"t_start 不能早于 t_dec（解析后的启动时刻）\")\nE   quant_lab.market.contract.ContractError: t_start 不能早于 t_dec（解析后的启动时刻）\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_start - quant_la...\n1 failed in 0.35s\n"
+    },
+    "restored": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 2.14s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "start-resolver",
+    "file": "src/quant_lab/market/contract.py",
+    "test": "tests/market/test_single_source.py::test_differential_start",
+    "old": "return self.t_start if self.t_start is not None else derived_t_start(self.t_dec, policy)",
+    "new": "return self.t_start if self.t_start is not None else (self.t_dec + dt.timedelta(seconds=policy.latency_s)).replace(microsecond=0)",
+    "baseline": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 2.20s\n"
+    },
+    "mutant": {
+      "sha256": "c40f524bee263789741033c27ea28de36f18c8dee6a4111394d53d2ee4aac406",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________________ test_differential_start ____________________________\ntests/market/test_single_source.py:357: in test_differential_start\n    assert req.resolved_t_start(policy) == start\nE   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 58, 59, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc)\nE    +  where datetime.datetime(2024, 1, 31, 23, 58, 59, tzinfo=datetime.timezone.utc) = resolved_t_start(ExecutionPolicy(version='a28-input', latency_s=0, ladder_steps=2, costs={'base': CostSpec(maker_fee=Decimal('0'), take...zon_s=432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')))\nE    +    where resolved_t_start = ExecutionRequest(episode_id='E03', graph_version='gv-fixture', decision_snapshot_hash='dsh-E03', t_dec=datetime.dateti...e='one_way', entry_ttl_s=86400, entry_fractions=(Decimal('1'),), tp_fractions=(Decimal('1'),), horizon_source='policy').resolved_t_start\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_start - Assertio...\n1 failed in 0.23s\n"
+    },
+    "restored": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 2.15s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "start-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "test": "tests/market/test_single_source.py::test_differential_start",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = (t_dec + dt.timedelta(seconds=policy.latency_s)).replace(microsecond=0) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "baseline": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 2.26s\n"
+    },
+    "mutant": {
+      "sha256": "81646fe0a454a8618f21b60a00544669d01d6fb2d48096711338b4f2b6a4df49",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________________ test_differential_start ____________________________\ntests/market/test_single_source.py:356: in test_differential_start\n    req = _build(_plan(), t_dec, policy)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests/market/test_single_source.py:165: in _build\n    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,\nsrc/quant_lab/market/contract.py:540: in build_request\n    return ExecutionRequest(\nsrc/quant_lab/market/contract.py:493: in _chk\n    raise ContractError(f\"horizon_source=policy 但 horizon_end 与推导值不一致：窗口 {window} != {dt.timedelta(seconds=derived_s)}\"\nE   quant_lab.market.contract.ContractError: horizon_source=policy 但 horizon_end 与推导值不一致：窗口 5 days, 23:59:59.000001 != 6 days, 0:00:00（自选观察窗请显式标 horizon_source='caller'，它会进 trace_hash 并由 G3 记入尝试账本）\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_start - quant_la...\n1 failed in 0.27s\n"
+    },
+    "restored": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 2.52s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "start-lower-bound",
+    "file": "src/quant_lab/market/contract.py",
+    "test": "tests/market/test_single_source.py::test_differential_start",
+    "old": "if self.horizon_end <= exp_t_start:",
+    "new": "if self.horizon_end < exp_t_start:",
+    "baseline": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 2.17s\n"
+    },
+    "mutant": {
+      "sha256": "768120656a9322045e611c190679803e23f525f06ebe881ec6f7071ca3adce8a",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________________ test_differential_start ____________________________\ntests/market/test_single_source.py:379: in test_differential_start\n    assert _accepts(data) == (valid_spelling and data['horizon_end'] > start)\nE   AssertionError: assert True == ((True and datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) > datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc)))\nE    +  where True = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_start - Assertio...\n1 failed in 0.32s\n"
+    },
+    "restored": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 2.16s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "window-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "test": "tests/market/test_single_source.py::test_differential_window",
+    "old": "window = self.horizon_end - exp_t_start",
+    "new": "window = dt.timedelta(seconds=int((self.horizon_end - exp_t_start).total_seconds()))",
+    "baseline": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 0.30s\n"
+    },
+    "mutant": {
+      "sha256": "14ea2d9571c48ecc28fe8322a7487b968265b06ba529fa11bee8e9835bb8a5c9",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________________ test_differential_window ___________________________\ntests/market/test_single_source.py:405: in test_differential_window\n    assert _accepts(data) == want\nE   AssertionError: assert True == False\nE    +  where True = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_window - Asserti...\n1 failed in 0.26s\n"
+    },
+    "restored": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 0.32s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "window-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "test": "tests/market/test_single_source.py::test_differential_window",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=ttl + (plan.expiry.max_holding_s or policy.max_horizon_s))",
+    "baseline": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 0.32s\n"
+    },
+    "mutant": {
+      "sha256": "92333ef2358c55d985b8bd8264524a3f2758f3db8d40d07718536cd6dc1755e7",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________________ test_differential_window ___________________________\ntests/market/test_single_source.py:394: in test_differential_window\n    req = _build(plan, t_dec, policy)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests/market/test_single_source.py:165: in _build\n    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,\nsrc/quant_lab/market/contract.py:540: in build_request\n    return ExecutionRequest(\nsrc/quant_lab/market/contract.py:489: in _chk\n    raise ContractError(f\"观察窗 {window} 超过 policy {self.policy_version} 的安全上限 \"\nE   quant_lab.market.contract.ContractError: 观察窗 4 days, 15:07:40 超过 policy a28-input 的安全上限 max_horizon_s=400000s（亚秒偏移同样超限）\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_window - quant_l...\n1 failed in 0.24s\n"
+    },
+    "restored": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 0.29s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "window-derived-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "test": "tests/market/test_single_source.py::test_differential_window",
+    "old": "derived_s = derived_window_s(self.order_plan, pol, exp_ttl)",
+    "new": "derived_s = exp_ttl + (self.order_plan.expiry.max_holding_s or pol.max_horizon_s)",
+    "baseline": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 0.30s\n"
+    },
+    "mutant": {
+      "sha256": "98c2f9718e5072b8c3ab9e23befdf09942c6b52d734069a82df5d4ee2df158f6",
+      "exit_code": 1,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\nF                                                                        [100%]\n=================================== FAILURES ===================================\n___________________________ test_differential_window ___________________________\ntests/market/test_single_source.py:394: in test_differential_window\n    req = _build(plan, t_dec, policy)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests/market/test_single_source.py:165: in _build\n    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,\nsrc/quant_lab/market/contract.py:540: in build_request\n    return ExecutionRequest(\nsrc/quant_lab/market/contract.py:493: in _chk\n    raise ContractError(f\"horizon_source=policy 但 horizon_end 与推导值不一致：窗口 {window} != {dt.timedelta(seconds=derived_s)}\"\nE   quant_lab.market.contract.ContractError: horizon_source=policy 但 horizon_end 与推导值不一致：窗口 0:03:03 != 4 days, 15:07:40（自选观察窗请显式标 horizon_source='caller'，它会进 trace_hash 并由 G3 记入尝试账本）\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_differential_window - quant_l...\n1 failed in 0.21s\n"
+    },
+    "restored": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 0.29s\n"
+    },
+    "sha_equal": true,
+    "verdict": "RED→内容还原一致→GREEN"
+  },
+  {
+    "id": "ttl-before",
+    "file": "src/quant_lab/market/contract.py",
+    "test": "tests/market/test_single_source.py::test_differential_ttl",
+    "old": "\"entry_ttl_s\": resolve_entry_ttl_s(plan, pol)",
+    "new": "\"entry_ttl_s\": pol.entry_ttl_s",
+    "baseline": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 0.20s\n"
+    },
+    "mutant": {
+      "sha256": "1312d1bef00a4d96f05405da8cf45a5285de16747a5ffd259cab18f30ba6d779",
+      "exit_code": 4,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\nERROR: found no collectors for /Users/balen/projects/trader-bot/quant-lab/tests/market/test_single_source.py::test_differential_ttl\n\n\n==================================== ERRORS ====================================\n_____________ ERROR collecting tests/market/test_single_source.py ______________\ntests/market/test_single_source.py:129: in <module>\n    from tests.market.test_review_p1 import FIX\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\n.venv-g2/lib/python3.12/site-packages/_pytest/assertion/rewrite.py:188: in exec_module\n    exec(co, module.__dict__)\ntests/market/test_review_p1.py:20: in <module>\n    FIX = {f.id: f for f in c.load_fixtures(EP)}\n                            ^^^^^^^^^^^^^^^^^^^\nsrc/quant_lab/market/contract.py:1053: in load_fixtures\n    return [load_fixture(p) for p in sorted(Path(dir_).glob(\"*.json\"))]\n            ^^^^^^^^^^^^^^^\nsrc/quant_lab/market/contract.py:1049: in load_fixture\n    return EpisodeFixture.model_validate_json(Path(path).read_text(encoding=\"utf-8\"))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsrc/quant_lab/market/contract.py:483: in _chk\n    raise ContractError(f\"entry_ttl_s 与{src}解析值不一致：{self.entry_ttl_s} != {exp_ttl}\")\nE   quant_lab.market.contract.ContractError: entry_ttl_s 与计划解析值不一致：86400 != 3600\n=========================== short test summary info ============================\nERROR tests/market/test_single_source.py - quant_lab.market.contract.Contract...\n1 error in 0.22s\n"
+    },
+    "restored": {
+      "sha256": "f84428aa6f48fab639c3df562ff9a9e2996f21a7fc4e43ad49415c4ed3e60291",
+      "exit_code": 0,
+      "output": "IMPORTED /Users/balen/projects/trader-bot/quant-lab/src/quant_lab/market/contract.py\n.                                                                        [100%]\n1 passed in 0.21s\n"
+    },
+    "sha_equal": true,
+    "verdict": "收集期错误 exit 4，不是差分变红证据；已真实还原，修正测试输入装载后重跑全部"
+  }
+]

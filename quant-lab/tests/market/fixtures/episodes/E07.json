@@ -1,0 +1,398 @@
+{
+ "id": "E07",
+ "title": "可变周期 + 空仓收付：08:00(8h) 收 0.1，12:00(4h) 付 0.2",
+ "derivation": "short 1@100。08:00 rate=0.001：cash=-(-1)×100×0.001=+0.1；12:00 rate=-0.002（周期切 4h，按结算表不按固定 8h）：cash=-(-1)×100×(-0.002)=-0.2。12:01 last=99 TP 平仓：gross=(100-99)×1=1；funding=-0.1；net=0.9；R=0.18（budget 5）；mfe=0.2。第二次结算不能漏、不能乘 4/8。",
+ "request": {
+  "episode_id": "E07",
+  "graph_version": "gv-fixture",
+  "decision_snapshot_hash": "dsh-E07",
+  "t_dec": "2024-01-01T07:59:00.000000Z",
+  "order_plan": {
+   "instrument_id": "BTCUSDT-PERP.BINANCE-UM",
+   "side": "short",
+   "entries": [
+    {
+     "kind": "limit",
+     "price_lo": "100",
+     "price_hi": "100",
+     "fraction": "1",
+     "tif": "GTC",
+     "post_only": false
+    }
+   ],
+   "stop": {
+    "price": "105",
+    "trigger": "mark"
+   },
+   "tps": [
+    {
+     "level": "99",
+     "fraction": "1"
+    }
+   ],
+   "sizing": {
+    "mode": "fixed_qty",
+    "qty": "1"
+   },
+   "expiry": {
+    "entry_ttl_s": 3600,
+    "max_holding_s": null
+   },
+   "reduce_only_exit": true
+  },
+  "policy_version": "fixture-zero-v1",
+  "policy_hash": "12ca10ebb10ef27d10873584ee42a224c44efdf99e9b55c7656e8a838c58cd1d",
+  "risk_budget": "5",
+  "cost_scenario": "base",
+  "path_scenario": "primary",
+  "market_manifest": "fixture-E07",
+  "execution_contract_version": "g2-exec-v0",
+  "seed": 0,
+  "t_start": null,
+  "horizon_end": "2024-01-01T13:59:00.000000Z",
+  "position_mode": "one_way",
+  "horizon_source": "caller"
+ },
+ "market": {
+  "manifest_id": "fixture-E07",
+  "last": [
+   {
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   },
+   {
+    "ts": "2024-01-01T12:01:00.000000Z",
+    "price": "99",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   }
+  ],
+  "mark": [
+   {
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   },
+   {
+    "ts": "2024-01-01T08:00:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   },
+   {
+    "ts": "2024-01-01T12:00:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   },
+   {
+    "ts": "2024-01-01T12:01:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   }
+  ],
+  "bars_last": [],
+  "bars_mark": [],
+  "funding": [
+   {
+    "calc_time": "2024-01-01T08:00:00.000000Z",
+    "rate": "0.001",
+    "interval_hours": 8
+   },
+   {
+    "calc_time": "2024-01-01T12:00:00.000000Z",
+    "rate": "-0.002",
+    "interval_hours": 4
+   }
+  ],
+  "funding_schedule_complete": true,
+  "rules": {
+   "tick_size": "1",
+   "step_size": "1",
+   "min_notional": "0",
+   "multiplier": "1"
+  },
+  "rules_known": true,
+  "bars_complete": true
+ },
+ "expected": {
+  "canonical_events": [
+   {
+    "seq": 0,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "submitted",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "none",
+    "price": "100",
+    "qty": "1",
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 1,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "accepted",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 2,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "working",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 3,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "filled",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "last",
+    "price": "100",
+    "qty": "1",
+    "fee": "0",
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 4,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "submitted",
+    "order_id": "sl-0",
+    "leg": "sl",
+    "trigger_basis": "none",
+    "price": "105",
+    "qty": "1",
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 5,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "accepted",
+    "order_id": "sl-0",
+    "leg": "sl",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 6,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "working",
+    "order_id": "sl-0",
+    "leg": "sl",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 7,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "submitted",
+    "order_id": "tp-0",
+    "leg": "tp",
+    "trigger_basis": "none",
+    "price": "99",
+    "qty": "1",
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 8,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "accepted",
+    "order_id": "tp-0",
+    "leg": "tp",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 9,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "working",
+    "order_id": "tp-0",
+    "leg": "tp",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 10,
+    "ts": "2024-01-01T08:00:00.000000Z",
+    "kind": "funding",
+    "order_id": "funding-0",
+    "leg": "funding",
+    "trigger_basis": "funding",
+    "price": "100",
+    "qty": "-1",
+    "fee": null,
+    "reason": "rate=0.001",
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": "0.1"
+   },
+   {
+    "seq": 11,
+    "ts": "2024-01-01T12:00:00.000000Z",
+    "kind": "funding",
+    "order_id": "funding-1",
+    "leg": "funding",
+    "trigger_basis": "funding",
+    "price": "100",
+    "qty": "-1",
+    "fee": null,
+    "reason": "rate=-0.002",
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": "-0.2"
+   },
+   {
+    "seq": 12,
+    "ts": "2024-01-01T12:01:00.000000Z",
+    "kind": "tp_triggered",
+    "order_id": "tp-0",
+    "leg": "tp",
+    "trigger_basis": "last",
+    "price": "99",
+    "qty": "1",
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 13,
+    "ts": "2024-01-01T12:01:00.000000Z",
+    "kind": "filled",
+    "order_id": "tp-0",
+    "leg": "tp",
+    "trigger_basis": "last",
+    "price": "99",
+    "qty": "1",
+    "fee": "0",
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 14,
+    "ts": "2024-01-01T12:01:00.000000Z",
+    "kind": "cancelled",
+    "order_id": "sl-0",
+    "leg": "sl",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": "position_closed",
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 15,
+    "ts": "2024-01-01T12:01:00.000000Z",
+    "kind": "closed",
+    "order_id": "bracket-0",
+    "leg": "close",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   }
+  ],
+  "fill_status": "filled",
+  "filled_qty": "1",
+  "fees": "0",
+  "funding": "-0.1",
+  "slippage": "0",
+  "gross_pnl": "1",
+  "net_pnl": "0.9",
+  "net_R": "0.18",
+  "censor_reason": null,
+  "coverage_mask": {
+   "mark_ok": true,
+   "funding_ok": true,
+   "rules_ok": true,
+   "bars_ok": true,
+   "liquidation_unmodeled": true
+  },
+  "entry_avg_price": "100",
+  "exit_avg_price": "99",
+  "position_open_at": "2024-01-01T07:59:00.000000Z",
+  "position_close_at": "2024-01-01T12:01:00.000000Z",
+  "mae_R": "0",
+  "mfe_R": "0.2"
+ },
+ "kernels": [
+  "A",
+  "B"
+ ]
+}

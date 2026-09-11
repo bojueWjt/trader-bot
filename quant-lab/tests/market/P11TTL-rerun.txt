@@ -1,0 +1,20 @@
+COMMAND: PYTHONDONTWRITEBYTECODE=1 .venv-g2/bin/python -c 'exec("import pathlib,hashlib,sys,json,pytest\nfrom unittest.mock import patch\nitem=json.loads(sys.argv[1])\np=pathlib.Path(\"src/quant_lab/market\")/item[\"file\"]\nraw=p.read_bytes();source=raw.decode();original=pathlib.Path.read_text\nif item[\"old\"] is None:\n mutated=source+item[\"new\"]\nelse:\n assert source.count(item[\"old\"])==1\n mutated=source.replace(item[\"old\"],item[\"new\"])\ndef read(path,*a,**kw):\n if path.resolve()==p.resolve():\n  return mutated\n return original(path,*a,**kw)\nwith patch.object(pathlib.Path,\"read_text\",read):\n rc=pytest.main([\"tests/market/test_single_source.py\",\"-q\",\"-p\",\"no:cacheprovider\"])\nprint(\"INJECTED\",rc)\nrc=pytest.main([\"tests/market/test_single_source.py\",\"-q\",\"-p\",\"no:cacheprovider\"])\nprint(\"RESTORED\",rc,\"SHA256_EQUAL\",hashlib.sha256(raw).digest()==hashlib.sha256(p.read_bytes()).digest())\n")' '{"name":"S41-annotated-ttl","file":"vision.py","old":null,"new":"\ndef _audit_ttl(plan, policy):\n    ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n    return ttl\n","tests":["tests/market/test_single_source.py"]}'
+.F........................                                               [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+
+    def test_no_inline_reexpression_of_single_sources_anywhere_in_src():
+>       assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E       AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E         
+E         Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_audit_ttl', 'ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s')
+E         Use -v to get more diff
+
+tests/market/test_single_source.py:13: AssertionError
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed, 25 passed in 2.11s
+INJECTED 1
+..........................                                               [100%]
+26 passed in 1.54s
+RESTORED 0 SHA256_EQUAL True

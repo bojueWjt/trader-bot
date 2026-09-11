@@ -1,0 +1,283 @@
+{
+ "id": "E16",
+ "title": "funding 缺口：持仓跨 08:00 但结算行缺失 → FUNDING_SCHEDULE_GAP",
+ "derivation": "07:59 入场，08:00 应有结算（8h 网格）但 funding 表无行且 schedule 不完整 → censor=FUNDING_SCHEDULE_GAP，funding_ok=false；后续 08:30 last=105 不再处理。net=null，不能补零得完整 R。",
+ "request": {
+  "episode_id": "E16",
+  "graph_version": "gv-fixture",
+  "decision_snapshot_hash": "dsh-E16",
+  "t_dec": "2024-01-01T07:59:00.000000Z",
+  "order_plan": {
+   "instrument_id": "BTCUSDT-PERP.BINANCE-UM",
+   "side": "long",
+   "entries": [
+    {
+     "kind": "limit",
+     "price_lo": "100",
+     "price_hi": "100",
+     "fraction": "1",
+     "tif": "GTC",
+     "post_only": false
+    }
+   ],
+   "stop": {
+    "price": "95",
+    "trigger": "mark"
+   },
+   "tps": [
+    {
+     "level": "105",
+     "fraction": "1"
+    }
+   ],
+   "sizing": {
+    "mode": "risk_budget",
+    "qty": null
+   },
+   "expiry": {
+    "entry_ttl_s": 3600,
+    "max_holding_s": null
+   },
+   "reduce_only_exit": true
+  },
+  "policy_version": "fixture-zero-v1",
+  "policy_hash": "12ca10ebb10ef27d10873584ee42a224c44efdf99e9b55c7656e8a838c58cd1d",
+  "risk_budget": "5",
+  "cost_scenario": "base",
+  "path_scenario": "primary",
+  "market_manifest": "fixture-E16",
+  "execution_contract_version": "g2-exec-v0",
+  "seed": 0,
+  "t_start": null,
+  "horizon_end": "2024-01-01T08:59:00.000000Z",
+  "position_mode": "one_way",
+  "horizon_source": "caller"
+ },
+ "market": {
+  "manifest_id": "fixture-E16",
+  "last": [
+   {
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   },
+   {
+    "ts": "2024-01-01T08:30:00.000000Z",
+    "price": "105",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   }
+  ],
+  "mark": [
+   {
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   },
+   {
+    "ts": "2024-01-01T08:30:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   }
+  ],
+  "bars_last": [],
+  "bars_mark": [],
+  "funding": [],
+  "funding_schedule_complete": false,
+  "rules": {
+   "tick_size": "1",
+   "step_size": "1",
+   "min_notional": "0",
+   "multiplier": "1"
+  },
+  "rules_known": true,
+  "bars_complete": true
+ },
+ "expected": {
+  "canonical_events": [
+   {
+    "seq": 0,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "submitted",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "none",
+    "price": "100",
+    "qty": "1",
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 1,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "accepted",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 2,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "working",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 3,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "filled",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "last",
+    "price": "100",
+    "qty": "1",
+    "fee": "0",
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 4,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "submitted",
+    "order_id": "sl-0",
+    "leg": "sl",
+    "trigger_basis": "none",
+    "price": "95",
+    "qty": "1",
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 5,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "accepted",
+    "order_id": "sl-0",
+    "leg": "sl",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 6,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "working",
+    "order_id": "sl-0",
+    "leg": "sl",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 7,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "submitted",
+    "order_id": "tp-0",
+    "leg": "tp",
+    "trigger_basis": "none",
+    "price": "105",
+    "qty": "1",
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 8,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "accepted",
+    "order_id": "tp-0",
+    "leg": "tp",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 9,
+    "ts": "2024-01-01T07:59:00.000000Z",
+    "kind": "working",
+    "order_id": "tp-0",
+    "leg": "tp",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   }
+  ],
+  "fill_status": "filled",
+  "filled_qty": "1",
+  "fees": "0",
+  "funding": "0",
+  "slippage": "0",
+  "gross_pnl": "0",
+  "net_pnl": null,
+  "net_R": null,
+  "censor_reason": "FUNDING_SCHEDULE_GAP",
+  "coverage_mask": {
+   "mark_ok": true,
+   "funding_ok": false,
+   "rules_ok": true,
+   "bars_ok": true,
+   "liquidation_unmodeled": true
+  },
+  "entry_avg_price": "100",
+  "exit_avg_price": null,
+  "position_open_at": "2024-01-01T07:59:00.000000Z",
+  "position_close_at": null,
+  "mae_R": "0",
+  "mfe_R": "0"
+ },
+ "kernels": [
+  "A",
+  "B"
+ ]
+}

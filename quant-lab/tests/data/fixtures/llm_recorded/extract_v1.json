@@ -1,0 +1,338 @@
+{
+ "version": "fixture-v1",
+ "model": "synthetic-recorded",
+ "prompt_version": "extract-v1",
+ "items": {
+  "6c3c8d6a15af43ab200f5a1e1a7215fad2789b2ee659cdf5d4c7005863b1db8d": {
+   "peer": "A",
+   "message_id": 4,
+   "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 120,
+    "synthetic": true
+   },
+   "response": {
+    "kind": "entry_proposal",
+    "symbol_raw": "ETH",
+    "side": "long",
+    "entry": {
+     "lo": 3295,
+     "hi": 3315,
+     "kind": "zone"
+    },
+    "entries": [],
+    "stop": 3268,
+    "tps": [
+     {
+      "level": 3360
+     },
+     {
+      "level": 3430
+     },
+     {
+      "level": 3530
+     }
+    ],
+    "spans": [
+     {
+      "field": "entry.lo",
+      "start": 13,
+      "end": 17
+     },
+     {
+      "field": "entry.hi",
+      "start": 18,
+      "end": 22
+     },
+     {
+      "field": "stop",
+      "start": 88,
+      "end": 92
+     },
+     {
+      "field": "tps",
+      "start": 52,
+      "end": 56
+     },
+     {
+      "field": "tps",
+      "start": 63,
+      "end": 67
+     },
+     {
+      "field": "tps",
+      "start": 74,
+      "end": 78
+     }
+    ],
+    "reason_codes": []
+   }
+  },
+  "13cafb3918cac7b7732acd1ad1fbc033087a108d196fc5f9398d536b1d1abb1e": {
+   "peer": "A",
+   "message_id": 16,
+   "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 120,
+    "synthetic": true
+   },
+   "response": {
+    "kind": "entry_proposal",
+    "symbol_raw": "BTC",
+    "side": "long",
+    "entry": {
+     "lo": 62000,
+     "hi": 62500,
+     "kind": "zone"
+    },
+    "entries": [],
+    "stop": 60800,
+    "tps": [
+     {
+      "level": 63500
+     },
+     {
+      "level": 64500
+     },
+     {
+      "level": 66000
+     }
+    ],
+    "spans": [
+     {
+      "field": "entry.lo",
+      "start": 13,
+      "end": 18
+     },
+     {
+      "field": "entry.hi",
+      "start": 19,
+      "end": 24
+     },
+     {
+      "field": "stop",
+      "start": 93,
+      "end": 98
+     },
+     {
+      "field": "tps",
+      "start": 54,
+      "end": 59
+     },
+     {
+      "field": "tps",
+      "start": 66,
+      "end": 71
+     },
+     {
+      "field": "tps",
+      "start": 78,
+      "end": 83
+     }
+    ],
+    "reason_codes": []
+   }
+  },
+  "9ff8ee1abba3a7b91643e28ee82183c579c29169910bccfd1e4d99b3ca4356fc": {
+   "peer": "A",
+   "message_id": 47,
+   "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 120,
+    "synthetic": true
+   },
+   "response": {
+    "kind": "stop_move",
+    "symbol_raw": "BTC",
+    "side": "short",
+    "entry": null,
+    "entries": [],
+    "stop": 65000,
+    "tps": [],
+    "spans": [
+     {
+      "field": "stop",
+      "start": 11,
+      "end": 16
+     }
+    ],
+    "reason_codes": []
+   }
+  },
+  "045d0bbce02685f339d6881f3c19cec50626985659d150bd5786053be53f9486": {
+   "peer": "A",
+   "message_id": 25,
+   "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 120,
+    "synthetic": true
+   },
+   "response": {
+    "kind": "reduce",
+    "symbol_raw": "ETH",
+    "side": null,
+    "entry": null,
+    "entries": [],
+    "stop": null,
+    "tps": [
+     {
+      "level": 3000
+     }
+    ],
+    "spans": [
+     {
+      "field": "tps",
+      "start": 7,
+      "end": 11
+     }
+    ],
+    "reason_codes": []
+   }
+  },
+  "7a8f93116f4c8f2391baa2cfe08e02f562df54db01f693e2222560a18de6accf": {
+   "peer": "B",
+   "message_id": 9,
+   "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 120,
+    "synthetic": true
+   },
+   "response": {
+    "kind": "entry_proposal",
+    "symbol_raw": "BTC",
+    "side": "long",
+    "entry": {
+     "lo": 64000,
+     "hi": 64500,
+     "kind": "zone"
+    },
+    "entries": [],
+    "stop": 63000,
+    "tps": [],
+    "spans": [],
+    "reason_codes": []
+   }
+  },
+  "7c8158f64e5e17599088c6bd3cb5ee2cf9e14f80a3a2c85523f5bf1ca2e0702a": {
+   "peer": "B",
+   "message_id": 3,
+   "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 120,
+    "synthetic": true
+   },
+   "response": {
+    "kind": "entry_proposal",
+    "symbol_raw": "ZRO",
+    "side": "long",
+    "entry": {
+     "lo": 0.688,
+     "hi": 0.7102,
+     "kind": "ladder"
+    },
+    "entries": [
+     0.7102,
+     0.688
+    ],
+    "stop": 0.6666,
+    "tps": [],
+    "spans": [
+     {
+      "field": "entries",
+      "start": 45,
+      "end": 50
+     },
+     {
+      "field": "entries",
+      "start": 45,
+      "end": 50
+     },
+     {
+      "field": "stop",
+      "start": 62,
+      "end": 68
+     }
+    ],
+    "reason_codes": []
+   }
+  },
+  "0b08c34eb725ec583a7c79aa1353717bec1f8c2b667603f372e73c5363e7c8a1": {
+   "peer": "C",
+   "message_id": 7,
+   "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 120,
+    "synthetic": true
+   },
+   "abstain": {
+    "reason_code": "NOT_SIGNAL",
+    "note": "chatter"
+   }
+  },
+  "621c1117875d71fe7be2a8f6f1379e03bcd7dedea2530afecb7a72f747c7c3bd": {
+   "peer": "A",
+   "message_id": 31,
+   "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 120,
+    "synthetic": true
+   },
+   "response": {
+    "kind": "entry_proposal",
+    "symbol_raw": "SOL",
+    "side": "short",
+    "entry": {
+     "lo": 150,
+     "hi": 152,
+     "kind": "zone"
+    },
+    "entries": [],
+    "stop": 156,
+    "tps": [
+     {
+      "level": 145
+     },
+     {
+      "level": 140
+     },
+     {
+      "level": 132
+     }
+    ],
+    "spans": [
+     {
+      "field": "entry.lo",
+      "start": 13,
+      "end": 16
+     },
+     {
+      "field": "entry.hi",
+      "start": 17,
+      "end": 20
+     },
+     {
+      "field": "stop",
+      "start": 83,
+      "end": 86
+     },
+     {
+      "field": "tps",
+      "start": 50,
+      "end": 53
+     },
+     {
+      "field": "tps",
+      "start": 60,
+      "end": 63
+     },
+     {
+      "field": "tps",
+      "start": 70,
+      "end": 73
+     }
+    ],
+    "reason_codes": []
+   }
+  }
+ }
+}

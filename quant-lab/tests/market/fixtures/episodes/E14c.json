@@ -1,0 +1,178 @@
+{
+ "id": "E14c",
+ "title": "MARGIN：钱包 99 < 名义额 100 / 杠杆 1 → rejected",
+ "derivation": "policy fixture-wallet99-v1 钱包 99，入场预留 100/1=100 > 99：rejected(MARGIN)，不自动加杠杆。",
+ "request": {
+  "episode_id": "E14c",
+  "graph_version": "gv-fixture",
+  "decision_snapshot_hash": "dsh-E14c",
+  "t_dec": "2024-01-01T01:00:00.000000Z",
+  "order_plan": {
+   "instrument_id": "BTCUSDT-PERP.BINANCE-UM",
+   "side": "long",
+   "entries": [
+    {
+     "kind": "limit",
+     "price_lo": "100",
+     "price_hi": "100",
+     "fraction": "1",
+     "tif": "GTC",
+     "post_only": false
+    }
+   ],
+   "stop": {
+    "price": "95",
+    "trigger": "mark"
+   },
+   "tps": [
+    {
+     "level": "105",
+     "fraction": "1"
+    }
+   ],
+   "sizing": {
+    "mode": "fixed_qty",
+    "qty": "1"
+   },
+   "expiry": {
+    "entry_ttl_s": 3600,
+    "max_holding_s": null
+   },
+   "reduce_only_exit": true
+  },
+  "policy_version": "fixture-wallet99-v1",
+  "policy_hash": "982b510678f507dfec7269216e68ba24479f161624cdfebf48bc0b28d417f41f",
+  "risk_budget": "5",
+  "cost_scenario": "base",
+  "path_scenario": "primary",
+  "market_manifest": "fixture-E14c",
+  "execution_contract_version": "g2-exec-v0",
+  "seed": 0,
+  "t_start": null,
+  "horizon_end": "2024-01-01T02:00:00.000000Z",
+  "position_mode": "one_way",
+  "horizon_source": "caller"
+ },
+ "market": {
+  "manifest_id": "fixture-E14c",
+  "last": [
+   {
+    "ts": "2024-01-01T01:00:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   },
+   {
+    "ts": "2024-01-01T01:01:00.000000Z",
+    "price": "105",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   }
+  ],
+  "mark": [
+   {
+    "ts": "2024-01-01T01:00:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   },
+   {
+    "ts": "2024-01-01T01:01:00.000000Z",
+    "price": "100",
+    "capacity": null,
+    "bar_open_time": null,
+    "path_step": "none"
+   }
+  ],
+  "bars_last": [],
+  "bars_mark": [],
+  "funding": [],
+  "funding_schedule_complete": true,
+  "rules": {
+   "tick_size": "1",
+   "step_size": "1",
+   "min_notional": "0",
+   "multiplier": "1"
+  },
+  "rules_known": true,
+  "bars_complete": true
+ },
+ "expected": {
+  "canonical_events": [
+   {
+    "seq": 0,
+    "ts": "2024-01-01T01:00:00.000000Z",
+    "kind": "submitted",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "none",
+    "price": "100",
+    "qty": "1",
+    "fee": null,
+    "reason": null,
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 1,
+    "ts": "2024-01-01T01:00:00.000000Z",
+    "kind": "rejected",
+    "order_id": "entry-0",
+    "leg": "entry",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": "MARGIN",
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   },
+   {
+    "seq": 2,
+    "ts": "2024-01-01T01:00:00.000000Z",
+    "kind": "closed",
+    "order_id": "bracket-0",
+    "leg": "close",
+    "trigger_basis": "none",
+    "price": null,
+    "qty": null,
+    "fee": null,
+    "reason": "no_fill",
+    "bar_open_time": null,
+    "path_step": "none",
+    "cash_delta": null
+   }
+  ],
+  "fill_status": "none",
+  "filled_qty": "0",
+  "fees": "0",
+  "funding": "0",
+  "slippage": "0",
+  "gross_pnl": "0",
+  "net_pnl": "0",
+  "net_R": "0",
+  "censor_reason": null,
+  "coverage_mask": {
+   "mark_ok": true,
+   "funding_ok": true,
+   "rules_ok": true,
+   "bars_ok": true,
+   "liquidation_unmodeled": true
+  },
+  "entry_avg_price": null,
+  "exit_avg_price": null,
+  "position_open_at": null,
+  "position_close_at": null,
+  "mae_R": "0",
+  "mfe_R": "0"
+ },
+ "kernels": [
+  "A",
+  "B"
+ ]
+}

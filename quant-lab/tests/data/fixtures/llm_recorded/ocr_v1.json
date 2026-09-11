@@ -1,0 +1,426 @@
+{
+ "version": "ocr-fixture-v3",
+ "items": {
+  "4c31e65d9ebc450de7250cc3098ec6107e5ce54274cdf87d34d49064a62298b6": {
+   "size": [
+    256,
+    80
+   ],
+   "text": "BTC 做多 入场 64000-64500 止损 63000",
+   "numbers": [
+    {
+     "value": 64000.0,
+     "bbox": [
+      8,
+      8,
+      66,
+      22
+     ]
+    },
+    {
+     "value": 64500.0,
+     "bbox": [
+      8,
+      30,
+      66,
+      44
+     ]
+    },
+    {
+     "value": 63000.0,
+     "bbox": [
+      8,
+      52,
+      66,
+      66
+     ]
+    }
+   ]
+  },
+  "8c76213bfd7fb51cae15b088de432ac14a09573e27a475f3d0870426fca9c1e3": {
+   "size": [
+    256,
+    80
+   ],
+   "text": "BTC 做空 首次入场价 64570 第二次入场价 64900 止损 66200",
+   "numbers": [
+    {
+     "value": 64570.0,
+     "bbox": [
+      8,
+      8,
+      66,
+      22
+     ]
+    },
+    {
+     "value": 64900.0,
+     "bbox": [
+      8,
+      30,
+      66,
+      44
+     ]
+    },
+    {
+     "value": 66200.0,
+     "bbox": [
+      8,
+      52,
+      66,
+      66
+     ]
+    }
+   ]
+  },
+  "126e2790f3e8f6d1cd424117ba408256fc66d31a9bdab848d6ceb693426d4427": {
+   "size": [
+    256,
+    80
+   ],
+   "text": "FIL 做多 首次入场价 6.328 第二次入场价 6.156 止损 5.5",
+   "numbers": [
+    {
+     "value": 6.328,
+     "bbox": [
+      8,
+      8,
+      66,
+      22
+     ]
+    },
+    {
+     "value": 6.156,
+     "bbox": [
+      8,
+      30,
+      66,
+      44
+     ]
+    },
+    {
+     "value": 5.5,
+     "bbox": [
+      8,
+      52,
+      42,
+      66
+     ]
+    }
+   ]
+  },
+  "272c782550889479ad55869d4dc5de39e3a0621e5c0664e96dc708e461e17fa9": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": [],
+   "paired_with": "4c31e65d9ebc450de7250cc3098ec6107e5ce54274cdf87d34d49064a62298b6"
+  },
+  "c10c02e49b40566c293257420ee6ef1c25ec34e5fcf36483709bf3260a300b30": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "72f1afe754893f738d43691640b01e9285331b7a255a9d7860bc0bbd5e6c3657": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "06a3e3aa769d8cef0fb6c293ae66c06c87510eb2505e5cce55b7da19d9fcc6f8": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "59fa82fd5706a4db5759f277e5568cc007ebd3035c7f7ecc1685a80bc7178012": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "1b33736b4198aeef3148f8123d694f33077b0e7a594507f2f19384648d05ed30": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "3044c031a2239bbd518780945c50c9c301114e4597bbdb8b58b8c3434ea1b336": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "38c76568968c7fb0751f6d3f5897c6b0550e81af7e27c6f876e8f1fd57fa846c": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "e8aba3726cc19098af38680483a00e3b7d52180f254d087a09195abe23670a1f": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "9fe5f50417c5857b535f0cec331cf5eff0db69ed25736dd51f0a795db62a81e4": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "78910f81b6196b5a3378950d021788c870ad0b5068924ae5aa858e59facb4a7e": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "44d7d617e5b648c00a989bc13d8317143f39145ebe8ffec6998377940bfd4b26": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "be9cf4ae260304972de0dd4d9cb7100f150ffb305876c169935ec6f3d5ecca3a": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "f5741c89cb8958d321cf4a31cb812172296450e7b6839acef71cfd2326a4b827": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "94fb2bd78a4b7411cd2489a64d69647a1e7e7e58371446f6edd0bf545f9f4a86": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "3184460c9ba9691ca25e194978ba6c206e63ccac0a1660a4b6db79fd6d9ac3ed": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "15ea7de93ab196779ae5357b632b69b908ff67faa18f53669b0f2a0950d10cd5": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "f4d3935a5ceaa24c791398fc4e8776801bf7b23d9474407079be070faa071633": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "e9275c73197179255e540093a61b7a53cd24e921fb4593ec460cb30b1d8af29b": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "ddcce2b7a9d96634e27b56bf40dbedda56d1453ec75bb4331f1700ba6bd67dc8": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "3375b5ed523974a614813d07c8bd97c91e2aaff7dae4c2391c9014e8f04effea": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "a1cecd80ac5da21a5980d3115d5533a40b8f5cdd4e6021b62cb8a7b7b0b54b19": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "ed993809bd210385cc448c8c78a47f66fffdb4d5b0dc7c1629ac619fa7acb9fa": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "d38ce9b559abd439f6bb7f90a462d4ebea17e8d672482234e11916449ffc50f8": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "adb61686d8f635ea12f636c7e4fba6d4495f52a71b9994b84f2f742d97a226ec": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "50fbbbf1971745bb66e49a78b61172a592a9af21132fcc363275197bd505322e": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "bda33d1abec0dfa62e73b8624af6b2b12861407b5355542fe7fe967495c35004": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "c6b941fdb09b33787fd34b93fc3204b7902aa0c0e18dddf4a616989c7394eff6": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "5e9172eca34a9514339eb1bca2291fa5a0510f6623571c59749769b00fea30df": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "c7bce874734f2ddbd1ee018c417ebe864cdab16d4f02cbe6e46d1b7e8271210e": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "963c02241778d6e9a60d49641422faf2b4c664310e57d65f7d931770e5845064": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "37095bccc01b2e142e495d5ebf5e86e63352fb6be758d1b7d7b0957b7ecbca98": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "9c0b377eba2e70558e52e2c5de5c9e83ad66db79c5305d65329aeee1059b3304": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "3ced45c4f908c6aa4b121418bad15df32950500fd3160505407ed9e2379c1970": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "5172cb8f0f09a70eeba15cfac96f370e0c1b75b7e715d2c4d8230748fc16e7d8": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "9a5b1c5b14dc0710b355d4330696910fb092524ac4759be04ba41c13103510ee": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "76a81397a5a4dc01bf8e3196918b0eb57a7f2ad2fbdb7a3740b645e91624ac9a": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "aa1acd3217be061c9d5f56bd66b91507c3f1d7ba892a18a82b7cab76c1a18d2c": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  },
+  "a369c7fb0a08789ad799b2fb8e308ba1af9a1575646adfcf5ac710b2a7307ab7": {
+   "size": [
+    256,
+    80
+   ],
+   "unreadable": true,
+   "numbers": []
+  }
+ }
+}

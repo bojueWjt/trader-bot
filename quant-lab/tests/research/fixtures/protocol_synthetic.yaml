@@ -1,0 +1,48 @@
+# G3 run_protocol 冻结配置（合成数据；P1）。QUANT_LAB_DATA_ROOT 决定账本/缓存落点。
+name: protocol-synthetic-v0
+seed: 7
+backend: polars
+data:
+  source: synthetic
+  synthetic:
+    instruments: ["BTCUSDT-PERP.BINANCE-UM", "ETHUSDT-PERP.BINANCE-UM", "SOLUSDT-PERP.BINANCE-UM"]
+    interval: 15m
+    n_bars: 36000          # 375 天 × 96 根/天
+    n_episodes: 3000
+    cluster_window_h: 2       # 同品种 2h 内连通成簇 → 约 2000 簇；内层折 K 在 S06 口径下落 T1+
+    span_days: 360
+    censor_frac: 0.05
+    none_frac: 0.10
+    noise_sd: 1.0
+    gap_frac: 0.0
+    graph_version: gv-synth-0001
+execution:
+  policy_version: policy-synth-base
+  cost_scenario: base
+  path_scenario: primary
+  market_manifest: mm-synth-0001
+candidates:
+  mode: prelisted           # T1：预列 ≤ 12 配置；enumerate 需 T2+（封顶枚举，无 DEAP）
+  asts:
+    - {op: SafeDiv, args: [{op: Mean, args: [{field: close}], window: {unit: wallclock, minutes: 300}}, {field: close}]}
+    - {op: TSRank, args: [{field: close}], window: {unit: rows, count: 96}}
+    - {op: SafeDiv, args: [{op: Delta, args: [{field: close}], params: {lag: 4}}, {field: close}]}
+    - {op: Std, args: [{op: LogPositive, args: [{op: SafeDiv, args: [{field: close}, {field: open}]}]}], window: {unit: rows, count: 96}}
+    - {op: Corr, args: [{op: Delta, args: [{field: close}], params: {lag: 1}}, {field: volume}], window: {unit: rows, count: 48}}
+    - {op: SafeDiv, args: [{field: volume}, {op: Mean, args: [{field: volume}], window: {unit: wallclock, minutes: 1440}}]}
+  rules:
+    - {rule_id: gt_q70, kind: gt_q, param: 0.7}
+    - {rule_id: lt_q30, kind: lt_q, param: 0.3}
+protocol:
+  scheme: expanding
+  test_span_days: 60
+  min_train_span_days: 180
+  embargo_days: 1
+  label_maturity_days: 0
+  min_train_clusters: 20
+  search_frac: 0.5
+  block_len_days: auto      # auto → 首折训练窗残差块均值 lag-1 自相关诊断预注册（1/3/7），不按 p 选
+  block_len_sensitivity: [1, 3, 7]
+  B: 2000
+  alpha: 0.05
+  config_cap: null          # null → 按档硬顶（T1=12）

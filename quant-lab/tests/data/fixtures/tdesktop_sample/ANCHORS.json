@@ -1,0 +1,35 @@
+{
+  "peers": {
+    "A": -1002000000001,
+    "B": -1002000000002,
+    "C": -1002000000003,
+    "D": -1002000000001
+  },
+  "anchors": {
+    "A_eth_1": 4,
+    "A_btc_short_wan": 8,
+    "CE1_edited_sl": 16,
+    "CE2_unfilled_tp": 23,
+    "CE3_timeout": 31,
+    "CE4_ambiguous_mgmt": 42,
+    "CE4_dual_1": 37,
+    "CE4_dual_2": 39,
+    "CE5_orphan_mgmt": 47,
+    "A_2025_first": 49,
+    "B_album_inferred": 3,
+    "B_album_explicit": 7,
+    "B_pure_image": 9,
+    "B_edited_photo_signal": 11,
+    "B_ethfi": 24,
+    "C_fwd_of_A_eth_1": 4,
+    "C_copy_of_A_btc_short": 5,
+    "C_near_copy_CE1": 6,
+    "C_dup_first": 7,
+    "C_dup_second": 8,
+    "C_bad_time": 9,
+    "C_missing_photo": 10,
+    "C_unknown_key": 11,
+    "C_entities": 12,
+    "D_live_edit_v1_v2": 65
+  }
+}

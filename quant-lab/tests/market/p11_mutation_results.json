@@ -1,0 +1,386 @@
+[
+  {
+    "case": "P1_inline_latency:latency",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_____________ test_lint_gate_fails_on_injected_violation[latency] ______________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-972/test_lint_gate_fails_on_inject0')\npattern = 'P1_inline_latency'\nsnippet = 'return t + dt.timedelta(seconds=policy.latency_s)'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P1_inline_latency'}\nE         \nE         Extra items in the right set:\nE         'P1_inline_latency'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]\n1 failed in 0.25s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.02s\n"
+    }
+  },
+  {
+    "case": "P2_int_total_seconds:int-seconds",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n___________ test_lint_gate_fails_on_injected_violation[int-seconds] ____________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-974/test_lint_gate_fails_on_inject0')\npattern = 'P2_int_total_seconds'\nsnippet = 'return int((b - a).total_seconds())'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P2_int_total_seconds'}\nE         \nE         Extra items in the right set:\nE         'P2_int_total_seconds'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]\n1 failed in 0.26s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P3_duration_div:duration-div",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n___________ test_lint_gate_fails_on_injected_violation[duration-div] ___________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-976/test_lint_gate_fails_on_inject0')\npattern = 'P3_duration_div'\nsnippet = 'return (b - a).total_seconds() // interval_s'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P3_duration_div'}\nE         \nE         Extra items in the right set:\nE         'P3_duration_div'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]\n1 failed in 0.03s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P4_t_start_or_t_dec:start-or",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_____________ test_lint_gate_fails_on_injected_violation[start-or] _____________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-978/test_lint_gate_fails_on_inject0')\npattern = 'P4_t_start_or_t_dec', snippet = 'return req.t_start or req.t_dec'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P4_t_start_or_t_dec'}\nE         \nE         Extra items in the right set:\nE         'P4_t_start_or_t_dec'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P5_inline_entry_ttl:expiry-add",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n____________ test_lint_gate_fails_on_injected_violation[expiry-add] ____________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-980/test_lint_gate_fails_on_inject0')\npattern = 'P5_inline_entry_ttl'\nsnippet = 'return t + dt.timedelta(seconds=req.entry_ttl_s)'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P5_inline_entry_ttl'}\nE         \nE         Extra items in the right set:\nE         'P5_inline_entry_ttl'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P6_inline_grid_comparison:middle-grid",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n___________ test_lint_gate_fails_on_injected_violation[middle-grid] ____________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-982/test_lint_gate_fails_on_inject0')\npattern = 'P6_inline_grid_comparison', snippet = 'return o - prev > iv'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P6_inline_grid_comparison'}\nE         \nE         Extra items in the right set:\nE         'P6_inline_grid_comparison'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P6_inline_grid_comparison:tail-grid",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n____________ test_lint_gate_fails_on_injected_violation[tail-grid] _____________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-984/test_lint_gate_fails_on_inject0')\npattern = 'P6_inline_grid_comparison', snippet = 'return prev + iv < end'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P6_inline_grid_comparison'}\nE         \nE         Extra items in the right set:\nE         'P6_inline_grid_comparison'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P7_inline_ttl_resolution:ttl-expression",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________ test_lint_gate_fails_on_injected_violation[ttl-expression] __________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-986/test_lint_gate_fails_on_inject0')\npattern = 'P7_inline_ttl_resolution'\nsnippet = 'ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P7_inline_ttl_resolution'}\nE         \nE         Extra items in the right set:\nE         'P7_inline_ttl_resolution'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P7_inline_ttl_resolution:ttl-branches",
+    "test": "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n___________ test_lint_gate_fails_on_injected_violation[ttl-branches] ___________\n\ntmp_path = PosixPath('/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/pytest-988/test_lint_gate_fails_on_inject0')\npattern = 'P7_inline_ttl_resolution'\nsnippet = 'ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P1_inline_latency\", \"return t + dt.timedelta(seconds=policy.latency_s)\"),\n        (\"P2_int_total_seconds\", \"return int((b - a).total_seconds())\"),\n        (\"P3_duration_div\", \"return (b - a).total_seconds() // interval_s\"),\n        (\"P4_t_start_or_t_dec\", \"return req.t_start or req.t_dec\"),\n        (\"P5_inline_entry_ttl\", \"return t + dt.timedelta(seconds=req.entry_ttl_s)\"),\n        (\"P6_inline_grid_comparison\", \"return o - prev > iv\"),\n        (\"P6_inline_grid_comparison\", \"return prev + iv < end\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\"),\n        (\"P7_inline_ttl_resolution\", \"ttl = plan.expiry.entry_ttl_s\\n    if ttl is None:\\n        ttl = policy.entry_ttl_s\"),\n    ], ids=[\"latency\", \"int-seconds\", \"duration-div\", \"start-or\", \"expiry-add\", \"middle-grid\", \"tail-grid\", \"ttl-expression\", \"ttl-branches\"])\n    def test_lint_gate_fails_on_injected_violation(tmp_path, pattern, snippet):\n        package = tmp_path / \"quant_lab\" / \"market\"\n        package.mkdir(parents=True)\n        (package / \"injected.py\").write_text(\"def f():\\n    \" + snippet + \"\\n\")\n        bad = gate.violations(gate.lint_tree(package.parent))\n>       assert {p for p, _, _, _ in bad} == {pattern}\nE       AssertionError: assert set() == {'P7_inline_ttl_resolution'}\nE         \nE         Extra items in the right set:\nE         'P7_inline_ttl_resolution'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:57: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]\n1 failed in 0.03s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P7:annotated",
+    "test": "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    },
+    "overlay": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n______________________ test_ttl_standard_nodes[annotated] ______________________\n\nsnippet = 'ttl: int = plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s'\n\n    @pytest.mark.parametrize(\"snippet\", [\n        \"ttl: int = plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"ttl *= plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return (ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s)\",\n        \"return plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return [(ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s) for x in xs]\",\n        \"return policy.entry_ttl_s\",\n    ], ids=[\"annotated\", \"augmented\", \"named\", \"return\", \"comprehension\", \"return-field\"])\n    def test_ttl_standard_nodes(snippet):\n        lint = gate._Lint(\"market/injected.py\", \"def f():\\n    \" + snippet + \"\\n\")\n        import ast\n        lint.visit(ast.parse(lint.text))\n        expected = {\"P7_inline_ttl_resolution\"}\n>       assert {p for p, _, _, _ in lint.hits} == expected\nE       AssertionError: assert set() == {'P7_inline_ttl_resolution'}\nE         \nE         Extra items in the right set:\nE         'P7_inline_ttl_resolution'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:77: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]\n1 failed in 0.02s\n"
+    },
+    "classification": "A23 非行为证据、不可达防御；A26 叠加破坏性质后 RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P7:augmented",
+    "test": "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    },
+    "overlay": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n______________________ test_ttl_standard_nodes[augmented] ______________________\n\nsnippet = 'ttl *= plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s'\n\n    @pytest.mark.parametrize(\"snippet\", [\n        \"ttl: int = plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"ttl *= plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return (ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s)\",\n        \"return plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return [(ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s) for x in xs]\",\n        \"return policy.entry_ttl_s\",\n    ], ids=[\"annotated\", \"augmented\", \"named\", \"return\", \"comprehension\", \"return-field\"])\n    def test_ttl_standard_nodes(snippet):\n        lint = gate._Lint(\"market/injected.py\", \"def f():\\n    \" + snippet + \"\\n\")\n        import ast\n        lint.visit(ast.parse(lint.text))\n        expected = {\"P7_inline_ttl_resolution\"}\n>       assert {p for p, _, _, _ in lint.hits} == expected\nE       AssertionError: assert set() == {'P7_inline_ttl_resolution'}\nE         \nE         Extra items in the right set:\nE         'P7_inline_ttl_resolution'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:77: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]\n1 failed in 0.02s\n"
+    },
+    "classification": "A23 非行为证据、不可达防御；A26 叠加破坏性质后 RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P7:named",
+    "test": "tests/market/test_single_source.py::test_ttl_standard_nodes[named]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    },
+    "overlay": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n________________________ test_ttl_standard_nodes[named] ________________________\n\nsnippet = 'return (ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s)'\n\n    @pytest.mark.parametrize(\"snippet\", [\n        \"ttl: int = plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"ttl *= plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return (ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s)\",\n        \"return plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return [(ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s) for x in xs]\",\n        \"return policy.entry_ttl_s\",\n    ], ids=[\"annotated\", \"augmented\", \"named\", \"return\", \"comprehension\", \"return-field\"])\n    def test_ttl_standard_nodes(snippet):\n        lint = gate._Lint(\"market/injected.py\", \"def f():\\n    \" + snippet + \"\\n\")\n        import ast\n        lint.visit(ast.parse(lint.text))\n        expected = {\"P7_inline_ttl_resolution\"}\n>       assert {p for p, _, _, _ in lint.hits} == expected\nE       AssertionError: assert set() == {'P7_inline_ttl_resolution'}\nE         \nE         Extra items in the right set:\nE         'P7_inline_ttl_resolution'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:77: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_ttl_standard_nodes[named] - A...\n1 failed in 0.02s\n"
+    },
+    "classification": "A23 非行为证据、不可达防御；A26 叠加破坏性质后 RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P7:return",
+    "test": "tests/market/test_single_source.py::test_ttl_standard_nodes[return]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_______________________ test_ttl_standard_nodes[return] ________________________\n\nsnippet = 'return plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s'\n\n    @pytest.mark.parametrize(\"snippet\", [\n        \"ttl: int = plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"ttl *= plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return (ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s)\",\n        \"return plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return [(ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s) for x in xs]\",\n        \"return policy.entry_ttl_s\",\n    ], ids=[\"annotated\", \"augmented\", \"named\", \"return\", \"comprehension\", \"return-field\"])\n    def test_ttl_standard_nodes(snippet):\n        lint = gate._Lint(\"market/injected.py\", \"def f():\\n    \" + snippet + \"\\n\")\n        import ast\n        lint.visit(ast.parse(lint.text))\n        expected = {\"P7_inline_ttl_resolution\"}\n>       assert {p for p, _, _, _ in lint.hits} == expected\nE       AssertionError: assert set() == {'P7_inline_ttl_resolution'}\nE         \nE         Extra items in the right set:\nE         'P7_inline_ttl_resolution'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:77: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_ttl_standard_nodes[return] - ...\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P7:comprehension",
+    "test": "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    },
+    "overlay": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n____________________ test_ttl_standard_nodes[comprehension] ____________________\n\nsnippet = 'return [(ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s) for x in xs]'\n\n    @pytest.mark.parametrize(\"snippet\", [\n        \"ttl: int = plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"ttl *= plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return (ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s)\",\n        \"return plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return [(ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s) for x in xs]\",\n        \"return policy.entry_ttl_s\",\n    ], ids=[\"annotated\", \"augmented\", \"named\", \"return\", \"comprehension\", \"return-field\"])\n    def test_ttl_standard_nodes(snippet):\n        lint = gate._Lint(\"market/injected.py\", \"def f():\\n    \" + snippet + \"\\n\")\n        import ast\n        lint.visit(ast.parse(lint.text))\n        expected = {\"P7_inline_ttl_resolution\"}\n>       assert {p for p, _, _, _ in lint.hits} == expected\nE       AssertionError: assert set() == {'P7_inline_ttl_resolution'}\nE         \nE         Extra items in the right set:\nE         'P7_inline_ttl_resolution'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:77: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]\n1 failed in 0.02s\n"
+    },
+    "classification": "A23 非行为证据、不可达防御；A26 叠加破坏性质后 RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P7:return-field",
+    "test": "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n____________________ test_ttl_standard_nodes[return-field] _____________________\n\nsnippet = 'return policy.entry_ttl_s'\n\n    @pytest.mark.parametrize(\"snippet\", [\n        \"ttl: int = plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"ttl *= plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return (ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s)\",\n        \"return plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s\",\n        \"return [(ttl := plan.expiry.entry_ttl_s if flag else policy.entry_ttl_s) for x in xs]\",\n        \"return policy.entry_ttl_s\",\n    ], ids=[\"annotated\", \"augmented\", \"named\", \"return\", \"comprehension\", \"return-field\"])\n    def test_ttl_standard_nodes(snippet):\n        lint = gate._Lint(\"market/injected.py\", \"def f():\\n    \" + snippet + \"\\n\")\n        import ast\n        lint.visit(ast.parse(lint.text))\n        expected = {\"P7_inline_ttl_resolution\"}\n>       assert {p for p, _, _, _ in lint.hits} == expected\nE       AssertionError: assert set() == {'P7_inline_ttl_resolution'}\nE         \nE         Extra items in the right set:\nE         'P7_inline_ttl_resolution'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:77: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P6:delta = o - prev",
+    "test": "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_________________ test_grid_local_definition[delta = o - prev] _________________\n\nassignment = 'delta = o - prev'\n\n    @pytest.mark.parametrize(\"assignment\", [\"delta = o - prev\", \"delta: int = o - prev\", \"delta -= prev\"])\n    def test_grid_local_definition(assignment):\n        import ast\n        source = \"def f():\\n    \" + assignment + \"\\n    return delta > iv\\n\"\n        lint = gate._Lint(\"market/injected.py\", source)\n        lint.visit(ast.parse(source))\n>       assert {p for p, _, _, _ in lint.hits} == {\"P6_inline_grid_comparison\"}\nE       AssertionError: assert set() == {'P6_inline_grid_comparison'}\nE         \nE         Extra items in the right set:\nE         'P6_inline_grid_comparison'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:86: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P6:delta: int = o - prev",
+    "test": "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n______________ test_grid_local_definition[delta: int = o - prev] _______________\n\nassignment = 'delta: int = o - prev'\n\n    @pytest.mark.parametrize(\"assignment\", [\"delta = o - prev\", \"delta: int = o - prev\", \"delta -= prev\"])\n    def test_grid_local_definition(assignment):\n        import ast\n        source = \"def f():\\n    \" + assignment + \"\\n    return delta > iv\\n\"\n        lint = gate._Lint(\"market/injected.py\", source)\n        lint.visit(ast.parse(source))\n>       assert {p for p, _, _, _ in lint.hits} == {\"P6_inline_grid_comparison\"}\nE       AssertionError: assert set() == {'P6_inline_grid_comparison'}\nE         \nE         Extra items in the right set:\nE         'P6_inline_grid_comparison'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:86: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P6:delta -= prev",
+    "test": "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________________ test_grid_local_definition[delta -= prev] ___________________\n\nassignment = 'delta -= prev'\n\n    @pytest.mark.parametrize(\"assignment\", [\"delta = o - prev\", \"delta: int = o - prev\", \"delta -= prev\"])\n    def test_grid_local_definition(assignment):\n        import ast\n        source = \"def f():\\n    \" + assignment + \"\\n    return delta > iv\\n\"\n        lint = gate._Lint(\"market/injected.py\", source)\n        lint.visit(ast.parse(source))\n>       assert {p for p, _, _, _ in lint.hits} == {\"P6_inline_grid_comparison\"}\nE       AssertionError: assert set() == {'P6_inline_grid_comparison'}\nE         \nE         Extra items in the right set:\nE         'P6_inline_grid_comparison'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:86: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P3_duration_div:AugAssign",
+    "test": "tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n______________ test_augmented_binary_patterns[duration-augmented] ______________\n\npattern = 'P3_duration_div', snippet = 'duration /= interval_s'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P3_duration_div\", \"duration /= interval_s\"),\n        (\"P5_inline_entry_ttl\", \"t += dt.timedelta(seconds=req.entry_ttl_s)\"),\n    ], ids=[\"duration-augmented\", \"expiry-augmented\"])\n    def test_augmented_binary_patterns(pattern, snippet):\n        import ast\n        lint = gate._Lint(\"market/injected.py\", \"def f():\\n    \" + snippet + \"\\n\")\n        lint.visit(ast.parse(lint.text))\n>       assert {p for p, _, _, _ in lint.hits} == {pattern}\nE       AssertionError: assert set() == {'P3_duration_div'}\nE         \nE         Extra items in the right set:\nE         'P3_duration_div'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:97: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "P5_inline_entry_ttl:AugAssign",
+    "test": "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]",
+    "sha256_before": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_______________ test_augmented_binary_patterns[expiry-augmented] _______________\n\npattern = 'P5_inline_entry_ttl'\nsnippet = 't += dt.timedelta(seconds=req.entry_ttl_s)'\n\n    @pytest.mark.parametrize(\"pattern,snippet\", [\n        (\"P3_duration_div\", \"duration /= interval_s\"),\n        (\"P5_inline_entry_ttl\", \"t += dt.timedelta(seconds=req.entry_ttl_s)\"),\n    ], ids=[\"duration-augmented\", \"expiry-augmented\"])\n    def test_augmented_binary_patterns(pattern, snippet):\n        import ast\n        lint = gate._Lint(\"market/injected.py\", \"def f():\\n    \" + snippet + \"\\n\")\n        lint.visit(ast.parse(lint.text))\n>       assert {p for p, _, _, _ in lint.hits} == {pattern}\nE       AssertionError: assert set() == {'P5_inline_entry_ttl'}\nE         \nE         Extra items in the right set:\nE         'P5_inline_entry_ttl'\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:97: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]\n1 failed in 0.02s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "94ab3cebe2220a063f5198dfeb965bd7a52e80d8bed4d711e98667a983d1eb54",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n"
+    }
+  },
+  {
+    "case": "S40-count",
+    "test": "tests/market/test_single_source.py::test_single_source_use_counts_match_registry",
+    "sha256_before": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_________________ test_single_source_use_counts_match_registry _________________\n\n    def test_single_source_use_counts_match_registry():\n>       assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS\nE       AssertionError: assert {'derived_t_s...ows': 1}, ...} == {'check_polic...ies': 1}, ...}\nE         \nE         Omitting 6 identical items, use -vv to show\nE         Differing items:\nE         {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}} != {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 2, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}}\nE         Use -v to get more diff\n\ntests/market/test_single_source.py:61: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_single_source.py::test_single_source_use_counts_match_registry\n1 failed in 0.17s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "d0582ac7a77ea000c3f901882e97802726000e087b1075ca1e5f204b9c169c82",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.15s\n"
+    }
+  },
+  {
+    "case": "B20-placeholder",
+    "test": "tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash",
+    "sha256_before": "a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________ test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash ___________\n\n    def test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash():\n        f = FIX[\"E03\"]\n        old = c.POLICIES[f.request.policy_version]\n        try:\n            c.POLICIES[f.request.policy_version] = old.model_copy(update={\"wallet\": D(999)})\n            for sim in (simulate_a, nb.simulate_b):\n                with pytest.raises(c.ContractError):\n                    sim(f.request, f.market)\n        finally:\n            c.POLICIES[f.request.policy_version] = old\n        reg = c.load_policy_registry()\n        # B20 解除占位；B21 将声明期追溯挂在声明，而非经济内容哈希。\n        assert reg == {k: p.content_hash for k, p in c.POLICIES.items()}\n        meta = c.policy_registry_meta()\n>       assert meta[\"_placeholder_fields\"] == []\nE       AssertionError: assert ['research_horizon_s'] == []\nE         \nE         Left contains one more item: 'research_horizon_s'\nE         Use -v to get more diff\n\ntests/market/test_review_p1_round2.py:103: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash\n1 failed in 0.23s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.20s\n"
+    }
+  },
+  {
+    "case": "B21-provenance",
+    "test": "tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash",
+    "sha256_before": "a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65",
+    "injected": {
+      "exit": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________ test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash ___________\n\n    def test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash():\n        f = FIX[\"E03\"]\n        old = c.POLICIES[f.request.policy_version]\n        try:\n            c.POLICIES[f.request.policy_version] = old.model_copy(update={\"wallet\": D(999)})\n            for sim in (simulate_a, nb.simulate_b):\n                with pytest.raises(c.ContractError):\n                    sim(f.request, f.market)\n        finally:\n            c.POLICIES[f.request.policy_version] = old\n        reg = c.load_policy_registry()\n        # B20 解除占位；B21 将声明期追溯挂在声明，而非经济内容哈希。\n        assert reg == {k: p.content_hash for k, p in c.POLICIES.items()}\n        meta = c.policy_registry_meta()\n        assert meta[\"_placeholder_fields\"] == []\n>       assert all(term in meta[\"_note\"] for term in (\"432000\", \"B16\", \"曲线 v2\", \"B20\", \"B21\", \"contracts.version\", \"changeLog\", \"哈希不可区分\"))\nE       assert False\nE        +  where False = all(<generator object test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash.<locals>.<genexpr> at 0x108dff060>)\n\ntests/market/test_review_p1_round2.py:104: AssertionError\n=========================== short test summary info ============================\nFAILED tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash\n1 failed in 0.22s\n"
+    },
+    "classification": "RED",
+    "sha256_after": "a89ef8a1f1155e530b0b78c4420e55a1e70413743ebefdef6b0b1b78cc94dd65",
+    "SHA256_EQUAL": true,
+    "restored": {
+      "exit": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.21s\n"
+    }
+  }
+]

@@ -1,0 +1,9 @@
+{
+ "_note": "research_horizon_s 定稿为 432000（5 天），依据 B16 + 曲线 v2 + B20。B20 确认取值未变，content_hash 不读取本文件元数据，版本 bump 条件未触发。占位期与定稿期经济内容相同、哈希不可区分；按 B21，可追溯性挂在声明上：θ 声明须记 contracts.version 与 changeLog 编号，不挂在哈希上。",
+ "_placeholder_fields": [],
+ "fixture-zero-v1": "12ca10ebb10ef27d10873584ee42a224c44efdf99e9b55c7656e8a838c58cd1d",
+ "fixture-tick-v1": "79a818107c42ffc1aec9af8ca4beb672231adfaf4b514c8eb0b63664fbb0238f",
+ "fixture-halftp-v1": "b5b9db9aaec5d88e1574d028a0807cdd34cff3d5141d93f2390edd69ccf338c9",
+ "fixture-wallet99-v1": "982b510678f507dfec7269216e68ba24479f161624cdfebf48bc0b28d417f41f",
+ "base-v1": "12f83216444dff123f7cc6e9b4f4752449b8a678555079f033cbb9980f07d5db"
+}

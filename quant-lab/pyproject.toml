@@ -1,0 +1,21 @@
+# quant-lab 共用 pyproject（G1 D-01 建立；G2/G3 如需追加 optional-dependencies 请走看板 note 通知）。
+# 版本钉在 requirements/*.txt，这里只声明包与工具配置，不重复钉版本。
+[project]
+name = "quant-lab"
+version = "0.0.1"
+description = "频道种子→量化算法的研究 app（research_only，与生产 services/* 物理隔离）"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quant_lab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-p no:cacheprovider"
+filterwarnings = ["ignore::DeprecationWarning"]
