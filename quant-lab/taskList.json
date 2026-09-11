@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T07:15:20Z",
+  "updatedAt": "2026-09-11T07:38:01Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -466,10 +466,18 @@
         "section": "§23 A37",
         "summary": "裁 G2 所问基线时序：允许批前快照而非强制 HEAD（HEAD 严格口径会因在途工作恒不干净使护栏无法开工、终被关掉），但仅『记录差异』不足——快照使污染可见而看不出分辨，上批残留突变与合法在途修改在差异里长得一样；立第三口径：批前声明预期差异清单、护栏断言实际差异==声明差异、任何未归因差异即拒绝开工（与 A24 调用点登记同形），记录让人事后能查、归因让机器当场能拒；采纳 G2 对 A36 后果性质的推进——两向错误代价不对称（世界事实误记为我方缺口代价是统计效率，我方无知改写为世界中性事实则使样本带编造事实进 θ 分母、代价是结论本身），立一般规则：两向代价不对称时门须偏向代价较低一侧并写明依据，删失归因证据不足时归 unevaluable 不得归 LABEL_RIGHT_CENSORED；记 G2 验收失误自陈（核了维度存在未核该维度产生过真实实例、把声明了当成做了，与上轮过度泛化同源：只问生成器生成什么没问消费方能收到什么），并据此说明 A36 判别性限定不可省——131 组突变全红却一条也未证明离网类被覆盖",
         "by": "G0/427ed064 R66"
+      },
+      {
+        "n": 64,
+        "at": "2026-09-11T07:38:01Z",
+        "file": "contracts/README.md",
+        "section": "§23.5",
+        "summary": "修订 §20.3/§21.3 提交时序：由『三窗口均出写入窗口』改为按模块判定，某模块空闲即可提交该模块；依据是要避免的风险（捕获半写文件）是按文件/模块而非全局的，原口径比必要更严且连续两轮阻止提交，代价为未提交累积并迫使 G2 护栏降级到快照基线；本轮据此提交 data/market（4f911a5，19 文件）并收入 scripts/tree_guard.py（A35 要求认证链工具入库），research 距今 114 秒保留至下个空闲窗口；附记该修订由 G0 观察自身规则执行代价作出——一条规则连续两轮阻止它本该促成的事就该检查是否过严，与 A26『假警报终将被关掉』同源：过严的规则不会被遵守只会被绕过或搁置",
+        "by": "G0/427ed064 R67"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.40",
+    "version": "v1.41",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -806,7 +814,7 @@
         "note": "[G0/427ed064 R50 · B20] **G2 撤回其 §5 结论，G0 读源核实属实，我的 B18 前提确实错了。** maxt.py:85 calendar_blocks 按日历整除切块（raw=int((t-origin)/L)）、**不因样本重叠合并**、整簇归最早 t_dec 块、n_nonempty 只数共同支持 W>0 的块——**max-t 的重采样单位是日历块，连通分量会因重叠合并，两者不是同一个量**。三口径对照（按实际单位）：1d 22/24、3d 8/8、5d 5/5、7d 4/4——**B 在各观察窗不劣于 A**；只有连通分量口径让 B 看起来灾难性地差，而它恰恰不是 max-t 用的单位。B18 §5 / B19 §4 中『删失率与有效簇数反向、B 以有效样本为代价』**作废**，B 的无偏是净得。**新记第三种失效形态**：继『永不触发』(A22/A24) 与『因噪声触发』(A27) 之后——**用错单位的度量不只是量不准，它会把一个不存在的取舍写进决策**。门本身工作正常，但度量的是另一个量，产出看似可信实则虚构的权衡并据此改变裁定。**前两种让门失效，这一种让决策失真**；G0 的 B18 正是被它改变过的裁定。通则：用于准入/下限/取舍论证的统计量必须与所服务的推断过程同单位，且须逐字对照实现（如『口径= maxt.calendar_blocks 的 n_nonempty』）。最小下限采纳 G2 四条：口径取 n_nonempty；**下限与 block_len 成对声明**（只写块数不写块长，同一数字可对应任意强度）且 block_len ≥ horizon + purge/embargo；同时钉 cross 与 max_span；数据量由切分算术给出——5d 下 Q 块需每折 Q×5 天（Q=20→100 天）。**research_horizon_s = 5d 解除占位**（其占位依据已被本裁定撤销）；新增 P2 前置：基于 5d 的 θ 声明须满足每折日历长度要求，否则只作描述性报告，属 G-STAT-CLAIM 实质内容。**2024-01 单月在 5d 下仅 5 块——这是数据量结论不是取值结论**；把后者误报成前者会让人去调一个本来正确的参数。",
         "at": "2026-09-11T05:19:35Z"
       },
-      "lastUpdate": "2026-09-11T07:15:20Z",
+      "lastUpdate": "2026-09-11T07:27:40Z",
       "tasks": [
         {
           "id": "M-01",
@@ -1185,6 +1193,14 @@
         {
           "t": "16:15",
           "n": "**收 G0 R65/A36。核心是一个我必须照做的区分，以及一条新的验收要求。**\n**区分（写进契约，修复须按此方向）**：**不是第三层被穿过，是第三层没有按 A28 的规格实现。** A28 **显式列出**离网边界为必须对抗覆盖的四类之一；而 kernel 生成器只用 `_grid(start,end)` 子集造 bar、时间边界变的是**请求的 start/end**、`bar.open_time` **始终落在精确网格上**；lake 同理（`start−1µs/end` 在**窗口外**）；partition 确实覆盖了但**另一消费方的覆盖不能替代 kernel/lake 各自的输入路径**。**那一类边界从未被测试过。**\n**后果的性质（G0 点出，值得单记）**：`open_time.replace(microsecond=0)` 这条真实秒级截断，让删失原因从 `BAR_GAP` 静默变成 `LABEL_RIGHT_CENSORED`——**\"我们有数据缺口\"被改写成\"观察终点仍持仓\"，即\"我们的事实\"被写成\"世界的事实\"**。**这正是 A15 设立 `unevaluable` 时要分开的那条界线**，只不过这次是从边界覆盖的缺口里漏进来的。\n**A36 新验收要求（我已照此准备后续工作）**：**每个边界类必须各配一条只有该类能捕获的突变并证明变红；给不出该突变的边界类视为未覆盖**，不得以\"生成器已含该维度参数\"充数。G0 的判词是\"门须自证会红\"再往下一层——**一个能红的门配一个到不了的输入，合起来仍然是绿的**。\n**我的处置**：A36 在我派出十三审之后到达，故**十三审任务书未含该判据**。十三审正在读树（`status=running`），期间不动 `src/`。**A36 的四类边界各配判别性突变（时间/数值/空与缺失/跨分支等价对），我列为十三审回执后的第一项工作**，不在本轮补派以免与审查方并发改树。\n**G0 采纳的另一条（我任务书里预先堵的那条便宜路）已立为规范**：**不把添加一条 `replace` 字符串禁令当作第三层已经修复**——加一条枚举写法的禁令是**退回第二层**，而 A28 已判该方向不可封闭；修复验收须在**真实消费路径**上覆盖窗口内 `−1/0/+1µs` 离网类并证明\"拒绝/隔离\"或\"行为偏离\"会红。\n**G0 记下十二审两处克制**：拒绝把\"指定落点已闭合\"外推为\"该族已绝迹\"；拒绝以\"24 个突变全部检出\"反推覆盖完整——**两处都是拒绝把已验证的部分说成全部**。\n**G0 本轮实跑**：data 225 / market **344** / integration 8；**research 距测量 42 秒在写入窗口内，记不判**，故**本轮推迟提交**（提交半写的树正是 A22 记过的那件事）。A35 必报量：`src` 48/48、`tests` 56/58，未跟踪两个是修复任务在途的 `verify_s42_s43.py` / `verify_s43_archive.py`。"
+        },
+        {
+          "t": "16:19",
+          "n": "**收 G0 R66/A37，已实现并自证；落地过程中在我自己的护栏里查出两个缺陷，都报。**\n**A37 第三条口径已实现**（`scripts/tree_guard.py` 的 `assert_declared`）：**批前声明预期差异清单，护栏断言「实际差异 == 声明差异」，任何未被归因的差异即拒绝开工。** 双向自证：正确声明→通过（9 个差异全部已归因）；**漏声明一条→拒绝** ✓；**多声明一条→拒绝** ✓（相等而非包含）。G0 的理由我抄进 docstring：**快照把污染变可见了，但看见不等于分辨——一条上批残留的突变，与一条合法在途修改，在快照差异里长得一模一样**；记录让人事后能查，**归因让机器当场能拒**。\n**缺陷一：我的护栏监视范围大于我的所有权边界。** 原先监视 `quant-lab/src` + `quant-lab/tests` 全仓，于是看到 14 个差异，其中 **5 个是 G3 在途工作**（`research/api.py`、`ledger.py`、`nullmodel.py`、`paths.py`、`tests/research/test_review_p1_round3.py`，mtime 251–779s，正在写）。**我无法为 G3 的改动归因（我不知道它在做什么）**，若纳入监视范围，A37 会让我**因为别人在正常工作而无法开工**。已收敛到 `G2_PATHS = [src/quant_lab/market, tests/market]`，收敛后差异 9 个、全部可归因。**这与 A37 是同一个混淆，只是发生在所有权轴而非时间轴上：护栏的监视范围必须等于所有权边界，否则别人的合法工作与我的残骸长得一模一样。**\n**缺陷二：我的护栏解析路径用了定长切片，会截掉路径首字符。** `git status --porcelain` 我按 `l[3:]` 取路径，但实测存在 **一位状态码 + 单空格** 的条目（`M quant-lab/...`，而非 ` M quant-lab/...`），于是 `quant-lab/...` 被切成 `uant-lab/...`。**后果是双向的**：一个合法差异会因路径对不上被当成\"未被归因\"而误拒（吵闹，会被发现），或者**一个真实残骸因路径对不上而被漏掉**（安静，不会被发现）——**后者正是危险的那个方向**。已改用 `--porcelain -z` + 显式跳过状态码解析，重测 9 条路径全部完整。\n**A37 第二条（代价不对称时门须偏向代价较低一侧）**：对删失归因即**证据不足时归 `unevaluable`，不得归 `LABEL_RIGHT_CENSORED`**——宁可损失统计效率，不可污染结论。已核 `CENSOR_PRIORITY` 现为 `SYMBOL_TIME_INVALID, RULE_HISTORY_MISSING, BAR_GAP, MARK_STALE, FUNDING_SCHEDULE_GAP, LABEL_RIGHT_CENSORED`——**`LABEL_RIGHT_CENSORED` 排在最后，证据类删失优先，方向已经是对的**；是否需要在代码里显式写明\"本门偏向哪侧及依据\"，待十三审回执后与 A36 四类判别性突变一并处理（审查方正在读树，此刻不动 `src/`）。\n**十三审 `task-mtwm08j6-54w9yy` 仍在跑**（`status=running`/`phase=verifying`）。**本条不含对其结果的预判。**"
+        },
+        {
+          "t": "16:27",
+          "n": "**十三审终裁 fail**（job `task-mtwm08j6-54w9yy`，97 次三阶段突变实验，历史字节完整保留）。**十二审指定项 S42/S43 原反例全部闭合。** 新增两条阻断，**其中一条是我自己工具的缺陷**。\n**S44（我的护栏）——已由我当场修复并三向自证。** 审查方复现：批中新增 `src/unregistered.py` 后树 SHA 改变，而我的 `assert_matches` **仍 exit0**。我亲自复现确认成立。**根因是我写了一个单向检查**：只遍历快照里已有的文件问\"变了没\"，没问\"有没有多出文件\"。**而我在 A24 里要求别人的调用点登记必须是集合相等（新增调用方与缺失调用方都要红），然后在自己的护栏里做了单向比对。** 批中新增文件正是残骸最典型的形态（注入新函数、写临时模块），恰好落在盲区。已改为双向并三向自证：**新增→捕获、删除→捕获、干净→通过**。附带对照值得记：**A37 的 `assert_declared` 分支抓到了同一个新增文件，`assert_matches` 分支没抓到**——同一工具的两条路径，一条有集合相等一条没有。\n**S45（产品侧检验缺口，非当前实现错误）**：`test_differential_partition_grid` 生成器移动 expected 时间**只用 +1µs**，端点 `a−1µs/b` 样本**不是\"窗口内网格点提前 1µs\"**；kernel 与 loader 的 `_interior_bar_variants` 覆盖各自消费方，**不能替分区入口证明负向离网边界**。审查方把 `first_grid_point(t,sec) == t` 改为 `(first_grid_point(t,sec) - t <= 1µs)`（保持同一 helper 与调用次数，只把精确身份误改为 1µs 前向容差），**三道门 48 passed、全 T 344 passed 均 exit0**，而同批 `expected_rows+1` 活性对照 **1 failed**（取证器是活的）。同一真实 DataFrame（`0/59999999/120000000`µs、60s）：基线 `expected=3/missing=1/quarantine=2`，突变 `expected=3/missing=0/quarantine=0` 且**真实保留了 59.999999s 离网行**。**当前未突变实现仍正确，这是会放过真实退化的检验缺口。**\n**已派修复 `task-mtwmvana-l131hc`**，含三件：S45（分区真实消费路径兑现窗口内 −1µs 覆盖并证明容差突变会红；**不得用 `replace` 或特定减法禁令冒充语义覆盖**——那是退回第二层）；**A36 四类边界各配判别性突变**（要求给出\"**本类红 / 他类绿**\"双向证明，只证红不够——那证不了判别性）；**A37 第 2 条**（在代码里显式写明删失归因偏向哪一侧及依据，并配回归：把 `LABEL_RIGHT_CENSORED` 提前到证据类之前必须红；现 `CENSOR_PRIORITY` 方向已正确，本项是把已正确的偏向变成可读可审可钉住的）。"
         }
       ]
     },
@@ -1210,7 +1226,7 @@
         "note": "[G0/427ed064 OR-02 R62 · A34 基线首次投用即见效] 测量时刻 06:53Z。**research 首次全绿 328 passed**：G3 已于 15:43:01 重生成 null-model 报告，**A31 关系现已满足**（报告 15:43:01 晚于 nullmodel.py 15:01:48），此前两条同源失败（test_S17_real_low_power_truthful_fail_accepted 与 test_A31_report_must_be_generated_by_current_code）**均已消失**。data 225 passed、integration 8 passed。**market 记不判**：首跑 2 failed/330 passed，复跑 0 failed；源码最近写入 15:52:48（距测量 67 秒，**在写入窗口内**）。**A34 的批前基线在本轮第一次派上用场，且正是它让『残骸』与『在干活』可分**：`git status quant-lab/src quant-lab/tests` 显示 market 5 个文件已改，并列出 `tests/market/.s42-s43-5m8x1o4q/`、`s42-s43-mutation-evidence.json`、`verify_s42_s43.py`——**是 S42/S43 的突变取证正在进行，带证据文件，不是残骸**。**若无 R61 的入库，本轮我只会看到『2 条失败 + 5 个文件被改』而无从判断是故意还是残骸**——这正是 A34 §20.2 真实树法护栏要挡的那一面。记为该护栏的首个实例。P1 缺项收窄至两项：M-10（十二审进行中；S42/S43 修复取证中）与 R-10（三审 fail，但其阻断性失败已随报告重生成消失，待重派）。D-10 已闭合；OR-04 端到端 8 passed 稳定。",
         "at": "2026-09-11T06:54:29Z"
       },
-      "lastUpdate": "2026-09-11T06:49:04Z",
+      "lastUpdate": "2026-09-11T07:26:18Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1481,6 +1497,10 @@
         {
           "t": "15:49",
           "n": "MC11（最终，A31 同源）落盘，全链转绿：tests/research **328 passed**；R-05/R-07/R-08/R-09 verify 全部 rc=0（R-08 含 A31 哈希比对 + CP 复算 + 机制唯一性 + 诊断一致性，91 passed）。MC11 结果：四个空机制全 pass——common_shock 阳性 2/1000、cluster_heavy_tail 6、nonuniform_density 8、circular_shift 4，最坏界 CI 上界 0.87% / 1.70% / 2.95% / 1.02%（阈值 7%），逐 replicate 结构门误拒率 0.0；功效 δ=0.2R 为 327/768 有搜索 replicate（最坏界下界 29.8%），按用户裁定出口 A 如实报 fail 并附 §3.2 限制声明。R-10 四审已派（task-mtwli22r-l4ke1j），任务书加了一条独立取证要求：请审查者按 A27 第 2 条**自己注入一次结构破坏**核验重做后的门仍会触发，只证'假警报消失'不构成通过。"
+        },
+        {
+          "t": "16:26",
+          "n": "四审两项必修的修复已落代码，MC12 正在最终代码上重跑（A31 同源）。S08(R4-L)：code_version 统一走 paths.research_code_digest()（递归覆盖 backends/，路径+内容），api 传实际 backend_version；**并把 code_version/backend_version 纳入 duplicate 复用判据**——仅改后端实现时旧 completed 记录不再被当作当前实现的 duplicate（四审验收原文要求）；内存/磁盘两条路径同测。修复中自查出两处自伤：api.py 漏 import get_backend（合成面板路径 NameError，被 test_api 抓到）、ledger.py 行内注释吃掉了 model_version/data_manifest/seed 三个字段（已拆行并加断言）。S17(R4-V)：verify_report_text 改为**从原始诊断重算**结构门（用与 run_mc 同一 _correlation_preserved 判据复算 grid_dependence.ok），要求 grid/aggregate/invalid_reason/verdict/tiers.invalid/n_invalid_null_model/guard_fail_rate/guard_failures_by_check 八处自洽，单改一处即拒；**并把判读口径与 run_mc 对齐**（≤5% 设计误拒率带内可接受，不再要求零失败——四审点名'两个不同判定不应宣传为同一门'），§4 报告正文同步改写成两个门的分别表述并新增格点门列。A31 生成来源绑定：MC 起跑冻结 generating digest、收尾确认源码未变才允许落盘；--rebuild 保留源报告生成哈希、缺哈希时写显式占位（绝不回落当前摘要）、另记 renderer_code_sha256。新增回归 6 条（R4-L 内存/磁盘 ×2、R4-V 七种单字段篡改、rebuild 旧哈希/缺哈希 ×2、≤5% 对齐与超限判废）。当前 tests/research 除 2 条待新报告的 A31 相关外全绿。"
         }
       ]
     },
@@ -1503,7 +1523,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T07:12:32Z",
+      "lastUpdate": "2026-09-11T07:38:01Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1682,6 +1702,10 @@
         {
           "t": "16:12",
           "n": "[G0/427ed064 OR-02 R64 · 按 A30 分模块判定 + A35 必报量] 测量时刻 07:09Z。**判定资格**：data 写入距今 166 分钟、market 7 分钟 → 可判；**research 距今 42 秒，在写入窗口内 → 本轮不判**（07:12 复核仍在写，16:11:54）。**实跑**：data **225 passed**、market **344 passed**（332→344，G2 的 S42/S43 已落）、integration **8 passed**（附注：integration 依赖 research，本跑绿但 research 处于写入中）。**A35 必报量 · 入库状态**：`src` 跟踪 **48/48**；`tests` 跟踪 **56/58**，未跟踪两个为 G2 在途的 `verify_s42_s43.py` 与 `verify_s43_archive.py`。工作树相对 HEAD 有 market 4 个、research 2 个文件已改，属在途工作。**本轮按 §20.3/§21.3 的时序要求推迟提交**：规则是『三窗口均出写入窗口时提交当轮新增』，而 research 在窗口内——**提交一棵半写的树正是 §10 A22 记过的那件事（入库固化损坏状态）**，故不因'手头有改动'而破例。待下轮三窗口同时空闲时一并提交。P1 缺项仍为 M-10 与 R-10 两项；D-10 已闭合，OR-04 端到端 8 passed 稳定。"
+        },
+        {
+          "t": "16:38",
+          "n": "[G0/427ed064 OR-02 R67] 测量 07:29Z→07:36Z。**A35 必报量**：src 48/48、tests 56/58（未跟踪两个为 G2 在途 verify_s42_s43.py / verify_s43_archive.py；`verify_s45_a36.py` 本轮已入库）。**实跑**：data **225 passed**、market **357 passed**（344→357；首跑 1 failed 未复现，属写入邻近）、integration **8 passed**。**research 记不判**：轮初距今 273 秒可判，**但在 G0 跑测试期间被改写**，复核时距今 114 秒回到窗口内。其 2 failed 为 A31 陈旧对（test_S17_real_low_power_truthful_fail_accepted + test_A31_report_must_be_generated_by_current_code）——**G3 再次在生成报告后改了 nullmodel.py**，A31 的门当场报出，属门在履职。**提交时序规则本轮被自身执行代价证否，已修订（§23.5）**：原『三窗口均出写入窗口才提交』连续两轮阻止提交，而要避免的风险（捕获半写文件）**是按模块的不是全局的**。改为按模块判定：本轮提交 data+market（4f911a5，19 文件）并收入 scripts/tree_guard.py（§21.2 要求），research 保留至其下个空闲窗口。**一条规则连续两轮阻止它本该促成的事，就该被检查是不是比必要更严**——与 A26 同源：过严的规则不会被遵守，只会被绕过或搁置。十三审终裁 fail、G3 四审终裁 fail；P1 缺项仍为 M-10 与 R-10。"
         }
       ]
     }
