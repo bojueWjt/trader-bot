@@ -19,6 +19,12 @@ BINANCE_FUTURES_DST = (
     "nautilus_trader/adapters/binance/futures/execution.py"
 )
 EXPECTED_PATCH_MOUNTS = {
+    "entry_batch.py": "/app/execution_domain/entry_batch.py",
+    "account_execution_ledger.py": "/app/execution_domain/account_execution_ledger.py",
+    "execution_domain_init.py": "/app/execution_domain/__init__.py",
+    "idempotency.py": "/app/execution_domain/idempotency.py",
+    "identifiers.py": "/app/execution_domain/identifiers.py",
+    "owned_order_recovery.py": "/app/runtime/owned_order_recovery.py",
     "intent_execution_planner.py": "/app/strategy/intent_execution_planner.py",
     "contracts.py": "/app/execution_domain/contracts.py",
     "control_plane.py": "/app/execution_domain/control_plane.py",
@@ -64,6 +70,8 @@ LEGACY_PATCH_MOUNTS = {
     for key, value in EXPECTED_PATCH_MOUNTS.items()
     if key
     not in {
+        "entry_batch.py", "account_execution_ledger.py", "execution_domain_init.py",
+        "idempotency.py", "identifiers.py", "owned_order_recovery.py",
         "approved_intent_client.py",
         "bounded_task_worker.py",
         "control_plane_session.py",
@@ -166,6 +174,13 @@ class NodePatchMountContractTest(unittest.TestCase):
             deploy,
         )
         self.assertIn("staging missing host/v3_trade.py", deploy)
+        for required in (
+            "staging missing host/execution_domain/entry_batch.py",
+            'CHANGED_HOST+=("execution_domain_entry_batch")',
+            "host__execution_domain_entry_batch.py",
+            "post-install mismatch: host/execution_domain/entry_batch.py",
+        ):
+            self.assertIn(required, deploy)
         self.assertIn(
             "staging missing host/v3-trader/SKILL.md",
             deploy,

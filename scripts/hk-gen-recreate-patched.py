@@ -50,6 +50,10 @@ PATCH_MOUNT_TARGETS = (
     ("intent_execution_planner.py", "/app/strategy/intent_execution_planner.py"),
     ("execution_domain_init.py", "/app/execution_domain/__init__.py"),
     (
+        "entry_batch.py",
+        "/app/execution_domain/entry_batch.py",
+    ),
+    (
         "account_execution_ledger.py",
         "/app/execution_domain/account_execution_ledger.py",
     ),

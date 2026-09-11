@@ -8075,6 +8075,7 @@ EXECUTION_DOMAIN_CONTRACTS_TGT="$EXECUTION_DOMAIN_TGT/contracts.py"
 EXECUTION_DOMAIN_CONTROL_PLANE_TGT="$EXECUTION_DOMAIN_TGT/control_plane.py"
 EXECUTION_DOMAIN_PORTFOLIO_BASELINE_TGT="$EXECUTION_DOMAIN_TGT/portfolio_baseline.py"
 EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT="$EXECUTION_DOMAIN_TGT/account_execution_ledger.py"
+EXECUTION_DOMAIN_ENTRY_BATCH_TGT="$EXECUTION_DOMAIN_TGT/entry_batch.py"
 EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT="$EXECUTION_DOMAIN_TGT/order_ownership.py"
 EXECUTION_DOMAIN_IDEMPOTENCY_TGT="$EXECUTION_DOMAIN_TGT/idempotency.py"
 EXECUTION_DOMAIN_IDENTIFIERS_TGT="$EXECUTION_DOMAIN_TGT/identifiers.py"
@@ -8113,6 +8114,8 @@ REBUILD_ORDERS_PROJECTION_TGT="$T/scripts/rebuild_orders_projection.py"
   || die "staging missing host/execution_domain/portfolio_baseline.py"
 [ -f host/execution_domain/account_execution_ledger.py ] \
   || die "staging missing host/execution_domain/account_execution_ledger.py"
+[ -f host/execution_domain/entry_batch.py ] \
+  || die "staging missing host/execution_domain/entry_batch.py"
 [ -f host/execution_domain/order_ownership.py ] \
   || die "staging missing host/execution_domain/order_ownership.py"
 [ -f host/execution_domain/idempotency.py ] \
@@ -9324,7 +9327,7 @@ if [ "$DELIVERY_MODE" = "transition_bind_mount" ]; then
     live="$T/container-patches/$bundle_path"
     if [ ! -f "$live" ]; then
       case "$bundle_path" in
-        account_execution_ledger.py|idempotency.py|identifiers.py|owned_order_recovery.py|execution_domain_init.py|approved_intent_client.py|bounded_task_worker.py|control_plane_session.py|health.py|health_server.py|run_node.py|reconciliation.py|redis_safety.py|live_canary_execution.py|node_config.py|risk_config.py|risk_init.py|projection_spool.py|nautilus_config.py|persistence_init.py|redis_namespace_lease.py|redis_resp_client.py)
+        entry_batch.py|account_execution_ledger.py|idempotency.py|identifiers.py|owned_order_recovery.py|execution_domain_init.py|approved_intent_client.py|bounded_task_worker.py|control_plane_session.py|health.py|health_server.py|run_node.py|reconciliation.py|redis_safety.py|live_canary_execution.py|node_config.py|risk_config.py|risk_init.py|projection_spool.py|nautilus_config.py|persistence_init.py|redis_namespace_lease.py|redis_resp_client.py)
           NEW_CONTAINER+=("$bundle_path")
           CHANGED_CONTAINER+=("$bundle_path")
           continue
@@ -9365,6 +9368,9 @@ cmp -s host/execution_domain/portfolio_baseline.py \
 cmp -s host/execution_domain/account_execution_ledger.py \
   "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT" \
   || CHANGED_HOST+=("execution_domain_account_execution_ledger")
+cmp -s host/execution_domain/entry_batch.py \
+  "$EXECUTION_DOMAIN_ENTRY_BATCH_TGT" \
+  || CHANGED_HOST+=("execution_domain_entry_batch")
 cmp -s host/execution_domain/order_ownership.py \
   "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
   || CHANGED_HOST+=("execution_domain_order_ownership")
@@ -10505,6 +10511,15 @@ for h in "${CHANGED_HOST[@]:-}"; do
           >> "$BACKUP_ROOT/new-files.txt"
       fi
       ;;
+    execution_domain_entry_batch)
+      if [ -f "$EXECUTION_DOMAIN_ENTRY_BATCH_TGT" ]; then
+        bk "$EXECUTION_DOMAIN_ENTRY_BATCH_TGT" \
+          "host__execution_domain_entry_batch.py"
+      else
+        printf '%s\n' "$EXECUTION_DOMAIN_ENTRY_BATCH_TGT" \
+          >> "$BACKUP_ROOT/new-files.txt"
+      fi
+      ;;
     execution_domain_order_ownership)
       if [ -f "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" ]; then
         bk "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" \
@@ -10833,6 +10848,12 @@ for h in "${CHANGED_HOST[@]:-}"; do
         host/execution_domain/account_execution_ledger.py \
         "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT"
       ;;
+    execution_domain_entry_batch)
+      mkdir -p "$EXECUTION_DOMAIN_TGT"
+      install_payload_atomically \
+        host/execution_domain/entry_batch.py \
+        "$EXECUTION_DOMAIN_ENTRY_BATCH_TGT"
+      ;;
     execution_domain_order_ownership)
       mkdir -p "$EXECUTION_DOMAIN_TGT"
       if [ -f "$EXECUTION_DOMAIN_ORDER_OWNERSHIP_TGT" ]; then
@@ -10954,6 +10975,9 @@ for h in "${CHANGED_HOST[@]:-}"; do
 	cmp -s host/execution_domain/account_execution_ledger.py \
 	  "$EXECUTION_DOMAIN_ACCOUNT_EXECUTION_LEDGER_TGT" \
 	  || die "post-install mismatch: host/execution_domain/account_execution_ledger.py"
+	cmp -s host/execution_domain/entry_batch.py \
+	  "$EXECUTION_DOMAIN_ENTRY_BATCH_TGT" \
+	  || die "post-install mismatch: host/execution_domain/entry_batch.py"
 	cmp -s host/app_roles.py "$APP_ROLES_TGT" \
 	  || die "post-install mismatch: host/app_roles.py"
 	cmp -s host/pools.py "$DB_POOLS_TGT" \
