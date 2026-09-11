@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T07:38:01Z",
+  "updatedAt": "2026-09-11T07:39:19Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -474,10 +474,18 @@
         "section": "§23.5",
         "summary": "修订 §20.3/§21.3 提交时序：由『三窗口均出写入窗口』改为按模块判定，某模块空闲即可提交该模块；依据是要避免的风险（捕获半写文件）是按文件/模块而非全局的，原口径比必要更严且连续两轮阻止提交，代价为未提交累积并迫使 G2 护栏降级到快照基线；本轮据此提交 data/market（4f911a5，19 文件）并收入 scripts/tree_guard.py（A35 要求认证链工具入库），research 距今 114 秒保留至下个空闲窗口；附记该修订由 G0 观察自身规则执行代价作出——一条规则连续两轮阻止它本该促成的事就该检查是否过严，与 A26『假警报终将被关掉』同源：过严的规则不会被遵守只会被绕过或搁置",
         "by": "G0/427ed064 R67"
+      },
+      {
+        "n": 65,
+        "at": "2026-09-11T07:44:28Z",
+        "file": "contracts/README.md",
+        "section": "§24 A38",
+        "summary": "准 G2 所请细化 A33/A34 并给出更强形式：对照的职责是证明本批『取证器+选择器』组合能把绿变红，选择器碰不到的对照只可能产出绿而该绿不携带信息（健康+不可达与取证器失效同样产绿），而 A33 存在理由正是失效产出绿；自带验证——对照在本批选择器下变红则可达性由该红本身证明，故收敛为『对照必须在本批实际选择器下变红』；据此消歧『同批』以选择器同一性定义而非会话或墙钟；与 A36 同一谓词（判别性而非红过），规则用于检验别人是判别性用于检验自己也必须是；立判例 6 与一般义务——G2 在 A24 要求他人调用点登记集合相等而自身快照护栏是单向检查，同一文件内 assert_declared 用集合语义抓到新增而 assert_matches 没有，故凡为他人立下的检查性质要求立规者须同期审计自己的同类工具并记录，因立规时注意力在被规范对象不在自己手里的工具；A36 首条对角线已验（S45 前向 1µs 容差→时间类 RED 其余三类 GREEN）",
+        "by": "G0/427ed064 R68"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.41",
+    "version": "v1.42",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -814,7 +822,7 @@
         "note": "[G0/427ed064 R50 · B20] **G2 撤回其 §5 结论，G0 读源核实属实，我的 B18 前提确实错了。** maxt.py:85 calendar_blocks 按日历整除切块（raw=int((t-origin)/L)）、**不因样本重叠合并**、整簇归最早 t_dec 块、n_nonempty 只数共同支持 W>0 的块——**max-t 的重采样单位是日历块，连通分量会因重叠合并，两者不是同一个量**。三口径对照（按实际单位）：1d 22/24、3d 8/8、5d 5/5、7d 4/4——**B 在各观察窗不劣于 A**；只有连通分量口径让 B 看起来灾难性地差，而它恰恰不是 max-t 用的单位。B18 §5 / B19 §4 中『删失率与有效簇数反向、B 以有效样本为代价』**作废**，B 的无偏是净得。**新记第三种失效形态**：继『永不触发』(A22/A24) 与『因噪声触发』(A27) 之后——**用错单位的度量不只是量不准，它会把一个不存在的取舍写进决策**。门本身工作正常，但度量的是另一个量，产出看似可信实则虚构的权衡并据此改变裁定。**前两种让门失效，这一种让决策失真**；G0 的 B18 正是被它改变过的裁定。通则：用于准入/下限/取舍论证的统计量必须与所服务的推断过程同单位，且须逐字对照实现（如『口径= maxt.calendar_blocks 的 n_nonempty』）。最小下限采纳 G2 四条：口径取 n_nonempty；**下限与 block_len 成对声明**（只写块数不写块长，同一数字可对应任意强度）且 block_len ≥ horizon + purge/embargo；同时钉 cross 与 max_span；数据量由切分算术给出——5d 下 Q 块需每折 Q×5 天（Q=20→100 天）。**research_horizon_s = 5d 解除占位**（其占位依据已被本裁定撤销）；新增 P2 前置：基于 5d 的 θ 声明须满足每折日历长度要求，否则只作描述性报告，属 G-STAT-CLAIM 实质内容。**2024-01 单月在 5d 下仅 5 块——这是数据量结论不是取值结论**；把后者误报成前者会让人去调一个本来正确的参数。",
         "at": "2026-09-11T05:19:35Z"
       },
-      "lastUpdate": "2026-09-11T07:27:40Z",
+      "lastUpdate": "2026-09-11T07:39:19Z",
       "tasks": [
         {
           "id": "M-01",
@@ -1201,6 +1209,10 @@
         {
           "t": "16:27",
           "n": "**十三审终裁 fail**（job `task-mtwm08j6-54w9yy`，97 次三阶段突变实验，历史字节完整保留）。**十二审指定项 S42/S43 原反例全部闭合。** 新增两条阻断，**其中一条是我自己工具的缺陷**。\n**S44（我的护栏）——已由我当场修复并三向自证。** 审查方复现：批中新增 `src/unregistered.py` 后树 SHA 改变，而我的 `assert_matches` **仍 exit0**。我亲自复现确认成立。**根因是我写了一个单向检查**：只遍历快照里已有的文件问\"变了没\"，没问\"有没有多出文件\"。**而我在 A24 里要求别人的调用点登记必须是集合相等（新增调用方与缺失调用方都要红），然后在自己的护栏里做了单向比对。** 批中新增文件正是残骸最典型的形态（注入新函数、写临时模块），恰好落在盲区。已改为双向并三向自证：**新增→捕获、删除→捕获、干净→通过**。附带对照值得记：**A37 的 `assert_declared` 分支抓到了同一个新增文件，`assert_matches` 分支没抓到**——同一工具的两条路径，一条有集合相等一条没有。\n**S45（产品侧检验缺口，非当前实现错误）**：`test_differential_partition_grid` 生成器移动 expected 时间**只用 +1µs**，端点 `a−1µs/b` 样本**不是\"窗口内网格点提前 1µs\"**；kernel 与 loader 的 `_interior_bar_variants` 覆盖各自消费方，**不能替分区入口证明负向离网边界**。审查方把 `first_grid_point(t,sec) == t` 改为 `(first_grid_point(t,sec) - t <= 1µs)`（保持同一 helper 与调用次数，只把精确身份误改为 1µs 前向容差），**三道门 48 passed、全 T 344 passed 均 exit0**，而同批 `expected_rows+1` 活性对照 **1 failed**（取证器是活的）。同一真实 DataFrame（`0/59999999/120000000`µs、60s）：基线 `expected=3/missing=1/quarantine=2`，突变 `expected=3/missing=0/quarantine=0` 且**真实保留了 59.999999s 离网行**。**当前未突变实现仍正确，这是会放过真实退化的检验缺口。**\n**已派修复 `task-mtwmvana-l131hc`**，含三件：S45（分区真实消费路径兑现窗口内 −1µs 覆盖并证明容差突变会红；**不得用 `replace` 或特定减法禁令冒充语义覆盖**——那是退回第二层）；**A36 四类边界各配判别性突变**（要求给出\"**本类红 / 他类绿**\"双向证明，只证红不够——那证不了判别性）；**A37 第 2 条**（在代码里显式写明删失归因偏向哪一侧及依据，并配回归：把 `LABEL_RIGHT_CENSORED` 提前到证据类之前必须红；现 `CENSOR_PRIORITY` 方向已正确，本项是把已正确的偏向变成可读可审可钉住的）。"
+        },
+        {
+          "t": "16:39",
+          "n": "**S45 + A36 + A37(2) 已闭合并经我独立复核（测量时刻 16:37:10，180s 内无 .py 写入）。**\n**我亲跑的验收**：`tests/market` **358 passed**（+14）；`test_single_source.py` 48 passed；**`test_boundary_discrimination.py` 14 passed**；A `22/0`；AB 逐项与基线一致、UNEXPLAINED 0。护栏：G2 范围内差异 **0 个**（G0 已提交，HEAD=a59a0bf），批后 40 个文件逐一回到批前快照。\n**A36 判别性矩阵我独立复核，对角线成立**：注入 S45 原样「前向 1µs 容差」后——**时间类 RED / 数值 GREEN / 空缺失 GREEN / 等价对 GREEN**。**只红本类、他类全绿**，这是 A36 要的判别性，不是\"又跑了一批全红的突变\"。承包方自报四条对角线全部成立（前向 1µs 容差→时间；risk_budget 经 float 校验→数值；显式空分配被默认值吞掉→空/缺失；显式 t_start 额外偏移→等价对），我复核了其中第一条。\n**我在复核中犯了一个错，并由此得到一条 A33 的细化，值得单记**：我第一次的同批活性对照用的是 `vision.expected_rows + 1`，结果**四类全绿**。我差点据此怀疑取证器失效——但真因是**这四条 `test_boundary_*` 根本不测 `expected_rows`**，那是一条**本批选择器碰不到的对照**。它全绿不证明取证器坏了，**只证明我选错了对照**。换成消费方入口的无条件破坏（`grid_points_between` 恒返回 0）后，四类全部 RED，活性成立。\n**细化（建议 G0 考虑写进 A33）**：**活性对照必须对「本批实际使用的选择器」已知必红，而不只是\"在某处已知必红\"。** 一条选择器碰不到的对照，其绿与取证器失效产生的绿**无法区分**——而这正是 A33 立意要防的那个不对称（失效产出的是绿）。**换言之：对照的判别性要求，和 A36 对边界突变的判别性要求，是同一条。**\n**A37(2) 落地形态**：生产逻辑**仅补注释、未改优先级行为**（`CENSOR_PRIORITY` 方向本就正确），`contract.py` 明确写出偏向 `unevaluable` 及其依据——**统计效率 vs 结论污染的代价差异**；并配 10 条删失优先级回归（`test_a37_evidence_wins_over_label`，`label_first` 两向参数化），把已正确的偏向变成可读、可审、可被回归钉住的。\n**S44（我的护栏）已修并三向自证**，不在承包方范围，其回执明确\"S44 未触碰\"。"
         }
       ]
     },
@@ -1226,7 +1238,7 @@
         "note": "[G0/427ed064 OR-02 R62 · A34 基线首次投用即见效] 测量时刻 06:53Z。**research 首次全绿 328 passed**：G3 已于 15:43:01 重生成 null-model 报告，**A31 关系现已满足**（报告 15:43:01 晚于 nullmodel.py 15:01:48），此前两条同源失败（test_S17_real_low_power_truthful_fail_accepted 与 test_A31_report_must_be_generated_by_current_code）**均已消失**。data 225 passed、integration 8 passed。**market 记不判**：首跑 2 failed/330 passed，复跑 0 failed；源码最近写入 15:52:48（距测量 67 秒，**在写入窗口内**）。**A34 的批前基线在本轮第一次派上用场，且正是它让『残骸』与『在干活』可分**：`git status quant-lab/src quant-lab/tests` 显示 market 5 个文件已改，并列出 `tests/market/.s42-s43-5m8x1o4q/`、`s42-s43-mutation-evidence.json`、`verify_s42_s43.py`——**是 S42/S43 的突变取证正在进行，带证据文件，不是残骸**。**若无 R61 的入库，本轮我只会看到『2 条失败 + 5 个文件被改』而无从判断是故意还是残骸**——这正是 A34 §20.2 真实树法护栏要挡的那一面。记为该护栏的首个实例。P1 缺项收窄至两项：M-10（十二审进行中；S42/S43 修复取证中）与 R-10（三审 fail，但其阻断性失败已随报告重生成消失，待重派）。D-10 已闭合；OR-04 端到端 8 passed 稳定。",
         "at": "2026-09-11T06:54:29Z"
       },
-      "lastUpdate": "2026-09-11T07:26:18Z",
+      "lastUpdate": "2026-09-11T07:38:20Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1501,6 +1513,10 @@
         {
           "t": "16:26",
           "n": "四审两项必修的修复已落代码，MC12 正在最终代码上重跑（A31 同源）。S08(R4-L)：code_version 统一走 paths.research_code_digest()（递归覆盖 backends/，路径+内容），api 传实际 backend_version；**并把 code_version/backend_version 纳入 duplicate 复用判据**——仅改后端实现时旧 completed 记录不再被当作当前实现的 duplicate（四审验收原文要求）；内存/磁盘两条路径同测。修复中自查出两处自伤：api.py 漏 import get_backend（合成面板路径 NameError，被 test_api 抓到）、ledger.py 行内注释吃掉了 model_version/data_manifest/seed 三个字段（已拆行并加断言）。S17(R4-V)：verify_report_text 改为**从原始诊断重算**结构门（用与 run_mc 同一 _correlation_preserved 判据复算 grid_dependence.ok），要求 grid/aggregate/invalid_reason/verdict/tiers.invalid/n_invalid_null_model/guard_fail_rate/guard_failures_by_check 八处自洽，单改一处即拒；**并把判读口径与 run_mc 对齐**（≤5% 设计误拒率带内可接受，不再要求零失败——四审点名'两个不同判定不应宣传为同一门'），§4 报告正文同步改写成两个门的分别表述并新增格点门列。A31 生成来源绑定：MC 起跑冻结 generating digest、收尾确认源码未变才允许落盘；--rebuild 保留源报告生成哈希、缺哈希时写显式占位（绝不回落当前摘要）、另记 renderer_code_sha256。新增回归 6 条（R4-L 内存/磁盘 ×2、R4-V 七种单字段篡改、rebuild 旧哈希/缺哈希 ×2、≤5% 对齐与超限判废）。当前 tests/research 除 2 条待新报告的 A31 相关外全绿。"
+        },
+        {
+          "t": "16:38",
+          "n": "S08(R4-L) 补完后端身份链路：get_backend(name).version 只有 '0.2'，分不开 polars 与 polars_ta——改为 _backend_identity() 写 'polars/0.2'；feature_snapshot（真正跑后端的那一步）与 theta_final 两条预留原先 backend_version=None，现在也带上；execution_batch 不涉计算后端，保持 None。实跑核对：新写入行 feature_snapshot/theta/theta_final 全为 polars/0.2（同一账本里的旧 null 与 '0.2' 是历史事件，append-only 不改写）。预算口径未变——budget 仍只按 config_id 计集合，code_version 进的是**复用**判据不是**计费**判据，改代码不会重复扣额度（已实跑确认 duplicate 在同代码同后端下照常触发、换后端不复用）。tests/research 333 passed（余 2 条待 MC12 新报告）。MC12 已在最终代码上重跑；教训记一条：上一轮 pkill -f 只杀了父进程，ProcessPoolExecutor 的 5 个 worker 变孤儿继续烧 CPU 18 分钟（load 68），本轮改为按 pid 全杀后再重派。"
         }
       ]
     },
