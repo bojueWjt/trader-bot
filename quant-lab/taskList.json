@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T03:25:25Z",
+  "updatedAt": "2026-09-11T03:28:22Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -242,10 +242,18 @@
         "section": "§5.15 B13",
         "summary": "research_horizon_s 暂定 3 天为占位：认可 G2 排除 4h/12h（estimand 漂移/幸存偏差）与 7d（统计效率换边际删失率）的论证，但 G0 实测真实夹具 TP 距离中位 5.83%/最大 18.92% 远宽于曲线假设的 3%，括号越宽删失率越高、曲线右移，3 天很可能低估，须 P1 前在真实括号分布上重算；确立选窗原则：删失率与 t1 重叠/purge 损耗/独立机会数此消彼长，须同时看 n_evaluated 与折内有效簇数；记录同族第六七例（S22 合法假值被静默修补、partition_check or 0 把未知伪装成无缺失、S23 DF_DECIMAL 死常量）",
         "by": "G0/427ed064 R29"
+      },
+      {
+        "n": 36,
+        "at": "2026-09-11T03:28:20Z",
+        "file": "contracts/execution-interface.md",
+        "section": "§5.16 B14",
+        "summary": "S24 核实属实（rules_known 漏查 multiplier + or \"1\" 使未知乘数静默当 1，而乘数缩放全部经济量）；确立同族严重度准则：产出看似合理的错误数值高于放过非法输入；确立一般规则：证据完备性判定必须覆盖其解锁的每个经济量参数、缺失即判定为假并加断言测试；明确不可达不是不修的理由（区别于 B9 对合法枚举值不可达的处理）",
+        "by": "G0/427ed064 R30"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.12",
+    "version": "v1.13",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -270,7 +278,7 @@
         "note": "[G0/427ed064 R19 抽验 S16/S07 · 对抗式实跑，非自报] **S07（致命错不得降级）= 闭合**：severity_of_all 混合组合实跑——[EDIT_ORIGINAL_UNAVAILABLE, UNIT_SCALE_CONFLICT]→fatal（致命支配一般，primary=UNIT_SCALE_CONFLICT 按冻结优先级）、[ENTRY_LINK_AMBIGUOUS,...,DUPLICATE_EXACT]→fatal、单 EDIT_ORIGINAL_UNAVAILABLE→general、空→general；FATAL 集 = 契约 §4 原三项，未私自增删；决策视图 23 行含致命码者 **0 行**。首轮 S07 反例不再复现。**S16（媒体路径越权）= 实质闭合**：safe_media_path 对 ../SECRET.txt→parent_escape、/etc/hosts→absolute_path、sub/../../SECRET.txt→parent_escape、指向外部的 symlink→symlink_escape、C:\\\\Windows\\\\x→absolute_path 全部 REJECT，仅合法相对路径 ALLOW。**一处潜伏不一致（建议 P2，非 P1 阻断）**：反斜杠父级 '..\\\\SECRET.txt' 未被 '..' parts 检查命中而 ALLOW；G0 实测确认在 POSIX 下**不构成越权**（解析为 base 内的字面文件名、不存在），但代码的绝对路径分支已处理 Windows 分隔符、父级分支未处理，若产线在 Windows 运行即越权；TDesktop 导出常产自 Windows，建议 P2 补 '\\\\' 归一。四套实跑：data 134 / market 183 / research 248 / integration 7 全 passed（research 前一跑 2 failed 为 G3 写盘竞态，复跑全绿）。",
         "at": "2026-09-11T02:32:35Z"
       },
-      "lastUpdate": "2026-09-11T03:11:00Z",
+      "lastUpdate": "2026-09-11T03:28:22Z",
       "tasks": [
         {
           "id": "D-01",
@@ -522,6 +530,10 @@
         {
           "t": "12:11",
           "n": "[G1/6caf9e18 · 上一条补正] 反斜杠父级测试的示例路径在 note 里被 shell 吞掉，原意为：`..\\SECRET.txt`、`photos\\..\\..\\SECRET.txt` → parent_escape；`C:\\Windows\\x`、`\\\\server\\share\\x` → absolute_path；`photos\\ok.png` 归一后可用。测试 tests/data/test_normalize.py::test_media_path_windows_separators。r4 job=task-mtwdp3yr-qtpub1。"
+        },
+        {
+          "t": "12:28",
+          "n": "[G1/6caf9e18 · r4 结果] r4（task-mtwdp3yr-qtpub1 → docs/adr/review-G1-P1-r4.md，325 行）四审终裁 fail：S closed 6/16（S01/S02/S04/S06/S07/S16）、T 2/4（T02/T04）、U 1/1；新增必修 V01–V04（V01 Decimal 落盘前绕回 float 改写合法 12 位数；V02 默认决策视图把同文重发拆成不同簇违反 A12；V03 审核历史按可改 audit_plan_version 分桶导致重验次数可重置；V04 reopen 谱系绕过品种/作者守卫）。open 项残余均为具体反例：S03 父帖相册媒体未进递归闭包；S05 A12 同簇；S08=V01；S09 明确撤回被当 analysis、replay_required 未置；S10 仅 edit 时刻变（内容同）折成 1 版；S11/T01 manifest.counts 与实际行数不核对；S12 层 2 缺 5 条 service 的退出账、review+excluded 未入累计集合；S13 缺/非法 bbox 后仍 entry_proposal 且 reasons=[]、同数值跨品种图文判 match；S14=V03；S15 固化期望接受 edit-only 丢版、T03 漏断言；T03 无 bbox 数字未拒收。全部为有界修复项，无设计规模项。D-10 已四轮 fail，停下请示用户。"
         }
       ]
     },
@@ -543,10 +555,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R29] 六审两条 open 已修 + B11/B12 落地 + horizon 曲线提案，实跑 market+integration 259 passed。**B13 裁定**：research_horizon_s 暂定 3 天为占位。认可不取 4h/12h（删失 78.7%/48.9%，排除后 θ 只描述快速兑现子总体＝estimand 漂移）与不取 7d（3d→7d 仅多 2 样本却增 t1 重叠、purge 削训练样本）的论证。**但 G0 实测曲线基础与真实计划不符且偏差方向已知**：G2 用自编 1.5%/3% 括号，真实夹具 65 条实测 TP 距离中位 5.83%、最大 18.92%、最小 3.14%，SL 中位 1.70%——真实止盈距离约为假设两倍、尾部六倍；括号越宽触及越慢，同窗删失率只会更高，曲线右移，故 3 天很可能低估。要求 P1 前在真实括号分布上重算。确立选窗原则（采纳 G2 给 G3 的提醒）：删失率与 t1 重叠/purge 损耗/独立机会数此消彼长，须同时看 n_evaluated 与折内有效簇数，单看删失率会一路选到最长窗口赔光统计效率。同族第六七例记录：S22（合法假值被 or 兜底静默修补，G2 归纳为与 S17/S19/S20 同一枚硬币两面）、partition_check 的 or 0 把未知 expected_rows 填 0 使 missing=0 等于宣称一根不缺（or 兜底最危险形态：把不知道伪装成没问题）、S23 DF_DECIMAL 死常量。",
-        "at": "2026-09-11T03:25:25Z"
+        "note": "[G0/427ed064 R30] S24 G0 实地核实属实：execution.py:234 rules_known 查了 tick/step/min_notional/status/区间，唯独漏 multiplier；:239 multiplier=Decimal(rr['multiplier'] or '1') 未知静默当 1，而 S08 后 multiplier 缩放全部经济量。裁定入契约 v1.13 §5.16 B14：(1) 同族严重度准则——『产出看似合理的错误数值』高于『放过非法输入』，因前者与正确答案在下游不可区分、会一路进 θ 与最终声明（采纳 G2 对 S22 vs S24 的对比）；(2) 一般规则——证据完备性判定（rules_known/bars_complete/funding_schedule_complete）必须覆盖其解锁的每个参与经济计算的参数，缺失即判定为假，判定项与参数集逐一对应并加断言测试；(3) 不可达不是不修的理由：S24 今日不可达仅因两个生产者硬写 '1'，但列可空，接入第三数据源即触发；依赖生产者永不改变是把正确性寄托于契约之外的巧合。与 B9 对 filled_closed 的处理不矛盾——那里不可达的是合法枚举值，这里不可达的是缺陷。排期（终审后修）认可。实跑 market+integration 259 passed。",
+        "at": "2026-09-11T03:28:20Z"
       },
-      "lastUpdate": "2026-09-11T03:24:46Z",
+      "lastUpdate": "2026-09-11T03:26:36Z",
       "tasks": [
         {
           "id": "M-01",
@@ -755,6 +767,10 @@
         {
           "t": "12:24",
           "n": "七审已派 task-mtwe76h5-u96l6s（第 7 轮）。任务书注明与前几轮的关键差别：四审至六审期间契约在持续增补（B8/B9/B10/B11/B12），新 open 项多来自当轮新增接缝；本轮契约增补已停（G0 仅余 research_horizon_s 取值待定，属数值非机制），故新增面应已收敛——但明确要求不得因此放宽实证标准，并要它独立做同族穷举不采信 G2 自查结论。若本轮仍 fail 且新增项仍来自既有机制而非新接缝，将停止 review 轮次并请用户裁决收口方式。"
+        },
+        {
+          "t": "12:26",
+          "n": "G0 通则（真值性区分\"未提供\"与\"提供了空值\"）全模块自查完成，读代码不改树（第七轮 task-mtwe76h5-u96l6s 正在读树）。结论：src/quant_lab/market 全部 or 兜底、if not X、真值性守卫逐个核过，多数安全且有理由——datetime 永不为假（t_start or t_dec）；by or [] 的 None 与空列表语义相同；if not bars / if gaps / if eq.height 的空集合正是要表达的含义。**发现一处真的，记 S24（待修，排在终审后）**：execution.load_market_from_lake 用 Decimal(rr[\"multiplier\"] or \"1\") 把未知乘数静默当成 1，而 rules_known 的校验清单里恰恰漏了 multiplier（查了 tick/step/min_notional/status/区间重叠，唯独没查它）。S08 之后 multiplier 缩放全部经济量（PnL/费用/资金费/滑点/预留），未知当 1 属于典型的\"未知伪装成默认\"。今天不可达——rules_from_manifests 与 rules_from_exchange_info 都硬写 \"1\"——但 instrument_rules 的 multiplier 是可空 Utf8 列，任何真实/手写规则表都能留空。修法：multiplier 纳入 rules_known 校验清单（未知即 RULE_HISTORY_MISSING），并去掉 or 兜底改显式 is None；min_notional 的 or \"0\" 虽因前置 is not None 校验而不可达，一并清掉同款写法。"
         }
       ]
     },
@@ -1494,6 +1510,12 @@
         "module": "market",
         "verdict": "issues",
         "note": "[G0/427ed064 R29] 六审两条 open 已修 + B11/B12 落地 + horizon 曲线提案，实跑 market+integration 259 passed。**B13 裁定**：research_horizon_s 暂定 3 天为占位。认可不取 4h/12h（删失 78.7%/48.9%，排除后 θ 只描述快速兑现子总体＝estimand 漂移）与不取 7d（3d→7d 仅多 2 样本却增 t1 重叠、purge 削训练样本）的论证。**但 G0 实测曲线基础与真实计划不符且偏差方向已知**：G2 用自编 1.5%/3% 括号，真实夹具 65 条实测 TP 距离中位 5.83%、最大 18.92%、最小 3.14%，SL 中位 1.70%——真实止盈距离约为假设两倍、尾部六倍；括号越宽触及越慢，同窗删失率只会更高，曲线右移，故 3 天很可能低估。要求 P1 前在真实括号分布上重算。确立选窗原则（采纳 G2 给 G3 的提醒）：删失率与 t1 重叠/purge 损耗/独立机会数此消彼长，须同时看 n_evaluated 与折内有效簇数，单看删失率会一路选到最长窗口赔光统计效率。同族第六七例记录：S22（合法假值被 or 兜底静默修补，G2 归纳为与 S17/S19/S20 同一枚硬币两面）、partition_check 的 or 0 把未知 expected_rows 填 0 使 missing=0 等于宣称一根不缺（or 兜底最危险形态：把不知道伪装成没问题）、S23 DF_DECIMAL 死常量。"
+      },
+      {
+        "at": "12:28",
+        "module": "market",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R30] S24 G0 实地核实属实：execution.py:234 rules_known 查了 tick/step/min_notional/status/区间，唯独漏 multiplier；:239 multiplier=Decimal(rr['multiplier'] or '1') 未知静默当 1，而 S08 后 multiplier 缩放全部经济量。裁定入契约 v1.13 §5.16 B14：(1) 同族严重度准则——『产出看似合理的错误数值』高于『放过非法输入』，因前者与正确答案在下游不可区分、会一路进 θ 与最终声明（采纳 G2 对 S22 vs S24 的对比）；(2) 一般规则——证据完备性判定（rules_known/bars_complete/funding_schedule_complete）必须覆盖其解锁的每个参与经济计算的参数，缺失即判定为假，判定项与参数集逐一对应并加断言测试；(3) 不可达不是不修的理由：S24 今日不可达仅因两个生产者硬写 '1'，但列可空，接入第三数据源即触发；依赖生产者永不改变是把正确性寄托于契约之外的巧合。与 B9 对 filled_closed 的处理不矛盾——那里不可达的是合法枚举值，这里不可达的是缺陷。排期（终审后修）认可。实跑 market+integration 259 passed。"
       }
     ],
     "blockers": [
